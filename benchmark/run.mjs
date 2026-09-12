@@ -100,15 +100,15 @@ try {
   metadata.sourceSha256 = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
   write('source-manifest.json', manifest); write('metadata.json', metadata);
   fs.writeFileSync(path.join(root, 'source.diff'), git(['diff', 'HEAD']));
-  log(`Benchmark ${runId}; building actual desktop command host`);
-  const build = command('cargo', ['build', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'benchmark', '--example', 'benchmark', '--bin', 'grapher']);
+  log(`Benchmark ${runId}; building backend command host`);
+  const build = command('cargo', ['build', '--manifest-path', 'backend/Cargo.toml', '--features', 'benchmark', '--example', 'benchmark', '--bin', 'grapher']);
   fs.writeFileSync(path.join(root, 'build.log'), `${build.stdout ?? ''}${build.stderr ?? ''}`);
   if (build.status !== 0) throw Error(`Build failed: ${build.error ?? build.stderr}`);
   for (const id of ids.filter(id => (!selected || id === selected) && (!deterministic || id !== 'B010'))) {
     for (let sample = 1; sample <= (id === 'B010' ? repeats : 1); sample++) {
       const caseDir = path.join(root, `${id}-${sample}`); fs.mkdirSync(caseDir);
       const t = Date.now();
-      const r = command(path.join(repo, 'src-tauri/target/debug/examples/benchmark'), [], 210000, { BENCHMARK_CASE: id, BENCHMARK_CASE_DIR: caseDir, ...(planning && id === 'B010' ? { BENCHMARK_PLAN: '1' } : {}) });
+      const r = command(path.join(repo, 'backend/target/debug/examples/benchmark'), [], 210000, { BENCHMARK_CASE: id, BENCHMARK_CASE_DIR: caseDir, ...(planning && id === 'B010' ? { BENCHMARK_PLAN: '1' } : {}) });
       fs.writeFileSync(path.join(caseDir, 'host.log'), `${r.stdout ?? ''}${r.stderr ?? ''}`);
       let value = fs.existsSync(path.join(caseDir, 'result.json')) ? JSON.parse(fs.readFileSync(path.join(caseDir, 'result.json'))) : { status: 'FAIL', error: `Host failed: status=${r.status}, signal=${r.signal}, ${r.error ?? r.stderr}` };
       value = { ...value, schemaVersion: 1, benchmarkRunId: runId, benchmarkCaseId: id, name: names[ids.indexOf(id)], sample, variant: id === 'B010' ? metadata.agentVariant : 'canonical', layer: id === 'B010' ? 'agent-dependent' : 'deterministic', artifacts: path.relative(repo, caseDir), runtimeDurationMs: value.durationMs, classification: null, gitCommit: metadata.gitCommit, sourceSha256: metadata.sourceSha256 };

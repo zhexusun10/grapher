@@ -1,0 +1,693 @@
+use crate::{
+    compiler,
+    engine::{run_pi, PiRequest},
+    model::*,
+    runtime::{perform, Runtime},
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    io::Read,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+};
+
+use uuid::Uuid;
+
+pub struct Service {
+    runtime: Mutex<Runtime>,
+    driving: AtomicBool,
+    planning: AtomicBool,
+    extension: PathBuf,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bootstrap {
+    snapshot: Snapshot,
+    config: Config,
+    runs: Vec<String>,
+    data_path: String,
+    repository_info: Option<crate::workspace::RepositoryInfo>,
+}
+
+#[derive(Deserialize)]
+pub struct Route {
+    plan_type: String,
+}
+
+const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
+const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
+
+fn render_prompt(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut rendered = template.to_string();
+    for (key, value) in replacements {
+        let double_brace = format!("{{{{{key}}}}}");
+        let single_brace = format!("{{{key}}}");
+        if rendered.contains(&double_brace) {
+            rendered = rendered.replace(&double_brace, value);
+        } else if rendered.contains(&single_brace) {
+            rendered = rendered.replace(&single_brace, value);
+        }
+    }
+    rendered
+}
+
+fn load_env_file() {
+    let candidates = [
+        PathBuf::from(".env"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.env"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"),
+    ];
+    for path in &candidates {
+        if let Ok(content) = fs::read_to_string(path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = trimmed.split_once('=') {
+                    let k = k.trim();
+                    let v = v.trim().trim_matches('"').trim_matches('\'');
+                    if std::env::var(k).is_err() {
+                        std::env::set_var(k, v);
+                    }
+                }
+            }
+            break;
+        }
+    }
+}
+
+fn bootstrap(service: &Arc<Service>) -> Result<Bootstrap, String> {
+    load_env_file();
+    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("pi");
+    let local = source.join("node_modules/.bin/tsx").exists();
+    let detected_repo = crate::workspace::detect(None).ok().flatten();
+    let mut config = runtime.state.config.clone().unwrap_or(Config {
+        repository: detected_repo
+            .as_ref()
+            .map(|r| r.path.clone())
+            .unwrap_or_default(),
+        engine: "pi".into(),
+        pi_command: if local { "node" } else { "pi" }.into(),
+        pi_args: if local {
+            vec![
+                source
+                    .join("node_modules/tsx/dist/cli.mjs")
+                    .to_string_lossy()
+                    .into(),
+                "--tsconfig".into(),
+                source.join("tsconfig.json").to_string_lossy().into(),
+                source
+                    .join("packages/coding-agent/src/cli.ts")
+                    .to_string_lossy()
+                    .into(),
+            ]
+        } else {
+            Vec::new()
+        },
+        model: "qwen3.8-flash".into(),
+        max_parallel: 2,
+        max_feedback: 3,
+    });
+    if config.model.trim().is_empty() {
+        config.model = "qwen3.8-flash".into();
+    }
+    if config.repository.is_empty() {
+        if let Some(ref repo) = detected_repo {
+            config.repository = repo.path.clone();
+        }
+    }
+    let repository_info = if !config.repository.is_empty() {
+        if let Some(ref repo) = detected_repo {
+            if repo.path == config.repository {
+                Some(repo.clone())
+            } else {
+                crate::workspace::detect(Some(std::path::Path::new(&config.repository)))
+                    .ok()
+                    .flatten()
+            }
+        } else {
+            crate::workspace::detect(Some(std::path::Path::new(&config.repository)))
+                .ok()
+                .flatten()
+        }
+    } else {
+        None
+    };
+    Ok(Bootstrap {
+        snapshot: runtime.state.clone(),
+        config,
+        runs: runtime.store.runs()?,
+        data_path: runtime.root.to_string_lossy().into(),
+        repository_info,
+    })
+}
+
+fn snapshot(service: &Arc<Service>) -> Result<Snapshot, String> {
+    Ok(service
+        .runtime
+        .lock()
+        .map_err(|error| error.to_string())?
+        .state
+        .clone())
+}
+
+fn history(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
+    service
+        .runtime
+        .lock()
+        .map_err(|error| error.to_string())?
+        .store
+        .load(&run_id)
+}
+
+fn compile_graph(graph: Graph) -> Result<Plan, Vec<compiler::Diagnostic>> {
+    compiler::compile(&graph, true)
+}
+
+fn save_graph(graph: Graph, mut config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
+    if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current operation to finish".into());
+    }
+    if config.model.trim().is_empty() {
+        config.model = "qwen3.8-flash".into();
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.create(graph, config)?;
+    Ok(runtime.state.clone())
+}
+
+fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
+    if goal.trim().is_empty() {
+        return Err("Enter a goal".into());
+    }
+    if config.engine != "pi" {
+        return Err("Automatic planning requires the Pi engine".into());
+    }
+    if service.driving.load(Ordering::SeqCst) || service.planning.swap(true, Ordering::SeqCst) {
+        return Err("Another operation is running".into());
+    }
+    let service = service.clone();
+    let cleanup = service.clone();
+    let result = (move || {
+        let root = service
+            .runtime
+            .lock()
+            .map_err(|error| error.to_string())?
+            .root
+            .clone();
+        let repository = PathBuf::from(&config.repository);
+        crate::workspace::verify(&repository)?;
+        let directory = root.join("planning").join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let route_path = directory.join("route.json");
+        let task = render_prompt(PARTITIONER_PROMPT, &[("goal", &goal)]);
+        let mut partitioner_config = config.clone();
+        if let Ok(model) = std::env::var("PARTITIONER_MODEL") {
+            if !model.trim().is_empty() {
+                partitioner_config.model = model;
+            }
+        }
+        if partitioner_config.model.trim().is_empty() {
+            partitioner_config.model = "qwen3.8-flash".into();
+        }
+        let mut log = String::new();
+        run_pi(
+            PiRequest {
+                config: &partitioner_config,
+                cwd: &repository,
+                task: &task,
+                session_dir: &directory.join("partition-session"),
+                extension: Some(&service.extension),
+                tools: "route_task",
+                session_id: None,
+                extra_args: vec!["--thinking", "off"],
+                environment: vec![
+                    ("GRAPHER_MODE", "partition".into()),
+                    ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
+                ],
+            },
+            |text| log.push_str(&text),
+        )?;
+        fs::write(directory.join("partition.jsonl"), log).map_err(|error| error.to_string())?;
+        let route: Route = serde_json::from_str(
+            &fs::read_to_string(route_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let graph = match route.plan_type.as_str() {
+            "serial" => Graph {
+                original_goal: goal.clone(),
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: goal.clone(),
+                }],
+                edges: Vec::new(),
+            },
+            "graph" => {
+                let graph_path = directory.join("graph.json");
+                fs::write(
+                    &graph_path,
+                    serde_json::to_string(&Graph {
+                        original_goal: goal.clone(),
+                        ..Graph::default()
+                    })
+                    .unwrap(),
+                )
+                .map_err(|error| error.to_string())?;
+                let mut planner_config = config.clone();
+                if let Ok(model) = std::env::var("PLANNER_MODEL") {
+                    if !model.trim().is_empty() {
+                        planner_config.model = model;
+                    }
+                }
+                if planner_config.model.trim().is_empty() {
+                    planner_config.model = "qwen3.8-flash".into();
+                }
+                let task = render_prompt(PLANNER_PROMPT, &[("goal", &goal)]);
+                let mut log = String::new();
+                run_pi(
+                    PiRequest {
+                        config: &planner_config,
+                        cwd: &repository,
+                        task: &task,
+                        session_dir: &directory.join("planner-session"),
+                        extension: Some(&service.extension),
+                        tools: "node,edge,read,bash",
+                        session_id: None,
+                        extra_args: Vec::new(),
+                        environment: vec![
+                            ("GRAPHER_MODE", "planner".into()),
+                            ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
+                            (
+                                "GRAPHER_COMPILER_PATH",
+                                std::env::current_exe()
+                                    .map_err(|error| error.to_string())?
+                                    .to_string_lossy()
+                                    .into(),
+                            ),
+                        ],
+                    },
+                    |text| log.push_str(&text),
+                )?;
+                fs::write(directory.join("planner.jsonl"), log)
+                    .map_err(|error| error.to_string())?;
+                serde_json::from_str(
+                    &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?
+            }
+            _ => return Err("Partitioner returned an invalid route".into()),
+        };
+        let mut final_config = config;
+        if let Ok(model) = std::env::var("PI_MODEL") {
+            if !model.trim().is_empty() {
+                final_config.model = model;
+            }
+        }
+        if final_config.model.trim().is_empty() {
+            final_config.model = "qwen3.8-flash".into();
+        }
+        let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        runtime.create(graph, final_config)?;
+        Ok(runtime.state.clone())
+    })();
+    cleanup.planning.store(false, Ordering::SeqCst);
+    result
+}
+
+fn drive(service: Arc<Service>) {
+    if service.driving.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            loop {
+                let (jobs, root, parents) = {
+                    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                    let jobs = runtime.jobs()?;
+                    let parents: Vec<_> = jobs
+                        .iter()
+                        .map(|job| runtime.parents(&job.execution.node))
+                        .collect();
+                    (jobs, runtime.root.clone(), parents)
+                };
+                if jobs.is_empty() {
+                    break;
+                }
+                let handles: Vec<_> = jobs
+                    .into_iter()
+                    .zip(parents)
+                    .map(|(job, parents)| {
+                        let service = service.clone();
+                        let root = root.clone();
+                        thread::spawn(move || {
+                            let result = perform(
+                                &job,
+                                &root,
+                                &parents,
+                                |text| {
+                                    if let Ok(mut runtime) = service.runtime.lock() {
+                                        if let Err(error) = runtime.emit(EventKind::Output {
+                                            execution_id: job.execution.id.clone(),
+                                            text,
+                                        }) {
+                                            eprintln!("Cannot persist Pi output: {error}");
+                                        }
+                                    }
+                                },
+                                |head| {
+                                    service
+                                        .runtime
+                                        .lock()
+                                        .map_err(|error| error.to_string())?
+                                        .emit(EventKind::Prepared {
+                                            execution_id: job.execution.id.clone(),
+                                            head,
+                                        })
+                                },
+                            );
+                            (job.execution, result)
+                        })
+                    })
+                    .collect();
+                let mut reviews = Vec::new();
+                for handle in handles {
+                    let (execution, result) =
+                        handle.join().map_err(|_| "Execution worker panicked")?;
+                    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                    if let Some(review) = runtime.finish(&execution, result)? {
+                        reviews.push(review);
+                    }
+                }
+                let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                for (from, output) in reviews {
+                    if runtime.state.nodes[&from].status == "done" {
+                        runtime.review(&from, &output)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("Runtime halted safely: {error}");
+            if let Ok(mut runtime) = service.runtime.lock() {
+                let _ = runtime.emit(EventKind::Paused { paused: true });
+            }
+        }
+        service.driving.store(false, Ordering::SeqCst);
+        let resume = service
+            .runtime
+            .lock()
+            .map(|runtime| {
+                runtime.state.approved
+                    && !runtime.state.paused
+                    && runtime.state.phase == "running"
+                    && !runtime.active()
+            })
+            .unwrap_or(false);
+        if resume {
+            drive(service.clone());
+        }
+    });
+}
+
+fn control(
+    action: String,
+    node: Option<String>,
+    instruction: Option<String>,
+    service: &Arc<Service>,
+) -> Result<Snapshot, String> {
+    if service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for planning to finish".into());
+    }
+    if matches!(action.as_str(), "intervene" | "resolve") && service.driving.load(Ordering::SeqCst)
+    {
+        return Err("Pause and wait for the current execution wave to settle first".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    match action.as_str() {
+        "approve" => runtime.approve()?,
+        "pause" => runtime.pause(true)?,
+        "resume" => runtime.pause(false)?,
+        "reject" => {
+            if runtime.state.phase != "awaiting_approval" {
+                return Err("Only an unapproved plan can be rejected".into());
+            }
+            runtime.emit(EventKind::Rejected)?;
+        }
+        "intervene" => runtime.intervene(
+            node.as_deref().unwrap_or_default(),
+            instruction.as_deref().unwrap_or_default(),
+        )?,
+        "resolve" => runtime.resolved(node.as_deref().unwrap_or_default())?,
+        _ => return Err("Unknown action".into()),
+    }
+    let snapshot = runtime.state.clone();
+    drop(runtime);
+    if matches!(
+        action.as_str(),
+        "approve" | "resume" | "intervene" | "resolve"
+    ) {
+        drive(service.clone());
+    }
+    Ok(snapshot)
+}
+
+fn detect_repository(
+    path: Option<String>,
+) -> Result<Option<crate::workspace::RepositoryInfo>, String> {
+    crate::workspace::detect(path.as_deref().map(std::path::Path::new))
+}
+
+fn reset_workspace(service: &Arc<Service>) -> Result<Snapshot, String> {
+    if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current operation to finish".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.reset_workspace()
+}
+
+fn clear_history(service: &Arc<Service>) -> Result<(), String> {
+    if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current operation to finish".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.clear_history()
+}
+
+fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
+    if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current operation to finish".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.delete_run(&run_id)
+}
+
+fn argument<T: serde::de::DeserializeOwned>(
+    body: &serde_json::Value,
+    key: &str,
+) -> Result<T, String> {
+    serde_json::from_value(body.get(key).cloned().unwrap_or(serde_json::Value::Null))
+        .map_err(|error| format!("Invalid {key}: {error}"))
+}
+
+pub fn dispatch(
+    service: &Arc<Service>,
+    command: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use serde_json::to_value;
+    let result = match command {
+        "bootstrap" => to_value(bootstrap(service)?),
+        "snapshot" => to_value(snapshot(service)?),
+        "history" => to_value(history(argument(&body, "runId")?, service)?),
+        "compile_graph" => to_value(
+            compile_graph(argument(&body, "graph")?)
+                .map_err(|errors| serde_json::to_string(&errors).unwrap())?,
+        ),
+        "save_graph" => to_value(save_graph(
+            argument(&body, "graph")?,
+            argument(&body, "config")?,
+            service,
+        )?),
+        "plan_goal" => to_value(plan_goal(
+            argument(&body, "goal")?,
+            argument(&body, "config")?,
+            service,
+        )?),
+        "control" => to_value(control(
+            argument(&body, "action")?,
+            argument(&body, "node")?,
+            argument(&body, "instruction")?,
+            service,
+        )?),
+        "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),
+        "reset_workspace" => to_value(reset_workspace(service)?),
+        "clear_history" => to_value(clear_history(service)?),
+        "delete_run" => to_value(delete_run(argument(&body, "runId")?, service)?),
+        _ => return Err("Unknown command".into()),
+    };
+    result.map_err(|error| error.to_string())
+}
+
+pub fn run() -> Result<(), String> {
+    use tiny_http::{Header, Response, Server};
+    load_env_file();
+    let root = std::env::var_os("GRAPHER_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.grapher"));
+    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let extension = root.join("grapher-planner.ts");
+    fs::write(&extension, include_str!("../resources/planner.ts"))
+        .map_err(|error| error.to_string())?;
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&root)?),
+        driving: AtomicBool::new(false),
+        planning: AtomicBool::new(false),
+        extension,
+    });
+    let port: u16 = std::env::var("GRAPHER_PORT")
+        .unwrap_or_else(|_| "1421".into())
+        .parse()
+        .map_err(|_| "Invalid GRAPHER_PORT")?;
+    let server = Server::http(("127.0.0.1", port)).map_err(|error| error.to_string())?;
+    let mut signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+    ])
+    .map_err(|error| error.to_string())?;
+    let shutdown_service = service.clone();
+    thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            if let Ok(mut runtime) = shutdown_service.runtime.lock() {
+                if runtime.state.approved && (runtime.active() || runtime.state.phase == "running")
+                {
+                    let _ = runtime.emit(EventKind::Paused { paused: true });
+                }
+            }
+            crate::engine::terminate_all();
+            std::process::exit(0);
+        }
+    });
+    eprintln!(
+        "Grapher backend: http://127.0.0.1:{port} (data: {})",
+        root.display()
+    );
+    let web_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist");
+    for mut request in server.incoming_requests() {
+        let service = service.clone();
+        let web_root = web_root.clone();
+        thread::spawn(move || {
+            let trusted_hosts = [
+                format!("127.0.0.1:{port}"),
+                format!("localhost:{port}"),
+                "127.0.0.1:1420".into(),
+                "localhost:1420".into(),
+            ];
+            let trusted = request
+                .headers()
+                .iter()
+                .filter(|h| h.field.equiv("Host") || h.field.equiv("Origin"))
+                .all(|h| {
+                    let value = h.value.as_str();
+                    let host = if h.field.equiv("Origin") {
+                        value.strip_prefix("http://").unwrap_or("")
+                    } else {
+                        value
+                    };
+                    trusted_hosts.iter().any(|allowed| allowed == host)
+                });
+            if !trusted {
+                let _ = request
+                    .respond(Response::from_string("Untrusted origin").with_status_code(403));
+                return;
+            }
+            let url = request.url().split('?').next().unwrap_or("/").to_string();
+            if let Some(command) = url.strip_prefix("/api/") {
+                // JSON-only requests and no CORS prevent other websites from issuing commands.
+                let is_json = request.headers().iter().any(|h| {
+                    h.field.equiv("Content-Type")
+                        && h.value.as_str().split(';').next() == Some("application/json")
+                });
+                if request.method() != &tiny_http::Method::Post || !is_json {
+                    let _ = request
+                        .respond(Response::from_string("JSON POST required").with_status_code(415));
+                    return;
+                }
+                let mut input = String::new();
+                let result = std::io::Read::read_to_string(
+                    &mut request.as_reader().take(2 * 1024 * 1024 + 1),
+                    &mut input,
+                )
+                .map_err(|e| e.to_string())
+                .and_then(|_| {
+                    if input.len() > 2 * 1024 * 1024 {
+                        return Err("Request too large".into());
+                    }
+                    let body = serde_json::from_str(&input).map_err(|e| e.to_string())?;
+                    dispatch(&service, command, body)
+                });
+                let (status, body) = match result {
+                    Ok(value) => (200, serde_json::json!({"result": value})),
+                    Err(error) => (400, serde_json::json!({"error": error})),
+                };
+                let _ = request.respond(
+                    Response::from_string(body.to_string())
+                        .with_status_code(status)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+            } else {
+                let relative = url.trim_start_matches('/');
+                if relative.split('/').any(|part| part == "..") {
+                    let _ = request.respond(Response::empty(404));
+                    return;
+                }
+                let path = web_root.join(if relative.is_empty() {
+                    "index.html"
+                } else {
+                    relative
+                });
+                let mime = match path.extension().and_then(|s| s.to_str()) {
+                    Some("html") => "text/html; charset=utf-8",
+                    Some("js") => "text/javascript",
+                    Some("css") => "text/css",
+                    Some("svg") => "image/svg+xml",
+                    _ => "application/octet-stream",
+                };
+                match fs::read(path) {
+                    Ok(bytes) => {
+                        let _ =
+                            request
+                                .respond(Response::from_data(bytes).with_header(
+                                    Header::from_bytes("Content-Type", mime).unwrap(),
+                                ));
+                    }
+                    Err(_) => {
+                        let _ = request.respond(
+                            Response::from_string("Run npm run build to build the frontend")
+                                .with_status_code(404),
+                        );
+                    }
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "benchmark")]
+pub mod benchmark {
+    include!("../../benchmark/server.rs");
+}

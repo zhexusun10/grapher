@@ -27,7 +27,7 @@ BASE_URL = os.getenv(
     "DASHSCOPE_BASE_URL",
     "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
 )
-MODEL = os.getenv("PLANNER_MODEL", "qwen3.8-max-0902")
+MODEL = os.getenv("PLANNER_MODEL", "qwen3.8-flash")
 
 
 def call_planner_openai(prompt: str, model: str = MODEL, enable_thinking: bool = True):

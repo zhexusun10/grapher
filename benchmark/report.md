@@ -1,5 +1,7 @@
 # Grapher MVP validation and hardening — current checkout
 
+> 历史记录：本文描述迁移前的实现与测试结果。当前版本使用浏览器前端和 HTTP 后端；现有基准适配器调用产品 dispatcher，HTTP 集成测试见 `npm run test:http`。
+
 2026-09-13。**当前桌面执行边界内验收 PASS**：三次连续确定性套件通过，最终 12/12 samples 通过。本文已更新为中断后变化的当前仓库；此前报告保留在 [report-initial.md](report-initial.md)，不以旧源码结果替代当前结果。原生 UI 点击和新浏览器模拟器的等价性不在这个 PASS 声明内。
 
 ## 1. System under test
@@ -16,7 +18,7 @@
 
 [run.mjs](run.mjs) 提供单命令运行、分层结果、源码/环境指纹和 artifacts；[validate.mjs](validate.mjs) 固定执行三次确定性 suite，再运行三次 planned Pi samples，并比较逻辑指标及源码 hash。
 
-[desktop.rs](desktop.rs) 只使用 feature-gated Tauri MockRuntime 替代原生窗口宿主；调用 shipping command handlers/drive，不复制 scheduler，不 mock 核心执行结果。确定性层使用 shipping demo + 实际 Git/SQLite，负向场景用真实 /usr/bin/false 子进程。
+[server.rs](server.rs) 只使用 feature-gated Tauri MockRuntime 替代原生窗口宿主；调用 shipping command handlers/drive，不复制 scheduler，不 mock 核心执行结果。确定性层使用 shipping demo + 实际 Git/SQLite，负向场景用真实 /usr/bin/false 子进程。
 
 B008 运行当前 App action/filter AST、**实际 runtimeService 和 Tauri invoke**，native IPC transport 对接真实 host；断言 isDesktop=true，禁止误入浏览器模拟器。实际 TaskNode SSR、TypeScript structural contract、状态/attempt/revision/失败与历史范围均检查。状态 setters 用于观察前端值；Runtime truth 始终来自产品事件。
 
@@ -61,10 +63,10 @@ B008 运行当前 App action/filter AST、**实际 runtimeService 和 Tauri invo
 
 * **src/App.tsx**：Demo 入口/配置可达性、时间线、最新运行交互状态；恢复后新增删除失败处理与按持久化仓库配置限定清空范围。
 * **src/types.ts**：补充产品已有 human event 字段。
-* **src-tauri/src/runtime.rs**：Runtime Drop 显式释放 flock。
-* **src-tauri/src/engine.rs**：复用 output channel 记录 PID/exit；成功重试后清除旧 agent_error。
-* **src-tauri/src/desktop.rs**：仅增加 benchmark feature 模块接入；适配器调用原有 handler/drive。
-* **src-tauri/tests/engine.rs**：补充重试恢复协议回归，不冒充真实 Pi benchmark。
+* **backend/src/runtime.rs**：Runtime Drop 显式释放 flock。
+* **backend/src/engine.rs**：复用 output channel 记录 PID/exit；成功重试后清除旧 agent_error。
+* **backend/src/server.rs**：仅增加 benchmark feature 模块接入；适配器调用原有 handler/drive。
+* **backend/tests/engine.rs**：补充重试恢复协议回归，不冒充真实 Pi benchmark。
 * **benchmark/**、example、package/Cargo benchmark 配置、README/gitignore：runner、fixtures、schema、记录与复现。
 
 中断期间新增的 runtimeService/Web simulator/rfd/历史 backend/UI 布局/desktop runner 是当前已有改动，已保留；不将它们冒称为本次 benchmark 实现，也未为本次验收创建未来架构 subsystem。

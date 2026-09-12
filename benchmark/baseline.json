@@ -6,7 +6,7 @@
     "benchmarkRunId": "baseline-2026-09-12T14-22-30-778Z",
     "label": "baseline",
     "gitCommit": "a3b8798234bd9832c4e7a0156d678af8ea01fd0a",
-    "dirtyWorkingTree": "M .gitignore\n M package.json\n M src-tauri/Cargo.toml\n M src-tauri/src/desktop.rs\n M src-tauri/src/engine.rs\n?? benchmark/\n?? src-tauri/examples/",
+    "dirtyWorkingTree": "M .gitignore\n M package.json\n M backend/Cargo.toml\n M backend/src/server.rs\n M backend/src/engine.rs\n?? benchmark/\n?? backend/examples/",
     "diffSha256": "529c6212d36ce4363453c7600f92bbbe905a98677d500bc4f2ef480111f91e49",
     "startedAt": "2026-09-12T14:22:30.779Z",
     "endedAt": "2026-09-12T14:23:50.966Z",

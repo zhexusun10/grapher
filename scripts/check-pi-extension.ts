@@ -7,12 +7,12 @@ import type { ExtensionContext } from "../pi/packages/coding-agent/src/core/exte
 
 const root = mkdtempSync(join(tmpdir(), "grapher-extension-"));
 process.env.GRAPHER_GRAPH_PATH = join(root, "graph.json");
-process.env.GRAPHER_COMPILER_PATH = resolve("src-tauri/target/debug/grapher");
+process.env.GRAPHER_COMPILER_PATH = resolve("backend/target/debug/grapher");
 process.env.GRAPHER_MODE = "planner";
 writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({ originalGoal: "Test", nodes: [], edges: [] }));
 
 try {
-  const loaded = await loadExtensions([resolve("src-tauri/resources/planner.ts")], process.cwd());
+  const loaded = await loadExtensions([resolve("backend/resources/planner.ts")], process.cwd());
   assert.deepEqual(loaded.errors, []);
   assert.equal(loaded.extensions.length, 1);
   const extension = loaded.extensions[0];
@@ -38,7 +38,7 @@ try {
   await call("node", { name: "build", delete: true });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
   process.env.GRAPHER_MODE = "partition";
-  const partition = await loadExtensions([resolve("src-tauri/resources/planner.ts")], process.cwd());
+  const partition = await loadExtensions([resolve("backend/resources/planner.ts")], process.cwd());
   assert.deepEqual(partition.errors, []);
   assert.deepEqual([...partition.extensions[0].tools.keys()], ["route_task"]);
   console.log("Pi extension smoke passed: loading, tool surface, mutation rollback, upsert, deletion, read-only Bash, partitioner.");

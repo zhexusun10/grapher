@@ -20,8 +20,7 @@ pnpm-debug.log*
 .env.*.local
 
 # Grapher runtime and Rust outputs
-src-tauri/target/
-src-tauri/gen/
+backend/target/
 .grapher/
 
 # Python

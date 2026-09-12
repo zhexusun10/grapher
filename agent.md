@@ -1767,12 +1767,12 @@ Current Status
 
 # 31. Technology Stack
 
-Grapher 定位为本地 Mac Desktop Agent Runtime。
+Grapher 定位为本地浏览器前端与终端后端 Agent Runtime。
 
 推荐技术栈：
 
 ```text
-Tauri 2
+HTTP API + Browser UI
 │
 ├── Rust Core
 │   ├── Graph Compiler
@@ -1810,7 +1810,7 @@ Signals
 Pi lifecycle
 Git worktree lifecycle
 Workspace composition
-Feedback state machine
+Feedback state model
 Retry limits
 Event persistence
 Crash recovery
@@ -2175,7 +2175,7 @@ Independent Pi Executions
 - Compiler
 - Runtime
 - Git
-- State Machine
+- State Model
 
 确定性解决的问题，不交给另一个 LLM Coordinator。
 

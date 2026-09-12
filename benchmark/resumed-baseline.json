@@ -17,7 +17,7 @@
     "deterministicOnly": false,
     "agentVariant": "graph-ir",
     "gitCommit": "a3b8798234bd9832c4e7a0156d678af8ea01fd0a",
-    "dirtyWorkingTree": "M .gitignore\n M README.md\n M package.json\n M src-tauri/Cargo.lock\n M src-tauri/Cargo.toml\n M src-tauri/src/desktop.rs\n M src-tauri/src/engine.rs\n M src-tauri/src/runtime.rs\n M src-tauri/src/store.rs\n M src-tauri/src/workspace.rs\n M src-tauri/tauri.conf.json\n M src-tauri/tests/engine.rs\n M src/App.tsx\n M src/styles.css\n M src/types.ts\n?? benchmark/\n?? scripts/tauri-runner.mjs\n?? src-tauri/examples/\n?? src/services/",
+    "dirtyWorkingTree": "M .gitignore\n M README.md\n M package.json\n M backend/Cargo.lock\n M backend/Cargo.toml\n M backend/src/server.rs\n M backend/src/engine.rs\n M backend/src/runtime.rs\n M backend/src/store.rs\n M backend/src/workspace.rs\n M backend/tauri.conf.json\n M backend/tests/engine.rs\n M src/App.tsx\n M src/styles.css\n M src/types.ts\n?? benchmark/\n?? scripts/tauri-runner.mjs\n?? backend/examples/\n?? src/services/",
     "startedAt": "2026-09-12T19:18:51.991Z",
     "sourceSha256": "f8089c8a2cccbd821a2ac8e907c093a2baaf6b21363b18faed5c3491f016a02a",
     "endedAt": "2026-09-12T19:19:41.301Z",

@@ -1,5 +1,7 @@
 # Grapher MVP system under test
 
+> 历史记录：本文描述迁移前的实现与测试结果。当前版本使用浏览器前端和 HTTP 后端；现有基准适配器调用产品 dispatcher，HTTP 集成测试见 `npm run test:http`。
+
 Discovery completed before code changes on 2026-09-12. Repository initially clean.
 Root architecture specification: `agent.md` (2,303 lines, read in full); no root AGENTS.md. `pi/AGENTS.md` applies only to the independent ignored Pi checkout, which is not modified.
 
@@ -7,7 +9,7 @@ Root architecture specification: `agent.md` (2,303 lines, read in full); no root
 
 * Editable graph: React `App.save` → invoke `save_graph` → `Runtime.create` → Rust compiler → SQLite Created event → serialized Snapshot → React state. Approval: `control(approve)` → verify clean repository/base → Approved event → desktop `drive` → `Runtime.jobs` → worker threads → `perform` → Git worktree creation/composition → engine execute → snapshot commit → Finished/Failed → feedback/invalidation → next wave → Settled. React polls `snapshot` every 700ms except while busy/historical; node views use Snapshot.nodes/executions; failures use node.error and events.
 * Goal: `plan_goal` → real Pi partition process + extension route_task → serial one-node graph OR Pi planner process + node/edge extension → `grapher --compile` subprocess on every mutation → Runtime.create → same approval/execution path. Planner is not alive during node execution.
-* `pi` is the only engine in shipping builds. The deterministic actuator (`src-tauri/src/fixture.rs`, Cargo feature `fixture`) drives real compiler, runtime, event store and Git operations with deterministic Markdown writes, 650ms/node, first review REVISE then ACCEPT. It does **not** prove Pi/model success.
+* `pi` is the only engine in shipping builds. The deterministic actuator (`backend/src/fixture.rs`, Cargo feature `fixture`) drives real compiler, runtime, event store and Git operations with deterministic Markdown writes, 650ms/node, first review REVISE then ACCEPT. It does **not** prove Pi/model success.
 * Browser-only Vite preview runs the client-side `WebInteractiveRuntime` sandbox and invents display state. It is outside execution acceptance. `scripts/planner_client.py` is an independent Python experiment, not called by desktop.
 
 ## Implemented versus specification
@@ -31,11 +33,11 @@ Pre-hardening mismatch: goal submission always called plan_goal, rejecting the t
 
 Canonical cases invoke **existing Tauri generated command handlers**, actual desktop drive, runtime, SQLite and workspaces through Tauri's official MockRuntime window host. Only the native WebView host is replaced; compiler/scheduling/engine/workspace/state are not mocked. Isolated case directories are retained under benchmark-results; never run tasks against the user's checkout or application data. Deterministic success cases use the `fixture`-feature actuator; every other layer is shipping code. Controlled process failure uses /usr/bin/false through the shipping Pi subprocess boundary, not fabricated runtime results. Real Pi case uses the local CLI with its existing authentication and an isolated trivial repository.
 
-Frontend coverage: actual IPC serialized snapshots are checked against current TypeScript interfaces; actual TaskNode renders against runtime snapshot data. This does not automate native WebView clicks, approval dialog, browser polling or macOS lifecycle. Native UI automation is an explicit coverage gap, not a passing end-to-end claim.
+Frontend coverage: actual IPC serialized snapshots are checked against current TypeScript interfaces; actual TaskNode renders against runtime snapshot data. This does not automate native WebView clicks, approval dialog, browser polling or 原生窗口平台 lifecycle. Native UI automation is an explicit coverage gap, not a passing end-to-end claim.
 
 ## Tooling
 
-`npm run dev`: browser sandbox preview, port 1420. `npm run desktop`: Tauri dev. `npm run build`: tsc + Vite. `npm test`: Rust non-desktop tests with `--features fixture` (many manually inject results). `cargo check --manifest-path src-tauri/Cargo.toml`: desktop check. `npm run desktop:build`: macOS bundle. Local cargo is ~/.cargo/bin/cargo and must be on PATH. Pi source and dependencies exist locally and are ignored. Existing extension smoke exercises actual Pi loader + compiler without a model.
+`npm run dev`: browser sandbox preview, port 1420. `npm run desktop`: Tauri dev. `npm run build`: tsc + Vite. `npm test`: Rust non-desktop tests with `--features fixture` (many manually inject results). `cargo check --manifest-path backend/Cargo.toml`: desktop check. `npm run desktop:build`: 原生窗口平台 bundle. Local cargo is ~/.cargo/bin/cargo and must be on PATH. Pi source and dependencies exist locally and are ignored. Existing extension smoke exercises actual Pi loader + compiler without a model.
 
 ## Observability
 

@@ -10,9 +10,9 @@ import { motion, AnimatePresence } from "motion/react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
 import { defaultConfig, emptyGraph, emptySnapshot, example, type Bootstrap, type Config, type Graph, type ProjectItem, type RepositoryInfo, type Snapshot, type Status } from "./types";
 import { tokens } from "./tokens";
-import { runtimeService, isDesktop, isDesktopMac } from "./services/runtime";
+import { runtimeService } from "./services/runtime";
 
-const desktop = isDesktop;
+
 const statusText: Record<Status, string> = {
   waiting: "WAITING",
   running: "RUNNING",
@@ -644,7 +644,7 @@ export default function App() {
       },
     }));
     try {
-      if (desktop && !config.repository) {
+      if (!config.repository) {
         setMainTab("settings");
         setError("请先在左侧工作区选择绑定的本地 Git 仓库。");
         return;
@@ -666,82 +666,31 @@ export default function App() {
 
   useEffect(() => {
     if (historical || busy) return;
-    if (desktop) {
-      const interval = setInterval(() => {
-        runtimeService.snapshot()
-          .then((newSnap) => {
-            if (!newSnap || !newSnap.runId) return;
-            setState((prev) => {
-              if (
-                prev.runId === newSnap.runId &&
-                prev.phase === newSnap.phase &&
-                prev.paused === newSnap.paused &&
-                prev.approved === newSnap.approved &&
-                prev.events.length === newSnap.events.length &&
-                prev.executions.length === newSnap.executions.length &&
-                JSON.stringify(prev.nodes) === JSON.stringify(newSnap.nodes) &&
-                JSON.stringify(prev.feedbackCounts) === JSON.stringify(newSnap.feedbackCounts)
-              ) {
-                return prev;
-              }
-              return newSnap;
-            });
-          })
-          .catch((err) => setError(String(err)));
-      }, 700);
-      return () => clearInterval(interval);
-    } else {
-      const unsubscribe = runtimeService.onWebUpdate((newSnap) => {
-        if (!newSnap || !newSnap.runId) return;
-        setState((prev) => {
-          if (
-            prev.runId === newSnap.runId &&
-            prev.phase === newSnap.phase &&
-            prev.paused === newSnap.paused &&
-            prev.approved === newSnap.approved &&
-            prev.events.length === newSnap.events.length &&
-            prev.executions.length === newSnap.executions.length &&
-            JSON.stringify(prev.nodes) === JSON.stringify(newSnap.nodes) &&
-            JSON.stringify(prev.feedbackCounts) === JSON.stringify(newSnap.feedbackCounts)
-          ) {
-            return prev;
-          }
-          return newSnap;
-        });
-      });
-      return unsubscribe;
-    }
-  }, [historical, busy]);
 
-  useEffect(() => {
-    if (!desktop) return;
-    const onMouseDown = (e: MouseEvent) => {
-      if (e.buttons !== 1) return;
-      const target = e.target as HTMLElement | null;
-      if (!target) return;
-      if (
-        target.closest(
-          "button, input, select, textarea, a, .tab-btn, .project-workspace-item, .run-item, .react-flow, .prompt-box, .modal, .history-banner-actions, .section-actions, .resizer"
-        )
-      ) {
-        return;
-      }
-      if (
-        target.closest("[data-tauri-drag-region]") ||
-        target.closest(".macos-traffic-light-spacer") ||
-        target.closest(".sidebar-brand-row") ||
-        target.closest(".workspace-header") ||
-        target.closest(".header-top") ||
-        target.closest(".landing-screen")
-      ) {
-        import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-          getCurrentWindow().startDragging().catch(() => {});
-        });
-      }
-    };
-    window.addEventListener("mousedown", onMouseDown);
-    return () => window.removeEventListener("mousedown", onMouseDown);
-  }, []);
+    const interval = setInterval(() => {
+      runtimeService.snapshot()
+        .then((newSnap) => {
+          if (!newSnap || !newSnap.runId) return;
+          setState((prev) => {
+            if (
+              prev.runId === newSnap.runId &&
+              prev.phase === newSnap.phase &&
+              prev.paused === newSnap.paused &&
+              prev.approved === newSnap.approved &&
+              prev.events.length === newSnap.events.length &&
+              prev.executions.length === newSnap.executions.length &&
+              JSON.stringify(prev.nodes) === JSON.stringify(newSnap.nodes) &&
+              JSON.stringify(prev.feedbackCounts) === JSON.stringify(newSnap.feedbackCounts)
+            ) {
+              return prev;
+            }
+            return newSnap;
+          });
+        })
+        .catch((err) => setError(String(err)));
+    }, 700);
+    return () => clearInterval(interval);
+  }, [historical, busy]);
 
   useEffect(() => {
     const handleClose = () => {
@@ -766,7 +715,7 @@ export default function App() {
     try {
       await work();
     } catch (err) {
-      setError(typeof err === "string" ? err : JSON.stringify(err));
+      setError(err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err));
     } finally {
       setBusy(false);
     }
@@ -926,8 +875,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        {isDesktopMac && <div className="macos-traffic-light-spacer" data-tauri-drag-region />}
-        <div className="sidebar-brand-row" data-tauri-drag-region>
+        <div className="sidebar-brand-row">
           <a className="brand" href="#" onClick={(event) => event.preventDefault()}>
             <strong>Grapher</strong>
           </a>
@@ -1073,8 +1021,7 @@ export default function App() {
 
               <div className="landing-center-content">
                 <div>
-                  {!desktop && (
-                    <button
+                  <button
                       className="primary"
                       disabled={busy}
                       onClick={async () => {
@@ -1082,14 +1029,10 @@ export default function App() {
                         setMainTab("graph");
                       }}
                     >
-                      编译示例图（浏览器沙箱）
+                      编译示例图
                     </button>
-                  )}
                   <button className="secondary" onClick={() => setMainTab("settings")}>运行配置</button>
                 </div>
-                {!desktop && (
-                  <p>浏览器沙箱：纯客户端图编辑、DAG 编译校验与波次模拟，不接触 Git，也不调用模型。真实执行请运行 npm run desktop。</p>
-                )}
                 <motion.p
                   className="landing-title"
                   initial={{ opacity: 0, y: -10 }}
@@ -1121,12 +1064,12 @@ export default function App() {
               {/* 精简专业的操作控制头部 */}
               <motion.header
                 className="workspace-header"
-                data-tauri-drag-region
+
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
               >
-              <div className="header-top" data-tauri-drag-region>
+              <div className="header-top">
                 <div className="workspace-meta">
                   <FolderGit2 size={16} />
                   <span className="repo-badge" title={config.repository || "未选择本地仓库"}>
@@ -2003,8 +1946,8 @@ export default function App() {
                     <label className="form-field">
                       <span>执行引擎</span>
                       <select value={config.engine} disabled>
-                        <option value={desktop ? "pi" : "sandbox"}>
-                          {desktop ? "Pi（唯一出货引擎）" : "浏览器沙箱（无后端执行能力）"}
+                        <option value="pi">
+                          Pi
                         </option>
                       </select>
                     </label>
@@ -2014,7 +1957,7 @@ export default function App() {
                       <input
                         value={config.model}
                         onChange={(e) => setConfig({ ...config, model: e.target.value })}
-                        placeholder="例如: qwen3.8-max-0902 或 provider/model"
+                        placeholder="例如: qwen3.8-flash 或 provider/model"
                       />
                     </label>
 
@@ -2093,7 +2036,7 @@ export default function App() {
         <footer className="workspace-footer">
           <span>
             <span />
-            {desktop ? "Local deterministic runtime · SQLite event store" : "Web Interactive Sandbox · Client DAG Simulator"}
+            Local runtime · SQLite event store
           </span>
           <span>Git carries workspace state.<ArrowDown size={11} /> Humans stay in control.</span>
         </footer>
@@ -2136,8 +2079,8 @@ export default function App() {
                   <label>
                     执行引擎
                     <select value={config.engine} disabled>
-                      <option value={desktop ? "pi" : "sandbox"}>
-                        {desktop ? "Pi（唯一出货引擎）" : "浏览器沙箱（无后端执行能力）"}
+                      <option value="pi">
+                        Pi
                       </option>
                     </select>
                   </label>
@@ -2214,7 +2157,7 @@ export default function App() {
                     <input
                       value={config.model}
                       onChange={(event) => setConfig({ ...config, model: event.target.value })}
-                      placeholder="provider/model，如 qwen3.8-max-0902"
+                      placeholder="provider/model，如 qwen3.8-flash"
                     />
                   </label>
                   <div className="field-pair">
@@ -2241,7 +2184,7 @@ export default function App() {
                   </div>
                   <p className="settings-note">
                     设置将保存并应用到下一次编译。Pi 使用独立登录凭据或本地环境变量。<br />
-                    持久化数据目录：{dataPath || "桌面端启动后就绪"}
+                    持久化数据目录：{dataPath || "后端连接后显示"}
                   </p>
                 </div>
                 <footer>
@@ -2306,9 +2249,7 @@ export default function App() {
                   <p>{state.graph.originalGoal}</p>
                   <ul>
                     <li>
-                      {state.config?.engine === "sandbox"
-                        ? "在浏览器沙箱中模拟运行，不接触 Git，也不消耗模型 Token。"
-                        : `在仓库 ${state.config?.repository || config.repository} 创建独立 Git worktree。`}
+                      {`在仓库 ${state.config?.repository || config.repository} 创建独立 Git worktree。`}
                     </li>
                     <li>每个节点分配独立隔离会话；验证失败最多自动反馈重试 {state.config?.maxFeedback ?? config.maxFeedback} 次。</li>
                     <li>完全不修改或破坏你的主开发目录。</li>
@@ -2344,7 +2285,7 @@ export default function App() {
 
       {contextMenu && (
         <div
-          className="macos-context-menu"
+          className="context-menu"
           style={{
             left: Math.min(contextMenu.x, window.innerWidth - 180),
             top: Math.min(contextMenu.y, window.innerHeight - 120),
@@ -2378,7 +2319,7 @@ export default function App() {
 
       {runContextMenu && (
         <div
-          className="macos-context-menu"
+          className="context-menu"
           style={{
             left: Math.min(runContextMenu.x, window.innerWidth - 180),
             top: Math.min(runContextMenu.y, window.innerHeight - 120),
@@ -2413,14 +2354,14 @@ export default function App() {
       {confirmModal && (
         <div className="modal-backdrop" onClick={() => setConfirmModal(null)}>
           <div
-            className="macos-confirm-dialog"
+            className="confirm-dialog"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="macos-confirm-header">
-              <div className={`macos-confirm-icon-wrap ${confirmModal.danger ? "danger" : ""}`}>
+            <div className="confirm-header">
+              <div className={`confirm-icon-wrap ${confirmModal.danger ? "danger" : ""}`}>
                 {confirmModal.danger ? <AlertTriangle size={18} /> : <Trash2 size={18} />}
               </div>
-              <div className="macos-confirm-texts">
+              <div className="confirm-texts">
                 <h4>{confirmModal.title}</h4>
                 <p>{confirmModal.message}</p>
                 {confirmModal.detail && (
@@ -2428,7 +2369,7 @@ export default function App() {
                 )}
               </div>
             </div>
-            <div className="macos-confirm-actions">
+            <div className="confirm-actions">
               <button
                 type="button"
                 className="cancel-btn"

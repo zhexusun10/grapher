@@ -16,15 +16,17 @@ function visit(n){
  ts.forEachChild(n,visit);
 }visit(ast);
 const live=path.join(dir,'frontend-live');fs.mkdirSync(live,{recursive:true});
-const host=spawn(path.resolve('src-tauri/target/debug/examples/benchmark'),[],{env:{...process.env,BENCHMARK_CASE:'B008',BENCHMARK_CASE_DIR:live,BENCHMARK_SERVE:'1'},stdio:['pipe','pipe','pipe']});
+const host=spawn(path.resolve('backend/target/debug/examples/benchmark'),[],{env:{...process.env,BENCHMARK_CASE:'B008',BENCHMARK_CASE_DIR:live,BENCHMARK_SERVE:'1'},stdio:['pipe','pipe','pipe']});
 const hostLog=fs.createWriteStream(path.join(live,'host.log'));host.stderr.pipe(hostLog);
 const queue=[];
 createInterface({input:host.stdout}).on('line',line=>{const pending=queue.shift();if(!pending)return;try{const r=JSON.parse(line).result;r.Err!==undefined?pending.reject(r.Err):pending.resolve(r.Ok);}catch(e){pending.reject(e)}});
 host.on('exit',code=>{for(const p of queue.splice(0))p.reject(Error(`IPC host exited ${code}`))});
 const invoke=(command,body={})=>new Promise((resolve,reject)=>{queue.push({resolve,reject});host.stdin.write(JSON.stringify({command,body})+'\n')});
-// The only substituted boundary is the native IPC transport. Run the actual service module.
-globalThis.isTauri=true;
-globalThis.window={__TAURI_INTERNALS__:{invoke}};
+// Exercise the shipping fetch service against the product dispatcher through the test transport.
+globalThis.fetch=async(url, options)=>{
+ try { return new Response(JSON.stringify({result:await invoke(url.replace('/api/',''),JSON.parse(options.body))}),{status:200}); }
+ catch(error) { return new Response(JSON.stringify({error:String(error)}),{status:400}); }
+};
 const storage=new Map();
 const localStorage={getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,String(value)),removeItem:key=>storage.delete(key)};
 globalThis.localStorage=localStorage;
@@ -33,9 +35,8 @@ await build({entryPoints:[path.resolve('src/services/runtime.ts')],bundle:true,p
 const typesFile=path.join(dir,'types.mjs');
 await build({entryPoints:[path.resolve('src/types.ts')],bundle:true,platform:'node',format:'esm',packages:'external',outfile:typesFile});
 const {example}=await import(typesFile);
-const {runtimeService,isDesktop}=await import(serviceFile);
-assert.equal(isDesktop,true,'Benchmark must use the actual desktop service, never the browser simulator');
-const context={runtimeService,localStorage,currentRepoPath:'default',workspaceRuns:{},console,Date,Promise,setTimeout,desktop:true,useCallback:fn=>fn,invoke,goal:'',selected:'A',instruction:'',state:{graph:{originalGoal:'',nodes:[],edges:[]}},runs:[],projects:[],error:'',historical:false};
+const {runtimeService}=await import(serviceFile);
+const context={runtimeService,localStorage,currentRepoPath:'default',workspaceRuns:{},console,Date,Promise,setTimeout,useCallback:fn=>fn,invoke,goal:'',selected:'A',instruction:'',state:{graph:{originalGoal:'',nodes:[],edges:[]}},runs:[],projects:[],error:'',historical:false};
 for(const name of ['State','Goal','Config','IsPlanning','Selected','Messages','MainTab','Runs','Error','Busy','Historical','Modal','Instruction','RepoInfo','Projects','Args','DataPath','WorkspaceRuns','ConfirmModal'])context[`set${name}`]=value=>{const key=name[0].toLowerCase()+name.slice(1);context[key]=typeof value==='function'?value(context[key]):value;};
 vm.createContext(context);
 // Reuse production fixture and action closures; setters are a contract observation surface, not runtime truth.

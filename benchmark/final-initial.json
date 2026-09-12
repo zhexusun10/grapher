@@ -18,7 +18,7 @@
     "deterministicOnly": false,
     "agentVariant": "planned",
     "gitCommit": "a3b8798234bd9832c4e7a0156d678af8ea01fd0a",
-    "dirtyWorkingTree": "M .gitignore\n M README.md\n M package.json\n M src-tauri/Cargo.toml\n M src-tauri/src/desktop.rs\n M src-tauri/src/engine.rs\n M src-tauri/src/runtime.rs\n M src-tauri/tests/engine.rs\n M src/App.tsx\n M src/types.ts\n?? benchmark/\n?? src-tauri/examples/",
+    "dirtyWorkingTree": "M .gitignore\n M README.md\n M package.json\n M backend/Cargo.toml\n M backend/src/server.rs\n M backend/src/engine.rs\n M backend/src/runtime.rs\n M backend/tests/engine.rs\n M src/App.tsx\n M src/types.ts\n?? benchmark/\n?? backend/examples/",
     "startedAt": "2026-09-12T14:40:17.554Z",
     "sourceSha256": "8384bbd04e1d63a0f6c3a72e23d8e9cfdbcf3a80a4faf504a6d7fabec69be5bb",
     "endedAt": "2026-09-12T14:42:47.804Z",

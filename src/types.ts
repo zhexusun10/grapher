@@ -5,9 +5,8 @@ export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphE
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
 /**
  * "pi" 是唯一的出货引擎；"fixture" 只存在于启用 Cargo `fixture` 特性的测试构建；
- * "sandbox" 只由浏览器端模拟器自己设置，永远不会发给 Rust 后端。
  */
-export type Engine = "pi" | "fixture" | "sandbox";
+export type Engine = "pi" | "fixture";
 export interface Config { repository: string; engine: Engine; piCommand: string; piArgs: string[]; model: string; maxParallel: number; maxFeedback: number }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; startedAt: number; completedAt: number | null }
@@ -39,7 +38,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", engine: "pi", piCommand: "pi", piArgs: [], model: "", maxParallel: 2, maxFeedback: 3 };
+export const defaultConfig: Config = { repository: "", engine: "pi", piCommand: "pi", piArgs: [], model: "qwen3.8-flash", maxParallel: 2, maxFeedback: 3 };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},

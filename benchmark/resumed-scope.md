@@ -1,5 +1,7 @@
 # Resumed validation — 2026-09-13
 
+> 历史记录：本文描述迁移前的实现与测试结果。当前版本使用浏览器前端和 HTTP 后端；现有基准适配器调用产品 dispatcher，HTTP 集成测试见 `npm run test:http`。
+
 The user resumed after additional repository work. The earlier acceptance applies to source hash 8384bbd04e1d63a0f6c3a72e23d8e9cfdbcf3a80a4faf504a6d7fabec69be5bb, not automatically to this checkout. Those original artifacts remain immutable.
 
 ## Boundary changes discovered before repair

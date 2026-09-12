@@ -4,19 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "node scripts/free-port.mjs",
-    "dev": "vite --host 127.0.0.1",
+    "dev": "node scripts/dev.mjs",
     "build": "tsc --noEmit && vite build",
-    "predesktop": "node scripts/free-port.mjs",
-    "desktop": "node scripts/tauri-runner.mjs dev",
-    "desktop:build": "node scripts/tauri-runner.mjs build",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features fixture",
+    "test": "cargo test --manifest-path backend/Cargo.toml --no-default-features --features fixture",
     "check": "tsc --noEmit",
     "benchmark": "node benchmark/run.mjs",
-    "benchmark:validate": "node benchmark/validate.mjs"
+    "benchmark:validate": "node benchmark/validate.mjs",
+    "frontend": "vite --host 127.0.0.1",
+    "backend": "cargo run --manifest-path backend/Cargo.toml --bin grapher",
+    "start": "cargo run --release --manifest-path backend/Cargo.toml --bin grapher",
+    "test:http": "npm run build && cargo build --manifest-path backend/Cargo.toml --features fixture --bin grapher && node scripts/test-http.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.11.1",
     "@xyflow/react": "12.8.5",
     "lucide-react": "0.468.0",
     "motion": "^13.2.0",
@@ -24,7 +23,6 @@
     "react-dom": "19.2.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.11.4",
     "@types/node": "^22.20.2",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",

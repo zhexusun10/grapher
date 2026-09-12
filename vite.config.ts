@@ -9,7 +9,12 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
-  server: { port: 1420, strictPort: true },
+  server: {
+    host: "127.0.0.1",
+    port: 1420,
+    strictPort: true,
+    proxy: { "/api": `http://127.0.0.1:${process.env.GRAPHER_PORT || "1421"}` },
+  },
   clearScreen: false,
 });
 

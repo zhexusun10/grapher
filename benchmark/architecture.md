@@ -1,8 +1,10 @@
 # Benchmark harness contract (schema v1)
 
-Entry: `npm run benchmark`. Runner: Node standard library, existing TypeScript/esbuild/React, Cargo feature `benchmark`. No added third-party packages. The test-only adapter is included in desktop.rs so it can call private generated command wrappers. It is excluded from shipping builds. Each case runs in a fresh OS process with its own Tauri MockRuntime host; the real desktop drive owns scheduling and worker threads.
+> 历史记录：本文描述迁移前的实现与测试结果。当前版本使用浏览器前端和 HTTP 后端；现有基准适配器调用产品 dispatcher，HTTP 集成测试见 `npm run test:http`。
 
-Fixtures are small deterministic Graph values in desktop.rs, not model-generated graphs. The deterministic actuator is `src-tauri/src/fixture.rs`, compiled only under the Cargo `fixture` feature that `benchmark` enables; engine id `fixture`, isolated repository `fixture-repository`, output prefix `[fixture]`. Shipping builds contain no such engine and accept only `pi`, so only the node-execution step is substituted while compiler, scheduler, worktrees, event store and feedback stay on the shipping path. B006 deliberately configures `/usr/bin/false` as the executable to exercise a controlled real process failure. It does not fake a Runtime.finish result. B010 uses the actual local Pi installation. `--planning` changes only B010's initiation variant from hand-authored Graph IR to real plan_goal; variant must be reported when comparing results.
+Entry: `npm run benchmark`. Runner: Node standard library, existing TypeScript/esbuild/React, Cargo feature `benchmark`. No added third-party packages. The test-only adapter is included in server.rs so it can call private generated command wrappers. It is excluded from shipping builds. Each case runs in a fresh OS process with its own Tauri MockRuntime host; the real desktop drive owns scheduling and worker threads.
+
+Fixtures are small deterministic Graph values in server.rs, not model-generated graphs. The deterministic actuator is `backend/src/fixture.rs`, compiled only under the Cargo `fixture` feature that `benchmark` enables; engine id `fixture`, isolated repository `fixture-repository`, output prefix `[fixture]`. Shipping builds contain no such engine and accept only `pi`, so only the node-execution step is substituted while compiler, scheduler, worktrees, event store and feedback stay on the shipping path. B006 deliberately configures `/usr/bin/false` as the executable to exercise a controlled real process failure. It does not fake a Runtime.finish result. B010 uses the actual local Pi installation. `--planning` changes only B010's initiation variant from hand-authored Graph IR to real plan_goal; variant must be reported when comparing results.
 
 | ID | Layer | Acceptance |
 |---|---|---|
@@ -17,7 +19,7 @@ Fixtures are small deterministic Graph values in desktop.rs, not model-generated
 | B009 | deterministic | feedback limit zero: no extra attempts, reviewer failed, independent node done; fork-inherited lock release and interrupted-run recovery |
 | B010 | agent-dependent | real Pi writes exact hello.txt and runtime completes; optional real partition/plan initiation |
 
-B008 extracts the existing action/filter AST from App.tsx for a contract test. State setters observe frontend state; invoke goes to a persistent real Tauri handler host via JSON stdin/stdout. Neither a fake backend nor a replacement scheduler is used. TaskNode and readableLog are exposed only in a test bundle, without changing their production exports. This covers action/serialization/render integration but does not prove native window clicks, effects or macOS window lifecycle.
+B008 extracts the existing action/filter AST from App.tsx for a contract test. State setters observe frontend state; invoke goes to a persistent real Tauri handler host via JSON stdin/stdout. Neither a fake backend nor a replacement scheduler is used. TaskNode and readableLog are exposed only in a test bundle, without changing their production exports. This covers action/serialization/render integration but does not prove native window clicks, effects or 原生窗口平台 window lifecycle.
 
 ## Artifacts
 

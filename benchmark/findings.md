@@ -1,5 +1,7 @@
 # Failure classification and repair ledger
 
+> 历史记录：本文描述迁移前的实现与测试结果。当前版本使用浏览器前端和 HTTP 后端；现有基准适配器调用产品 dispatcher，HTTP 集成测试见 `npm run test:http`。
+
 ## Baseline (immutable)
 
 `baseline-2026-09-12T14-22-30-778Z`: first complete suite before behavior repairs. 8 PASS, 2 FAIL. Deterministic 8/9; agent 0/1. Raw result classification was provisional; this ledger is the reviewed classification authority.

@@ -1,5 +1,7 @@
 # Grapher MVP benchmark validation and hardening
 
+> 历史记录：本文描述迁移前的实现与测试结果。当前版本使用浏览器前端和 HTTP 后端；现有基准适配器调用产品 dispatcher，HTTP 集成测试见 `npm run test:http`。
+
 2026-09-12。结论：在下述明确的 IPC / frontend contract / execution 边界内，当前已实现的 MVP 达到本次验收条件。原生 WebView 点击与 effects 自动化仍是覆盖缺口，不能把本报告解释为完整原生 UI 自动化认证。
 
 ## 1. System under test
@@ -14,7 +16,7 @@
 
 ## 2. Benchmark architecture
 
-[run.mjs](run.mjs) 为单命令 runner；[desktop.rs](desktop.rs) 是 feature-gated Tauri 测试宿主适配器，调用原有 command handler 和 drive，不复制调度器。Tauri MockRuntime 仅替代原生窗口宿主。固定 Graph fixture、真实 shipping demo、实际 Git/SQLite 与受控失败进程构成确定性层；真实 Pi 单独统计。
+[run.mjs](run.mjs) 为单命令 runner；[server.rs](server.rs) 是 feature-gated Tauri 测试宿主适配器，调用原有 command handler 和 drive，不复制调度器。Tauri MockRuntime 仅替代原生窗口宿主。固定 Graph fixture、真实 shipping demo、实际 Git/SQLite 与受控失败进程构成确定性层；真实 Pi 单独统计。
 
 B008 通过实际 App.tsx action/filter AST、真实 IPC、TypeScript structural contract 和实际 TaskNode SSR 验证 frontend/backend。React setters 是观测界面；后台状态仍只来自产品 Runtime。未模拟核心成功结果。新增的 scripted Pi retry test 仅为补充协议单测，完全排除在真实 Pi benchmark 成功率之外。
 
@@ -56,9 +58,9 @@ B008 通过实际 App.tsx action/filter AST、真实 IPC、TypeScript structural
 
 * `src/App.tsx`：修复默认 demo 入口、运行配置入口、事件过滤和最新运行只读状态；展示 fixed-demo 的真实含义。
 * `src/types.ts`：补充产品已有 invalidated.human 的可选字段。
-* `src-tauri/src/runtime.rs`：仅新增 Drop 显式释放 flock。
-* `src-tauri/src/engine.rs`：沿现有 output channel 添加 PID/退出元数据；清除已被成功重试取代的 agent_error。
-* `src-tauri/src/desktop.rs`：仅新增 benchmark feature 下的适配器模块；shipping command/drive 无替代实现。
+* `backend/src/runtime.rs`：仅新增 Drop 显式释放 flock。
+* `backend/src/engine.rs`：沿现有 output channel 添加 PID/退出元数据；清除已被成功重试取代的 agent_error。
+* `backend/src/server.rs`：仅新增 benchmark feature 下的适配器模块；shipping command/drive 无替代实现。
 * Cargo/package scripts、benchmark files、README、gitignore：harness、协议回归、结果格式及复现文档。没有实现架构中的未来 subsystem。
 
 ## 6. Final benchmark
