@@ -1,8 +1,79 @@
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryInfo {
+    pub path: String,
+    pub name: String,
+    pub branch: String,
+    pub head: String,
+    pub clean: bool,
+}
+
+pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
+    let candidate = match target {
+        Some(path) => {
+            if !path.exists() {
+                return Ok(None);
+            }
+            path.to_path_buf()
+        }
+        None => match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(_) => return Ok(None),
+        },
+    };
+    let top_level = match git(&candidate, &["rev-parse", "--show-toplevel"]) {
+        Ok(top) => PathBuf::from(top),
+        Err(_) => return Ok(None),
+    };
+    let path_str = top_level.to_string_lossy().to_string();
+    let name = top_level
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path_str.clone());
+    let branch = git(&top_level, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".into());
+    let head = git(&top_level, &["rev-parse", "--short", "HEAD"])
+        .unwrap_or_default();
+    let status = git(&top_level, &["status", "--porcelain"])
+        .unwrap_or_default();
+    let clean = status.trim().is_empty();
+
+    Ok(Some(RepositoryInfo {
+        path: path_str,
+        name,
+        branch,
+        head,
+        clean,
+    }))
+}
+
+pub fn pick_folder() -> Result<Option<PathBuf>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("osascript")
+            .args(["-e", "POSIX path of (choose folder with prompt \"请选择本地 Git 项目根目录\")"])
+            .output()
+            .map_err(|e| format!("无法调起系统文件夹选择器: {e}"))?;
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                return Ok(Some(PathBuf::from(path_str)));
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(None)
+    }
+}
 
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")

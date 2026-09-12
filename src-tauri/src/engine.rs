@@ -263,7 +263,7 @@ pub fn execute(
             task: &task,
             session_dir: &session_dir,
             extension: None,
-            tools: "read,bash,edit,write,grep,find,ls",
+            tools: "read,write,bash,edit",
             session_id: Some(&execution.session_id),
             environment: Vec::new(),
         },

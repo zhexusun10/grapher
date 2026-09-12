@@ -84,6 +84,31 @@ impl Runtime {
             .any(|node| node.status == "running")
     }
 
+    pub fn reset_workspace(&mut self) -> Result<Snapshot, String> {
+        if self.active() {
+            return Err("Pause and wait for the current executions to finish first".into());
+        }
+        let current_config = self.state.config.clone();
+        self.state = Snapshot {
+            config: current_config,
+            ..Snapshot::default()
+        };
+        Ok(self.state.clone())
+    }
+
+    pub fn clear_history(&mut self) -> Result<(), String> {
+        if self.active() {
+            return Err("Pause and wait for the current executions to finish first".into());
+        }
+        self.store.clear()?;
+        let current_config = self.state.config.clone();
+        self.state = Snapshot {
+            config: current_config,
+            ..Snapshot::default()
+        };
+        Ok(())
+    }
+
     pub fn create(&mut self, graph: Graph, config: Config) -> Result<(), String> {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());

@@ -1,0 +1,53 @@
+/**
+ * Grapher Semantic Design Tokens
+ * 语义化设计令牌系统
+ */
+
+:root {
+  /* 基础背景与画布 */
+  --bg-canvas: #FFFFFF;
+  --bg-default: #FFFFFF;
+
+  /* 容器与表面 */
+  --bg-surface: #F8FAFC;
+  --bg-surface-hover: #F1F5F9;
+  --bg-surface-active: #E2E8F0;
+
+  /* 边框与分割线 */
+  --border-default: #E2E8F0;
+  --border-subtle: #F1F5F9;
+  --border-focus: #2563EB;
+
+  /* 文本与图标 */
+  --text-primary: #0F172A;
+  --text-secondary: #64748B;
+  --text-inverse: #FFFFFF;
+
+  /* 品牌色体系 */
+  --brand-default: #2563EB;
+  --brand-hover: #1D4ED8;
+  --brand-active: #1E40AF;
+  --brand-subtle: #EFF6FF;
+  --brand-border: #BFDBFE;
+
+  /* 危险与警告状态 */
+  --status-danger: #EF4444;
+  --status-danger-subtle: #FEF2F2;
+  --status-danger-border: #FECACA;
+  --status-danger-text: #991B1B;
+
+  /* 成功与告警扩展状态 */
+  --status-success: #10B981;
+  --status-success-subtle: #ECFDF5;
+  --status-success-border: #A7F3D0;
+  --status-warning: #F59E0B;
+  --status-warning-subtle: #FFFBEB;
+
+  /* 遮罩与画布专用令牌 */
+  --bg-overlay: rgba(15, 23, 42, 0.45);
+  --graph-grid-dot: #CBD5E1;
+  --graph-edge-default: #94A3B8;
+  --graph-edge-feedback: #8B5CF6;
+  --graph-edge-feedback-bg: #F5F3FF;
+  --graph-edge-feedback-text: #7C3AED;
+}

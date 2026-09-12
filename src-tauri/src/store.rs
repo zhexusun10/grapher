@@ -80,4 +80,11 @@ impl Store {
         }
         Ok(state)
     }
+
+    pub fn clear(&self) -> Result<(), String> {
+        self.connection
+            .execute("DELETE FROM events", [])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }

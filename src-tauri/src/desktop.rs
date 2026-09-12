@@ -31,6 +31,7 @@ pub struct Bootstrap {
     config: Config,
     runs: Vec<String>,
     data_path: String,
+    repository_info: Option<crate::workspace::RepositoryInfo>,
 }
 
 #[derive(Deserialize)]
@@ -47,8 +48,12 @@ fn bootstrap(service: State<'_, Arc<Service>>) -> Result<Bootstrap, String> {
         .unwrap()
         .join("pi");
     let local = source.join("node_modules/.bin/tsx").exists();
-    let config = runtime.state.config.clone().unwrap_or(Config {
-        repository: String::new(),
+    let detected_repo = crate::workspace::detect(None).ok().flatten();
+    let mut config = runtime.state.config.clone().unwrap_or(Config {
+        repository: detected_repo
+            .as_ref()
+            .map(|r| r.path.clone())
+            .unwrap_or_default(),
         engine: "demo".into(),
         pi_command: if local {
             "/opt/homebrew/bin/node"
@@ -76,11 +81,34 @@ fn bootstrap(service: State<'_, Arc<Service>>) -> Result<Bootstrap, String> {
         max_parallel: 2,
         max_feedback: 3,
     });
+    if config.repository.is_empty() {
+        if let Some(ref repo) = detected_repo {
+            config.repository = repo.path.clone();
+        }
+    }
+    let repository_info = if !config.repository.is_empty() {
+        if let Some(ref repo) = detected_repo {
+            if repo.path == config.repository {
+                Some(repo.clone())
+            } else {
+                crate::workspace::detect(Some(std::path::Path::new(&config.repository)))
+                    .ok()
+                    .flatten()
+            }
+        } else {
+            crate::workspace::detect(Some(std::path::Path::new(&config.repository)))
+                .ok()
+                .flatten()
+        }
+    } else {
+        None
+    };
     Ok(Bootstrap {
         snapshot: runtime.state.clone(),
         config,
         runs: runtime.store.runs()?,
         data_path: runtime.root.to_string_lossy().into(),
+        repository_info,
     })
 }
 
@@ -312,6 +340,48 @@ fn control(
     Ok(snapshot)
 }
 
+#[tauri::command]
+fn detect_repository(
+    path: Option<String>,
+) -> Result<Option<crate::workspace::RepositoryInfo>, String> {
+    crate::workspace::detect(path.as_deref().map(std::path::Path::new))
+}
+
+#[tauri::command]
+fn pick_repository() -> Result<Option<crate::workspace::RepositoryInfo>, String> {
+    if let Some(folder) = crate::workspace::pick_folder()? {
+        let info = crate::workspace::detect(Some(&folder))?;
+        if let Some(info) = info {
+            Ok(Some(info))
+        } else {
+            Err(format!(
+                "所选目录「{}」不是有效的 Git 仓库根目录（未找到 .git）。请选择包含 .git 的目录，或在该目录执行 git init。",
+                folder.display()
+            ))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+fn reset_workspace(service: State<'_, Arc<Service>>) -> Result<Snapshot, String> {
+    if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current operation to finish".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.reset_workspace()
+}
+
+#[tauri::command]
+fn clear_history(service: State<'_, Arc<Service>>) -> Result<(), String> {
+    if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current operation to finish".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.clear_history()
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -335,7 +405,11 @@ pub fn run() {
             compile_graph,
             save_graph,
             plan_goal,
-            control
+            control,
+            detect_repository,
+            pick_repository,
+            reset_workspace,
+            clear_history
         ])
         .build(tauri::generate_context!())
         .expect("Cannot run Grapher desktop")
