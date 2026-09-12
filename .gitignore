@@ -22,6 +22,7 @@ pnpm-debug.log*
 # Grapher runtime and Rust outputs
 backend/target/
 .grapher/
+.pi/
 
 # Python
 .venv/
