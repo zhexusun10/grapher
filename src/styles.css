@@ -91,7 +91,7 @@ h3 {
   flex-shrink: 0;
   border-right: 1px solid var(--border-default);
   background: var(--bg-surface);
-  padding: 18px 12px 0;
+  padding: 18px 12px 16px;
   display: flex;
   flex-direction: column;
 }
@@ -292,7 +292,7 @@ h3 {
   justify-content: center;
   padding: 20px 12px;
   background: var(--bg-canvas);
-  border: 1px dashed var(--border-default);
+  border: 1px solid var(--border-default);
   border-radius: 8px;
   color: var(--text-secondary);
   cursor: pointer;
@@ -301,8 +301,8 @@ h3 {
 }
 
 .empty-projects-hint:hover {
-  border-color: var(--brand-default);
-  color: var(--brand-default);
+  border-color: var(--text-primary);
+  color: var(--text-primary);
 }
 
 .empty-projects-hint span {
@@ -314,8 +314,14 @@ h3 {
 .empty-projects-hint small {
   font-size: 9.5px;
   color: var(--text-secondary);
+  transition: color 0.15s ease;
 }
 
+.empty-projects-hint:hover small {
+  color: var(--text-primary);
+}
+
+.section-actions,
 .runs-actions {
   display: flex;
   align-items: center;
@@ -326,17 +332,20 @@ h3 {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  padding: 3px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border-radius: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
 }
 
 .icon-tiny-btn:hover {
-  background: var(--bg-surface);
+  background: var(--bg-surface-hover);
   color: var(--text-primary);
 }
 
@@ -346,12 +355,16 @@ h3 {
 }
 
 .nav-section {
-  font-size: 9px;
-  letter-spacing: 1.3px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 22px;
+  font-size: 11px;
+  letter-spacing: 0.3px;
   font-weight: 600;
   color: var(--text-secondary);
-  padding: 0 12px;
-  margin-bottom: 13px;
+  padding: 0 4px;
+  box-sizing: border-box;
 }
 
 .nav-item {
@@ -388,16 +401,8 @@ h3 {
 }
 
 .runs-label {
-  margin-top: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-right: 5px;
-}
-
-.runs-label button {
-  padding: 0;
-  color: var(--text-secondary);
+  margin-top: 24px;
+  margin-bottom: 8px;
 }
 
 .runs-list {
@@ -796,7 +801,13 @@ h3 {
   color: var(--text-primary);
   text-align: center;
   margin: 0;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
   user-select: none;
+  -webkit-user-drag: none;
+  cursor: default;
+  pointer-events: none;
 }
 
 /* ChatGPT Prompt Box 全新独立与缩放组件 */
@@ -826,17 +837,19 @@ h3 {
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
 }
 
-/* 点击输入框不要高亮任何东西：保持平静中性，无任何蓝框、边框变色或发光 */
+/* 输入框保持中性轮廓，hover 边框变黑 */
 .prompt-box-container:focus,
 .prompt-box-container:focus-within,
 .prompt-box-container:focus-visible,
-.prompt-box-container:hover,
 .prompt-box-container.compact:focus,
 .prompt-box-container.compact:focus-within,
-.prompt-box-container.compact:focus-visible,
-.prompt-box-container.compact:hover {
+.prompt-box-container.compact:focus-visible {
   border-color: var(--border-default) !important;
   outline: none !important;
+}
+
+.prompt-box-container:hover {
+  border-color: var(--text-primary) !important;
 }
 
 .prompt-box-container.landing:focus,
@@ -1303,7 +1316,7 @@ h3 {
   background: var(--brand-default);
   opacity: 1;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .ai-chat-send-btn.active:hover {
@@ -1414,7 +1427,7 @@ h3 {
   border: 1px solid var(--border-default);
   border-radius: 10px;
   padding: 14px 16px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
 }
 
 .query-card-header {
@@ -1576,10 +1589,21 @@ h3 {
   background: var(--status-waiting);
 }
 
-.chip-dot.running { background: var(--brand-default); }
-.chip-dot.done { background: var(--status-success); }
-.chip-dot.failed { background: var(--status-danger); }
-.chip-dot.blocked { background: var(--status-warning); }
+.chip-dot.running {
+  background: var(--brand-default);
+}
+
+.chip-dot.done {
+  background: var(--status-success);
+}
+
+.chip-dot.failed {
+  background: var(--status-danger);
+}
+
+.chip-dot.blocked {
+  background: var(--status-warning);
+}
 
 .chip-name {
   font-weight: 550;
@@ -3016,10 +3040,22 @@ h3 {
   flex-shrink: 0;
 }
 
-.status-indicator.running { background: var(--brand-default); box-shadow: 0 0 6px var(--brand-default); }
-.status-indicator.done { background: var(--status-success); }
-.status-indicator.failed { background: var(--status-danger); }
-.status-indicator.blocked { background: var(--status-warning); }
+.status-indicator.running {
+  background: var(--brand-default);
+  box-shadow: 0 0 6px var(--brand-default);
+}
+
+.status-indicator.done {
+  background: var(--status-success);
+}
+
+.status-indicator.failed {
+  background: var(--status-danger);
+}
+
+.status-indicator.blocked {
+  background: var(--status-warning);
+}
 
 .card-task {
   font-size: 11px;
@@ -3045,10 +3081,21 @@ h3 {
   letter-spacing: 0.5px;
 }
 
-.status-text.running { color: var(--brand-default); }
-.status-text.done { color: var(--status-success); }
-.status-text.failed { color: var(--status-danger); }
-.status-text.waiting { color: var(--text-secondary); }
+.status-text.running {
+  color: var(--brand-default);
+}
+
+.status-text.done {
+  color: var(--status-success);
+}
+
+.status-text.failed {
+  color: var(--status-danger);
+}
+
+.status-text.waiting {
+  color: var(--text-secondary);
+}
 
 .attempts-count {
   color: var(--text-secondary);
@@ -3390,10 +3437,18 @@ h3 {
 }
 
 .event-badge-dot.node_completed,
-.event-badge-dot.approved { background: var(--status-success); }
+.event-badge-dot.approved {
+  background: var(--status-success);
+}
+
 .event-badge-dot.node_failed,
-.event-badge-dot.rejected { background: var(--status-danger); }
-.event-badge-dot.feedback { background: var(--status-warning); }
+.event-badge-dot.rejected {
+  background: var(--status-danger);
+}
+
+.event-badge-dot.feedback {
+  background: var(--status-warning);
+}
 
 .card-main {
   flex: 1;
@@ -3743,4 +3798,3 @@ h3 {
     height: 52px;
   }
 }
-

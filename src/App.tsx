@@ -549,21 +549,21 @@ export default function App() {
       <aside className="sidebar">
         <div className="sidebar-brand-row">
           <a className="brand" href="#" onClick={(event) => event.preventDefault()}>
-            <span className="brand-mark"><Workflow size={20} /></span>
             <strong>Grapher</strong>
-            <span className="version">v0.1.0</span>
           </a>
         </div>
 
         <div className="nav-section projects-label">
-          <span>WORKSPACES ({projects.length})</span>
-          <button
-            className="icon-tiny-btn"
-            title="添加或打开本地 Git 仓库"
-            onClick={handleOpenProject}
-          >
-            <Plus size={14} />
-          </button>
+          <span>Work Space</span>
+          <div className="section-actions">
+            <button
+              className="icon-tiny-btn"
+              title="添加或打开本地 Git 仓库"
+              onClick={handleOpenProject}
+            >
+              <Plus size={14} />
+            </button>
+          </div>
         </div>
 
         <div className="projects-list">
@@ -612,8 +612,8 @@ export default function App() {
         </div>
 
         <div className="nav-section runs-label">
-          <span>RUN HISTORY</span>
-          <div className="runs-actions">
+          <span>Run History</span>
+          <div className="section-actions">
             {runs.length > 0 && (
               <button
                 className="icon-tiny-btn danger-hover"
@@ -663,14 +663,7 @@ export default function App() {
           )}
         </div>
 
-        <div className="sidebar-bottom">
-          <div className="local-indicator">
-            <span />{config.engine === "pi" ? "Pi 驱动引擎" : "Demo 模式"}
-          </div>
-          <div className="storage-info" title={dataPath}>
-            <small>数据目录: {dataPath ? dataPath.split("/").slice(-2).join("/") : "本地存储"}</small>
-          </div>
-        </div>
+
       </aside>
 
       <main className="main">
@@ -777,7 +770,7 @@ export default function App() {
                 <div className="header-actions">
                   <span className="engine-indicator">
                     <span className="engine-dot" />
-                    {config.engine === "pi" ? "Pi Engine" : "Demo"}
+                    pi
                   </span>
                   <button
                     className="secondary btn-sm"
@@ -1669,8 +1662,7 @@ export default function App() {
                         value={config.engine}
                         onChange={(e) => setConfig({ ...config, engine: e.target.value as Config["engine"] })}
                       >
-                        <option value="pi">Pi · 真实模型调用与代码执行</option>
-                        <option value="demo">Demo · 隔离演示模式（不调用外部模型）</option>
+                        <option value="pi">pi</option>
                       </select>
                     </label>
 
@@ -1803,8 +1795,7 @@ export default function App() {
                       value={config.engine}
                       onChange={(event) => setConfig({ ...config, engine: event.target.value as Config["engine"] })}
                     >
-                      <option value="pi">Pi · 真实模型与代码执行</option>
-                      <option value="demo">Demo · 隔离演示仓库</option>
+                      <option value="pi">pi</option>
                     </select>
                   </label>
                   <div className="repo-setting-box">

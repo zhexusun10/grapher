@@ -1,36 +1,8 @@
 "use client";
 
-import React, { useState, useRef, useLayoutEffect, useEffect } from "react";
+import React, { useState, useRef, useLayoutEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import {
-  ArrowUp,
-  Paperclip,
-  Wrench,
-  X,
-  Search,
-  Lightbulb,
-  Code2,
-  Globe,
-  ImageIcon,
-  LoaderCircle,
-  Sparkles,
-} from "lucide-react";
-
-export interface ToolOption {
-  id: string;
-  name: string;
-  shortName: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
-  extra?: string;
-}
-
-export const TOOL_OPTIONS: ToolOption[] = [
-  { id: "searchWeb", name: "联网搜索与资料检索", shortName: "Search", icon: Search },
-  { id: "thinkLonger", name: "深度思考与架构推演", shortName: "Think", icon: Lightbulb },
-  { id: "writeCode", name: "编写与重构代码", shortName: "Code", icon: Code2 },
-  { id: "deepResearch", name: "全库深度上下文检索", shortName: "Deep Search", icon: Globe, extra: "Beta" },
-  { id: "createImage", name: "拓扑可视化图表生成", shortName: "Diagram", icon: ImageIcon },
-];
+import { ArrowUp, Paperclip, X, LoaderCircle } from "lucide-react";
 
 export interface PromptBoxProps
   extends Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, "onSubmit"> {
@@ -63,15 +35,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
   ) => {
     const internalTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
-    const toolsRef = useRef<HTMLDivElement | null>(null);
 
     const [internalValue, setInternalValue] = useState("");
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
-    const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
-    const [isToolsOpen, setIsToolsOpen] = useState(false);
 
     const currentText = value !== undefined ? value : internalValue;
+    const hasText = currentText.trim().length > 0;
 
     // Auto-adjust textarea height
     useLayoutEffect(() => {
@@ -84,21 +54,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         textarea.style.height = `${targetHeight}px`;
       }
     }, [currentText, compact]);
-
-    // Handle outside clicks to close tools menu
-    useEffect(() => {
-      const handleClickOutside = (e: MouseEvent) => {
-        if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
-          setIsToolsOpen(false);
-        }
-      };
-      if (isToolsOpen) {
-        document.addEventListener("mousedown", handleClickOutside);
-      }
-      return () => {
-        document.removeEventListener("mousedown", handleClickOutside);
-      };
-    }, [isToolsOpen]);
 
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       if (onChange) {
@@ -137,7 +92,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       if (onSubmit) {
         onSubmit(trimmed, {
           files: selectedFile ? [selectedFile] : [],
-          selectedTool: selectedToolId,
         });
       }
 
@@ -155,8 +109,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     };
 
-    const canSubmit = (currentText.trim().length > 0 || !!selectedImage) && !disabled && !isBusy;
-    const activeTool = selectedToolId ? TOOL_OPTIONS.find((t) => t.id === selectedToolId) : null;
+    const canSubmit = (hasText || !!selectedImage) && !disabled && !isBusy;
 
     return (
       <motion.div
@@ -237,86 +190,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             >
               <Paperclip size={compact ? 15 : 18} />
             </button>
-
-            {/* Tools Menu Button (UI展示，暂搁置不连接后端真实功能) */}
-            <div className="prompt-box-tools-wrap" ref={toolsRef}>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setIsToolsOpen((prev) => !prev);
-                }}
-                className={`prompt-box-tool-btn ${activeTool ? "has-active" : ""}`}
-                title="探索工具（暂未连接功能）"
-                aria-label="探索工具"
-                disabled={disabled || isBusy}
-              >
-                <Wrench size={compact ? 13 : 15} />
-                {!compact && <span>{activeTool ? activeTool.shortName : "Tools"}</span>}
-              </button>
-
-              {/* Tools Popover Menu */}
-              <AnimatePresence>
-                {isToolsOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.95, y: 6 }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.95, y: 6 }}
-                    transition={{ duration: 0.15 }}
-                    className="prompt-box-tools-popover"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div className="prompt-box-tools-header">
-                      <Sparkles size={13} />
-                      <span>探索可用工具</span>
-                      <small>(暂未连接后端功能)</small>
-                    </div>
-                    <div className="prompt-box-tools-list">
-                      {TOOL_OPTIONS.map((tool) => {
-                        const Icon = tool.icon;
-                        const isSelected = selectedToolId === tool.id;
-                        return (
-                          <button
-                            key={tool.id}
-                            type="button"
-                            className={`prompt-box-tool-item ${isSelected ? "selected" : ""}`}
-                            onClick={() => {
-                              setSelectedToolId(isSelected ? null : tool.id);
-                              setIsToolsOpen(false);
-                            }}
-                          >
-                            <Icon size={14} className="tool-icon" />
-                            <span className="tool-name">{tool.name}</span>
-                            {tool.extra && <span className="tool-extra">{tool.extra}</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-
-            {/* Active tool badge */}
-            {activeTool && (
-              <div className="prompt-box-active-tool-tag">
-                <activeTool.icon size={12} />
-                <span>{activeTool.shortName}</span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedToolId(null);
-                  }}
-                  title="取消工具"
-                >
-                  <X size={11} />
-                </button>
-              </div>
-            )}
           </div>
 
-          {/* Right Action Button: Send Button ONLY (Voice button is removed) */}
+          {/* Right Action Button: Send Button */}
           <div className="prompt-box-right-actions">
             <button
               type="button"
@@ -332,7 +208,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               {isBusy ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
               ) : (
-                <ArrowUp size={compact ? 15 : 18} />
+                <motion.span
+                  animate={{ rotate: hasText ? -90 : 0 }}
+                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                >
+                  <ArrowUp size={compact ? 15 : 18} />
+                </motion.span>
               )}
             </button>
           </div>

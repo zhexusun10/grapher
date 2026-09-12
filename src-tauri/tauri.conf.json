@@ -13,5 +13,16 @@
     "windows": [{ "title": "Grapher", "width": 1440, "height": 940, "minWidth": 1000, "minHeight": 720 }],
     "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost" }
   },
-  "bundle": { "active": true, "targets": ["app"], "icon": ["icons/128x128.png"], "resources": ["resources/*"] }
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": ["resources/*"]
+  }
 }
