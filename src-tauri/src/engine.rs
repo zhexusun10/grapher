@@ -45,6 +45,7 @@ pub struct PiRequest<'request> {
     pub extension: Option<&'request Path>,
     pub tools: &'request str,
     pub session_id: Option<&'request str>,
+    pub extra_args: Vec<&'request str>,
     pub environment: Vec<(&'request str, String)>,
 }
 
@@ -75,6 +76,9 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     }
     if let Some(session_id) = request.session_id {
         command.args(["--session-id", session_id]);
+    }
+    if !request.extra_args.is_empty() {
+        command.args(&request.extra_args);
     }
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
     command
@@ -265,6 +269,7 @@ pub fn execute(
             extension: None,
             tools: "read,write,bash,edit",
             session_id: Some(&execution.session_id),
+            extra_args: Vec::new(),
             environment: Vec::new(),
         },
         on_output,

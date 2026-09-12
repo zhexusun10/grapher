@@ -37,7 +37,23 @@ pub struct Bootstrap {
 #[derive(Deserialize)]
 pub struct Route {
     plan_type: String,
-    reasoning: String,
+}
+
+const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
+const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
+
+fn render_prompt(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut rendered = template.to_string();
+    for (key, value) in replacements {
+        let double_brace = format!("{{{{{key}}}}}");
+        let single_brace = format!("{{{key}}}");
+        if rendered.contains(&double_brace) {
+            rendered = rendered.replace(&double_brace, value);
+        } else if rendered.contains(&single_brace) {
+            rendered = rendered.replace(&single_brace, value);
+        }
+    }
+    rendered
 }
 
 #[tauri::command]
@@ -175,9 +191,9 @@ async fn plan_goal(
         let directory = root.join("planning").join(Uuid::new_v4().to_string());
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
         let route_path = directory.join("route.json");
-        let task = format!("Use route_task exactly once. Choose graph only when multiple substantial workstreams can independently progress; otherwise serial. Do not solve the task. User goal:\n{goal}");
+        let task = render_prompt(PARTITIONER_PROMPT, &[("goal", &goal)]);
         let mut log = String::new();
-        run_pi(PiRequest { config: &config, cwd: &repository, task: &task, session_dir: &directory.join("partition-session"), extension: Some(&service.extension), tools: "route_task", session_id: None, environment: vec![("GRAPHER_MODE", "partition".into()), ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into())] }, |text| log.push_str(&text))?;
+        run_pi(PiRequest { config: &config, cwd: &repository, task: &task, session_dir: &directory.join("partition-session"), extension: Some(&service.extension), tools: "route_task", session_id: None, extra_args: vec!["--thinking", "off"], environment: vec![("GRAPHER_MODE", "partition".into()), ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into())] }, |text| log.push_str(&text))?;
         fs::write(directory.join("partition.jsonl"), log).map_err(|error| error.to_string())?;
         let route: Route = serde_json::from_str(&fs::read_to_string(route_path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
         let graph = match route.plan_type.as_str() {
@@ -185,9 +201,9 @@ async fn plan_goal(
             "graph" => {
                 let graph_path = directory.join("graph.json");
                 fs::write(&graph_path, serde_json::to_string(&Graph { original_goal: goal.clone(), ..Graph::default() }).unwrap()).map_err(|error| error.to_string())?;
-                let task = format!("Compile the following goal into the smallest complete work graph using only node, edge, read, bash. Do not perform the work. Each node gets a fresh Pi, knows only its task and filesystem, and runs in an isolated Git worktree. Dependencies convey filesystem state, not conversation. Parallel nodes must be mergeable. Ordinary edges must form a DAG. Feedback edges return from a verifier to a dependency ancestor; REVISE invalidates that target and its dependency descendants, with at most 3 automatic retries. No merge/mechanics nodes. Correct compiler diagnostics using node/edge. When complete, finish your response and exit.\nRouting rationale: {}\nGoal: {goal}", route.reasoning);
+                let task = render_prompt(PLANNER_PROMPT, &[("goal", &goal)]);
                 let mut log = String::new();
-                run_pi(PiRequest { config: &config, cwd: &repository, task: &task, session_dir: &directory.join("planner-session"), extension: Some(&service.extension), tools: "node,edge,read,bash", session_id: None, environment: vec![("GRAPHER_MODE", "planner".into()), ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()), ("GRAPHER_COMPILER_PATH", std::env::current_exe().map_err(|error| error.to_string())?.to_string_lossy().into())] }, |text| log.push_str(&text))?;
+                run_pi(PiRequest { config: &config, cwd: &repository, task: &task, session_dir: &directory.join("planner-session"), extension: Some(&service.extension), tools: "node,edge,read,bash", session_id: None, extra_args: Vec::new(), environment: vec![("GRAPHER_MODE", "planner".into()), ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()), ("GRAPHER_COMPILER_PATH", std::env::current_exe().map_err(|error| error.to_string())?.to_string_lossy().into())] }, |text| log.push_str(&text))?;
                 fs::write(directory.join("planner.jsonl"), log).map_err(|error| error.to_string())?;
                 serde_json::from_str(&fs::read_to_string(graph_path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?
             }
@@ -389,6 +405,10 @@ pub fn run() {
             fs::create_dir_all(&root)?;
             let extension = root.join("grapher-planner.ts");
             fs::write(&extension, include_str!("../resources/planner.ts"))?;
+            let prompts_dir = root.join("prompts");
+            fs::create_dir_all(&prompts_dir)?;
+            fs::write(prompts_dir.join("partitioner.md"), PARTITIONER_PROMPT)?;
+            fs::write(prompts_dir.join("planner.md"), PLANNER_PROMPT)?;
             let runtime = Runtime::open(&root).map_err(std::io::Error::other)?;
             app.manage(Arc::new(Service {
                 runtime: Mutex::new(runtime),

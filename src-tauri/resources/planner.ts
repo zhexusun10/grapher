@@ -12,7 +12,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   if (process.env.GRAPHER_MODE === "partition") {
     pi.registerTool(defineTool({
       name: "route_task", label: "Route task", description: "Choose serial for linear work, graph only for multiple substantial independent workstreams.",
-      parameters: Type.Object({ plan_type: Type.Union([Type.Literal("serial"), Type.Literal("graph")]), reasoning: Type.String() }),
+      parameters: Type.Object({ plan_type: Type.Union([Type.Literal("serial"), Type.Literal("graph")]) }),
       async execute(_id, parameters) {
         writeFileSync(graphPath, JSON.stringify(parameters));
         return result("Route saved. Finish your response now.");

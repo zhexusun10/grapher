@@ -1,8 +1,8 @@
-# Grapher MVP
+# Grapher
 
 Don't orchestrate agents. Compile work.
 
-基于 [`agent.md`](agent.md) 的本地 macOS 桌面 MVP：**Tauri 2 + Rust + SQLite + React/TypeScript + React Flow**。Rust 是运行状态的唯一来源；前端不模拟节点执行。
+基于 [`agent.md`](agent.md) 的本地 macOS 桌面runtime：**Tauri 2 + Rust + SQLite + React/TypeScript + React Flow**。Rust 是运行状态的唯一来源；前端不模拟节点执行。
 
 ## 启动
 

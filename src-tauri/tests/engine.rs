@@ -28,6 +28,7 @@ fn execute_script(script: &str) -> (Result<String, String>, String) {
             extension: None,
             tools: "read,bash",
             session_id: Some("test-session"),
+            extra_args: Vec::new(),
             environment: Vec::new(),
         },
         |text| output.push_str(&text),
