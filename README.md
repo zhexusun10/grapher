@@ -14,22 +14,17 @@ export PATH="$HOME/.cargo/bin:$PATH"
 npm run desktop
 ```
 
-首次 Cargo 构建需要下载依赖。`npm run dev` 只启动浏览器界面预览，**没有后端执行能力**。
+首次 Cargo 构建需要下载依赖。`npm run dev` 只启动浏览器沙箱，**没有后端执行能力**。
 
-### 无模型演示
+### 浏览器沙箱（无后端）
 
-1. 保持默认 **Demo engine**，点击「编译演示图」。演示模式编译固定的可编辑示例，不会理解或实现输入框中的任意目标。
-2. 点击节点查看 task，或使用 **Graph IR** 编辑节点/边。
-3. 点击 **Approve & Start**，确认后启动真实 Rust Runtime。
-4. `api_spec → frontend ∥ backend → qa_review` 在真实临时 Git worktree 中执行。Demo engine 写入示例 Markdown 文件，不启动 Pi、不产生模型费用。
-5. 第一次 review 返回 `<REVISE>`，只重跑 frontend 和 qa_review；第二次返回 `<ACCEPT>`。最终共 6 次 execution。
-6. 选择节点，发送指令即可创建新 revision 并重跑受影响的依赖子图。可从事件历史和 execution 下拉框检查全部尝试。
+`npm run dev` 打开的是纯客户端沙箱：图编辑、DAG 编译校验与波次推进全部在浏览器内模拟，不接触 Git、不启动 Pi、不消耗模型额度。落地页的「编译示例图（浏览器沙箱）」载入内置示例图，可点击节点查看 task、用 **Graph IR** 编辑节点/边、审批并观察模拟的 `<REVISE>` → 重跑 → `<ACCEPT>` 流程。沙箱只用于熟悉 Graph IR 与界面，**不能验证真实执行**；真实运行必须使用 `npm run desktop`。
 
 ### 真实 Pi
 
-先在 Pi 自己的 CLI 中完成登录和模型配置。Grapher 不收集、存储 API Key。
+出货构建只有 **Pi** 一种执行引擎。先在 Pi 自己的 CLI 中完成登录和模型配置。Grapher 不收集、存储 API Key。
 
-1. 在运行设置中选择 **Pi**，填写**已有 commit 且完全干净**的 Git 仓库根路径。
+1. 运行设置中填写**已有 commit 且完全干净**的 Git 仓库根路径。
 2. 配置 Pi 可执行文件的绝对路径；启动参数是 JSON 字符串数组，不经 shell 拼接。模型留空使用 Pi 默认值。
 3. 本机若存在 `pi/` 源码和 `pi/node_modules`，开发版会预填本地 Node/tsx 启动参数。`pi/` 保持独立且不会修改；分发到其他机器需自行安装兼容 Pi。
 4. 点击「规划并编译」：Partitioner 只有 `route_task`；Graph Planner 只有 `node / edge / read / bash`。每次 mutation 都调用同一个 Rust 编译器，失败不会写入候选图。Serial 路由不调用 Planner，用单节点承载原始任务，同样保留审批边界。
@@ -59,7 +54,6 @@ npm run desktop
 ```text
 ~/Library/Application Support/dev.grapher.desktop/
   events.sqlite
-  demo-repository/
   planning/<planning-id>/
   worktrees/<run-id>/<node>-<execution-id>/
   worktrees/<run-id>/sessions-<execution-id>/
@@ -77,7 +71,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 npm run desktop:build
 ```
 
-核心测试不调用真实模型，覆盖编译、审批、反馈、失败传播、介入、SQLite replay、重启恢复、实际并行 worktree 合并和冲突；Pi JSON 进程协议使用本地假进程测试。
+核心测试不调用真实模型，覆盖编译、审批、反馈、失败传播、介入、SQLite replay、重启恢复、实际并行 worktree 合并和冲突；Pi JSON 进程协议使用本地假进程测试。测试用的确定性执行器位于 Cargo `fixture` 特性下（`src-tauri/src/fixture.rs`），出货构建不包含它，也只接受 `pi` 引擎。
 
 有本地 `pi/` 源码时，还可以验证真实 Pi 扩展加载和 mutation 回滚（不调用模型）：
 
@@ -95,3 +89,15 @@ node pi/node_modules/tsx/dist/cli.mjs --tsconfig pi/tsconfig.json scripts/check-
 - 普通退出会清理 Pi 进程组。系统断电或应用被 SIGKILL 时不能保证清理；重启会失效未完成尝试，用户需检查残留进程和工作区。
 - 支持当前本地 Pi 0.85.1 的 JSON 事件格式及 `--session-id`。真实模型认证/质量需使用用户自己的环境验证。
 - Partitioner/Planner prompt 为实验性实现，不把它们当成架构不变量。
+
+## MVP 系统 benchmark
+
+```sh
+npm run benchmark                 # 9 个确定性场景 + 1 个真实 Pi 文件任务
+npm run benchmark:validate        # 连续 3 次确定性套件 + 3 次真实规划执行样本
+npm run benchmark -- --deterministic  # 无模型成本
+```
+
+确定性场景通过 `benchmark` Cargo 特性启用 `fixture` 执行器：只有「节点执行」这一步是确定性的，编译器、调度器、真实 Git worktree、SQLite 事件日志与反馈失效全部走出货代码路径。
+
+结果保存在 `benchmark-results/<run-id>/`，包含 summary/cases/events、IPC 请求响应、SQLite、worktree 和会话日志。真实 Pi 需要现有模型认证和联网；网络错误保持 FAIL 并单独分类。可用 `BENCHMARK_PI_COMMAND`、`BENCHMARK_PI_ARGS`（JSON 数组）、`BENCHMARK_PI_MODEL` 指定环境。系统边界、覆盖限制与失败修复记录见 [system-under-test](benchmark/system-under-test.md)、[harness architecture](benchmark/architecture.md)、[findings](benchmark/findings.md)。

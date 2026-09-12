@@ -101,6 +101,7 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         .map_err(|error| error.to_string())?
         .insert(child.id());
     let _guard = ProcessGuard(child.id());
+    on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "timestamp":crate::model::now()})));
     if let Err(error) = child
         .stdin
         .take()
@@ -178,6 +179,10 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
                                         .unwrap_or("Pi assistant failed")
                                         .to_string(),
                                 );
+                            } else {
+                                // Pi can emit a transient error before its own successful retry.
+                                // Keep the stream, but judge the final assistant response.
+                                agent_error = None;
                             }
                         }
                         _ => {}
@@ -202,6 +207,7 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         }
     }
     let status = child.wait().map_err(|error| error.to_string())?;
+    on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success(), "timestamp":crate::model::now()})));
     if !status.success() {
         return Err(format!("Pi exited with {status}: {stderr_tail}"));
     }
@@ -222,34 +228,11 @@ pub fn execute(
     execution: &Execution,
     task: &str,
     reviewer: bool,
-    mut on_output: impl FnMut(String),
+    on_output: impl FnMut(String),
 ) -> Result<String, String> {
-    if config.engine == "demo" {
-        on_output(format!(
-            "[demo] Fresh execution {}\n[read] Inspecting isolated workspace\n",
-            execution.session_id
-        ));
-        thread::sleep(Duration::from_millis(650));
-        let output = if reviewer && execution.attempt == 1 {
-            "Demo verification: add an empty-state message.\n<REVISE>".into()
-        } else if reviewer {
-            "Demo verification passed.\n<ACCEPT>".into()
-        } else {
-            fs::write(
-                Path::new(&execution.worktree).join(format!("{}.md", execution.node)),
-                format!(
-                    "# {}\n\n{}\n\nAttempt {}\n",
-                    execution.node, task, execution.attempt
-                ),
-            )
-            .map_err(|error| error.to_string())?;
-            format!(
-                "Implemented {} in its isolated workspace.\nDemo execution #{} completed.",
-                execution.node, execution.attempt
-            )
-        };
-        on_output(format!("[assistant] {output}\n"));
-        return Ok(output);
+    #[cfg(feature = "fixture")]
+    if config.engine == crate::fixture::ENGINE {
+        return crate::fixture::execute(execution, task, reviewer, on_output);
     }
     let task = if reviewer {
         format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<REVISE>\nIf REVISE, clearly describe the changes needed before the marker.")

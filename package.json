@@ -8,10 +8,12 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "predesktop": "node scripts/free-port.mjs",
-    "desktop": "tauri dev",
-    "desktop:build": "tauri build",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
-    "check": "tsc --noEmit"
+    "desktop": "node scripts/tauri-runner.mjs dev",
+    "desktop:build": "node scripts/tauri-runner.mjs build",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features fixture",
+    "check": "tsc --noEmit",
+    "benchmark": "node benchmark/run.mjs",
+    "benchmark:validate": "node benchmark/validate.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

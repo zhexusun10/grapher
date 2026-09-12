@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
-import { Background, Controls, Handle, MarkerType, Position, ReactFlow, type NodeProps, type Node, type Edge } from "@xyflow/react";
+import { Background, Controls, Handle, MarkerType, Position, ReactFlow, BaseEdge, getBezierPath, type NodeProps, type Node, type Edge, type EdgeProps } from "@xyflow/react";
 import {
-  ArrowDown, ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, Circle,
-  Clock3, Code2, FolderGit2, GitBranch, GitFork, History,
+  AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, Circle,
+  Clock3, Code2, Copy, FolderGit2, GitBranch, GitFork, History,
   LoaderCircle, MessageSquare, Pause, Play, Plus, RotateCcw,
-  Settings2, ShieldCheck, Terminal, Workflow, X
+  Settings2, ShieldCheck, Terminal, Trash2, Workflow, X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
-import { defaultConfig, emptyGraph, emptySnapshot, createPreviewSnapshot, type Bootstrap, type Config, type Graph, type ProjectItem, type RepositoryInfo, type Snapshot, type Status } from "./types";
+import { defaultConfig, emptyGraph, emptySnapshot, example, type Bootstrap, type Config, type Graph, type ProjectItem, type RepositoryInfo, type Snapshot, type Status } from "./types";
 import { tokens } from "./tokens";
+import { runtimeService, isDesktop, isDesktopMac } from "./services/runtime";
 
-const desktop = isTauri();
+const desktop = isDesktop;
 const statusText: Record<Status, string> = {
   waiting: "WAITING",
   running: "RUNNING",
@@ -36,26 +36,35 @@ type WorkNode = Node<{
   task: string;
   status: Status;
   attempts: number;
-  revision: number;
   hint: string;
   reviewer: boolean;
   selected: boolean;
   worktree: string;
+  hasTop: boolean;
+  hasBottom: boolean;
+  hasLeftTarget: boolean;
+  hasLeftSource: boolean;
+  hasRightTarget: boolean;
+  hasRightSource: boolean;
 }, "work">;
 
 function TaskNode({ data }: NodeProps<WorkNode>) {
   return (
     <div
       className={`task-node ${data.selected ? "selected" : ""} ${data.status}`}
-      title={`${data.task}${data.hint ? `\n\n依赖关系:\n${data.hint}` : ""}\n版本: Rev ${data.revision} · 尝试: ${data.attempts}\n工作区: ${data.worktree || "未生成"}`}
+      title={`${data.task}${data.hint ? `\n\n依赖关系:\n${data.hint}` : ""}\n尝试: ${data.attempts}\n工作区: ${data.worktree || "未生成"}`}
     >
-      <Handle type="target" position={Position.Top} />
+      <Handle
+        id="top"
+        type="target"
+        position={Position.Top}
+        className={`react-flow__handle ${data.hasTop ? "connected" : ""}`}
+      />
       <div className="node-heading">
         <span className={`node-icon ${data.reviewer ? "review" : ""}`}>
           {data.reviewer ? <ShieldCheck size={16} /> : <Code2 size={16} />}
         </span>
         <strong>{data.name}</strong>
-        <span className="node-rev-badge">r{data.revision}</span>
       </div>
       <p>{data.task}</p>
       <div className="node-footer">
@@ -73,14 +82,110 @@ function TaskNode({ data }: NodeProps<WorkNode>) {
           {data.attempts > 0 ? `#${data.attempts} 尝试` : "就绪"}
         </span>
       </div>
-      <Handle type="source" position={Position.Bottom} />
-      <Handle id="feedback-out" type="source" position={Position.Left} />
-      <Handle id="feedback-in" type="target" position={Position.Left} />
+      <Handle
+        id="bottom"
+        type="source"
+        position={Position.Bottom}
+        className={`react-flow__handle ${data.hasBottom ? "connected" : ""}`}
+      />
+      <Handle
+        id="left-target"
+        type="target"
+        position={Position.Left}
+        className={`react-flow__handle ${data.hasLeftTarget ? "connected feedback" : ""}`}
+      />
+      <Handle
+        id="left-source"
+        type="source"
+        position={Position.Left}
+        className={`react-flow__handle ${data.hasLeftSource ? "connected feedback" : ""}`}
+      />
+      <Handle
+        id="right-target"
+        type="target"
+        position={Position.Right}
+        className={`react-flow__handle ${data.hasRightTarget ? "connected feedback" : ""}`}
+      />
+      <Handle
+        id="right-source"
+        type="source"
+        position={Position.Right}
+        className={`react-flow__handle ${data.hasRightSource ? "connected feedback" : ""}`}
+      />
     </div>
   );
 }
 
+function SmoothWorkflowEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition = Position.Bottom,
+  targetPosition = Position.Top,
+  style,
+  markerEnd,
+  markerStart,
+  label,
+  labelStyle,
+  labelBgStyle,
+  labelBgPadding,
+  labelBgBorderRadius,
+  interactionWidth,
+}: EdgeProps) {
+  let path: string;
+  let labelX: number;
+  let labelY: number;
+
+  if (sourcePosition === Position.Bottom && targetPosition === Position.Top && targetY > sourceY) {
+    // 垂直流向下游卡片：在到达目标卡片（以及箭头）之前预留一段纯垂直直线引线，
+    // 确保连线从三角箭头的正中心轴笔直穿入，彻底杜绝从箭头侧翼斜穿或歪歪扭扭的现象
+    const dy = targetY - sourceY;
+    const lead = Math.min(26, Math.max(16, dy * 0.22));
+    const p1Y = sourceY + lead;
+    const p2Y = targetY - lead;
+    const midY = (p1Y + p2Y) / 2;
+
+    path = `M ${sourceX},${sourceY} L ${sourceX},${p1Y} C ${sourceX},${midY} ${targetX},${midY} ${targetX},${p2Y} L ${targetX},${targetY}`;
+    labelX = (sourceX + targetX) / 2;
+    labelY = midY;
+  } else {
+    const [p, lx, ly] = getBezierPath({
+      sourceX,
+      sourceY,
+      sourcePosition,
+      targetX,
+      targetY,
+      targetPosition,
+    });
+    path = p;
+    labelX = lx;
+    labelY = ly;
+  }
+
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      style={style}
+      markerEnd={markerEnd}
+      markerStart={markerStart}
+      label={label}
+      labelX={labelX}
+      labelY={labelY}
+      labelStyle={labelStyle}
+      labelShowBg={!!label}
+      labelBgStyle={labelBgStyle}
+      labelBgPadding={labelBgPadding}
+      labelBgBorderRadius={labelBgBorderRadius}
+      interactionWidth={interactionWidth ?? 24}
+    />
+  );
+}
+
 const nodeTypes = { work: TaskNode };
+const edgeTypes = { workflow: SmoothWorkflowEdge };
 
 function readableLog(output: string) {
   return output.split("\n").map((line) => {
@@ -126,12 +231,43 @@ export default function App() {
   const [instruction, setInstruction] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [runs, setRuns] = useState<string[]>([]);
+  const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
+    try {
+      const saved = localStorage.getItem("grapher_workspace_runs");
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+  const currentRepoPath = useMemo(() => config.repository || repoInfo?.path || "default", [config.repository, repoInfo]);
+  const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
   const [historical, setHistorical] = useState(false);
   const [attemptId, setAttemptId] = useState("");
   const [dataPath, setDataPath] = useState("");
   const [timelineFilter, setTimelineFilter] = useState<string>("all");
   const [isPlanning, setIsPlanning] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);
+  const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    detail?: string;
+    confirmText: string;
+    danger?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
+
+  const recordRunToWorkspace = (runId: string, repo: string = currentRepoPath) => {
+    setWorkspaceRuns((prev) => {
+      const existing = prev[repo] || [];
+      const nextList = [runId, ...existing.filter((id) => id !== runId)];
+      const updated = { ...prev, [repo]: nextList };
+      try {
+        localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
 
   // 对话流消息记录（Chatbot 模式）
   const [messages, setMessages] = useState<Array<{ id: string; role: "user" | "assistant"; text: string; timestamp?: number }>>([]);
@@ -227,8 +363,7 @@ export default function App() {
   }, []);
 
   const load = useCallback(async () => {
-    if (!desktop) return;
-    const data = await invoke<Bootstrap>("bootstrap");
+    const data = await runtimeService.bootstrap();
     setConfig(data.config);
     if (data.repositoryInfo) {
       const info = data.repositoryInfo;
@@ -253,26 +388,32 @@ export default function App() {
       });
     }
     setArgs(JSON.stringify(data.config.piArgs));
-    setRuns(data.runs);
     setDataPath(data.dataPath);
+    if (data.runs && data.runs.length > 0) {
+      const initialKey = data.config?.repository || data.repositoryInfo?.path || "default";
+      setWorkspaceRuns((prev) => {
+        if (!prev[initialKey] || prev[initialKey].length === 0) {
+          const updated = { ...prev, [initialKey]: data.runs };
+          try {
+            localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
+          } catch {}
+          return updated;
+        }
+        return prev;
+      });
+    }
     if (data.snapshot.runId) {
       setState(data.snapshot);
       setGoal(data.snapshot.graph.originalGoal);
       if (data.snapshot.graph.nodes.length > 0) {
         setSelected((curr) => (curr && data.snapshot.graph.nodes.some(n => n.name === curr) ? curr : ""));
       }
-      if (["completed", "rejected", "needs_attention"].includes(data.snapshot.phase)) {
-        setHistorical(true);
-      }
+      setHistorical(false);
     }
   }, []);
 
   const handleOpenProject = () => run(async () => {
-    if (!desktop) {
-      setError("当前为浏览器只读预览。请运行 npm run desktop 使用 Rust 桌面环境。");
-      return;
-    }
-    const info = await invoke<RepositoryInfo | null>("pick_repository");
+    const info = await runtimeService.pickRepository();
     if (info) {
       setRepoInfo(info);
       setConfig((prev) => ({ ...prev, repository: info.path }));
@@ -291,7 +432,7 @@ export default function App() {
         } catch {}
         return next;
       });
-      const snapshot = await invoke<Snapshot>("reset_workspace");
+      const snapshot = await runtimeService.resetWorkspace();
       setState(snapshot);
       setGoal("");
       setSelected("");
@@ -317,12 +458,8 @@ export default function App() {
   };
 
   const handleSelectProject = (proj: ProjectItem) => run(async () => {
-    if (!desktop) {
-      setError("当前为浏览器只读预览。请运行 npm run desktop 使用 Rust 桌面环境。");
-      return;
-    }
     if (config.repository === proj.path) return;
-    const info = await invoke<RepositoryInfo | null>("detect_repository", { path: proj.path });
+    const info = await runtimeService.detectRepository(proj.path);
     if (info) {
       setRepoInfo(info);
       setConfig((prev) => ({ ...prev, repository: info.path }));
@@ -340,31 +477,93 @@ export default function App() {
     } else {
       setConfig((prev) => ({ ...prev, repository: proj.path }));
     }
-    const snapshot = await invoke<Snapshot>("reset_workspace");
-    setState(snapshot);
+    const projRuns = workspaceRuns[proj.path] || [];
+    if (projRuns.length > 0) {
+      try {
+        const snapshot = await runtimeService.history(projRuns[0]);
+        setState(snapshot);
+        setHistorical(true);
+        if (snapshot.graph.nodes.length > 0) {
+          setSelected(snapshot.graph.nodes[0].name);
+        }
+      } catch {
+        const snapshot = await runtimeService.resetWorkspace();
+        setState(snapshot);
+        setHistorical(false);
+      }
+    } else {
+      const snapshot = await runtimeService.resetWorkspace();
+      setState(snapshot);
+      setHistorical(false);
+    }
     setGoal("");
-    setSelected("");
-    setHistorical(false);
     setError("");
   });
 
-  const handleRemoveProject = (e: React.MouseEvent, path: string) => {
-    e.stopPropagation();
-    setProjects((prev) => {
-      const next = prev.filter((p) => p.path !== path);
+  const handleRemoveWorkspaceConfirm = (project: ProjectItem) => {
+    setConfirmModal({
+      title: "移除工作区",
+      message: `确定从工作区列表中移除「${project.name}」吗？`,
+      detail: `路径: ${project.path}\n这仅会从工作区列表中移除索引，不会删除磁盘上的代码文件。`,
+      confirmText: "移除工作区",
+      danger: true,
+      onConfirm: () => {
+        const pathToRemove = project.path;
+        setProjects((prev) => {
+          const next = prev.filter((p) => p.path !== pathToRemove);
+          try {
+            localStorage.setItem("grapher_projects", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+        setWorkspaceRuns((prev) => {
+          const copy = { ...prev };
+          delete copy[pathToRemove];
+          try {
+            localStorage.setItem("grapher_workspace_runs", JSON.stringify(copy));
+          } catch {}
+          return copy;
+        });
+        if (config.repository === pathToRemove) {
+          handleResetWorkspace();
+        }
+      },
+    });
+  };
+
+  const handleDeleteRun = (runIdToDelete: string) => run(async () => {
+    await runtimeService.deleteRun(runIdToDelete);
+    setWorkspaceRuns((prev) => {
+      const existing = prev[currentRepoPath] || [];
+      const nextList = existing.filter((id) => id !== runIdToDelete);
+      const updated = { ...prev, [currentRepoPath]: nextList };
       try {
-        localStorage.setItem("grapher_projects", JSON.stringify(next));
+        localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
       } catch {}
-      return next;
+      return updated;
+    });
+    if (state.runId === runIdToDelete) {
+      const snapshot = await runtimeService.resetWorkspace();
+      setState(snapshot);
+      setGoal("");
+      setSelected("");
+      setHistorical(false);
+    }
+  });
+
+  const handleDeleteRunConfirm = (runId: string) => {
+    setConfirmModal({
+      title: "删除运行历史",
+      message: `确定删除历史快照「Graph ${runId.slice(0, 8)}」吗？`,
+      detail: `快照 ID: ${runId}\n删除后该次运行的执行拓扑图与事件记录将被彻底清除。`,
+      confirmText: "删除历史",
+      danger: true,
+      onConfirm: () => handleDeleteRun(runId),
     });
   };
 
   const handleDetectRepository = (customPath?: string) => run(async () => {
-    if (!desktop) {
-      setError("当前为浏览器只读预览。请运行 npm run desktop 使用 Rust 桌面环境。");
-      return;
-    }
-    const info = await invoke<RepositoryInfo | null>("detect_repository", { path: customPath || null });
+    const info = await runtimeService.detectRepository(customPath || null);
     if (info) {
       setRepoInfo(info);
       setConfig((prev) => ({ ...prev, repository: info.path }));
@@ -376,44 +575,50 @@ export default function App() {
 
   const handleResetWorkspace = () => run(async () => {
     setMessages([]);
-    if (!desktop) {
-      setState(emptySnapshot);
-      setGoal("");
-      setSelected("");
-      setHistorical(false);
-      setError("");
-      return;
-    }
-    const snapshot = await invoke<Snapshot>("reset_workspace");
+    const snapshot = await runtimeService.resetWorkspace();
     setState(snapshot);
     setGoal("");
     setSelected("");
     setHistorical(false);
     setError("");
   });
-
-  const handleClearHistory = () => run(async () => {
-    setMessages([]);
-    if (!desktop) {
-      setRuns([]);
-      setState(emptySnapshot);
-      setGoal("");
-      setSelected("");
-      setHistorical(false);
-      setError("");
-      return;
-    }
-    if (window.confirm("确定清空所有历史运行记录吗？历史测试数据将被永久清除。")) {
-      await invoke("clear_history");
-      setRuns([]);
-      const snapshot = await invoke<Snapshot>("reset_workspace");
-      setState(snapshot);
-      setGoal("");
-      setSelected("");
-      setHistorical(false);
-      setError("");
-    }
-  });
+  const handleClearHistory = () => {
+    setConfirmModal({
+      title: "清空运行历史",
+      message: "确定清空当前工作区的所有历史运行记录吗？",
+      detail: "当前工作区的所有历史运行快照与事件将被彻底清除，此操作不可撤销。",
+      confirmText: "清空全部",
+      danger: true,
+      onConfirm: () => run(async () => {
+        const data = await runtimeService.bootstrap();
+        const snapshots = await Promise.all(data.runs.map((id) => runtimeService.history(id)));
+        // The local sidebar index can be stale; authorize scope from persisted run config.
+        const scopedIds = snapshots
+          .filter((snapshot) => snapshot.config && (snapshot.config.repository || "default") === currentRepoPath)
+          .map((snapshot) => snapshot.runId);
+        for (const runId of scopedIds) {
+          await runtimeService.deleteRun(runId);
+          setWorkspaceRuns((prev) => {
+            const updated = {
+              ...prev,
+              [currentRepoPath]: (prev[currentRepoPath] || []).filter((id) => id !== runId),
+            };
+            try {
+              localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
+            } catch {}
+            return updated;
+          });
+          if (state.runId === runId) {
+            setState(emptySnapshot);
+            setMessages([]);
+            setGoal("");
+            setSelected("");
+            setHistorical(false);
+          }
+        }
+      }),
+    });
+  };
 
   const handlePlanGoal = (inputGoal?: string) => run(async () => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
@@ -439,27 +644,16 @@ export default function App() {
       },
     }));
     try {
-      if (!desktop) {
-        // 浏览器环境演示：模拟 500ms 分析后生成示例图，提供完整的流体动效
-        await new Promise((r) => setTimeout(r, 500));
-        const previewSnap = createPreviewSnapshot(targetGoal);
-        setState(previewSnap);
-        setHistorical(false);
-        setMainTab("graph");
-        setRuns((prev) => [previewSnap.runId, ...prev.filter((id) => id !== previewSnap.runId)]);
-        setSelected("");
-        return;
-      }
-      if (!config.repository) {
+      if (desktop && !config.repository) {
         setMainTab("settings");
         setError("请先在左侧工作区选择绑定的本地 Git 仓库。");
         return;
       }
-      const snapshot = await invoke<Snapshot>("plan_goal", { goal: targetGoal, config });
+      const snapshot = await runtimeService.planGoal(targetGoal, config);
       setState(snapshot);
       setHistorical(false);
       setMainTab("graph");
-      setRuns((prev) => [snapshot.runId, ...prev.filter((id) => id !== snapshot.runId)]);
+      recordRunToWorkspace(snapshot.runId);
       setSelected("");
     } finally {
       setIsPlanning(false);
@@ -471,18 +665,96 @@ export default function App() {
   }, [load]);
 
   useEffect(() => {
-    if (!desktop || historical || busy) return;
-    const interval = setInterval(() => {
-      invoke<Snapshot>("snapshot")
-        .then((snapshot) => {
-          if (snapshot.runId) {
-            setState(snapshot);
+    if (historical || busy) return;
+    if (desktop) {
+      const interval = setInterval(() => {
+        runtimeService.snapshot()
+          .then((newSnap) => {
+            if (!newSnap || !newSnap.runId) return;
+            setState((prev) => {
+              if (
+                prev.runId === newSnap.runId &&
+                prev.phase === newSnap.phase &&
+                prev.paused === newSnap.paused &&
+                prev.approved === newSnap.approved &&
+                prev.events.length === newSnap.events.length &&
+                prev.executions.length === newSnap.executions.length &&
+                JSON.stringify(prev.nodes) === JSON.stringify(newSnap.nodes) &&
+                JSON.stringify(prev.feedbackCounts) === JSON.stringify(newSnap.feedbackCounts)
+              ) {
+                return prev;
+              }
+              return newSnap;
+            });
+          })
+          .catch((err) => setError(String(err)));
+      }, 700);
+      return () => clearInterval(interval);
+    } else {
+      const unsubscribe = runtimeService.onWebUpdate((newSnap) => {
+        if (!newSnap || !newSnap.runId) return;
+        setState((prev) => {
+          if (
+            prev.runId === newSnap.runId &&
+            prev.phase === newSnap.phase &&
+            prev.paused === newSnap.paused &&
+            prev.approved === newSnap.approved &&
+            prev.events.length === newSnap.events.length &&
+            prev.executions.length === newSnap.executions.length &&
+            JSON.stringify(prev.nodes) === JSON.stringify(newSnap.nodes) &&
+            JSON.stringify(prev.feedbackCounts) === JSON.stringify(newSnap.feedbackCounts)
+          ) {
+            return prev;
           }
-        })
-        .catch((err) => setError(String(err)));
-    }, 700);
-    return () => clearInterval(interval);
+          return newSnap;
+        });
+      });
+      return unsubscribe;
+    }
   }, [historical, busy]);
+
+  useEffect(() => {
+    if (!desktop) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.buttons !== 1) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (
+        target.closest(
+          "button, input, select, textarea, a, .tab-btn, .project-workspace-item, .run-item, .react-flow, .prompt-box, .modal, .history-banner-actions, .section-actions, .resizer"
+        )
+      ) {
+        return;
+      }
+      if (
+        target.closest("[data-tauri-drag-region]") ||
+        target.closest(".macos-traffic-light-spacer") ||
+        target.closest(".sidebar-brand-row") ||
+        target.closest(".workspace-header") ||
+        target.closest(".header-top") ||
+        target.closest(".landing-screen")
+      ) {
+        import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+          getCurrentWindow().startDragging().catch(() => {});
+        });
+      }
+    };
+    window.addEventListener("mousedown", onMouseDown);
+    return () => window.removeEventListener("mousedown", onMouseDown);
+  }, []);
+
+  useEffect(() => {
+    const handleClose = () => {
+      setContextMenu(null);
+      setRunContextMenu(null);
+    };
+    window.addEventListener("click", handleClose);
+    window.addEventListener("contextmenu", handleClose);
+    return () => {
+      window.removeEventListener("click", handleClose);
+      window.removeEventListener("contextmenu", handleClose);
+    };
+  }, []);
 
   useEffect(() => {
     setAttemptId("");
@@ -501,23 +773,19 @@ export default function App() {
   };
 
   const control = (action: string, extra = {}) => run(async () => {
-    if (!desktop) {
-      if (action === "intervene") setInstruction("");
-      return;
-    }
-    const snapshot = await invoke<Snapshot>("control", { action, node: selected, instruction, ...extra });
+    const snapshot = await runtimeService.control(action, { node: selected, instruction, ...extra });
     setState(snapshot);
     setModal(null);
     if (action === "intervene") setInstruction("");
   });
 
   const save = (graph: Graph) => run(async () => {
-    const snapshot = await invoke<Snapshot>("save_graph", { graph, config });
+    const snapshot = await runtimeService.saveGraph(graph, config);
     setState(snapshot);
     setGoal(graph.originalGoal);
     setModal(null);
     setHistorical(false);
-    setRuns((prev) => [snapshot.runId, ...prev.filter((id) => id !== snapshot.runId)]);
+    recordRunToWorkspace(snapshot.runId);
     if (graph.nodes.length > 0) {
       setSelected(graph.nodes[0].name);
     }
@@ -544,13 +812,36 @@ export default function App() {
 
   const nodes = useMemo<WorkNode[]>(() => {
     const layers = state.plan?.executionBatches ?? [state.graph.nodes.map((node) => node.name)];
+    const getNodeX = (nodeName: string) => {
+      const layer = Math.max(0, layers.findIndex((batch) => batch.includes(nodeName)));
+      const batch = layers[layer] || [];
+      return (batch.indexOf(nodeName) - (batch.length - 1) / 2) * 260 + 160;
+    };
+
     return state.graph.nodes.map((node) => {
       const layer = Math.max(0, layers.findIndex((batch) => batch.includes(node.name)));
       const batch = layers[layer] || [];
       const nodeAttempts = state.executions.filter((execution) => execution.node === node.name);
+
+      const hasTop = state.graph.edges.some((e) => e.to === node.name && !e.feedback);
+      const hasBottom = state.graph.edges.some((e) => e.from === node.name && !e.feedback);
+      const hasLeftTarget = state.graph.edges.some(
+        (e) => e.to === node.name && e.feedback && !(getNodeX(e.from) > 160 && getNodeX(e.to) > 160)
+      );
+      const hasLeftSource = state.graph.edges.some(
+        (e) => e.from === node.name && e.feedback && !(getNodeX(e.from) > 160 && getNodeX(e.to) > 160)
+      );
+      const hasRightTarget = state.graph.edges.some(
+        (e) => e.to === node.name && e.feedback && (getNodeX(e.from) > 160 && getNodeX(e.to) > 160)
+      );
+      const hasRightSource = state.graph.edges.some(
+        (e) => e.from === node.name && e.feedback && (getNodeX(e.from) > 160 && getNodeX(e.to) > 160)
+      );
+
       return {
         id: node.name,
         type: "work",
+        width: 236,
         position: {
           x: (batch.indexOf(node.name) - (batch.length - 1) / 2) * 260 + 160,
           y: layer * 155 + 24,
@@ -560,7 +851,6 @@ export default function App() {
           task: node.task,
           status: state.nodes[node.name]?.status ?? "waiting",
           attempts: nodeAttempts.length,
-          revision: state.nodes[node.name]?.revision ?? 1,
           hint: state.graph.edges
             .filter((edge) => edge.to === node.name || (edge.from === node.name && edge.feedback))
             .map((edge) => `${edge.from} → ${edge.to}: ${edge.relation}${edge.feedback ? " (feedback)" : ""}`)
@@ -568,39 +858,76 @@ export default function App() {
           reviewer: state.graph.edges.some((edge) => edge.from === node.name && edge.feedback),
           selected: selected === node.name,
           worktree: nodeAttempts.at(-1)?.worktree ?? "",
+          hasTop,
+          hasBottom,
+          hasLeftTarget,
+          hasLeftSource,
+          hasRightTarget,
+          hasRightSource,
         },
       };
     });
   }, [state.graph, state.plan, state.nodes, state.executions, selected]);
 
-  const edges = useMemo<Edge[]>(() => state.graph.edges.map((edge) => ({
-    id: `${edge.from}->${edge.to}`,
-    source: edge.from,
-    target: edge.to,
-    type: "smoothstep",
-    sourceHandle: edge.feedback ? "feedback-out" : undefined,
-    targetHandle: edge.feedback ? "feedback-in" : undefined,
-    animated: !edge.feedback && state.nodes[edge.from]?.status === "running",
-    markerEnd: {
-      type: MarkerType.ArrowClosed,
-      color: edge.feedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
-      width: 14,
-      height: 14,
-    },
-    style: {
-      stroke: edge.feedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
-      strokeWidth: 1.5,
-      strokeDasharray: edge.feedback ? "5 5" : undefined,
-    },
-    label: edge.feedback ? `REVISE · ≤ ${state.config?.maxFeedback ?? config.maxFeedback}` : undefined,
-    labelStyle: { fontSize: 10, fill: tokens.graphEdgeFeedbackText, fontFamily: "monospace" },
-    labelBgStyle: { fill: tokens.graphEdgeFeedbackBg },
-  })), [state.graph, state.nodes, state.config, config.maxFeedback]);
+  const edges = useMemo<Edge[]>(() => {
+    const layers = state.plan?.executionBatches ?? [state.graph.nodes.map((node) => node.name)];
+    const getNodeX = (nodeName: string) => {
+      const layer = Math.max(0, layers.findIndex((batch) => batch.includes(nodeName)));
+      const batch = layers[layer] || [];
+      return (batch.indexOf(nodeName) - (batch.length - 1) / 2) * 260 + 160;
+    };
+
+    return state.graph.edges.map((edge) => {
+      const isFeedback = !!edge.feedback;
+      const useRight = isFeedback && (getNodeX(edge.from) > 160 && getNodeX(edge.to) > 160);
+      const sourceHandle = isFeedback ? (useRight ? "right-source" : "left-source") : "bottom";
+      const targetHandle = isFeedback ? (useRight ? "right-target" : "left-target") : "top";
+
+      return {
+        id: `${edge.from}-${isFeedback ? "fb" : "dep"}-${edge.to}`,
+        source: edge.from,
+        target: edge.to,
+        type: isFeedback ? "smoothstep" : "workflow",
+        sourceHandle,
+        targetHandle,
+        animated: !isFeedback && state.nodes[edge.from]?.status === "running",
+        pathOptions: isFeedback ? { borderRadius: 20, offset: 35 } : undefined,
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
+          width: 14,
+          height: 14,
+        },
+        style: {
+          stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
+          strokeWidth: 1.5,
+          strokeDasharray: isFeedback ? "5 4" : undefined,
+        },
+        label: isFeedback
+          ? `${edge.relation || "缺陷重构反馈"} · REVISE`
+          : (edge.relation || undefined),
+        labelStyle: {
+          fontSize: 10,
+          fontWeight: 500,
+          fill: isFeedback ? tokens.graphEdgeFeedbackText : tokens.textSecondary,
+          fontFamily: isFeedback ? "monospace" : "inherit",
+        },
+        labelBgStyle: {
+          fill: isFeedback ? tokens.graphEdgeFeedbackBg : tokens.bgCanvas,
+          stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.borderDefault,
+          strokeWidth: 1,
+        },
+        labelBgPadding: [6, 3] as [number, number],
+        labelBgBorderRadius: 4,
+      };
+    });
+  }, [state.graph.edges, state.graph.nodes, state.plan, state.nodes, tokens]);
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar-brand-row">
+        {isDesktopMac && <div className="macos-traffic-light-spacer" data-tauri-drag-region />}
+        <div className="sidebar-brand-row" data-tauri-drag-region>
           <a className="brand" href="#" onClick={(event) => event.preventDefault()}>
             <strong>Grapher</strong>
           </a>
@@ -628,7 +955,12 @@ export default function App() {
                   key={proj.path}
                   className={`project-workspace-item ${isActive ? "active" : ""}`}
                   onClick={() => handleSelectProject(proj)}
-                  title={`${proj.name}\n${proj.path}\n分支: ${proj.branch}`}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setContextMenu({ x: e.clientX, y: e.clientY, project: proj });
+                  }}
+                  title={`${proj.name}\n${proj.path}\n分支: ${proj.branch}\n(右键管理工作区)`}
                 >
                   <span className="proj-icon">
                     <FolderGit2 size={15} />
@@ -643,15 +975,6 @@ export default function App() {
                     </div>
                     <small className="proj-path-text">{proj.path}</small>
                   </div>
-                  {projects.length > 1 && !isActive && (
-                    <button
-                      className="proj-remove-btn"
-                      title="从工作区列表移除"
-                      onClick={(e) => handleRemoveProject(e, proj.path)}
-                    >
-                      <X size={12} />
-                    </button>
-                  )}
                 </div>
               );
             })
@@ -693,13 +1016,20 @@ export default function App() {
                 className={`run-item ${state.runId === id ? "chosen" : ""}`}
                 key={id}
                 onClick={() => run(async () => {
-                  const snapshot = await invoke<Snapshot>("history", { runId: id });
+                  const snapshot = await runtimeService.history(id);
                   setState(snapshot);
                   setHistorical(true);
                   if (snapshot.graph.nodes.length > 0) {
                     setSelected(snapshot.graph.nodes[0].name);
                   }
                 })}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setContextMenu(null);
+                  setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
+                }}
+                title={`快照: ${id}\n(右键可复制 ID 或删除)`}
               >
                 <span className="run-dot" />
                 <span>
@@ -742,6 +1072,24 @@ export default function App() {
               )}
 
               <div className="landing-center-content">
+                <div>
+                  {!desktop && (
+                    <button
+                      className="primary"
+                      disabled={busy}
+                      onClick={async () => {
+                        await save(example);
+                        setMainTab("graph");
+                      }}
+                    >
+                      编译示例图（浏览器沙箱）
+                    </button>
+                  )}
+                  <button className="secondary" onClick={() => setMainTab("settings")}>运行配置</button>
+                </div>
+                {!desktop && (
+                  <p>浏览器沙箱：纯客户端图编辑、DAG 编译校验与波次模拟，不接触 Git，也不调用模型。真实执行请运行 npm run desktop。</p>
+                )}
                 <motion.p
                   className="landing-title"
                   initial={{ opacity: 0, y: -10 }}
@@ -773,11 +1121,12 @@ export default function App() {
               {/* 精简专业的操作控制头部 */}
               <motion.header
                 className="workspace-header"
+                data-tauri-drag-region
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
               >
-              <div className="header-top">
+              <div className="header-top" data-tauri-drag-region>
                 <div className="workspace-meta">
                   <FolderGit2 size={16} />
                   <span className="repo-badge" title={config.repository || "未选择本地仓库"}>
@@ -904,10 +1253,6 @@ export default function App() {
                   </div>
                   <div className="heading-title-col">
                     <h2>{selectedNode.name}</h2>
-                    <span>
-                      Revision {selectedState?.revision ?? 1} <b>·</b>{" "}
-                      {attempts.length ? `${attempts.length} 次执行尝试` : "等待启动"}
-                    </span>
                   </div>
                   <span className={`status ${selectedState?.status ?? "waiting"}`}>
                     {statusText[selectedState?.status ?? "waiting"]}
@@ -940,7 +1285,7 @@ export default function App() {
                       >
                         {attempts.map((item) => (
                           <option key={item.id} value={item.id}>
-                            #{item.attempt} · r{item.revision} · {item.status}
+                            #{item.attempt} · {item.status}
                           </option>
                         ))}
                       </select>
@@ -1073,7 +1418,6 @@ export default function App() {
                               >
                                 <span className={`chip-dot ${nState?.status ?? "waiting"}`} />
                                 <span className="chip-name">{node.name}</span>
-                                <span className="chip-rev">r{nState?.revision ?? 1}</span>
                               </button>
                             );
                           })}
@@ -1230,6 +1574,7 @@ export default function App() {
                     nodes={nodes}
                     edges={edges}
                     nodeTypes={nodeTypes}
+                    edgeTypes={edgeTypes}
                     onNodeClick={(_, node) => {
                       setSelected(node.id);
                     }}
@@ -1343,7 +1688,6 @@ export default function App() {
                           <div className="card-top">
                             <span className={`status-indicator ${nState?.status ?? "waiting"}`} />
                             <strong>{node.name}</strong>
-                            <span className="badge">r{nState?.revision ?? 1}</span>
                           </div>
                           <p className="card-task">{node.task}</p>
                           <div className="card-bottom">
@@ -1375,7 +1719,6 @@ export default function App() {
                         <span className={`phase-tag ${selectedState?.status ?? "waiting"}`}>
                           {statusText[selectedState?.status ?? "waiting"]}
                         </span>
-                        <span className="rev-info">Revision {selectedState?.revision ?? 1}</span>
                       </div>
                       {attempts.length > 0 && (
                         <div className="attempt-select-wrap">
@@ -1386,7 +1729,7 @@ export default function App() {
                           >
                             {attempts.map((item) => (
                               <option key={item.id} value={item.id}>
-                                #{item.attempt} · r{item.revision} · {item.status} · {new Date(item.startedAt).toLocaleTimeString()}
+                                #{item.attempt} · {item.status} · {new Date(item.startedAt).toLocaleTimeString()}
                               </option>
                             ))}
                           </select>
@@ -1510,9 +1853,9 @@ export default function App() {
                 {state.events.filter((event) => {
                   if (event.type === "output") return false;
                   if (timelineFilter === "all") return true;
-                  if (timelineFilter === "node") return ["node_started", "node_completed", "node_failed"].includes(event.type);
+                  if (timelineFilter === "node") return ["started", "finished", "failed", "blocked", "prepared"].includes(event.type);
                   if (timelineFilter === "feedback") return event.type === "feedback";
-                  if (timelineFilter === "intervention") return event.type === "intervene";
+                  if (timelineFilter === "intervention") return event.type === "invalidated" && event.human === true;
                   if (timelineFilter === "approval") return ["approved", "rejected", "paused", "resumed"].includes(event.type);
                   return true;
                 }).length === 0 ? (
@@ -1526,9 +1869,9 @@ export default function App() {
                     .filter((event) => {
                       if (event.type === "output") return false;
                       if (timelineFilter === "all") return true;
-                      if (timelineFilter === "node") return ["node_started", "node_completed", "node_failed"].includes(event.type);
+                      if (timelineFilter === "node") return ["started", "finished", "failed", "blocked", "prepared"].includes(event.type);
                       if (timelineFilter === "feedback") return event.type === "feedback";
-                      if (timelineFilter === "intervention") return event.type === "intervene";
+                      if (timelineFilter === "intervention") return event.type === "invalidated" && event.human === true;
                       if (timelineFilter === "approval") return ["approved", "rejected", "paused", "resumed"].includes(event.type);
                       return true;
                     })
@@ -1659,11 +2002,10 @@ export default function App() {
                   <div className="form-grid">
                     <label className="form-field">
                       <span>执行引擎</span>
-                      <select
-                        value={config.engine}
-                        onChange={(e) => setConfig({ ...config, engine: e.target.value as Config["engine"] })}
-                      >
-                        <option value="pi">pi</option>
+                      <select value={config.engine} disabled>
+                        <option value={desktop ? "pi" : "sandbox"}>
+                          {desktop ? "Pi（唯一出货引擎）" : "浏览器沙箱（无后端执行能力）"}
+                        </option>
                       </select>
                     </label>
 
@@ -1751,7 +2093,7 @@ export default function App() {
         <footer className="workspace-footer">
           <span>
             <span />
-            {desktop ? "Local deterministic runtime · SQLite event store" : "Web UI Preview · No runtime connected"}
+            {desktop ? "Local deterministic runtime · SQLite event store" : "Web Interactive Sandbox · Client DAG Simulator"}
           </span>
           <span>Git carries workspace state.<ArrowDown size={11} /> Humans stay in control.</span>
         </footer>
@@ -1793,11 +2135,10 @@ export default function App() {
                 <div className="settings-grid">
                   <label>
                     执行引擎
-                    <select
-                      value={config.engine}
-                      onChange={(event) => setConfig({ ...config, engine: event.target.value as Config["engine"] })}
-                    >
-                      <option value="pi">pi</option>
+                    <select value={config.engine} disabled>
+                      <option value={desktop ? "pi" : "sandbox"}>
+                        {desktop ? "Pi（唯一出货引擎）" : "浏览器沙箱（无后端执行能力）"}
+                      </option>
                     </select>
                   </label>
                   <div className="repo-setting-box">
@@ -1965,8 +2306,8 @@ export default function App() {
                   <p>{state.graph.originalGoal}</p>
                   <ul>
                     <li>
-                      {state.config?.engine === "demo"
-                        ? "在演示隔离环境中运行，不消耗实际模型 Token。"
+                      {state.config?.engine === "sandbox"
+                        ? "在浏览器沙箱中模拟运行，不接触 Git，也不消耗模型 Token。"
                         : `在仓库 ${state.config?.repository || config.repository} 创建独立 Git worktree。`}
                     </li>
                     <li>每个节点分配独立隔离会话；验证失败最多自动反馈重试 {state.config?.maxFeedback ?? config.maxFeedback} 次。</li>
@@ -1998,6 +2339,116 @@ export default function App() {
               </>
             )}
           </section>
+        </div>
+      )}
+
+      {contextMenu && (
+        <div
+          className="macos-context-menu"
+          style={{
+            left: Math.min(contextMenu.x, window.innerWidth - 180),
+            top: Math.min(contextMenu.y, window.innerHeight - 120),
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              navigator.clipboard?.writeText(contextMenu.project.path);
+              setContextMenu(null);
+            }}
+          >
+            <Copy size={13} />
+            <span>复制仓库路径</span>
+          </button>
+          <div className="context-menu-divider" />
+          <button
+            className="context-menu-item danger"
+            onClick={() => {
+              const project = contextMenu.project;
+              setContextMenu(null);
+              handleRemoveWorkspaceConfirm(project);
+            }}
+          >
+            <Trash2 size={13} />
+            <span>从工作区移除</span>
+          </button>
+        </div>
+      )}
+
+      {runContextMenu && (
+        <div
+          className="macos-context-menu"
+          style={{
+            left: Math.min(runContextMenu.x, window.innerWidth - 180),
+            top: Math.min(runContextMenu.y, window.innerHeight - 120),
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              navigator.clipboard?.writeText(runContextMenu.runId);
+              setRunContextMenu(null);
+            }}
+          >
+            <Copy size={13} />
+            <span>复制快照 ID</span>
+          </button>
+          <div className="context-menu-divider" />
+          <button
+            className="context-menu-item danger"
+            onClick={() => {
+              const runId = runContextMenu.runId;
+              setRunContextMenu(null);
+              handleDeleteRunConfirm(runId);
+            }}
+          >
+            <Trash2 size={13} />
+            <span>删除此条历史</span>
+          </button>
+        </div>
+      )}
+
+      {confirmModal && (
+        <div className="modal-backdrop" onClick={() => setConfirmModal(null)}>
+          <div
+            className="macos-confirm-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="macos-confirm-header">
+              <div className={`macos-confirm-icon-wrap ${confirmModal.danger ? "danger" : ""}`}>
+                {confirmModal.danger ? <AlertTriangle size={18} /> : <Trash2 size={18} />}
+              </div>
+              <div className="macos-confirm-texts">
+                <h4>{confirmModal.title}</h4>
+                <p>{confirmModal.message}</p>
+                {confirmModal.detail && (
+                  <small style={{ whiteSpace: "pre-wrap" }}>{confirmModal.detail}</small>
+                )}
+              </div>
+            </div>
+            <div className="macos-confirm-actions">
+              <button
+                type="button"
+                className="cancel-btn"
+                onClick={() => setConfirmModal(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className={confirmModal.danger ? "danger-btn" : "primary-btn"}
+                onClick={() => {
+                  const action = confirmModal.onConfirm;
+                  setConfirmModal(null);
+                  action();
+                }}
+              >
+                {confirmModal.confirmText}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

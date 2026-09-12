@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Grapher benchmark cases.jsonl record v1",
+  "type": "object",
+  "required": ["schemaVersion", "benchmarkRunId", "benchmarkCaseId", "status", "layer", "classification"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "benchmarkRunId": {"type": "string"},
+    "benchmarkCaseId": {"type": "string", "pattern": "^(B00[1-9]|B010|HARNESS)$"},
+    "status": {"enum": ["PASS", "FAIL", "NOT_IMPLEMENTED", "NOT_APPLICABLE"]},
+    "layer": {"enum": ["deterministic", "agent-dependent"]},
+    "classification": {"enum": [null, "BENCHMARK_BUG", "IMPLEMENTATION_BUG", "NOT_IMPLEMENTED", "ENVIRONMENT_FAILURE", "AGENT_FAILURE", "FLAKY"]},
+    "sample": {"type": "integer", "minimum": 1},
+    "variant": {"enum": ["canonical", "graph-ir", "planned"]},
+    "gitCommit": {"type": "string"},
+    "sourceSha256": {"type": "string"},
+    "startedAt": {"type": "string", "format": "date-time"},
+    "endedAt": {"type": "string", "format": "date-time"},
+    "durationMs": {"type": "number", "minimum": 0},
+    "runtimeDurationMs": {"type": "number", "minimum": 0},
+    "grapherRunIds": {"type": "array", "items": {"type": "string"}},
+    "nodeExecutionCount": {"type": "integer", "minimum": 0},
+    "retryCount": {"type": "integer", "minimum": 0},
+    "providerRetryCount": {"type": "integer", "minimum": 0},
+    "processFailures": {"type": "integer", "minimum": 0},
+    "tokenUsage": {"type": ["object", "null"]},
+    "model": {"type": ["string", "null"]},
+    "error": {"type": ["string", "null"]},
+    "artifacts": {"type": "string"}
+  }
+}

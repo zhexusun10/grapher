@@ -81,6 +81,13 @@ impl Store {
         Ok(state)
     }
 
+    pub fn delete_run(&self, run_id: &str) -> Result<(), String> {
+        self.connection
+            .execute("DELETE FROM events WHERE run_id=?1", params![run_id])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     pub fn clear(&self) -> Result<(), String> {
         self.connection
             .execute("DELETE FROM events", [])

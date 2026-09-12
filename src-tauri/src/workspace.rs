@@ -55,24 +55,9 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
 }
 
 pub fn pick_folder() -> Result<Option<PathBuf>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("osascript")
-            .args(["-e", "POSIX path of (choose folder with prompt \"请选择本地 Git 项目根目录\")"])
-            .output()
-            .map_err(|e| format!("无法调起系统文件夹选择器: {e}"))?;
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                return Ok(Some(PathBuf::from(path_str)));
-            }
-        }
-        Ok(None)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok(None)
-    }
+    Ok(rfd::FileDialog::new()
+        .set_title("请选择本地 Git 项目根目录")
+        .pick_folder())
 }
 
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
@@ -109,22 +94,6 @@ pub fn verify(repository: &Path) -> Result<String, String> {
         return Err("Repository must be clean, including untracked files. Commit or move your changes first; Grapher will not touch them.".into());
     }
     git(repository, &["rev-parse", "--verify", "HEAD"])
-}
-
-pub fn demo_repository(root: &Path) -> Result<PathBuf, String> {
-    let path = root.join("demo-repository");
-    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-    if !path.join(".git").exists() {
-        git(&path, &["init"])?;
-        fs::write(
-            path.join("README.md"),
-            "# Grapher demo\nAn isolated fixture; no model calls.\n",
-        )
-        .map_err(|error| error.to_string())?;
-        git(&path, &["add", "README.md"])?;
-        git(&path, &["commit", "-m", "Initialize isolated demo"])?;
-    }
-    Ok(path)
 }
 
 pub fn prepare(

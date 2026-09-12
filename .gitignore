@@ -30,3 +30,6 @@ venv/
 __pycache__/
 *.pyc
 
+
+# Persisted local benchmark artifacts (may contain model output)
+benchmark-results/

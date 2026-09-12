@@ -10,7 +10,17 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Grapher", "width": 1440, "height": 940, "minWidth": 1000, "minHeight": 720 }],
+    "windows": [
+      {
+        "title": "Grapher",
+        "width": 1440,
+        "height": 940,
+        "minWidth": 1000,
+        "minHeight": 720,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
     "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost" }
   },
   "bundle": {

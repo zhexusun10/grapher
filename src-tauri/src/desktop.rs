@@ -70,7 +70,7 @@ fn bootstrap(service: State<'_, Arc<Service>>) -> Result<Bootstrap, String> {
             .as_ref()
             .map(|r| r.path.clone())
             .unwrap_or_default(),
-        engine: "demo".into(),
+        engine: "pi".into(),
         pi_command: if local {
             "/opt/homebrew/bin/node"
         } else {
@@ -177,7 +177,7 @@ async fn plan_goal(
         return Err("Enter a goal".into());
     }
     if config.engine != "pi" {
-        return Err("Automatic planning requires Pi; use the editable example in demo mode".into());
+        return Err("Automatic planning requires the Pi engine".into());
     }
     if service.driving.load(Ordering::SeqCst) || service.planning.swap(true, Ordering::SeqCst) {
         return Err("Another operation is running".into());
@@ -398,6 +398,15 @@ fn clear_history(service: State<'_, Arc<Service>>) -> Result<(), String> {
     runtime.clear_history()
 }
 
+#[tauri::command]
+fn delete_run(run_id: String, service: State<'_, Arc<Service>>) -> Result<(), String> {
+    if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current operation to finish".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.delete_run(&run_id)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -429,7 +438,8 @@ pub fn run() {
             detect_repository,
             pick_repository,
             reset_workspace,
-            clear_history
+            clear_history,
+            delete_run
         ])
         .build(tauri::generate_context!())
         .expect("Cannot run Grapher desktop")
@@ -447,4 +457,9 @@ pub fn run() {
                 crate::engine::terminate_all();
             }
         });
+}
+
+#[cfg(feature = "benchmark")]
+pub mod benchmark {
+    include!("../../benchmark/desktop.rs");
 }

@@ -20,11 +20,40 @@ pub struct Job {
     pub reviewer: bool,
 }
 
+/// Shipping builds accept only the Pi engine. The `fixture` feature adds a
+/// deterministic actuator for tests and the benchmark harness.
+fn known_engine(engine: &str) -> bool {
+    #[cfg(feature = "fixture")]
+    if engine == crate::fixture::ENGINE {
+        return true;
+    }
+    engine == "pi"
+}
+
+fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf, String> {
+    #[cfg(feature = "fixture")]
+    if config.engine == crate::fixture::ENGINE {
+        return crate::fixture::repository(root);
+    }
+    let _ = root;
+    Ok(PathBuf::from(&config.repository))
+}
+
 pub struct Runtime {
     pub store: Store,
     pub state: Snapshot,
     pub root: PathBuf,
     _lock: fs::File,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // A concurrent process spawn can inherit this file description until exec.
+        // Release the owner's lock explicitly instead of waiting for every copy to close.
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 impl Runtime {
@@ -41,11 +70,17 @@ impl Runtime {
             return Err("Another Grapher instance owns this runtime. Close it before opening this data directory again.".into());
         }
         let store = Store::open(&root.join("events.sqlite"))?;
-        let state = if let Some(run) = store.runs()?.first() {
+        let mut state = if let Some(run) = store.runs()?.first() {
             store.load(run)?
         } else {
             Snapshot::default()
         };
+        // Event stores written by older builds can name engines this build does not ship.
+        if let Some(config) = state.config.as_mut() {
+            if !known_engine(&config.engine) {
+                config.engine = "pi".into();
+            }
+        }
         let mut runtime = Self {
             store,
             state,
@@ -109,13 +144,28 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn delete_run(&mut self, run_id: &str) -> Result<(), String> {
+        if self.state.run_id == run_id && self.active() {
+            return Err("Cannot delete the currently running execution".into());
+        }
+        self.store.delete_run(run_id)?;
+        if self.state.run_id == run_id {
+            let current_config = self.state.config.clone();
+            self.state = Snapshot {
+                config: current_config,
+                ..Snapshot::default()
+            };
+        }
+        Ok(())
+    }
+
     pub fn create(&mut self, graph: Graph, config: Config) -> Result<(), String> {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());
         }
         compile(&graph, true)
             .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
-        if !matches!(config.engine.as_str(), "demo" | "pi") {
+        if !known_engine(&config.engine) {
             return Err("Unknown engine".into());
         }
         if !(1..=8).contains(&config.max_parallel) || config.max_feedback > 10 {
@@ -136,11 +186,7 @@ impl Runtime {
             return Err("Only a compiled, unapproved graph can be approved".into());
         }
         let config = self.state.config.as_ref().ok_or("No graph")?;
-        let repository = if config.engine == "demo" {
-            workspace::demo_repository(&self.root)?
-        } else {
-            PathBuf::from(&config.repository)
-        };
+        let repository = resolve_repository(&self.root, config)?;
         let base = workspace::verify(&repository)?;
         self.emit(EventKind::Approved { base })
     }
@@ -449,11 +495,7 @@ pub fn perform(
     on_output: impl FnMut(String),
     mut on_prepared: impl FnMut(String) -> Result<(), String>,
 ) -> Result<(String, String), String> {
-    let repository = if job.config.engine == "demo" {
-        root.join("demo-repository")
-    } else {
-        PathBuf::from(&job.config.repository)
-    };
+    let repository = resolve_repository(root, &job.config)?;
     let path = Path::new(&job.execution.worktree);
     let before = workspace::prepare(&repository, path, &job.execution.before, parents)?;
     on_prepared(before)?;

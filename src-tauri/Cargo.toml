@@ -5,7 +5,10 @@ edition = "2021"
 
 [features]
 default = ["desktop"]
+benchmark = ["desktop", "tauri/test", "fixture"]
 desktop = ["dep:tauri", "dep:tauri-build"]
+# Test-only deterministic actuator; never enabled in shipping builds.
+fixture = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -14,9 +17,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 libc = "0.2"
 tauri = { version = "2", optional = true , features = [] }
+rfd = "0.17.2"
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[example]]
+name = "benchmark"
+required-features = ["benchmark"]

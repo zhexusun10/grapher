@@ -39,7 +39,7 @@ fn graph() -> Graph {
 fn config() -> Config {
     Config {
         repository: String::new(),
-        engine: "demo".into(),
+        engine: "fixture".into(),
         pi_command: "pi".into(),
         pi_args: vec![],
         model: String::new(),
@@ -311,7 +311,7 @@ fn sqlite_replay_restores_state_and_crash_marks_running_attempt_failed() {
 }
 
 #[test]
-fn actual_worktrees_parallel_merge_and_feedback_demo_complete() {
+fn actual_worktrees_parallel_merge_and_feedback_fixture_complete() {
     let temp = TempDir::new().unwrap();
     let mut runtime = runtime(temp.path());
     runtime.approve().unwrap();
@@ -356,18 +356,18 @@ fn actual_worktrees_parallel_merge_and_feedback_demo_complete() {
         .unwrap()
         .contains("Attempt 2"));
     assert!(workspace::git(
-        &temp.path().join("demo-repository"),
+        &temp.path().join("fixture-repository"),
         &["status", "--porcelain"]
     )
     .unwrap()
     .is_empty());
-    assert!(!temp.path().join("demo-repository/frontend.md").exists());
+    assert!(!temp.path().join("fixture-repository/frontend.md").exists());
 }
 
 #[test]
 fn conflicting_worktrees_block_without_modifying_source_repository() {
     let temp = TempDir::new().unwrap();
-    let repository = workspace::demo_repository(temp.path()).unwrap();
+    let repository = grapher::fixture::repository(temp.path()).unwrap();
     let base = workspace::verify(&repository).unwrap();
     let first = temp.path().join("first");
     let second = temp.path().join("second");
@@ -395,7 +395,7 @@ fn conflicting_worktrees_block_without_modifying_source_repository() {
 #[test]
 fn dirty_source_repository_is_rejected() {
     let temp = TempDir::new().unwrap();
-    let repository = workspace::demo_repository(temp.path()).unwrap();
+    let repository = grapher::fixture::repository(temp.path()).unwrap();
     fs::write(repository.join("untracked.txt"), "keep my work").unwrap();
     assert!(workspace::verify(&repository)
         .unwrap_err()

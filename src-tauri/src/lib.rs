@@ -2,6 +2,8 @@ pub mod compiler;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod engine;
+#[cfg(feature = "fixture")]
+pub mod fixture;
 pub mod model;
 pub mod runtime;
 pub mod store;
