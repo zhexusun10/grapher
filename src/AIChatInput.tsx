@@ -179,21 +179,6 @@ export const AIChatInput: React.FC<AIChatInputProps> = ({
 
           {/* Text Input & Placeholder */}
           <div className="ai-chat-input-area">
-            {!compact && inputValue ? (
-              <motion.div
-                layoutId="user-query-content"
-                style={{
-                  position: "absolute",
-                  left: 4,
-                  top: 6,
-                  pointerEvents: "none",
-                  opacity: 0,
-                  fontSize: 14,
-                }}
-              >
-                {inputValue}
-              </motion.div>
-            ) : null}
             <input
               ref={inputRef}
               type="text"

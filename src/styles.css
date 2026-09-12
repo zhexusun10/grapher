@@ -85,15 +85,37 @@ h3 {
   background: var(--bg-canvas);
 }
 
-/* 侧边栏 */
+/* 侧边栏 (悬浮圆角卡片模式) */
 .sidebar {
-  width: 252px;
+  width: 256px;
   flex-shrink: 0;
-  border-right: 1px solid var(--border-default);
+  margin: 12px 0 12px 12px;
+  height: calc(100vh - 24px);
+  box-sizing: border-box;
+  border-radius: 10px;
+  border: 1px solid var(--border-default);
   background: var(--bg-surface);
-  padding: 18px 12px 16px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  padding: 18px 14px 16px;
   display: flex;
   flex-direction: column;
+  z-index: 10;
+  overflow: hidden;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sidebar *::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.sidebar *::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 4px;
+}
+
+.sidebar *::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .sidebar-brand-row {
@@ -529,8 +551,19 @@ h3 {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding: 0 30px;
+  padding: 0 12px;
   background: var(--bg-canvas);
+  position: relative;
+  overflow: hidden;
+}
+
+.workspace-view-wrapper {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  position: relative;
 }
 
 /* 主内容区头部与命令条 */
@@ -538,15 +571,16 @@ h3 {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding-top: 14px;
+  padding-top: 12px;
 }
 
 .header-top {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border-subtle);
+  position: relative;
 }
 
 .workspace-meta {
@@ -555,6 +589,8 @@ h3 {
   gap: 8px;
   font-size: 11px;
   color: var(--text-secondary);
+  justify-self: start;
+  min-width: 0;
 }
 
 .workspace-meta strong {
@@ -618,55 +654,104 @@ h3 {
 .header-nav-tabs {
   display: flex;
   align-items: center;
+  justify-self: center;
   gap: 3px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   padding: 3px;
   border-radius: 8px;
+  position: relative;
 }
 
 .tab-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  height: 28px;
+  box-sizing: border-box;
   gap: 6px;
-  padding: 5px 11px;
+  padding: 0 11px;
   border-radius: 6px;
   font-size: 11.5px;
   font-weight: 500;
+  line-height: 1;
   color: var(--text-secondary);
-  border: 1px solid transparent;
+  border: none;
   background: transparent;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease;
   white-space: nowrap;
+  user-select: none;
+  z-index: 1;
 }
 
-.tab-btn:hover {
+.tab-btn svg {
+  display: block;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+}
+
+.tab-btn span {
+  position: relative;
+  z-index: 2;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+
+.tab-btn:hover:not(.active) {
   color: var(--text-primary);
   background: var(--bg-surface-hover);
 }
 
 .tab-btn.active {
   color: var(--brand-default);
+}
+
+/* 滑块指示器 */
+.tab-active-indicator {
+  position: absolute;
+  inset: 0;
+  border-radius: 6px;
   background: var(--brand-subtle);
-  border-color: var(--brand-border);
-  font-weight: 600;
+  border: 1px solid var(--brand-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.tab-count {
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  font-weight: 500;
+  color: var(--text-tertiary);
+  opacity: 0.85;
+  display: inline-flex;
+  align-items: center;
+  margin-left: -2px;
+}
+
+.tab-btn.active .tab-count {
+  color: var(--brand-default);
+  opacity: 1;
 }
 
 .tab-badge {
   font-size: 9.5px;
-  padding: 1px 5px;
-  border-radius: 10px;
-  background: var(--bg-canvas);
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--bg-surface);
   color: var(--text-secondary);
   border: 1px solid var(--border-default);
   font-family: var(--font-mono, monospace);
 }
 
 .tab-btn.active .tab-badge {
-  background: var(--brand-default);
-  color: var(--text-inverse);
-  border-color: var(--brand-default);
+  background: var(--brand-subtle);
+  color: var(--brand-default);
+  border-color: var(--brand-border);
 }
 
 .select-badge {
@@ -680,6 +765,7 @@ h3 {
   display: flex;
   align-items: center;
   gap: 10px;
+  justify-self: end;
 }
 
 .engine-indicator {
@@ -773,6 +859,8 @@ h3 {
   width: 100%;
   height: 100%;
   position: relative;
+  will-change: transform, opacity;
+  transform: translateZ(0);
 }
 
 .landing-screen .error-banner {
@@ -1422,77 +1510,59 @@ h3 {
   gap: 16px;
 }
 
-.initial-query-card {
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-default);
-  border-radius: 10px;
-  padding: 14px 16px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
-}
-
-.query-card-header {
+/* 对话流与 Chatbot 消息样式（无生硬卡片，靠右展示） */
+.chat-messages-stream {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
 }
 
-.user-info {
+.chat-message-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  width: 100%;
 }
 
-.user-avatar-mark {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+.chat-message-row.user {
+  justify-content: flex-end;
+}
+
+.chat-message-row.assistant {
+  justify-content: flex-start;
+}
+
+.chat-bubble-user {
+  max-width: 84%;
+  padding: 9px 13px;
   background: var(--brand-subtle);
-  color: var(--brand-default);
   border: 1px solid var(--brand-border);
-  display: grid;
-  place-items: center;
-  font-size: 11px;
-}
-
-.user-info strong {
-  font-size: 12px;
-  font-weight: 600;
+  border-radius: 12px 12px 2px 12px;
   color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.55;
+  word-break: break-word;
+  white-space: pre-wrap;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
 
-.query-status-badge {
-  font-size: 9px;
-  padding: 1px 6px;
-  border-radius: 4px;
+.chat-bubble-assistant {
+  max-width: 88%;
+  padding: 9px 13px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
+  border-radius: 12px 12px 12px 2px;
   color: var(--text-secondary);
-  font-family: var(--font-mono, monospace);
-}
-
-.query-card-text {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-primary);
-  word-break: break-word;
-}
-
-.query-planning-indicator {
+  font-size: 12px;
+  line-height: 1.5;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-subtle);
-  font-size: 11.5px;
-  color: var(--brand-default);
 }
 
-.query-planning-indicator span {
-  font-size: 11px;
+.chat-bubble-assistant.planning {
   color: var(--brand-default);
-  font-weight: 500;
+  background: var(--brand-subtle);
+  border-color: var(--brand-border);
 }
 
 /* 执行拓扑概览卡片 */
@@ -1617,7 +1687,7 @@ h3 {
 .pane-bottom-chat {
   padding: 10px 14px 14px;
   background: var(--bg-surface);
-  border-top: 1px solid var(--border-subtle);
+  border-top: none;
   flex-shrink: 0;
 }
 
@@ -1639,7 +1709,7 @@ h3 {
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.15s ease;
-  margin-right: 6px;
+  margin-left: 6px;
 }
 
 .back-to-query-btn:hover {
@@ -1648,44 +1718,13 @@ h3 {
   background: var(--brand-subtle);
 }
 
-.header-subbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 10px;
-  color: var(--text-secondary);
-  padding-bottom: 12px;
-}
-
-.subbar-info {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.subbar-stats {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.stats-divider {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--border-default);
-}
-
-.stats-completed {
-  color: var(--status-success);
-  font-weight: 500;
-}
 
 /* 工作台面板与可调节分割器 */
 .workbench {
   display: flex;
   flex: 1;
-  min-height: 420px;
+  min-height: 0;
+  margin: 10px 0 4px 0;
   border: 1px solid var(--border-default);
   background: var(--bg-canvas);
   border-radius: 10px;
@@ -1742,44 +1781,6 @@ h3 {
 }
 
 
-.pane-tabs {
-  height: 48px;
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--border-default);
-  display: flex;
-  padding: 0 16px;
-  gap: 22px;
-}
-
-.pane-tabs button {
-  position: relative;
-  gap: 7px;
-  font-size: 11px;
-  padding: 0;
-  color: var(--text-secondary);
-}
-
-.pane-tabs button.active {
-  color: var(--brand-default);
-}
-
-.pane-tabs button.active:after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--brand-default);
-}
-
-.pane-tabs button>span {
-  font-size: 9px;
-  background: var(--bg-surface);
-  padding: 1px 4px;
-  border-radius: 4px;
-  color: var(--text-secondary);
-}
 
 .conversation-heading {
   display: flex;
@@ -2214,9 +2215,6 @@ h3 {
   box-shadow: 0 0 0 3px var(--brand-subtle), 0 4px 12px rgba(37, 99, 235, 0.1);
 }
 
-.task-node.running {
-  border-color: var(--brand-default);
-}
 
 .task-node.failed,
 .task-node.blocked {
@@ -2327,7 +2325,7 @@ h3 {
 .graph-note {
   position: absolute;
   bottom: 16px;
-  left: 20px;
+  left: 50px;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -2458,24 +2456,27 @@ h3 {
 }
 
 .workspace-footer {
-  height: 39px;
+  height: 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 8px;
+  font-size: 9.5px;
   color: var(--text-secondary);
   flex-shrink: 0;
+  padding: 0 2px;
+  margin: 4px 0 8px 0;
+  opacity: 0.75;
 }
 
 .workspace-footer>span {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .workspace-footer>span:last-child {
   font-family: ui-monospace, monospace;
-  font-size: 8px;
+  font-size: 9.5px;
 }
 
 /* 提示条与横幅 */
@@ -2932,7 +2933,7 @@ h3 {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  margin-top: 14px;
+  margin: 10px 0 4px 0;
   overflow: hidden;
   border: 1px solid var(--border-default);
   border-radius: 10px;
@@ -3755,7 +3756,7 @@ h3 {
   }
 
   .main {
-    padding: 0 20px;
+    padding: 0 12px;
   }
 
   .planner-cost {
@@ -3774,7 +3775,7 @@ h3 {
 
 @media (max-height: 820px) {
   .workspace-header {
-    padding-top: 10px;
+    padding-top: 12px;
   }
 
   .command-bar {

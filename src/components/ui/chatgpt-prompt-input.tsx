@@ -27,7 +27,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       disabled = false,
       isBusy = false,
       compact = false,
-      layoutId = "chatgpt-prompt-box",
+      layoutId,
       className = "",
       ...restProps
     },
@@ -113,8 +113,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     return (
       <motion.div
-        layoutId={layoutId}
-        transition={{ type: "spring", stiffness: 140, damping: 20 }}
+        layoutId={layoutId || undefined}
+        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
         className={`prompt-box-container ${compact ? "compact" : "landing"} ${className}`}
         onClick={() => internalTextareaRef.current?.focus()}
       >
