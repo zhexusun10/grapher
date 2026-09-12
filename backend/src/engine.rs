@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::process::CommandExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{mpsc, Mutex, OnceLock},
     thread,
@@ -47,6 +47,7 @@ pub struct PiRequest<'request> {
     pub session_id: Option<&'request str>,
     pub extra_args: Vec<&'request str>,
     pub environment: Vec<(&'request str, String)>,
+    pub system_prompt: Option<&'request str>,
 }
 
 pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Result<String, String> {
@@ -88,6 +89,19 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         command.args(&request.extra_args);
     }
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
+    if let Some(system_prompt) = request.system_prompt {
+        let prompt_path = if Path::new(system_prompt).is_file() {
+            PathBuf::from(system_prompt)
+        } else {
+            let path = request.session_dir.join("system-prompt.md");
+            fs::write(&path, system_prompt).map_err(|error| error.to_string())?;
+            path
+        };
+        command.args([
+            "--system-prompt",
+            prompt_path.to_str().ok_or("Invalid system prompt path")?,
+        ]);
+    }
     command
         .arg("--session-dir")
         .arg(request.session_dir)
@@ -261,6 +275,7 @@ pub fn execute(
             session_id: Some(&execution.session_id),
             extra_args: Vec::new(),
             environment: Vec::new(),
+            system_prompt: None,
         },
         on_output,
     )

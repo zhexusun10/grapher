@@ -30,6 +30,7 @@ fn execute_script(script: &str) -> (Result<String, String>, String) {
             session_id: Some("test-session"),
             extra_args: Vec::new(),
             environment: Vec::new(),
+            system_prompt: None,
         },
         |text| output.push_str(&text),
     );
@@ -71,3 +72,49 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(stream.contains("Temporary provider failure"));
     assert_eq!(result.unwrap(), "Recovered successfully");
 }
+
+#[test]
+fn passes_system_prompt_flag_when_provided() {
+    let temp = TempDir::new().unwrap();
+    let script_path = temp.path().join("fake-pi.sh");
+    let script = r#"cat >/dev/null
+echo "ARGS: $@"
+for arg in "$@"; do
+    if [ "$prev" = "--system-prompt" ]; then
+        echo "SYSTEM_PROMPT_CONTENT: $(cat "$arg")"
+    fi
+    prev="$arg"
+done
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
+"#;
+    fs::write(&script_path, script).unwrap();
+    let config = Config {
+        repository: String::new(),
+        engine: "pi".into(),
+        pi_command: "/bin/sh".into(),
+        pi_args: vec![script_path.to_string_lossy().into()],
+        model: String::new(),
+        max_parallel: 2,
+        max_feedback: 3,
+    };
+    let mut output = String::new();
+    let result = run_pi(
+        PiRequest {
+            config: &config,
+            cwd: temp.path(),
+            task: "Do not run a model",
+            session_dir: &temp.path().join("session"),
+            extension: None,
+            tools: "read,bash",
+            session_id: Some("test-session"),
+            extra_args: Vec::new(),
+            environment: Vec::new(),
+            system_prompt: Some("Custom system prompt content for test"),
+        },
+        |text| output.push_str(&text),
+    );
+    assert_eq!(result.unwrap(), "OK");
+    assert!(output.contains("--system-prompt"));
+    assert!(output.contains("SYSTEM_PROMPT_CONTENT: Custom system prompt content for test"));
+}
+

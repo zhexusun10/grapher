@@ -43,6 +43,7 @@ pub struct Route {
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
 const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
 
+#[allow(dead_code)]
 fn render_prompt(template: &str, replacements: &[(&str, &str)]) -> String {
     let mut rendered = template.to_string();
     for (key, value) in replacements {
@@ -55,6 +56,16 @@ fn render_prompt(template: &str, replacements: &[(&str, &str)]) -> String {
         }
     }
     rendered
+}
+
+fn split_prompt_template<'a>(template: &'a str) -> (&'a str, &'a str) {
+    if let Some((system, _)) = template.split_once("Goal: {{goal}}") {
+        (system.trim(), "Goal: {{goal}}")
+    } else if let Some((system, _)) = template.split_once("Goal: {goal}") {
+        (system.trim(), "Goal: {goal}")
+    } else {
+        (template.trim(), "")
+    }
 }
 
 fn load_env_file() {
@@ -211,7 +222,10 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
         let directory = root.join("planning").join(Uuid::new_v4().to_string());
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
         let route_path = directory.join("route.json");
-        let task = render_prompt(PARTITIONER_PROMPT, &[("goal", &goal)]);
+        let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
+        let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
+            .unwrap_or_else(|_| default_partitioner_system.to_string());
+        let task = format!("Goal: {goal}");
         let mut partitioner_config = config.clone();
         if let Ok(model) = std::env::var("PARTITIONER_MODEL") {
             if !model.trim().is_empty() {
@@ -236,6 +250,7 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
                     ("GRAPHER_MODE", "partition".into()),
                     ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
                 ],
+                system_prompt: Some(&partitioner_system_prompt),
             },
             |text| log.push_str(&text),
         )?;
@@ -273,7 +288,10 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
                 if planner_config.model.trim().is_empty() {
                     planner_config.model = "qwen3.8-flash".into();
                 }
-                let task = render_prompt(PLANNER_PROMPT, &[("goal", &goal)]);
+                let (default_planner_system, _) = split_prompt_template(PLANNER_PROMPT);
+                let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
+                    .unwrap_or_else(|_| default_planner_system.to_string());
+                let task = format!("Goal: {goal}");
                 let mut log = String::new();
                 run_pi(
                     PiRequest {
@@ -296,6 +314,7 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
                                     .into(),
                             ),
                         ],
+                        system_prompt: Some(&planner_system_prompt),
                     },
                     |text| log.push_str(&text),
                 )?;
