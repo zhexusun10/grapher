@@ -18,3 +18,15 @@ pnpm-debug.log*
 .env
 .env.local
 .env.*.local
+
+# Grapher runtime and Rust outputs
+src-tauri/target/
+src-tauri/gen/
+.grapher/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
