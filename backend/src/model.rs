@@ -153,6 +153,12 @@ pub enum EventKind {
         to: String,
         accepted: bool,
     },
+    PublicationStarted { repository: String, heads: Vec<String> },
+    PublicationCompleted { head: String },
+    PublicationFailed { error: String },
+    MergerStarted { execution: Execution },
+    MergerFinished { execution_id: String, head: String },
+    MergerFailed { execution_id: String, error: String },
     Settled,
 }
 
@@ -164,6 +170,20 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+/// Publication state is separate from node state. Retain the exact heads and
+/// target across retries/restarts instead of replaying historical attempts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Publication {
+    pub repository: String,
+    pub heads: Vec<String>,
+    pub status: String,
+    pub head: Option<String>,
+    pub error: Option<String>,
+    pub started_at: u64,
+    pub completed_at: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -173,6 +193,10 @@ pub struct Snapshot {
     pub plan: Option<Plan>,
     pub nodes: BTreeMap<String, NodeState>,
     pub executions: Vec<Execution>,
+    #[serde(default)]
+    pub mergers: Vec<Execution>,
+    #[serde(default)]
+    pub publication: Option<Publication>,
     pub events: Vec<Event>,
     pub approved: bool,
     pub paused: bool,
@@ -224,6 +248,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             if let Some(execution) = state
                 .executions
                 .iter_mut()
+                .chain(state.mergers.iter_mut())
                 .find(|item| item.id == *execution_id)
             {
                 execution.output.push_str(text);
@@ -285,6 +310,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             instruction,
             human,
         } => {
+            state.publication = None;
             for name in nodes {
                 let node = state.nodes.get_mut(name).unwrap();
                 node.status = "dirty".into();
@@ -310,6 +336,53 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     .feedback_counts
                     .entry(format!("{from}->{to}"))
                     .or_default() += 1;
+            }
+        }
+        EventKind::PublicationStarted { repository, heads } => {
+            state.publication = Some(Publication {
+                repository: repository.clone(), heads: heads.clone(), status: "publishing".into(),
+                head: None, error: None, started_at: event.timestamp, completed_at: None,
+            });
+            state.paused = false;
+            state.phase = "publishing".into();
+        }
+        EventKind::PublicationCompleted { head } => {
+            if let Some(publication) = &mut state.publication {
+                publication.status = "completed".into();
+                publication.head = Some(head.clone());
+                publication.completed_at = Some(event.timestamp);
+                publication.error = None;
+            }
+            state.phase = "completed".into();
+            state.paused = false;
+        }
+        EventKind::PublicationFailed { error } => {
+            if let Some(publication) = &mut state.publication {
+                publication.status = "failed".into();
+                publication.error = Some(error.clone());
+            }
+            state.phase = "publication_failed".into();
+            state.paused = true;
+        }
+        EventKind::MergerStarted { execution } => {
+            state.mergers.push(execution.clone());
+            state.phase = "merging".into();
+            if let Some(publication) = &mut state.publication { publication.status = "merging".into(); }
+        }
+        EventKind::MergerFinished { execution_id, head } => {
+            if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
+                execution.status = "completed".into();
+                execution.after = Some(head.clone());
+                execution.completed_at = Some(event.timestamp);
+            }
+            state.phase = "publishing".into();
+            if let Some(publication) = &mut state.publication { publication.status = "publishing".into(); }
+        }
+        EventKind::MergerFailed { execution_id, error } => {
+            if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
+                execution.status = "failed".into();
+                execution.output.push_str(&format!("\nMerger failed: {error}\n"));
+                execution.completed_at = Some(event.timestamp);
             }
         }
         EventKind::Settled => {

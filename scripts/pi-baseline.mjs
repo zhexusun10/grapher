@@ -7,7 +7,12 @@ import { join } from "node:path";
 export const root = fileURLToPath(new URL("../", import.meta.url));
 export const source = join(root, "pi");
 export const lock = JSON.parse(readFileSync(join(root, "engine/pi-lock.json"), "utf8"));
-const git = (...args) => execFileSync("git", ["-C", source, ...args], { encoding: "utf8" }).trim();
+// Merger may inherit a shadow repository's GIT_DIR/GIT_WORK_TREE. Baseline
+// verification must still inspect Pi; leave those variables intact for its child.
+const git = (...args) => execFileSync("git", ["-C", source, ...args], {
+  encoding: "utf8",
+  env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+}).trim();
 const hash = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 
 export function verifyBaseline() {

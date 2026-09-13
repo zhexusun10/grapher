@@ -1,0 +1,12 @@
+.publication-panel { margin: 10px 18px; padding: 12px 16px; border: 1px solid #c5d4eb; border-radius: 10px; background: #f3f7fc; flex-shrink: 0; max-height: 55vh; overflow: auto; font-size: 13px; }
+.publication-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.publication-heading span { color: #526277; }
+.publication-panel p { margin: 8px 0; overflow-wrap: anywhere; }
+.publication-panel.completed { border-color: #99c8a7; background: #f1faf4; }
+.publication-panel.failed { border-color: #e4b6a3; background: #fff5f0; }
+.publication-error { color: #a02e17; white-space: pre-wrap; }
+.publication-mergers summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+.publication-mergers select { max-width: 100%; padding: 6px; }
+.publication-transcript { height: 280px; display: flex; flex-direction: column; background: white; border-radius: 8px; }
+.phase-tag.publishing, .phase-tag.merging { color: #254a83; background: #e7effd; }
+.phase-tag.publication_failed { color: #a02e17; background: #fff0e8; }

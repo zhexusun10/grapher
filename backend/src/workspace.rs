@@ -294,6 +294,19 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().into())
 }
 
+/// Run Git against either a normal checkout or the existing external shadow
+/// repository. Publication must never create/rebaseline a shadow repository.
+pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String> {
+    let repository = repository.canonicalize().map_err(|e| e.to_string())?;
+    if is_standard_git(&repository) { return git(&repository, args); }
+    let shadow = shadow_repo_dir(&repository);
+    if !shadow.is_dir() { return Err("Shadow repository is missing; retained node results have not been published".into()); }
+    let mut command = vec!["--git-dir", shadow.to_str().ok_or("Invalid shadow path")?,
+        "--work-tree", repository.to_str().ok_or("Invalid repository path")?];
+    command.extend_from_slice(args);
+    git(&repository, &command)
+}
+
 pub fn verify(repository: &Path) -> Result<String, String> {
     if is_standard_git(repository) {
         let root = git(repository, &["rev-parse", "--show-toplevel"])?;

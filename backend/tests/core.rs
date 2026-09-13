@@ -193,7 +193,7 @@ fn feedback_reexecutes_only_affected_branch_with_fresh_sessions() {
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "<ACCEPT>");
     assert!(runtime.jobs().unwrap().is_empty());
-    assert_eq!(runtime.state.phase, "completed");
+    assert_eq!(runtime.state.phase, "publishing");
     let frontend: Vec<_> = runtime
         .state
         .executions
@@ -369,7 +369,7 @@ fn actual_worktrees_parallel_merge_and_feedback_fixture_complete() {
         }
     }
     assert_eq!(
-        runtime.state.phase, "completed",
+        runtime.state.phase, "publishing",
         "{:?}",
         runtime.state.nodes
     );

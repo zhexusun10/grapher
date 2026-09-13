@@ -13,6 +13,8 @@ test("Pi source, dependency lock and model data match the recorded baseline", ()
 test("owned entrypoint starts the pinned CLI without a global Pi executable", () => {
   const version = execFileSync(process.execPath, [join(root, "engine/entrypoint.mjs"), "--version"], {
     cwd: root, encoding: "utf8", timeout: 30000,
+    // Merger's shadow Git environment must not redirect baseline verification.
+    env: { ...process.env, GIT_DIR: join(root, ".grapher/nonexistent-test-git-dir"), GIT_WORK_TREE: root },
   });
   assert.equal(version.trim(), lock.packageVersion);
 });

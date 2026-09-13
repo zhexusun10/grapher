@@ -42,44 +42,82 @@ npm start
 
 ### 真实 Pi
 
-出货构建以 **Pi** 为唯一 **Execution Instance Engine**，一次实际执行称为 **Execution Instance**。目前通过 `npm run pi` 使用 upstream CLI 完成登录和模型配置；前端 Provider/Auth Adapter 尚待接入。Grapher 不自行实现凭据存储。
+出货构建以 **Pi** 为唯一 **Execution Instance Engine**，一次实际执行称为 **Execution Instance**。设置中的模型与 Provider 认证通过 Adapter 委托 Pi `ModelRuntime`；也可用 `npm run pi` 使用原生 CLI 登录。Grapher 不自行实现 provider、OAuth 或凭据刷新。
 
-1. 运行设置中填写**已有 commit 且完全干净**的 Git 仓库根路径。
+1. 运行设置中填写项目目录。标准 Git 仓库要求已有 commit 且工作树干净；普通文件夹通过外置 shadow repository 保存基线、执行和自动回写，用户目录不创建 `.git`。
 2. 选择模型（可用 `provider/model` 指定 provider）。生产后端固定使用 `engine/entrypoint.mjs`；旧配置中的可执行文件和参数不再控制生产启动。
 3. 先执行 `npm run pi:setup` 安装锁定依赖及恢复固定模型目录。不能用全局安装的 Pi 替代 submodule。当前 upstream 完整构建有已记录的类型检查阻塞，源码 CLI 可启动；详见基线文档。
-4. 点击「规划并编译」：Partitioner 只有 `route_task`；Graph Planner 只有 `node / edge / read / bash`。每次 mutation 都调用同一个 Rust 编译器，失败不会写入候选图。Serial 路由不调用 Planner，用单节点承载原始任务，同样保留审批边界。
-5. Planner 退出，完整图展示后才能审批启动工作节点。也可以直接导入手写 Graph IR，省去规划模型调用。
+4. Partitioner 只调用一次 `route_task`：仅当存在多个可独立推进的实质工作流时选择 Graph，否则选择 Serial；不解决或规划任务。Serial 跳过 Planner，后端创建名为 `task` 的单节点图并自动审批、开始执行，直接修改用户目录。
+5. Graph Planner 使用 `node / edge / read / bash` 生成完整可执行图。每次 mutation 调用 Rust 编译器，校验失败不会写入候选图；Planner 退出后展示图，用户批准才启动节点。也可以导入手写 Graph IR。
 
-**安全边界：**规划会调用模型并消耗额度；执行 Pi 可以运行 shell、联网、读写其进程权限允许的文件。Worktree 是并行隔离机制，**不是安全沙箱**。仅对可信代码和任务使用真实 Pi。Planner 的 bash 是自定义只读检查接口，不是任意 shell：只接受列目录、搜索、读文件和公开 HTTP(S) 的 curl GET/HEAD；禁止写入、执行脚本、仓库外读取、符号链接、Git 元数据及本机/内网访问。read 使用相同的本地路径边界。此工具边界不是进程级沙箱；Pi、本机文件系统及仓库仍须可信。公网请求仍可能携带 URL 信息，GET 也不能保证远端没有副作用。详见 [规划检查权限](backend/resources/planning-inspection.md)。
+### 当前 Planner
+
+实际提示词以 [partitioner.md](backend/resources/prompts/partitioner.md) 和 [planner.md](backend/resources/prompts/planner.md) 为准。Planner 将任务划分为独立工作成果，不提前替节点探索实现步骤；节点数不是优化目标。节点 task 必须自包含目标、用户约束、职责及验收方式。
+
+只有当检查可能改变节点边界、依赖、并行性、可合并性或权威契约时才读取仓库/公开文档。普通边传递上游文件系统状态，不传递对话；只为有意义的有限审查修正流程添加 feedback 边。路径必须相对于当前节点 worktree，禁止嵌入 Planner 所在原仓库的绝对路径。通过编译、覆盖完整后停止规划。
+
+**规划检查边界：**Planner 的 bash 是自定义只读检查接口，不是任意 shell：只接受列目录、搜索、读文件和公开 HTTP(S) 的 curl GET/HEAD；禁止写入、执行脚本、仓库外读取、符号链接、Git 元数据及本机/内网访问。read 使用相同边界。公网请求仍可能携带 URL 信息，GET 不保证远端没有副作用。详见 [规划检查权限](backend/resources/planning-inspection.md)。Graph 执行节点的 OS sandbox 是下述另一层边界。
 
 ## 已实现
 
 - Graph IR 以 `name` 为语义标识，边以 `(from, to)` 唯一标识。显式 `feedback` 不可省略。
 - 确定性编译：重复名称、空 task、未知节点、自环、重复边、普通依赖环、反馈祖先关系校验；执行层/根/终点和孤立节点警告。
-- 强制审批；每次 execution 使用新的会话 ID 和 detached Git worktree；最大并发可设置为 1–8。
-- 并行分支在下游执行前通过 Git merge 组合；变更在 worktree 内自动提交，不自动合入原仓库。
+- Graph 需审批，每次节点执行使用新会话和 detached Git worktree；Serial 直接使用用户目录；最大并发可设置为 1–8。
+- 并行分支在下游执行前通过宿主 Git merge 组合；Graph 节点受路径 sandbox 保护。整图节点完成后自动合并当前有效节点提交到用户仓库，实际冲突时调用 merger。
 - 精确解析最终一行 `<ACCEPT>` / `<REVISE>`；协议错误显式失败；默认最多 3 次自动反馈重试；失败只阻塞依赖分支。
 - SQLite append-only 事件日志与 reducer；执行流、工具调用、输出、工作区 SHA、节点 revision、介入指令和历史尝试持久化。
 - 暂停停止派发**下一执行波次**，不强杀正在工作的 Pi；等待当前波次完成后可介入或重跑。所有受影响后继失效，无关分支保留。
 - 退出时终止受管理 Pi 进程组；重启后端不会自动续跑。被中断的 execution 标记 failed，需人工检查并重跑 fresh session。
 
-## 合并冲突与取回结果
+## 执行、merger 与结果落地
 
-合并冲突使下游节点变成 **BLOCKED**。点击该节点，从 Workspace 信息取得冲突 worktree 路径，在外部终端解决冲突并提交；暂停且等待当前波次结束后，点击 **Use resolved workspace**。运行时以解决后的快照重新启动该节点，不伪造任务成功。
+Serial（当前判定为唯一节点名为 `task`）直接在用户目录执行，结束后由 Workspace Runtime 保存快照。Graph 节点在用户项目旁的 `.grapher-worktrees/<run>/<node>-<id>` 工作；下游启动前由宿主进程合并依赖提交。此阶段有冲突仍将下游标为 **BLOCKED**：人工在冲突 worktree 解决并提交，暂停且等待波次结束后点击 **Use resolved workspace**，再以新 Execution Instance 重跑该节点。
 
-代码结果保留在每个 execution 的 worktree 中，最终终点的 `After` SHA 是对应结果快照。用户自行 review，并按需要 merge/cherry-pick。多个独立终点不会自动再合并成一个提交。
+当 Graph 所有节点完成时，`jobs()` 先持久化 `PublicationStarted` 并进入 `publishing`，driver 随后发布当前有效节点 head。跳过已合并的祖先提交，不合并历史失败/失效尝试；Git 仓库和普通文件夹使用相同合并逻辑。普通文件夹通过明确指定外置 `--git-dir` 与用户 `--work-tree` 直接回写，正确处理新增、修改、删除，保持没有 `.git`。回写前检查本地改动，不重新快照来吞掉用户并发修改。只有实际未解决冲突才调用 merger，进入 `merging`；权限、脏目录等错误进入 `publication_failed`。
 
-持久化数据默认位于项目的 `.grapher/`。可通过 `GRAPHER_DATA_DIR` 指定已有数据目录或其他绝对路径：
+merger 使用锁定 Pi 内核，在用户源仓库当前 merge 状态中运行。自定义系统提示词只有原始 user query 与冲突修复要求（保留有效修改、避免无关修改、暂存解决结果、检查冲突）；不加载项目 context files 或自动发现的扩展。Pi 仍附加 cwd，工具 schema 仍由 upstream 提供。merger 不使用普通 Graph 节点的源仓库 deny 策略，也不是图中的普通任务或 Planner。
+
+完成后宿主检查未解决条目和 `MERGE_HEAD`，必要时创建 merge commit，校验传入 commit 已成为 HEAD 祖先且目录干净，然后继续剩余节点。只有所有结果确实落地后，`PublicationCompleted` 才将 phase 设为 `completed`，记录最终 SHA 和完成时间。merger 在普通文件夹内运行时仅向其进程树传递 `GIT_DIR/GIT_WORK_TREE`，原生 Git 命令可以工作，无需在用户目录写 `.git`。
+
+工作区顶部的回写面板在各 tab 显示目标路径、正在回写/merger 修复/失败/已写回状态；可选择 merger 历史尝试，查看实时工具输出、session ID、before/after SHA。失败时提供“重试回写”：保留节点结果和冲突现场，重试跳过已完成提交，仅继续本次发布所属的 pending merge，不重新执行图节点、不接管不相关 merge。正在回写时禁止节点介入或普通暂停/恢复，失败通过专用重试入口继续。重启时未完成回写标为失败并显示原因，不自动续用旧 merger 会话。
+
+已落地的前缀提交不自动回滚；仍不能与用户同时写目标目录。旧版本留下的 `Settled/completed` 事件保留原有历史解释，不凭历史记录自动重做回写。
+
+merger 的 session、JSON 输出及 `result.json` 存在 runtime 的 `mergers/<id>/`；生命周期与流式输出写入 SQLite 事件，并投影到 `Snapshot.mergers`，回写状态投影到 `Snapshot.publication`。它是独立 Execution Instance，不伪装成普通 Graph node，也不会和用户命名为 `merger` 的节点冲突。真实模型的语义修复质量需要人工检查；自动测试使用脚本执行器验证完整 HTTP、重启和重试流程，不调用计费模型。
+
+## Graph sandbox
+
+生产 Graph 节点通过 macOS `/usr/bin/sandbox-exec` 启动整个 Node/Pi 进程树。策略由 [sandbox.rs](backend/src/sandbox.rs) 生成，路径先 canonicalize；默认允许宿主其他路径和网络，再拒绝源目录以及整个 `.grapher-worktrees` 树中当前节点以外的目录。因此同一 run、其他 run、profile 生成后才创建的 worktree 都受保护，不依赖目录枚举快照。
+
+| 路径或操作 | Graph 节点权限 |
+| --- | --- |
+| 当前节点 worktree | 读写、Bash、Pi read/write/edit |
+| 源仓库、其他 worktree、指向它们的符号链接 | 禁止读写 |
+| worktree 根与当前 run 父目录 | 仅定位路径所需 metadata；不能列出目录内容 |
+| 共享 Git common-dir，包括独立 git-dir / shadow metadata | 禁止读写，防止从 Git 对象库读取其他分支 |
+| 其他宿主文件、环境认证、网络 | 按宿主权限允许 |
+
+节点内普通 Git 命令可能因无法访问 common-dir 而失败；prepare、snapshot、依赖合并和发布由未套用节点 sandbox 的 Rust 宿主负责。Serial、Partitioner/Planner 和 merger 的 cwd 是用户目录，不使用此 Graph profile；Planner 另有只读工具边界。没有 macOS sandbox 支持时生产 Graph 节点拒绝启动，`fixture` 测试进程不代表生产 sandbox。
+
+这是限定目录的文件访问边界，不是隔离整个宿主机的容器。按设计允许外部文件和网络，因此不防止通过预先存在的外部副本、外部 hardlink、宿主服务或其他代理间接取得同样的数据；不提供网络隔离，也不约束宿主用户和 Rust 的文件访问。适用于防止节点直接探索/改写原项目及其他工作区，不宣称可以执行恶意代码。
+
+Grapher/Pi 安装目录及 runtime 会话目录必须位于被保护源目录之外；否则这些依赖也会被 deny，节点应失败，不能为了启动内核而放开整个源仓库。因此对 Grapher 自身开发 Graph 任务时，需要从另一份外部安装启动宿主。
+
+路径布局：
 
 ```text
-.grapher/
+<project-parent>/
+  project/                                      # Serial / merger / 最终发布目录
+  .grapher-worktrees/<run>/<node>-<execution>/   # Graph 节点 cwd
+<GRAPHER_DATA_DIR or grapher/.grapher>/
   events.sqlite
-  planning/<planning-id>/
-  worktrees/<run-id>/<node>-<execution-id>/
-  worktrees/<run-id>/sessions-<execution-id>/
+  planning/<id>/                                # partition/planner 日志及候选图
+  sessions/<execution>/                         # 节点会话及 execution-instance.sb
+  mergers/<id>/                                 # 冲突会话、output.jsonl、result.json
+  shadow_repos/                                 # 普通文件夹的宿主 Git metadata
 ```
 
-历史记录含源码片段和工具输出，应按本地敏感开发数据管理。
+历史会话含源码片段、任务和工具输出，按本地开发数据管理。旧位置的 worktree 不自动迁移，重跑会创建使用新边界的工作区。
 
 ## 验证与打包
 
@@ -89,9 +127,16 @@ npm run build
 npm test
 cargo check --manifest-path backend/Cargo.toml
 cargo build --release --manifest-path backend/Cargo.toml
+# macOS: real sandbox processes, upstream tools, test auth and local HTTP
+cargo test --manifest-path backend/Cargo.toml --no-default-features --test sandbox -- --nocapture
+cargo test --manifest-path backend/Cargo.toml --no-default-features --test graph_merge
+npm run test:benchmark
+npm run test:publication # Git / 普通文件夹 HTTP 回写、merger 失败重试、重启与 UI 状态
 ```
 
-核心测试不调用真实模型，覆盖编译、审批、反馈、失败传播、介入、SQLite replay、重启恢复、实际并行 worktree 合并和冲突；Pi JSON 进程协议使用本地假进程测试。测试用的确定性执行器位于 Cargo `fixture` 特性下（`backend/src/fixture.rs`），出货构建不包含它，也只接受 `pi` 引擎。
+2026-09-13 实测环境：macOS 26.6.2、Node 25.4.0。真实 sandbox 测试覆盖：当前目录/外部文件允许读写；源目录、已有/稍后创建/其他 run 的 worktree 拒绝读写；`..`、符号链接、子进程继承；父目录禁止枚举；外置 Git metadata 拒绝访问而宿主 Git 正常；Pi 原生 read/write/edit/bash；Node 本机 HTTP；隔离的测试 auth.json；固定 Pi 入口 `--version`。测试只用假凭据与本机 HTTP 服务，不调用真实 provider API 或模型。测试源码见 [sandbox.rs](backend/tests/sandbox.rs) 和 [sandbox-probe.ts](scripts/sandbox-probe.ts)。macOS 以外不运行这些 OS 用例。
+
+核心测试不调用真实模型，覆盖编译、审批、反馈、失败传播、介入、SQLite replay、重启恢复、实际并行 worktree 合并和冲突；Pi JSON 进程协议使用本地假进程测试。测试用的确定性执行器位于 Cargo `fixture` 特性下（`backend/src/fixture.rs`），出货构建不包含它。发布回归额外覆盖无冲突落地、冲突后继续剩余提交、失败保留现场、脏源目录保护以及 driver 的完成触发时机。
 
 有本地 `pi/` 源码时，还可以验证真实 Pi 扩展加载和 mutation 回滚（不调用模型）：
 
@@ -104,8 +149,8 @@ node pi/node_modules/tsx/dist/cli.mjs --tsconfig pi/tsconfig.json scripts/check-
 
 - 仅一个活动 Graph，波次式并行调度；执行中修改节点需先暂停并等待波次结束。
 - Graph 编辑使用 JSON；没有拖线编辑、自动布局库、完整 xterm 交互终端或多项目管理。
-- 暂不自动清理 worktree、自动合入用户分支、安装依赖或迁移未提交改动；历史工作区按需由用户清理。
-- 不支持多引擎、远程执行、自动恢复旧 Pi session、自动解决 merge conflict、签名/公证/安装更新器。
+- 暂不自动清理 worktree、安装依赖或迁移未提交改动；历史工作区按需由用户清理。Graph 自动发布支持标准 Git 仓库和普通文件夹；发布时若用户目录有并发改动，明确失败并保留现场，处理后可重试。
+- 不支持多引擎、远程执行、自动恢复旧 session、签名/公证/安装更新器。merger 处理整图完成后的冲突，不处理下游 prepare 阶段的 BLOCKED 冲突。
 - 普通退出会清理 Pi 进程组。系统断电或后端被 SIGKILL 时不能保证清理；重启会失效未完成尝试，用户需检查残留进程和工作区。
 - 支持当前本地 Pi 0.85.1 的 JSON 事件格式及 `--session-id`。真实模型认证/质量需使用用户自己的环境验证。
 - Partitioner/Planner prompt 为实验性实现，不把它们当成架构不变量。

@@ -15,10 +15,12 @@ import {
 } from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
+import { PublicationPanel } from "./components/PublicationPanel";
 import { ProviderSettings } from "./components/ProviderSettings";
 import { MarkdownRenderer } from "./components/MarkdownRenderer";
 import { ToolCallCard } from "./components/ToolCallCard";
 import { VirtualizedTranscript } from "./components/VirtualizedTranscript";
+import { ThinkingCard } from "./components/ThinkingCard";
 
 function deduceRouteType(snap: Snapshot): PlanRouteType {
   if (snap.graph.nodes.length > 1) return "graph";
@@ -43,6 +45,9 @@ const phaseText: Record<string, string> = {
   running: "执行中",
   paused: "已暂停",
   completed: "已完成",
+  publishing: "正在合并回写",
+  merging: "merger 修复冲突中",
+  publication_failed: "回写失败",
   needs_attention: "需要介入",
   rejected: "已拒绝",
 };
@@ -256,6 +261,8 @@ export default function App() {
   });
   const currentRepoPath = useMemo(() => config.repository || repoInfo?.path || "default", [config.repository, repoInfo]);
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
+  const [activeBackendRunId, setActiveBackendRunId] = useState<string | null>(null);
+  const [activeBackendPhase, setActiveBackendPhase] = useState<string | null>(null);
   const [attemptId, setAttemptId] = useState("");
   const [dataPath, setDataPath] = useState("");
   const [timelineFilter, setTimelineFilter] = useState<string>("all");
@@ -286,17 +293,19 @@ export default function App() {
   // 对话流消息记录（Chatbot 模式）
   const [messages, setMessages] = useState<Array<{ id: string; role: "user" | "assistant"; text: string; timestamp?: number }>>([]);
   const [routeType, setRouteType] = useState<PlanRouteType>(() => deduceRouteType(emptySnapshot));
-  const [plannerStream, setPlannerStream] = useState<{
-    stage: "idle" | "partitioning" | "planning" | "done" | "error";
-    partitionerText: string;
-    plannerText: string;
-    tools: TranscriptItem[];
-  }>({
-    stage: "idle",
+
+  const initialPlannerStream = {
+    stage: "idle" as "idle" | "partitioning" | "planning" | "done" | "error",
+    partitionerThinking: "",
+    partitionerThinkingActive: false,
     partitionerText: "",
+    plannerThinking: "",
+    plannerThinkingActive: false,
     plannerText: "",
-    tools: [],
-  });
+    tools: [] as TranscriptItem[],
+  };
+
+  const [plannerStream, setPlannerStream] = useState(initialPlannerStream);
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
   const effectiveMessages = useMemo(() => {
@@ -430,11 +439,16 @@ export default function App() {
       });
     }
     if (data.snapshot.runId) {
+      const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
-      setRouteType(deduceRouteType(data.snapshot));
+      setActiveBackendRunId(data.snapshot.runId);
+      setActiveBackendPhase(data.snapshot.phase);
+      setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
-      if (data.snapshot.graph.nodes.length > 0) {
+      if (deduced === "graph" && data.snapshot.graph.nodes.length > 0) {
         setSelected((curr) => (curr && data.snapshot.graph.nodes.some(n => n.name === curr) ? curr : ""));
+      } else {
+        setSelected("");
       }
     }
   }, []);
@@ -460,10 +474,14 @@ export default function App() {
         } catch {}
         return next;
       });
-      const snapshot = await runtimeService.resetWorkspace();
-      setState(snapshot);
+      try {
+        const snapshot = await runtimeService.resetWorkspace();
+        setState(snapshot);
+      } catch {
+        setState(emptySnapshot);
+      }
       setRouteType("undecided");
-      setPlannerStream({ stage: "idle", partitionerText: "", plannerText: "", tools: [] });
+      setPlannerStream(initialPlannerStream);
       setGoal("");
       setSelected("");
       setError("");
@@ -505,25 +523,39 @@ export default function App() {
     if (projRuns.length > 0) {
       try {
         const snapshot = await runtimeService.loadRun(projRuns[0]);
+        const deduced = deduceRouteType(snapshot);
         setState(snapshot);
-        setRouteType(deduceRouteType(snapshot));
+        setRouteType(deduced);
         setGoal(snapshot.graph.originalGoal || "");
-        if (snapshot.graph.nodes.length > 0) {
+        setMessages([]);
+        if (deduced === "graph" && snapshot.graph.nodes.length > 0) {
           setSelected(snapshot.graph.nodes[0].name);
+        } else {
+          setSelected("");
         }
       } catch {
-        const snapshot = await runtimeService.resetWorkspace();
-        setState(snapshot);
+        try {
+          const snapshot = await runtimeService.resetWorkspace();
+          setState(snapshot);
+        } catch {
+          setState(emptySnapshot);
+        }
         setRouteType("undecided");
-        setPlannerStream({ stage: "idle", partitionerText: "", plannerText: "", tools: [] });
+        setPlannerStream(initialPlannerStream);
         setGoal("");
+        setMessages([]);
       }
     } else {
-      const snapshot = await runtimeService.resetWorkspace();
-      setState(snapshot);
+      try {
+        const snapshot = await runtimeService.resetWorkspace();
+        setState(snapshot);
+      } catch {
+        setState(emptySnapshot);
+      }
       setRouteType("undecided");
-      setPlannerStream({ stage: "idle", partitionerText: "", plannerText: "", tools: [] });
+      setPlannerStream(initialPlannerStream);
       setGoal("");
+      setMessages([]);
     }
     setError("");
   });
@@ -571,8 +603,12 @@ export default function App() {
       return updated;
     });
     if (state.runId === runIdToDelete) {
-      const snapshot = await runtimeService.resetWorkspace();
-      setState(snapshot);
+      try {
+        const snapshot = await runtimeService.resetWorkspace();
+        setState(snapshot);
+      } catch {
+        setState(emptySnapshot);
+      }
       setGoal("");
       setSelected("");
     }
@@ -602,10 +638,14 @@ export default function App() {
 
   const handleResetWorkspace = () => run(async () => {
     setMessages([]);
-    const snapshot = await runtimeService.resetWorkspace();
-    setState(snapshot);
+    try {
+      const snapshot = await runtimeService.resetWorkspace();
+      setState(snapshot);
+    } catch {
+      setState(emptySnapshot);
+    }
     setRouteType("undecided");
-    setPlannerStream({ stage: "idle", partitionerText: "", plannerText: "", tools: [] });
+    setPlannerStream(initialPlannerStream);
     setGoal("");
     setSelected("");
     setError("");
@@ -656,7 +696,11 @@ export default function App() {
     setRouteType("undecided");
     setPlannerStream({
       stage: "partitioning",
+      partitionerThinking: "",
+      partitionerThinkingActive: false,
       partitionerText: "",
+      plannerThinking: "",
+      plannerThinkingActive: false,
       plannerText: "",
       tools: [],
     });
@@ -682,15 +726,92 @@ export default function App() {
         setError("请先在左侧工作区选择绑定的本地 Git 仓库。");
         return;
       }
+      let partInTag = false;
+      let planInTag = false;
+
       const snapshot = await runtimeService.planGoalStream(targetGoal, config, (event) => {
         if (event.type === "partitioner") {
           const pEvent = event.event;
-          if (pEvent?.type === "message_update" && pEvent.assistantMessageEvent?.type === "text_delta") {
-            const delta = pEvent.assistantMessageEvent.delta;
-            setPlannerStream((prev) => ({
-              ...prev,
-              partitionerText: prev.partitionerText + delta,
-            }));
+          if (pEvent?.type === "message_update") {
+            const aEvent = pEvent.assistantMessageEvent;
+            if (aEvent?.type === "thinking_start") {
+              setPlannerStream((prev) => ({
+                ...prev,
+                partitionerThinkingActive: true,
+              }));
+            } else if (aEvent?.type === "thinking_delta") {
+              const delta = aEvent.delta || "";
+              setPlannerStream((prev) => ({
+                ...prev,
+                partitionerThinking: prev.partitionerThinking + delta,
+                partitionerThinkingActive: true,
+              }));
+            } else if (aEvent?.type === "thinking_end") {
+              setPlannerStream((prev) => ({
+                ...prev,
+                partitionerThinkingActive: false,
+              }));
+            } else if (aEvent?.type === "text_delta") {
+              const delta = aEvent.delta || "";
+              if (partInTag || delta.includes("<think>") || delta.includes("<thought>")) {
+                let remaining = delta;
+                let thinkChunk = "";
+                let textChunk = "";
+                while (remaining.length > 0) {
+                  if (partInTag) {
+                    const endTag = remaining.includes("</think>") ? "</think>" : remaining.includes("</thought>") ? "</thought>" : null;
+                    if (endTag) {
+                      const idx = remaining.indexOf(endTag);
+                      thinkChunk += remaining.slice(0, idx);
+                      partInTag = false;
+                      remaining = remaining.slice(idx + endTag.length);
+                    } else {
+                      thinkChunk += remaining;
+                      remaining = "";
+                    }
+                  } else {
+                    const startTag = remaining.includes("<think>") ? "<think>" : remaining.includes("<thought>") ? "<thought>" : null;
+                    if (startTag) {
+                      const idx = remaining.indexOf(startTag);
+                      textChunk += remaining.slice(0, idx);
+                      partInTag = true;
+                      remaining = remaining.slice(idx + startTag.length);
+                    } else {
+                      textChunk += remaining;
+                      remaining = "";
+                    }
+                  }
+                }
+                setPlannerStream((prev) => ({
+                  ...prev,
+                  partitionerThinking: prev.partitionerThinking + thinkChunk,
+                  partitionerThinkingActive: partInTag,
+                  partitionerText: prev.partitionerText + textChunk,
+                }));
+              } else {
+                setPlannerStream((prev) => ({
+                  ...prev,
+                  partitionerThinkingActive: false,
+                  partitionerText: prev.partitionerText + delta,
+                }));
+              }
+            }
+          } else if (pEvent?.type === "message_end") {
+            setPlannerStream((prev) => {
+              let thinking = prev.partitionerThinking;
+              if (!thinking && Array.isArray(pEvent.message?.content)) {
+                for (const c of pEvent.message.content) {
+                  if (c.type === "thinking" && c.thinking) {
+                    thinking = c.thinking;
+                  }
+                }
+              }
+              return {
+                ...prev,
+                partitionerThinking: thinking,
+                partitionerThinkingActive: false,
+              };
+            });
           } else if (pEvent?.type === "tool_execution_start") {
             const toolItem: TranscriptItem = {
               id: pEvent.toolCallId || `part_tool_${Date.now()}`,
@@ -703,6 +824,7 @@ export default function App() {
             };
             setPlannerStream((prev) => ({
               ...prev,
+              partitionerThinkingActive: false,
               tools: [...prev.tools, toolItem],
             }));
           } else if (pEvent?.type === "tool_execution_end") {
@@ -724,16 +846,91 @@ export default function App() {
           setRouteType(planType);
           setPlannerStream((prev) => ({
             ...prev,
+            partitionerThinkingActive: false,
             stage: planType === "graph" ? "planning" : "done",
           }));
         } else if (event.type === "planner") {
           const pEvent = event.event;
-          if (pEvent?.type === "message_update" && pEvent.assistantMessageEvent?.type === "text_delta") {
-            const delta = pEvent.assistantMessageEvent.delta;
-            setPlannerStream((prev) => ({
-              ...prev,
-              plannerText: prev.plannerText + delta,
-            }));
+          if (pEvent?.type === "message_update") {
+            const aEvent = pEvent.assistantMessageEvent;
+            if (aEvent?.type === "thinking_start") {
+              setPlannerStream((prev) => ({
+                ...prev,
+                plannerThinkingActive: true,
+              }));
+            } else if (aEvent?.type === "thinking_delta") {
+              const delta = aEvent.delta || "";
+              setPlannerStream((prev) => ({
+                ...prev,
+                plannerThinking: prev.plannerThinking + delta,
+                plannerThinkingActive: true,
+              }));
+            } else if (aEvent?.type === "thinking_end") {
+              setPlannerStream((prev) => ({
+                ...prev,
+                plannerThinkingActive: false,
+              }));
+            } else if (aEvent?.type === "text_delta") {
+              const delta = aEvent.delta || "";
+              if (planInTag || delta.includes("<think>") || delta.includes("<thought>")) {
+                let remaining = delta;
+                let thinkChunk = "";
+                let textChunk = "";
+                while (remaining.length > 0) {
+                  if (planInTag) {
+                    const endTag = remaining.includes("</think>") ? "</think>" : remaining.includes("</thought>") ? "</thought>" : null;
+                    if (endTag) {
+                      const idx = remaining.indexOf(endTag);
+                      thinkChunk += remaining.slice(0, idx);
+                      planInTag = false;
+                      remaining = remaining.slice(idx + endTag.length);
+                    } else {
+                      thinkChunk += remaining;
+                      remaining = "";
+                    }
+                  } else {
+                    const startTag = remaining.includes("<think>") ? "<think>" : remaining.includes("<thought>") ? "<thought>" : null;
+                    if (startTag) {
+                      const idx = remaining.indexOf(startTag);
+                      textChunk += remaining.slice(0, idx);
+                      planInTag = true;
+                      remaining = remaining.slice(idx + startTag.length);
+                    } else {
+                      textChunk += remaining;
+                      remaining = "";
+                    }
+                  }
+                }
+                setPlannerStream((prev) => ({
+                  ...prev,
+                  plannerThinking: prev.plannerThinking + thinkChunk,
+                  plannerThinkingActive: planInTag,
+                  plannerText: prev.plannerText + textChunk,
+                }));
+              } else {
+                setPlannerStream((prev) => ({
+                  ...prev,
+                  plannerThinkingActive: false,
+                  plannerText: prev.plannerText + delta,
+                }));
+              }
+            }
+          } else if (pEvent?.type === "message_end") {
+            setPlannerStream((prev) => {
+              let thinking = prev.plannerThinking;
+              if (!thinking && Array.isArray(pEvent.message?.content)) {
+                for (const c of pEvent.message.content) {
+                  if (c.type === "thinking" && c.thinking) {
+                    thinking = c.thinking;
+                  }
+                }
+              }
+              return {
+                ...prev,
+                plannerThinking: thinking,
+                plannerThinkingActive: false,
+              };
+            });
           } else if (pEvent?.type === "tool_execution_start") {
             const toolItem: TranscriptItem = {
               id: pEvent.toolCallId || `plan_tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -746,6 +943,7 @@ export default function App() {
             };
             setPlannerStream((prev) => ({
               ...prev,
+              plannerThinkingActive: false,
               tools: [...prev.tools, toolItem],
             }));
           } else if (pEvent?.type === "tool_execution_end") {
@@ -794,8 +992,20 @@ export default function App() {
     const interval = setInterval(() => {
       runtimeService.snapshot()
         .then((newSnap) => {
-          if (!newSnap || !newSnap.runId) return;
+          if (!newSnap || !newSnap.runId) {
+            setActiveBackendRunId(null);
+            setActiveBackendPhase(null);
+            return;
+          }
+          setActiveBackendRunId(newSnap.runId);
+          setActiveBackendPhase(newSnap.phase);
+
           setState((prev) => {
+            // CRITICAL: If the user navigated away to another run (e.g. historical snapshot)
+            // or to an empty workspace draft, NEVER hijack the user's view back to the active run!
+            if (prev.runId !== newSnap.runId) {
+              return prev;
+            }
             if (
               prev.runId === newSnap.runId &&
               prev.phase === newSnap.phase &&
@@ -811,7 +1021,9 @@ export default function App() {
             return newSnap;
           });
         })
-        .catch((err) => setError(String(err)));
+        .catch((err) => {
+          console.warn("Snapshot poll error:", err);
+        });
     }, 700);
     return () => clearInterval(interval);
   }, [busy]);
@@ -846,7 +1058,8 @@ export default function App() {
   };
 
   const control = (action: string, extra = {}) => run(async () => {
-    const snapshot = await runtimeService.control(action, { node: selected, instruction, ...extra });
+    const targetNode = selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
+    const snapshot = await runtimeService.control(action, { node: targetNode, instruction, ...extra });
     setState(snapshot);
     setModal(null);
     if (action === "intervene") setInstruction("");
@@ -860,12 +1073,16 @@ export default function App() {
 
   const save = (graph: Graph) => run(async () => {
     const snapshot = await runtimeService.saveGraph(graph, config);
+    const deduced = deduceRouteType(snapshot);
     setState(snapshot);
+    setRouteType(deduced);
     setGoal(graph.originalGoal);
     setModal(null);
     recordRunToWorkspace(snapshot.runId);
-    if (graph.nodes.length > 0) {
+    if (deduced === "graph" && graph.nodes.length > 0) {
       setSelected(graph.nodes[0].name);
+    } else {
+      setSelected("");
     }
   });
 
@@ -890,7 +1107,9 @@ export default function App() {
   const serialAttempts = serialNode ? state.executions.filter((e) => e.node === serialNode.name) : [];
   const serialExecution = serialAttempts.at(-1);
 
-  const active = Object.values(state.nodes).some((node) => node.status === "running");
+  const publishing = state.phase === "publishing" || state.phase === "merging";
+  const publicationFailed = state.phase === "publication_failed";
+  const active = publishing || publicationFailed || Object.values(state.nodes).some((node) => node.status === "running");
   const completed = Object.values(state.nodes).filter((node) => node.status === "done").length;
   const locked = busy;
 
@@ -1129,33 +1348,45 @@ export default function App() {
 
         <div className="runs-list">
           {runs.length > 0 ? (
-            runs.map((id, index) => (
-              <button
-                className={`run-item ${state.runId === id ? "chosen" : ""}`}
-                key={id}
-                onClick={() => run(async () => {
-                  const snapshot = await runtimeService.loadRun(id);
-                  setState(snapshot);
-                  setGoal(snapshot.graph.originalGoal || "");
-                  if (snapshot.graph.nodes.length > 0) {
-                    setSelected(snapshot.graph.nodes[0].name);
-                  }
-                })}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setContextMenu(null);
-                  setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
-                }}
-                title={`快照: ${id}\n(右键可复制 ID 或删除)`}
-              >
-                <span className="run-dot" />
-                <span>
-                  Graph {id.slice(0, 8)}
-                  <small>{index === 0 ? "最近编译" : "历史快照"}</small>
-                </span>
-              </button>
-            ))
+            runs.map((id, index) => {
+              const isThisRunActive = activeBackendRunId === id && ["running", "awaiting_approval", "publishing", "merging"].includes(activeBackendPhase ?? "");
+              return (
+                <button
+                  className={`run-item ${state.runId === id ? "chosen" : ""} ${isThisRunActive ? "active-running" : ""}`}
+                  key={id}
+                  onClick={() => run(async () => {
+                    const snapshot = await runtimeService.loadRun(id);
+                    const deduced = deduceRouteType(snapshot);
+                    setState(snapshot);
+                    setRouteType(deduced);
+                    setGoal(snapshot.graph.originalGoal || "");
+                    setMessages([]);
+                    if (deduced === "graph" && snapshot.graph.nodes.length > 0) {
+                      setSelected(snapshot.graph.nodes[0].name);
+                    } else {
+                      setSelected("");
+                    }
+                  })}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setContextMenu(null);
+                    setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
+                  }}
+                  title={`快照: ${id}\n(右键可复制 ID 或删除)`}
+                >
+                  <span className={`run-dot ${isThisRunActive ? "pulse-dot" : ""}`} />
+                  <span>
+                    Graph {id.slice(0, 8)}
+                    <small>
+                      {isThisRunActive
+                        ? (activeBackendPhase === "awaiting_approval" ? "等待审批" : "运行中...")
+                        : index === 0 ? "最近编译" : "历史快照"}
+                    </small>
+                  </span>
+                </button>
+              );
+            })
           ) : (
             <div className="run-placeholder">
               <GitBranch size={13} />
@@ -1178,6 +1409,37 @@ export default function App() {
       </aside>
 
       <main className="main">
+        {activeBackendRunId &&
+          ["running", "awaiting_approval", "publishing", "merging"].includes(activeBackendPhase ?? "") &&
+          state.runId !== activeBackendRunId && (
+            <div className="background-run-banner">
+              <div className="background-run-info">
+                <span className="pulse-indicator" />
+                <span>
+                  后台有任务正在{activeBackendPhase === "awaiting_approval" ? "等待审批" : "执行中"}: <strong>Graph {activeBackendRunId.slice(0, 8)}</strong>
+                </span>
+              </div>
+              <button
+                type="button"
+                className="background-run-action-btn"
+                onClick={() => run(async () => {
+                  const snapshot = await runtimeService.loadRun(activeBackendRunId);
+                  const deduced = deduceRouteType(snapshot);
+                  setState(snapshot);
+                  setRouteType(deduced);
+                  setGoal(snapshot.graph.originalGoal || "");
+                  setMessages([]);
+                  if (deduced === "graph" && snapshot.graph.nodes.length > 0) {
+                    setSelected(snapshot.graph.nodes[0].name);
+                  } else {
+                    setSelected("");
+                  }
+                })}
+              >
+                返回运行中的任务
+              </button>
+            </div>
+        )}
         <AnimatePresence mode="wait" initial={false}>
           {state.graph.nodes.length === 0 && !isPlanning && mainTab === "graph" ? (
             <motion.div
@@ -1301,6 +1563,9 @@ export default function App() {
               </div>
             </motion.header>
 
+        <PublicationPanel key={state.runId} publication={state.publication} mergers={state.mergers ?? []}
+          busy={busy} onRetry={() => control("retry_publication")} />
+
         {/* 工作台主双栏布局，中间带可拖拽 resizer */}
         {mainTab === "graph" && (
           <section className={`workbench ${isResizing ? "resizing" : ""} ${routeType === "graph" ? "graph-mode" : "dialogue-only-mode"}`} ref={workbenchRef}>
@@ -1311,7 +1576,7 @@ export default function App() {
             style={routeType === "graph" ? { width: `${leftWidth}px` } : { width: "100%", maxWidth: "100%" }}
             transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
           >
-            {selectedNode ? (
+            {selectedNode && routeType === "graph" ? (
               <>
                 <div className="conversation-heading">
                   <div className="detail-icon">
@@ -1323,14 +1588,16 @@ export default function App() {
                   <span className={`status ${selectedState?.status ?? "waiting"}`}>
                     {statusText[selectedState?.status ?? "waiting"]}
                   </span>
-                  <button
-                    className="back-to-query-btn"
-                    title="取消选中节点，返回查看全局初始任务目标"
-                    onClick={() => setSelected("")}
-                  >
-                    <ArrowLeft size={12} />
-                    <span>初始目标</span>
-                  </button>
+                  {routeType === "graph" && (
+                    <button
+                      className="back-to-query-btn"
+                      title="取消选中节点，返回查看全局初始任务目标"
+                      onClick={() => setSelected("")}
+                    >
+                      <ArrowLeft size={12} />
+                      <span>初始目标</span>
+                    </button>
+                  )}
                 </div>
 
                 <div className="conversation-scroll">
@@ -1374,7 +1641,7 @@ export default function App() {
                         <p>Session ID: {execution.sessionId}</p>
                         <p>Commit Before: {execution.before}</p>
                         <p>Commit After: {execution.after ?? "pending"}</p>
-                        <p className="details-tip">所有变更保存在独立 worktree，不会污染主分支。</p>
+                        <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
                       </details>
                     </>
                   ) : (
@@ -1384,7 +1651,7 @@ export default function App() {
                       </div>
                       <h3>全新独立上下文</h3>
                       <p>
-                        审批通过后，该节点将在隔离的 Git worktree 中启动全新的 Pi 实例。<br />
+                        审批通过后，该节点将在用户仓库旁的隔离 Git worktree 中启动全新的 Execution Instance。<br />
                         执行进度、代码修改与工具调用流将在此呈现。
                       </p>
                     </div>
@@ -1435,6 +1702,14 @@ export default function App() {
                           <Compass size={14} className="spin" />
                           <span>AI 架构师正在评估任务执行路径 (Serial / Graph)...</span>
                         </div>
+                        {plannerStream.partitionerThinking && (
+                          <ThinkingCard
+                            content={plannerStream.partitionerThinking}
+                            isStreaming={isPlanning && plannerStream.partitionerThinkingActive}
+                            title="AI 架构师思维链"
+                            defaultExpanded={true}
+                          />
+                        )}
                         {plannerStream.partitionerText && (
                           <div className="stream-card-body">
                             <MarkdownRenderer content={plannerStream.partitionerText} isStreaming={true} />
@@ -1532,14 +1807,24 @@ export default function App() {
                           <Workflow size={14} className="spin" />
                           <span>AI Planner 正在探测仓库架构并构建有向执行图...</span>
                         </div>
+                        {plannerStream.plannerThinking && (
+                          <ThinkingCard
+                            content={plannerStream.plannerThinking}
+                            isStreaming={isPlanning && plannerStream.plannerThinkingActive}
+                            title="AI 规划器思维链"
+                            defaultExpanded={true}
+                          />
+                        )}
                         {plannerStream.plannerText ? (
                           <div className="stream-card-body">
                             <MarkdownRenderer content={plannerStream.plannerText} isStreaming={true} />
                           </div>
                         ) : (
-                          <div className="stream-card-hint">
-                            正在计算独立 Git worktree 执行批次与验收复审依赖...
-                          </div>
+                          !plannerStream.plannerThinking && (
+                            <div className="stream-card-hint">
+                              正在计算独立 Git worktree 执行批次与验收复审依赖...
+                            </div>
+                          )
                         )}
                       </motion.div>
                     )}
@@ -1799,7 +2084,7 @@ export default function App() {
                     <span className="progress-dot" />
                     {completed} / {state.graph.nodes.length} 节点完成
                   </span>
-                  <span>并发限制 {state.config?.maxParallel ?? config.maxParallel}</span>
+                  <span>{phaseText[state.phase] ?? state.phase} · 并发限制 {state.config?.maxParallel ?? config.maxParallel}</span>
                 </div>
                 <div className="progress-track">
                   <div style={{ width: `${(completed / Math.max(1, state.graph.nodes.length)) * 100}%` }} />
@@ -1831,7 +2116,7 @@ export default function App() {
                         </button>
                         <button
                           className="primary"
-                          disabled={locked || state.phase === "completed"}
+                          disabled={locked || publishing || publicationFailed || state.phase === "completed"}
                           onClick={() => control(state.paused ? "resume" : "pause")}
                         >
                           {state.paused ? <Play size={13} /> : <Pause size={13} />}
@@ -2318,7 +2603,7 @@ export default function App() {
                   <p>{state.graph.originalGoal}</p>
                   <ul>
                     <li>
-                      {`在仓库 ${state.config?.repository || config.repository} 创建独立 Git worktree。`}
+                      {`Graph 模式的节点在用户仓库旁的 .grapher-worktrees 中执行，完成后自动合并回用户仓库。`}
                     </li>
                     <li>每个节点分配独立隔离会话；验证失败最多自动反馈重试 {state.config?.maxFeedback ?? config.maxFeedback} 次。</li>
                     <li>完全不修改或破坏你的主开发目录。</li>

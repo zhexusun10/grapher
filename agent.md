@@ -110,7 +110,7 @@ Planner 在 Graph 编译成功后立即退出。
 flowchart TD
     User([User Request]) --> Partitioner[Partitioner]
 
-    Partitioner -->|Serial| SerialPi[Single Pi Instance]
+    Partitioner -->|Serial| SerialPi[Single Execution Instance]
     Partitioner -->|Graph| Planner[Graph Planner]
 
     subgraph CompilationPhase
@@ -127,9 +127,9 @@ flowchart TD
     subgraph RuntimePhase
         Runtime --> Workspace[Workspace Runtime]
         Runtime --> EventStore[(Execution Event Store)]
-        Runtime --> PiA[Fresh Pi Instance]
-        Runtime --> PiB[Fresh Pi Instance]
-        Runtime --> PiC[Fresh Pi Instance]
+        Runtime --> PiA[Fresh Execution Instance]
+        Runtime --> PiB[Fresh Execution Instance]
+        Runtime --> PiC[Fresh Execution Instance]
 
         Workspace --> WorktreeA[Git Worktree A]
         Workspace --> WorktreeB[Git Worktree B]
@@ -184,7 +184,7 @@ route_task({
 - 高度线性的任务
 - 分解后几乎不存在有效并行度的任务
 
-直接交给一个原生 Pi Instance。
+直接交给一个原生 Execution Instance。
 
 ### Graph
 
@@ -215,21 +215,19 @@ Graph Planner 是一个短生命周期的 **Execution Graph Compiler Frontend**�
 
 它只负责：
 
-> 将 User Intent 转换成最小完备的 Task Graph。
+> 将 User Intent 转换成完整可执行的 Task Graph。
 
 ---
 
 # 5. Planner Tools
 
-Planner 只有六个工具：
+Planner 只有四个工具：
 
 ```text
 node
 edge
 read
-ls
-find
-grep
+bash
 ```
 
 不存在：
@@ -244,16 +242,14 @@ send_message
 
 等任何派发 Agent 或运行 Agent 的能力。
 
-Planner 无法直接创建或运行任何 Pi Instance。
+Planner 无法直接创建或运行任何 Execution Instance。
 
 其中：
 
 - `node`：创建、修改、删除 Graph Node
 - `edge`：创建、修改、删除 Graph Edge
 - `read`：读取 Repository / Workspace
-- `ls`：列出仓库目录
-- `find`：按 glob 搜索仓库文件
-- `grep`：按模式搜索仓库内容
+- `bash`：受限只读检查入口，内部解析 ls/find/rg 等白名单命令，不执行任意 shell。
 
 Graph 中使用语义化的 Node `name` 作为 Planner 可见的唯一标识。
 
@@ -287,7 +283,7 @@ interface NodeToolInput {
   name: string;
 
   /**
-   * 给这个 Node Execution 对应 fresh Pi instance
+   * 给这个 Node Execution 对应 fresh Execution Instance
    * 使用的 Specific Task。
    *
    * Agent 不知道 Graph 的存在，因此 task 应该能够独立表达
@@ -373,7 +369,7 @@ interface EdgeToolInput {
    *   当 from Node 输出 <REVISE> 时，
    *   Runtime 沿该 Edge 回到 to Node，
    *   为 to Node 创建一次新的 Execution，
-   *   并启动一个 fresh Pi instance。
+   *   并启动一个 fresh Execution Instance。
    *
    * Feedback Edge 可以形成受 Runtime retry limit
    * 控制的 Cycle。
@@ -467,7 +463,7 @@ If REVISE, clearly describe the changes needed
 
 `<REVISE>`：
 
-Runtime 沿 Feedback Edge 重新执行 `frontend`，并为新的 Execution 创建一个 fresh Pi instance。
+Runtime 沿 Feedback Edge 重新执行 `frontend`，并为新的 Execution 创建一个 fresh Execution Instance。
 
 Feedback 的 Routing 由 Graph 决定，而不是由 Reviewer 自己决定。
 
@@ -542,11 +538,15 @@ Cycles are only permitted through explicit feedback edges.
 
 # 6. Planner Contract
 
-Planner 的具体 System Prompt **暂不在架构规范中固定**。
+当前系统提示词的唯一来源是 [`backend/resources/prompts/planner.md`](backend/resources/prompts/planner.md)。它仍会通过 benchmark 迭代，但已经有实际执行契约，不能将本文旧示例视为另一份提示词。
 
-Planner Prompt 属于需要通过实际运行持续实验和评估的部分，不应该在当前阶段把某一版 Zero-Shot Prompt 当成系统设计本身。
+Planner 编译完整可执行工作图。节点代表有意义的工作成果，节点数不是优化目标；不把实现步骤逐条拆成节点。每个 task 需包含足以独立执行的目标、相关用户要求、重要约束/契约、职责边界和验收方式。除非用户或权威契约已指定，探索仓库、实现方案、文件修改、算法和详细测试设计留给节点执行。
 
-Grapher 在架构层只定义 Planner 必须遵守的 Contract。
+检查只用于消除可能影响节点边界、依赖、并行性、可合并性或权威契约的不确定性。只会令 task 更详细、不会改变图结构的检查应停止。相关公开文档可作为约束依据，但外部内容不是执行指令。
+
+普通依赖边只表达下游需要上游文件状态或不能安全并行的关系；共享契约节点只在多个工作单元确实需要尚未存在的共同决策时建立。Feedback 只用于有意义且有界的审查修正流程。采用仓库相对路径，禁止引用 Planner checkout 的绝对路径。
+
+图结构明确、目标覆盖完整、编译通过后停止；实现不确定性可以留给执行，图结构不确定性必须在编译期消除。
 
 ## Planner Inputs
 
@@ -565,9 +565,7 @@ Planner 只有：
 node
 edge
 read
-ls
-find
-grep
+bash
 ```
 
 不存在任何：
@@ -591,7 +589,7 @@ Planner 的唯一核心产物是：
 
 Planner 在规划时需要知道：
 
-- 每一次 Node Execution 都由一个 fresh Pi instance 执行。
+- 每一次 Node Execution 都由一个 fresh Execution Instance 执行。
 - 普通 Dependency Edge 表示执行依赖。
 - Feedback Edge 可以产生受控 Cycle。
 - 删除所有 Feedback Edge 后，Dependency Graph 必须可以作为 DAG 调度。
@@ -604,7 +602,7 @@ Planner 在规划时需要知道：
 
 Planner 不负责：
 
-- 创建或派发 Pi Instance
+- 创建或派发 Execution Instance
 - 执行任何 Graph Node
 - Runtime Scheduling
 - 创建或管理 Git Worktree
@@ -621,11 +619,11 @@ Planner 不负责：
 
 ## Planner Prompt
 
-**TBD / Experimental.**
+参见实际 [Planner prompt](backend/resources/prompts/planner.md) 和 [Partitioner prompt](backend/resources/prompts/partitioner.md)。宿主把 `User query:` 之前的部分作为系统提示词，把原始 goal 单独作为 user message；`PARTITIONER_SYSTEM_PROMPT` / `PLANNER_SYSTEM_PROMPT` 可覆盖系统部分，`PARTITIONER_MODEL` / `PLANNER_MODEL` 可分别覆盖模型，`PARTITIONER_THINKING` / `PLANNER_THINKING` 覆盖对应 thinking 参数；普通节点使用 `PI_MODEL` / `PI_THINKING`。候选图和原始 JSON 输出保存在 runtime 的 `planning/<id>/`。
 
-Planner Prompt 应该通过实际 benchmark 和运行结果逐步确定，而不是由当前架构文档提前固化。
+Partitioner 唯一工具 `route_task` 只能成功调用一次：多个实质工作流能够独立推进才选 Graph，否则 Serial；成功路由即终止，不规划或解决任务。Serial 不调用 Planner，生成唯一名为 `task` 的节点并由后端自动审批启动，直接写用户目录。Graph 则经过 Planner、最终编译与用户审批。
 
-原则上优先保持 Prompt 简洁，并依赖 Graph Compiler 返回确定性的 diagnostics，而不是不断向 Prompt 中加入可以由 Compiler 检查的 corner cases。
+Prompt 保持简洁，结构性错误由 Compiler diagnostics 纠正。只读检查的具体语法和拒绝行为以 [planning-inspection.md](backend/resources/planning-inspection.md) 为准。
 
 # 7. Planner Lifecycle
 
@@ -921,9 +919,9 @@ Reject
 Approve & Start
 ```
 
-之后 Runtime 才能创建 Pi Instance。
+之后 Runtime 才能创建 Execution Instance。
 
-这是 Grapher 的强制 Human Approval Boundary。
+这是 Graph 路由的 Human Approval Boundary。Serial 路由由后端自动批准单节点并直接执行，不再经过单独的图审批操作；源目录检查仍适用。
 
 ---
 
@@ -937,7 +935,7 @@ Graph Runtime 是 Grapher 的核心确定性执行引擎。
 
 - dependency resolution
 - concurrency
-- Pi process lifecycle
+- Execution Instance process lifecycle
 - worktree lifecycle
 - workspace state
 - feedback transition
@@ -949,13 +947,13 @@ Graph Runtime 是 Grapher 的核心确定性执行引擎。
 
 ---
 
-# 12. Node ≠ Pi Instance
+# 12. Node ≠ Execution Instance
 
 这是 Grapher 的核心约束。
 
 **Graph Node 是稳定的 Task Definition。**
 
-**Pi Instance 是一次 Node Execution Attempt。**
+**Execution Instance 是一次 Node Execution Attempt。**
 
 例如：
 
@@ -963,20 +961,20 @@ Graph Runtime 是 Grapher 的核心确定性执行引擎。
 frontend
 │
 ├── Execution #1
-│      └── Pi Instance A
+│      └── Execution Instance A
 │
 ├── Execution #2
-│      └── Pi Instance B
+│      └── Execution Instance B
 │
 └── Execution #3
-       └── Pi Instance C
+       └── Execution Instance C
 ```
 
 每一次 Execution：
 
-> **必须创建全新的 Pi Instance。**
+> **必须创建全新的 Execution Instance。**
 
-永远不恢复上一轮 Pi Session 继续执行。
+永远不恢复上一轮 Execution Instance Session 继续执行。
 
 ---
 
@@ -1003,33 +1001,25 @@ frontend #1 ≠ frontend #2
 review #1 ≠ review #2
 ```
 
-四次 execution 对应四个独立 Pi Instance。
+四次 execution 对应四个独立 Execution Instance。
 
 旧 Conversation 保留在 Execution History。
 
 ---
 
-# 13. Pi Isolation
+# 13. Execution Instance 的上下文与文件边界
 
-每个 Pi：
+普通 Graph 节点使用全新会话、节点 task 和当前 worktree，不获得 Graph mutation、调度或派发工具。Pi 是唯一 Execution Instance Engine，原生 read/write/edit/bash 工具通过 macOS Seatbelt 受同一个进程级文件策略约束，Bash 子进程继承策略。
 
-- 是 fresh instance
-- 不知道 Graph 存在
-- 不知道 Planner 存在
-- 没有 graph 工具
-- 没有 node/edge 工具
-- 没有 spawn agent 工具
-- 不负责 scheduling
+策略以 canonical 源目录、`.grapher-worktrees` 根和当前节点目录生成。默认允许宿主其他路径和网络，拒绝源目录与整个 worktree 根中当前节点以外的目录。因此对其他 run、稍后创建的 worktree、`..` 和解析到受保护目录的符号链接同样生效，不是先扫描现有 sibling 再生成固定列表。
 
-Pi 只知道：
+只允许读取 worktree 根和当前 run 的路径定位 metadata，以兼容 Node `realpath`；不允许枚举它们的目录内容。当前节点文件允许读写。共享 Git common-dir 也被拒绝，包括位于源目录之外的独立 git-dir 与 shadow repository：这些目录能泄漏其他分支对象及工作区信息。节点内部 `git status/show` 等依赖 common-dir 的命令可能失败，prepare、snapshot、merge 由宿主 Workspace Runtime 执行。
 
-```text
-Specific Task
-+
-Current Working Directory
-```
+系统没有 `sandbox-exec` 时，生产 Graph 节点必须失败，不回退到无隔离执行。Grapher/Pi 安装与 runtime 会话目录也必须在受保护源目录之外，否则会一并被拒绝访问；对 Grapher 自身运行 Graph 任务需从另一份外部安装启动。`fixture` 编译特性可注入测试替身，它的测试通过不代表 sandbox 被测过。Serial、Partitioner/Planner、merger 在源目录执行，不套用普通 Graph 节点的源目录 deny 规则；Planner 另有工具层只读限制。
 
-Pi 使用原生工具工作。
+这不是敌对代码的宿主安全隔离：按产品要求保留外部文件、网络和环境认证访问，因此外部副本、预先存在的外部 hardlink、宿主服务/代理不在直接路径策略的保护范围内。宿主用户和 Rust Git 操作不受节点 profile 限制。
+
+Pi 系统提示词的身份与文档引导由 Grapher-owned prompt extension 清理，provider/auth upstream 代码不裁剪。Pi 的 cwd 来自实际执行目录；节点应使用当前目录的相对路径，不回到原仓库。
 
 ---
 
@@ -1072,24 +1062,20 @@ backend ──┘
 例如：
 
 ```text
-project/
-.grapher/
-  worktrees/
-    run-001/
-      frontend/
-      backend/
-      qa/
+<project-parent>/
+  project/                              # 源目录，Serial 和 merger 的 cwd
+  .grapher-worktrees/
+    <run-id>/
+      <node>-<execution-id>/             # Graph 节点 cwd
+<runtime-root>/
+  sessions/<execution-id>/               # 会话、execution-instance.sb
+  planning/<planning-id>/                # 路由、候选图、Planner 日志
+  mergers/<id>/                         # merger 会话、输出、结果状态
 ```
 
-Pi 启动时：
+Graph 的 `Execution.worktree`、Pi cwd 和 UI 展示的执行路径一致，均使用分配目录。源仓库路径不作为节点工作路径。相邻 worktree 的物理布局只解决工作区管理；第 13 节的 OS sandbox 才负责访问控制。
 
-```text
-cwd = assigned_worktree
-```
-
-Pi 不需要任何额外 Grapher protocol。
-
-从 Pi 的视角看，它只是在普通 repository 中工作。
+Serial 当前由“单一节点且 name 为 task”识别，直接在用户目录读写，结束后宿主保存快照。Graph 则在宿主准备和合并上游状态后进入节点 sandbox；节点退出后由宿主生成 commit。普通文件夹可使用 runtime 外置 shadow Git metadata，用户目录不添加 `.git`；整图自动回写通过宿主明确指定 shadow git-dir 和用户 work-tree，支持普通文件夹的新增、修改、删除与冲突修复。发布前检查用户目录是否变脏，不重新快照并吞掉并发改动。
 
 ---
 
@@ -1276,6 +1262,38 @@ D = BLOCKED
 Runtime 不应该静默猜测复杂语义冲突。
 
 冲突应作为 Graph Runtime Event 暴露给用户。
+
+## 18.1 整图完成后的发布与 merger
+
+下游 prepare 阶段的冲突仍由人修复后通过 `Use resolved workspace` 继续，不唤醒 Planner。另一个阶段是整图节点全部完成后的最终发布：
+
+```mermaid
+flowchart TD
+    Nodes[所有节点完成] --> Publishing[PublicationStarted / phase publishing]
+    Publishing --> Publish[宿主按当前节点 head 合并到用户目录]
+    Publish -->|无冲突| Next[校验 commit 祖先关系与干净状态]
+    Publish -->|实际 Git 冲突| Merger[merger Execution Instance]
+    Merger -->|解决且暂存| Commit[检查未解决条目 / 完成 MERGE_HEAD 提交]
+    Commit --> Next
+    Next -->|还有 head| Publish
+    Next -->|全部完成| Landed[PublicationCompleted / phase completed]
+    Merger -->|失败| Pause[PublicationFailed / 保留现场并允许重试]
+    Publish -->|脏目录 / 权限等错误| Pause
+```
+
+实现位于 `backend/src/server.rs` 的 driver 和 `backend/src/graph_merge.rs`。Graph 的 `jobs()` 在节点全部完成后先发出 `PublicationStarted`，phase 进入 `publishing`；driver 在退出空工作波次前调用发布，实际文件操作前状态已经持久化。只有全部 head 落地并通过检查，`PublicationCompleted` 才令 phase 为 `completed`，节点完成不再提前代表结果回写成功。Serial 不经过发布阶段，原目录执行和快照成功后直接完成。发布读取每个节点**当前有效 head**，不遍历 Execution History 的所有旧提交；已经是 HEAD 祖先的提交跳过，避免重复发布。每次冲突解决后继续剩余 head，不能只解决第一个冲突便返回成功。
+
+merger 是确定性 Runtime 在实际 Git 冲突时创建的专用 Execution Instance，不是图里的节点，也不是常驻 Coordinator。它使用新 session ID、固定 Pi 内核，在用户源目录的 merge 状态下工作，工具为 `read/write/bash/edit`。自定义系统提示词只包含原始 user query 和冲突修复要求：保留各节点有效修改、避免无关改动、暂存解决结果、检查无冲突。禁用项目 context files 和自动扩展发现；Pi 保留必要的 cwd、工具 schema 以及 provider/auth 能力。merger 不使用普通 Graph 节点 sandbox，因为其职责需要访问源目录。
+
+宿主在模型返回后检查 unmerged index；若仍有 `MERGE_HEAD`，即使最终树与 ours 相同，也必须创建 merge commit。再验证 incoming head 已成为 HEAD 祖先、没有脏文件，才能继续发布。不能把 Git 权限错误、脏目录或缺少仓库误归类为可由模型解决的冲突。
+
+merger session 与 `output.jsonl`、`result.json` 存在 runtime `mergers/<id>/`，不写入用户目录。`MergerStarted/Finished/Failed` 和复用的 `Output` 事件写入 SQLite，投影到独立的 `Snapshot.mergers` 集合；图节点 execution 保留在 `Snapshot.executions`，因此同名图节点不会发生状态冲突。`Snapshot.publication` 保存目标目录、待发布 heads、状态、错误、最终 SHA 与时间。
+
+UI 在工作区各 tab 顶部显示回写面板；`publishing` 显示正在合并回写，`merging` 显示冲突修复和实时日志，`completed` 显示已写回及最终提交，`publication_failed` 显示错误及“重试回写”。可选择不同 merger 尝试，查看状态、工作目录、session ID、before/after SHA；暂停/恢复和节点介入不改变正在发布的状态。
+
+`retry_publication` 复用已记录目标和 heads，不重跑图节点。若存在属于本次发布的 pending merge，继续修复/提交后处理剩余 head；不相关 merge 拒绝接管。重启或载入中断运行时，正在执行的 merger 标为失败，未完成发布转为 `publication_failed` 并持久化原因；需要用户重试，以新 session 继续。完成状态和日志经事件重放恢复。已落地的前缀提交不自动回滚，也不支持与用户同时写源目录。旧版本历史 `Settled` 事件仍按旧含义重放，不自动重新发布。
+
+Git 仓库和普通文件夹共享同一个 merge 算法：`workspace::repository_git` 在标准 checkout 使用原生 Git，在普通目录使用已有 shadow git-dir 与用户 work-tree，不创建 `.git`，不在发布时初始化或重新快照 shadow 基线。普通文件夹中的 merger 子进程得到 `GIT_DIR/GIT_WORK_TREE`，原生 Git 操作可以识别冲突；Grapher 内核版本校验清除自身 Git 命令的这些环境变量，避免误把 shadow 仓库当作 Pi。新增、删除、文件内容和冲突解决均通过 Git merge 落地，而非覆盖整个目录的复制操作。
 
 ---
 
@@ -1581,7 +1599,7 @@ Node
   ↓
 Execution Attempt
   ↓
-Pi Session
+Execution Instance Session
 ```
 
 组织。
@@ -1723,7 +1741,7 @@ Current Status
 
 点击 Node：
 
-左侧立即切换到该 Node 当前/历史 Pi Instance Conversation。
+左侧立即切换到该 Node 当前/历史 Execution Instance Conversation。
 
 用户可以查看：
 
@@ -1858,7 +1876,7 @@ SQLite
 - Graph Definitions
 - Node Revisions
 - Execution Attempts
-- Pi Session metadata
+- Execution Instance Session metadata
 - Graph Events
 - Feedback history
 - User interventions
@@ -2071,7 +2089,7 @@ Runtime：
 ```text
 api_spec
 ↓
-fresh Pi
+fresh Execution Instance
 ↓
 DONE
 ```
@@ -2086,8 +2104,8 @@ backend worktree
 并发启动：
 
 ```text
-fresh Pi(frontend)
-fresh Pi(backend)
+fresh Execution Instance(frontend)
+fresh Execution Instance(backend)
 ```
 
 两者完成。
@@ -2097,7 +2115,7 @@ Runtime composition workspace。
 随后：
 
 ```text
-fresh Pi(qa_review)
+fresh Execution Instance(qa_review)
 ```
 
 Runtime 自动追加 Feedback Protocol。
@@ -2126,11 +2144,11 @@ frontend
 frontend execution #2
 ```
 
-启动一个**全新的 Pi Instance**。
+启动一个**全新的 Execution Instance**。
 
 完成后重新执行受影响的 downstream path。
 
-QA 再次执行，同样是 fresh Pi。
+QA 再次执行，同样是 fresh Execution Instance。
 
 最终：
 
@@ -2161,7 +2179,7 @@ Deterministic Compiler
         ↓
 Deterministic Runtime
         ↓
-Independent Pi Executions
+Independent Execution Instances
 ```
 
 能由：
@@ -2176,44 +2194,17 @@ Independent Pi Executions
 
 ---
 
-# 42. Future Engine Abstraction
+# 42. Execution Instance Engine 与 Provider/Auth Adapter
 
-MVP 只支持 Pi。
+Pi fork 是唯一生产 Execution Instance Engine，由 submodule 锁定完整 commit；Grapher 不提供其他引擎实现或切换接口。生产入口固定为 `engine/entrypoint.mjs`，版本与构建输入校验见 [engine/README.md](engine/README.md)。一次实际执行统一称为 Execution Instance，包括节点和专用 merger。
 
-但 Runtime Architecture 不应该把 Node 与 Pi 强绑定。
-
-未来可以抽象：
-
-```ts
-interface AgentEngine {
-  start(config: ExecutionConfig): Promise<AgentSession>;
-  interrupt(sessionId: string): Promise<void>;
-  terminate(sessionId: string): Promise<void>;
-}
-```
-
-未来：
-
-```text
-Node A → Pi
-Node B → Codex
-Node C → Claude Code
-Node D → Local Agent
-```
-
-但这不是 MVP 的目标。
-
-**MVP 只证明 Pi + Compiled Work Graph。**
+Grapher 拥有进程生命周期、sandbox、图编译、审批、调度、工作区和仪表记录。Provider/Auth Adapter 委托 upstream `ModelRuntime` 枚举 provider/model、登录、登出、认证状态和凭据管理；前端选择模型/provider、提交认证交互，不自行维护 OAuth/provider 实现。未来 provider/auth 更新通过同步 upstream 继承，边界变化由 Adapter 合约测试发现。
 
 ---
 
 # 43. Grapher 真正拥有的资产
 
-Pi 可以替换。
-
-模型可以替换。
-
-底层 Agent Runtime 可以替换。
+模型与 provider 可以通过内核能力选择；生产 Execution Instance Engine 统一为锁定 Pi fork。
 
 Grapher 真正拥有的是：
 
@@ -2275,7 +2266,7 @@ Execution History
                          Graph Runtime
                         /      |      \
                        /       |       \
-                  fresh Pi  fresh Pi  fresh Pi
+                  fresh Execution Instance  fresh Execution Instance  fresh Execution Instance
                       │         │         │
                   worktree  worktree  worktree
                        \        |        /
@@ -2297,3 +2288,24 @@ Execution History
 以及：
 
 > **Don't orchestrate agents. Compile work.**
+
+# 45. 功能验证与实现证据
+
+Sandbox 测试必须启动真实 `/usr/bin/sandbox-exec`，只编译通过或使用 `fixture` 假进程不能证明文件边界。运行前安装锁定 Pi 依赖和模型目录：
+
+```sh
+npm run pi:setup
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo test --manifest-path backend/Cargo.toml --no-default-features --test sandbox -- --nocapture
+cargo test --manifest-path backend/Cargo.toml --no-default-features --test graph_merge
+npm test
+npm run test:benchmark
+cargo build --manifest-path backend/Cargo.toml --no-default-features
+node pi/node_modules/tsx/dist/cli.mjs --tsconfig pi/tsconfig.json scripts/check-pi-extension.ts
+```
+
+`backend/tests/sandbox.rs` 与 `scripts/sandbox-probe.ts` 实际验证当前 worktree 及外部文件可读写、源文件/其他 worktree 被拒绝、profile 之后创建的节点与其他 run 同样拒绝、符号链接和 `..` 不能绕过、子 shell 继承规则、目录枚举被拒绝、外置 Git common-dir 被拒绝而宿主 Git 正常。Pi 原生 read/write/edit/bash 在同一 profile 内逐项验证，Node 本机 HTTP 连接、隔离测试 auth.json 的 ModelRuntime 读取及 Grapher-owned Pi CLI 启动也需通过。测试不打印凭据，不调用真实模型；macOS 以外这些 OS 测试不运行，不能宣称其他平台已通过。
+
+发布测试覆盖无冲突落地、重复发布不产生新提交、解决冲突后继续后续 head、resolver 失败保留冲突、脏源目录不启动 resolver；driver fixture 测试验证节点结束进入 `publishing`，然后落地两个并行结果并发出 `PublicationCompleted`。新增 `publication`/`publication_state` 测试覆盖普通目录新增/删除/冲突、并发修改保护、失败重试、事件重放和中断恢复、merger 与同名节点分离。`npm run test:publication` 通过真实 HTTP 后端和脚本执行器验证 Git 与普通目录的 merger 失败、日志轮询、重启、重试、最终落地，以及 UI 状态渲染；不调用真实模型。这里验证 Git 控制流，真实模型语义冲突修复的质量不由 fixture 证明。
+
+2026-09-13 在 macOS 26.6.2 / Node 25.4.0 上发现并修正了旧策略的两个问题：枚举 sibling 的 profile 漏掉稍后创建的 worktree；拒绝所有父目录 metadata 会使 Pi write/edit 的 realpath 失败。当前策略按整个根目录拒绝，并仅例外放行路径定位所需的父目录 metadata。完整边界与复现命令也见 [README](README.md#graph-sandbox)。

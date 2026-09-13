@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "pi:verify": "node scripts/pi-baseline.mjs verify",
+    "test:publication": "cargo build --manifest-path backend/Cargo.toml --features fixture --bin grapher && node scripts/test-publication-http.mjs && node --test scripts/publication-ui.test.mjs",
     "test:pi": "node --test scripts/pi-baseline.test.mjs",
     "pi:setup": "node scripts/pi-baseline.mjs setup",
     "pi:build": "node scripts/pi-baseline.mjs build",

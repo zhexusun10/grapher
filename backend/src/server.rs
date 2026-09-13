@@ -70,6 +70,39 @@ fn split_prompt_template<'a>(template: &'a str) -> (&'a str, &'a str) {
 mod prompt_tests {
     use super::*;
 
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn completed_graph_is_published_by_driver() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut runtime = Runtime::open(temp.path()).unwrap();
+        let config = Config {
+            repository: String::new(), engine: "fixture".into(),
+            pi_command: String::new(), pi_args: Vec::new(), model: String::new(),
+            max_parallel: 2, max_feedback: 1,
+        };
+        runtime.create(Graph {
+            original_goal: "Publish both independent outcomes".into(),
+            nodes: vec![Node { name: "first".into(), task: "First".into() },
+                Node { name: "last".into(), task: "Last".into() }], edges: Vec::new(),
+        }, config).unwrap();
+        runtime.approve().unwrap();
+        let service = Arc::new(Service { runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused-extension.ts") });
+        drive(service.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while service.driving.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "Driver did not settle");
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.state.phase, "completed");
+        let source = temp.path().join("fixture-repository");
+        assert!(source.join("first.md").exists());
+        assert!(source.join("last.md").exists());
+        assert!(crate::workspace::git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+    }
+
     #[test]
     fn planning_prompts_separate_user_query_from_system() {
         for template in [PLANNER_PROMPT, PARTITIONER_PROMPT] {
@@ -251,6 +284,12 @@ fn plan_goal_internal(
         if partitioner_config.model.trim().is_empty() {
             partitioner_config.model = "qwen3.8-flash".into();
         }
+        let partitioner_thinking = std::env::var("PARTITIONER_THINKING").unwrap_or_default();
+        let mut partitioner_extra_args = Vec::new();
+        if !partitioner_thinking.trim().is_empty() {
+            partitioner_extra_args.push("--thinking");
+            partitioner_extra_args.push(partitioner_thinking.as_str());
+        }
         let mut log = String::new();
         let partition_result = run_pi(
             PiRequest {
@@ -261,7 +300,7 @@ fn plan_goal_internal(
                 extension: Some(&service.extension),
                 tools: "route_task",
                 session_id: None,
-                extra_args: vec!["--thinking", "off"],
+                extra_args: partitioner_extra_args,
                 environment: vec![
                     ("GRAPHER_MODE", "partition".into()),
                     ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
@@ -313,6 +352,12 @@ fn plan_goal_internal(
                 let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                     .unwrap_or_else(|_| default_planner_system.to_string());
                 let task = format!("User query:\n\n{goal}");
+                let planner_thinking = std::env::var("PLANNER_THINKING").unwrap_or_default();
+                let mut planner_extra_args = Vec::new();
+                if !planner_thinking.trim().is_empty() {
+                    planner_extra_args.push("--thinking");
+                    planner_extra_args.push(planner_thinking.as_str());
+                }
                 let mut log = String::new();
                 let planner_result = run_pi(
                     PiRequest {
@@ -323,7 +368,7 @@ fn plan_goal_internal(
                         extension: Some(&service.extension),
                         tools: "node,edge,read,bash",
                         session_id: None,
-                        extra_args: Vec::new(),
+                        extra_args: planner_extra_args,
                         environment: vec![
                             ("GRAPHER_MODE", "planner".into()),
                             ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
@@ -398,6 +443,28 @@ fn drive(service: Arc<Service>) {
                     (jobs, runtime.root.clone(), parents)
                 };
                 if jobs.is_empty() {
+                    // PublicationStarted is durable before any user files change.
+                    let publication = {
+                        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                        if runtime.state.phase == "publishing" {
+                            Some((runtime.state.config.clone().ok_or("Missing config")?,
+                                runtime.state.graph.original_goal.clone(),
+                                runtime.state.publication.clone().ok_or("Missing publication state")?))
+                        } else { None }
+                    };
+                    if let Some((config, query, publication)) = publication {
+                        let repository = PathBuf::from(&publication.repository);
+                        let result = crate::graph_merge::merge_graph(&repository, &publication.heads, || {
+                            let attempt = service.runtime.lock().map_err(|e| e.to_string())?.state.mergers.len() + 1;
+                            crate::graph_merge::resolve_with_merger(&repository, &query, &config, &root, attempt,
+                                |event| service.runtime.lock().map_err(|e| e.to_string())?.emit(event))
+                        });
+                        let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                        match result {
+                            Ok(head) => runtime.emit(EventKind::PublicationCompleted { head })?,
+                            Err(error) => runtime.emit(EventKind::PublicationFailed { error })?,
+                        }
+                    }
                     break;
                 }
                 let handles: Vec<_> = jobs
@@ -451,23 +518,17 @@ fn drive(service: Arc<Service>) {
                         runtime.review(&from, &output)?;
                     }
                 }
-                // Graph mode publishes all completed heads to the user's repository.
-                // Serial mode already writes there directly and is excluded.
-                if runtime.state.phase == "completed" && runtime.state.graph.nodes.len() > 1 {
-                    let repository = PathBuf::from(&runtime.state.config.as_ref().unwrap().repository);
-                    let heads: Vec<String> = runtime.state.executions.iter().filter_map(|e| e.after.clone()).collect();
-                    if let Err(error) = crate::graph_merge::merge_graph(&repository, &heads) {
-                        eprintln!("Graph auto-merge requires merger Execution Instance: {error}");
-                        let _ = runtime.emit(EventKind::Paused { paused: true });
-                    }
-                }
             }
             Ok(())
         })();
         if let Err(error) = result {
             eprintln!("Runtime halted safely: {error}");
             if let Ok(mut runtime) = service.runtime.lock() {
-                let _ = runtime.emit(EventKind::Paused { paused: true });
+                if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
+                    let _ = runtime.emit(EventKind::PublicationFailed { error });
+                } else {
+                    let _ = runtime.emit(EventKind::Paused { paused: true });
+                }
             }
         }
         service.driving.store(false, Ordering::SeqCst);
@@ -496,12 +557,13 @@ fn control(
     if service.planning.load(Ordering::SeqCst) {
         return Err("Wait for planning to finish".into());
     }
-    if matches!(action.as_str(), "intervene" | "resolve") && service.driving.load(Ordering::SeqCst)
+    if matches!(action.as_str(), "intervene" | "resolve" | "retry_publication") && service.driving.load(Ordering::SeqCst)
     {
         return Err("Pause and wait for the current execution wave to settle first".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     match action.as_str() {
+        "retry_publication" => runtime.retry_publication()?,
         "approve" => runtime.approve()?,
         "pause" => runtime.pause(true)?,
         "resume" => runtime.pause(false)?,
@@ -522,7 +584,7 @@ fn control(
     drop(runtime);
     if matches!(
         action.as_str(),
-        "approve" | "resume" | "intervene" | "resolve"
+        "approve" | "resume" | "intervene" | "resolve" | "retry_publication"
     ) {
         drive(service.clone());
     }
@@ -681,7 +743,9 @@ pub fn run() -> Result<(), String> {
     thread::spawn(move || {
         if signals.forever().next().is_some() {
             if let Ok(mut runtime) = shutdown_service.runtime.lock() {
-                if runtime.state.approved && (runtime.active() || runtime.state.phase == "running")
+                if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
+                    let _ = runtime.emit(EventKind::PublicationFailed { error: "Backend stopped during publication; inspect and retry publication.".into() });
+                } else if runtime.state.approved && (runtime.active() || runtime.state.phase == "running")
                 {
                     let _ = runtime.emit(EventKind::Paused { paused: true });
                 }

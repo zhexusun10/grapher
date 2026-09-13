@@ -26,6 +26,12 @@ export const runtimeService = {
     try {
       return await request<Snapshot>("load_run", { runId });
     } catch {
+      try {
+        const snap = await request<Snapshot>("snapshot");
+        if (snap && snap.runId === runId) {
+          return snap;
+        }
+      } catch {}
       return await request<Snapshot>("history", { runId });
     }
   },

@@ -1,4 +1,5 @@
 pub mod compiler;
+pub mod sandbox;
 pub mod server;
 pub mod engine;
 pub mod graph_merge;

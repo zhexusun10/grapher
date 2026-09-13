@@ -696,11 +696,99 @@ a,
 }
 
 .run-dot {
-  height: 5px;
-  width: 5px;
+  height: 6px;
+  width: 6px;
   background: var(--brand-default);
   border-radius: 50%;
   margin: 0 3px;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.run-dot.pulse-dot {
+  background: var(--brand-default, #06b6d4);
+  box-shadow: 0 0 8px var(--brand-default, #06b6d4);
+  animation: pulse-glow 1.5s infinite ease-in-out;
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.4);
+    opacity: 1;
+    box-shadow: 0 0 12px var(--brand-default, #06b6d4);
+  }
+}
+
+.run-item.active-running small {
+  color: var(--brand-default, #06b6d4);
+  font-weight: 600;
+}
+
+.background-run-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 18px;
+  background: rgba(6, 182, 212, 0.08);
+  border-bottom: 1px solid rgba(6, 182, 212, 0.2);
+  font-size: 12px;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  z-index: 10;
+  animation: banner-slide-down 0.2s ease-out;
+}
+
+@keyframes banner-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.background-run-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.background-run-info .pulse-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #06b6d4;
+  box-shadow: 0 0 8px #06b6d4;
+  animation: pulse-glow 1.5s infinite ease-in-out;
+  flex-shrink: 0;
+}
+
+.background-run-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  background: rgba(6, 182, 212, 0.16);
+  color: #06b6d4;
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.background-run-action-btn:hover {
+  background: rgba(6, 182, 212, 0.28);
+  border-color: #06b6d4;
 }
 
 .run-placeholder {
@@ -4363,6 +4451,231 @@ a,
   width: 100%;
   max-width: 100%;
   min-width: 0;
+}
+
+/* ==========================================================================
+   Thinking Card (Chain of Thought / Reasoning Stream)
+   ========================================================================== */
+
+.thinking-card {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  border-left: 3px solid #8b5cf6;
+  background: rgba(139, 92, 246, 0.035);
+  overflow: hidden;
+  margin: 6px 0;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.thinking-card:hover {
+  border-color: rgba(139, 92, 246, 0.35);
+}
+
+.thinking-card.streaming {
+  border-color: rgba(139, 92, 246, 0.4);
+  background: linear-gradient(180deg, rgba(139, 92, 246, 0.06) 0%, rgba(139, 92, 246, 0.02) 100%);
+  box-shadow: 0 0 16px rgba(139, 92, 246, 0.08);
+}
+
+.thinking-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  background: rgba(139, 92, 246, 0.04);
+  font-size: 12.5px;
+  transition: background 0.15s ease;
+}
+
+.thinking-card-header:hover {
+  background: rgba(139, 92, 246, 0.08);
+}
+
+.thinking-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.thinking-icon-box {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.thinking-icon-box.pulse {
+  background: rgba(139, 92, 246, 0.25);
+  color: #c4b5fd;
+  animation: thinking-glow 2s infinite alternate;
+}
+
+@keyframes thinking-glow {
+  0% {
+    box-shadow: 0 0 4px rgba(139, 92, 246, 0.3);
+  }
+  100% {
+    box-shadow: 0 0 12px rgba(139, 92, 246, 0.6);
+  }
+}
+
+.sparkle-spin {
+  animation: spin 4s linear infinite;
+}
+
+.thinking-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.2px;
+}
+
+.thinking-status {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.thinking-status.streaming {
+  color: #a78bfa;
+  background: rgba(139, 92, 246, 0.12);
+  font-weight: 500;
+}
+
+.thinking-pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #a78bfa;
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+.thinking-status.completed {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.thinking-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.thinking-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.thinking-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.thinking-toggle-btn {
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
+}
+
+.thinking-card-body {
+  padding: 10px 14px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  max-height: 420px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(139, 92, 246, 0.1);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.thinking-card-body .thinking-markdown {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #d1d5db;
+}
+
+.thinking-card-body .thinking-markdown p {
+  margin: 6px 0;
+}
+
+.thinking-card-body .thinking-markdown code {
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(139, 92, 246, 0.1);
+  color: #c4b5fd;
+  border: 1px solid rgba(139, 92, 246, 0.15);
+}
+
+.thinking-card-body .thinking-markdown pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overflow-x: auto;
+}
+
+.thinking-shimmer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.shimmer-line {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #8b5cf6;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.transcript-row.thinking-row {
+  width: 100%;
+  margin-bottom: 8px;
 }
 
 /* ==========================================================================

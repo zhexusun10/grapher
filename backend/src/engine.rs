@@ -52,13 +52,26 @@ pub struct PiRequest<'request> {
 
 pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Result<String, String> {
     let config = request.config;
+    fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
     // legacy command fields cannot select a different engine implementation.
     #[cfg(not(feature = "fixture"))]
     let mut command = {
-        let mut command = Command::new("node");
-        command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs"));
-        command
+        let repository = Path::new(&config.repository).canonicalize().map_err(|_| "Invalid repository path")?;
+        let current = request.cwd.canonicalize().map_err(|_| "Invalid execution path")?;
+        if current != repository {
+            let profile = request.session_dir.join("execution-instance.sb");
+            let worktree_root = current.parent().and_then(Path::parent)
+                .filter(|path| path.file_name().is_some_and(|name| name == ".grapher-worktrees"))
+                .ok_or("Graph execution must use .grapher-worktrees/<run>/<instance>; rerun legacy workspaces")?;
+            crate::sandbox::write_graph_profile(&profile, &repository, worktree_root, &current)?;
+            let mut command = Command::new("/usr/bin/sandbox-exec");
+            command.args(["-f", profile.to_str().ok_or("Invalid sandbox profile path")?, "node"]);
+            command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs")); command
+        } else {
+            let mut command = Command::new("node");
+            command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs")); command
+        }
     };
     // Process substitution is exclusively a test capability.
     #[cfg(feature = "fixture")]
@@ -71,6 +84,7 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         "--mode",
         "json",
         "--print",
+        "--no-extensions",
         "--no-skills",
         "--no-prompt-templates",
         "--no-themes",
@@ -99,7 +113,6 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     if !request.extra_args.is_empty() {
         command.args(&request.extra_args);
     }
-    fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
     if let Some(system_prompt) = request.system_prompt {
         let prompt_path = if Path::new(system_prompt).is_file() {
             PathBuf::from(system_prompt)
@@ -280,7 +293,12 @@ pub fn execute(
     let session_dir = root
         .join("sessions")
         .join(&execution.id);
-    let _ = fs::create_dir_all(&session_dir);
+    let pi_thinking = std::env::var("PI_THINKING").unwrap_or_default();
+    let mut extra_args = Vec::new();
+    if !pi_thinking.trim().is_empty() {
+        extra_args.push("--thinking");
+        extra_args.push(pi_thinking.as_str());
+    }
     run_pi(
         PiRequest {
             config,
@@ -290,7 +308,7 @@ pub fn execute(
             extension: None,
             tools: "read,write,bash,edit",
             session_id: Some(&execution.session_id),
-            extra_args: Vec::new(),
+            extra_args,
             environment: Vec::new(),
             system_prompt: None,
         },

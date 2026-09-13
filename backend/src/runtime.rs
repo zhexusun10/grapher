@@ -30,7 +30,7 @@ fn known_engine(engine: &str) -> bool {
     engine == "pi"
 }
 
-fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf, String> {
+pub(crate) fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf, String> {
     #[cfg(feature = "fixture")]
     if config.engine == crate::fixture::ENGINE {
         return crate::fixture::repository(root);
@@ -99,10 +99,11 @@ impl Runtime {
         for execution in interrupted {
             runtime.emit(EventKind::Failed { node: execution.node, execution_id: Some(execution.id), error: "Application stopped during this execution. Its result is not trusted; inspect and rerun with a fresh Execution Instance.".into() })?;
         }
+        runtime.recover_publication()?;
         if runtime.state.approved
             && !matches!(
                 runtime.state.phase.as_str(),
-                "completed" | "needs_attention"
+                "completed" | "needs_attention" | "publication_failed"
             )
         {
             runtime.emit(EventKind::Paused { paused: true })?;
@@ -114,8 +115,26 @@ impl Runtime {
         self.store.append(&mut self.state, kind)
     }
 
+    fn recover_publication(&mut self) -> Result<(), String> {
+        let interrupted: Vec<String> = self.state.mergers.iter()
+            .filter(|e| e.status == "running").map(|e| e.id.clone()).collect();
+        for execution_id in interrupted {
+            self.emit(EventKind::MergerFailed { execution_id, error: "Merger interrupted; inspect the merge and retry publication.".into() })?;
+        }
+        if matches!(self.state.phase.as_str(), "publishing" | "merging") {
+            self.emit(EventKind::PublicationFailed { error: "Publication interrupted. Results and any pending merge are preserved; retry publication to verify and continue.".into() })?;
+        }
+        Ok(())
+    }
+
+    pub fn retry_publication(&mut self) -> Result<(), String> {
+        if self.state.phase != "publication_failed" { return Err("Only failed publication can be retried".into()); }
+        let publication = self.state.publication.clone().ok_or("No publication to retry")?;
+        self.emit(EventKind::PublicationStarted { repository: publication.repository, heads: publication.heads })
+    }
+
     pub fn active(&self) -> bool {
-        self.state
+        matches!(self.state.phase.as_str(), "publishing" | "merging") || self.state
             .nodes
             .values()
             .any(|node| node.status == "running")
@@ -187,6 +206,7 @@ impl Runtime {
                 error: "Execution was interrupted. Inspect and rerun.".into(),
             })?;
         }
+        self.recover_publication()?;
         Ok(self.state.clone())
     }
 
@@ -225,6 +245,9 @@ impl Runtime {
     }
 
     pub fn pause(&mut self, paused: bool) -> Result<(), String> {
+        if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+            return Err("Publication has its own lifecycle; wait for it to finish or retry failed publication".into());
+        }
         if !self.state.approved {
             return Err("Approve the graph first".into());
         }
@@ -232,6 +255,9 @@ impl Runtime {
     }
 
     pub fn intervene(&mut self, node: &str, instruction: &str) -> Result<(), String> {
+        if self.state.phase == "publication_failed" {
+            return Err("Resolve or retry publication before changing node results".into());
+        }
         if !self.state.approved || self.active() {
             return Err(
                 "Approve, then pause and wait for active executions before intervening".into(),
@@ -358,8 +384,13 @@ impl Runtime {
                 worktree: if self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task" {
                     resolve_repository(&self.root, &config)?.to_string_lossy().into()
                 } else {
-                    self.root
-                        .join("worktrees")
+                    // Graph worktrees belong beside the user's repository. Keeping
+                    // them under Grapher's runtime directory makes the process
+                    // discover a path that is unrelated to the project it edits.
+                    let repository = resolve_repository(&self.root, &config)?;
+                    let parent = repository.parent().ok_or("Repository has no parent directory")?;
+                    parent
+                        .join(".grapher-worktrees")
                         .join(&self.state.run_id)
                         .join(format!("{}-{id}", node.name))
                         .to_string_lossy()
@@ -392,9 +423,18 @@ impl Runtime {
                 reviewer,
             });
         }
-        if jobs.is_empty() && !matches!(self.state.phase.as_str(), "completed" | "needs_attention")
-        {
-            self.emit(EventKind::Settled)?;
+        if jobs.is_empty() && !matches!(self.state.phase.as_str(), "completed" | "needs_attention") {
+            let serial = self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task";
+            if !serial && self.state.nodes.values().all(|node| node.status == "done") {
+                let heads = self.state.graph.nodes.iter().map(|node|
+                    self.state.nodes[&node.name].head.clone().ok_or("Completed node has no snapshot")
+                ).collect::<Result<Vec<_>, _>>()?;
+                let repository = resolve_repository(&self.root, &config)?.canonicalize()
+                    .map_err(|e| e.to_string())?.to_string_lossy().into();
+                self.emit(EventKind::PublicationStarted { repository, heads })?;
+            } else {
+                self.emit(EventKind::Settled)?;
+            }
         }
         Ok(jobs)
     }

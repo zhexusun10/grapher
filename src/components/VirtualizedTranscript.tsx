@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useMemo, useCallback } from "react"
 import { TranscriptItem } from "../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ToolCallCard } from "./ToolCallCard";
+import { ThinkingCard } from "./ThinkingCard";
 import { ArrowDown, Terminal } from "lucide-react";
 
 interface VirtualizedTranscriptProps {
@@ -26,6 +27,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const lastProcessedPosRef = useRef<number>(0);
   const itemsRef = useRef<TranscriptItem[]>([]);
   const pendingToolsRef = useRef<Map<string, TranscriptItem>>(new Map());
+  const inTagThinkingRef = useRef<boolean>(false);
   const [itemsVersion, setItemsVersion] = useState(0);
 
   // Height cache for virtualization
@@ -39,6 +41,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       lastProcessedPosRef.current = 0;
       itemsRef.current = [];
       pendingToolsRef.current.clear();
+      inTagThinkingRef.current = false;
       setItemsVersion((v) => v + 1);
       return;
     }
@@ -48,6 +51,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       lastProcessedPosRef.current = 0;
       itemsRef.current = [];
       pendingToolsRef.current.clear();
+      inTagThinkingRef.current = false;
     }
 
     const unparsed = output.slice(lastProcessedPosRef.current);
@@ -71,13 +75,135 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       try {
         const event = JSON.parse(line);
 
-        // Assistant streaming text delta
+        // Assistant streaming thinking delta (native protocol)
+        if (
+          event.type === "message_update" &&
+          (event.assistantMessageEvent?.type === "thinking_start" ||
+            event.assistantMessageEvent?.type === "thinking_delta")
+        ) {
+          const delta = event.assistantMessageEvent.delta || "";
+          const lastItem = currentItems[currentItems.length - 1];
+          if (lastItem && lastItem.type === "thinking" && lastItem.status === "running") {
+            lastItem.content = (lastItem.content || "") + delta;
+          } else {
+            currentItems.push({
+              id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              type: "thinking",
+              role: "assistant",
+              content: delta,
+              status: "running",
+              timestamp: Date.now(),
+            });
+          }
+          continue;
+        }
+
+        if (
+          event.type === "message_update" &&
+          event.assistantMessageEvent?.type === "thinking_end"
+        ) {
+          const lastItem = currentItems[currentItems.length - 1];
+          if (lastItem && lastItem.type === "thinking") {
+            lastItem.status = "success";
+          }
+          continue;
+        }
+
+        // Assistant streaming text delta (or inline tag thinking fallback)
         if (
           event.type === "message_update" &&
           event.assistantMessageEvent?.type === "text_delta"
         ) {
-          const delta = event.assistantMessageEvent.delta;
+          const delta = event.assistantMessageEvent.delta || "";
+
+          // Check for inline <think> or </think> or <thought> tags
+          if (inTagThinkingRef.current || delta.includes("<think>") || delta.includes("<thought>")) {
+            let remaining = delta;
+            while (remaining.length > 0) {
+              if (inTagThinkingRef.current) {
+                const endTag = remaining.includes("</think>") ? "</think>" : remaining.includes("</thought>") ? "</thought>" : null;
+                if (endTag) {
+                  const endIdx = remaining.indexOf(endTag);
+                  const thinkText = remaining.slice(0, endIdx);
+                  const lastItem = currentItems[currentItems.length - 1];
+                  if (lastItem && lastItem.type === "thinking") {
+                    lastItem.content = (lastItem.content || "") + thinkText;
+                    lastItem.status = "success";
+                  } else if (thinkText) {
+                    currentItems.push({
+                      id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      type: "thinking",
+                      role: "assistant",
+                      content: thinkText,
+                      status: "success",
+                      timestamp: Date.now(),
+                    });
+                  }
+                  inTagThinkingRef.current = false;
+                  remaining = remaining.slice(endIdx + endTag.length);
+                } else {
+                  const lastItem = currentItems[currentItems.length - 1];
+                  if (lastItem && lastItem.type === "thinking" && lastItem.status === "running") {
+                    lastItem.content = (lastItem.content || "") + remaining;
+                  } else {
+                    currentItems.push({
+                      id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      type: "thinking",
+                      role: "assistant",
+                      content: remaining,
+                      status: "running",
+                      timestamp: Date.now(),
+                    });
+                  }
+                  remaining = "";
+                }
+              } else {
+                const startTag = remaining.includes("<think>") ? "<think>" : remaining.includes("<thought>") ? "<thought>" : null;
+                if (startTag) {
+                  const startIdx = remaining.indexOf(startTag);
+                  const textBefore = remaining.slice(0, startIdx);
+                  if (textBefore) {
+                    const lastItem = currentItems[currentItems.length - 1];
+                    if (lastItem && lastItem.type === "text" && lastItem.role === "assistant") {
+                      lastItem.content = (lastItem.content || "") + textBefore;
+                    } else {
+                      currentItems.push({
+                        id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                        type: "text",
+                        role: "assistant",
+                        content: textBefore,
+                        timestamp: Date.now(),
+                      });
+                    }
+                  }
+                  inTagThinkingRef.current = true;
+                  remaining = remaining.slice(startIdx + startTag.length);
+                } else {
+                  const lastItem = currentItems[currentItems.length - 1];
+                  if (lastItem && lastItem.type === "text" && lastItem.role === "assistant") {
+                    lastItem.content = (lastItem.content || "") + remaining;
+                  } else {
+                    currentItems.push({
+                      id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      type: "text",
+                      role: "assistant",
+                      content: remaining,
+                      timestamp: Date.now(),
+                    });
+                  }
+                  remaining = "";
+                }
+              }
+            }
+            continue;
+          }
+
+          // If last item was thinking with running status, close it
           const lastItem = currentItems[currentItems.length - 1];
+          if (lastItem && lastItem.type === "thinking" && lastItem.status === "running") {
+            lastItem.status = "success";
+          }
+
           if (lastItem && lastItem.type === "text" && lastItem.role === "assistant") {
             lastItem.content = (lastItem.content || "") + delta;
           } else {
@@ -94,6 +220,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
 
         // Tool execution start
         if (event.type === "tool_execution_start") {
+          const lastItem = currentItems[currentItems.length - 1];
+          if (lastItem && lastItem.type === "thinking" && lastItem.status === "running") {
+            lastItem.status = "success";
+          }
+          inTagThinkingRef.current = false;
+
           const toolItem: TranscriptItem = {
             id: event.toolCallId || `tool_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
             type: "tool_call",
@@ -135,6 +267,36 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
                 currentItems[i].isError = event.isError || event.result?.isError || false;
                 currentItems[i].status = currentItems[i].isError ? "error" : "success";
                 break;
+              }
+            }
+          }
+          continue;
+        }
+
+        // Message end
+        if (event.type === "message_end") {
+          const lastItem = currentItems[currentItems.length - 1];
+          if (lastItem && lastItem.type === "thinking" && lastItem.status === "running") {
+            lastItem.status = "success";
+          }
+          inTagThinkingRef.current = false;
+
+          // Backfill thinking if message has thinking content and it wasn't captured from stream deltas
+          const message = event.message;
+          if (message && Array.isArray(message.content)) {
+            for (const c of message.content) {
+              if (c.type === "thinking" && c.thinking) {
+                const hasThinking = currentItems.some((i) => i.type === "thinking" && i.content === c.thinking);
+                if (!hasThinking) {
+                  currentItems.push({
+                    id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                    type: "thinking",
+                    role: "assistant",
+                    content: c.thinking,
+                    status: "success",
+                    timestamp: Date.now(),
+                  });
+                }
               }
             }
           }
@@ -289,6 +451,14 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
               return (
                 <div key={item.id} className="transcript-row tool-row">
                   <ToolCallCard item={item} />
+                </div>
+              );
+            }
+
+            if (item.type === "thinking") {
+              return (
+                <div key={item.id} className="transcript-row thinking-row">
+                  <ThinkingCard item={item} isStreaming={item.status === "running"} />
                 </div>
               );
             }
