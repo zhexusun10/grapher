@@ -2,8 +2,8 @@
 #![cfg(feature = "fixture")]
 
 use grapher::{
-    engine::{run_pi, PiRequest},
-    model::Config,
+    engine::{parse_route_decision, run_pi, PiRequest, PiRole},
+    model::{Config, Route},
 };
 use std::fs;
 use tempfile::TempDir;
@@ -28,6 +28,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
     let mut output = String::new();
     let result = run_pi(
         PiRequest {
+            role: PiRole::from_mode(mode),
             config: &config,
             cwd: temp.path(),
             task: "Do not run a model",
@@ -45,24 +46,89 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
 }
 
 #[test]
-fn successful_route_is_terminal_without_another_assistant_turn() {
-    let started = std::time::Instant::now();
-    let (result, stream) = execute_script_in_mode(r#"cat >/dev/null
-printf '%s\n' '{"type":"tool_execution_end","toolName":"route_task","isError":false,"result":{"details":{"grapherRejected":false}}}'
-sleep 20
-exit 9
-"#, Some("partition"));
-    assert!(result.is_ok());
-    assert!(started.elapsed().as_secs() < 5);
-    assert!(stream.contains("route_saved"));
+fn parse_route_decision_recognizes_exact_single_words_and_formatting() {
+    assert_eq!(parse_route_decision("graph"), Route { plan_type: "graph".into() });
+    assert_eq!(parse_route_decision("serial"), Route { plan_type: "serial".into() });
+    assert_eq!(parse_route_decision("Graph"), Route { plan_type: "graph".into() });
+    assert_eq!(parse_route_decision("SERIAL\n"), Route { plan_type: "serial".into() });
+    assert_eq!(parse_route_decision("  graph  "), Route { plan_type: "graph".into() });
+    assert_eq!(parse_route_decision("**graph**"), Route { plan_type: "graph".into() });
+    assert_eq!(parse_route_decision("`serial`"), Route { plan_type: "serial".into() });
+    assert_eq!(parse_route_decision("\"graph\"."), Route { plan_type: "graph".into() });
 }
 
 #[test]
-fn rejected_route_and_non_partition_calls_do_not_terminate_successfully() {
-    for (mode, rejected) in [("partition", true), ("planner", false)] {
-        let script = format!("cat >/dev/null\nprintf '%s\\n' '{{\"type\":\"tool_execution_end\",\"toolName\":\"route_task\",\"isError\":false,\"result\":{{\"details\":{{\"grapherRejected\":{rejected}}}}}}}'\nexit 9\n");
-        assert!(execute_script_in_mode(&script, Some(mode)).0.is_err());
-    }
+fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
+    // Model outputs conversational text instead of single word
+    assert_eq!(
+        parse_route_decision("I recommend graph for this parallel task."),
+        Route { plan_type: "graph".into() }
+    );
+    assert_eq!(
+        parse_route_decision("This is a simple bug fix, please use serial."),
+        Route { plan_type: "serial".into() }
+    );
+    // Multiline reasoning ending with recommendation
+    assert_eq!(
+        parse_route_decision("Analysis:\n- Independent modules\n- Parallel work\nTherefore, graph execution is required."),
+        Route { plan_type: "graph".into() }
+    );
+    assert_eq!(
+        parse_route_decision("Analysis:\n- Single file edit\nProceed with serial."),
+        Route { plan_type: "serial".into() }
+    );
+}
+
+#[test]
+fn parse_route_decision_resolves_comparison_of_both_keywords() {
+    // When both words are mentioned, later occurrence represents the conclusion
+    assert_eq!(
+        parse_route_decision("Serial execution was considered, but we should use a graph."),
+        Route { plan_type: "graph".into() }
+    );
+    assert_eq!(
+        parse_route_decision("While a graph is possible, serial is safer here."),
+        Route { plan_type: "serial".into() }
+    );
+}
+
+#[test]
+fn parse_route_decision_recognizes_explicit_decision_marker() {
+    assert_eq!(
+        parse_route_decision("Some reasoning here...\nDECISION: graph"),
+        Route { plan_type: "graph".into() }
+    );
+    assert_eq!(
+        parse_route_decision("Some reasoning here...\nDECISION: serial"),
+        Route { plan_type: "serial".into() }
+    );
+    assert_eq!(
+        parse_route_decision("Reasoning: parallel work.\n**DECISION: GRAPH**"),
+        Route { plan_type: "graph".into() }
+    );
+    assert_eq!(
+        parse_route_decision("Reasoning: single step.\n**decision:** serial."),
+        Route { plan_type: "serial".into() }
+    );
+}
+
+#[test]
+fn parse_route_decision_safe_fallback_on_ambiguity_or_gibberish() {
+    // Empty output
+    assert_eq!(
+        parse_route_decision(""),
+        Route { plan_type: "serial".into() }
+    );
+    // Hallucination / gibberish
+    assert_eq!(
+        parse_route_decision("I am not sure what to do here. Hello world!"),
+        Route { plan_type: "serial".into() }
+    );
+    // Unrelated text
+    assert_eq!(
+        parse_route_decision("42 is the answer to everything."),
+        Route { plan_type: "serial".into() }
+    );
 }
 
 #[test]
@@ -128,6 +194,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     let mut output = String::new();
     let result = run_pi(
         PiRequest {
+            role: PiRole::Subagent,
             config: &config,
             cwd: temp.path(),
             task: "Do not run a model",

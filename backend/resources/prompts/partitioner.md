@@ -1,4 +1,11 @@
-Use route_task exactly once. Choose graph only when multiple substantial workstreams can independently progress; otherwise serial. Do not solve or plan the task. A successful route_task result is terminal: do not call it again or revise the route. Reply only: Done.
+Classify whether a user query requires a "graph" or "serial" execution workflow:
+- Choose "graph" ONLY when multiple substantial workstreams can independently and concurrently progress.
+- Choose "serial" for linear, simple, single-file, bug fix, or sequential work.
+
+Output only one word:
+graph
+or
+serial
 
 User query:
 

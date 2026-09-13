@@ -47,7 +47,7 @@ npm start
 1. 运行设置中填写项目目录。标准 Git 仓库要求已有 commit 且工作树干净；普通文件夹通过外置 shadow repository 保存基线、执行和自动回写，用户目录不创建 `.git`。
 2. 选择模型（可用 `provider/model` 指定 provider）。生产后端固定使用 `engine/entrypoint.mjs`；旧配置中的可执行文件和参数不再控制生产启动。
 3. 先执行 `npm run pi:setup` 安装锁定依赖及恢复固定模型目录。不能用全局安装的 Pi 替代 submodule。当前 upstream 完整构建有已记录的类型检查阻塞，源码 CLI 可启动；详见基线文档。
-4. Partitioner 只调用一次 `route_task`：仅当存在多个可独立推进的实质工作流时选择 Graph，否则选择 Serial；不解决或规划任务。Serial 跳过 Planner，后端创建名为 `task` 的单节点图并自动审批、开始执行，直接修改用户目录。
+4. Partitioner 是无工具的极简单轮文本分类器，直接输出 `graph` 或 `serial`：仅当存在多个可独立推进的实质工作流时选择 Graph，否则选择 Serial；不解决或规划任务。后端采用鲁棒关键词提取判定分支，即使模型输出多余解释或未严格遵守单词要求，只要检测到对应词即转入相应分支，遇到胡言乱语或歧义安全兜底为 Serial。Serial 跳过 Planner，后端创建名为 `task` 的单节点图并自动审批、开始执行，直接修改用户目录。各角色（Partitioner / Planner / Subagent / Merger）在统一的 `PiModelConfig` API 层解析模型与思考预算（支持 `PARTITIONER_MODEL`、`PLANNER_MODEL`、`PI_MODEL`、`MERGER_MODEL` 覆盖）。
 5. Graph Planner 使用 `node / edge / read / bash` 生成完整可执行图。每次 mutation 调用 Rust 编译器，校验失败不会写入候选图；Planner 退出后展示图，用户批准才启动节点。也可以导入手写 Graph IR。
 
 ### 当前 Planner

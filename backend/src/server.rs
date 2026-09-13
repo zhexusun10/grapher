@@ -1,10 +1,10 @@
 use crate::{
     compiler,
-    engine::{run_pi, PiRequest},
+    engine::{parse_route_decision, run_pi, PiModelConfig, PiRequest, PiRole},
     model::*,
     runtime::{perform, Runtime},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     fs,
     io::Read,
@@ -33,11 +33,6 @@ pub struct Bootstrap {
     runs: Vec<String>,
     data_path: String,
     repository_info: Option<crate::workspace::RepositoryInfo>,
-}
-
-#[derive(Deserialize)]
-pub struct Route {
-    plan_type: String,
 }
 
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
@@ -275,36 +270,26 @@ fn plan_goal_internal(
         let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
             .unwrap_or_else(|_| default_partitioner_system.to_string());
         let task = format!("User query:\n\n{goal}");
-        let mut partitioner_config = config.clone();
-        if let Ok(model) = std::env::var("PARTITIONER_MODEL") {
-            if !model.trim().is_empty() {
-                partitioner_config.model = model;
-            }
-        }
-        if partitioner_config.model.trim().is_empty() {
-            partitioner_config.model = "qwen3.8-flash".into();
-        }
-        let partitioner_thinking = std::env::var("PARTITIONER_THINKING").unwrap_or_default();
-        let mut partitioner_extra_args = Vec::new();
-        if !partitioner_thinking.trim().is_empty() {
+        let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+        let partitioner_config = partitioner_model_cfg.effective_config(&config);
+        let mut partitioner_extra_args = vec!["--no-tools", "--no-context-files"];
+        if let Some(thinking) = &partitioner_model_cfg.thinking {
             partitioner_extra_args.push("--thinking");
-            partitioner_extra_args.push(partitioner_thinking.as_str());
+            partitioner_extra_args.push(thinking.as_str());
         }
         let mut log = String::new();
         let partition_result = run_pi(
             PiRequest {
+                role: PiRole::Partitioner,
                 config: &partitioner_config,
                 cwd: &repository,
                 task: &task,
                 session_dir: &directory.join("partition-session"),
-                extension: Some(&service.extension),
-                tools: "route_task",
+                extension: None,
+                tools: "",
                 session_id: None,
                 extra_args: partitioner_extra_args,
-                environment: vec![
-                    ("GRAPHER_MODE", "partition".into()),
-                    ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
-                ],
+                environment: Vec::new(),
                 system_prompt: Some(&partitioner_system_prompt),
             },
             |text| {
@@ -313,11 +298,10 @@ fn plan_goal_internal(
             },
         );
         fs::write(directory.join("partition.jsonl"), log).map_err(|error| error.to_string())?;
-        partition_result?;
-        let route: Route = serde_json::from_str(
-            &fs::read_to_string(route_path).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
+        let output = partition_result.unwrap_or_default();
+        let route = parse_route_decision(&output);
+        fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
+            .map_err(|error| error.to_string())?;
         on_route(&route);
         let graph = match route.plan_type.as_str() {
             "serial" => Graph {
@@ -339,28 +323,21 @@ fn plan_goal_internal(
                     .unwrap(),
                 )
                 .map_err(|error| error.to_string())?;
-                let mut planner_config = config.clone();
-                if let Ok(model) = std::env::var("PLANNER_MODEL") {
-                    if !model.trim().is_empty() {
-                        planner_config.model = model;
-                    }
-                }
-                if planner_config.model.trim().is_empty() {
-                    planner_config.model = "qwen3.8-flash".into();
-                }
+                let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
+                let planner_config = planner_model_cfg.effective_config(&config);
                 let (default_planner_system, _) = split_prompt_template(PLANNER_PROMPT);
                 let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                     .unwrap_or_else(|_| default_planner_system.to_string());
                 let task = format!("User query:\n\n{goal}");
-                let planner_thinking = std::env::var("PLANNER_THINKING").unwrap_or_default();
                 let mut planner_extra_args = Vec::new();
-                if !planner_thinking.trim().is_empty() {
+                if let Some(thinking) = &planner_model_cfg.thinking {
                     planner_extra_args.push("--thinking");
-                    planner_extra_args.push(planner_thinking.as_str());
+                    planner_extra_args.push(thinking.as_str());
                 }
                 let mut log = String::new();
                 let planner_result = run_pi(
                     PiRequest {
+                        role: PiRole::Planner,
                         config: &planner_config,
                         cwd: &repository,
                         task: &task,

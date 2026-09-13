@@ -1,5 +1,5 @@
 use crate::{
-    engine::{run_pi, PiRequest},
+    engine::{run_pi, PiModelConfig, PiRequest, PiRole},
     model::{now, Config, EventKind, Execution},
     workspace::{self, repository_git as git},
 };
@@ -121,16 +121,24 @@ pub fn resolve_with_merger(
         ]
     };
     let mut output_error = None;
+    let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
+    let merger_config = merger_model_cfg.effective_config(config);
+    let mut extra_args = vec!["--no-context-files"];
+    if let Some(thinking) = &merger_model_cfg.thinking {
+        extra_args.push("--thinking");
+        extra_args.push(thinking.as_str());
+    }
     let result = run_pi(
         PiRequest {
-            config,
+            role: PiRole::Merger,
+            config: &merger_config,
             cwd: repository,
             task: "修复当前合并冲突。",
             session_dir: &directory,
             extension: None,
             tools: "read,write,bash,edit",
             session_id: Some(&id),
-            extra_args: vec!["--no-context-files"],
+            extra_args,
             environment,
             system_prompt: Some(&prompt),
         },

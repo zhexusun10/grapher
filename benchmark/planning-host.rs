@@ -34,13 +34,13 @@ pub fn main(input_path: &str) -> Result<(), String> {
         write_json(&graph_path, &json!({"originalGoal":goal,"nodes":[],"edges":[]}));
     }
     let (system, task, tools, extra_args) = match stage {
-        "partition" => (std::env::var("PARTITIONER_SYSTEM_PROMPT").unwrap_or_else(|_| split_prompt_template(PARTITIONER_PROMPT).0.into()), format!("User query:\n\n{goal}"), "route_task", vec!["--thinking", "off"]),
+        "partition" => (std::env::var("PARTITIONER_SYSTEM_PROMPT").unwrap_or_else(|_| split_prompt_template(PARTITIONER_PROMPT).0.into()), format!("User query:\n\n{goal}"), "", vec!["--no-tools", "--no-context-files", "--thinking", "off"]),
         "planner" => (std::env::var("PLANNER_SYSTEM_PROMPT").unwrap_or_else(|_| split_prompt_template(PLANNER_PROMPT).0.into()), format!("User query:\n\n{goal}"), "node,edge,read,bash", vec![]),
         "judge" => (input["system"].as_str().ok_or("Missing judge system")?.into(), goal.into(), "", vec!["--no-tools", "--no-context-files", "--thinking", "off"]),
         _ => unreachable!(),
     };
     let compiler = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/grapher");
-    let environment = if stage == "judge" { vec![] } else { vec![
+    let environment = if stage == "judge" || stage == "partition" { vec![] } else { vec![
         ("GRAPHER_MODE", stage.into()),
         ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
         ("GRAPHER_COMPILER_PATH", compiler.to_string_lossy().into()),
@@ -51,13 +51,26 @@ pub fn main(input_path: &str) -> Result<(), String> {
     let mut log = fs::File::create(root.join("events.jsonl")).map_err(|e| e.to_string())?;
     let mut log_error = None;
     let started = Instant::now();
+    let role = match stage {
+        "partition" => PiRole::Partitioner,
+        "planner" => PiRole::Planner,
+        _ => PiRole::Subagent,
+    };
     let result = run_pi(PiRequest {
+        role,
         config: &config, cwd: &repository, task: &task,
-        session_dir: &root.join("session"), extension: if stage == "judge" { None } else { Some(&extension) },
+        session_dir: &root.join("session"), extension: if stage == "judge" || stage == "partition" { None } else { Some(&extension) },
         tools, session_id: None, extra_args, environment, system_prompt: Some(&system),
     }, |text| { if let Err(error) = log.write_all(text.as_bytes()) { log_error = Some(error.to_string()); } });
     let result = match log_error { Some(error) => Err(format!("Cannot retain planning evidence: {error}")), None => result };
     write_json(&root.join("result.json"), &json!({"status":if result.is_ok(){"PASS"}else{"FAIL"},"durationMs":started.elapsed().as_millis(),"response":result.as_ref().ok(),"error":result.as_ref().err()}));
+    if stage == "partition" {
+        let route = match &result {
+            Ok(output) => parse_route_decision(output),
+            Err(_) => parse_route_decision(""),
+        };
+        write_json(&graph_path, &serde_json::to_value(&route).unwrap());
+    }
     if stage == "planner" {
         let graph = serde_json::from_slice::<Graph>(&fs::read(&graph_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         let compiled = match compiler::compile(&graph, true) { Ok(plan) => json!({"plan":plan,"diagnostics":[]}), Err(errors) => json!({"diagnostics":errors}) };

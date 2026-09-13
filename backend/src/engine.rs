@@ -1,4 +1,4 @@
-use crate::model::{Config, Execution};
+use crate::model::{Config, Execution, Route};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
@@ -37,7 +37,215 @@ pub fn terminate_all() {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PiRole {
+    Partitioner,
+    Planner,
+    Subagent,
+    Merger,
+}
+
+impl PiRole {
+    pub fn name(&self) -> &'static str {
+        match self {
+            PiRole::Partitioner => "Partitioner",
+            PiRole::Planner => "Planner",
+            PiRole::Subagent => "Subagent",
+            PiRole::Merger => "Merger",
+        }
+    }
+
+    pub fn timeout_seconds(&self) -> u64 {
+        match self {
+            PiRole::Partitioner => 60,
+            PiRole::Planner => 300,
+            PiRole::Subagent => 900,
+            PiRole::Merger => 900,
+        }
+    }
+
+    pub fn timeout_env_var(&self) -> &'static str {
+        match self {
+            PiRole::Partitioner => "PARTITIONER_TIMEOUT_SECONDS",
+            PiRole::Planner => "PLANNER_TIMEOUT_SECONDS",
+            PiRole::Subagent => "PI_TIMEOUT_SECONDS",
+            PiRole::Merger => "PI_TIMEOUT_SECONDS",
+        }
+    }
+
+    pub fn model_env_var(&self) -> &'static str {
+        match self {
+            PiRole::Partitioner => "PARTITIONER_MODEL",
+            PiRole::Planner => "PLANNER_MODEL",
+            PiRole::Subagent => "PI_MODEL",
+            PiRole::Merger => "MERGER_MODEL",
+        }
+    }
+
+    pub fn thinking_env_var(&self) -> &'static str {
+        match self {
+            PiRole::Partitioner => "PARTITIONER_THINKING",
+            PiRole::Planner => "PLANNER_THINKING",
+            PiRole::Subagent => "PI_THINKING",
+            PiRole::Merger => "MERGER_THINKING",
+        }
+    }
+
+    pub fn from_mode(mode: Option<&str>) -> Self {
+        match mode {
+            Some("partition") => PiRole::Partitioner,
+            Some("planner") => PiRole::Planner,
+            Some("merger") => PiRole::Merger,
+            _ => PiRole::Subagent,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiModelConfig {
+    pub model: String,
+    pub thinking: Option<String>,
+}
+
+impl PiModelConfig {
+    pub fn resolve(role: PiRole, base_config: &Config) -> Self {
+        let model = std::env::var(role.model_env_var())
+            .ok()
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| {
+                if !base_config.model.trim().is_empty() {
+                    Some(base_config.model.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "qwen3.8-flash".to_string());
+
+        let thinking = std::env::var(role.thinking_env_var())
+            .ok()
+            .filter(|t| !t.trim().is_empty());
+
+        Self { model, thinking }
+    }
+
+    pub fn effective_config(&self, base_config: &Config) -> Config {
+        let mut cfg = base_config.clone();
+        cfg.model = self.model.clone();
+        cfg
+    }
+}
+
+/// Parses the model text output to determine whether it chose "graph" or "serial".
+/// If ambiguous, missing, or model hallucinated, defaults safely to "serial".
+pub fn parse_route_decision(text: &str) -> Route {
+    let trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
+
+    // 1. Direct single-word match (ignoring whitespace and surrounding punctuation)
+    let clean_single = lower.trim_matches(|c: char| !c.is_alphanumeric());
+    if clean_single == "graph" {
+        return Route { plan_type: "graph".into() };
+    }
+    if clean_single == "serial" {
+        return Route { plan_type: "serial".into() };
+    }
+
+    // 2. Check each line in reverse order (bottom-up priority)
+    for line in lower.lines().rev() {
+        let line_clean = line.trim().trim_matches(|c: char| !c.is_alphanumeric());
+        if line_clean == "graph" {
+            return Route { plan_type: "graph".into() };
+        }
+        if line_clean == "serial" {
+            return Route { plan_type: "serial".into() };
+        }
+
+        let tokens: Vec<&str> = line
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+        let line_g = tokens.contains(&"graph");
+        let line_s = tokens.contains(&"serial");
+        if line_g && !line_s {
+            return Route { plan_type: "graph".into() };
+        }
+        if line_s && !line_g {
+            return Route { plan_type: "serial".into() };
+        }
+    }
+
+    // 3. Check for explicit decision/choice markers if present
+    for marker in ["decision:", "choice:", "conclusion:", "result:"] {
+        if let Some(pos) = lower.rfind(marker) {
+            let after = &lower[pos..];
+            let after_tokens: Vec<&str> = after
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
+            let after_g = after_tokens.contains(&"graph");
+            let after_s = after_tokens.contains(&"serial");
+            if after_g && !after_s {
+                return Route { plan_type: "graph".into() };
+            }
+            if after_s && !after_g {
+                return Route { plan_type: "serial".into() };
+            }
+        }
+    }
+
+    // 4. Token scan across entire text
+    let all_tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let total_g = all_tokens.contains(&"graph");
+    let total_s = all_tokens.contains(&"serial");
+
+    if total_g && !total_s {
+        return Route { plan_type: "graph".into() };
+    }
+    if total_s && !total_g {
+        return Route { plan_type: "serial".into() };
+    }
+
+    // 5. If both words are mentioned in prose, the later occurrence represents the conclusion
+    if total_g && total_s {
+        let last_g = lower.match_indices("graph").filter_map(|(idx, _)| {
+            let before = lower[..idx].chars().next_back();
+            let after = lower[idx + 5..].chars().next();
+            let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
+            let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
+            if before_ok && after_ok { Some(idx) } else { None }
+        }).last();
+
+        let last_s = lower.match_indices("serial").filter_map(|(idx, _)| {
+            let before = lower[..idx].chars().next_back();
+            let after = lower[idx + 6..].chars().next();
+            let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
+            let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
+            if before_ok && after_ok { Some(idx) } else { None }
+        }).last();
+
+        match (last_g, last_s) {
+            (Some(g), Some(s)) => {
+                if g > s {
+                    return Route { plan_type: "graph".into() };
+                } else {
+                    return Route { plan_type: "serial".into() };
+                }
+            }
+            (Some(_), None) => return Route { plan_type: "graph".into() },
+            (None, Some(_)) => return Route { plan_type: "serial".into() },
+            (None, None) => {}
+        }
+    }
+
+    // 6. Safe fallback for hallucination or completely unrelated output
+    Route { plan_type: "serial".into() }
+}
+
 pub struct PiRequest<'request> {
+    pub role: PiRole,
     pub config: &'request Config,
     pub cwd: &'request Path,
     pub task: &'request str,
@@ -50,20 +258,17 @@ pub struct PiRequest<'request> {
     pub system_prompt: Option<&'request str>,
 }
 
-fn execution_budget(environment: &[(&str, String)]) -> (&'static str, Duration) {
-    let mode = environment.iter().find(|(key, _)| *key == "GRAPHER_MODE").map(|(_, value)| value.as_str());
-    let (phase, variable, default) = match mode {
-        Some("partition") => ("Partitioner", "PARTITIONER_TIMEOUT_SECONDS", 60),
-        Some("planner") => ("Planner", "PLANNER_TIMEOUT_SECONDS", 300),
-        _ => ("Pi", "PI_TIMEOUT_SECONDS", 900),
-    };
-    let seconds = std::env::var(variable).ok().and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0).unwrap_or(default);
-    (phase, Duration::from_secs(seconds))
+fn execution_budget(role: PiRole) -> (&'static str, Duration) {
+    let seconds = std::env::var(role.timeout_env_var())
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| role.timeout_seconds());
+    (role.name(), Duration::from_secs(seconds))
 }
 
 pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Result<String, String> {
-    let (phase, budget) = execution_budget(&request.environment);
+    let (phase, budget) = execution_budget(request.role);
     let config = request.config;
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
@@ -102,9 +307,12 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         "--no-prompt-templates",
         "--no-themes",
         "--no-approve",
-        "--tools",
-        request.tools,
     ]);
+    if request.tools.trim().is_empty() {
+        command.arg("--no-tools");
+    } else {
+        command.args(["--tools", request.tools]);
+    }
     if let Some(extension) = request.extension {
         command.args([
             "--extension",
@@ -219,20 +427,6 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
                     continue;
                 }
                 if let Ok(event) = serde_json::from_str::<Value>(&line) {
-                    if phase == "Partitioner"
-                        && event["type"] == "tool_execution_end"
-                        && event["toolName"] == "route_task"
-                        && event["isError"] == false
-                        && event["result"]["details"]["grapherRejected"] == false
-                    {
-                        // Routing is terminal. Do not spend another model turn
-                        // asking for "Done", or let it begin planning in prose.
-                        on_output(format!("{line}\n"));
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "success":true, "reason":"route_saved", "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})));
-                        return Ok(String::new());
-                    }
                     match event["type"].as_str().unwrap_or_default() {
                         "message_end" if event["message"]["role"] == "assistant" => {
                             let message = &event["message"];
@@ -318,15 +512,17 @@ pub fn execute(
     let session_dir = root
         .join("sessions")
         .join(&execution.id);
-    let pi_thinking = std::env::var("PI_THINKING").unwrap_or_default();
+    let model_config = PiModelConfig::resolve(PiRole::Subagent, config);
+    let effective_config = model_config.effective_config(config);
     let mut extra_args = Vec::new();
-    if !pi_thinking.trim().is_empty() {
+    if let Some(thinking) = &model_config.thinking {
         extra_args.push("--thinking");
-        extra_args.push(pi_thinking.as_str());
+        extra_args.push(thinking.as_str());
     }
     run_pi(
         PiRequest {
-            config,
+            role: PiRole::Subagent,
+            config: &effective_config,
             cwd: Path::new(&execution.worktree),
             task: &task,
             session_dir: &session_dir,

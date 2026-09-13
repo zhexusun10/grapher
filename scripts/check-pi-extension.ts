@@ -66,19 +66,6 @@ try {
   assert.match(readFileSync(join(source, "backend/src/server.rs"), "utf8"), /include_str!\("\.\.\/resources\/planning-inspection.mjs"\)/);
   await call("node", { name: "build", delete: true });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
-  process.env.GRAPHER_MODE = "partition";
-  const partition = await loadExtensions([join(source, "backend/resources/planner.ts")], repository);
-  assert.deepEqual(partition.errors, []);
-  assert.deepEqual([...partition.extensions[0].tools.keys()], ["route_task"]);
-  let activeTools = ["route_task"];
-  partition.runtime.setActiveTools = (names) => { activeTools = names; };
-  const route = partition.extensions[0].tools.get("route_task")!.definition;
-  await route.execute("first", { plan_type: "graph" }, undefined, undefined, context);
-  assert.deepEqual(activeTools, []);
-  const savedRoute = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
-  assert.deepEqual(JSON.parse(savedRoute), { plan_type: "graph" });
-  assert.match(JSON.stringify(await route.execute("second", { plan_type: "serial" }, undefined, undefined, context)), /already saved/);
-  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), savedRoute);
   // Production extracts both resources outside the source tree.
   process.env.GRAPHER_MODE = "planner";
   writeFileSync(join(root, "grapher-planner.ts"), readFileSync(join(source, "backend/resources/planner.ts")));
@@ -87,7 +74,7 @@ try {
   assert.deepEqual(extracted.errors, []);
   const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
   assert.match(JSON.stringify(listed), /sample.txt/);
-  console.log("Pi extension smoke passed: mutation rollback, portability, read-only bash override, repository guards, partitioner.");
+  console.log("Pi extension smoke passed: mutation rollback, portability, read-only bash override, repository guards.");
 } finally {
   process.chdir(source);
   rmSync(root, { recursive: true, force: true });

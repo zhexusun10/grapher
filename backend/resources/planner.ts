@@ -18,21 +18,6 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       return { isError: true };
     }
   });
-  if (process.env.GRAPHER_MODE === "partition") {
-    let routed = false;
-    pi.registerTool(defineTool({
-      name: "route_task", label: "Route task", description: "Choose serial for linear work, graph only for multiple substantial independent workstreams.",
-      parameters: Type.Object({ plan_type: Type.Union([Type.Literal("serial"), Type.Literal("graph")]) }),
-      async execute(_id, parameters) {
-        if (routed) return result("Route already saved; it cannot be changed. Stop.", true);
-        writeFileSync(graphPath, JSON.stringify(parameters));
-        routed = true;
-        pi.setActiveTools([]);
-        return result("Route saved. Reply only: Done. Do not plan or solve the task.");
-      },
-    }));
-    return;
-  }
   // Capture once; tool calls cannot change the inspection root.
   const repository = realpathSync(process.cwd());
   const inspectionRoots = [...new Set([resolve(process.cwd()), repository])];

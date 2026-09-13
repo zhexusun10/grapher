@@ -124,7 +124,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <div className="settings-card">
               <div className="settings-card-title">
                 <Terminal size={16} />
-                <h4>模型与 Provider 认证</h4>
+                <h4>模型与 Pi Provider 认证 (/login)</h4>
               </div>
               <ProviderSettings model={config.model} onModel={model => setConfig(prev => ({ ...prev, model }))} />
             </div>
