@@ -9,6 +9,16 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          xyflow: ["@xyflow/react"],
+          marked: ["marked"],
+        },
+      },
+    },
+  },
   server: {
     host: "127.0.0.1",
     port: 1420,
@@ -17,4 +27,3 @@ export default defineConfig({
   },
   clearScreen: false,
 });
-

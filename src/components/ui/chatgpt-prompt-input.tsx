@@ -1,5 +1,3 @@
-"use client";
-
 import React, { useState, useRef, useLayoutEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { ArrowUp, Paperclip, X, LoaderCircle } from "lucide-react";

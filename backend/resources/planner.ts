@@ -9,7 +9,15 @@ type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; ed
 
 export default function grapherPlanner(pi: ExtensionAPI) {
   const graphPath = process.env.GRAPHER_GRAPH_PATH!;
-  const result = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], details: {}, isError });
+  const result = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], details: { grapherRejected: isError }, isError });
+  // Pi derives execution errors from throws or tool_result hooks, not an
+  // arbitrary isError property returned by execute. Preserve diagnostics while
+  // making rejected mutations/inspection visible as errors in its event stream.
+  pi.on("tool_result", async event => {
+    if ((event.details as { grapherRejected?: boolean } | undefined)?.grapherRejected) {
+      return { isError: true };
+    }
+  });
   if (process.env.GRAPHER_MODE === "partition") {
     let routed = false;
     pi.registerTool(defineTool({
@@ -47,9 +55,9 @@ Repository paths only; no symlinks or .git. No shell operators, expansion, scrip
     async execute(_id, parameters, signal) {
       const details = { inspectionPolicy: INSPECTION_POLICY };
       try {
-        return { ...result(await inspectCommand(repository, parameters.command, signal)), details };
+        return { ...result(await inspectCommand(repository, parameters.command, signal)), details: { ...details, grapherRejected: false } };
       } catch (error) {
-        return { ...result(String(error), true), details };
+        return { ...result(String(error), true), details: { ...details, grapherRejected: true } };
       }
     },
   }));
@@ -66,7 +74,10 @@ Repository paths only; no symlinks or .git. No shell operators, expansion, scrip
     const output = JSON.parse(checked.stdout);
     if (output.diagnostics?.length) return result(JSON.stringify(output.diagnostics), true);
     writeFileSync(graphPath, JSON.stringify(graph));
-    return result(JSON.stringify({ accepted: true, graph, plan: output.plan }));
+    // Echo topology, not every task accumulated so far on every mutation.
+    // The planner already authored the tasks; repeated full graphs grow its
+    // context quadratically without adding information.
+    return result(JSON.stringify({ accepted: true, nodes: graph.nodes.map(node => node.name), edges: graph.edges, plan: output.plan }));
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node", description: "Upsert a semantic node name and standalone specific task; delete also removes its edges.",

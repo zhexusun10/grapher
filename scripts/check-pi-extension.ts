@@ -33,6 +33,11 @@ try {
   const before = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
   const rejected = await call("edge", { from: "review", to: "build", feedback: false });
   assert.match(JSON.stringify(rejected), /E101/);
+  const toolResultHook = extension.handlers.get("tool_result")![0];
+  assert.deepEqual(await toolResultHook({ toolName: "edge", details: rejected.details, isError: false }), { isError: true });
+  const accepted = await call("node", { name: "review", task: "Review it" });
+  assert.equal(await toolResultHook({ toolName: "node", details: accepted.details, isError: false }), undefined);
+  assert.equal(JSON.parse(accepted.content[0].text).graph, undefined);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), before);
   await call("edge", { from: "review", to: "build", feedback: true });
   const portableGraph = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");

@@ -10,6 +10,8 @@ Each node runs later with only its task and a Git worktree containing completed 
 
 Leave repository exploration, implementation decisions, exact file changes, algorithms, and detailed test design to node execution unless the user or an authoritative contract explicitly determines them.
 
+Keep tasks concise. Reference authoritative repository contracts and preserve their defaults and exceptions exactly; do not invent stricter validation or additional requirements. State verification outcomes rather than enumerating test cases or implementation steps.
+
 ## Inspection
 
 Use `read` and `bash` only to resolve uncertainty that could materially change the graph: node boundaries, dependencies, parallelism, mergeability, or authoritative contracts.
@@ -28,6 +30,8 @@ Use an upstream contract node only when multiple work units genuinely require a 
 
 Use feedback edges only for meaningful bounded review-and-correction flows.
 
+`edge(from=A, to=B, feedback=false)` makes B wait for A's successful filesystem state. A separate `edge(from=B, to=A, feedback=true)` reruns A when B ends with `<REVISE>`; `<ACCEPT>` does not retry. Create the normal dependency path first. Feedback edges never provide ordering or replace dependency edges. A revision triggers all outgoing feedback targets, so avoid broad retry fan-out when the verifier can safely fix the composed result itself.
+
 Use repository-relative paths when paths matter. Never refer to the planner's checkout path.
 
 ## Completion
@@ -38,7 +42,8 @@ Implementation uncertainty is allowed. Graph-structure uncertainty is not.
 
 Once the graph passes compiler validation, stop and briefly summarize its structure.
 
+Compilation validates the proposed graph, not implementation files or worktree diffs. Nodes have not executed yet; their deliverables are not expected to exist. Only correct diagnostics actually returned by tools. Do not inspect or revise a complete accepted graph to check whether its future work has already happened.
+
 User query:
 
 {{query}}
-

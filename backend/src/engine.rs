@@ -50,7 +50,20 @@ pub struct PiRequest<'request> {
     pub system_prompt: Option<&'request str>,
 }
 
+fn execution_budget(environment: &[(&str, String)]) -> (&'static str, Duration) {
+    let mode = environment.iter().find(|(key, _)| *key == "GRAPHER_MODE").map(|(_, value)| value.as_str());
+    let (phase, variable, default) = match mode {
+        Some("partition") => ("Partitioner", "PARTITIONER_TIMEOUT_SECONDS", 60),
+        Some("planner") => ("Planner", "PLANNER_TIMEOUT_SECONDS", 300),
+        _ => ("Pi", "PI_TIMEOUT_SECONDS", 900),
+    };
+    let seconds = std::env::var(variable).ok().and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0).unwrap_or(default);
+    (phase, Duration::from_secs(seconds))
+}
+
 pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Result<String, String> {
+    let (phase, budget) = execution_budget(&request.environment);
     let config = request.config;
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
@@ -187,13 +200,11 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     let mut stderr_tail = String::new();
     let mut exited_at = None;
     loop {
-        if started.elapsed() > Duration::from_secs(900) {
+        if started.elapsed() > budget {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(
-                "Pi timed out after 15 minutes; inspect the isolated worktree before retrying"
-                    .into(),
-            );
+            on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "success":false, "timedOut":true, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})));
+            return Err(format!("{phase} timed out after {} seconds; inspect the saved session before retrying", budget.as_secs()));
         }
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok((is_error, line)) => {
@@ -208,6 +219,20 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
                     continue;
                 }
                 if let Ok(event) = serde_json::from_str::<Value>(&line) {
+                    if phase == "Partitioner"
+                        && event["type"] == "tool_execution_end"
+                        && event["toolName"] == "route_task"
+                        && event["isError"] == false
+                        && event["result"]["details"]["grapherRejected"] == false
+                    {
+                        // Routing is terminal. Do not spend another model turn
+                        // asking for "Done", or let it begin planning in prose.
+                        on_output(format!("{line}\n"));
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "success":true, "reason":"route_saved", "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})));
+                        return Ok(String::new());
+                    }
                     match event["type"].as_str().unwrap_or_default() {
                         "message_end" if event["message"]["role"] == "assistant" => {
                             let message = &event["message"];
@@ -257,7 +282,7 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         }
     }
     let status = child.wait().map_err(|error| error.to_string())?;
-    on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success(), "timestamp":crate::model::now()})));
+    on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success(), "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})));
     if !status.success() {
         return Err(format!("Pi exited with {status}: {stderr_tail}"));
     }

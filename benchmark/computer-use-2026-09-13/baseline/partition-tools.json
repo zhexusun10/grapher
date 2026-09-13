@@ -1,0 +1,26 @@
+[
+  {
+    "type": "call",
+    "tool": "route_task",
+    "id": "call_a809ac6e8e5b4e6da1a9cc8e",
+    "args": {
+      "plan_type": "graph"
+    }
+  },
+  {
+    "type": "result",
+    "tool": "route_task",
+    "id": "call_a809ac6e8e5b4e6da1a9cc8e",
+    "isError": false,
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "Route saved. Reply only: Done. Do not plan or solve the task."
+        }
+      ],
+      "details": {},
+      "isError": false
+    }
+  }
+]

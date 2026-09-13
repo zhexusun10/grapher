@@ -2106,6 +2106,7 @@ a,
 
 /* 工作台面板与可调节分割器 */
 .workbench {
+  --workbench-left-width: 390px;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -2121,6 +2122,10 @@ a,
 .workbench.resizing {
   user-select: none;
   cursor: col-resize !important;
+}
+
+.workbench.resizing .conversation-pane {
+  transition: none !important;
 }
 
 .conversation-pane {
@@ -4367,6 +4372,7 @@ a,
 }
 
 .conversation-pane.split {
+  width: var(--workbench-left-width, 390px);
   transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
 

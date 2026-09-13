@@ -84,7 +84,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
             badge: "edge",
             summary:
               args.from && args.to
-                ? `依赖边: [${args.from}] → [${args.to}]`
+                ? `${args.feedback ? "反馈边" : "依赖边"}: [${args.from}] → [${args.to}]`
                 : "连接依赖关系",
             type: "graph",
           };

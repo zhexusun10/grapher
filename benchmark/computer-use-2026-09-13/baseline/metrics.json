@@ -1,0 +1,47 @@
+{
+  "planningDirectory": "/private/tmp/grapher-cu-evaluation/runtime/planning/28a0d170-275a-45cb-9fbf-80242594ea0a",
+  "partition": {
+    "elapsedSeconds": 9.736,
+    "calls": {
+      "route_task": 1
+    },
+    "usage": {
+      "input": 868,
+      "output": 107,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "reasoning": 73,
+      "totalTokens": 975
+    },
+    "processEnd": {
+      "code": 0,
+      "pid": 81835,
+      "success": true,
+      "timestamp": 1789301356936,
+      "type": "grapher_process_exited"
+    }
+  },
+  "planner": {
+    "elapsedSeconds": 372.513,
+    "calls": {
+      "bash": 9,
+      "node": 4,
+      "edge": 5
+    },
+    "usage": {
+      "input": 24708,
+      "output": 5199,
+      "cacheRead": 115968,
+      "cacheWrite": 0,
+      "reasoning": 2082,
+      "totalTokens": 145875
+    },
+    "processEnd": {
+      "code": 0,
+      "pid": 81893,
+      "success": true,
+      "timestamp": 1789301729451,
+      "type": "grapher_process_exited"
+    }
+  }
+}

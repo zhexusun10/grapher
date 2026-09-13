@@ -7,23 +7,31 @@ interface MarkdownRendererProps {
   isStreaming?: boolean;
 }
 
-// Auto-closes open code fences for smooth streaming display without layout flickering
+// Lightweight sanitizer for dangerous tags and protocols to prevent XSS without heavy dependencies
+function sanitizeHtml(html: string): string {
+  if (!html) return "";
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+    .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, "")
+    .replace(/href\s*=\s*(['"])\s*(javascript:|data:text\/html)/gi, 'href=$1#blocked');
+}
+
+// Auto-closes open code fences for smooth streaming display without layout flickering.
+// Uses native RegExp iteration to avoid creating thousands of line strings on every streaming token chunk.
 function repairStreamingMarkdown(text: string): string {
   if (!text) return "";
-  const lines = text.split("\n");
+  const fenceRegex = /^(\s*)(`{3,}|~{3,})/mg;
+  let match: RegExpExecArray | null;
   let insideCodeFence = false;
   let fenceChars = "";
 
-  for (const line of lines) {
-    const match = line.match(/^(\s*)(`{3,}|~{3,})/);
-    if (match) {
-      if (!insideCodeFence) {
-        insideCodeFence = true;
-        fenceChars = match[2];
-      } else if (line.trim().startsWith(fenceChars)) {
-        insideCodeFence = false;
-        fenceChars = "";
-      }
+  while ((match = fenceRegex.exec(text)) !== null) {
+    if (!insideCodeFence) {
+      insideCodeFence = true;
+      fenceChars = match[2];
+    } else if (match[2].startsWith(fenceChars.slice(0, 3))) {
+      insideCodeFence = false;
+      fenceChars = "";
     }
   }
 
@@ -38,10 +46,11 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
     const sanitizedHtml = useMemo(() => {
       const repaired = isStreaming ? repairStreamingMarkdown(content) : content;
       try {
-        return marked.parse(repaired, {
+        const raw = marked.parse(repaired, {
           gfm: true,
           breaks: true,
         }) as string;
+        return sanitizeHtml(raw);
       } catch (err) {
         console.error("Markdown parse error:", err);
         return `<p>${escapeHtml(content)}</p>`;

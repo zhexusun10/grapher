@@ -9,6 +9,10 @@ use std::fs;
 use tempfile::TempDir;
 
 fn execute_script(script: &str) -> (Result<String, String>, String) {
+    execute_script_in_mode(script, None)
+}
+
+fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, String>, String) {
     let temp = TempDir::new().unwrap();
     let script_path = temp.path().join("fake-pi.sh");
     fs::write(&script_path, script).unwrap();
@@ -32,12 +36,33 @@ fn execute_script(script: &str) -> (Result<String, String>, String) {
             tools: "read,bash",
             session_id: Some("test-session"),
             extra_args: Vec::new(),
-            environment: Vec::new(),
+            environment: mode.map(|mode| vec![("GRAPHER_MODE", mode.into())]).unwrap_or_default(),
             system_prompt: None,
         },
         |text| output.push_str(&text),
     );
     (result, output)
+}
+
+#[test]
+fn successful_route_is_terminal_without_another_assistant_turn() {
+    let started = std::time::Instant::now();
+    let (result, stream) = execute_script_in_mode(r#"cat >/dev/null
+printf '%s\n' '{"type":"tool_execution_end","toolName":"route_task","isError":false,"result":{"details":{"grapherRejected":false}}}'
+sleep 20
+exit 9
+"#, Some("partition"));
+    assert!(result.is_ok());
+    assert!(started.elapsed().as_secs() < 5);
+    assert!(stream.contains("route_saved"));
+}
+
+#[test]
+fn rejected_route_and_non_partition_calls_do_not_terminate_successfully() {
+    for (mode, rejected) in [("partition", true), ("planner", false)] {
+        let script = format!("cat >/dev/null\nprintf '%s\\n' '{{\"type\":\"tool_execution_end\",\"toolName\":\"route_task\",\"isError\":false,\"result\":{{\"details\":{{\"grapherRejected\":{rejected}}}}}}}'\nexit 9\n");
+        assert!(execute_script_in_mode(&script, Some(mode)).0.is_err());
+    }
 }
 
 #[test]
@@ -120,4 +145,3 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(output.contains("--system-prompt"));
     assert!(output.contains("SYSTEM_PROMPT_CONTENT: Custom system prompt content for test"));
 }
-
