@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "pi:verify": "node scripts/pi-baseline.mjs verify",
+    "test:pi": "node --test scripts/pi-baseline.test.mjs",
+    "pi:setup": "node scripts/pi-baseline.mjs setup",
+    "pi:build": "node scripts/pi-baseline.mjs build",
+    "pi": "node engine/entrypoint.mjs",
     "dev": "node scripts/dev.mjs",
     "build": "tsc --noEmit && vite build",
     "test": "cargo test --manifest-path backend/Cargo.toml --no-default-features --features fixture",
@@ -21,6 +26,7 @@
   "dependencies": {
     "@xyflow/react": "12.8.5",
     "lucide-react": "0.468.0",
+    "marked": "^18.0.13",
     "motion": "^13.2.0",
     "react": "19.2.0",
     "react-dom": "19.2.0"

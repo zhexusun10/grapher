@@ -1,5 +1,4 @@
-# Local engine & dependencies
-pi/
+# Dependencies (Pi source is a pinned submodule)
 node_modules/
 dist/
 build/

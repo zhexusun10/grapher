@@ -1,3 +1,6 @@
+// Process substitution is not part of the production engine capability surface.
+#![cfg(feature = "fixture")]
+
 use grapher::{
     engine::{run_pi, PiRequest},
     model::Config,

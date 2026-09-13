@@ -38,14 +38,32 @@ pub struct Plan {
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     pub repository: String,
+    // Test-only actuator injection. Legacy engine/command JSON fields are
+    // ignored by production deserialization and never serialized back to UI.
+    #[cfg(feature = "fixture")]
+    #[serde(default = "test_engine")]
     pub engine: String,
+    #[cfg(feature = "fixture")]
+    #[serde(default = "test_command")]
     pub pi_command: String,
+    #[cfg(feature = "fixture")]
+    #[serde(default = "test_args")]
     pub pi_args: Vec<String>,
     pub model: String,
     pub max_parallel: usize,
     pub max_feedback: usize,
 }
 
+#[cfg(feature = "fixture")]
+fn test_engine() -> String { "pi".into() }
+#[cfg(feature = "fixture")]
+fn test_command() -> String { "node".into() }
+#[cfg(feature = "fixture")]
+fn test_args() -> Vec<String> {
+    vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs").to_string_lossy().into()]
+}
+
+/// One actual Execution Instance; its serialized event schema remains stable.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Execution {

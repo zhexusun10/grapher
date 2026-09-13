@@ -52,12 +52,25 @@ pub struct PiRequest<'request> {
 
 pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Result<String, String> {
     let config = request.config;
-    let mut command = Command::new(&config.pi_command);
-    command.args(&config.pi_args).args([
+    // Production always runs the pinned, Grapher-owned entrypoint. Persisted
+    // legacy command fields cannot select a different engine implementation.
+    #[cfg(not(feature = "fixture"))]
+    let mut command = {
+        let mut command = Command::new("node");
+        command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs"));
+        command
+    };
+    // Process substitution is exclusively a test capability.
+    #[cfg(feature = "fixture")]
+    let mut command = {
+        let mut command = Command::new(&config.pi_command);
+        command.args(&config.pi_args);
+        command
+    };
+    command.args([
         "--mode",
         "json",
         "--print",
-        "--no-extensions",
         "--no-skills",
         "--no-prompt-templates",
         "--no-themes",
@@ -74,10 +87,8 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     }
     let model = if !config.model.trim().is_empty() {
         Some(config.model.as_str())
-    } else if config.pi_command != "/bin/sh" {
-        Some("qwen3.8-flash")
     } else {
-        None
+        Some("qwen3.8-flash")
     };
     if let Some(model) = model {
         command.args(["--model", model]);
@@ -115,7 +126,7 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     command.process_group(0);
     let mut child = command
         .spawn()
-        .map_err(|error| format!("Cannot start Pi ({}): {error}", config.pi_command))?;
+        .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
     PROCESSES
         .get_or_init(Default::default)
         .lock()
@@ -174,6 +185,11 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok((is_error, line)) => {
                 if is_error {
+                    if line.contains("No project session found with id")
+                        && line.contains("creating a new session with that id")
+                    {
+                        continue;
+                    }
                     stderr_tail = line.clone();
                     on_output(format!("[stderr] {line}\n"));
                     continue;
@@ -249,6 +265,7 @@ pub fn execute(
     execution: &Execution,
     task: &str,
     reviewer: bool,
+    root: &Path,
     on_output: impl FnMut(String),
 ) -> Result<String, String> {
     #[cfg(feature = "fixture")]
@@ -260,10 +277,10 @@ pub fn execute(
     } else {
         task.into()
     };
-    let session_dir = Path::new(&execution.worktree)
-        .parent()
-        .ok_or("Invalid worktree")?
-        .join(format!("sessions-{}", execution.id));
+    let session_dir = root
+        .join("sessions")
+        .join(&execution.id);
+    let _ = fs::create_dir_all(&session_dir);
     run_pi(
         PiRequest {
             config,

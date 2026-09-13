@@ -3,11 +3,7 @@ export interface GraphNode { name: string; task: string }
 export interface GraphEdge { from: string; to: string; relation: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
-/**
- * "pi" 是唯一的出货引擎；"fixture" 只存在于启用 Cargo `fixture` 特性的测试构建；
- */
-export type Engine = "pi" | "fixture";
-export interface Config { repository: string; engine: Engine; piCommand: string; piArgs: string[]; model: string; maxParallel: number; maxFeedback: number }
+export interface Config { repository: string; model: string; maxParallel: number; maxFeedback: number }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; startedAt: number; completedAt: number | null }
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; from?: string; to?: string; accepted?: boolean; error?: string; execution?: Execution; instruction?: string; human?: boolean }
@@ -18,6 +14,7 @@ export interface RepositoryInfo {
   branch: string;
   head: string;
   clean: boolean;
+  isShadow?: boolean;
 }
 
 export interface ProjectItem {
@@ -27,6 +24,7 @@ export interface ProjectItem {
   branch: string;
   clean: boolean;
   lastOpened: number;
+  isShadow?: boolean;
 }
 
 export interface Bootstrap {
@@ -38,7 +36,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", engine: "pi", piCommand: "pi", piArgs: [], model: "qwen3.8-flash", maxParallel: 2, maxFeedback: 3 };
+export const defaultConfig: Config = { repository: "", model: "", maxParallel: 2, maxFeedback: 3 };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},
@@ -60,3 +58,29 @@ export const example: Graph = {
     { from: "qa_review", to: "frontend", relation: "缺陷重构反馈", feedback: true },
   ],
 };
+
+export type PlanRouteType = "undecided" | "serial" | "graph";
+
+export interface PlanStreamEvent {
+  type: "partitioner" | "route_decision" | "planner" | "complete" | "error";
+  raw?: string;
+  event?: any;
+  planType?: "serial" | "graph";
+  snapshot?: Snapshot;
+  error?: string;
+}
+
+export interface TranscriptItem {
+  id: string;
+  type: "text" | "tool_call" | "system";
+  role?: "user" | "assistant" | "system";
+  content?: string;
+  toolName?: string;
+  toolCallId?: string;
+  args?: Record<string, any>;
+  result?: string;
+  isError?: boolean;
+  status?: "running" | "success" | "error";
+  timestamp?: number;
+}
+

@@ -6,10 +6,12 @@ Don't orchestrate agents. Compile work.
 
 ## 启动
 
-需要 Node.js 22.19+、Rust stable、Git 和支持 POSIX 进程的环境。真实模型执行还需要 Pi CLI。
+需要 Node.js 22.19+、Rust stable、Git 和支持 POSIX 进程的环境。Pi 作为锁定 commit 的 submodule 提供，详见 [Execution Instance Engine 基线与同步流程](engine/README.md)。
 
 ```sh
+git submodule update --init --recursive
 npm ci --ignore-scripts
+npm run pi:setup
 npm run dev
 ```
 
@@ -40,11 +42,11 @@ npm start
 
 ### 真实 Pi
 
-出货构建只有 **Pi** 一种执行引擎。先在 Pi 自己的 CLI 中完成登录和模型配置。Grapher 不收集、存储 API Key。
+出货构建以 **Pi** 为唯一 **Execution Instance Engine**，一次实际执行称为 **Execution Instance**。目前通过 `npm run pi` 使用 upstream CLI 完成登录和模型配置；前端 Provider/Auth Adapter 尚待接入。Grapher 不自行实现凭据存储。
 
 1. 运行设置中填写**已有 commit 且完全干净**的 Git 仓库根路径。
-2. 配置 Pi 可执行文件的绝对路径；启动参数是 JSON 字符串数组，不经 shell 拼接。模型留空使用 Pi 默认值。
-3. 本机若存在 `pi/` 源码和 `pi/node_modules`，开发版会预填本地 Node/tsx 启动参数。`pi/` 保持独立且不会修改；分发到其他机器需自行安装兼容 Pi。
+2. 选择模型（可用 `provider/model` 指定 provider）。生产后端固定使用 `engine/entrypoint.mjs`；旧配置中的可执行文件和参数不再控制生产启动。
+3. 先执行 `npm run pi:setup` 安装锁定依赖及恢复固定模型目录。不能用全局安装的 Pi 替代 submodule。当前 upstream 完整构建有已记录的类型检查阻塞，源码 CLI 可启动；详见基线文档。
 4. 点击「规划并编译」：Partitioner 只有 `route_task`；Graph Planner 只有 `node / edge / read / bash`。每次 mutation 都调用同一个 Rust 编译器，失败不会写入候选图。Serial 路由不调用 Planner，用单节点承载原始任务，同样保留审批边界。
 5. Planner 退出，完整图展示后才能审批启动工作节点。也可以直接导入手写 Graph IR，省去规划模型调用。
 

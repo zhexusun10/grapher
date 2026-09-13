@@ -1,16 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Background, Controls, Handle, MarkerType, Position, ReactFlow, BaseEdge, getBezierPath, type NodeProps, type Node, type Edge, type EdgeProps } from "@xyflow/react";
 import {
-  AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, Circle,
-  Clock3, Code2, Copy, FolderGit2, GitBranch, GitFork, History,
+  AlertTriangle, ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, Circle,
+  Clock3, Code2, Compass, Copy, FolderGit2, GitBranch, GitFork, History,
   LoaderCircle, MessageSquare, Pause, Play, Plus, RotateCcw,
-  Settings2, ShieldCheck, Terminal, Trash2, Workflow, X
+  Settings2, ShieldCheck, Sparkles, Terminal, Trash2, Workflow, X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
-import { defaultConfig, emptyGraph, emptySnapshot, example, type Bootstrap, type Config, type Graph, type ProjectItem, type RepositoryInfo, type Snapshot, type Status } from "./types";
+import {
+  defaultConfig, emptyGraph, emptySnapshot,
+  type Bootstrap, type Config, type Graph, type ProjectItem, type RepositoryInfo,
+  type Snapshot, type Status, type PlanRouteType, type TranscriptItem
+} from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
+import { ProviderSettings } from "./components/ProviderSettings";
+import { MarkdownRenderer } from "./components/MarkdownRenderer";
+import { ToolCallCard } from "./components/ToolCallCard";
+import { VirtualizedTranscript } from "./components/VirtualizedTranscript";
+
+function deduceRouteType(snap: Snapshot): PlanRouteType {
+  if (snap.graph.nodes.length > 1) return "graph";
+  if (snap.graph.nodes.length === 1 && snap.graph.nodes[0].name === "task") return "serial";
+  if (snap.graph.nodes.length === 1) return "graph";
+  return "undecided";
+}
+
 
 
 const statusText: Record<Status, string> = {
@@ -222,12 +238,11 @@ export default function App() {
       return [];
     }
   });
-  const [mainTab, setMainTab] = useState<"graph" | "sessions" | "timeline" | "settings">("graph");
+  const [mainTab, setMainTab] = useState<"graph" | "sessions" | "timeline">("graph");
   const [goal, setGoal] = useState("");
   const [selected, setSelected] = useState<string>("");
   const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
   const [editor, setEditor] = useState("");
-  const [args, setArgs] = useState("[]");
   const [instruction, setInstruction] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -241,7 +256,6 @@ export default function App() {
   });
   const currentRepoPath = useMemo(() => config.repository || repoInfo?.path || "default", [config.repository, repoInfo]);
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
-  const [historical, setHistorical] = useState(false);
   const [attemptId, setAttemptId] = useState("");
   const [dataPath, setDataPath] = useState("");
   const [timelineFilter, setTimelineFilter] = useState<string>("all");
@@ -271,6 +285,18 @@ export default function App() {
 
   // 对话流消息记录（Chatbot 模式）
   const [messages, setMessages] = useState<Array<{ id: string; role: "user" | "assistant"; text: string; timestamp?: number }>>([]);
+  const [routeType, setRouteType] = useState<PlanRouteType>(() => deduceRouteType(emptySnapshot));
+  const [plannerStream, setPlannerStream] = useState<{
+    stage: "idle" | "partitioning" | "planning" | "done" | "error";
+    partitionerText: string;
+    plannerText: string;
+    tools: TranscriptItem[];
+  }>({
+    stage: "idle",
+    partitionerText: "",
+    plannerText: "",
+    tools: [],
+  });
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
   const effectiveMessages = useMemo(() => {
@@ -304,7 +330,8 @@ export default function App() {
       timestamp: Date.now(),
     };
     setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
-    control("intervene", { instruction: text });
+    const targetNode = selectedNode?.name || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
+    control("intervene", { node: targetNode, instruction: text });
   };
 
   // 可调节左右面板宽度状态，默认 380px，支持持久化存储
@@ -375,6 +402,7 @@ export default function App() {
           path: info.path,
           branch: info.branch,
           clean: info.clean,
+          isShadow: info.isShadow,
           lastOpened: Date.now(),
         };
         const exists = prev.some((p) => p.path === info.path);
@@ -387,7 +415,6 @@ export default function App() {
         return nextList;
       });
     }
-    setArgs(JSON.stringify(data.config.piArgs));
     setDataPath(data.dataPath);
     if (data.runs && data.runs.length > 0) {
       const initialKey = data.config?.repository || data.repositoryInfo?.path || "default";
@@ -404,11 +431,11 @@ export default function App() {
     }
     if (data.snapshot.runId) {
       setState(data.snapshot);
+      setRouteType(deduceRouteType(data.snapshot));
       setGoal(data.snapshot.graph.originalGoal);
       if (data.snapshot.graph.nodes.length > 0) {
         setSelected((curr) => (curr && data.snapshot.graph.nodes.some(n => n.name === curr) ? curr : ""));
       }
-      setHistorical(false);
     }
   }, []);
 
@@ -423,6 +450,7 @@ export default function App() {
         path: info.path,
         branch: info.branch,
         clean: info.clean,
+        isShadow: info.isShadow,
         lastOpened: Date.now(),
       };
       setProjects((prev) => {
@@ -434,27 +462,23 @@ export default function App() {
       });
       const snapshot = await runtimeService.resetWorkspace();
       setState(snapshot);
+      setRouteType("undecided");
+      setPlannerStream({ stage: "idle", partitionerText: "", plannerText: "", tools: [] });
       setGoal("");
       setSelected("");
-      setHistorical(false);
       setError("");
     }
   });
 
   const handlePickRepository = handleOpenProject;
 
+  const handleOpenSettings = () => {
+    setModal("settings");
+  };
+
   const handleSaveConfig = () => {
-    try {
-      const value: unknown = JSON.parse(args);
-      if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-        throw new Error("启动参数必须是字符串 JSON 数组，如 [\"--flag\"]");
-      }
-      setConfig({ ...config, piArgs: value });
-      setModal(null);
-      setError("");
-    } catch (err) {
-      setError(String(err));
-    }
+    setModal(null);
+    setError("");
   };
 
   const handleSelectProject = (proj: ProjectItem) => run(async () => {
@@ -466,7 +490,7 @@ export default function App() {
       setProjects((prev) => {
         const next = prev.map((p) =>
           p.path === info.path
-            ? { ...p, branch: info.branch, clean: info.clean, lastOpened: Date.now() }
+            ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
             : p
         );
         try {
@@ -480,23 +504,27 @@ export default function App() {
     const projRuns = workspaceRuns[proj.path] || [];
     if (projRuns.length > 0) {
       try {
-        const snapshot = await runtimeService.history(projRuns[0]);
+        const snapshot = await runtimeService.loadRun(projRuns[0]);
         setState(snapshot);
-        setHistorical(true);
+        setRouteType(deduceRouteType(snapshot));
+        setGoal(snapshot.graph.originalGoal || "");
         if (snapshot.graph.nodes.length > 0) {
           setSelected(snapshot.graph.nodes[0].name);
         }
       } catch {
         const snapshot = await runtimeService.resetWorkspace();
         setState(snapshot);
-        setHistorical(false);
+        setRouteType("undecided");
+        setPlannerStream({ stage: "idle", partitionerText: "", plannerText: "", tools: [] });
+        setGoal("");
       }
     } else {
       const snapshot = await runtimeService.resetWorkspace();
       setState(snapshot);
-      setHistorical(false);
+      setRouteType("undecided");
+      setPlannerStream({ stage: "idle", partitionerText: "", plannerText: "", tools: [] });
+      setGoal("");
     }
-    setGoal("");
     setError("");
   });
 
@@ -547,7 +575,6 @@ export default function App() {
       setState(snapshot);
       setGoal("");
       setSelected("");
-      setHistorical(false);
     }
   });
 
@@ -569,7 +596,7 @@ export default function App() {
       setConfig((prev) => ({ ...prev, repository: info.path }));
       setError("");
     } else {
-      setError("目标路径未检测到有效的 Git 仓库（需包含 .git 目录）。");
+      setError("目标路径不存在或无法作为工作区加载。");
     }
   });
 
@@ -577,9 +604,10 @@ export default function App() {
     setMessages([]);
     const snapshot = await runtimeService.resetWorkspace();
     setState(snapshot);
+    setRouteType("undecided");
+    setPlannerStream({ stage: "idle", partitionerText: "", plannerText: "", tools: [] });
     setGoal("");
     setSelected("");
-    setHistorical(false);
     setError("");
   });
   const handleClearHistory = () => {
@@ -613,7 +641,6 @@ export default function App() {
             setMessages([]);
             setGoal("");
             setSelected("");
-            setHistorical(false);
           }
         }
       }),
@@ -623,16 +650,22 @@ export default function App() {
   const handlePlanGoal = (inputGoal?: string) => run(async () => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return;
-    const g = targetGoal.trim();
-    if (!g) return;
-    setGoal(g);
+    setGoal(targetGoal);
+    setError("");
     setIsPlanning(true);
+    setRouteType("undecided");
+    setPlannerStream({
+      stage: "partitioning",
+      partitionerText: "",
+      plannerText: "",
+      tools: [],
+    });
     setSelected("");
     setMessages([
       {
         id: `msg-${Date.now()}`,
         role: "user",
-        text: g,
+        text: targetGoal,
         timestamp: Date.now(),
       },
     ]);
@@ -640,21 +673,112 @@ export default function App() {
       ...prev,
       graph: {
         ...prev.graph,
-        originalGoal: g,
+        originalGoal: targetGoal,
       },
     }));
     try {
       if (!config.repository) {
-        setMainTab("settings");
+        handleOpenSettings();
         setError("请先在左侧工作区选择绑定的本地 Git 仓库。");
         return;
       }
-      const snapshot = await runtimeService.planGoal(targetGoal, config);
+      const snapshot = await runtimeService.planGoalStream(targetGoal, config, (event) => {
+        if (event.type === "partitioner") {
+          const pEvent = event.event;
+          if (pEvent?.type === "message_update" && pEvent.assistantMessageEvent?.type === "text_delta") {
+            const delta = pEvent.assistantMessageEvent.delta;
+            setPlannerStream((prev) => ({
+              ...prev,
+              partitionerText: prev.partitionerText + delta,
+            }));
+          } else if (pEvent?.type === "tool_execution_start") {
+            const toolItem: TranscriptItem = {
+              id: pEvent.toolCallId || `part_tool_${Date.now()}`,
+              type: "tool_call",
+              toolName: pEvent.toolName,
+              toolCallId: pEvent.toolCallId,
+              args: pEvent.args || {},
+              status: "running",
+              timestamp: Date.now(),
+            };
+            setPlannerStream((prev) => ({
+              ...prev,
+              tools: [...prev.tools, toolItem],
+            }));
+          } else if (pEvent?.type === "tool_execution_end") {
+            const resText = (pEvent.result?.content ?? [])
+              .filter((i: any) => i.type === "text")
+              .map((i: any) => i.text)
+              .join("\n");
+            setPlannerStream((prev) => ({
+              ...prev,
+              tools: prev.tools.map((t) =>
+                t.toolCallId === pEvent.toolCallId || t.toolName === pEvent.toolName
+                  ? { ...t, result: resText, status: pEvent.isError ? "error" : "success" }
+                  : t
+              ),
+            }));
+          }
+        } else if (event.type === "route_decision") {
+          const planType = event.planType || "graph";
+          setRouteType(planType);
+          setPlannerStream((prev) => ({
+            ...prev,
+            stage: planType === "graph" ? "planning" : "done",
+          }));
+        } else if (event.type === "planner") {
+          const pEvent = event.event;
+          if (pEvent?.type === "message_update" && pEvent.assistantMessageEvent?.type === "text_delta") {
+            const delta = pEvent.assistantMessageEvent.delta;
+            setPlannerStream((prev) => ({
+              ...prev,
+              plannerText: prev.plannerText + delta,
+            }));
+          } else if (pEvent?.type === "tool_execution_start") {
+            const toolItem: TranscriptItem = {
+              id: pEvent.toolCallId || `plan_tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              type: "tool_call",
+              toolName: pEvent.toolName,
+              toolCallId: pEvent.toolCallId,
+              args: pEvent.args || {},
+              status: "running",
+              timestamp: Date.now(),
+            };
+            setPlannerStream((prev) => ({
+              ...prev,
+              tools: [...prev.tools, toolItem],
+            }));
+          } else if (pEvent?.type === "tool_execution_end") {
+            const resText = (pEvent.result?.content ?? [])
+              .filter((i: any) => i.type === "text")
+              .map((i: any) => i.text)
+              .join("\n");
+            setPlannerStream((prev) => ({
+              ...prev,
+              tools: prev.tools.map((t) =>
+                t.toolCallId === pEvent.toolCallId || (t.toolName === pEvent.toolName && t.status === "running")
+                  ? { ...t, result: resText, status: pEvent.isError ? "error" : "success" }
+                  : t
+              ),
+            }));
+          }
+        } else if (event.type === "complete") {
+          if (event.snapshot) {
+            setState(event.snapshot);
+            setRouteType(deduceRouteType(event.snapshot));
+            recordRunToWorkspace(event.snapshot.runId);
+          }
+        }
+      });
       setState(snapshot);
-      setHistorical(false);
+      setRouteType(deduceRouteType(snapshot));
       setMainTab("graph");
       recordRunToWorkspace(snapshot.runId);
       setSelected("");
+      setPlannerStream((prev) => ({ ...prev, stage: "done" }));
+    } catch (err) {
+      setError(String(err));
+      setPlannerStream((prev) => ({ ...prev, stage: "error" }));
     } finally {
       setIsPlanning(false);
     }
@@ -665,7 +789,7 @@ export default function App() {
   }, [load]);
 
   useEffect(() => {
-    if (historical || busy) return;
+    if (busy) return;
 
     const interval = setInterval(() => {
       runtimeService.snapshot()
@@ -690,7 +814,7 @@ export default function App() {
         .catch((err) => setError(String(err)));
     }, 700);
     return () => clearInterval(interval);
-  }, [historical, busy]);
+  }, [busy]);
 
   useEffect(() => {
     const handleClose = () => {
@@ -728,12 +852,17 @@ export default function App() {
     if (action === "intervene") setInstruction("");
   });
 
+  useEffect(() => {
+    if (routeType === "serial" && state.phase === "awaiting_approval" && !busy) {
+      control("approve");
+    }
+  }, [routeType, state.phase, busy]);
+
   const save = (graph: Graph) => run(async () => {
     const snapshot = await runtimeService.saveGraph(graph, config);
     setState(snapshot);
     setGoal(graph.originalGoal);
     setModal(null);
-    setHistorical(false);
     recordRunToWorkspace(snapshot.runId);
     if (graph.nodes.length > 0) {
       setSelected(graph.nodes[0].name);
@@ -755,9 +884,15 @@ export default function App() {
   const selectedState = state.nodes[selected];
   const attempts = state.executions.filter((execution) => execution.node === selected);
   const execution = attempts.find((execution) => execution.id === attemptId) ?? attempts.at(-1);
+
+  const serialNode = routeType === "serial" ? (state.graph.nodes.find((n) => n.name === "task") || state.graph.nodes[0]) : undefined;
+  const serialNodeState = serialNode ? state.nodes[serialNode.name] : undefined;
+  const serialAttempts = serialNode ? state.executions.filter((e) => e.node === serialNode.name) : [];
+  const serialExecution = serialAttempts.at(-1);
+
   const active = Object.values(state.nodes).some((node) => node.status === "running");
   const completed = Object.values(state.nodes).filter((node) => node.status === "done").length;
-  const locked = busy || historical;
+  const locked = busy;
 
   const nodes = useMemo<WorkNode[]>(() => {
     const layers = state.plan?.executionBatches ?? [state.graph.nodes.map((node) => node.name)];
@@ -874,6 +1009,35 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {/* 全局悬浮报错横幅 (Floating Error Banner)，绝对浮动展示，不挤压任何界面组件 */}
+      <AnimatePresence>
+        {error && (
+          <motion.div
+            className="floating-error-banner"
+            role="alert"
+            initial={{ opacity: 0, y: -20, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -16, scale: 0.96 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <div className="floating-error-icon">
+              <AlertTriangle size={15} />
+            </div>
+            <div className="floating-error-content">
+              <span className="floating-error-text">{error}</span>
+            </div>
+            <button
+              type="button"
+              className="floating-error-close"
+              aria-label="关闭错误提示"
+              onClick={() => setError("")}
+            >
+              <X size={14} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <aside className="sidebar">
         <div className="sidebar-brand-row">
           <a className="brand" href="#" onClick={(event) => event.preventDefault()}>
@@ -916,10 +1080,16 @@ export default function App() {
                   <div className="proj-details">
                     <div className="proj-name-row">
                       <strong>{proj.name}</strong>
-                      <span className="proj-branch-pill">
-                        <GitBranch size={9} />
-                        {proj.branch}
-                      </span>
+                      {proj.isShadow ? (
+                        <span className="proj-branch-pill shadow" title="本地零侵入影子仓库：不污染原项目目录">
+                          影子仓库
+                        </span>
+                      ) : (
+                        <span className="proj-branch-pill">
+                          <GitBranch size={9} />
+                          {proj.branch}
+                        </span>
+                      )}
                     </div>
                     <small className="proj-path-text">{proj.path}</small>
                   </div>
@@ -930,7 +1100,7 @@ export default function App() {
             <div className="empty-projects-hint" onClick={handleOpenProject}>
               <FolderGit2 size={24} />
               <span>暂无工作区</span>
-              <small>点击打开本地 Git 仓库</small>
+              <small>点击打开本地项目文件夹</small>
             </div>
           )}
         </div>
@@ -964,9 +1134,9 @@ export default function App() {
                 className={`run-item ${state.runId === id ? "chosen" : ""}`}
                 key={id}
                 onClick={() => run(async () => {
-                  const snapshot = await runtimeService.history(id);
+                  const snapshot = await runtimeService.loadRun(id);
                   setState(snapshot);
-                  setHistorical(true);
+                  setGoal(snapshot.graph.originalGoal || "");
                   if (snapshot.graph.nodes.length > 0) {
                     setSelected(snapshot.graph.nodes[0].name);
                   }
@@ -994,12 +1164,22 @@ export default function App() {
           )}
         </div>
 
-
+        <div className="sidebar-bottom">
+          <button
+            type="button"
+            className={`sidebar-bottom-btn ${modal === "settings" ? "active" : ""}`}
+            onClick={handleOpenSettings}
+            title="项目与引擎运行配置"
+          >
+            <Settings2 size={15} />
+            <span>运行配置</span>
+          </button>
+        </div>
       </aside>
 
       <main className="main">
         <AnimatePresence mode="wait" initial={false}>
-          {state.graph.nodes.length === 0 && !isPlanning && !historical && mainTab === "graph" ? (
+          {state.graph.nodes.length === 0 && !isPlanning && mainTab === "graph" ? (
             <motion.div
               key="landing-screen"
               className="landing-screen"
@@ -1012,27 +1192,7 @@ export default function App() {
               }}
               transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
             >
-              {error && (
-                <div className="error-banner" role="alert">
-                  <span>{error}</span>
-                  <button aria-label="关闭错误" onClick={() => setError("")}><X size={15} /></button>
-                </div>
-              )}
-
               <div className="landing-center-content">
-                <div>
-                  <button
-                      className="primary"
-                      disabled={busy}
-                      onClick={async () => {
-                        await save(example);
-                        setMainTab("graph");
-                      }}
-                    >
-                      编译示例图
-                    </button>
-                  <button className="secondary" onClick={() => setMainTab("settings")}>运行配置</button>
-                </div>
                 <motion.p
                   className="landing-title"
                   initial={{ opacity: 0, y: -10 }}
@@ -1075,12 +1235,16 @@ export default function App() {
                   <span className="repo-badge" title={config.repository || "未选择本地仓库"}>
                     {activeProject?.name || repoInfo?.name || (config.repository ? config.repository.split("/").pop() : "未选择项目")}
                   </span>
-                  {activeProject?.branch && (
+                  {activeProject?.isShadow || repoInfo?.isShadow ? (
+                    <span className="shadow-tag" title="本地零侵入影子仓库：版本由 Grapher 内部维护，不污染用户目录">
+                      影子仓库
+                    </span>
+                  ) : activeProject?.branch ? (
                     <span className="branch-tag">
                       <GitBranch size={11} />
                       {activeProject.branch}
                     </span>
-                  )}
+                  ) : null}
                   <ChevronRight size={13} />
                   <span className={`phase-tag ${state.phase}`}>{phaseText[state.phase] ?? "草稿"}</span>
                 </div>
@@ -1131,63 +1295,22 @@ export default function App() {
                     <span>事件流水</span>
                     <span className="tab-count">{state.events.filter(e => e.type !== "output").length}</span>
                   </button>
-                  <button
-                    className={`tab-btn ${mainTab === "settings" ? "active" : ""}`}
-                    onClick={() => setMainTab("settings")}
-                  >
-                    {mainTab === "settings" && (
-                      <motion.div
-                        layoutId="header-active-tab-pill"
-                        className="tab-active-indicator"
-                        transition={{ type: "spring", stiffness: 420, damping: 32 }}
-                      />
-                    )}
-                    <Settings2 size={14} />
-                    <span>运行配置</span>
-                  </button>
                 </nav>
 
-                <div className="header-actions">
-                  <button
-                    className="secondary btn-sm"
-                    title="新建会话 / 开始新任务"
-                    onClick={handleResetWorkspace}
-                  >
-                    <Plus size={13} />新会话
-                  </button>
-                </div>
+                <div className="header-actions" />
               </div>
             </motion.header>
 
-        {error && (
-          <div className="error-banner" role="alert">
-            <span>{error}</span>
-            <button aria-label="关闭错误" onClick={() => setError("")}><X size={15} /></button>
-          </div>
-        )}
-
-        {historical && (
-          <div className="history-banner">
-            <div className="history-banner-text">
-              <span>正在查看历史快照 [Graph {state.runId ? state.runId.slice(0, 8) : "历史"}]（只读状态）</span>
-              {state.graph.originalGoal && <small>历史目标: {state.graph.originalGoal.slice(0, 60)}</small>}
-            </div>
-            <div className="history-banner-actions">
-              <button className="primary btn-sm" onClick={handleResetWorkspace}>
-                <Plus size={13} /> 新建工作区 / 开始新任务
-              </button>
-              <button className="secondary btn-sm" onClick={() => { setHistorical(false); load().catch((err) => setError(String(err))); }}>
-                返回最新运行 <ArrowRight size={13} />
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* 工作台主双栏布局，中间带可拖拽 resizer */}
         {mainTab === "graph" && (
-          <section className={`workbench ${isResizing ? "resizing" : ""}`} ref={workbenchRef}>
-          {/* 左侧对话与日志面板 */}
-          <div className="conversation-pane" style={{ width: `${leftWidth}px` }}>
+          <section className={`workbench ${isResizing ? "resizing" : ""} ${routeType === "graph" ? "graph-mode" : "dialogue-only-mode"}`} ref={workbenchRef}>
+          {/* 左侧/居中对话与日志面板 */}
+          <motion.div
+            layout
+            className={`conversation-pane ${routeType === "graph" ? "split" : "full-width"}`}
+            style={routeType === "graph" ? { width: `${leftWidth}px` } : { width: "100%", maxWidth: "100%" }}
+            transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+          >
             {selectedNode ? (
               <>
                 <div className="conversation-heading">
@@ -1242,80 +1365,187 @@ export default function App() {
                         <span>{execution.status}</span>
                         <time>{new Date(execution.startedAt).toLocaleTimeString()}</time>
                       </div>
-                        <pre className="execution-log">
-                          {readableLog(execution.output) || "工作区就绪，等待输出…"}
-                        </pre>
-                        <details className="workspace-details">
-                          <summary><FolderGit2 size={12} />工作区与会话信息</summary>
-                          <p>Worktree: {execution.worktree}</p>
-                          <p>Session ID: {execution.sessionId}</p>
-                          <p>Commit Before: {execution.before}</p>
-                          <p>Commit After: {execution.after ?? "pending"}</p>
-                          <p className="details-tip">所有变更保存在独立 worktree，不会污染主分支。</p>
-                        </details>
-                      </>
-                    ) : (
-                      <div className="conversation-empty">
-                        <div className="empty-orbit">
-                          <Terminal size={22} />
-                        </div>
-                        <h3>全新独立上下文</h3>
-                        <p>
-                          审批通过后，该节点将在隔离的 Git worktree 中启动全新的 Pi 实例。<br />
-                          执行进度、代码修改与工具调用流将在此呈现。
-                        </p>
+                      <div style={{ flex: 1, minHeight: 320, display: "flex", flexDirection: "column", marginTop: 8 }}>
+                        <VirtualizedTranscript output={execution.output} />
                       </div>
-                    )}
-
-                    {selectedState?.error && (
-                      <div className="node-error">
-                        {selectedState.error}
-                        {selectedState.status === "blocked" && (
-                          <button
-                            className="secondary"
-                            disabled={locked || active}
-                            onClick={() => control("resolve")}
-                          >
-                            Use resolved workspace
-                          </button>
-                        )}
+                      <details className="workspace-details">
+                        <summary><FolderGit2 size={12} />工作区与会话信息</summary>
+                        <p>Worktree: {execution.worktree}</p>
+                        <p>Session ID: {execution.sessionId}</p>
+                        <p>Commit Before: {execution.before}</p>
+                        <p>Commit After: {execution.after ?? "pending"}</p>
+                        <p className="details-tip">所有变更保存在独立 worktree，不会污染主分支。</p>
+                      </details>
+                    </>
+                  ) : (
+                    <div className="conversation-empty">
+                      <div className="empty-orbit">
+                        <Terminal size={22} />
                       </div>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <div className="initial-query-view">
-                  <div className="initial-query-scroll" ref={chatScrollRef}>
-                    <div className="chat-messages-stream">
-                      {effectiveMessages.map((msg) => (
-                        <motion.div
-                          key={msg.id}
-                          className={`chat-message-row ${msg.role}`}
-                          initial={{ opacity: 0, y: 8, scale: 0.98 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-                        >
-                          <div className={`chat-bubble-${msg.role}`}>
-                            {msg.text}
-                          </div>
-                        </motion.div>
-                      ))}
+                      <h3>全新独立上下文</h3>
+                      <p>
+                        审批通过后，该节点将在隔离的 Git worktree 中启动全新的 Pi 实例。<br />
+                        执行进度、代码修改与工具调用流将在此呈现。
+                      </p>
+                    </div>
+                  )}
 
-                      {isPlanning && (
-                        <motion.div
-                          className="chat-message-row assistant"
-                          initial={{ opacity: 0, y: 8 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          transition={{ duration: 0.28 }}
+                  {selectedState?.error && (
+                    <div className="node-error">
+                      {selectedState.error}
+                      {selectedState.status === "blocked" && (
+                        <button
+                          className="secondary"
+                          disabled={locked || active}
+                          onClick={() => control("resolve")}
                         >
-                          <div className="chat-bubble-assistant planning">
-                            <LoaderCircle size={14} className="spin" />
-                            <span>AI 架构师正在分析仓库结构并编译有向执行图...</span>
-                          </div>
-                        </motion.div>
+                          Use resolved workspace
+                        </button>
                       )}
                     </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="initial-query-view">
+                <div className="initial-query-scroll" ref={chatScrollRef}>
+                  <div className="chat-messages-stream">
+                    {effectiveMessages.map((msg) => (
+                      <motion.div
+                        key={msg.id}
+                        className={`chat-message-row ${msg.role}`}
+                        initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                      >
+                        <div className={`chat-bubble-${msg.role}`}>
+                          <MarkdownRenderer content={msg.text} />
+                        </div>
+                      </motion.div>
+                    ))}
 
+                    {/* Partitioner 实时推理流 */}
+                    {isPlanning && plannerStream.stage === "partitioning" && (
+                      <motion.div
+                        className="planning-stream-card partitioner"
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                      >
+                        <div className="stream-card-header">
+                          <Compass size={14} className="spin" />
+                          <span>AI 架构师正在评估任务执行路径 (Serial / Graph)...</span>
+                        </div>
+                        {plannerStream.partitionerText && (
+                          <div className="stream-card-body">
+                            <MarkdownRenderer content={plannerStream.partitionerText} isStreaming={true} />
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+
+                    {/* 任务路线决策结果 */}
+                    {routeType !== "undecided" && (
+                      <motion.div
+                        className={`route-decision-pill ${routeType}`}
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                      >
+                        <Compass size={13} />
+                        <span>
+                          {routeType === "serial"
+                            ? "任务路线决策：单节点串行执行（无需图分解）"
+                            : "任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）"}
+                        </span>
+                      </motion.div>
+                    )}
+
+                    {/* 单节点串行执行会话与流式实时日志 */}
+                    {routeType === "serial" && state.graph.nodes.length > 0 && (
+                      <motion.div
+                        className="serial-execution-panel"
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.3 }}
+                      >
+                        <div className="session-label">
+                          <strong>Pi 串行执行实例</strong>
+                          <span className={`status-badge ${serialNodeState?.status ?? "waiting"}`}>
+                            {statusText[serialNodeState?.status as Status] ?? serialNodeState?.status ?? "WAITING"}
+                          </span>
+                          {serialExecution?.startedAt && (
+                            <time>{new Date(serialExecution.startedAt).toLocaleTimeString()}</time>
+                          )}
+                        </div>
+
+                        {serialExecution?.output ? (
+                          <div style={{ flex: 1, minHeight: 280, display: "flex", flexDirection: "column", marginTop: 4 }}>
+                            <VirtualizedTranscript output={serialExecution.output} />
+                          </div>
+                        ) : (
+                          <div className="stream-card-hint" style={{ padding: "8px 0", marginTop: 6 }}>
+                            <Workflow size={14} className="spin" style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
+                            独立沙箱正在推进中，正在启动 Pi 实例执行任务...
+                          </div>
+                        )}
+
+                        {serialExecution && (
+                          <details className="workspace-details" style={{ marginTop: 12 }}>
+                            <summary><FolderGit2 size={12} />工作区与会话信息</summary>
+                            <p>工作目录: {serialExecution.worktree}</p>
+                            <p>会话实例: {serialExecution.sessionId}</p>
+                            {(() => {
+                              const pidMatch = serialExecution.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
+                                               serialExecution.output.match(/"pid":(\d+)/);
+                              return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
+                            })()}
+                            <p>Commit Before: {serialExecution.before || "HEAD"}</p>
+                            <p>Commit After: {serialExecution.after ?? "pending"}</p>
+                            <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
+                          </details>
+                        )}
+
+                        {serialNodeState?.error && (
+                          <div className="node-error" style={{ marginTop: 12 }}>
+                            {serialNodeState.error}
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+
+                    {/* Planner 工具调用流 */}
+                    {plannerStream.tools.length > 0 && (
+                      <div className="planner-tools-stream">
+                        {plannerStream.tools.map((tool) => (
+                          <ToolCallCard key={tool.id} item={tool} />
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Planner 实时思考与推理 */}
+                    {isPlanning && plannerStream.stage === "planning" && (
+                      <motion.div
+                        className="planning-stream-card planner"
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                      >
+                        <div className="stream-card-header">
+                          <Workflow size={14} className="spin" />
+                          <span>AI Planner 正在探测仓库架构并构建有向执行图...</span>
+                        </div>
+                        {plannerStream.plannerText ? (
+                          <div className="stream-card-body">
+                            <MarkdownRenderer content={plannerStream.plannerText} isStreaming={true} />
+                          </div>
+                        ) : (
+                          <div className="stream-card-hint">
+                            正在计算独立 Git worktree 执行批次与验收复审依赖...
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+                  </div>
+
+                  {routeType === "graph" && state.graph.nodes.length > 0 && (
                     <motion.div
                       className="plan-summary-card"
                       initial={{ opacity: 0, y: 14 }}
@@ -1367,9 +1597,10 @@ export default function App() {
                         </div>
                       </div>
                     </motion.div>
-                  </div>
+                  )}
                 </div>
-              )}
+              </div>
+            )}
 
             <motion.div
               className="pane-bottom-chat"
@@ -1383,30 +1614,41 @@ export default function App() {
                 placeholder={
                   selectedNode
                     ? `向 [${selectedNode.name}] 发送微调或介入指令...`
+                    : routeType === "serial"
+                    ? "向当前串行任务发送微调或介入指令..."
                     : "向工作图追加全局指令或修改规划要求..."
                 }
                 disabled={locked || active || !state.approved}
               />
             </motion.div>
-          </div>
+          </motion.div>
 
-          {/* 左右可调节分割器 */}
-          <div
-            className={`workbench-resizer ${isResizing ? "active" : ""}`}
-            onMouseDown={handleStartResize}
-            onDoubleClick={handleResetResizer}
-            title="按住左右拖动调节宽度，双击恢复默认"
-          >
-            <div className="resizer-handle" />
-          </div>
+          {/* 左右可调节分割器 与 右侧执行拓扑图面板：仅在判定为 graph 时流畅展开 */}
+          <AnimatePresence>
+            {routeType === "graph" && (
+              <>
+                <motion.div
+                  key="workbench-resizer"
+                  className={`workbench-resizer ${isResizing ? "active" : ""}`}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                  onMouseDown={handleStartResize}
+                  onDoubleClick={handleResetResizer}
+                  title="按住左右拖动调节宽度，双击恢复默认"
+                >
+                  <div className="resizer-handle" />
+                </motion.div>
 
-          {/* 右侧执行拓扑图面板 */}
-          <motion.div
-            className="graph-pane"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-          >
+                <motion.div
+                  key="graph-pane"
+                  className="graph-pane"
+                  initial={{ opacity: 0, x: 45 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 45 }}
+                  transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+                >
             <div className="graph-toolbar">
               <div className="toolbar-left">
                 <Workflow size={15} />
@@ -1495,9 +1737,9 @@ export default function App() {
                     </>
                   ) : (
                     <>
-                      <h3>未检测到本地 Git 仓库</h3>
+                      <h3>未选择本地工作区</h3>
                       <p>
-                        Grapher 需要绑定一个本地 Git 项目来创建确定性的隔离 worktree 并发工作流。请通过下方按钮选择本地项目文件夹，或在仓库目录下启动。
+                        Grapher 支持选择本地 Git 仓库或任意普通项目文件夹（自动提供本地隔离沙箱，零侵入不污染原项目）。请通过下方按钮选择本地文件夹。
                       </p>
                       <div className="empty-actions">
                         <button className="primary" onClick={handlePickRepository}>
@@ -1606,7 +1848,10 @@ export default function App() {
               </div>
             )}
           </motion.div>
-        </section>
+        </>
+      )}
+    </AnimatePresence>
+          </section>
         )}
 
         {mainTab === "sessions" && (
@@ -1701,9 +1946,9 @@ export default function App() {
                             </span>
                           )}
                         </div>
-                        <pre className="full-execution-log">
-                          {readableLog(execution.output) || "工作区就绪，等待节点指令输出…"}
-                        </pre>
+                        <div style={{ height: "460px", display: "flex", flexDirection: "column" }}>
+                          <VirtualizedTranscript output={execution.output} />
+                        </div>
                         <div className="worktree-info-footer">
                           <span>Session: <code>{execution.sessionId}</code></span>
                           <span>Commit Before: <code>{execution.before ? execution.before.slice(0, 7) : "-"}</code></span>
@@ -1866,180 +2111,6 @@ export default function App() {
           </section>
         )}
 
-        {mainTab === "settings" && (
-          <section className="full-tab-view settings-view">
-            <div className="settings-page-container">
-              <div className="settings-page-header">
-                <Settings2 size={20} />
-                <div>
-                  <h3>项目与引擎运行配置</h3>
-                  <small>管理当前工作区关联的本地 Git 仓库路径、AI 执行引擎及并发参数。</small>
-                </div>
-              </div>
-
-              <div className="settings-sections">
-                {/* Section 1: 本地 Git 仓库 */}
-                <div className="settings-card">
-                  <div className="settings-card-title">
-                    <FolderGit2 size={16} />
-                    <h4>本地 Git 仓库绑定</h4>
-                  </div>
-                  <p className="section-desc">
-                    Grapher 在本地 Git 仓库基础上使用 <code>git worktree</code> 为每个并发节点创建隔离沙箱，保证主分支安全。
-                  </p>
-                  <div className="setting-input-row">
-                    <input
-                      className="repo-path-input"
-                      value={config.repository}
-                      onChange={(e) => setConfig({ ...config, repository: e.target.value })}
-                      placeholder="/Users/username/Projects/my-app"
-                    />
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={handleOpenProject}
-                      title="调起系统文件夹选择器"
-                    >
-                      <FolderGit2 size={14} /> 浏览本地目录
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => handleDetectRepository(config.repository || undefined)}
-                      title="检测 Git 信息"
-                    >
-                      <RotateCcw size={14} /> 检测状态
-                    </button>
-                  </div>
-
-                  {repoInfo ? (
-                    <div className="repo-status-card">
-                      <div className="repo-status-header">
-                        <span className="repo-name">
-                          <FolderGit2 size={15} />
-                          <strong>{repoInfo.name}</strong>
-                        </span>
-                        <span className={`status-badge ${repoInfo.clean ? "clean" : "warning"}`}>
-                          {repoInfo.clean ? "✓ 工作树干净 (Clean)" : "⚠ 有未提交改动 (Dirty)"}
-                        </span>
-                      </div>
-                      <div className="repo-status-meta">
-                        <span>当前分支: <code>{repoInfo.branch}</code></span>
-                        {repoInfo.head && <span>HEAD: <code>{repoInfo.head}</code></span>}
-                      </div>
-                      <div className="repo-status-path">{repoInfo.path}</div>
-                    </div>
-                  ) : (
-                    <div className="repo-status-hint">
-                      提示：未检测到有效 Git 信息，请确保选择的文件夹包含 <code>.git</code>。
-                    </div>
-                  )}
-                </div>
-
-                {/* Section 2: 执行引擎与模型 */}
-                <div className="settings-card">
-                  <div className="settings-card-title">
-                    <Terminal size={16} />
-                    <h4>执行引擎与模型设置</h4>
-                  </div>
-                  <div className="form-grid">
-                    <label className="form-field">
-                      <span>执行引擎</span>
-                      <select value={config.engine} disabled>
-                        <option value="pi">
-                          Pi
-                        </option>
-                      </select>
-                    </label>
-
-                    <label className="form-field">
-                      <span>指定模型（留空使用 Pi 默认配置）</span>
-                      <input
-                        value={config.model}
-                        onChange={(e) => setConfig({ ...config, model: e.target.value })}
-                        placeholder="例如: qwen3.8-flash 或 provider/model"
-                      />
-                    </label>
-
-                    <label className="form-field">
-                      <span>Pi 命令 / 可执行文件路径</span>
-                      <input
-                        value={config.piCommand}
-                        onChange={(e) => setConfig({ ...config, piCommand: e.target.value })}
-                        placeholder="pi 或 /usr/local/bin/pi"
-                      />
-                    </label>
-
-                    <label className="form-field">
-                      <span>并发执行节点上限</span>
-                      <input
-                        type="number"
-                        min={1}
-                        max={8}
-                        value={config.maxParallel}
-                        onChange={(e) => setConfig({ ...config, maxParallel: Number(e.target.value) })}
-                      />
-                    </label>
-
-                    <label className="form-field">
-                      <span>反馈重试上限</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={10}
-                        value={config.maxFeedback}
-                        onChange={(e) => setConfig({ ...config, maxFeedback: Number(e.target.value) })}
-                      />
-                    </label>
-                  </div>
-
-                  <label className="form-field full-width">
-                    <span>Pi 启动额外参数（JSON 字符串数组）</span>
-                    <textarea
-                      value={args}
-                      onChange={(e) => setArgs(e.target.value)}
-                      rows={3}
-                      placeholder='["--verbose"]'
-                    />
-                  </label>
-                </div>
-
-                {/* Section 3: 数据管理 */}
-                <div className="settings-card">
-                  <div className="settings-card-title">
-                    <RotateCcw size={16} />
-                    <h4>存储与重置</h4>
-                  </div>
-                  <p className="section-desc">
-                    Grapher 将运行时快照与事件保存在本地 SQLite 数据库中。路径：<code>{dataPath || "本地系统应用目录"}</code>
-                  </p>
-                  <div className="danger-actions-row">
-                    <button type="button" className="secondary" onClick={handleResetWorkspace}>
-                      <Plus size={14} /> 重置当前工作区图
-                    </button>
-                    <button type="button" className="secondary danger-btn" onClick={handleClearHistory}>
-                      <RotateCcw size={14} /> 清空所有历史运行快照
-                    </button>
-                  </div>
-                </div>
-
-                <div className="settings-save-bar">
-                  <button type="button" className="primary save-config-btn" onClick={handleSaveConfig}>
-                    <Check size={16} /> 保存所有配置
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
-        )}
-
-        <footer className="workspace-footer">
-          <span>
-            <span />
-            Local runtime · SQLite event store
-          </span>
-          <span>Git carries workspace state.<ArrowDown size={11} /> Humans stay in control.</span>
-        </footer>
             </motion.div>
           )}
         </AnimatePresence>
@@ -2053,160 +2124,158 @@ export default function App() {
           }}
         >
           <section
-            className={`modal ${modal === "editor" ? "wide" : ""}`}
+            className={`modal ${modal === "editor" ? "wide" : ""} ${modal === "settings" ? "settings-modal" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="modal-title"
           >
-            <header>
-              <h2 id="modal-title">
-                {modal === "settings"
-                  ? "运行环境配置"
-                  : modal === "editor"
-                  ? "Graph IR · 编辑与编译"
-                  : "审批执行图计划"}
-              </h2>
+            <header className={modal === "settings" ? "settings-modal-header" : ""}>
+              {modal === "settings" ? (
+                <div className="settings-header-title-wrap">
+                  <div className="settings-header-icon">
+                    <Settings2 size={18} />
+                  </div>
+                  <div>
+                    <h2 id="modal-title">项目与引擎运行配置</h2>
+                    <small>管理工作区、模型、Provider 认证及 Execution Instance 并发参数</small>
+                  </div>
+                </div>
+              ) : (
+                <h2 id="modal-title">
+                  {modal === "editor" ? "Graph IR · 编辑与编译" : "审批执行图计划"}
+                </h2>
+              )}
               <button className="icon-button" aria-label="关闭弹窗" onClick={() => setModal(null)}>
                 <X size={18} />
               </button>
             </header>
 
-            {error && <div className="error-banner" role="alert">{error}</div>}
-
             {modal === "settings" ? (
-              <>
-                <div className="settings-grid">
-                  <label>
-                    执行引擎
-                    <select value={config.engine} disabled>
-                      <option value="pi">
-                        Pi
-                      </option>
-                    </select>
-                  </label>
-                  <div className="repo-setting-box">
-                    <label>
-                      <span>Git 仓库根路径</span>
-                      <div className="repo-input-group">
-                        <input
-                          value={config.repository}
-                          onChange={(event) => setConfig({ ...config, repository: event.target.value })}
-                          placeholder="/Users/you/project"
-                        />
-                        <button
-                          type="button"
-                          className="secondary btn-repo-action"
-                          title="在 Finder 中浏览并选择本地文件夹"
-                          onClick={handlePickRepository}
-                        >
-                          <FolderGit2 size={13} />
-                          浏览
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary btn-repo-action"
-                          title="重新检测当前工作目录或输入路径"
-                          onClick={() => handleDetectRepository(config.repository || undefined)}
-                        >
-                          <RotateCcw size={13} />
-                          检测
-                        </button>
-                      </div>
-                    </label>
+              <div className="settings-modal-content">
+                <div className="settings-sections">
+                  {/* Section 1: 本地项目工作区 */}
+                  <div className="settings-card">
+                    <div className="settings-card-title">
+                      <FolderGit2 size={16} />
+                      <h4>本地项目工作区绑定</h4>
+                    </div>
+                    <p className="section-desc">
+                      支持本地 Git 仓库或任意普通文件夹（自动维护零侵入影子仓库沙箱，不污染原项目）。
+                    </p>
+                    <div className="setting-input-row">
+                      <input
+                        className="repo-path-input"
+                        value={config.repository}
+                        onChange={(e) => setConfig({ ...config, repository: e.target.value })}
+                        placeholder="/Users/username/Projects/my-app"
+                      />
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handleOpenProject}
+                        title="调起系统文件夹选择器"
+                      >
+                        <FolderGit2 size={14} /> 浏览本地目录
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => handleDetectRepository(config.repository || undefined)}
+                        title="检测 Git 信息"
+                      >
+                        <RotateCcw size={14} /> 检测状态
+                      </button>
+                    </div>
 
                     {repoInfo ? (
                       <div className="repo-status-card">
                         <div className="repo-status-header">
                           <span className="repo-name">
-                            <FolderGit2 size={14} />
+                            <FolderGit2 size={15} />
                             <strong>{repoInfo.name}</strong>
                           </span>
                           <span className={`status-badge ${repoInfo.clean ? "clean" : "warning"}`}>
-                            {repoInfo.clean ? "工作树干净 (Ready)" : "有未提交改动 (Dirty)"}
+                            {repoInfo.clean ? "✓ 工作树干净 (Clean)" : "⚠ 有未提交改动 (Dirty)"}
                           </span>
                         </div>
                         <div className="repo-status-meta">
-                          <span>分支: <code>{repoInfo.branch}</code></span>
+                          <span>当前分支: <code>{repoInfo.branch}</code></span>
                           {repoInfo.head && <span>HEAD: <code>{repoInfo.head}</code></span>}
                         </div>
+                        <div className="repo-status-path">{repoInfo.path}</div>
                       </div>
                     ) : (
                       <div className="repo-status-hint">
-                        提示：Grapher 将在此 Git 仓库中创建隔离临时 worktree 并发执行任务。
+                        提示：未检测到有效 Git 信息，请确保选择的文件夹包含 <code>.git</code>。
                       </div>
                     )}
                   </div>
-                  <label>
-                    Pi 可执行文件路径 / 命令
-                    <input
-                      value={config.piCommand}
-                      onChange={(event) => setConfig({ ...config, piCommand: event.target.value })}
-                      placeholder="pi 或 /path/to/node"
-                    />
-                  </label>
-                  <label>
-                    Pi 启动额外参数（JSON 数组）
-                    <textarea
-                      value={args}
-                      onChange={(event) => setArgs(event.target.value)}
-                      rows={3}
-                    />
-                  </label>
-                  <label>
-                    模型（留空使用 Pi 默认配置）
-                    <input
-                      value={config.model}
-                      onChange={(event) => setConfig({ ...config, model: event.target.value })}
-                      placeholder="provider/model，如 qwen3.8-flash"
-                    />
-                  </label>
-                  <div className="field-pair">
-                    <label>
-                      并发上限
-                      <input
-                        type="number"
-                        min={1}
-                        max={8}
-                        value={config.maxParallel}
-                        onChange={(event) => setConfig({ ...config, maxParallel: Number(event.target.value) })}
-                      />
-                    </label>
-                    <label>
-                      反馈重试上限
-                      <input
-                        type="number"
-                        min={0}
-                        max={10}
-                        value={config.maxFeedback}
-                        onChange={(event) => setConfig({ ...config, maxFeedback: Number(event.target.value) })}
-                      />
-                    </label>
+
+                  <div className="settings-card">
+                    <div className="settings-card-title">
+                      <Terminal size={16} />
+                      <h4>模型与 Provider 认证</h4>
+                    </div>
+                    <ProviderSettings model={config.model} onModel={model => setConfig(prev => ({ ...prev, model }))} />
                   </div>
-                  <p className="settings-note">
-                    设置将保存并应用到下一次编译。Pi 使用独立登录凭据或本地环境变量。<br />
-                    持久化数据目录：{dataPath || "后端连接后显示"}
-                  </p>
+                  <div className="settings-card">
+                    <div className="settings-card-title"><h4>Execution Instance 调度</h4></div>
+                    <div className="form-grid">
+
+                      <label className="form-field">
+                        <span>并发执行节点上限</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={8}
+                          value={config.maxParallel}
+                          onChange={(e) => setConfig({ ...config, maxParallel: Number(e.target.value) })}
+                        />
+                      </label>
+
+                      <label className="form-field">
+                        <span>反馈重试上限</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={10}
+                          value={config.maxFeedback}
+                          onChange={(e) => setConfig({ ...config, maxFeedback: Number(e.target.value) })}
+                        />
+                      </label>
+                    </div>
+
+                  </div>
+
+                  {/* Section 3: 数据管理 */}
+                  <div className="settings-card">
+                    <div className="settings-card-title">
+                      <RotateCcw size={16} />
+                      <h4>存储与重置</h4>
+                    </div>
+                    <p className="section-desc">
+                      Grapher 将运行时快照与事件保存在本地 SQLite 数据库中。路径：<code>{dataPath || "本地系统应用目录"}</code>
+                    </p>
+                    <div className="danger-actions-row">
+                      <button type="button" className="secondary" onClick={handleResetWorkspace}>
+                        <Plus size={14} /> 重置当前工作区图
+                      </button>
+                      <button type="button" className="secondary danger-btn" onClick={handleClearHistory}>
+                        <RotateCcw size={14} /> 清空所有历史运行快照
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <footer>
-                  <button
-                    className="primary"
-                    onClick={() => {
-                      try {
-                        const value: unknown = JSON.parse(args);
-                        if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-                          throw new Error("启动参数必须是字符串 JSON 数组，如 [\"--flag\"]");
-                        }
-                        setConfig({ ...config, piArgs: value });
-                        setModal(null);
-                      } catch (err) {
-                        setError(String(err));
-                      }
-                    }}
-                  >
-                    保存配置<Check size={14} />
+
+                <footer className="settings-modal-footer">
+                  <button type="button" className="secondary" onClick={() => setModal(null)}>
+                    取消
+                  </button>
+                  <button type="button" className="primary save-config-btn" onClick={handleSaveConfig}>
+                    <Check size={14} /> 保存所有配置
                   </button>
                 </footer>
-              </>
+              </div>
             ) : modal === "editor" ? (
               <>
                 <p className="modal-description">
@@ -2253,11 +2322,9 @@ export default function App() {
                     </li>
                     <li>每个节点分配独立隔离会话；验证失败最多自动反馈重试 {state.config?.maxFeedback ?? config.maxFeedback} 次。</li>
                     <li>完全不修改或破坏你的主开发目录。</li>
-                    {state.config?.engine === "pi" && (
-                      <li className="warning">
-                        Pi 可执行 shell 指令并调用模型，请审视节点任务定义后再行批准。
-                      </li>
-                    )}
+                    <li className="warning">
+                      Execution Instance 可执行 shell 指令并调用模型，请审视节点任务定义后再行批准。
+                    </li>
                   </ul>
                   {state.plan?.warnings.map((warning) => (
                     <p className="warning" key={warning}>{warning}</p>

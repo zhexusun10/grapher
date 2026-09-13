@@ -311,6 +311,32 @@ fn sqlite_replay_restores_state_and_crash_marks_running_attempt_failed() {
 }
 
 #[test]
+fn load_run_switches_active_state_and_allows_continuation() {
+    let temp = TempDir::new().unwrap();
+    let mut rt = runtime(temp.path());
+    let run1 = rt.state.run_id.clone();
+    rt.approve().unwrap();
+
+    // Create a second run
+    rt.create(graph(), config()).unwrap();
+    let run2 = rt.state.run_id.clone();
+    assert_ne!(run1, run2);
+    assert_eq!(rt.state.run_id, run2);
+
+    // Switch back to run1 via load_run
+    let snapshot1 = rt.load_run(&run1).unwrap();
+    assert_eq!(snapshot1.run_id, run1);
+    assert_eq!(rt.state.run_id, run1);
+    assert!(rt.state.approved);
+
+    // Continue run1: pause and resume
+    rt.pause(true).unwrap();
+    assert!(rt.state.paused);
+    rt.pause(false).unwrap();
+    assert!(!rt.state.paused);
+}
+
+#[test]
 fn actual_worktrees_parallel_merge_and_feedback_fixture_complete() {
     let temp = TempDir::new().unwrap();
     let mut runtime = runtime(temp.path());

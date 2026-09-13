@@ -1,6 +1,8 @@
 pub mod compiler;
 pub mod server;
 pub mod engine;
+pub mod graph_merge;
+pub mod provider_auth;
 #[cfg(feature = "fixture")]
 pub mod fixture;
 pub mod model;

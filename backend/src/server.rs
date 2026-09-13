@@ -111,38 +111,24 @@ fn load_env_file() {
 fn bootstrap(service: &Arc<Service>) -> Result<Bootstrap, String> {
     load_env_file();
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("pi");
-    let local = source.join("node_modules/.bin/tsx").exists();
+    #[cfg(feature = "fixture")]
+    let entrypoint = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../engine/entrypoint.mjs");
     let detected_repo = crate::workspace::detect(None).ok().flatten();
     let mut config = runtime.state.config.clone().unwrap_or(Config {
         repository: detected_repo
             .as_ref()
             .map(|r| r.path.clone())
             .unwrap_or_default(),
-        engine: "pi".into(),
-        pi_command: if local { "node" } else { "pi" }.into(),
-        pi_args: if local {
-            vec![
-                source
-                    .join("node_modules/tsx/dist/cli.mjs")
-                    .to_string_lossy()
-                    .into(),
-                "--tsconfig".into(),
-                source.join("tsconfig.json").to_string_lossy().into(),
-                source
-                    .join("packages/coding-agent/src/cli.ts")
-                    .to_string_lossy()
-                    .into(),
-            ]
-        } else {
-            Vec::new()
-        },
         model: "qwen3.8-flash".into(),
         max_parallel: 2,
         max_feedback: 3,
+        #[cfg(feature = "fixture")]
+        engine: "pi".into(),
+        #[cfg(feature = "fixture")]
+        pi_command: "node".into(),
+        #[cfg(feature = "fixture")]
+        pi_args: vec![entrypoint.to_string_lossy().into()],
     });
     if config.model.trim().is_empty() {
         config.model = "qwen3.8-flash".into();
@@ -196,6 +182,14 @@ fn history(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
         .load(&run_id)
 }
 
+fn load_run(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
+    if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current operation to finish before switching runs".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    runtime.load_run(&run_id)
+}
+
 fn compile_graph(graph: Graph) -> Result<Plan, Vec<compiler::Diagnostic>> {
     compiler::compile(&graph, true)
 }
@@ -212,12 +206,20 @@ fn save_graph(graph: Graph, mut config: Config, service: &Arc<Service>) -> Resul
     Ok(runtime.state.clone())
 }
 
-fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
+fn plan_goal_internal(
+    goal: String,
+    config: Config,
+    service: &Arc<Service>,
+    mut on_partitioner_line: impl FnMut(&str),
+    mut on_route: impl FnMut(&Route),
+    mut on_planner_line: impl FnMut(&str),
+) -> Result<Snapshot, String> {
     if goal.trim().is_empty() {
         return Err("Enter a goal".into());
     }
+    #[cfg(feature = "fixture")]
     if config.engine != "pi" {
-        return Err("Automatic planning requires the Pi engine".into());
+        return Err("Automatic planning requires the Execution Instance Engine".into());
     }
     if service.driving.load(Ordering::SeqCst) || service.planning.swap(true, Ordering::SeqCst) {
         return Err("Another operation is running".into());
@@ -266,7 +268,10 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
                 ],
                 system_prompt: Some(&partitioner_system_prompt),
             },
-            |text| log.push_str(&text),
+            |text| {
+                log.push_str(&text);
+                on_partitioner_line(&text);
+            },
         );
         fs::write(directory.join("partition.jsonl"), log).map_err(|error| error.to_string())?;
         partition_result?;
@@ -274,6 +279,7 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
             &fs::read_to_string(route_path).map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
+        on_route(&route);
         let graph = match route.plan_type.as_str() {
             "serial" => Graph {
                 original_goal: goal.clone(),
@@ -331,7 +337,10 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
                         ],
                         system_prompt: Some(&planner_system_prompt),
                     },
-                    |text| log.push_str(&text),
+                    |text| {
+                        log.push_str(&text);
+                        on_planner_line(&text);
+                    },
                 );
                 fs::write(directory.join("planner.jsonl"), log)
                     .map_err(|error| error.to_string())?;
@@ -354,10 +363,22 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
         }
         let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
         runtime.create(graph, final_config)?;
-        Ok(runtime.state.clone())
+        if route.plan_type == "serial" {
+            runtime.approve()?;
+        }
+        let snapshot = runtime.state.clone();
+        drop(runtime);
+        if route.plan_type == "serial" {
+            drive(service.clone());
+        }
+        Ok(snapshot)
     })();
     cleanup.planning.store(false, Ordering::SeqCst);
     result
+}
+
+fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
+    plan_goal_internal(goal, config, service, |_| {}, |_| {}, |_| {})
 }
 
 fn drive(service: Arc<Service>) {
@@ -428,6 +449,16 @@ fn drive(service: Arc<Service>) {
                 for (from, output) in reviews {
                     if runtime.state.nodes[&from].status == "done" {
                         runtime.review(&from, &output)?;
+                    }
+                }
+                // Graph mode publishes all completed heads to the user's repository.
+                // Serial mode already writes there directly and is excluded.
+                if runtime.state.phase == "completed" && runtime.state.graph.nodes.len() > 1 {
+                    let repository = PathBuf::from(&runtime.state.config.as_ref().unwrap().repository);
+                    let heads: Vec<String> = runtime.state.executions.iter().filter_map(|e| e.after.clone()).collect();
+                    if let Err(error) = crate::graph_merge::merge_graph(&repository, &heads) {
+                        eprintln!("Graph auto-merge requires merger Execution Instance: {error}");
+                        let _ = runtime.emit(EventKind::Paused { paused: true });
                     }
                 }
             }
@@ -543,9 +574,11 @@ pub fn dispatch(
 ) -> Result<serde_json::Value, String> {
     use serde_json::to_value;
     let result = match command {
+        "provider_auth" => to_value(crate::provider_auth::request(body)?),
         "bootstrap" => to_value(bootstrap(service)?),
         "snapshot" => to_value(snapshot(service)?),
         "history" => to_value(history(argument(&body, "runId")?, service)?),
+        "load_run" => to_value(load_run(argument(&body, "runId")?, service)?),
         "compile_graph" => to_value(
             compile_graph(argument(&body, "graph")?)
                 .map_err(|errors| serde_json::to_string(&errors).unwrap())?,
@@ -567,12 +600,53 @@ pub fn dispatch(
             service,
         )?),
         "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),
+        "pick_repository" => to_value(crate::workspace::pick_repository()?),
         "reset_workspace" => to_value(reset_workspace(service)?),
         "clear_history" => to_value(clear_history(service)?),
         "delete_run" => to_value(delete_run(argument(&body, "runId")?, service)?),
         _ => return Err("Unknown command".into()),
     };
     result.map_err(|error| error.to_string())
+}
+
+struct SseStreamReceiver {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    current: Vec<u8>,
+    pos: usize,
+}
+
+impl std::io::Read for SseStreamReceiver {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos < self.current.len() {
+            let n = (self.current.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.current[self.pos..self.pos + n]);
+            self.pos += n;
+            return Ok(n);
+        }
+        match self.rx.recv() {
+            Ok(bytes) => {
+                if bytes.is_empty() {
+                    return Ok(0);
+                }
+                let n = bytes.len().min(buf.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+                if n < bytes.len() {
+                    self.current = bytes;
+                    self.pos = n;
+                } else {
+                    self.current.clear();
+                    self.pos = 0;
+                }
+                Ok(n)
+            }
+            Err(_) => Ok(0),
+        }
+    }
+}
+
+fn send_sse_event(tx: &std::sync::mpsc::Sender<Vec<u8>>, event: &str, data: &serde_json::Value) {
+    let payload = format!("event: {event}\ndata: {}\n\n", data);
+    let _ = tx.send(payload.into_bytes());
 }
 
 pub fn run() -> Result<(), String> {
@@ -613,6 +687,7 @@ pub fn run() -> Result<(), String> {
                 }
             }
             crate::engine::terminate_all();
+            crate::provider_auth::shutdown();
             std::process::exit(0);
         }
     });
@@ -661,6 +736,88 @@ pub fn run() -> Result<(), String> {
                         .respond(Response::from_string("JSON POST required").with_status_code(415));
                     return;
                 }
+
+                if command == "plan_goal_stream" {
+                    let mut input = String::new();
+                    let body_res = std::io::Read::read_to_string(
+                        &mut request.as_reader().take(2 * 1024 * 1024 + 1),
+                        &mut input,
+                    )
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string()));
+
+                    let (goal, config): (String, Config) = match body_res.and_then(|body| {
+                        let goal: String = argument(&body, "goal")?;
+                        let config: Config = argument(&body, "config")?;
+                        Ok((goal, config))
+                    }) {
+                        Ok(pair) => pair,
+                        Err(err) => {
+                            let _ = request.respond(
+                                Response::from_string(serde_json::json!({"error": err}).to_string())
+                                    .with_status_code(400)
+                                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
+                            );
+                            return;
+                        }
+                    };
+
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let service_clone = service.clone();
+
+                    thread::spawn(move || {
+                        let tx_part = tx.clone();
+                        let tx_route = tx.clone();
+                        let tx_plan = tx.clone();
+                        let result = plan_goal_internal(
+                            goal,
+                            config,
+                            &service_clone,
+                            |line| {
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                                    send_sse_event(&tx_part, "partitioner", &serde_json::json!({ "raw": line, "event": parsed }));
+                                } else {
+                                    send_sse_event(&tx_part, "partitioner", &serde_json::json!({ "raw": line }));
+                                }
+                            },
+                            |route| {
+                                send_sse_event(&tx_route, "route_decision", &serde_json::json!({ "planType": route.plan_type }));
+                            },
+                            |line| {
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                                    send_sse_event(&tx_plan, "planner", &serde_json::json!({ "raw": line, "event": parsed }));
+                                } else {
+                                    send_sse_event(&tx_plan, "planner", &serde_json::json!({ "raw": line }));
+                                }
+                            },
+                        );
+
+                        match result {
+                            Ok(snapshot) => {
+                                send_sse_event(&tx, "complete", &serde_json::json!({ "snapshot": snapshot }));
+                            }
+                            Err(err) => {
+                                send_sse_event(&tx, "error", &serde_json::json!({ "error": err }));
+                            }
+                        }
+                        let _ = tx.send(Vec::new());
+                    });
+
+                    let stream = SseStreamReceiver {
+                        rx,
+                        current: Vec::new(),
+                        pos: 0,
+                    };
+                    let response = Response::empty(200)
+                        .with_data(stream, None)
+                        .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
+                        .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
+                        .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
+                        .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
+                    let _ = request.respond(response);
+                    return;
+                }
+
                 let mut input = String::new();
                 let result = std::io::Read::read_to_string(
                     &mut request.as_reader().take(2 * 1024 * 1024 + 1),
@@ -681,6 +838,7 @@ pub fn run() -> Result<(), String> {
                 let _ = request.respond(
                     Response::from_string(body.to_string())
                         .with_status_code(status)
+                        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
                         .with_header(
                             Header::from_bytes("Content-Type", "application/json").unwrap(),
                         ),

@@ -20,8 +20,8 @@ pub struct Job {
     pub reviewer: bool,
 }
 
-/// Shipping builds accept only the Pi engine. The `fixture` feature adds a
-/// deterministic actuator for tests and the benchmark harness.
+/// Test builds alone support actuator selection.
+#[cfg(feature = "fixture")]
 fn known_engine(engine: &str) -> bool {
     #[cfg(feature = "fixture")]
     if engine == crate::fixture::ENGINE {
@@ -70,12 +70,14 @@ impl Runtime {
             return Err("Another Grapher instance owns this runtime. Close it before opening this data directory again.".into());
         }
         let store = Store::open(&root.join("events.sqlite"))?;
+        #[allow(unused_mut)]
         let mut state = if let Some(run) = store.runs()?.first() {
             store.load(run)?
         } else {
             Snapshot::default()
         };
-        // Event stores written by older builds can name engines this build does not ship.
+        // Production serde discards legacy engine fields automatically.
+        #[cfg(feature = "fixture")]
         if let Some(config) = state.config.as_mut() {
             if !known_engine(&config.engine) {
                 config.engine = "pi".into();
@@ -95,7 +97,7 @@ impl Runtime {
             .cloned()
             .collect();
         for execution in interrupted {
-            runtime.emit(EventKind::Failed { node: execution.node, execution_id: Some(execution.id), error: "Application stopped during this execution. Its result is not trusted; inspect and rerun with a fresh Pi session.".into() })?;
+            runtime.emit(EventKind::Failed { node: execution.node, execution_id: Some(execution.id), error: "Application stopped during this execution. Its result is not trusted; inspect and rerun with a fresh Execution Instance.".into() })?;
         }
         if runtime.state.approved
             && !matches!(
@@ -159,20 +161,51 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn load_run(&mut self, run_id: &str) -> Result<Snapshot, String> {
+        if self.active() {
+            return Err("Pause and wait for the current executions to finish first".into());
+        }
+        #[allow(unused_mut)]
+        let mut state = self.store.load(run_id)?;
+        #[cfg(feature = "fixture")]
+        if let Some(config) = state.config.as_mut() {
+            if !known_engine(&config.engine) {
+                config.engine = "pi".into();
+            }
+        }
+        let interrupted: Vec<_> = state
+            .executions
+            .iter()
+            .filter(|execution| execution.status == "running")
+            .cloned()
+            .collect();
+        self.state = state;
+        for execution in interrupted {
+            self.emit(EventKind::Failed {
+                node: execution.node,
+                execution_id: Some(execution.id),
+                error: "Execution was interrupted. Inspect and rerun.".into(),
+            })?;
+        }
+        Ok(self.state.clone())
+    }
+
     pub fn create(&mut self, graph: Graph, config: Config) -> Result<(), String> {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());
         }
         compile(&graph, true)
             .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        #[cfg(feature = "fixture")]
         if !known_engine(&config.engine) {
-            return Err("Unknown engine".into());
+            return Err("Unknown test actuator".into());
         }
         if !(1..=8).contains(&config.max_parallel) || config.max_feedback > 10 {
             return Err("Concurrency must be 1–8; feedback limit must be 0–10".into());
         }
+        #[cfg(feature = "fixture")]
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
-            return Err("Pi command is required".into());
+            return Err("Test process command is required".into());
         }
         self.state = Snapshot {
             run_id: Uuid::new_v4().to_string(),
@@ -322,13 +355,16 @@ impl Runtime {
                     .count()
                     + 1,
                 session_id: Uuid::new_v4().to_string(),
-                worktree: self
-                    .root
-                    .join("worktrees")
-                    .join(&self.state.run_id)
-                    .join(format!("{}-{id}", node.name))
-                    .to_string_lossy()
-                    .into(),
+                worktree: if self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task" {
+                    resolve_repository(&self.root, &config)?.to_string_lossy().into()
+                } else {
+                    self.root
+                        .join("worktrees")
+                        .join(&self.state.run_id)
+                        .join(format!("{}-{id}", node.name))
+                        .to_string_lossy()
+                        .into()
+                },
                 before,
                 after: None,
                 status: "running".into(),
@@ -504,6 +540,7 @@ pub fn perform(
         &job.execution,
         &job.task,
         job.reviewer,
+        root,
         on_output,
     )?;
     let head = workspace::snapshot(path)?;
