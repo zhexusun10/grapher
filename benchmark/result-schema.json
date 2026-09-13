@@ -6,7 +6,7 @@
   "properties": {
     "schemaVersion": {"const": 1},
     "benchmarkRunId": {"type": "string"},
-    "benchmarkCaseId": {"type": "string", "pattern": "^(B00[1-9]|B010|HARNESS)$"},
+    "benchmarkCaseId": {"type": "string", "pattern": "^(B00[1-9]|B01[01]|HARNESS)$"},
     "status": {"enum": ["PASS", "FAIL", "NOT_IMPLEMENTED", "NOT_APPLICABLE"]},
     "layer": {"enum": ["deterministic", "agent-dependent"]},
     "classification": {"enum": [null, "BENCHMARK_BUG", "IMPLEMENTATION_BUG", "NOT_IMPLEMENTED", "ENVIRONMENT_FAILURE", "AGENT_FAILURE", "FLAKY"]},

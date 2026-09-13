@@ -221,13 +221,15 @@ Graph Planner 是一个短生命周期的 **Execution Graph Compiler Frontend**�
 
 # 5. Planner Tools
 
-Planner 只有四个工具：
+Planner 只有六个工具：
 
 ```text
 node
 edge
 read
-bash
+ls
+find
+grep
 ```
 
 不存在：
@@ -249,7 +251,9 @@ Planner 无法直接创建或运行任何 Pi Instance。
 - `node`：创建、修改、删除 Graph Node
 - `edge`：创建、修改、删除 Graph Edge
 - `read`：读取 Repository / Workspace
-- `bash`：检查 Repository / Environment
+- `ls`：列出仓库目录
+- `find`：按 glob 搜索仓库文件
+- `grep`：按模式搜索仓库内容
 
 Graph 中使用语义化的 Node `name` 作为 Planner 可见的唯一标识。
 
@@ -487,24 +491,13 @@ Planner 可以读取：
 
 ---
 
-## 5.4 `bash`
+## 5.4 `bash`（受限只读检查）
 
-尽可能直接复用 Pi 原生 `bash` 工具定义。
+Planner 注册自定义 bash，覆盖 Pi 的任意 shell 工具。命令字符串经专用解析器分派，不交给 shell 执行。支持 pwd、ls、find、rg/grep、cat、head/tail，以及读取公开 HTTP(S) 文档的 curl GET/HEAD；具体参数见工具描述及 `backend/resources/planning-inspection.md`。
 
-Planner 可以使用 Bash 检查：
+本地路径和 read 一样限制在当前仓库内，拒绝符号链接和 .git；禁止写入、脚本、测试、重定向、管道及命令组合。curl 不读取本机配置或代理，不允许上传、认证、请求体、非 HTTP(S) 协议和本机/内网地址；DNS 结果固定到已验证的公网地址，每次重定向重新验证。
 
-- Repository structure
-- Git state
-- Dependencies
-- Environment
-- Build system
-- Existing project configuration
-
-Planner 使用 Bash 的目的仍然是：
-
-> **理解环境并制定 Graph。**
-
-不是代替 Node 执行实际开发任务。
+这些检查用于理解现有契约、组件边界和依赖关系。实际实现、测试与实验由节点执行阶段负责。工具层只读不是进程级沙箱，也不能保证公网 GET 在远端没有副作用。
 
 ---
 
@@ -572,7 +565,9 @@ Planner 只有：
 node
 edge
 read
-bash
+ls
+find
+grep
 ```
 
 不存在任何：

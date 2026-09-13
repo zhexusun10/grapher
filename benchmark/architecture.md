@@ -1,50 +1,82 @@
-# Benchmark harness contract (schema v1)
+# Partitioner / Planner benchmark contract
 
-> 历史记录：本文描述迁移前的实现与测试结果。当前版本使用浏览器前端和 HTTP 后端；现有基准适配器调用产品 dispatcher，HTTP 集成测试见 `npm run test:http`。
+The primary benchmark is **B010, variant `planning-quality-v1`, schema v2**. The old B010 Pi file-writing task has been removed from executable code. Its historical results remain archived and are not comparable to this benchmark.
 
-Entry: `npm run benchmark`. Runner: Node standard library, existing TypeScript/esbuild/React, Cargo feature `benchmark`. No added third-party packages. The test-only adapter is included in server.rs so it can call private generated command wrappers. It is excluded from shipping builds. Each case runs in a fresh OS process with its own Tauri MockRuntime host; the real desktop drive owns scheduling and worker threads.
+## What is evaluated
 
-Fixtures are small deterministic Graph values in server.rs, not model-generated graphs. The deterministic actuator is `backend/src/fixture.rs`, compiled only under the Cargo `fixture` feature that `benchmark` enables; engine id `fixture`, isolated repository `fixture-repository`, output prefix `[fixture]`. Shipping builds contain no such engine and accept only `pi`, so only the node-execution step is substituted while compiler, scheduler, worktrees, event store and feedback stay on the shipping path. B006 deliberately configures `/usr/bin/false` as the executable to exercise a controlled real process failure. It does not fake a Runtime.finish result. B010 uses the actual local Pi installation. `--planning` changes only B010's initiation variant from hand-authored Graph IR to real plan_goal; variant must be reported when comparing results.
+1. Can the real Partitioner distinguish linear work from substantial independent workstreams?
+2. Can the real Planner generate a complete, actionable, appropriately parallel graph with sound dependencies and revision feedback?
 
-| ID | Layer | Acceptance |
+There is no Runtime construction, graph approval, `drive`, node execution, worktree preparation or implementation-success criterion. Pi is used only as the production planning engine and, in a separate process, as the semantic judge.
+
+`planning-host.rs` uses the production Pi adapter, Partitioner/Planner prompts, tool extension, mutation compiler and final compiler. This is a component evaluation of planning behavior, not a test of the HTTP `plan_goal` handler. The planner receives the same goal/system prompt and node/edge/read/bash surface (bash is the custom read-only inspection override, not Pi's unrestricted shell) as production. The partitioner receives route_task only.
+
+## Corpus
+
+`planning-cases.mjs` contains six authored goals and an isolated inspectable repository. Expected routes, rationale and evaluation rubrics stay outside that repository and are not included in candidate-model prompts.
+
+| Task | Expected route | Workload / distinguishing feature |
 |---|---|---|
-| B001 | deterministic | command save → approval → real fixture worktree write → completed + replay |
-| B002 | deterministic | A→B→C, upstream Finished precedes downstream Started |
-| B003 | deterministic | A→B/C; actual engine output intervals overlap |
-| B004 | deterministic | A→B/C→D; D contains all upstream files |
-| B005 | deterministic | normal cycle E101, failed save leaves no executions/worktrees |
-| B006 | deterministic | real child nonzero exit → failed A, blocked B, persisted cause, needs_attention |
-| B007 | deterministic | REVISE → invalidation → fresh sessions → ACCEPT; independent node not rerun |
-| B008 | deterministic | live IPC replay, revision history, structural TS contract, actual TaskNode SSR, original frontend action closures over live IPC, node/intervention filters and failure visibility |
-| B009 | deterministic | feedback limit zero: no extra attempts, reviewer failed, independent node done; fork-inherited lock release and interrupted-run recovery |
-| B010 | agent-dependent | real Pi writes exact hello.txt and runtime completes; optional real partition/plan initiation |
+| P001 | serial | local normalization fix with directly coupled tests |
+| P002 | serial | multiple ordered refinements of one CSV importer |
+| P003 | serial | mechanical rename across backend, frontend and documentation |
+| P004 | graph | endpoint and browser implementation against an existing contract, then integration |
+| P005 | graph | shared retry contract, TypeScript/Python SDKs, conformance review and feedback |
+| P006 | graph | independent authentication/storage audits, then release synthesis |
 
-B008 extracts the existing action/filter AST from App.tsx for a contract test. State setters observe frontend state; invoke goes to a persistent real Tauri handler host via JSON stdin/stdout. Neither a fake backend nor a replacement scheduler is used. TaskNode and readableLog are exposed only in a test bundle, without changing their production exports. This covers action/serialization/render integration but does not prove native window clicks, effects or 原生窗口平台 window lifecycle.
+These are finite authored cases with explicit rationales, not a broad statistical estimate. Six tasks do not establish general routing accuracy. Add new cases/version the corpus to broaden coverage; do not alter labels after observing model output merely to improve scores.
 
-## Artifacts
+## Routing and isolated Planner quality
 
-`benchmark-results/<label>-<UTC>/`: metadata.json, source.diff, source manifest, summary.json, cases.jsonl, events.jsonl, benchmark.log, build.log, `<case>-<sample>/`. Case directories retain compiler result, requests.jsonl, responses.jsonl, snapshot.json, result.json, SQLite WAL/event store, worktrees and Pi session directories. Frontend contract has before/after/failure JSON, emitted HTML, action results and another isolated host's event store. Original baseline is immutable; later classification corrections live in findings.md, not by rewriting baseline records.
+Routing accuracy depends only on the final valid route and successful process result. The separate protocol metric requires route_task exactly once; repeating the same correct route is a protocol failure, not a routing misclassification. Either can fail the overall sample. Missing routes and process/provider errors do not disappear from the denominator. Summary includes a confusion matrix with an error column.
 
-Result identity: schemaVersion, benchmarkRunId, benchmarkCaseId, sample, variant, grapherRunId(s), gitCommit, dirtyWorkingTree, source digest, start/end/duration. Status is PASS/FAIL/NOT_IMPLEMENTED/NOT_APPLICABLE. Failure classification is BENCHMARK_BUG/IMPLEMENTATION_BUG/ENVIRONMENT_FAILURE/AGENT_FAILURE/FLAKY/NOT_IMPLEMENTED, with raw error and artifacts. Expected process failure is a passing negative scenario only when failure state, persisted cause and dependency blocking all hold.
+For each **gold graph task**, the harness independently calls the Planner even if the Partitioner predicted serial. This exposes Planner quality despite a routing mistake. Routing accuracy and isolated Planner quality are reported separately; an incorrect route still fails the overall sample. Serial cases have no Planner requirement. `--planner-only` selects the three graph cases and does not call the Partitioner at all; routing is NOT_RUN, not PASS.
 
-Durations are wall clock in milliseconds. Runtime duration excludes frontend contract/build; case duration includes frontend checks; suite duration includes build/setup. retryCount counts fresh node attempts beyond first; providerRetryCount counts Pi auto_retry_start separately. Token usage is summed from message_end when present, otherwise null. Process failures count observed non-success OS exits; a model error may have OS exit 0. Do not compare fixture latency with model latency.
+## Candidate inspection boundary
 
-Historical records are immutable: `baseline.json`, `final*.json`, `resumed-baseline.json`, `report*.md`, `findings.md` and everything under `benchmark-results/` still carry the pre-removal `"engine":"demo"` value and `[demo]` log prefixes. They document runs of the engine that has since been deleted from the product; they are not rewritten to match the current `fixture` id.
+The Planner's bash name refers to `backend/resources/planning-inspection.mjs`, a restricted command dispatcher, not a shell. Local read/search inputs cannot leave the fixture or follow symlinks; public HTTP(S) GET/HEAD cannot access local/private addresses and every redirect is validated. This is a trusted tool boundary, not a process-level sandbox. See [inspection policy](../backend/resources/planning-inspection.md).
 
-## Reproduction and comparison
+Rubrics are written only after candidate generation. `planning-boundary.mjs` checks the recorded policy, tool start/end pairing, successful bash policy evidence, and successful read paths before invoking the judge. Missing policy or unsafe historical evidence is PLANNING_BOUNDARY failure even if Git is clean, the graph compiles and an old judge gave full marks. Old unrestricted P004 read its hidden rubric and executed temporary probes; its automatic PASS is not valid evidence. Replay retains originals but excludes unverified candidates from quality passes. Both outer `isError` and nested `result.isError` count as tool errors; inspection rejections and mutation rejections are reported separately.
+
+## Quality assessment
+
+The shipping compiler checks final graph validity. A separate tool-free semantic judge sees the goal, repository, candidate graph and hidden rubric. It maps deliverable producers to node names and scores five dimensions 0/1/2: goal coverage, standalone instructions, task boundaries, mergeability, and verification. Each nonzero score needs a node and task-line reference; the grader extracts the exact original line as its quotation. Invalid references and incomplete schemas are JUDGE_FAILURE. Legacy quotation-based reviews remain readable only when their quotations match verbatim; ellipses/paraphrases are rejected. The initial development judge produced such invalid quotations, motivating the line-reference format rather than relaxing evidence validation.
+
+The deterministic grader then checks:
+
+- Compiler success and a workload-specific generous node-count ceiling (no exact graph/node-name matching).
+- Workspace portability: tasks must not bind a fresh worker to the original inspected repository's absolute path. This static check remains visible even if semantic judging fails.
+- Required deliverable ownership, with concrete output paths in producer tasks.
+- Prerequisite reachability, accepting transitive dependency paths.
+- Independent producers remain distinct and are not artificially serialized.
+- P005's reviewer has feedback edges to both SDK implementation owners.
+- At least 8/10 semantic points with no zero dimension.
+
+A positive judge cannot override failed topology/ownership checks. Tests include monolithic keyword stuffing, missing prerequisites, unnecessary serialization, omitted feedback and fabricated quotations. Semantic role mapping and scores remain model judgments: validated quotations ground the evidence but do not prove the judgment correct. Default judge may use the same model as the candidate in a fresh process; use BENCHMARK_JUDGE_MODEL for a different model. Inspect retained graphs/reviews and calibrate against human judgments before treating scores as independent gold truth.
+
+## Commands
 
 ```sh
-npm run benchmark:validate # three repeated deterministic suites + final 3 planned Pi samples
-npm run benchmark -- --label baseline
-npm run benchmark -- --deterministic --label repeat-1
-npm run benchmark -- --case B008 --label targeted
-npm run benchmark -- --label final --agent-repeats 3 --planning
+npm run benchmark                         # six goals, one fixed sample each
+npm run benchmark:planner                 # three graph goals; Planner + judge only
+npm run benchmark -- --task P005           # targeted routing + graph evaluation
+npm run benchmark:validate                 # three fixed samples of every goal
+npm run test:benchmark                     # grader regressions, no model
+npm run benchmark:runtime                  # B001–B009 and B011, no real model
 ```
 
-Real Pi needs network and the already-configured Pi authentication. Optional overrides: BENCHMARK_PI_COMMAND, BENCHMARK_PI_ARGS (JSON array), BENCHMARK_PI_MODEL. They change engine configuration, never assert results. Model failures fail the scenario while the runtime invariants remain separately inspectable. No secrets are read by the harness. Keep artifacts local: tool/model output may contain source content.
+Supported primary runner flags: `--case B010`, `--task P001..P006`, `--label`, `--repeats 1..5`, `--planner-only`, `--replay <artifact-directory>`. Replay copies retained evidence to a new run and recalculates grades without building or calling any model; it records the original evidence run/source separately from the current grader source. Goals and corpus version must match. Raw original outputs remain unchanged. Add `--rejudge` to reuse candidate graphs but make exactly one new semantic evaluation per available complete graph with valid inspection-boundary evidence; this calls a model and records the new judge prompt/schema separately. It does not regenerate candidate graphs or retry invalid judgments until success. `gradingVersion` identifies grading policy; `evidenceRun` identifies the original candidate population.
 
-Acceptance requires three consecutive deterministic full suites with identical statuses and stable logical metrics, plus actual Pi evidence where available. Native UI automation and unimplemented future capabilities stay explicit gaps. Run selection is for diagnosis; selected runs never count as full-suite acceptance.
+Each real stage has the product's 900-second Pi timeout plus a 30-second host cleanup allowance. The initial development run used a shorter 240-second host limit; its interrupted samples remain explicit failures and cannot be compared as though they had the same planning budget.
 
-## Resumed harness adjustment
+Old `--planning`, `--agent-repeats`, and `--deterministic` primary-runner flags are removed; runtime regressions have their own command. Repetition is fixed in advance; no automatic resampling until a case passes.
 
-B008 now imports the shipping runtimeService and the Tauri JS invoke implementation; a native IPC transport shim connects it to the real test host. It also verifies rejected deletion preserves UI indexes and current-workspace history clearing preserves unrelated event-store snapshots, even with a stale sidebar entry. The host saves original store snapshots before fixture-only deletion so execution metrics/history are not lost. Revision values are asserted on wire state while visible attempt counts are asserted in TaskNode, matching the current UI design. Cargo.lock is retained in source manifests. See resumed-scope.md.
+BENCHMARK_PI_COMMAND/BENCHMARK_PI_ARGS configure the existing Pi installation. BENCHMARK_PI_MODEL overrides both candidate stages; otherwise PARTITIONER_MODEL/PLANNER_MODEL and the product default apply. BENCHMARK_JUDGE_MODEL selects the independent judging process's model. Product prompt overrides are honored and retained per stage. Existing Pi authentication/network are required; no new package dependencies.
+
+## Artifacts and interpretation
+
+`benchmark-results/<label>-<UTC>/` contains source manifest/snapshot/diff, corpus identity, build log, summary.json, cases.jsonl and report.md. Each sample retains the fixture repository and hidden rubric, stage inputs/effective prompts, model identity, raw JSONL events/session, route, graph, compiler diagnostics, judge response/quotations, quality checks and stage timings/tokens/tool counts.
+
+Candidate and judge costs are separate. Provider 429/5xx/auth/network failures are classified as environment failures; invalid/failed judge responses remain separately observable. Failed attempts stay in the report. `nodeExecutionCount` is zero by construction; the harness additionally checks the fixture HEAD/worktree remain unchanged and no runtime database/worktrees were created. Case-level errors cause a nonzero exit code and preserved partial results.
+
+Schema v2 and `planning-quality-v1` prevent mixing these results with the old B010 file task. Runtime reports from B001–B009/B011 concern execution correctness only; they contribute nothing to routing accuracy or graph-quality scores.

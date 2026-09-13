@@ -3,133 +3,191 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { parseArgs } from 'node:util';
+import { checkPlanningBoundary } from './planning-boundary.mjs';
+import { cases, corpusVersion, repositoryFiles } from './planning-cases.mjs';
+import { judgeRequest, judgeSystem, parseReview, scoreGraph, scoreRouting, staticGraphChecks } from './planning-grade.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
 process.chdir(repo);
-const args = process.argv.slice(2);
-const opt = (key, fallback) => { const i = args.indexOf(key); return i < 0 ? fallback : args[i + 1]; };
-const label = opt('--label', 'run');
-const selected = opt('--case', null);
-const deterministic = args.includes('--deterministic');
-const planning = args.includes('--planning');
-const repeats = Number(opt('--agent-repeats', '1'));
-const names = ['Minimal fixture execution', 'Dependency chain', 'Actual parallel fan-out', 'Fan-in composition', 'Compiler rejects dependency cycle', 'Pi process failure propagation', 'REVISE then ACCEPT', 'Frontend contract and intervention', 'Feedback limit and independent branch', 'Real Pi file task'];
-const ids = names.map((_, i) => `B${String(i + 1).padStart(3, '0')}`);
-const runId = `${/^[a-zA-Z0-9_-]+$/.test(label) ? label : 'invalid'}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+const { values: options } = parseArgs({ options: {
+  label: { type: 'string', default: 'planning' }, case: { type: 'string', default: 'B010' },
+  task: { type: 'string' }, repeats: { type: 'string', default: '1' },
+  'planner-only': { type: 'boolean', default: false }, replay: { type: 'string' }, rejudge: { type: 'boolean', default: false },
+} });
+const repeats = Number(options.repeats);
+if (!/^[\w-]+$/.test(options.label) || options.case !== 'B010' || !Number.isInteger(repeats) || repeats < 1 || repeats > 5 || (options.task && !cases.some(c => c.id === options.task))) throw Error('Use --case B010, --task P001..P006, --repeats 1..5 and a simple --label. Runtime regressions moved to npm run benchmark:runtime.');
+const selected = cases.filter(c => (!options.task || c.id === options.task) && (!options['planner-only'] || c.expectedRoute === 'graph'));
+if (!selected.length) throw Error('Selection contains no Planner graph task');
+if (options.rejudge && !options.replay) throw Error('--rejudge requires --replay; it reuses candidate graphs and only reruns their evaluator');
+const evidenceRoot = options.replay ? path.resolve(options.replay) : null;
+const evidenceMetadata = evidenceRoot ? JSON.parse(fs.readFileSync(path.join(evidenceRoot, 'metadata.json'), 'utf8')) : null;
+if (evidenceMetadata && evidenceMetadata.corpusVersion !== corpusVersion) throw Error('Replay requires the same corpus version');
+const runId = `${options.label}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
 const root = path.join(repo, 'benchmark-results', runId);
 fs.mkdirSync(root, { recursive: true });
-const write = (name, value) => fs.writeFileSync(path.join(root, name), JSON.stringify(value, null, 2) + '\n');
-const append = (name, value) => fs.appendFileSync(path.join(root, name), JSON.stringify(value) + '\n');
-const log = s => { console.log(s); fs.appendFileSync(path.join(root, 'benchmark.log'), s + '\n'); };
+const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); };
+const log = text => { console.log(text); fs.appendFileSync(path.join(root, 'benchmark.log'), text + '\n'); };
 const env = { ...process.env, PATH: `${os.homedir()}/.cargo/bin:${process.env.PATH}` };
-const command = (cmd, argv, timeout = 240000, extra = {}) => spawnSync(cmd, argv, { cwd: repo, env: { ...env, ...extra }, encoding: 'utf8', timeout, maxBuffer: 32 * 1024 * 1024 });
-const git = argv => command('git', argv).stdout?.trim() ?? '';
+const command = (program, args, extra = {}) => spawnSync(program, args, { cwd: repo, env, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: 240000, ...extra });
+function git(args, cwd = repo) {
+  const r = command('git', args, { cwd });
+  if (r.status !== 0) throw Error(`Git failed: ${r.stderr || r.error}`);
+  return r.stdout.trim();
+}
 const startedAt = new Date().toISOString();
-const metadata = { toolchain: {node:process.version, platform:process.platform, arch:process.arch, cargo:command('cargo',['--version']).stdout?.trim(), git:git(['--version']), piCommit:git(['-C','pi','rev-parse','HEAD'])}, schemaVersion: 1, benchmarkRunId: runId, label, selection: selected, deterministicOnly: deterministic, agentVariant: planning ? 'planned' : 'graph-ir', gitCommit: git(['rev-parse', 'HEAD']), dirtyWorkingTree: git(['status', '--porcelain']), startedAt };
+const metadata = { schemaVersion: 2, benchmarkCaseId: 'B010', variant: 'planning-quality-v1', corpusVersion, benchmarkRunId: runId, startedAt, selection: selected.map(c => c.id), repeats, plannerOnly: options['planner-only'], stageTimeoutMs: 930000, gradingVersion: 'graph-quality-rubric-v3-readonly-boundary', judgeEvidenceSchema: evidenceRoot && !options.rejudge ? (evidenceMetadata.judgeEvidenceSchema ?? 1) : 2, rejudge: options.rejudge, evidenceRun: evidenceMetadata ? { path: evidenceRoot, benchmarkRunId: evidenceMetadata.benchmarkRunId, sourceSha256: evidenceMetadata.sourceSha256 } : null, gitCommit: git(['rev-parse', 'HEAD']), dirtyWorkingTree: git(['status', '--porcelain']), nodeVersion: process.version };
 const results = [];
-fs.writeFileSync(path.join(root, 'cases.jsonl'), '');
-fs.writeFileSync(path.join(root, 'events.jsonl'), '');
+let fatal = null;
 
-function saveSummary() {
-  const counts = Object.fromEntries(['PASS', 'FAIL', 'NOT_IMPLEMENTED', 'NOT_APPLICABLE'].map(s => [s, results.filter(r => r.status === s).length]));
-  const layer = l => {
-    const r = results.filter(r => r.layer === l);
-    const durations = r.map(v => v.durationMs).filter(Number.isFinite).sort((a, b) => a - b);
-    return { total: r.length, pass: r.filter(r => r.status === 'PASS').length, fail: r.filter(r => r.status === 'FAIL').length, passRate: r.length ? r.filter(r => r.status === 'PASS').length / r.length : null, durationMs: { min: durations[0] ?? null, median: durations.length ? durations[Math.floor(durations.length / 2)] : null, max: durations.at(-1) ?? null } };
-  };
-  const sum = key => results.reduce((s, r) => s + (r[key] ?? 0), 0);
-  write('summary.json', { ...metadata, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(startedAt), totalCases: results.length, counts, deterministic: layer('deterministic'), agentDependent: layer('agent-dependent'), nodeExecutionCount: sum('nodeExecutionCount'), retryCount: sum('retryCount'), providerRetryCount: sum('providerRetryCount'), processFailures: sum('processFailures'), piExecutionCount: sum('piExecutionCount'), plannerInvocationCount: sum('plannerInvocationCount'), partitionerInvocationCount: sum('partitionerInvocationCount'), invariantViolations: results.filter(r => r.classification === 'IMPLEMENTATION_BUG').length, harnessFailures: results.filter(r => r.benchmarkCaseId === 'HARNESS').length, uiAutomation: 'GAP: native WebView clicks/effects not automated; real IPC, frontend action/type/render contract covered', notImplemented: ['Multi-engine execution', 'Remote execution', 'Automatic conflict resolution', 'Automatic worktree cleanup/result integration', 'Interactive terminal', 'Drag-edge authoring', 'Durable multi-project runtime', 'Semantic goal-contribution analysis'], results });
-}
-
-function snapshotsIn(caseDir) {
-  const snapshots = [];
-  if (fs.existsSync(path.join(caseDir, 'snapshot.json'))) snapshots.push(JSON.parse(fs.readFileSync(path.join(caseDir, 'snapshot.json'))));
-  const recovery = path.join(caseDir, 'recovery/snapshot.json');
-  if (fs.existsSync(recovery)) snapshots.push(JSON.parse(fs.readFileSync(recovery)));
-  const history = path.join(caseDir, 'frontend-live/histories.json');
-  if (fs.existsSync(history)) snapshots.push(...JSON.parse(fs.readFileSync(history)));
-  return snapshots;
-}
-function metrics(value, caseDir) {
-  const snapshots = snapshotsIn(caseDir);
-  Object.assign(value, { grapherRunIds: snapshots.map(s => s.runId).filter(Boolean), nodeExecutionCount: 0, retryCount: 0, providerRetryCount: 0, processFailures: 0, piExecutionCount: 0, model: null, tokenUsage: null, plannerInvocationCount: 0, partitionerInvocationCount: 0 });
-  function stream(text) {
-    for (const line of text.split('\n')) {
-      let p; try { p = JSON.parse(line); } catch { continue; } // Plain-text output is valid, not a failed assertion.
-      if (p.type === 'grapher_process_started') value.piExecutionCount++;
-      if (p.type === 'grapher_process_exited' && !p.success) value.processFailures++;
-      if (p.type === 'auto_retry_start') value.providerRetryCount++;
-      if (p.type === 'message_end' && p.message?.role === 'assistant') {
-        value.model = p.message.model ?? value.model;
-        if (p.message.usage) {
-          value.tokenUsage ??= {};
-          for (const [key, amount] of Object.entries(p.message.usage)) if (typeof amount === 'number') value.tokenUsage[key] = (value.tokenUsage[key] ?? 0) + amount;
-        }
+function stageMetrics(directory) {
+  const metrics = { model: null, tokenUsage: null, providerRetryCount: 0, processCount: 0, toolCalls: {}, compilerRejections: 0, inspectionRejections: 0 };
+  const file = path.join(directory, 'events.jsonl');
+  if (!fs.existsSync(file)) return metrics;
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    let e; try { e = JSON.parse(line); } catch { continue; }
+    if (e.type === 'grapher_process_started') metrics.processCount++;
+    if (e.type === 'auto_retry_start') metrics.providerRetryCount++;
+    if (e.type === 'tool_execution_start') metrics.toolCalls[e.toolName] = (metrics.toolCalls[e.toolName] ?? 0) + 1;
+    if (e.type === 'tool_execution_end' && (e.isError || e.result?.isError)) {
+      if (['node', 'edge'].includes(e.toolName)) metrics.compilerRejections++;
+      if (['bash', 'read'].includes(e.toolName)) metrics.inspectionRejections++;
+    }
+    if (e.type === 'message_end' && e.message?.role === 'assistant') {
+      metrics.model = e.message.model ?? metrics.model;
+      if (e.message.usage) {
+        metrics.tokenUsage ??= {};
+        for (const [key, value] of Object.entries(e.message.usage)) if (typeof value === 'number') metrics.tokenUsage[key] = (metrics.tokenUsage[key] ?? 0) + value;
       }
     }
   }
-  for (const s of snapshots) {
-    value.nodeExecutionCount += s.executions.length;
-    value.retryCount += s.executions.filter(e => e.attempt > 1).length;
-    for (const event of s.events) {
-      append('events.jsonl', { schemaVersion: 1, benchmarkRunId: runId, benchmarkCaseId: value.benchmarkCaseId, sample: value.sample, grapherRunId: s.runId, source: 'product-event-store', event });
-      if (event.type === 'output') stream(event.text);
-    }
+  return metrics;
+}
+function stage(name, sampleDir, repository, goal, system) {
+  const output = path.join(sampleDir, name);
+  const input = path.join(sampleDir, `${name}-input.json`);
+  if (evidenceRoot && !(name === 'judge' && options.rejudge)) {
+    const original = readJson(path.join(sampleDir, 'result.json'));
+    const result = original[name === 'partition' ? 'partitioner' : name]
+      ?? { status: 'FAIL', error: 'Original stage did not run; replay does not call a model' };
+    return { ...result, ...stageMetrics(output), replayed: true, artifacts: path.relative(repo, output) };
   }
-  const planningRoot = path.join(caseDir, 'planning');
-  if (fs.existsSync(planningRoot)) for (const planningId of fs.readdirSync(planningRoot)) {
-    for (const [file, metric] of [['partition.jsonl', 'partitionerInvocationCount'], ['planner.jsonl', 'plannerInvocationCount']]) {
-      const filePath = path.join(planningRoot, planningId, file);
-      if (!fs.existsSync(filePath)) continue;
-      value[metric]++;
-      const text = fs.readFileSync(filePath, 'utf8'); stream(text);
-      append('events.jsonl', { schemaVersion: 1, benchmarkRunId: runId, benchmarkCaseId: value.benchmarkCaseId, sample: value.sample, source: 'product-planning-log', planningId, file, text });
-    }
-  }
+  write(input, { output, repository, goal, stage: name, ...(system ? { system } : {}) });
+  const start = Date.now();
+  const r = command(path.join(repo, 'backend/target/debug/examples/benchmark'), [], { env: { ...env, BENCHMARK_PLANNING_INPUT: input }, timeout: metadata.stageTimeoutMs });
+  fs.mkdirSync(output, { recursive: true });
+  fs.writeFileSync(path.join(output, 'host.log'), `${r.stdout ?? ''}${r.stderr ?? ''}`);
+  const file = path.join(output, 'result.json');
+  const result = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : { status: 'FAIL', error: `Host failed: ${r.error ?? r.stderr ?? r.signal}` };
+  if (r.status !== 0) { result.status = 'FAIL'; result.error ??= String(r.error ?? r.stderr); }
+  return { ...result, durationMs: Date.now() - start, ...stageMetrics(output), artifacts: path.relative(repo, output) };
+}
+const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+function saveSummary() {
+  const routed = results.filter(r => r.routeStatus !== 'NOT_RUN');
+  const generated = results.filter(r => r.expectedRoute === 'graph');
+  const confusion = { serial: { serial: 0, graph: 0, error: 0 }, graph: { serial: 0, graph: 0, error: 0 } };
+  for (const r of routed) confusion[r.expectedRoute][['serial', 'graph'].includes(r.actualRoute) ? r.actualRoute : 'error']++;
+  const quality = generated.filter(r => r.quality && r.planningBoundary?.status === 'PASS');
+  const summary = { ...metadata, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(startedAt), status: fatal || results.length !== selected.length * repeats || results.some(r => r.status !== 'PASS') ? 'FAIL' : 'PASS', fatalError: fatal, total: results.length,
+    counts: { PASS: results.filter(r => r.status === 'PASS').length, FAIL: results.filter(r => r.status === 'FAIL').length },
+    routing: { total: routed.length, correct: routed.filter(r => r.routeStatus === 'PASS').length, protocolCorrect: routed.filter(r => r.routingProtocolStatus === 'PASS').length, accuracy: routed.length ? routed.filter(r => r.routeStatus === 'PASS').length / routed.length : null, confusion },
+    planner: { expected: generated.length, compiled: generated.filter(r => r.compilerStatus === 'PASS').length, staticPass: generated.filter(r => r.staticChecks?.every(c => c.pass)).length, assessed: quality.length, qualityPass: quality.filter(r => r.quality.status === 'PASS').length, averageScore: quality.length ? quality.reduce((sum, r) => sum + r.quality.score, 0) / quality.length : null, missingJudgments: generated.length - quality.length },
+    nodeExecutionCount: 0, executionBoundary: 'No Runtime construction, approval, drive, node execution or worktree creation; planning processes and separate judge only.',
+    limitations: ['Six authored tasks, not general routing accuracy.', 'Semantic scores are model judgments with validated quotations, not independent human gold labels.', 'Graph quality is evaluated before execution; no claim of implementation success.', 'Planner runs on gold graph tasks even if routing is wrong; route accuracy and isolated Planner quality are separate.'], results };
+  write(path.join(root, 'summary.json'), summary);
+  fs.writeFileSync(path.join(root, 'cases.jsonl'), results.map(r => JSON.stringify(r)).join('\n') + '\n');
+  fs.writeFileSync(path.join(root, 'report.md'), `# B010 Partitioner and Planner evaluation\n\nStatus: ${summary.status}. Routing: ${summary.routing.correct}/${summary.routing.total}. Graph quality: ${summary.planner.qualityPass}/${summary.planner.expected}; assessed ${summary.planner.assessed}, mean score ${summary.planner.averageScore ?? 'N/A'}/10. Node executions: 0.\n\n| Task | Sample | Expected | Actual | Route | Protocol | Compile | Quality | Status |\n|---|---:|---|---|---|---|---|---|---|\n${results.map(r => `| ${r.taskId} | ${r.sample} | ${r.expectedRoute} | ${r.actualRoute ?? '—'} | ${r.routeStatus} | ${r.routingProtocolStatus} | ${r.compilerStatus} | ${r.quality ? `${r.quality.score}/10 (${r.quality.status})` : '—'} | ${r.status} |`).join('\n')}\n\nGraph tasks are assessed independently even after a routing error. See each task's graph, compiler output, judge response, exact evidence and quality checks in result.json. Semantic judgment is fallible; do not treat this score as proof of execution success.\n`);
+  return summary;
 }
 
 try {
-  if (!/^[a-zA-Z0-9_-]+$/.test(label) || (selected && !ids.includes(selected)) || !Number.isInteger(repeats) || repeats < 1 || repeats > 10) throw Error('Invalid label, case or agent-repeats (1–10)');
-  // Hash and retain all text sources, including untracked harness files. Never include .env or Pi credentials.
-  const sources = [...new Set(git(['ls-files', '--cached', '--others', '--exclude-standard']).split('\n'))].filter(f => /\.(rs|tsx?|mjs|json|toml|lock|md|css|html)$/.test(f) && fs.existsSync(f));
+  const files = git(['ls-files', '--cached', '--others', '--exclude-standard']).split('\n').filter(f => /\.(rs|tsx?|mjs|json|toml|lock|md|css|html)$/.test(f) && fs.existsSync(f));
   const manifest = {};
-  for (const file of sources) {
+  for (const file of [...new Set(files)].sort()) {
     const data = fs.readFileSync(file); manifest[file] = createHash('sha256').update(data).digest('hex');
-    const dest = path.join(root, 'sources', file); fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.writeFileSync(dest, data);
+    const target = path.join(root, 'sources', file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, data);
   }
   metadata.sourceSha256 = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
-  write('source-manifest.json', manifest); write('metadata.json', metadata);
+  write(path.join(root, 'metadata.json'), metadata); write(path.join(root, 'source-manifest.json'), manifest);
   fs.writeFileSync(path.join(root, 'source.diff'), git(['diff', 'HEAD']));
-  log(`Benchmark ${runId}; building backend command host`);
-  const build = command('cargo', ['build', '--manifest-path', 'backend/Cargo.toml', '--features', 'benchmark', '--example', 'benchmark', '--bin', 'grapher']);
-  fs.writeFileSync(path.join(root, 'build.log'), `${build.stdout ?? ''}${build.stderr ?? ''}`);
-  if (build.status !== 0) throw Error(`Build failed: ${build.error ?? build.stderr}`);
-  for (const id of ids.filter(id => (!selected || id === selected) && (!deterministic || id !== 'B010'))) {
-    for (let sample = 1; sample <= (id === 'B010' ? repeats : 1); sample++) {
-      const caseDir = path.join(root, `${id}-${sample}`); fs.mkdirSync(caseDir);
-      const t = Date.now();
-      const r = command(path.join(repo, 'backend/target/debug/examples/benchmark'), [], 210000, { BENCHMARK_CASE: id, BENCHMARK_CASE_DIR: caseDir, ...(planning && id === 'B010' ? { BENCHMARK_PLAN: '1' } : {}) });
-      fs.writeFileSync(path.join(caseDir, 'host.log'), `${r.stdout ?? ''}${r.stderr ?? ''}`);
-      let value = fs.existsSync(path.join(caseDir, 'result.json')) ? JSON.parse(fs.readFileSync(path.join(caseDir, 'result.json'))) : { status: 'FAIL', error: `Host failed: status=${r.status}, signal=${r.signal}, ${r.error ?? r.stderr}` };
-      value = { ...value, schemaVersion: 1, benchmarkRunId: runId, benchmarkCaseId: id, name: names[ids.indexOf(id)], sample, variant: id === 'B010' ? metadata.agentVariant : 'canonical', layer: id === 'B010' ? 'agent-dependent' : 'deterministic', artifacts: path.relative(repo, caseDir), runtimeDurationMs: value.durationMs, classification: null, gitCommit: metadata.gitCommit, sourceSha256: metadata.sourceSha256 };
-      if (value.status === 'FAIL') value.classification = id === 'B010' ? (/timed out|Authentication|Cannot start Pi|Host failed/i.test(value.error) ? 'ENVIRONMENT_FAILURE' : 'AGENT_FAILURE') : 'IMPLEMENTATION_BUG';
-      if (r.error || r.signal || r.status !== 0) { value.status = 'FAIL'; value.classification = 'ENVIRONMENT_FAILURE'; }
-      if (id === 'B008' && value.status === 'PASS') {
-        const actions = command(process.execPath, ['benchmark/frontend-actions.mjs', caseDir], 30000);
-        fs.writeFileSync(path.join(caseDir, 'frontend-actions.log'), `${actions.stdout ?? ''}${actions.stderr ?? ''}`);
-        const contract = command(process.execPath, ['benchmark/frontend.mjs', caseDir]);
-        fs.writeFileSync(path.join(caseDir, 'frontend.log'), `${contract.stdout ?? ''}${contract.stderr ?? ''}`);
-        if (contract.status !== 0 || actions.status !== 0) { value.status = 'FAIL'; value.classification = 'IMPLEMENTATION_BUG'; value.error = 'Frontend contract failed; see frontend-actions.log and frontend.log'; }
-      }
-      metrics(value, caseDir);
-      value.startedAt = new Date(t).toISOString(); value.endedAt = new Date().toISOString(); value.durationMs = Date.now() - t;
-      value.runtimeInvariants = snapshotsIn(caseDir).every(s => s.executions.every(e => e.completedAt != null) && !Object.values(s.nodes).some(n => n.status === 'running')) ? 'PASS' : 'FAIL';
-      results.push(value); append('cases.jsonl', value); saveSummary();
-      log(`${id} sample ${sample}: ${value.status} (${value.durationMs}ms)${value.error ? ` — ${value.error}` : ''}`);
-    }
+  log(`B010 planning-only benchmark ${runId}; ${selected.length} tasks × ${repeats} sample(s)`);
+  if (!evidenceRoot) {
+    const build = command('cargo', ['build', '--manifest-path', 'backend/Cargo.toml', '--features', 'benchmark', '--example', 'benchmark', '--bin', 'grapher']);
+    fs.writeFileSync(path.join(root, 'build.log'), `${build.stdout ?? ''}${build.stderr ?? ''}`);
+    if (build.status !== 0) throw Error(`Build failed: ${build.error ?? build.stderr}`);
   }
-} catch (error) {
-  results.push({ schemaVersion: 1, benchmarkRunId: runId, benchmarkCaseId: 'HARNESS', status: 'FAIL', classification: 'ENVIRONMENT_FAILURE', layer: 'deterministic', error: String(error) });
-  append('cases.jsonl', results.at(-1)); log(String(error));
-} finally { saveSummary(); log(`Artifacts: ${path.relative(repo, root)}`); }
-process.exitCode = results.some(r => r.status === 'FAIL') ? 1 : 0;
+  for (const testCase of selected) for (let sample = 1; sample <= repeats; sample++) {
+    const sampleDir = path.join(root, `${testCase.id}-${sample}`);
+    const repository = path.join(sampleDir, 'repository');
+    if (evidenceRoot) {
+      const original = path.join(evidenceRoot, `${testCase.id}-${sample}`);
+      if (readJson(path.join(original, 'rubric.json')).goal !== testCase.goal) throw Error('Cannot replay evidence for a different goal');
+      fs.cpSync(original, sampleDir, { recursive: true });
+    } else {
+      fs.mkdirSync(repository, { recursive: true });
+      for (const [file, content] of Object.entries(repositoryFiles)) {
+        const target = path.join(repository, file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, content);
+      }
+      git(['init', '-q'], repository); git(['add', '.'], repository);
+      git(['-c', 'user.name=Benchmark', '-c', 'user.email=benchmark@localhost', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Planning fixture'], repository);
+    }
+    const evidenceResult = evidenceRoot ? readJson(path.join(sampleDir, 'result.json')) : null;
+    const head = git(['rev-parse', 'HEAD'], repository);
+    const result = { benchmarkCaseId: 'B010', taskId: testCase.id, sample, title: testCase.title, expectedRoute: testCase.expectedRoute, actualRoute: null, routeStatus: 'NOT_RUN', routingProtocolStatus: 'NOT_RUN', compilerStatus: 'NOT_APPLICABLE', status: 'FAIL', failures: [], nodeExecutionCount: 0, artifacts: path.relative(repo, sampleDir) };
+    if (!options['planner-only']) {
+      log(`${testCase.id}/${sample}: evaluating Partitioner`);
+      result.partitioner = stage('partition', sampleDir, repository, testCase.goal);
+      if (result.partitioner.status === 'PASS') {
+        try { result.actualRoute = readJson(path.join(sampleDir, 'partition/route.json')).plan_type; } catch (error) { result.failures.push({ classification: 'PARTITIONER_ERROR', error: String(error) }); }
+      }
+      const routing = scoreRouting(testCase.expectedRoute, result.actualRoute, result.partitioner);
+      result.routeStatus = routing.routeStatus;
+      result.routingProtocolStatus = routing.protocolStatus;
+      if (result.routeStatus === 'FAIL') result.failures.push({ classification: result.partitioner.status === 'FAIL' ? 'PARTITIONER_ERROR' : 'ROUTING_ERROR', error: result.partitioner.error ?? `Expected ${testCase.expectedRoute}, got ${result.actualRoute}` });
+      if (result.routingProtocolStatus === 'FAIL') result.failures.push({ classification: 'PARTITIONER_PROTOCOL', error: `route_task called ${result.partitioner.toolCalls.route_task ?? 0} times; expected exactly once` });
+    }
+    if (testCase.expectedRoute === 'graph') {
+      log(`${testCase.id}/${sample}: evaluating Planner independently (observed route: ${result.actualRoute ?? 'not run'})`);
+      result.planner = stage('planner', sampleDir, repository, testCase.goal);
+      const planningRepository = readJson(path.join(sampleDir, 'planner-input.json')).repository;
+      result.planningBoundary = checkPlanningBoundary(path.join(sampleDir, 'planner'), planningRepository);
+      if (result.planningBoundary.status !== 'PASS') result.failures.push({ classification: 'PLANNING_BOUNDARY', error: result.planningBoundary.issues.join('; ') });
+      let graph, compiled;
+      try {
+        graph = readJson(path.join(sampleDir, 'planner/graph.json'));
+        compiled = readJson(path.join(sampleDir, 'planner/compiler.json'));
+        result.compilerStatus = !!compiled.plan && compiled.diagnostics.length === 0 ? 'PASS' : 'FAIL';
+      } catch { result.compilerStatus = 'NOT_RUN'; }
+      if (result.planner.status !== 'PASS' || result.compilerStatus !== 'PASS') result.failures.push({ classification: 'PLANNER_ERROR', error: result.planner.error ?? 'Graph failed shipping compiler', diagnostics: compiled?.diagnostics });
+      else if (result.planningBoundary.status === 'PASS') {
+        result.staticChecks = staticGraphChecks(testCase, graph, compiled, planningRepository);
+        if (result.staticChecks.some(c => !c.pass)) result.failures.push({ classification: 'GRAPH_QUALITY', error: 'Graph failed static quality checks', checks: result.staticChecks.filter(c => !c.pass) });
+        log(`${testCase.id}/${sample}: reviewing graph quality (${graph.nodes.length} nodes)`);
+        result.judge = stage('judge', sampleDir, repository, judgeRequest(testCase, graph, repositoryFiles), judgeSystem);
+        try {
+          if (result.judge.status !== 'PASS') throw Error(result.judge.error);
+          const review = parseReview(result.judge.response);
+          write(path.join(sampleDir, 'judge/review.json'), review);
+          result.quality = scoreGraph(testCase, graph, compiled, review, planningRepository);
+          // Once the full grade exists, replace provisional static failures with one complete list.
+          result.failures = result.failures.filter(f => f.classification !== 'GRAPH_QUALITY');
+          if (result.quality.status !== 'PASS') result.failures.push({ classification: 'GRAPH_QUALITY', error: 'Generated graph missed rubric requirements', checks: result.quality.checks.filter(c => !c.pass) });
+        } catch (error) { result.failures.push({ classification: 'JUDGE_FAILURE', error: String(error) }); }
+      }
+    }
+    result.repositoryUnchanged = (!evidenceRoot || evidenceResult.repositoryUnchanged === true) && git(['status', '--porcelain'], repository) === '' && git(['rev-parse', 'HEAD'], repository) === head;
+    result.noExecutionArtifacts = (!evidenceRoot || evidenceResult.noExecutionArtifacts === true) && ['worktrees', 'events.sqlite', '.grapher'].every(name => !fs.existsSync(path.join(sampleDir, name)) && !fs.existsSync(path.join(repository, name)));
+    if (!result.repositoryUnchanged || !result.noExecutionArtifacts) result.failures.push({ classification: 'PLANNING_BOUNDARY', error: 'Planning modified the repository or created execution artifacts' });
+    // Rubrics are evaluator artifacts, never inputs made available before candidate generation.
+    write(path.join(sampleDir, 'rubric.json'), testCase);
+    for (const failure of result.failures) if (failure.classification !== 'PLANNING_BOUNDARY' && /\b(?:429|50[0234])\b|timed out|ETIMEDOUT|Authentication|Cannot start Pi|ENOTFOUND|ECONN/i.test(failure.error)) failure.classification = 'ENVIRONMENT_FAILURE';
+    result.status = result.failures.length === 0 ? 'PASS' : 'FAIL';
+    write(path.join(sampleDir, 'result.json'), result); results.push(result); saveSummary();
+    log(`${testCase.id}/${sample}: ${result.status}; route=${result.routeStatus}; compile=${result.compilerStatus}; quality=${result.quality?.status ?? 'NOT_SCORED'}`);
+  }
+} catch (error) { fatal = String(error); log(fatal); }
+const summary = saveSummary();
+log(`Result ${summary.status}; routing ${summary.routing.correct}/${summary.routing.total}; graph quality ${summary.planner.qualityPass}/${summary.planner.expected}; node executions 0`);
+log(`Artifacts: ${path.relative(repo, root)}`);
+process.exitCode = summary.status === 'PASS' ? 0 : 1;

@@ -97,7 +97,7 @@ fn run_case(
         max_parallel: 2,
         max_feedback: 3,
     };
-    let mut g = match id {
+    let g = match id {
         "B002" => graph(&["A", "B", "C"], &[("A", "B", false), ("B", "C", false)]),
         "B003" => graph(&["A", "B", "C"], &[("A", "B", false), ("A", "C", false)]),
         "B004" => graph(
@@ -120,37 +120,12 @@ fn run_case(
     if id == "B009" {
         config.max_feedback = 0;
     }
-    if id == "B006" || id == "B010" {
+    if id == "B006" {
         config.repository = crate::fixture::repository(root)?
             .to_string_lossy()
             .into();
         config.engine = "pi".into();
-        if id == "B006" {
-            config.pi_command = "/usr/bin/false".into();
-        } else {
-            let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .to_path_buf();
-            config.pi_command =
-                std::env::var("BENCHMARK_PI_COMMAND").unwrap_or("/opt/homebrew/bin/node".into());
-            config.pi_args = match std::env::var("BENCHMARK_PI_ARGS") {
-                Ok(s) => serde_json::from_str(&s)
-                    .map_err(|e| format!("Invalid BENCHMARK_PI_ARGS: {e}"))?,
-                Err(_) => vec![
-                    repo.join("pi/node_modules/tsx/dist/cli.mjs")
-                        .to_string_lossy()
-                        .into(),
-                    "--tsconfig".into(),
-                    repo.join("pi/tsconfig.json").to_string_lossy().into(),
-                    repo.join("pi/packages/coding-agent/src/cli.ts")
-                        .to_string_lossy()
-                        .into(),
-                ],
-            };
-            config.model = std::env::var("BENCHMARK_PI_MODEL").unwrap_or_default();
-            g.nodes[0].task="Create hello.txt containing exactly grapher-ok followed by a newline. Do not change other files. Read it back to verify. Respond briefly.".into();
-        }
+        config.pi_command = "/usr/bin/false".into();
     }
     let compiled = ipc(window, root, "compile_graph", json!({"graph":g}));
     write_json(&root.join("compiler.json"), &compiled);
@@ -176,23 +151,12 @@ fn run_case(
         );
     }
     compiled?;
-    if id == "B010" && std::env::var("BENCHMARK_PLAN").is_ok() {
-        let planned = ipc(
-            window,
-            root,
-            "plan_goal",
-            json!({"goal":g.nodes[0].task,"config":config}),
-        )?;
-        g = serde_json::from_value(planned["graph"].clone()).map_err(|e| e.to_string())?;
-        write_json(&root.join("planned-graph.json"), &g);
-    } else {
-        ipc(
-            window,
-            root,
-            "save_graph",
-            json!({"graph":g,"config":config}),
-        )?;
-    }
+    ipc(
+        window,
+        root,
+        "save_graph",
+        json!({"graph":g,"config":config}),
+    )?;
     check(
         !root.join("worktrees").exists(),
         "Approval boundary violated",
@@ -358,13 +322,6 @@ fn run_case(
         write_json(&root.join("frontend-before.json"), &before);
         write_json(&root.join("frontend-after.json"), &s);
     }
-    if id == "B010" {
-        let e = &s["executions"][0];
-        let actual =
-            fs::read_to_string(Path::new(e["worktree"].as_str().unwrap()).join("hello.txt"))
-                .map_err(|e| format!("Agent result missing: {e}"))?;
-        check(actual == "grapher-ok\n", "Agent produced incorrect file")?;
-    }
     if id == "B009" {
         // A concurrent fork temporarily inherits open file descriptions, just as Git/Pi spawn does.
         // Keep that child alive deterministically until after the old Runtime owner is dropped.
@@ -440,8 +397,26 @@ fn run_case(
     Ok(())
 }
 
+mod planning {
+    include!("planning-host.rs");
+}
+
 pub fn main() {
+    if let Ok(input) = std::env::var("BENCHMARK_PLANNING_INPUT") {
+        let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT]).unwrap();
+        thread::spawn(move || {
+            if signals.forever().next().is_some() {
+                crate::engine::terminate_all();
+                std::process::exit(2);
+            }
+        });
+        let result = planning::main(&input);
+        crate::engine::terminate_all();
+        if let Err(error) = result { eprintln!("{error}"); std::process::exit(1); }
+        return;
+    }
     let id = std::env::var("BENCHMARK_CASE").expect("BENCHMARK_CASE");
+    assert!(["B001", "B002", "B003", "B004", "B005", "B006", "B007", "B008", "B009"].contains(&id.as_str()), "Unknown runtime case; B010 is planning-only");
     let root = PathBuf::from(std::env::var("BENCHMARK_CASE_DIR").expect("BENCHMARK_CASE_DIR"));
     fs::create_dir_all(&root).unwrap();
     let started = now();

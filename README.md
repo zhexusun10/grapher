@@ -10,7 +10,6 @@ Don't orchestrate agents. Compile work.
 
 ```sh
 npm ci --ignore-scripts
-export PATH="$HOME/.cargo/bin:$PATH"
 npm run dev
 ```
 
@@ -49,7 +48,7 @@ npm start
 4. 点击「规划并编译」：Partitioner 只有 `route_task`；Graph Planner 只有 `node / edge / read / bash`。每次 mutation 都调用同一个 Rust 编译器，失败不会写入候选图。Serial 路由不调用 Planner，用单节点承载原始任务，同样保留审批边界。
 5. Planner 退出，完整图展示后才能审批启动工作节点。也可以直接导入手写 Graph IR，省去规划模型调用。
 
-**安全边界：**规划会调用模型并消耗额度；执行 Pi 可以运行 shell、联网、读写其进程权限允许的文件。Worktree 是并行隔离机制，**不是安全沙箱**。仅对可信代码和任务使用真实 Pi。Planner 的 Bash 只允许固定只读命令，read 限于仓库；但 Pi 本身及仓库配置仍须可信。
+**安全边界：**规划会调用模型并消耗额度；执行 Pi 可以运行 shell、联网、读写其进程权限允许的文件。Worktree 是并行隔离机制，**不是安全沙箱**。仅对可信代码和任务使用真实 Pi。Planner 的 bash 是自定义只读检查接口，不是任意 shell：只接受列目录、搜索、读文件和公开 HTTP(S) 的 curl GET/HEAD；禁止写入、执行脚本、仓库外读取、符号链接、Git 元数据及本机/内网访问。read 使用相同的本地路径边界。此工具边界不是进程级沙箱；Pi、本机文件系统及仓库仍须可信。公网请求仍可能携带 URL 信息，GET 也不能保证远端没有副作用。详见 [规划检查权限](backend/resources/planning-inspection.md)。
 
 ## 已实现
 
@@ -109,16 +108,23 @@ node pi/node_modules/tsx/dist/cli.mjs --tsconfig pi/tsconfig.json scripts/check-
 - 支持当前本地 Pi 0.85.1 的 JSON 事件格式及 `--session-id`。真实模型认证/质量需使用用户自己的环境验证。
 - Partitioner/Planner prompt 为实验性实现，不把它们当成架构不变量。
 
-## MVP 系统 benchmark
+## Partitioner / Planner benchmark
+
+主基准评估两件事：**能否分辨线性任务与图任务，以及能否生成高质量执行图**。B010 已替换为规划质量套件，旧的 Pi 写文件测试已删除。
 
 ```sh
-npm run benchmark                 # 9 个确定性场景 + 1 个真实 Pi 文件任务
-npm run benchmark:validate        # 连续 3 次确定性套件 + 3 次真实规划执行样本
-npm run benchmark -- --deterministic  # 无模型成本
+npm run benchmark                         # 3 个 serial + 3 个 graph 任务，各采样一次
+npm run benchmark:planner                 # 只评估 Planner：3 个图任务，不调用 Partitioner
+npm run benchmark -- --task P005           # 契约、双 SDK、审查反馈的定向评估
+npm run benchmark:validate                 # 每个任务固定采样 3 次
+npm run test:benchmark                     # 评分器回归，不调用模型
+npm run benchmark:runtime                  # B001–B009/B011 执行机制回归，不计入规划得分
 ```
 
-确定性场景通过 `benchmark` Cargo 特性启用 `fixture` 执行器：只有「节点执行」这一步是确定性的，编译器、调度器、真实 Git worktree、SQLite 事件日志与反馈失效全部走出货代码路径。
+规划宿主复用出货的 prompts、Pi 工具扩展、逐次 mutation 编译器和最终编译器，**不创建 Runtime、不审批、不执行图中的节点**。正确路由、目标覆盖、节点指令自包含、依赖顺序、有效并行、文件边界及反馈路径分别评估。即使 Partitioner 把图任务误判为 serial，也会独立调用 Planner 暴露它的生成质量；路由错误仍记为失败。
 
-结果保存在 `benchmark-results/<run-id>/`，包含 summary/cases/events、API 请求响应、SQLite、worktree 和会话日志。真实 Pi 需要现有模型认证和联网；网络错误保持 FAIL 并单独分类。可用 `BENCHMARK_PI_COMMAND`、`BENCHMARK_PI_ARGS`（JSON 数组）、`BENCHMARK_PI_MODEL` 指定环境。系统边界、覆盖限制与失败修复记录见 [system-under-test](benchmark/system-under-test.md)、[harness architecture](benchmark/architecture.md)、[findings](benchmark/findings.md)。
+语义评审由独立、无工具的模型调用完成，以节点任务行号取证，评分器提取并保存原文；确定性检查还覆盖责任归属、依赖可达性、独立分支、反馈边，以及是否把 worker 错误绑定到原始仓库绝对路径。模型评分仍需审阅，不等同于独立人工金标或实际执行成功。可用 `BENCHMARK_JUDGE_MODEL` 单独设置评审模型；`BENCHMARK_PI_MODEL` 设置待评估模型，`BENCHMARK_PI_COMMAND` / `BENCHMARK_PI_ARGS` 设置现有 Pi 安装。
 
-历史 benchmark 报告记录迁移前的结果，不代表当前 HTTP 实现的验证结果。当前适配器调用产品 dispatcher；HTTP 传输另由 `npm run test:http` 覆盖。
+结果在 `benchmark-results/<run-id>/`：保存目标、仓库、隐藏评分标准、实际生成图、路由、编译诊断、模型原始输出、评审证据、耗时和 token。`--replay <结果目录>` 可以离线重算；加 `--rejudge` 则仅重跑评审，复用原始候选图。新结果使用 schema v2 / `planning-quality-v1`，不与旧 B010 写文件成绩混用。设计与覆盖边界见 [benchmark contract](benchmark/architecture.md) 和 [system under test](benchmark/system-under-test.md)。
+
+历史执行机制报告和原始失败证据继续保留；其中的通过率不作为 Partitioner／Planner 质量成绩。本次实测与发现见 [规划 benchmark 报告](benchmark/report-planning.md)。

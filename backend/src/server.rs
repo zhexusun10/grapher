@@ -59,12 +59,26 @@ fn render_prompt(template: &str, replacements: &[(&str, &str)]) -> String {
 }
 
 fn split_prompt_template<'a>(template: &'a str) -> (&'a str, &'a str) {
-    if let Some((system, _)) = template.split_once("Goal: {{goal}}") {
-        (system.trim(), "Goal: {{goal}}")
-    } else if let Some((system, _)) = template.split_once("Goal: {goal}") {
-        (system.trim(), "Goal: {goal}")
+    if let Some((system, query)) = template.split_once("User query:") {
+        (system.trim(), query.trim())
     } else {
         (template.trim(), "")
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn planning_prompts_separate_user_query_from_system() {
+        for template in [PLANNER_PROMPT, PARTITIONER_PROMPT] {
+            let (system, query) = split_prompt_template(template);
+            assert!(!system.contains("{{query}}"));
+            assert!(!system.contains("Goal:"));
+            assert_eq!(query, "{{query}}");
+            assert_eq!(render_prompt(query, &[("query", "Build a graph")]), "Build a graph");
+        }
     }
 }
 
@@ -225,7 +239,7 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
         let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
         let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
             .unwrap_or_else(|_| default_partitioner_system.to_string());
-        let task = format!("Goal: {goal}");
+        let task = format!("User query:\n\n{goal}");
         let mut partitioner_config = config.clone();
         if let Ok(model) = std::env::var("PARTITIONER_MODEL") {
             if !model.trim().is_empty() {
@@ -236,7 +250,7 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
             partitioner_config.model = "qwen3.8-flash".into();
         }
         let mut log = String::new();
-        run_pi(
+        let partition_result = run_pi(
             PiRequest {
                 config: &partitioner_config,
                 cwd: &repository,
@@ -253,8 +267,9 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
                 system_prompt: Some(&partitioner_system_prompt),
             },
             |text| log.push_str(&text),
-        )?;
+        );
         fs::write(directory.join("partition.jsonl"), log).map_err(|error| error.to_string())?;
+        partition_result?;
         let route: Route = serde_json::from_str(
             &fs::read_to_string(route_path).map_err(|error| error.to_string())?,
         )
@@ -291,9 +306,9 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
                 let (default_planner_system, _) = split_prompt_template(PLANNER_PROMPT);
                 let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                     .unwrap_or_else(|_| default_planner_system.to_string());
-                let task = format!("Goal: {goal}");
+                let task = format!("User query:\n\n{goal}");
                 let mut log = String::new();
-                run_pi(
+                let planner_result = run_pi(
                     PiRequest {
                         config: &planner_config,
                         cwd: &repository,
@@ -317,9 +332,10 @@ fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Sna
                         system_prompt: Some(&planner_system_prompt),
                     },
                     |text| log.push_str(&text),
-                )?;
+                );
                 fs::write(directory.join("planner.jsonl"), log)
                     .map_err(|error| error.to_string())?;
+                planner_result?;
                 serde_json::from_str(
                     &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
                 )
@@ -568,6 +584,8 @@ pub fn run() -> Result<(), String> {
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let extension = root.join("grapher-planner.ts");
     fs::write(&extension, include_str!("../resources/planner.ts"))
+        .map_err(|error| error.to_string())?;
+    fs::write(root.join("planning-inspection.mjs"), include_str!("../resources/planning-inspection.mjs"))
         .map_err(|error| error.to_string())?;
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root)?),

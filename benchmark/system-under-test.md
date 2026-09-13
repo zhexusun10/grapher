@@ -1,48 +1,32 @@
-# Grapher MVP system under test
+# System under test: planning quality
 
-> 历史记录：本文描述迁移前的实现与测试结果。当前版本使用浏览器前端和 HTTP 后端；现有基准适配器调用产品 dispatcher，HTTP 集成测试见 `npm run test:http`。
+The architecture contract is [agent.md](../agent.md). The primary benchmark evaluates **Partitioner routing and Planner graph design**, independently of later task execution.
 
-Discovery completed before code changes on 2026-09-12. Repository initially clean.
-Root architecture specification: `agent.md` (2,303 lines, read in full); no root AGENTS.md. `pi/AGENTS.md` applies only to the independent ignored Pi checkout, which is not modified.
+## Production components exercised
 
-## Actual paths
+`benchmark/run.mjs` creates isolated repository fixtures and calls the planning-only Rust host in `benchmark/planning-host.rs`. The host reuses:
 
-* Editable graph: React `App.save` → invoke `save_graph` → `Runtime.create` → Rust compiler → SQLite Created event → serialized Snapshot → React state. Approval: `control(approve)` → verify clean repository/base → Approved event → desktop `drive` → `Runtime.jobs` → worker threads → `perform` → Git worktree creation/composition → engine execute → snapshot commit → Finished/Failed → feedback/invalidation → next wave → Settled. React polls `snapshot` every 700ms except while busy/historical; node views use Snapshot.nodes/executions; failures use node.error and events.
-* Goal: `plan_goal` → real Pi partition process + extension route_task → serial one-node graph OR Pi planner process + node/edge extension → `grapher --compile` subprocess on every mutation → Runtime.create → same approval/execution path. Planner is not alive during node execution.
-* `pi` is the only engine in shipping builds. The deterministic actuator (`backend/src/fixture.rs`, Cargo feature `fixture`) drives real compiler, runtime, event store and Git operations with deterministic Markdown writes, 650ms/node, first review REVISE then ACCEPT. It does **not** prove Pi/model success.
-* Browser-only Vite preview runs the client-side `WebInteractiveRuntime` sandbox and invents display state. It is outside execution acceptance. `scripts/planner_client.py` is an independent Python experiment, not called by desktop.
+- `backend/resources/prompts/partitioner.md` and `planner.md`, including configured product overrides.
+- `backend/resources/planner.ts`: real route_task/node/edge tools and the repository-scoped read guard plus a custom read-only bash override (`planning-inspection.mjs`). No arbitrary shell is exposed; curl is limited to public HTTP(S) GET/HEAD with validated/pinned DNS and redirects. This is a tool-level boundary, not an OS sandbox.
+- `backend/src/engine.rs::run_pi`: fresh Pi processes, actual configured model, JSON output and provider retry behavior.
+- The shipping `grapher --compile` CLI for each mutation and Rust final graph validation.
 
-## Implemented versus specification
+The host is under Cargo feature `benchmark`. It never initializes Runtime, approves a graph, calls drive, prepares an execution worktree or performs a graph node. The goal/repository are the candidate inputs; expected route/rubric remain hidden outside the model-visible repository.
 
-| Capability | Actual MVP |
-|---|---|
-| Compiler | Implemented E001/002/101/201–207, ancestor feedback validation, batches, roots, terminals, W301 isolated-node warnings; no semantic goal-contribution analysis |
-| Scheduler | Implemented bounded 1–8 concurrency, wave barrier (not continuous slot refill), failed dependency propagation |
-| Approval | Implemented for both serial and graph routes |
-| Workspaces | Real detached Git worktrees, parent merge before task, commit after task, conflict BLOCKED, human resolve |
-| Feedback | Implemented exact final-line markers, fresh execution/session, descendant invalidation, bounded per-edge count |
-| Persistence | SQLite append-only events + reducer, replay, interrupted-execution failure and paused recovery; one active graph |
-| UI | React + React Flow, command invocation and polling, graph JSON editor, node output/error/history, local project list |
-| Pi | CLI JSON stdout, tagged stderr, final message/error parsing, 15-minute timeout, process groups; model/auth external |
-| Planner | Experimental prompts; mutation rollback via real compiler; partition route lacks spec reasoning field |
-| Future/not implemented | Multiple engines, remote execution, semantic reachability analysis, automatic conflict resolution, automatic worktree cleanup/result integration, full interactive terminal, drag-edge graph authoring, durable multi-project runtime |
+A separate Pi call with **no tools or context files** provides semantic graph review. It receives a fixed rubric and the generated graph as untrusted data. Deterministic code validates quotations, ownership references, prerequisites, meaningful parallelism and requested feedback. This is not an independent human judgment or proof the graph would successfully execute.
 
-Pre-hardening mismatch: goal submission always called plan_goal, rejecting the then-default model-free engine. This was reproduced through the real frontend action/IPC contract and repaired by restoring a fixed-example save_graph entry. See findings.md for evidence. That engine has since been deleted from the product: goal submission again always calls plan_goal, hand-authored Graph IR remains the model-free desktop entry, and the browser sandbox carries the no-model UI path.
+## What is measured
 
-## Benchmark boundary
+The six-case corpus includes three serial and three graph goals. Default runs report route confusion, compile validity, graph-quality dimensions/checks, planning/judge duration, token use and tool calls. Gold graph tasks call the Planner independently even after a Partitioner misroute so the two capabilities remain separately measurable. The end-to-end sample still fails when routing is wrong.
 
-Canonical cases invoke **existing Tauri generated command handlers**, actual desktop drive, runtime, SQLite and workspaces through Tauri's official MockRuntime window host. Only the native WebView host is replaced; compiler/scheduling/engine/workspace/state are not mocked. Isolated case directories are retained under benchmark-results; never run tasks against the user's checkout or application data. Deterministic success cases use the `fixture`-feature actuator; every other layer is shipping code. Controlled process failure uses /usr/bin/false through the shipping Pi subprocess boundary, not fabricated runtime results. Real Pi case uses the local CLI with its existing authentication and an isolated trivial repository.
+`npm run benchmark:planner` skips the Partitioner and runs only the three graph tasks through Planner and evaluator. `npm run benchmark:validate` takes three fixed samples of each corpus task. Neither command runs node implementations.
 
-Frontend coverage: actual IPC serialized snapshots are checked against current TypeScript interfaces; actual TaskNode renders against runtime snapshot data. This does not automate native WebView clicks, approval dialog, browser polling or 原生窗口平台 lifecycle. Native UI automation is an explicit coverage gap, not a passing end-to-end claim.
+See [benchmark contract](architecture.md) for corpus, grading rubric, failure classes, artifacts and limitations.
 
-## Tooling
+## Separate runtime regressions
 
-`npm run dev`: browser sandbox preview, port 1420. `npm run desktop`: Tauri dev. `npm run build`: tsc + Vite. `npm test`: Rust non-desktop tests with `--features fixture` (many manually inject results). `cargo check --manifest-path backend/Cargo.toml`: desktop check. `npm run desktop:build`: 原生窗口平台 bundle. Local cargo is ~/.cargo/bin/cargo and must be on PATH. Pi source and dependencies exist locally and are ignored. Existing extension smoke exercises actual Pi loader + compiler without a model.
+`npm run benchmark:runtime` retains B001–B009 and B011 solely as deterministic regression tests. They cover compiler rejection, approval, scheduling, actual fixture worktree writes/merges, feedback, failure propagation, history, UI contracts, HTTP lifecycle and restart recovery. They do not measure planning quality and no longer include a real-Pi file task.
 
-## Observability
+B008 extracts production frontend actions and uses a dispatcher transport bridge. B011 starts the real HTTP backend with fixture execution and scripted planning failures. Neither is browser-click automation. `npm run test:http` runs B011's script independently.
 
-Product SQLite remains the runtime authority. Benchmark exports original events with benchmark IDs, plus initiating IPC requests/responses, compiler diagnostics, snapshots, timings and git state. Prepared/Started/Finished/Failed preserve node, attempt, session and revision attribution. Pi JSON carries model/usage when emitted; missing metrics are null, never zero guesses. Prior to baseline, additive process-start/exit metadata is emitted through the existing output channel. No behavior repair precedes the baseline.
-
-## Resumed checkout, 2026-09-13
-
-The frontend now calls runtimeService before Tauri invoke; browser preview has an independent simulator; desktop adds scoped single-run deletion. The updated harness exercises the actual desktop service and preserves the simulator as an explicit excluded boundary. Added history deletion contracts found and repaired two UI/backend consistency bugs. See [resumed scope](resumed-scope.md) for actual implementation changes, browser compiler parity mismatch, and the immutable resumed baseline. Native picker/titlebar changes are not exercised by the IPC host.
+Historical `report.md`, `report-http.md`, baseline/final JSON and artifacts are retained as records of previous execution-oriented suites. Their B010 meaning and pass rates do not describe the new planning benchmark.
