@@ -29,4 +29,4 @@ See [benchmark contract](architecture.md) for corpus, grading rubric, failure cl
 
 B008 extracts production frontend actions and uses a dispatcher transport bridge. B011 starts the real HTTP backend with fixture execution and scripted planning failures. Neither is browser-click automation. `npm run test:http` runs B011's script independently.
 
-Historical `report.md`, `report-http.md`, baseline/final JSON and artifacts are retained as records of previous execution-oriented suites. Their B010 meaning and pass rates do not describe the new planning benchmark.
+Historical Schema v1 suites (B001–B011 execution suite and old B010 file task) have been retired and purged; their legacy pass rates do not apply to the current planning benchmark.

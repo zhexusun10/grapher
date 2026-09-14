@@ -7,14 +7,19 @@ import { build } from 'esbuild';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 const dir=path.resolve(process.argv[2]);
-const source=fs.readFileSync('src/App.tsx','utf8');
-const ast=ts.createSourceFile('App.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+const appSource=fs.readFileSync('src/App.tsx','utf8');
+const timelineSource=fs.existsSync('src/components/views/TimelineView.tsx') ? fs.readFileSync('src/components/views/TimelineView.tsx','utf8') : appSource;
+const ast=ts.createSourceFile('App.tsx',appSource,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+const timelineAst=ts.createSourceFile('TimelineView.tsx',timelineSource,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 const declarations=new Map();let timeline;
 function visit(n){
- if(ts.isVariableDeclaration(n)&&ts.isIdentifier(n.name))declarations.set(n.name.text,n);
- if(ts.isCallExpression(n)&&ts.isPropertyAccessExpression(n.expression)&&n.expression.name.text==='filter'&&n.arguments[0]?.getText(ast).includes('timelineFilter'))timeline=n.arguments[0].getText(ast);
+ if((ts.isVariableDeclaration(n)||ts.isFunctionDeclaration(n))&&n.name&&ts.isIdentifier(n.name))declarations.set(n.name.text,n);
  ts.forEachChild(n,visit);
 }visit(ast);
+function visitTimeline(n){
+ if(ts.isCallExpression(n)&&ts.isPropertyAccessExpression(n.expression)&&n.expression.name.text==='filter'&&n.arguments[0]?.getText(timelineAst).includes('timelineFilter'))timeline=n.arguments[0].getText(timelineAst);
+ ts.forEachChild(n,visitTimeline);
+}visitTimeline(timelineAst);
 const live=path.join(dir,'frontend-live');fs.mkdirSync(live,{recursive:true});
 const host=spawn(path.resolve('backend/target/debug/examples/benchmark'),[],{env:{...process.env,BENCHMARK_CASE:'B008',BENCHMARK_CASE_DIR:live,BENCHMARK_SERVE:'1'},stdio:['pipe','pipe','pipe']});
 const hostLog=fs.createWriteStream(path.join(live,'host.log'));host.stderr.pipe(hostLog);
@@ -36,12 +41,19 @@ const typesFile=path.join(dir,'types.mjs');
 await build({entryPoints:[path.resolve('src/types.ts')],bundle:true,platform:'node',format:'esm',packages:'external',outfile:typesFile});
 const {example}=await import(typesFile);
 const {runtimeService}=await import(serviceFile);
-const context={runtimeService,localStorage,currentRepoPath:'default',workspaceRuns:{},console,Date,Promise,setTimeout,useCallback:fn=>fn,invoke,goal:'',selected:'A',instruction:'',state:{graph:{originalGoal:'',nodes:[],edges:[]}},runs:[],projects:[],error:'',historical:false};
-for(const name of ['State','Goal','Config','IsPlanning','Selected','Messages','MainTab','Runs','Error','Busy','Historical','Modal','Instruction','RepoInfo','Projects','Args','DataPath','WorkspaceRuns','ConfirmModal'])context[`set${name}`]=value=>{const key=name[0].toLowerCase()+name.slice(1);context[key]=typeof value==='function'?value(context[key]):value;};
+const context={runtimeService,localStorage,currentRepoPath:'default',workspaceRuns:{},console,Date,Promise,setTimeout,useCallback:fn=>fn,invoke,goal:'',selected:'A',instruction:'',state:{graph:{originalGoal:'',nodes:[],edges:[]}},runs:[],projects:[],error:'',historical:false,failedPlanning:null,planningRequestIdRef:{current:0},routeType:'undecided',activeBackendRunId:null,activeBackendPhase:null};
+for(const name of ['State','Goal','Config','IsPlanning','Selected','Messages','MainTab','Runs','Error','Busy','Historical','Modal','Instruction','RepoInfo','Projects','Args','DataPath','WorkspaceRuns','ConfirmModal','FailedPlanning','RouteType','ActiveBackendRunId','ActiveBackendPhase'])context[`set${name}`]=value=>{const key=name[0].toLowerCase()+name.slice(1);context[key]=typeof value==='function'?value(context[key]):value;};
 vm.createContext(context);
 // Reuse production fixture and action closures; setters are a contract observation surface, not runtime truth.
 vm.runInContext(ts.transpileModule(fs.readFileSync('src/types.ts','utf8').replace(/export /g,''),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText+'\nglobalThis.example=example;',context);
-const code=['run','recordRunToWorkspace','handlePlanGoal','control','save','load','handleDeleteRun','handleClearHistory'].map(name=>`const ${declarations.get(name).getText(ast)};`).join('\n')+'\nglobalThis.actions={handlePlanGoal,control,save,load,handleDeleteRun,handleClearHistory};';
+const actionNames=['run','recordRunToWorkspace','refreshFailedPlanning','handlePlanGoal','control','save','load','handleDeleteRun','handleClearHistory'];
+const code=[
+  declarations.has('deduceRouteType') ? declarations.get('deduceRouteType').getText(ast) : '',
+  ...actionNames.map(name => {
+    const d = declarations.get(name);
+    return ts.isFunctionDeclaration(d) ? d.getText(ast) : `const ${d.getText(ast)};`;
+  })
+].join('\n')+'\nglobalThis.actions={handlePlanGoal,control,save,load,handleDeleteRun,handleClearHistory};';
 vm.runInContext(ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
 const checks=[];
 async function test(name,fn){try{await fn();checks.push({name,status:'PASS'});}catch(e){checks.push({name,status:'FAIL',error:String(e)});}}
