@@ -1,4 +1,4 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MarkerType, type Edge } from "@xyflow/react";
 import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -101,6 +101,34 @@ export default function App() {
   const [isPlanning, setIsPlanning] = useState(false);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
   const [failedPlanning, setFailedPlanning] = useState<PlanningSummary | null>(null);
+  const planningRequestIdRef = useRef(0);
+
+  const refreshFailedPlanning = useCallback(async (targetRepo?: string, currentSnapshot?: Snapshot) => {
+    const reqId = ++planningRequestIdRef.current;
+    setFailedPlanning(null);
+    if (!targetRepo) return;
+    try {
+      const plannings = await runtimeService.listPlannings(targetRepo);
+      if (planningRequestIdRef.current !== reqId) return;
+      if (!plannings || plannings.length === 0) {
+        setFailedPlanning(null);
+        return;
+      }
+      const latestPlanning = plannings[0];
+      const isFailed = latestPlanning.status === "failed" || !!latestPlanning.error;
+      const runPlanningTime = currentSnapshot?.planning?.createdAt || 0;
+      const latestTime = latestPlanning.createdAt || 0;
+      if (isFailed && (!currentSnapshot?.runId || !currentSnapshot?.planning || latestTime >= runPlanningTime)) {
+        setFailedPlanning(latestPlanning);
+      } else {
+        setFailedPlanning(null);
+      }
+    } catch {
+      if (planningRequestIdRef.current === reqId) {
+        setFailedPlanning(null);
+      }
+    }
+  }, []);
 
   const recordRunToWorkspace = (runId: string, repo: string = currentRepoPath) => {
     setWorkspaceRuns((prev) => {
@@ -226,7 +254,6 @@ export default function App() {
       });
     }
     if (data.snapshot.runId) {
-      setFailedPlanning(null);
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       setActiveBackendRunId(data.snapshot.runId);
@@ -238,19 +265,16 @@ export default function App() {
       } else {
         setSelected("");
       }
-    } else {
-      runtimeService.listPlannings().then((plannings) => {
-        const latestFailed = plannings.find((p) => p.status === "failed" || p.error);
-        if (latestFailed) {
-          setFailedPlanning(latestFailed);
-        }
-      }).catch(() => {});
     }
-  }, []);
+
+    const targetRepo = data.config.repository || data.repositoryInfo?.path;
+    refreshFailedPlanning(targetRepo, data.snapshot);
+  }, [refreshFailedPlanning]);
 
   const handleOpenProject = () => run(async () => {
     const info = await runtimeService.pickRepository();
     if (info) {
+      setFailedPlanning(null);
       setRepoInfo(info);
       setConfig((prev) => ({ ...prev, repository: info.path }));
       const item: ProjectItem = {
@@ -269,9 +293,10 @@ export default function App() {
         } catch {}
         return next;
       });
+      let nextSnapshot = emptySnapshot;
       try {
-        const snapshot = await runtimeService.resetWorkspace();
-        setState(snapshot);
+        nextSnapshot = await runtimeService.resetWorkspace();
+        setState(nextSnapshot);
       } catch {
         setState(emptySnapshot);
       }
@@ -280,11 +305,13 @@ export default function App() {
       setGoal("");
       setSelected("");
       setError("");
+      refreshFailedPlanning(info.path, nextSnapshot);
     }
   });
 
   const handleSelectProject = (proj: ProjectItem) => run(async () => {
     if (config.repository === proj.path) return;
+    setFailedPlanning(null);
     const info = await runtimeService.detectRepository(proj.path);
     if (info) {
       setRepoInfo(info);
@@ -304,6 +331,7 @@ export default function App() {
       setConfig((prev) => ({ ...prev, repository: proj.path }));
     }
     const projRuns = workspaceRuns[proj.path] || [];
+    let loadedSnapshot: Snapshot = emptySnapshot;
     if (projRuns.length > 0) {
       try {
         const snapshot = await runtimeService.loadRun(projRuns[0]);
@@ -317,12 +345,15 @@ export default function App() {
         } else {
           setSelected("");
         }
+        loadedSnapshot = snapshot;
       } catch {
         try {
           const snapshot = await runtimeService.resetWorkspace();
           setState(snapshot);
+          loadedSnapshot = snapshot;
         } catch {
           setState(emptySnapshot);
+          loadedSnapshot = emptySnapshot;
         }
         setRouteType("undecided");
         setPlannerStream(initialPlannerStream);
@@ -333,8 +364,10 @@ export default function App() {
       try {
         const snapshot = await runtimeService.resetWorkspace();
         setState(snapshot);
+        loadedSnapshot = snapshot;
       } catch {
         setState(emptySnapshot);
+        loadedSnapshot = emptySnapshot;
       }
       setRouteType("undecided");
       setPlannerStream(initialPlannerStream);
@@ -342,6 +375,7 @@ export default function App() {
       setMessages([]);
     }
     setError("");
+    refreshFailedPlanning(proj.path, loadedSnapshot);
   });
 
   const handleRemoveWorkspaceConfirm = (project: ProjectItem) => {
@@ -760,12 +794,15 @@ export default function App() {
         } else if (event.type === "error") {
           if (event.summary) {
             setFailedPlanning(event.summary);
+          } else if (event.planningId) {
+            runtimeService.getPlanning(event.planningId).then(setFailedPlanning).catch(() => {});
           }
         } else if (event.type === "complete") {
           if (event.snapshot) {
             setState(event.snapshot);
             setRouteType(deduceRouteType(event.snapshot));
             recordRunToWorkspace(event.snapshot.runId);
+            setFailedPlanning(null);
           }
         }
       });
@@ -773,12 +810,15 @@ export default function App() {
       setRouteType(deduceRouteType(snapshot));
       setMainTab("graph");
       recordRunToWorkspace(snapshot.runId);
+      setFailedPlanning(null);
       setSelected("");
       setPlannerStream((prev) => ({ ...prev, stage: "done" }));
     } catch (err: any) {
       setError(String(err?.message || err));
       if (err?.summary) {
         setFailedPlanning(err.summary);
+      } else if (err?.planningId) {
+        runtimeService.getPlanning(err.planningId).then(setFailedPlanning).catch(() => {});
       }
       setPlannerStream((prev) => ({ ...prev, stage: "error" }));
     } finally {

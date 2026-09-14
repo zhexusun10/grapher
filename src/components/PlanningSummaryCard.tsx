@@ -220,14 +220,20 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
           <span className="stat-value primary">{formatSeconds(planning.modelDuration)}</span>
         </div>
 
-        <div className="planning-stat-box" title="规划创建至用户点击审批的等待耗时">
+        <div className="planning-stat-box" title={planning.status === "failed" || planning.error ? "规划状态" : "规划创建至用户点击审批的等待耗时"}>
           <span className="stat-label">
-            <Clock size={12} />
-            审批等待
+            {planning.status === "failed" || planning.error ? <AlertCircle size={12} /> : <Clock size={12} />}
+            {planning.status === "failed" || planning.error ? "规划状态" : "审批等待"}
           </span>
-          <span className={`stat-value ${approvalWaiting.isWaiting ? "warning" : "neutral"}`}>
-            {formatSeconds(approvalWaiting.durationSeconds)}
-            {approvalWaiting.isWaiting && <span className="waiting-pill">等待中</span>}
+          <span className={`stat-value ${planning.status === "failed" || planning.error ? "error" : approvalWaiting.isWaiting ? "warning" : "neutral"}`}>
+            {planning.status === "failed" || planning.error ? (
+              <span style={{ color: "#ef4444" }}>未通过</span>
+            ) : (
+              <>
+                {formatSeconds(approvalWaiting.durationSeconds)}
+                {approvalWaiting.isWaiting && <span className="waiting-pill">等待中</span>}
+              </>
+            )}
           </span>
         </div>
 

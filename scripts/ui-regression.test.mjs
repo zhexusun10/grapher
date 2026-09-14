@@ -56,12 +56,12 @@ try {
   };
   registerExtension(mockPi);
 
-  async function runBashThroughExtension(command) {
-    const toolCallId = "tc-" + Math.random().toString(36).slice(2);
+  async function runBashThroughExtension(command, options = {}) {
+    const toolCallId = options.toolCallId || ("tc-" + Math.random().toString(36).slice(2));
     let res;
     let isErr = false;
     try {
-      res = await registeredBash.execute(toolCallId, { command }, null, () => {}, undefined);
+      res = await registeredBash.execute(toolCallId, { command }, options.signal, () => {}, undefined);
     } catch (e) {
       isErr = true;
       res = { content: [{ type: "text", text: String(e) }] };
@@ -294,6 +294,45 @@ try {
     assert.match(truncatedHtml, /已截断/);
     assert.match(truncatedHtml, /退出码:/);
     assert.match(truncatedHtml, /已截断 \(Truncated\)/);
+
+    // Case 8 (V4-3): Concurrency test with inverted completion order
+    // Call A sleeps 150ms and exits with 3; Call B sleeps 10ms and exits with 7.
+    // Call B finishes first while Call A is still executing.
+    // Because operations and exitCode are strictly closure-local, each toolCallId receives its own exact code.
+    const [concurrentA, concurrentB] = await Promise.all([
+      runBashThroughExtension("sleep 0.15 && exit 3"),
+      runBashThroughExtension("sleep 0.01 && exit 7"),
+    ]);
+    assert.equal(concurrentA.exitCode, 3, "Concurrent call A should maintain exit code 3 without race condition");
+    assert.equal(concurrentA.isError, true, "Concurrent call A should be marked as error");
+    assert.equal(concurrentB.exitCode, 7, "Concurrent call B should maintain exit code 7 without race condition");
+    assert.equal(concurrentB.isError, true, "Concurrent call B should be marked as error");
+
+    // Case 9 (V4-3): Cancel / timeout test with AbortController
+    const abortController = new AbortController();
+    const abortPromise = runBashThroughExtension("sleep 5", { signal: abortController.signal });
+    setTimeout(() => abortController.abort(), 30);
+    const abortedItem = await abortPromise;
+    assert.equal(abortedItem.exitCode, null, "Aborted command should have null exit code");
+    assert.equal(abortedItem.isError, true, "Aborted command should be marked as error");
+    const abortedHtml = renderToStaticMarkup(createElement(ToolCallCard, { item: abortedItem }));
+    assert.match(abortedHtml, /失败 \(退出码未知\)/);
+    assert.doesNotMatch(abortedHtml, /Exit 0/);
+    assert.doesNotMatch(abortedHtml, /Exit 1/);
+
+    // Case 10 (V4-3): Unrecorded orphan tool_result event must preserve null, never default to 0
+    const orphanEvent = {
+      toolCallId: "orphan-call-id-999",
+      toolName: "bash",
+      input: { command: "unknown" },
+      isError: false,
+      details: {},
+    };
+    for (const h of listeners.get("tool_result") || []) {
+      const patch = await h(orphanEvent);
+      if (patch) Object.assign(orphanEvent, patch);
+    }
+    assert.equal(orphanEvent.details.exitCode, null, "Orphan tool_result must strictly preserve null, never synthesize 0");
   });
 
   test("PlanningSummaryCard renders persisted planning metrics, time breakdown, and tokens without exposing internal reasoning", () => {
@@ -365,6 +404,10 @@ try {
       },
     }));
     assert.match(failedHtml, /规划未通过：Partitioner returned an invalid route/);
+    assert.match(failedHtml, /规划状态/);
+    assert.match(failedHtml, /未通过/);
+    assert.doesNotMatch(failedHtml, /审批等待/);
+    assert.equal(calculateApprovalWaitingTime(mockPlanning, undefined).durationSeconds, 0);
 
     // Check footer note clarifies SQLite authority and avoids unconditional claims
     assert.match(approvedHtml, /运行态生命周期以 SQLite 事件为权威源/);
@@ -403,7 +446,89 @@ try {
     assert.equal(pausedSeconds, 15);
   });
 
-  console.log("UI regression tests passed: Header matching, ApprovalModal target, TaskNode state, ExecutionTiming, PlanningSummaryCard.");
+  test("V5-2: Workspace switching, failed planning restoration, and request sequence race condition protection", async () => {
+    // Model the state management logic from App.tsx
+    let failedPlanning = null;
+    let requestId = 0;
+
+    const mockDb = {
+      "/repo/a": [
+        { planningId: "a-fail-1", status: "failed", error: "Failed in A", createdAt: 1000, repository: "/repo/a" }
+      ],
+      "/repo/b": [
+        { planningId: "b-success-1", status: "success", createdAt: 2000, repository: "/repo/b" }
+      ],
+      "/repo/c": [
+        // Has newer success after an older failure
+        { planningId: "c-success-2", status: "success", createdAt: 3000, repository: "/repo/c" },
+        { planningId: "c-fail-1", status: "failed", error: "Old fail in C", createdAt: 1500, repository: "/repo/c" }
+      ],
+      "/repo/d": [
+        // Has newer failure after an older successful run
+        { planningId: "d-fail-2", status: "failed", error: "Newer fail in D", createdAt: 4000, repository: "/repo/d" },
+        { planningId: "d-success-1", status: "success", createdAt: 3500, repository: "/repo/d" }
+      ],
+    };
+
+    async function refreshFailedPlanning(targetRepo, currentSnapshot, artificialDelay = 0) {
+      const currentReqId = ++requestId;
+      failedPlanning = null; // Clear immediately
+      if (!targetRepo) return;
+      if (artificialDelay > 0) {
+        await new Promise(r => setTimeout(r, artificialDelay));
+      }
+      const plannings = mockDb[targetRepo] || [];
+      if (requestId !== currentReqId) return; // Discard stale response
+      if (!plannings || plannings.length === 0) {
+        failedPlanning = null;
+        return;
+      }
+      const latestPlanning = plannings[0];
+      const isFailed = latestPlanning.status === "failed" || !!latestPlanning.error;
+      const runPlanningTime = currentSnapshot?.planning?.createdAt || 0;
+      const latestTime = latestPlanning.createdAt || 0;
+      if (isFailed && (!currentSnapshot?.runId || !currentSnapshot?.planning || latestTime >= runPlanningTime)) {
+        failedPlanning = latestPlanning;
+      } else {
+        failedPlanning = null;
+      }
+    }
+
+    // 1. Initial workspace A has a failure
+    await refreshFailedPlanning("/repo/a", null);
+    assert.equal(failedPlanning?.planningId, "a-fail-1", "Workspace A should display failed planning");
+
+    // 2. Switch to workspace B (which has only success): failure must be cleared immediately and remain null
+    await refreshFailedPlanning("/repo/b", null);
+    assert.equal(failedPlanning, null, "Workspace B must never display Workspace A's failed planning");
+
+    // 3. Switch back to workspace A: failure must be restored
+    await refreshFailedPlanning("/repo/a", null);
+    assert.equal(failedPlanning?.planningId, "a-fail-1", "Switching back to A must restore A's failed planning");
+
+    // 4. Workspace C: has older failure, but latest attempt was successful:
+    // "若最近尝试成功，旧失败作为历史可查，但不要伪装成当前失败"
+    await refreshFailedPlanning("/repo/c", null);
+    assert.equal(failedPlanning, null, "Older failure must NOT be disguised as current failure when latest planning succeeded");
+
+    // 5. Workspace D: "旧 run + 新失败" scenario
+    // Existing run was created with d-success-1 at t=3500, then a subsequent planning failed at t=4000
+    const snapshotD = {
+      runId: "run-d-1",
+      planning: { planningId: "d-success-1", createdAt: 3500 },
+    };
+    await refreshFailedPlanning("/repo/d", snapshotD);
+    assert.equal(failedPlanning?.planningId, "d-fail-2", "Newer failed planning after an existing run must be displayed");
+
+    // 6. Race condition protection: rapid switch A -> B where A responds slower than B
+    failedPlanning = null;
+    const slowA = refreshFailedPlanning("/repo/a", null, 50); // Req 1 (slow)
+    const fastB = refreshFailedPlanning("/repo/b", null, 10); // Req 2 (fast)
+    await Promise.all([slowA, fastB]);
+    assert.equal(failedPlanning, null, "Stale slow response from Repo A must not overwrite Repo B state");
+  });
+
+  console.log("UI regression tests passed: Header matching, ApprovalModal target, TaskNode state, ExecutionTiming, PlanningSummaryCard, Workspace Switching.");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

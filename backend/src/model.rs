@@ -83,6 +83,10 @@ pub struct PlanningSummary {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

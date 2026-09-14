@@ -125,7 +125,7 @@ export const runtimeService = {
     return finalSnapshot;
   },
   getPlanning: (planningId: string) => request<PlanningSummary>("get_planning", { planningId }),
-  listPlannings: () => request<PlanningSummary[]>("list_plannings"),
+  listPlannings: (repository?: string) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}),
   control: (action: string, extra?: Record<string, unknown>) => request<Snapshot>("control", { action, ...extra }),
   detectRepository: (path?: string | null) => request<RepositoryInfo | null>("detect_repository", { path: path || null }),
   async pickRepository(): Promise<RepositoryInfo | null> {

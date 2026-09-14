@@ -10,20 +10,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async event => ({ systemPrompt: grapherSystemPrompt(event.systemPrompt) }));
 
   const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();
-  let pendingExitCode: number | null = null;
-
   const localOps = createLocalBashOperations();
-  const customOps: BashOperations = {
-    exec: async (command, cwd, options) => {
-      const res = await localOps.exec(command, cwd, options);
-      pendingExitCode = res.exitCode;
-      return res;
-    },
-  };
-
-  const baseBashTool = createBashToolDefinition(process.cwd(), {
-    operations: customOps,
-  });
+  const baseBashTool = createBashToolDefinition(process.cwd());
 
   pi.registerTool({
     ...baseBashTool,
@@ -34,16 +22,29 @@ export default function (pi: ExtensionAPI) {
         : `set -E -e -o pipefail\n${rawCmd}`;
       params.command = cmd;
 
-      pendingExitCode = null;
+      // Call-local isolated exit code variable specific to this invocation closure
+      let callExitCode: number | null = null;
+      const scopedOps: BashOperations = {
+        exec: async (command, cwd, options) => {
+          const res = await localOps.exec(command, cwd, options);
+          callExitCode = res.exitCode;
+          return res;
+        },
+      };
+
+      const scopedBashTool = createBashToolDefinition(ctx?.cwd || process.cwd(), {
+        operations: scopedOps,
+      });
+
       let result: any;
       let execError: any;
       try {
-        result = await baseBashTool.execute(toolCallId, params, signal, onUpdate, ctx);
+        result = await scopedBashTool.execute(toolCallId, params, signal, onUpdate, ctx);
       } catch (err) {
         execError = err;
       }
 
-      const exitCode = pendingExitCode;
+      const exitCode = callExitCode;
       const isTruncated = !!(result?.details?.truncation?.truncated || result?.details?.truncated);
       toolCallExitCodes.set(toolCallId, { exitCode, command: rawCmd, truncated: isTruncated });
 
@@ -78,7 +79,8 @@ export default function (pi: ExtensionAPI) {
       if (recorded) {
         toolCallExitCodes.delete(event.toolCallId);
       }
-      const exitCode = recorded ? recorded.exitCode : (event.isError ? null : 0);
+      // Strictly preserve null when unknown; NEVER guess 0 without provenance
+      const exitCode = recorded ? recorded.exitCode : null;
       const details = ((event.details || {}) as Record<string, unknown>);
       details.exitCode = exitCode;
       details.command = recorded?.command ?? event.input?.command;

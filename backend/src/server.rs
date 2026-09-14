@@ -144,6 +144,8 @@ mod prompt_tests {
             model_duration: 12.345,
             status: Some("success".into()),
             error: None,
+            created_at: None,
+            repository: None,
         };
         runtime
             .create_with_planning(
@@ -167,6 +169,98 @@ mod prompt_tests {
         let loaded = runtime.store.load(&runtime.state.run_id).unwrap();
         assert_eq!(loaded.planning_id.as_deref(), Some("test-plan-id"));
         assert_eq!(loaded.planning.as_ref(), Some(&summary));
+    }
+
+    #[test]
+    fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut runtime = Runtime::open(temp.path()).unwrap();
+        let config = Config {
+            repository: "/workspace/repo-a".into(),
+            #[cfg(feature = "fixture")]
+            engine: "fixture".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: String::new(),
+            #[cfg(feature = "fixture")]
+            pi_args: Vec::new(),
+            model: String::new(),
+            max_parallel: 2,
+            max_feedback: 1,
+        };
+        let summary = PlanningSummary {
+            planning_id: "legacy-plan-a".into(),
+            roles: Default::default(),
+            total_planning_duration: 10.0,
+            model_duration: 8.0,
+            status: Some("success".into()),
+            error: None,
+            created_at: Some(100),
+            repository: None, // legacy: missing repository
+        };
+        runtime
+            .create_with_planning(
+                Graph {
+                    original_goal: "Goal A".into(),
+                    nodes: vec![Node {
+                        name: "task".into(),
+                        task: "Run task".into(),
+                    }],
+                    edges: Vec::new(),
+                },
+                config,
+                Some("legacy-plan-a".into()),
+                Some(summary.clone()),
+            )
+            .unwrap();
+
+        // Write legacy summary on disk with NO repository
+        let plan_a_dir = temp.path().join("planning").join("legacy-plan-a");
+        fs::create_dir_all(&plan_a_dir).unwrap();
+        let legacy_json = serde_json::to_string_pretty(&summary).unwrap();
+        fs::write(plan_a_dir.join("summary.json"), &legacy_json).unwrap();
+
+        // Write an unattributed legacy summary (failed planning never tied to a run)
+        let unattr_summary = PlanningSummary {
+            planning_id: "unattributed-plan".into(),
+            roles: Default::default(),
+            total_planning_duration: 5.0,
+            model_duration: 4.0,
+            status: Some("failed".into()),
+            error: Some("Planner crashed".into()),
+            created_at: Some(200),
+            repository: None,
+        };
+        let unattr_dir = temp.path().join("planning").join("unattributed-plan");
+        fs::create_dir_all(&unattr_dir).unwrap();
+        fs::write(unattr_dir.join("summary.json"), serde_json::to_string_pretty(&unattr_summary).unwrap()).unwrap();
+
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("ext.ts"),
+        });
+
+        // 1. Filter by repo-b: must return NOTHING (fail closed against repo-a and unattributed)
+        let res_b = list_plannings(&service, Some("/workspace/repo-b".into())).unwrap();
+        assert_eq!(res_b.len(), 0, "Repo B must not receive Repo A or unattributed plannings");
+
+        // 2. Filter by repo-a: must backfill legacy-plan-a and return it, and exclude unattributed
+        let res_a = list_plannings(&service, Some("/workspace/repo-a".into())).unwrap();
+        assert_eq!(res_a.len(), 1, "Repo A must receive backfilled planning");
+        assert_eq!(res_a[0].planning_id, "legacy-plan-a");
+        assert_eq!(res_a[0].repository.as_deref(), Some("/workspace/repo-a"));
+
+        // Verify summary on disk was migrated
+        let migrated_disk = fs::read_to_string(plan_a_dir.join("summary.json")).unwrap();
+        let parsed_disk: PlanningSummary = serde_json::from_str(&migrated_disk).unwrap();
+        assert_eq!(parsed_disk.repository.as_deref(), Some("/workspace/repo-a"));
+
+        // 3. Unfiltered: returns both legacy-plan-a and unattributed-plan
+        let res_all = list_plannings(&service, None).unwrap();
+        assert_eq!(res_all.len(), 2, "Unfiltered query returns all plannings");
+        assert_eq!(res_all[0].planning_id, "unattributed-plan"); // created_at 200 > 100
+        assert_eq!(res_all[1].planning_id, "legacy-plan-a");
     }
 
     #[cfg(feature = "fixture")]
@@ -439,6 +533,10 @@ fn plan_goal_internal(
     let cleanup = service.clone();
     let result = (move || {
         let planning_start = std::time::Instant::now();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let root = service
             .runtime
             .lock()
@@ -446,6 +544,7 @@ fn plan_goal_internal(
             .root
             .clone();
         let repository = PathBuf::from(&config.repository);
+        let repo_str = repository.to_string_lossy().to_string();
         crate::workspace::verify(&repository).map_err(|error| (error, None))?;
         let planning_id = Uuid::new_v4().to_string();
         let directory = root.join("planning").join(&planning_id);
@@ -594,6 +693,8 @@ fn plan_goal_internal(
             model_duration,
             status: Some("success".to_string()),
             error: None,
+            created_at: Some(now_ms),
+            repository: Some(repo_str.clone()),
         };
         if let Ok(summary_json) = serde_json::to_string_pretty(&summary) {
             let _ = fs::write(directory.join("summary.json"), &summary_json);
@@ -650,6 +751,8 @@ fn plan_goal_internal(
                     model_duration,
                     status: Some("failed".to_string()),
                     error: Some(err.clone()),
+                    created_at: Some(now_ms),
+                    repository: Some(repo_str.clone()),
                 };
                 if let Ok(failure_json) = serde_json::to_string_pretty(&failure_summary) {
                     let _ = fs::write(directory.join("summary.json"), &failure_json);
@@ -863,18 +966,47 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     runtime.delete_run(&run_id)
 }
 
+fn is_valid_planning_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 128 {
+        return false;
+    }
+    id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !id.starts_with('.')
+        && id != ".."
+}
+
 fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningSummary, String> {
+    if !is_valid_planning_id(&planning_id) {
+        return Err(format!("Invalid planning ID: {planning_id}"));
+    }
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-    let summary_path = runtime.root.join("planning").join(&planning_id).join("summary.json");
+    let planning_dir = runtime.root.join("planning");
+    let summary_path = planning_dir.join(&planning_id).join("summary.json");
+    if let Ok(canonical_summary) = summary_path.canonicalize() {
+        if let Ok(canonical_planning_dir) = planning_dir.canonicalize() {
+            if !canonical_summary.starts_with(&canonical_planning_dir) {
+                return Err(format!("Invalid planning ID: path traversal detected: {planning_id}"));
+            }
+        }
+    }
     if summary_path.exists() {
         let content = fs::read_to_string(&summary_path).map_err(|error| error.to_string())?;
-        serde_json::from_str(&content).map_err(|error| error.to_string())
+        let mut summary = serde_json::from_str::<PlanningSummary>(&content).map_err(|error| error.to_string())?;
+        if summary.repository.is_none() {
+            if let Some(repo) = runtime.store.find_repository_by_planning_id(&summary.planning_id) {
+                summary.repository = Some(repo);
+                if let Ok(migrated_json) = serde_json::to_string_pretty(&summary) {
+                    let _ = fs::write(&summary_path, migrated_json);
+                }
+            }
+        }
+        Ok(summary)
     } else {
         Err(format!("Planning summary not found: {planning_id}"))
     }
 }
 
-fn list_plannings(service: &Arc<Service>) -> Result<Vec<PlanningSummary>, String> {
+fn list_plannings(service: &Arc<Service>, repository_filter: Option<String>) -> Result<Vec<PlanningSummary>, String> {
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     let planning_dir = runtime.root.join("planning");
     if !planning_dir.exists() {
@@ -886,14 +1018,38 @@ fn list_plannings(service: &Arc<Service>) -> Result<Vec<PlanningSummary>, String
             let summary_path = entry.path().join("summary.json");
             if summary_path.exists() {
                 if let Ok(content) = fs::read_to_string(&summary_path) {
-                    if let Ok(summary) = serde_json::from_str::<PlanningSummary>(&content) {
+                    if let Ok(mut summary) = serde_json::from_str::<PlanningSummary>(&content) {
+                        // If repository is missing, attempt to backfill from associated run in event store
+                        if summary.repository.is_none() {
+                            if let Some(repo) = runtime.store.find_repository_by_planning_id(&summary.planning_id) {
+                                summary.repository = Some(repo);
+                                if let Ok(migrated_json) = serde_json::to_string_pretty(&summary) {
+                                    let _ = fs::write(&summary_path, migrated_json);
+                                }
+                            }
+                        }
+
+                        // Filter by repository if requested (fail closed)
+                        if let Some(ref repo) = repository_filter {
+                            let filter = repo.trim();
+                            if !filter.is_empty() {
+                                match &summary.repository {
+                                    Some(summary_repo) if summary_repo == filter => {}
+                                    _ => continue, // Fail closed: reject mismatched or unattributed summaries
+                                }
+                            }
+                        }
                         summaries.push(summary);
                     }
                 }
             }
         }
     }
-    summaries.sort_by(|a, b| b.planning_id.cmp(&a.planning_id));
+    summaries.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.planning_id.cmp(&a.planning_id))
+    });
     Ok(summaries)
 }
 
@@ -932,7 +1088,10 @@ pub fn dispatch(
             service,
         )?),
         "get_planning" => to_value(get_planning(argument(&body, "planningId")?, service)?),
-        "list_plannings" => to_value(list_plannings(service)?),
+        "list_plannings" => to_value(list_plannings(
+            service,
+            argument(&body, "repository").ok(),
+        )?),
         "control" => to_value(control(
             argument(&body, "action")?,
             argument(&body, "node")?,

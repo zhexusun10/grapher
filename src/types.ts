@@ -35,6 +35,8 @@ export interface PlanningSummary {
   modelDuration: number;
   status?: string;
   error?: string;
+  createdAt?: number;
+  repository?: string;
 }
 
 export interface Snapshot {

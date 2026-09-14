@@ -119,7 +119,73 @@ fi
     await assert.rejects(call("control", { action: "unknown" }), /Unknown action/, "Failure must release the planning guard");
     assert.equal((await call("snapshot")).runId, saved.runId, "Failed planning must preserve the current graph");
     assert.deepEqual(await call("history", { runId: saved.runId }), snapshot);
+    // Verify get_planning retrieves legitimate failed planning summary
+    const planSummary = await call("get_planning", { planningId: created[0] });
+    assert.equal(planSummary.planningId, created[0]);
+    assert.equal(planSummary.status, "failed");
+    assert.ok(planSummary.createdAt > 0);
+
+    // V4-1 Security regression: Path traversal attacks must fail with Invalid planning ID
+    for (const evilId of ["../../outside", "../planning", "/etc/passwd", "sub/dir", "..", "."]) {
+      await assert.rejects(call("get_planning", { planningId: evilId }), /Invalid planning ID/);
+    }
   }
+
+  // Verify list_plannings sorting (createdAt desc) and repository filtering
+  const allPlannings = await call("list_plannings");
+  assert.ok(allPlannings.length >= 2);
+  for (let i = 0; i < allPlannings.length - 1; i++) {
+    assert.ok((allPlannings[i].createdAt || 0) >= (allPlannings[i + 1].createdAt || 0));
+  }
+  const filteredPlannings = await call("list_plannings", { repository: path.join(root, "fixture-repository") });
+  assert.ok(filteredPlannings.length >= 2);
+  assert.ok(filteredPlannings.every(p => p.repository === path.join(root, "fixture-repository")));
+
+  const nonExistentRepoPlannings = await call("list_plannings", { repository: "/nonexistent/repo" });
+  assert.equal(nonExistentRepoPlannings.length, 0);
+
+  // V5-1: Test legacy backfilling and fail-closed isolation across workspaces
+  const legacyDirUnattributed = path.join(root, "planning", "legacy-unattributed");
+  await mkdir(legacyDirUnattributed, { recursive: true });
+  await writeFile(path.join(legacyDirUnattributed, "summary.json"), JSON.stringify({
+    planningId: "legacy-unattributed",
+    totalPlanningDuration: 1.0,
+    modelDuration: 1.0,
+    roles: {},
+    status: "failed",
+    error: "Legacy failure without repository",
+    createdAt: 1000,
+  }, null, 2));
+
+  const workspaceBDir = path.join(root, "planning", "workspace-b-plan");
+  await mkdir(workspaceBDir, { recursive: true });
+  await writeFile(path.join(workspaceBDir, "summary.json"), JSON.stringify({
+    planningId: "workspace-b-plan",
+    totalPlanningDuration: 2.0,
+    modelDuration: 1.5,
+    roles: {},
+    status: "failed",
+    error: "Workspace B failure",
+    createdAt: 2000,
+    repository: path.join(root, "workspace-b"),
+  }, null, 2));
+
+  // Query Workspace B: must include workspace B plan, but MUST NOT include fixture-repository or unattributed legacy plan
+  const wsBPlannings = await call("list_plannings", { repository: path.join(root, "workspace-b") });
+  assert.equal(wsBPlannings.length, 1);
+  assert.equal(wsBPlannings[0].planningId, "workspace-b-plan");
+
+  // Query fixture-repository: must NOT include workspace-b or unattributed legacy plan
+  const fixturePlannings = await call("list_plannings", { repository: path.join(root, "fixture-repository") });
+  assert.ok(fixturePlannings.length >= 2);
+  assert.ok(fixturePlannings.every(p => p.repository === path.join(root, "fixture-repository")));
+  assert.ok(!fixturePlannings.some(p => p.planningId === "legacy-unattributed" || p.planningId === "workspace-b-plan"));
+
+  // Unfiltered list_plannings: must include all plannings, including unattributed legacy
+  const allWithLegacy = await call("list_plannings");
+  assert.ok(allWithLegacy.some(p => p.planningId === "legacy-unattributed"));
+  assert.ok(allWithLegacy.some(p => p.planningId === "workspace-b-plan"));
+
   await call("delete_run", { runId: saved.runId });
   assert.ok(!(await call("bootstrap")).runs.includes(saved.runId));
   console.log("HTTP integration passed: assets, request validation, compilation, approval, execution, persistence, planning failure diagnostics, deletion, shutdown.");

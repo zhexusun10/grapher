@@ -430,17 +430,32 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
               </div>
 
-              {/* 持久化规划阶段摘要 */}
-              {(state.planning || failedPlanning) && (
+              {/* 失败规划摘要：当最近规划未通过时独立呈现，不与旧 run 混淆，亦不继承旧 run 事件 */}
+              {failedPlanning && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 >
                   <PlanningSummaryCard
-                    planning={state.planning || failedPlanning!}
+                    planning={failedPlanning}
+                    state={undefined}
+                    defaultExpanded={true}
+                  />
+                </motion.div>
+              )}
+
+              {/* 当前 Run 的规划阶段摘要（仅在当前 Run 自身拥有有效规划时展示） */}
+              {state.planning && (!failedPlanning || state.planning.planningId !== failedPlanning.planningId) && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+                >
+                  <PlanningSummaryCard
+                    planning={state.planning}
                     state={state}
-                    defaultExpanded={!state.planning && !!failedPlanning}
+                    defaultExpanded={!failedPlanning}
                   />
                 </motion.div>
               )}
