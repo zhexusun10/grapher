@@ -34,7 +34,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
             task: "Do not run a model",
             session_dir: &temp.path().join("session"),
             extension: None,
-            tools: "read,bash",
+            tools: Some("read,bash"),
             session_id: Some("test-session"),
             extra_args: Vec::new(),
             environment: mode.map(|mode| vec![("GRAPHER_MODE", mode.into())]).unwrap_or_default(),
@@ -200,7 +200,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             task: "Do not run a model",
             session_dir: &temp.path().join("session"),
             extension: None,
-            tools: "read,bash",
+            tools: Some("read,bash"),
             session_id: Some("test-session"),
             extra_args: Vec::new(),
             environment: Vec::new(),
@@ -212,3 +212,168 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(output.contains("--system-prompt"));
     assert!(output.contains("SYSTEM_PROMPT_CONTENT: Custom system prompt content for test"));
 }
+
+#[test]
+fn subagent_allows_skills_and_plugins_while_planner_and_partitioner_disable_them() {
+    let temp = TempDir::new().unwrap();
+    let script_path = temp.path().join("fake-pi.sh");
+    let script = r#"cat >/dev/null
+echo "ARGS: $@"
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
+"#;
+    fs::write(&script_path, script).unwrap();
+    let config = Config {
+        repository: String::new(),
+        engine: "pi".into(),
+        pi_command: "/bin/sh".into(),
+        pi_args: vec![script_path.to_string_lossy().into()],
+        model: "test-model".into(),
+        max_parallel: 2,
+        max_feedback: 3,
+    };
+
+    // 1. Subagent: must NOT have --no-skills or --no-extensions, MUST have --approve, must NOT restrict tools
+    let mut subagent_out = String::new();
+    let _ = run_pi(
+        PiRequest {
+            role: PiRole::Subagent,
+            config: &config,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &temp.path().join("session-subagent"),
+            extension: None,
+            tools: None,
+            session_id: Some("subagent-session"),
+            extra_args: Vec::new(),
+            environment: Vec::new(),
+            system_prompt: None,
+        },
+        |text| subagent_out.push_str(&text),
+    );
+    assert!(!subagent_out.contains("--no-skills"), "Subagent must not have --no-skills");
+    assert!(!subagent_out.contains("--no-extensions"), "Subagent must not have --no-extensions");
+    assert!(!subagent_out.contains("--no-approve"), "Subagent must not have --no-approve");
+    assert!(subagent_out.contains("--approve"), "Subagent must have --approve for workspace trust");
+    assert!(!subagent_out.contains("--tools"), "Subagent must not restrict tools via --tools");
+
+    // 2. Planner: MUST have --no-skills, --no-extensions, --no-approve, and restricted tools
+    let mut planner_out = String::new();
+    let _ = run_pi(
+        PiRequest {
+            role: PiRole::Planner,
+            config: &config,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &temp.path().join("session-planner"),
+            extension: None,
+            tools: Some("node,edge,read,bash"),
+            session_id: Some("planner-session"),
+            extra_args: Vec::new(),
+            environment: Vec::new(),
+            system_prompt: None,
+        },
+        |text| planner_out.push_str(&text),
+    );
+    assert!(planner_out.contains("--no-skills"), "Planner must have --no-skills");
+    assert!(planner_out.contains("--no-extensions"), "Planner must have --no-extensions");
+    assert!(planner_out.contains("--no-approve"), "Planner must have --no-approve");
+    assert!(planner_out.contains("--tools node,edge,read,bash"), "Planner must restrict tools");
+
+    // 3. Partitioner: MUST have --no-skills, --no-extensions, --no-approve, and --no-tools
+    let mut partitioner_out = String::new();
+    let _ = run_pi(
+        PiRequest {
+            role: PiRole::Partitioner,
+            config: &config,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &temp.path().join("session-part"),
+            extension: None,
+            tools: Some(""),
+            session_id: None,
+            extra_args: vec!["--no-tools", "--no-context-files"],
+            environment: Vec::new(),
+            system_prompt: None,
+        },
+        |text| partitioner_out.push_str(&text),
+    );
+    assert!(partitioner_out.contains("--no-skills"), "Partitioner must have --no-skills");
+    assert!(partitioner_out.contains("--no-extensions"), "Partitioner must have --no-extensions");
+    assert!(partitioner_out.contains("--no-approve"), "Partitioner must have --no-approve");
+    assert!(partitioner_out.contains("--no-tools"), "Partitioner must have --no-tools");
+}
+
+#[test]
+fn external_pi_model_env_does_not_override_subagent_or_leak_to_child() {
+    let temp = TempDir::new().unwrap();
+    let script_path = temp.path().join("fake-pi.sh");
+    let script = r#"cat >/dev/null
+echo "PI_MODEL_ENV: ${PI_MODEL:-UNSET}"
+echo "PI_THINKING_ENV: ${PI_THINKING:-UNSET}"
+echo "PI_SESSION_ID_ENV: ${PI_SESSION_ID:-UNSET}"
+echo "PI_SESSION_FILE_ENV: ${PI_SESSION_FILE:-UNSET}"
+for arg in "$@"; do
+    if [ "$prev" = "--model" ]; then
+        echo "CLI_MODEL: $arg"
+    fi
+    prev="$arg"
+done
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
+"#;
+    fs::write(&script_path, script).unwrap();
+
+    // Set external PI_MODEL, PI_THINKING, PI_SESSION_ID, PI_SESSION_FILE in current test process
+    std::env::set_var("PI_MODEL", "leaked-external-model");
+    std::env::set_var("PI_THINKING", "leaked-external-thinking");
+    std::env::set_var("PI_SESSION_ID", "leaked-external-session");
+    std::env::set_var("PI_SESSION_FILE", "leaked-external-file");
+
+    let base_config = Config {
+        repository: String::new(),
+        engine: "pi".into(),
+        pi_command: "/bin/sh".into(),
+        pi_args: vec![script_path.to_string_lossy().into()],
+        model: "internal-grapher-model".into(),
+        max_parallel: 2,
+        max_feedback: 3,
+    };
+
+    // Verify PiModelConfig::resolve for Subagent ignores PI_MODEL and uses base_config.model
+    use grapher::engine::PiModelConfig;
+    let resolved = PiModelConfig::resolve(PiRole::Subagent, &base_config);
+    assert_eq!(resolved.model, "internal-grapher-model");
+    assert_eq!(resolved.thinking, None);
+
+    // Verify run_pi strips PI_MODEL, PI_THINKING, PI_SESSION_ID, PI_SESSION_FILE from child process environment
+    let effective = resolved.effective_config(&base_config);
+    let mut output = String::new();
+    let _ = run_pi(
+        PiRequest {
+            role: PiRole::Subagent,
+            config: &effective,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &temp.path().join("session"),
+            extension: None,
+            tools: None,
+            session_id: Some("session-id"),
+            extra_args: Vec::new(),
+            environment: Vec::new(),
+            system_prompt: None,
+        },
+        |text| output.push_str(&text),
+    );
+
+    assert!(output.contains("PI_MODEL_ENV: UNSET"), "Child process must not inherit PI_MODEL");
+    assert!(output.contains("PI_THINKING_ENV: UNSET"), "Child process must not inherit PI_THINKING");
+    assert!(output.contains("PI_SESSION_ID_ENV: UNSET"), "Child process must not inherit PI_SESSION_ID");
+    assert!(output.contains("PI_SESSION_FILE_ENV: UNSET"), "Child process must not inherit PI_SESSION_FILE");
+    assert!(output.contains("CLI_MODEL: internal-grapher-model"), "Child must receive internal grapher model via --model");
+
+    // Clean up test env
+    std::env::remove_var("PI_MODEL");
+    std::env::remove_var("PI_THINKING");
+    std::env::remove_var("PI_SESSION_ID");
+    std::env::remove_var("PI_SESSION_FILE");
+}
+

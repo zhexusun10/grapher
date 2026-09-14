@@ -136,7 +136,7 @@ pub fn resolve_with_merger(
             task: "修复当前合并冲突。",
             session_dir: &directory,
             extension: None,
-            tools: "read,write,bash,edit",
+            tools: Some("read,write,bash,edit"),
             session_id: Some(&id),
             extra_args,
             environment,

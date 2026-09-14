@@ -68,8 +68,8 @@ impl PiRole {
         match self {
             PiRole::Partitioner => "PARTITIONER_TIMEOUT_SECONDS",
             PiRole::Planner => "PLANNER_TIMEOUT_SECONDS",
-            PiRole::Subagent => "PI_TIMEOUT_SECONDS",
-            PiRole::Merger => "PI_TIMEOUT_SECONDS",
+            PiRole::Subagent => "SUBAGENT_TIMEOUT_SECONDS",
+            PiRole::Merger => "MERGER_TIMEOUT_SECONDS",
         }
     }
 
@@ -77,7 +77,7 @@ impl PiRole {
         match self {
             PiRole::Partitioner => "PARTITIONER_MODEL",
             PiRole::Planner => "PLANNER_MODEL",
-            PiRole::Subagent => "PI_MODEL",
+            PiRole::Subagent => "SUBAGENT_MODEL",
             PiRole::Merger => "MERGER_MODEL",
         }
     }
@@ -86,7 +86,7 @@ impl PiRole {
         match self {
             PiRole::Partitioner => "PARTITIONER_THINKING",
             PiRole::Planner => "PLANNER_THINKING",
-            PiRole::Subagent => "PI_THINKING",
+            PiRole::Subagent => "SUBAGENT_THINKING",
             PiRole::Merger => "MERGER_THINKING",
         }
     }
@@ -251,7 +251,7 @@ pub struct PiRequest<'request> {
     pub task: &'request str,
     pub session_dir: &'request Path,
     pub extension: Option<&'request Path>,
-    pub tools: &'request str,
+    pub tools: Option<&'request str>,
     pub session_id: Option<&'request str>,
     pub extra_args: Vec<&'request str>,
     pub environment: Vec<(&'request str, String)>,
@@ -302,16 +302,22 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         "--mode",
         "json",
         "--print",
-        "--no-extensions",
-        "--no-skills",
         "--no-prompt-templates",
         "--no-themes",
-        "--no-approve",
     ]);
-    if request.tools.trim().is_empty() {
-        command.arg("--no-tools");
+    if request.role == PiRole::Subagent {
+        command.arg("--approve");
     } else {
-        command.args(["--tools", request.tools]);
+        command.args(["--no-extensions", "--no-skills", "--no-approve"]);
+    }
+    match request.tools {
+        Some(tools) if tools.trim().is_empty() => {
+            command.arg("--no-tools");
+        }
+        Some(tools) => {
+            command.args(["--tools", tools]);
+        }
+        None => {}
     }
     if let Some(extension) = request.extension {
         command.args([
@@ -354,6 +360,14 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Strip external Pi environment variables so child Pi instances
+    // are completely isolated from outer Pi CLI sessions or shell exports.
+    command.env_remove("PI_MODEL");
+    command.env_remove("PI_THINKING");
+    command.env_remove("PI_PROVIDER");
+    command.env_remove("PI_REASONING_LEVEL");
+    command.env_remove("PI_SESSION_ID");
+    command.env_remove("PI_SESSION_FILE");
     for (key, value) in request.environment {
         command.env(key, value);
     }
@@ -527,7 +541,7 @@ pub fn execute(
             task: &task,
             session_dir: &session_dir,
             extension: None,
-            tools: "read,write,bash,edit",
+            tools: None,
             session_id: Some(&execution.session_id),
             extra_args,
             environment: Vec::new(),

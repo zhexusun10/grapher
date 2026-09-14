@@ -47,8 +47,22 @@ npm start
 1. 运行设置中填写项目目录。标准 Git 仓库要求已有 commit 且工作树干净；普通文件夹通过外置 shadow repository 保存基线、执行和自动回写，用户目录不创建 `.git`。
 2. 选择模型（可用 `provider/model` 指定 provider）。生产后端固定使用 `engine/entrypoint.mjs`；旧配置中的可执行文件和参数不再控制生产启动。
 3. 先执行 `npm run pi:setup` 安装锁定依赖及恢复固定模型目录。不能用全局安装的 Pi 替代 submodule。当前 upstream 完整构建有已记录的类型检查阻塞，源码 CLI 可启动；详见基线文档。
-4. Partitioner 是无工具的极简单轮文本分类器，直接输出 `graph` 或 `serial`：仅当存在多个可独立推进的实质工作流时选择 Graph，否则选择 Serial；不解决或规划任务。后端采用鲁棒关键词提取判定分支，即使模型输出多余解释或未严格遵守单词要求，只要检测到对应词即转入相应分支，成功响应但文本含糊时兜底为 Serial；启动、认证或请求失败则显式报错，不创建或自动审批执行图。Serial 跳过 Planner，后端创建名为 `task` 的单节点图并自动审批、开始执行，直接修改用户目录。各角色（Partitioner / Planner / Subagent / Merger）在统一的 `PiModelConfig` API 层解析模型与思考预算（支持 `PARTITIONER_MODEL`、`PLANNER_MODEL`、`PI_MODEL`、`MERGER_MODEL` 覆盖）。
+4. Partitioner 是无工具的极简单轮文本分类器，直接输出 `graph` 或 `serial`：仅当存在多个可独立推进的实质工作流时选择 Graph，否则选择 Serial；不解决或规划任务。后端采用鲁棒关键词提取判定分支，即使模型输出多余解释或未严格遵守单词要求，只要检测到对应词即转入相应分支，成功响应但文本含糊时兜底为 Serial；启动、认证或请求失败则显式报错，不创建或自动审批执行图。Serial 跳过 Planner，后端创建名为 `task` 的单节点图并自动审批、开始执行，直接修改用户目录。各角色（Partitioner / Planner / Subagent / Merger）在统一的 `PiModelConfig` API 层解析模型与思考预算（支持 `PARTITIONER_MODEL`、`PLANNER_MODEL`、`SUBAGENT_MODEL`、`MERGER_MODEL` 覆盖）。
 5. Graph Planner 使用 `node / edge / read / bash` 生成完整可执行图。每次 mutation 调用 Rust 编译器，校验失败不会写入候选图；Planner 退出后展示图，用户批准才启动节点。也可以导入手写 Graph IR。
+
+### 角色环境隔离与 Subagent 技能/插件支持
+
+1. **环境与模型隔离（解耦与防泄漏）**：
+   - 各角色拥有专属配置环境变量：`PARTITIONER_MODEL` / `PARTITIONER_THINKING`、`PLANNER_MODEL` / `PLANNER_THINKING`、`SUBAGENT_MODEL` / `SUBAGENT_THINKING`、`MERGER_MODEL` / `MERGER_THINKING`，超时通过对应 `*_TIMEOUT_SECONDS` 配置。
+   - 子进程环境净化：每次调用 Pi 启动子进程前，后端显式调用 `env_remove` 剔除父环境中的 `PI_MODEL`、`PI_THINKING`、`PI_PROVIDER`、`PI_REASONING_LEVEL`、`PI_SESSION_ID`、`PI_SESSION_FILE`，避免终端或外部 Pi 会话残留污染内部子进程。
+   - 命令行显式指定 `--model <resolved_model>` 覆盖外部 `~/.pi/agent/settings.json` 的 `defaultModel`。
+2. **角色权限分流与扩展加载**：
+   - **Partitioner / Planner / Merger**：始终附带 `--no-extensions`、`--no-skills` 与 `--no-approve`，防止未知的外部 Prompt / Tool / 扩展破坏图规划、分类决策或冲突解决的确定性与纯粹性。
+   - **Subagent（执行代码的 Worker 实例）**：
+     - 解除 `--no-skills` 与 `--no-extensions`，附带 `--approve` 显式信任工作区，支持加载全局（如 `~/.agents/skills/`、`~/.pi/agent/skills/`）与当前工作区（如 `.agents/skills/`、`.pi/skills/`）的 Skill 以及插件配置（`~/.pi/agent/extensions/`、`settings.json` packages）。
+     - 工具链采用开放策略（不传递硬编码 `--tools` 白名单限制），确保 Extension 注册的自定义工具（Extension Tools）与内置基础工具（`read, write, bash, edit`）同时生效。
+     - **多节点沙箱与 Worktree 隔离注意**：在 Graph 多节点并发模式下，Worker 运行于独立的 `.grapher-worktrees/<run>/<instance>` 沙箱中（严格隔离主仓库路径）。因此，**工作区级的 Skill 与 Extension 必须已提交（commit）到 Git 仓库**，独立 Worktree 检出时才能包含对应文件；未跟踪的本地文件在 Graph 模式下沙箱不可见（Serial 单节点模式直接在主工作区执行，不受此限制）。
+
 
 ### 当前 Planner
 

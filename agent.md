@@ -612,7 +612,7 @@ Planner 不负责：
 
 ## Planner Prompt
 
-参见实际 [Planner prompt](backend/resources/prompts/planner.md) 和 [Partitioner prompt](backend/resources/prompts/partitioner.md)。宿主把 `User query:` 之前的部分作为系统提示词，把原始 goal 单独作为 user message；`PARTITIONER_SYSTEM_PROMPT` / `PLANNER_SYSTEM_PROMPT` 可覆盖系统部分，`PARTITIONER_MODEL` / `PLANNER_MODEL` 可分别覆盖模型，`PARTITIONER_THINKING` / `PLANNER_THINKING` 覆盖对应 thinking 参数；普通节点使用 `PI_MODEL` / `PI_THINKING`。候选图和原始 JSON 输出保存在 runtime 的 `planning/<id>/`。
+参见实际 [Planner prompt](backend/resources/prompts/planner.md) 和 [Partitioner prompt](backend/resources/prompts/partitioner.md)。宿主把 `User query:` 之前的部分作为系统提示词，把原始 goal 单独作为 user message；`PARTITIONER_SYSTEM_PROMPT` / `PLANNER_SYSTEM_PROMPT` 可覆盖系统部分，`PARTITIONER_MODEL` / `PLANNER_MODEL` 可分别覆盖模型，`PARTITIONER_THINKING` / `PLANNER_THINKING` 覆盖对应 thinking 参数；普通节点使用 `SUBAGENT_MODEL` / `SUBAGENT_THINKING`。候选图和原始 JSON 输出保存在 runtime 的 `planning/<id>/`。
 
 Partitioner 不注册工具：多个实质工作流能够独立推进才输出 Graph，否则 Serial；分类结束即退出，不规划或解决任务。调用失败保留日志并返回错误，不创建或审批执行图。Serial 不调用 Planner，生成唯一名为 `task` 的节点并由后端自动审批启动，直接写用户目录。Graph 则经过 Planner、最终编译与用户审批。
 

@@ -473,7 +473,7 @@ fn plan_goal_internal(
                 task: &task,
                 session_dir: &directory.join("partition-session"),
                 extension: None,
-                tools: "",
+                tools: Some(""),
                 session_id: None,
                 extra_args: partitioner_extra_args,
                 environment: vec![
@@ -542,7 +542,7 @@ fn plan_goal_internal(
                         task: &task,
                         session_dir: &directory.join("planner-session"),
                         extension: Some(&service.extension),
-                        tools: "node,edge,read,bash",
+                        tools: Some("node,edge,read,bash"),
                         session_id: None,
                         extra_args: planner_extra_args,
                         environment: vec![
