@@ -1,0 +1,4 @@
+{"cwd":"/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-a8cyDQ/sdk/project","pid":7056,"sessionId":null,"timestamp":1789389771703,"type":"grapher_process_started"}
+[stderr] Error: Failed to load extension "/Users/jerry/Desktop/grapher/engine/prompt-extension.ts": Tool "bash" conflicts with /var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-a8cyDQ/sdk/data/grapher-planner.ts
+[stderr] Hint: Start without extensions using "pi -ne".
+{"code":1,"elapsedMs":2404,"phase":"Planner","pid":7056,"success":false,"timestamp":1789389774107,"type":"grapher_process_exited"}

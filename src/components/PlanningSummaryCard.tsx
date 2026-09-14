@@ -4,6 +4,7 @@ import {
   Copy, Check, FileText, CheckCircle2, PauseCircle, Wrench
 } from "lucide-react";
 import type { PlanningSummary, PlanningRoleMetrics, Snapshot, TokenUsage } from "../types";
+import { PlanningActivity } from "./PlanningActivity";
 
 interface PlanningSummaryCardProps {
   planning: PlanningSummary;
@@ -116,12 +117,12 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
     [state, now]
   );
 
-  // Live timer for ongoing approval wait
+  const needsClock = approvalWaiting.isWaiting || !!state?.paused;
   useEffect(() => {
-    if (!approvalWaiting.isWaiting) return;
+    if (!needsClock) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [approvalWaiting.isWaiting]);
+  }, [needsClock]);
 
   const handleCopyId = () => {
     if (!planning.planningId) return;
@@ -217,7 +218,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
             <Cpu size={12} />
             Pi 会话耗时
           </span>
-          <span className="stat-value primary">{formatSeconds(planning.modelDuration)}</span>
+          <span className="stat-value planning-duration">{formatSeconds(planning.modelDuration)}</span>
         </div>
 
         <div className="planning-stat-box" title={planning.status === "failed" || planning.error ? "规划状态" : "规划创建至用户点击审批的等待耗时"}>
@@ -353,11 +354,12 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
           <div className="planning-footer-note">
             <FileText size={11} />
             <span>
-              摘要已持久化于 <code>planning/{planning.planningId}/summary.json</code>。运行态生命周期以 SQLite 事件为权威源；磁盘摘要记录分阶段耗时与 Token 指标，不记录模型思考文本。
+              统计摘要与完整规划活动分别保存；下方可查看规划时的文字、思维链及工具调用。
             </span>
           </div>
         </div>
       )}
+      <PlanningActivity key={planning.planningId} planning={planning} />
     </div>
   );
 };

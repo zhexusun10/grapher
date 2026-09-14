@@ -1,0 +1,44 @@
+{
+  "planningId": "a7c2f9d1-d715-4435-830a-94e2a6770ef1",
+  "roles": {
+    "partition": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789389981200",
+      "lastEvent": "1789390005707",
+      "durationSeconds": 24.507,
+      "assistantMessages": 1,
+      "tools": 0,
+      "toolErrors": 0,
+      "usage": {
+        "input": 233,
+        "output": 198,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 195,
+        "totalTokens": 431
+      }
+    },
+    "planner": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789390005709",
+      "lastEvent": "1789390387299",
+      "durationSeconds": 381.589,
+      "assistantMessages": 16,
+      "tools": 17,
+      "toolErrors": 3,
+      "usage": {
+        "input": 11521,
+        "output": 3770,
+        "cacheRead": 48128,
+        "cacheWrite": 0,
+        "reasoning": 1211,
+        "totalTokens": 63419
+      }
+    }
+  },
+  "totalPlanningDuration": 406.169569667,
+  "modelDuration": 406.096,
+  "status": "success",
+  "createdAt": 1789389981148,
+  "repository": "/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-CHUaiL/audit/project"
+}

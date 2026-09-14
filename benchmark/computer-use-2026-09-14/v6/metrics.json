@@ -1,0 +1,207 @@
+[
+  {
+    "sample": "catalog",
+    "planningId": "bd1d6da2-f883-4687-88e8-9ec228743439",
+    "runId": "f69da018-51a7-4567-9eef-bca481725c85",
+    "phase": "needs_attention",
+    "planningDuration": 142.206966125,
+    "nodes": 4,
+    "normalEdges": 3,
+    "feedbackEdges": 0,
+    "roles": {
+      "partition": {
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789389984686",
+        "lastEvent": "1789389994713",
+        "durationSeconds": 10.026,
+        "assistantMessages": 1,
+        "tools": 0,
+        "toolErrors": 0,
+        "usage": {
+          "input": 260,
+          "output": 398,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 395,
+          "totalTokens": 658
+        },
+        "postLastToolSeconds": null,
+        "providerRetries": 0
+      },
+      "planner": {
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789389994716",
+        "lastEvent": "1789390126818",
+        "durationSeconds": 132.101,
+        "assistantMessages": 10,
+        "tools": 15,
+        "toolErrors": 2,
+        "usage": {
+          "input": 10542,
+          "output": 3977,
+          "cacheRead": 30208,
+          "cacheWrite": 0,
+          "reasoning": 1015,
+          "totalTokens": 44727
+        },
+        "postLastToolSeconds": 36.909,
+        "providerRetries": 1
+      }
+    },
+    "executions": [
+      {
+        "node": "csv-parser-module",
+        "id": "db8ce20c-f7e7-44bf-a78b-2e3318545b01",
+        "sessionId": "f3c5b942-2bca-469e-8771-49fa2ee11b00",
+        "attempt": 1,
+        "status": "failed",
+        "startedAt": 1789390128297,
+        "completedAt": 1789390728416,
+        "durationSeconds": 600.119,
+        "piProcessSeconds": 600.038,
+        "toolCalls": 9,
+        "toolErrors": 2,
+        "usage": {
+          "input": 17545,
+          "output": 12686,
+          "cacheRead": 44672,
+          "cacheWrite": 0,
+          "reasoning": 6818,
+          "totalTokens": 74903
+        }
+      },
+      {
+        "node": "search-filter-module",
+        "id": "97f8f06f-ced7-475b-9b86-86de26d465f9",
+        "sessionId": "d0d5c889-4391-4860-afe8-567836f2698d",
+        "attempt": 1,
+        "status": "completed",
+        "startedAt": 1789390128297,
+        "completedAt": 1789390728416,
+        "durationSeconds": 600.119,
+        "piProcessSeconds": 428.335,
+        "toolCalls": 14,
+        "toolErrors": 3,
+        "usage": {
+          "input": 16849,
+          "output": 9650,
+          "cacheRead": 86528,
+          "cacheWrite": 0,
+          "reasoning": 3799,
+          "totalTokens": 113027
+        }
+      }
+    ],
+    "feedbackCounts": {},
+    "publication": null,
+    "approvalToLastEventSeconds": 600.17
+  },
+  {
+    "sample": "sdk",
+    "planningId": "74950353-cf1c-4145-b81b-2279f0a1511c",
+    "runId": "bd30bad4-01ae-4727-a4db-3a810945677f",
+    "phase": "awaiting_approval",
+    "planningDuration": 253.627076166,
+    "nodes": 5,
+    "normalEdges": 5,
+    "feedbackEdges": 2,
+    "roles": {
+      "partition": {
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789389981198",
+        "lastEvent": "1789389995767",
+        "durationSeconds": 14.568,
+        "assistantMessages": 1,
+        "tools": 0,
+        "toolErrors": 0,
+        "usage": {
+          "input": 272,
+          "output": 434,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 430,
+          "totalTokens": 706
+        },
+        "postLastToolSeconds": null,
+        "providerRetries": 0
+      },
+      "planner": {
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789389995770",
+        "lastEvent": "1789390234750",
+        "durationSeconds": 238.979,
+        "assistantMessages": 12,
+        "tools": 26,
+        "toolErrors": 3,
+        "usage": {
+          "input": 10630,
+          "output": 3503,
+          "cacheRead": 36096,
+          "cacheWrite": 0,
+          "reasoning": 1085,
+          "totalTokens": 50229
+        },
+        "postLastToolSeconds": 11.945,
+        "providerRetries": 1
+      }
+    },
+    "executions": [],
+    "feedbackCounts": {},
+    "publication": null,
+    "approvalToLastEventSeconds": null
+  },
+  {
+    "sample": "audit",
+    "planningId": "a7c2f9d1-d715-4435-830a-94e2a6770ef1",
+    "runId": "dad94655-a114-4fd4-aefb-09f672d87d02",
+    "phase": "awaiting_approval",
+    "planningDuration": 406.169569667,
+    "nodes": 4,
+    "normalEdges": 3,
+    "feedbackEdges": 1,
+    "roles": {
+      "partition": {
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789389981200",
+        "lastEvent": "1789390005707",
+        "durationSeconds": 24.507,
+        "assistantMessages": 1,
+        "tools": 0,
+        "toolErrors": 0,
+        "usage": {
+          "input": 233,
+          "output": 198,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 195,
+          "totalTokens": 431
+        },
+        "postLastToolSeconds": null,
+        "providerRetries": 0
+      },
+      "planner": {
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789390005709",
+        "lastEvent": "1789390387299",
+        "durationSeconds": 381.589,
+        "assistantMessages": 16,
+        "tools": 17,
+        "toolErrors": 3,
+        "usage": {
+          "input": 11521,
+          "output": 3770,
+          "cacheRead": 48128,
+          "cacheWrite": 0,
+          "reasoning": 1211,
+          "totalTokens": 63419
+        },
+        "postLastToolSeconds": 49.901,
+        "providerRetries": 2
+      }
+    },
+    "executions": [],
+    "feedbackCounts": {},
+    "publication": null,
+    "approvalToLastEventSeconds": null
+  }
+]

@@ -1,0 +1,28 @@
+{
+  "createdAt": 1789390455015,
+  "error": "Partitioner failed: Pi exited with exit status: 1: Error: Model \"nonexistent-v6-provider/nonexistent-v6-model\" not found. Use --list-models to see available models.",
+  "modelDuration": 2.866,
+  "planningId": "1ff3b861-04bd-46b6-b5b0-7d11992b311e",
+  "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-recovery-v6-uK8Hzh/workspace-a",
+  "roles": {
+    "partition": {
+      "assistantMessages": 0,
+      "durationSeconds": 2.866,
+      "lastEvent": "1789390457944",
+      "model": "nonexistent-v6-provider/nonexistent-v6-model",
+      "sessionStart": "1789390455077",
+      "toolErrors": 0,
+      "tools": 0,
+      "usage": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "totalTokens": 0
+      }
+    }
+  },
+  "status": "failed",
+  "totalPlanningDuration": 2.9294595
+}

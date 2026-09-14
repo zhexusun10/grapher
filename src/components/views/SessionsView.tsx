@@ -133,7 +133,7 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
                     )}
                   </div>
                   <div style={{ height: "460px", display: "flex", flexDirection: "column" }}>
-                    <VirtualizedTranscript output={execution.output} />
+                    <VirtualizedTranscript key={execution.id} output={execution.output} />
                   </div>
                   <div className="worktree-info-footer">
                     <span>Session: <code>{execution.sessionId}</code></span>

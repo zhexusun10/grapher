@@ -1,0 +1,14 @@
+{
+  "executionBatches": [
+    [
+      "task"
+    ]
+  ],
+  "roots": [
+    "task"
+  ],
+  "terminals": [
+    "task"
+  ],
+  "warnings": []
+}

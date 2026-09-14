@@ -30,7 +30,7 @@ export function PublicationPanel({ publication, mergers, busy, onRetry }: {
       </select></label>
       <p>状态：{executionLabels[execution.status] ?? execution.status} · 会话：<code>{execution.sessionId}</code></p>
       <p>工作目录：<code>{execution.worktree}</code></p>
-      <div className="publication-transcript"><VirtualizedTranscript output={execution.output} /></div>
+      <div className="publication-transcript"><VirtualizedTranscript key={execution.id} output={execution.output} /></div>
       <p>Before: <code>{execution.before}</code> · After: <code>{execution.after ?? "待提交"}</code></p>
     </details>}
   </section>;

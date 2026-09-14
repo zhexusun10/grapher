@@ -1,0 +1,55 @@
+{
+  "baseline": "56316cd1a0e3da56bfd10c600d25dfd3df974602",
+  "deterministicRegressionStatus": "PASS",
+  "plannerQualityStatus": "PARTIAL",
+  "realRun": {
+    "runId": "1ee4611f-077b-4d2f-96dc-bfb5f4c51f25",
+    "phase": "completed",
+    "route": "graph",
+    "nodes": 4,
+    "executions": 5,
+    "humanInterventions": 1,
+    "firstAttemptUnattendedSuccess": false,
+    "reviewVerdict": "ACCEPT",
+    "automaticReviseCount": 0,
+    "publicationHead": "c2d5c422c45e33ed55d684ab931505e7295ff93c",
+    "approvalToPublicationSeconds": 2304.668,
+    "planningStartToPublicationSeconds": 3025.449,
+    "nodeTokenUsageIncludingCacheRead": 885319,
+    "independentAcceptance": "PASS"
+  },
+  "finalBrowserRegression": "PASS",
+  "longDurationBrowserStability": "NOT_PROVEN",
+  "tests": {
+    "rust": 45,
+    "piBaseline": 4,
+    "planningBoundaryAndGrade": 17,
+    "uiAndPublicationRendering": 13,
+    "httpIntegration": "PASS",
+    "combinedPlannerExtensionSmoke": "PASS"
+  },
+  "documents": {
+    "plan": "fix-plan-v6.md",
+    "report": "report-v6.md",
+    "finalSourceManifest": "v6-browser-final/source-manifest.json",
+    "browserChecks": "v6-browser-final/result.json",
+    "independentAcceptance": "v6-browser-final/independent-acceptance.json",
+    "runtimeInvariants": "v6-browser-final/runtime-invariants.json",
+    "reviewServer": "v6-browser-final/review-server.json"
+  },
+  "remainingIssues": [
+    "Planner still adds overlapping verification work and sometimes ambiguous ownership or unsupported repository assumptions.",
+    "Two Catalog CSV executions exceeded the explicit 600-second test budget; default-900-second completion for that task was not demonstrated.",
+    "The audit synthesis exceeded the default 900-second budget before targeted human intervention.",
+    "Single-sample routing recovery and graph improvements do not establish general accuracy or token/latency savings.",
+    "Compact snapshots still carry 11.59 MB; short browser stress passed after mitigation, but the long-session crash root cause is not fully established."
+  ],
+  "followUp": {
+    "planningActivityHistoryAndCompletedLiveRendering": "PASS",
+    "evidence": "v6-follow-up/planning-activity-result.json",
+    "remainingIssues": "remaining-issues-v6.md",
+    "nodeTiming": "node-timing-v6.md",
+    "cleanup": "v6-follow-up/cleanup.json",
+    "activePlanningRefreshResubscription": "NOT_IMPLEMENTED"
+  }
+}

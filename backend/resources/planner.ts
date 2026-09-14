@@ -69,7 +69,7 @@ Repository paths only; no symlinks or .git. No shell operators, expansion, scrip
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node", description: "Upsert a semantic node name and standalone specific task; delete also removes its edges.",
-    parameters: Type.Object({ name: Type.String(), task: Type.Optional(Type.String()), delete: Type.Optional(Type.Boolean()) }),
+    parameters: Type.Object({ name: Type.String({ description: "Stable identifier using only ASCII letters, digits, _ or - (no spaces); e.g. api_spec." }), task: Type.Optional(Type.String()), delete: Type.Optional(Type.Boolean()) }),
     async execute(_id, parameters) {
       return mutate((graph) => {
         graph.nodes = graph.nodes.filter((node) => node.name !== parameters.name);

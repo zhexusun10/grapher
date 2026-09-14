@@ -9,6 +9,11 @@ import { grapherSystemPrompt } from "./system-prompt.mjs";
 export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async event => ({ systemPrompt: grapherSystemPrompt(event.systemPrompt) }));
 
+  // Planner owns its restricted inspection tool; Partitioner has no tools.
+  // The launcher loads this adapter for every role, so execution-only tool
+  // overrides and hooks must not register on either planning role.
+  if (["planner", "partition"].includes(process.env.GRAPHER_MODE || "")) return;
+
   const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();
   const localOps = createLocalBashOperations();
   const baseBashTool = createBashToolDefinition(process.cwd());

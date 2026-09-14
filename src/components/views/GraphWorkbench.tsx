@@ -232,7 +232,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <ExecutionTiming execution={execution} />
                   </div>
                   <div style={{ flex: 1, minHeight: 320, display: "flex", flexDirection: "column", marginTop: 8 }}>
-                    <VirtualizedTranscript output={execution.output} />
+                    <VirtualizedTranscript key={execution.id} output={execution.output} />
                   </div>
                   <details className="workspace-details">
                     <summary><FolderGit2 size={12} />工作区与会话信息</summary>
@@ -292,15 +292,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 ))}
 
                 {/* Partitioner 实时推理流 */}
-                {isPlanning && plannerStream.stage === "partitioning" && (
+                {(plannerStream.partitionerThinking || plannerStream.partitionerText || (isPlanning && plannerStream.stage === "partitioning")) && (
                   <motion.div
                     className="planning-stream-card partitioner"
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                   >
                     <div className="stream-card-header">
-                      <Compass size={14} className="spin" />
-                      <span>AI 架构师正在评估任务执行路径 (Serial / Graph)...</span>
+                      <Compass size={14} className={isPlanning && plannerStream.stage === "partitioning" ? "spin" : ""} />
+                      <span>{isPlanning && plannerStream.stage === "partitioning" ? "AI 架构师正在评估任务执行路径 (Serial / Graph)..." : "Partitioner 路由记录"}</span>
                     </div>
                     {plannerStream.partitionerThinking && (
                       <ThinkingCard
@@ -354,7 +354,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     {serialExecution?.output ? (
                       <div style={{ flex: 1, minHeight: 280, display: "flex", flexDirection: "column", marginTop: 4 }}>
-                        <VirtualizedTranscript output={serialExecution.output} />
+                        <VirtualizedTranscript key={serialExecution.id} output={serialExecution.output} />
                       </div>
                     ) : (
                       <div className="stream-card-hint" style={{ padding: "8px 0", marginTop: 6 }}>
@@ -397,15 +397,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
 
                 {/* Planner 实时思考与推理 */}
-                {isPlanning && plannerStream.stage === "planning" && (
+                {(plannerStream.plannerThinking || plannerStream.plannerText || (isPlanning && plannerStream.stage === "planning")) && (
                   <motion.div
                     className="planning-stream-card planner"
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                   >
                     <div className="stream-card-header">
-                      <Workflow size={14} className="spin" />
-                      <span>AI Planner 正在探测仓库架构并构建有向执行图...</span>
+                      <Workflow size={14} className={isPlanning && plannerStream.stage === "planning" ? "spin" : ""} />
+                      <span>{isPlanning && plannerStream.stage === "planning" ? "AI Planner 正在探测仓库架构并构建有向执行图..." : "Planner 规划记录"}</span>
                     </div>
                     {plannerStream.plannerThinking && (
                       <ThinkingCard

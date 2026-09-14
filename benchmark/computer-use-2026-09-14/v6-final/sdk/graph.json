@@ -1,0 +1,59 @@
+{
+  "edges": [
+    {
+      "feedback": false,
+      "from": "retry_policy_contract",
+      "relation": "implements",
+      "to": "typescript_client_retry"
+    },
+    {
+      "feedback": false,
+      "from": "retry_policy_contract",
+      "relation": "implements",
+      "to": "python_client_retry"
+    },
+    {
+      "feedback": false,
+      "from": "typescript_client_retry",
+      "relation": "reviewed_by",
+      "to": "sdk_conformance_review"
+    },
+    {
+      "feedback": false,
+      "from": "python_client_retry",
+      "relation": "reviewed_by",
+      "to": "sdk_conformance_review"
+    },
+    {
+      "feedback": true,
+      "from": "sdk_conformance_review",
+      "relation": "corrections_requested",
+      "to": "typescript_client_retry"
+    },
+    {
+      "feedback": true,
+      "from": "sdk_conformance_review",
+      "relation": "corrections_requested",
+      "to": "python_client_retry"
+    }
+  ],
+  "nodes": [
+    {
+      "name": "retry_policy_contract",
+      "task": "Author the new authoritative contract `contracts/retry-policy.md` for SDK request retries, before any implementation. It must define language-neutral, testable semantics that both clients will implement identically: the set of transport/request conditions considered retryable (explicitly HTTP 429 and 503, plus any other conditions you choose to include or exclude — state them either way), `Retry-After` handling (both delta-seconds and HTTP-date forms, precedence over backoff, and behavior when the header is absent or unparseable), exponential backoff (base delay, multiplier, growth sequence, any jitter and cap), maximum attempts including whether the first try counts as an attempt and the exact total-attempt/total-request ceiling, and non-idempotent request protection (how a request is judged idempotent, e.g. method and/or opt-in flag, and the rule that non-idempotent requests are not retried, including on 429/503). Also state what is explicitly out of scope: retry behavior must live only in the client SDKs (`clients/typescript/client.ts`, `clients/python/client.py`), never in the server (`server/`), the browser app (`web/`), or shared `src/` modules. Follow the existing style of `contracts/users.json` and the workspace conventions in `README.md`. Where an edge case has no obvious default, choose one and label it as a normative decision so implementers do not diverge. Write only the contract; do not modify client, server, web, src, or test code."
+    },
+    {
+      "name": "typescript_client_retry",
+      "task": "Implement the retry policy specified in `contracts/retry-policy.md` in the TypeScript SDK at `clients/typescript/client.ts`, and add unit tests for it following the existing test conventions in `tests/` (the workspace runs `npm test`, i.e. `node --test`; see `tests/normalize.test.ts` and `tests/users-flow.test.ts` for style). Cover every normative rule of the contract: retryable statuses 429 and 503, non-retryable statuses, `Retry-After` delta-seconds and HTTP-date handling and its precedence over computed backoff, the exponential backoff sequence with any cap/jitter the contract defines, the maximum-attempt ceiling counted exactly as the contract specifies, and non-idempotent request protection. Make delays observable in tests (injectable clock/sleep and a scripted or fake transport) so runs are deterministic and do not actually wait. Do not add retry logic to `server/`, `web/`, or shared `src/` modules, and do not change existing public behavior of the client beyond what the retry contract requires. Keep `contracts/retry-policy.md` as the source of truth: if you find a genuine ambiguity or contradiction, implement the contract's stated default and record the interpretation in your summary rather than silently redefining the policy."
+    },
+    {
+      "name": "python_client_retry",
+      "task": "Implement the retry policy specified in `contracts/retry-policy.md` in the Python SDK at `clients/python/client.py`, and add unit tests for it as a Python test module placed alongside the existing test layout under `tests/`. Mirror the TypeScript client's structure conceptually: same retryable statuses 429 and 503, same non-retryable behavior, same `Retry-After` delta-seconds and HTTP-date handling and precedence over computed backoff, same exponential backoff sequence, cap/jitter, and maximum-attempt counting, and the same non-idempotent request protection. Make delays and transport observable/injectable so tests are deterministic and never sleep for real. Do not add retry logic to `server/`, `web/`, or shared `src/` modules, and do not change existing public behavior of the client beyond what the retry contract requires. Keep `contracts/retry-policy.md` as the source of truth: if you find a genuine ambiguity or contradiction, implement the contract's stated default and record the interpretation in your summary rather than silently redefining the policy."
+    },
+    {
+      "name": "sdk_conformance_review",
+      "task": "Review the two SDK retry implementations together as one conformance exercise and record the outcome in `tests/sdk-conformance.md`, replacing the current placeholder text (\"No retry contract is defined yet.\"). Using `contracts/retry-policy.md` as the sole source of truth, write reproducible conformance scenarios — exact inputs (status code, presence and form of `Retry-After`, request method/idempotency, configured maximum attempts and backoff parameters), the expected observed outcome (request count, waited delays, which delay source wins, error surfaced after exhaustion), and how to run each scenario against both `clients/typescript/client.ts` and `clients/python/client.py` — and then execute them and record the observed results side by side for TypeScript and Python. The review must determine whether both clients exhibit identical policy semantics for: retryable statuses 429 and 503, non-retryable responses, `Retry-After` delta-seconds and HTTP-date forms and their precedence over computed backoff, the exponential backoff sequence, any cap/jitter, maximum-attempt counting and the resulting total-request ceiling, and non-idempotent request protection. Also verify the scope boundary that no retry behavior was introduced into `server/`, `web/`, or shared `src/` modules, and report actual commands run, real exit codes, and passing/failing counts per client. Clearly separate observed facts from inferences, and state the conclusion plus a list of any concrete divergences. This node owns the conformance report only: do not edit the client implementations, their unit tests, or the contract. End with `<ACCEPT>` when the report is written and both clients conform to the contract and the scope boundary; otherwise end with `<REVISE>` and enumerate each nonconformance as a specific, per-client correction request against the policy in `contracts/retry-policy.md`."
+    }
+  ],
+  "originalGoal": "Add a consistent retry policy to the TypeScript and Python SDKs. Specify retryable HTTP statuses (429 and 503), Retry-After handling, exponential backoff, maximum attempts and non-idempotent request protection in a new contracts/retry-policy.md before implementation. Implement and unit-test that contract in clients/typescript/client.ts and clients/python/client.py. Review both clients together and write reproducible conformance scenarios and results in tests/sdk-conformance.md, checking both use identical policy semantics. If that review finds nonconformance, request corrections to both client implementations and repeat the conformance review. Do not put retry behavior in the server or browser app."
+}

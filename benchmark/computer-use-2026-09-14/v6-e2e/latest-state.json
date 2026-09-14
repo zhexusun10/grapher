@@ -1,0 +1,74 @@
+{
+  "phase": "needs_attention",
+  "nodes": {
+    "auth_session_audit": {
+      "error": null,
+      "head": "2e415b2dfae2dbd18678d972226e0c95974b04c1",
+      "instruction": "",
+      "revision": 1,
+      "status": "done"
+    },
+    "release_assessment_review": {
+      "error": "Required upstream branch failed or is blocked",
+      "head": null,
+      "instruction": "",
+      "revision": 1,
+      "status": "blocked"
+    },
+    "release_readiness_assessment": {
+      "error": "NodeAgent timed out after 900 seconds; inspect the saved session before retrying",
+      "head": null,
+      "instruction": "",
+      "revision": 1,
+      "status": "failed"
+    },
+    "storage_crash_audit": {
+      "error": null,
+      "head": "e802ea13bad45e97a4dd4792d9107c04268706da",
+      "instruction": "",
+      "revision": 1,
+      "status": "done"
+    }
+  },
+  "executions": [
+    {
+      "after": "2e415b2dfae2dbd18678d972226e0c95974b04c1",
+      "attempt": 1,
+      "before": "1214c196db93a9c10530e0f27b043a87ef3d3baf",
+      "completedAt": 1789391680111,
+      "id": "e9fa8249-1402-4a17-9592-1af2332c788c",
+      "node": "auth_session_audit",
+      "revision": 1,
+      "sessionId": "49abbd74-0c2b-4cfd-bcf9-a8a6dbfbf9ed",
+      "startedAt": 1789391467108,
+      "status": "completed",
+      "worktree": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-recheck-tcN81S/audit/.grapher-worktrees/1ee4611f-077b-4d2f-96dc-bfb5f4c51f25/auth_session_audit-e9fa8249-1402-4a17-9592-1af2332c788c"
+    },
+    {
+      "after": "e802ea13bad45e97a4dd4792d9107c04268706da",
+      "attempt": 1,
+      "before": "1214c196db93a9c10530e0f27b043a87ef3d3baf",
+      "completedAt": 1789391787777,
+      "id": "f4ccb01a-f135-4217-842a-3783350808c9",
+      "node": "storage_crash_audit",
+      "revision": 1,
+      "sessionId": "c5812e77-db69-41ce-8b6d-450400b0c387",
+      "startedAt": 1789391467108,
+      "status": "completed",
+      "worktree": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-recheck-tcN81S/audit/.grapher-worktrees/1ee4611f-077b-4d2f-96dc-bfb5f4c51f25/storage_crash_audit-f4ccb01a-f135-4217-842a-3783350808c9"
+    },
+    {
+      "after": null,
+      "attempt": 1,
+      "before": "525060b6a836cc9352f42462cf12d36afa6465ed",
+      "completedAt": 1789392688045,
+      "id": "4e756af4-dc8b-43cf-85e5-a7e3c4fe3ffa",
+      "node": "release_readiness_assessment",
+      "revision": 1,
+      "sessionId": "c511081b-a040-4201-ba2e-49c8425d92d1",
+      "startedAt": 1789391787841,
+      "status": "failed",
+      "worktree": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-recheck-tcN81S/audit/.grapher-worktrees/1ee4611f-077b-4d2f-96dc-bfb5f4c51f25/release_readiness_assessment-4e756af4-dc8b-43cf-85e5-a7e3c4fe3ffa"
+    }
+  ]
+}

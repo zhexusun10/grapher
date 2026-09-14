@@ -1,0 +1,45 @@
+{
+  "planningId": "0047331e-1ca1-47d3-97ea-a8a0b728db9b",
+  "roles": {
+    "partition": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789389757319",
+      "lastEvent": "1789389774923",
+      "durationSeconds": 17.603,
+      "assistantMessages": 1,
+      "tools": 0,
+      "toolErrors": 0,
+      "usage": {
+        "input": 260,
+        "output": 606,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 602,
+        "totalTokens": 866
+      }
+    },
+    "planner": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789389774927",
+      "lastEvent": "1789389777236",
+      "durationSeconds": 2.308,
+      "assistantMessages": 0,
+      "tools": 0,
+      "toolErrors": 0,
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 0,
+        "totalTokens": 0
+      }
+    }
+  },
+  "totalPlanningDuration": 19.984858709,
+  "modelDuration": 19.911,
+  "status": "failed",
+  "error": "Pi exited with exit status: 1: Hint: Start without extensions using \"pi -ne\".",
+  "createdAt": 1789389757254,
+  "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-a8cyDQ/catalog/project"
+}

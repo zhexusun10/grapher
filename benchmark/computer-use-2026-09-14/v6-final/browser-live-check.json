@@ -1,0 +1,14 @@
+{
+  "errors": [],
+  "domContentLoadedMs": 51,
+  "graphReadyMs": 908,
+  "metricStyle": {
+    "text": "4分10秒",
+    "color": "rgb(37, 99, 235)",
+    "background": "rgba(0, 0, 0, 0)"
+  },
+  "timingBefore": "20:56:42 · 已运行 5分18秒",
+  "timingAfter": "20:56:42 · 已运行 5分20秒",
+  "reloadMs": 4641,
+  "status": "PASS"
+}

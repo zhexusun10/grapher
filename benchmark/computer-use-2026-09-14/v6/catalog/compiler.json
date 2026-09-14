@@ -1,0 +1,22 @@
+{
+  "executionBatches": [
+    [
+      "csv-parser-module",
+      "search-filter-module"
+    ],
+    [
+      "integration-test"
+    ],
+    [
+      "verification-report"
+    ]
+  ],
+  "roots": [
+    "csv-parser-module",
+    "search-filter-module"
+  ],
+  "terminals": [
+    "verification-report"
+  ],
+  "warnings": []
+}

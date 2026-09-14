@@ -19,6 +19,8 @@ try {
       timing: "src/components/ExecutionTiming.tsx",
       card: "src/components/ToolCallCard.tsx",
       planningCard: "src/components/PlanningSummaryCard.tsx",
+      recovery: "src/services/planningRecovery.ts",
+      runtime: "src/services/runtime.ts",
       extension: "engine/prompt-extension.ts",
     },
     bundle: true,
@@ -40,6 +42,8 @@ try {
   const { ExecutionTiming } = await import(pathToFileURL(path.join(root, "timing.js")));
   const { ToolCallCard } = await import(pathToFileURL(path.join(root, "card.js")));
   const { PlanningSummaryCard, calculateApprovalWaitingTime, calculatePausedTime, parseTimestamp } = await import(pathToFileURL(path.join(root, "planningCard.js")));
+  const { createPlanningRecovery } = await import(pathToFileURL(path.join(root, "recovery.js")));
+  const { runtimeService } = await import(pathToFileURL(path.join(root, "runtime.js")));
   const registerExtension = (await import(pathToFileURL(path.join(root, "extension.js")))).default;
 
   // Set up extension with mock Pi ExtensionAPI to capture bash tool and tool_result handlers
@@ -447,9 +451,8 @@ try {
   });
 
   test("V5-2: Workspace switching, failed planning restoration, and request sequence race condition protection", async () => {
-    // Model the state management logic from App.tsx
+    // Exercise the same controller used by App.tsx.
     let failedPlanning = null;
-    let requestId = 0;
 
     const mockDb = {
       "/repo/a": [
@@ -470,28 +473,14 @@ try {
       ],
     };
 
+    const controller = createPlanningRecovery({
+      listPlannings: async (repo) => mockDb[repo] || [],
+      getPlanning: async () => { throw Error("unexpected lookup"); },
+    }, summary => { failedPlanning = summary; });
     async function refreshFailedPlanning(targetRepo, currentSnapshot, artificialDelay = 0) {
-      const currentReqId = ++requestId;
-      failedPlanning = null; // Clear immediately
-      if (!targetRepo) return;
-      if (artificialDelay > 0) {
-        await new Promise(r => setTimeout(r, artificialDelay));
-      }
-      const plannings = mockDb[targetRepo] || [];
-      if (requestId !== currentReqId) return; // Discard stale response
-      if (!plannings || plannings.length === 0) {
-        failedPlanning = null;
-        return;
-      }
-      const latestPlanning = plannings[0];
-      const isFailed = latestPlanning.status === "failed" || !!latestPlanning.error;
-      const runPlanningTime = currentSnapshot?.planning?.createdAt || 0;
-      const latestTime = latestPlanning.createdAt || 0;
-      if (isFailed && (!currentSnapshot?.runId || !currentSnapshot?.planning || latestTime >= runPlanningTime)) {
-        failedPlanning = latestPlanning;
-      } else {
-        failedPlanning = null;
-      }
+      const scope = controller.begin(targetRepo);
+      if (artificialDelay) await new Promise(r => setTimeout(r, artificialDelay));
+      await controller.restore(scope, currentSnapshot);
     }
 
     // 1. Initial workspace A has a failure
@@ -528,7 +517,56 @@ try {
     assert.equal(failedPlanning, null, "Stale slow response from Repo A must not overwrite Repo B state");
   });
 
-  console.log("UI regression tests passed: Header matching, ApprovalModal target, TaskNode state, ExecutionTiming, PlanningSummaryCard, Workspace Switching.");
+  test("V6: delayed history cannot overwrite terminal results or a pending workspace switch", async () => {
+    const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
+    const old = { planningId: "old", repository: "/a", status: "failed", createdAt: 1 };
+    const fresh = { ...old, planningId: "new", createdAt: 2 };
+    for (const terminal of [null, fresh]) {
+      let visible;
+      const list = deferred();
+      const recovery = createPlanningRecovery({ listPlannings: () => list.promise }, value => { visible = value; });
+      const scope = recovery.begin("/a");
+      const pending = recovery.restore(scope);
+      await recovery.finish(scope, terminal || undefined);
+      list.resolve([old]);
+      await pending;
+      assert.equal(visible, terminal);
+    }
+    for (const method of ["list", "lookup"]) {
+      let visible;
+      const result = deferred();
+      const recovery = createPlanningRecovery({ listPlannings: () => result.promise, getPlanning: () => result.promise }, value => { visible = value; });
+      const scope = recovery.begin("/a");
+      const pending = method === "list" ? recovery.restore(scope) : recovery.finish(scope, undefined, "old");
+      // B's detect/load has not completed; invalidation must already have happened.
+      recovery.begin("/b");
+      result.resolve(method === "list" ? [old] : old);
+      await pending;
+      assert.equal(visible, null);
+    }
+    let visible;
+    const recovery = createPlanningRecovery({}, value => { visible = value; });
+    const scope = recovery.begin("/a");
+    await recovery.finish(scope, { ...fresh, repository: "/b" });
+    assert.equal(visible, null);
+    await recovery.finish(scope, fresh, "different-id");
+    assert.equal(visible, null);
+  });
+
+  test("V6: truncated planning SSE fails without fetching an unrelated snapshot", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    globalThis.fetch = async url => {
+      requests.push(url);
+      return new Response('event: route_decision\ndata: {"planType":"graph"}\n\n');
+    };
+    try {
+      await assert.rejects(runtimeService.planGoalStream("goal", {}, () => {}), /完成结果/);
+      assert.deepEqual(requests, ["/api/plan_goal_stream"]);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  console.log("UI regression tests cover rendered components, real Bash results and production planning recovery.");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

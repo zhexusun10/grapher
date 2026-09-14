@@ -7,7 +7,7 @@ use crate::{
 use serde::Serialize;
 use std::{
     fs,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -99,6 +99,54 @@ mod prompt_tests {
         let failure_summary: PlanningSummary = serde_json::from_str(&summary_content).unwrap();
         assert_eq!(failure_summary.status.as_deref(), Some("failed"));
         assert!(failure_summary.roles.contains_key("partition"));
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn fast_sibling_finishes_before_slow_sibling_without_dispatching_next_wave() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let repository = crate::fixture::repository(root).unwrap();
+        let release = root.join("release-slow");
+        let script = root.join("worker.sh");
+        fs::write(&script, format!(r#"case "$PWD" in
+  *a_slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > slow.txt ;;
+  *z_fast-*) echo done > fast.txt ;;
+  *) echo done > downstream.txt ;;
+esac
+printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
+"#, release.display())).unwrap();
+        let mut runtime = Runtime::open(root).unwrap();
+        runtime.create(Graph {
+            original_goal: "Check real completion order".into(),
+            nodes: ["a_slow", "z_fast", "after_fast"].into_iter()
+                .map(|name| Node { name: name.into(), task: "Write your result".into() }).collect(),
+            edges: vec![Edge { from: "z_fast".into(), to: "after_fast".into(), feedback: false, relation: String::new() }],
+        }, Config { repository: repository.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "test".into(), max_parallel: 2, max_feedback: 2 }).unwrap();
+        runtime.approve().unwrap();
+        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false), extension: root.join("unused.ts") });
+        drive(service.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let observed = loop {
+            let state = service.runtime.lock().unwrap().state.clone();
+            if state.nodes["z_fast"].status == "done" || std::time::Instant::now() > deadline { break state; }
+            thread::sleep(std::time::Duration::from_millis(20));
+        };
+        // Always release and drain before assertions, even on a regression.
+        fs::write(&release, "release").unwrap();
+        while service.driving.load(Ordering::SeqCst) { thread::sleep(std::time::Duration::from_millis(20)); }
+        assert_eq!(observed.nodes["z_fast"].status, "done");
+        assert_eq!(observed.nodes["a_slow"].status, "running");
+        assert_eq!(observed.nodes["after_fast"].status, "waiting");
+        let fast = observed.executions.iter().find(|e| e.node == "z_fast").unwrap();
+        assert!(fast.completed_at.is_some());
+        let runtime = service.runtime.lock().unwrap();
+        let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+        assert_eq!(replayed.executions.iter().find(|e| e.node == "z_fast").unwrap().completed_at, fast.completed_at);
+        assert_eq!(replayed.phase, "completed");
     }
 
     #[test]
@@ -844,16 +892,17 @@ fn drive(service: Arc<Service>) {
                                         })
                                 },
                             );
-                            (job.execution, result)
+                            // Persist completion in the worker that actually finished.
+                            // Joining in graph order must not inflate a fast sibling's
+                            // duration or leave it RUNNING behind a slow sibling.
+                            service.runtime.lock().map_err(|error| error.to_string())?
+                                .finish(&job.execution, result)
                         })
                     })
                     .collect();
                 let mut reviews = Vec::new();
                 for handle in handles {
-                    let (execution, result) =
-                        handle.join().map_err(|_| "Execution worker panicked")?;
-                    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                    if let Some(review) = runtime.finish(&execution, result)? {
+                    if let Some(review) = handle.join().map_err(|_| "Execution worker panicked")?? {
                         reviews.push(review);
                     }
                 }
@@ -1006,6 +1055,45 @@ fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningS
     }
 }
 
+// Planning traces are loaded only when opened in the UI. Keep raw model output
+// out of bootstrap/list/poll responses and cap each UTF-8-safe page.
+fn get_planning_output(
+    planning_id: String,
+    role: String,
+    offset: u64,
+    service: &Arc<Service>,
+) -> Result<serde_json::Value, String> {
+    if !is_valid_planning_id(&planning_id) {
+        return Err("Invalid planning ID".into());
+    }
+    if !matches!(role.as_str(), "partition" | "planner") {
+        return Err("Invalid planning role".into());
+    }
+    let root = service.runtime.lock().map_err(|e| e.to_string())?.root.join("planning");
+    let root = root.canonicalize().map_err(|_| "Planning output not found")?;
+    let file_path = root.join(&planning_id).join(format!("{role}.jsonl"));
+    let file_path = file_path.canonicalize().map_err(|_| "Planning output not found")?;
+    if !file_path.starts_with(&root) {
+        return Err("Invalid planning output path".into());
+    }
+    let mut file = fs::File::open(file_path).map_err(|e| e.to_string())?;
+    let total_bytes = file.metadata().map_err(|e| e.to_string())?.len();
+    if offset > total_bytes { return Err("Invalid planning output offset".into()); }
+    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(256 * 1024).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let length = match std::str::from_utf8(&bytes) {
+        Ok(_) => bytes.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => return Err("Invalid planning output UTF-8 offset".into()),
+    };
+    let content = std::str::from_utf8(&bytes[..length]).map_err(|e| e.to_string())?;
+    let next_offset = offset + length as u64;
+    Ok(serde_json::json!({ "planningId": planning_id, "role": role,
+        "content": content, "nextOffset": next_offset, "totalBytes": total_bytes,
+        "complete": next_offset >= total_bytes }))
+}
+
 fn list_plannings(service: &Arc<Service>, repository_filter: Option<String>) -> Result<Vec<PlanningSummary>, String> {
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     let planning_dir = runtime.root.join("planning");
@@ -1067,6 +1155,7 @@ pub fn dispatch(
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use serde_json::to_value;
+    let compact = body.get("compact").and_then(serde_json::Value::as_bool).unwrap_or(false);
     let result = match command {
         "provider_auth" => to_value(crate::provider_auth::request(body)?),
         "bootstrap" => to_value(bootstrap(service)?),
@@ -1087,6 +1176,10 @@ pub fn dispatch(
             argument(&body, "config")?,
             service,
         )?),
+        "get_planning_output" => to_value(get_planning_output(
+            argument(&body, "planningId")?, argument(&body, "role")?,
+            body.get("offset").map(|_| argument(&body, "offset")).transpose()?.unwrap_or(0), service,
+        )?),
         "get_planning" => to_value(get_planning(argument(&body, "planningId")?, service)?),
         "list_plannings" => to_value(list_plannings(
             service,
@@ -1105,7 +1198,21 @@ pub fn dispatch(
         "delete_run" => to_value(delete_run(argument(&body, "runId")?, service)?),
         _ => return Err("Unknown command".into()),
     };
-    result.map_err(|error| error.to_string())
+    let mut value = result.map_err(|error| error.to_string())?;
+    // UI transcripts already live on executions/mergers. Avoid sending every
+    // raw Output frame a second time on each poll; the durable event store and
+    // default API responses retain the complete history for replay/export.
+    if compact {
+        let snapshot = if command == "bootstrap" {
+            value.get_mut("snapshot")
+        } else if matches!(command, "snapshot" | "history" | "load_run" | "save_graph" | "plan_goal" | "control" | "reset_workspace") {
+            Some(&mut value)
+        } else { None };
+        if let Some(events) = snapshot.and_then(|snapshot| snapshot.get_mut("events")).and_then(serde_json::Value::as_array_mut) {
+            events.retain(|event| event.get("type").and_then(serde_json::Value::as_str) != Some("output"));
+        }
+    }
+    Ok(value)
 }
 
 struct SseStreamReceiver {

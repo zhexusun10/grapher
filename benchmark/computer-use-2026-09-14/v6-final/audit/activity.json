@@ -1,0 +1,519 @@
+{
+  "sample": "audit",
+  "planningId": "6f28ccb3-f667-4403-a87c-7fcaccd35d5b",
+  "runId": "e047ac03-2f09-44cb-99e6-9e5f96f68c05",
+  "phase": "awaiting_approval",
+  "planningDuration": 315.510533166,
+  "nodes": 4,
+  "normalEdges": 5,
+  "feedbackEdges": 0,
+  "roles": {
+    "partition": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789390345977",
+      "lastEvent": "1789390355956",
+      "durationSeconds": 9.978,
+      "assistantMessages": 1,
+      "tools": [],
+      "toolErrors": 0,
+      "usage": {
+        "input": 234,
+        "output": 261,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 257,
+        "totalTokens": 495
+      },
+      "postLastToolSeconds": null,
+      "providerRetries": 0
+    },
+    "planner": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789390355959",
+      "lastEvent": "1789390661399",
+      "durationSeconds": 305.439,
+      "assistantMessages": 15,
+      "tools": [
+        {
+          "id": "call_48c213d392cf4dbaa3c86545",
+          "name": "bash",
+          "args": {
+            "command": "ls -la"
+          },
+          "assistantCompletedAt": "2026-09-14T12:52:44.910Z",
+          "resultPersistedAt": "2026-09-14T12:52:44.915Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "README.md\nclients/\ncontracts/\ndocs/\npackage.json\nserver/\nsrc/\ntests/\nweb/"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_8904977a499f45118d2dfcc2",
+          "name": "read",
+          "args": {
+            "path": "package.json",
+            "offset": "0",
+            "limit": "80"
+          },
+          "assistantCompletedAt": "2026-09-14T12:52:44.910Z",
+          "resultPersistedAt": "2026-09-14T12:52:44.915Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"name\":\"atlas-fixture\",\"private\":true,\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n"
+              }
+            ]
+          }
+        },
+        {
+          "id": "call_419e913458f44896b45ad9ac",
+          "name": "bash",
+          "args": {
+            "command": "ls -la server contracts docs tests"
+          },
+          "assistantCompletedAt": "2026-09-14T12:52:59.709Z",
+          "resultPersistedAt": "2026-09-14T12:52:59.712Z",
+          "isError": true,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "Error: Read-only inspection: ls accepts one directory"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": true
+            },
+            "isError": true
+          }
+        },
+        {
+          "id": "call_180ca1609ccd490d9a6cf939",
+          "name": "read",
+          "args": {
+            "path": "README.md",
+            "offset": "0",
+            "limit": "120"
+          },
+          "assistantCompletedAt": "2026-09-14T12:52:59.709Z",
+          "resultPersistedAt": "2026-09-14T12:52:59.713Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "# Atlas workspace\nSmall TypeScript service with a browser client and Python SDK.\nSource locations: server/users.ts, web/users.ts, src/normalize.ts, src/importer.ts, src/settings.ts.\nClient SDKs live in clients/typescript/client.ts and clients/python/client.py.\nContracts live in contracts/. Integration tests live in tests/. Audits are written under reports/.\nNo generated files are committed. Keep existing public behavior unless the user requests a change.\n"
+              }
+            ]
+          }
+        },
+        {
+          "id": "call_bb25deb05dc048bf80471fb1",
+          "name": "bash",
+          "args": {
+            "command": "ls -la server"
+          },
+          "assistantCompletedAt": "2026-09-14T12:53:06.761Z",
+          "resultPersistedAt": "2026-09-14T12:53:06.762Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "auth.ts\nconfig.ts\nstorage.ts\nusers.ts"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_0a83fbcc1a564f989228b06d",
+          "name": "bash",
+          "args": {
+            "command": "ls -la contracts"
+          },
+          "assistantCompletedAt": "2026-09-14T12:53:06.761Z",
+          "resultPersistedAt": "2026-09-14T12:53:06.762Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "users.json"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_a7006fa0114941af8a8d0e12",
+          "name": "bash",
+          "args": {
+            "command": "bash"
+          },
+          "assistantCompletedAt": "2026-09-14T12:53:13.014Z",
+          "resultPersistedAt": "2026-09-14T12:53:13.014Z",
+          "isError": true,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "Error: Read-only inspection: allowed commands: pwd, ls, find, rg, grep, cat, head, tail, curl (GET/HEAD). No shell, scripts, tests or writes"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": true
+            },
+            "isError": true
+          }
+        },
+        {
+          "id": "call_0fb28d8947c347f8ba9efd6a",
+          "name": "bash",
+          "args": {
+            "command": "ls -la docs"
+          },
+          "assistantCompletedAt": "2026-09-14T12:53:23.791Z",
+          "resultPersistedAt": "2026-09-14T12:53:23.793Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "configuration.md"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_e1e17852544f478b97e9b098",
+          "name": "bash",
+          "args": {
+            "command": "head -n 60 server/auth.ts"
+          },
+          "assistantCompletedAt": "2026-09-14T12:53:23.791Z",
+          "resultPersistedAt": "2026-09-14T12:53:23.793Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "export const sessions = new Map<string, {userId: string, expiresAt: number}>();\nexport function authenticate(token: string) { return sessions.get(token)?.userId; }"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_f65b3f7c3b4e4f608fc27ff8",
+          "name": "bash",
+          "args": {
+            "command": "cat server/storage.ts"
+          },
+          "assistantCompletedAt": "2026-09-14T12:53:45.489Z",
+          "resultPersistedAt": "2026-09-14T12:53:45.492Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "import { writeFileSync } from \"node:fs\";\nexport function save(path: string, data: string) { writeFileSync(path, data); }\n"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_e770dc65b500467aaec5194f",
+          "name": "bash",
+          "args": {
+            "command": "cat docs/configuration.md"
+          },
+          "assistantCompletedAt": "2026-09-14T12:53:45.489Z",
+          "resultPersistedAt": "2026-09-14T12:53:45.492Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "retryCount is the maximum number of retries; default 3.\n"
+              }
+            ],
+            "details": {
+              "inspectionPolicy": "repository-inspection-v1",
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_8add5006a4094e229feb8a43",
+          "name": "node",
+          "args": {
+            "name": "audit_auth",
+            "task": "Security audit of server/auth.ts (session/authentication layer) for this Atlas TypeScript service. Read the current implementation (an in-memory session Map of token -> {userId, expiresAt} plus authenticate(token)) and assess authentication and session-expiry vulnerabilities: e.g. whether expiry is ever enforced on lookup, missing revocation/invalidation, unbounded session growth, token entropy/creation assumptions, and process-restart loss of sessions. Where behaviour is not defined by repo contracts (contracts/, docs/, README), treat the gap as an open interpretation to document rather than an invented requirement.\n\nDeliver ONLY reports/auth.md (create it; do not modify server/, src/, web/, clients/, tests/ or any application source, and do not implement fixes). Structure it with: conclusion summary; findings table with, per finding, the evidence (file/line citations and quoted code), a concrete reproduction case (sequence of calls/inputs showing the vulnerable behaviour), severity with rationale, and a recommended fix described in prose/design terms only. State which findings would be release-blocking security issues versus hardening items, and note verification limits (static reading; no running of exploits) with the exact commands used if you inspected further. Report real evidence, not speculation, and mark unproven inferences as such."
+          },
+          "assistantCompletedAt": "2026-09-14T12:55:11.942Z",
+          "resultPersistedAt": "2026-09-14T12:55:11.956Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\"],\"edges\":[],\"plan\":{\"executionBatches\":[[\"audit_auth\"]],\"roots\":[\"audit_auth\"],\"terminals\":[\"audit_auth\"],\"warnings\":[]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_3f7c95138f85405699e0c99f",
+          "name": "node",
+          "args": {
+            "name": "audit_storage",
+            "task": "Reliability audit of server/storage.ts (persistence layer) for this Atlas TypeScript service. Read the current implementation (a save(path, data) that calls node:fs writeFileSync directly) and assess crash-consistency and data-loss risks: e.g. non-atomic overwrite of an existing file (torn/partial state if the process or machine dies mid-write), absence of fsync/durability guarantees, no backup or temp-file-and-rename pattern, error/exception propagation, and path or concurrent-writer hazards. Respect existing repo contracts and current public behaviour; where durability expectations are undefined by the repository, document that as an interpretation rather than adding requirements.\n\nDeliver ONLY reports/storage.md (create it; do not modify server/, src/, web/, clients/, tests/ or any application source, and do not implement fixes). Structure it with: conclusion summary; findings with evidence (file/line citations and quoted code), concrete failure scenarios (what crash/interruption sequence leads to what data loss or corruption), severity with rationale, and recommended fixes described in prose/design terms only. Identify which findings are release-blocking data-integrity risks versus hardening items, and state what was observed versus inferred, including the exact commands used for any further inspection."
+          },
+          "assistantCompletedAt": "2026-09-14T12:55:11.942Z",
+          "resultPersistedAt": "2026-09-14T12:55:11.957Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\",\"audit_storage\"],\"edges\":[],\"plan\":{\"executionBatches\":[[\"audit_auth\",\"audit_storage\"]],\"roots\":[\"audit_auth\",\"audit_storage\"],\"terminals\":[\"audit_auth\",\"audit_storage\"],\"warnings\":[\"W301: audit_auth is an isolated independent terminal; confirm it contributes to the goal\",\"W301: audit_storage is an isolated independent terminal; confirm it contributes to the goal\"]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_ef81500d5b2e4f7894d5a288",
+          "name": "node",
+          "args": {
+            "name": "release_assessment",
+            "task": "Release-readiness synthesis for this Atlas TypeScript service, based on the two completed audit reports in the worktree: reports/auth.md (authentication/session-expiry findings) and reports/storage.md (crash-consistency/data-loss findings). Deliver ONLY reports/release.md, which must reconcile both reports into a single release decision:\n\n- Ordered list of blockers (highest risk first), each traced back to the specific finding in reports/auth.md or reports/storage.md with links/citations; call out any conflict or duplicate between the two reports rather than silently merging them.\n- Tradeoff discussion: cost/risk of fixing now versus shipping with the defect, and what residual risk each accepted item carries.\n- An explicit release recommendation (e.g. GO / GO-WITH-CONDITIONS / NO-GO) with the conditions and their owners-by-area (auth vs storage), plus items that are hardening-only and should not gate release.\n- Where an audit labels something as an interpretation or unproven inference, do not present it as a confirmed blocker; carry the uncertainty forward.\n\nDo not modify any application source or the two audit reports, and do not implement or prescribe code-level fixes beyond the remediation directions already recorded in the audit reports."
+          },
+          "assistantCompletedAt": "2026-09-14T12:55:21.579Z",
+          "resultPersistedAt": "2026-09-14T12:55:21.585Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\",\"audit_storage\",\"release_assessment\"],\"edges\":[],\"plan\":{\"executionBatches\":[[\"audit_auth\",\"audit_storage\",\"release_assessment\"]],\"roots\":[\"audit_auth\",\"audit_storage\",\"release_assessment\"],\"terminals\":[\"audit_auth\",\"audit_storage\",\"release_assessment\"],\"warnings\":[\"W301: audit_auth is an isolated independent terminal; confirm it contributes to the goal\",\"W301: audit_storage is an isolated independent terminal; confirm it contributes to the goal\",\"W301: release_assessment is an isolated independent terminal; confirm it contributes to the goal\"]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_b4248248f87c4efea1ee4666",
+          "name": "edge",
+          "args": {
+            "from": "audit_auth",
+            "to": "release_assessment",
+            "relation": "release decision requires the finished auth/session audit findings",
+            "feedback": false
+          },
+          "assistantCompletedAt": "2026-09-14T12:55:40.912Z",
+          "resultPersistedAt": "2026-09-14T12:55:40.929Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\",\"audit_storage\",\"release_assessment\"],\"edges\":[{\"from\":\"audit_auth\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished auth/session audit findings\",\"feedback\":false}],\"plan\":{\"executionBatches\":[[\"audit_auth\",\"audit_storage\"],[\"release_assessment\"]],\"roots\":[\"audit_auth\",\"audit_storage\"],\"terminals\":[\"audit_storage\",\"release_assessment\"],\"warnings\":[\"W301: audit_storage is an isolated independent terminal; confirm it contributes to the goal\"]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_864f5b42e787464a915f469c",
+          "name": "edge",
+          "args": {
+            "from": "audit_storage",
+            "to": "release_assessment",
+            "relation": "release decision requires the finished storage durability audit findings",
+            "feedback": false
+          },
+          "assistantCompletedAt": "2026-09-14T12:55:40.912Z",
+          "resultPersistedAt": "2026-09-14T12:55:40.929Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\",\"audit_storage\",\"release_assessment\"],\"edges\":[{\"from\":\"audit_auth\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished auth/session audit findings\",\"feedback\":false},{\"from\":\"audit_storage\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished storage durability audit findings\",\"feedback\":false}],\"plan\":{\"executionBatches\":[[\"audit_auth\",\"audit_storage\"],[\"release_assessment\"]],\"roots\":[\"audit_auth\",\"audit_storage\"],\"terminals\":[\"release_assessment\"],\"warnings\":[]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_5f8e04a6ba214a0080515d1d",
+          "name": "node",
+          "args": {
+            "name": "verify_assessment",
+            "task": "Independent acceptance check of the completed release assessment deliverables, in the worktree containing reports/auth.md, reports/storage.md and reports/release.md alongside untouched application source (server/, src/, web/, clients/, tests/, contracts/, docs/).\n\nVerify and report on:\n1. Scope compliance: confirm no application source was changed by this assessment (compare against the base commit; list the changed paths) and confirm no fixes were implemented.\n2. Completeness: each audit report contains evidence with file/line citations and quoted code, a reproduction case / failure scenario, a severity with rationale, and recommended fixes described only in design terms; reports/release.md contains a prioritized blocker list, the tradeoff discussion, and an explicit release recommendation.\n3. Traceability and consistency: every blocker in reports/release.md maps to a real finding in reports/auth.md or reports/storage.md, severities/priorities are not inflated relative to the underlying evidence, items the audits labelled as interpretations or unproven inferences are not presented as confirmed blockers, and the recommendation is consistent with the stated blockers.\n4. Citation accuracy: spot-check that cited files/lines actually contain the quoted code.\n\nFailure path: you may correct documentation-level defects directly in the three reports/ files (missing sections, broken cross-references, traceability or severity-priority mismatches, stale wording) and then rerun your checks. Never modify application source, contracts, docs, tests, or any other file; if you find a defect that would require an application source change or a substantive re-audit beyond report-level correction, record it as an unresolved risk instead of fixing it.\n\nEnd with a concise verification report: conclusion (assessment accepted / accepted-with-corrections / unresolved risks), the exact read-only commands you ran with their real results, the changed-paths evidence, per-check pass/fail status, any report edits you made, and links to the supporting evidence."
+          },
+          "assistantCompletedAt": "2026-09-14T12:56:10.744Z",
+          "resultPersistedAt": "2026-09-14T12:56:10.758Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\",\"audit_storage\",\"release_assessment\",\"verify_assessment\"],\"edges\":[{\"from\":\"audit_auth\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished auth/session audit findings\",\"feedback\":false},{\"from\":\"audit_storage\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished storage durability audit findings\",\"feedback\":false}],\"plan\":{\"executionBatches\":[[\"audit_auth\",\"audit_storage\",\"verify_assessment\"],[\"release_assessment\"]],\"roots\":[\"audit_auth\",\"audit_storage\",\"verify_assessment\"],\"terminals\":[\"release_assessment\",\"verify_assessment\"],\"warnings\":[\"W301: verify_assessment is an isolated independent terminal; confirm it contributes to the goal\"]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_8846ebbe8f8c43b984666037",
+          "name": "edge",
+          "args": {
+            "feedback": false,
+            "from": "audit_auth",
+            "relation": "verifier checks the completed auth report",
+            "to": "verify_assessment"
+          },
+          "assistantCompletedAt": "2026-09-14T12:56:35.646Z",
+          "resultPersistedAt": "2026-09-14T12:56:35.668Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\",\"audit_storage\",\"release_assessment\",\"verify_assessment\"],\"edges\":[{\"from\":\"audit_auth\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished auth/session audit findings\",\"feedback\":false},{\"from\":\"audit_storage\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished storage durability audit findings\",\"feedback\":false},{\"from\":\"audit_auth\",\"to\":\"verify_assessment\",\"relation\":\"verifier checks the completed auth report\",\"feedback\":false}],\"plan\":{\"executionBatches\":[[\"audit_auth\",\"audit_storage\"],[\"release_assessment\",\"verify_assessment\"]],\"roots\":[\"audit_auth\",\"audit_storage\"],\"terminals\":[\"release_assessment\",\"verify_assessment\"],\"warnings\":[]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_3d4d387c51d84f1188a3294e",
+          "name": "edge",
+          "args": {
+            "feedback": false,
+            "from": "audit_storage",
+            "relation": "verifier checks the completed storage report",
+            "to": "verify_assessment"
+          },
+          "assistantCompletedAt": "2026-09-14T12:56:35.646Z",
+          "resultPersistedAt": "2026-09-14T12:56:35.668Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\",\"audit_storage\",\"release_assessment\",\"verify_assessment\"],\"edges\":[{\"from\":\"audit_auth\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished auth/session audit findings\",\"feedback\":false},{\"from\":\"audit_storage\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished storage durability audit findings\",\"feedback\":false},{\"from\":\"audit_auth\",\"to\":\"verify_assessment\",\"relation\":\"verifier checks the completed auth report\",\"feedback\":false},{\"from\":\"audit_storage\",\"to\":\"verify_assessment\",\"relation\":\"verifier checks the completed storage report\",\"feedback\":false}],\"plan\":{\"executionBatches\":[[\"audit_auth\",\"audit_storage\"],[\"release_assessment\",\"verify_assessment\"]],\"roots\":[\"audit_auth\",\"audit_storage\"],\"terminals\":[\"release_assessment\",\"verify_assessment\"],\"warnings\":[]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        },
+        {
+          "id": "call_567593f30fdb44309e9e9c2d",
+          "name": "edge",
+          "args": {
+            "feedback": false,
+            "from": "release_assessment",
+            "relation": "verifier validates the release decision against both audit reports",
+            "to": "verify_assessment"
+          },
+          "assistantCompletedAt": "2026-09-14T12:56:39.305Z",
+          "resultPersistedAt": "2026-09-14T12:56:39.310Z",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"mutationApplied\":true,\"structuralCheck\":\"passed\",\"nodes\":[\"audit_auth\",\"audit_storage\",\"release_assessment\",\"verify_assessment\"],\"edges\":[{\"from\":\"audit_auth\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished auth/session audit findings\",\"feedback\":false},{\"from\":\"audit_storage\",\"to\":\"release_assessment\",\"relation\":\"release decision requires the finished storage durability audit findings\",\"feedback\":false},{\"from\":\"audit_auth\",\"to\":\"verify_assessment\",\"relation\":\"verifier checks the completed auth report\",\"feedback\":false},{\"from\":\"audit_storage\",\"to\":\"verify_assessment\",\"relation\":\"verifier checks the completed storage report\",\"feedback\":false},{\"from\":\"release_assessment\",\"to\":\"verify_assessment\",\"relation\":\"verifier validates the release decision against both audit reports\",\"feedback\":false}],\"plan\":{\"executionBatches\":[[\"audit_auth\",\"audit_storage\"],[\"release_assessment\"],[\"verify_assessment\"]],\"roots\":[\"audit_auth\",\"audit_storage\"],\"terminals\":[\"verify_assessment\"],\"warnings\":[]}}"
+              }
+            ],
+            "details": {
+              "grapherRejected": false
+            },
+            "isError": false
+          }
+        }
+      ],
+      "toolErrors": 2,
+      "usage": {
+        "input": 13844,
+        "output": 3985,
+        "cacheRead": 44544,
+        "cacheWrite": 0,
+        "reasoning": 1545,
+        "totalTokens": 62373
+      },
+      "postLastToolSeconds": 62.089,
+      "providerRetries": 2
+    }
+  },
+  "executions": [],
+  "feedbackCounts": {},
+  "publication": null,
+  "approvalToLastEventSeconds": null
+}

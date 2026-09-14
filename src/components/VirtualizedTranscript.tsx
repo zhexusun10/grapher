@@ -65,8 +65,14 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     lastProcessedPosRef.current += chunkToProcess.length;
 
     const lines = chunkToProcess.split("\n");
-    const currentItems = itemsRef.current;
-    const pendingTools = pendingToolsRef.current;
+    // Each parsed chunk publishes new item identities. Memoized tool/thinking
+    // cards must see streamed content and status changes, not mutated old props.
+    const currentItems = itemsRef.current.map(item => ({ ...item }));
+    itemsRef.current = currentItems;
+    const pendingTools = new Map(currentItems
+      .filter(item => item.type === "tool_call" && item.status === "running" && item.toolCallId)
+      .map(item => [item.toolCallId!, item]));
+    pendingToolsRef.current = pendingTools;
 
     for (const rawLine of lines) {
       const line = rawLine.trim();
@@ -424,8 +430,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       };
     }
 
-    const startIndex = Math.max(0, Math.floor(scrollTop / ESTIMATED_ITEM_HEIGHT) - OVERSCAN);
     const visibleCount = Math.ceil(containerHeight / ESTIMATED_ITEM_HEIGHT) + OVERSCAN * 2;
+    const startIndex = Math.min(
+      Math.max(0, totalCount - visibleCount),
+      Math.max(0, Math.floor(scrollTop / ESTIMATED_ITEM_HEIGHT) - OVERSCAN),
+    );
     const endIndex = Math.min(totalCount, startIndex + visibleCount);
 
     const topPad = startIndex * ESTIMATED_ITEM_HEIGHT;

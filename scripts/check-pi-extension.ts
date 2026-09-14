@@ -19,8 +19,11 @@ writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({ originalGoal: "Te
 process.chdir(repository);
 
 try {
-  const loaded = await loadExtensions([join(source, "backend/resources/planner.ts")], repository);
+  const adapterPath = join(source, "engine/prompt-extension.ts");
+  const loaded = await loadExtensions([join(source, "backend/resources/planner.ts"), adapterPath], repository);
   assert.deepEqual(loaded.errors, []);
+  assert.equal(loaded.extensions[1].tools.size, 0, "Planner adapter must not override restricted bash");
+  assert.equal(loaded.extensions[1].handlers.has("tool_call"), false, "Planner inspection commands must not get shell prefixes");
   const extension = loaded.extensions[0];
   assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edge", "node"]);
   const context = {} as ExtensionContext;
@@ -75,7 +78,7 @@ try {
   process.env.GRAPHER_MODE = "planner";
   writeFileSync(join(root, "grapher-planner.ts"), readFileSync(join(source, "backend/resources/planner.ts")));
   writeFileSync(join(root, "planning-inspection.mjs"), readFileSync(join(source, "backend/resources/planning-inspection.mjs")));
-  const extracted = await loadExtensions([join(root, "grapher-planner.ts")], repository);
+  const extracted = await loadExtensions([join(root, "grapher-planner.ts"), adapterPath], repository);
   assert.deepEqual(extracted.errors, []);
   const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
   assert.match(JSON.stringify(listed), /sample.txt/);

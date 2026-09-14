@@ -1,0 +1,330 @@
+diff --git a/scripts/check-pi-extension.ts b/scripts/check-pi-extension.ts
+index d7994e6..532365c 100644
+--- a/scripts/check-pi-extension.ts
++++ b/scripts/check-pi-extension.ts
+@@ -19,8 +19,11 @@ writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({ originalGoal: "Te
+ process.chdir(repository);
+ 
+ try {
+-  const loaded = await loadExtensions([join(source, "backend/resources/planner.ts")], repository);
++  const adapterPath = join(source, "engine/prompt-extension.ts");
++  const loaded = await loadExtensions([join(source, "backend/resources/planner.ts"), adapterPath], repository);
+   assert.deepEqual(loaded.errors, []);
++  assert.equal(loaded.extensions[1].tools.size, 0, "Planner adapter must not override restricted bash");
++  assert.equal(loaded.extensions[1].handlers.has("tool_call"), false, "Planner inspection commands must not get shell prefixes");
+   const extension = loaded.extensions[0];
+   assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edge", "node"]);
+   const context = {} as ExtensionContext;
+@@ -75,7 +78,7 @@ try {
+   process.env.GRAPHER_MODE = "planner";
+   writeFileSync(join(root, "grapher-planner.ts"), readFileSync(join(source, "backend/resources/planner.ts")));
+   writeFileSync(join(root, "planning-inspection.mjs"), readFileSync(join(source, "backend/resources/planning-inspection.mjs")));
+-  const extracted = await loadExtensions([join(root, "grapher-planner.ts")], repository);
++  const extracted = await loadExtensions([join(root, "grapher-planner.ts"), adapterPath], repository);
+   assert.deepEqual(extracted.errors, []);
+   const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
+   assert.match(JSON.stringify(listed), /sample.txt/);
+diff --git a/scripts/ui-regression.test.mjs b/scripts/ui-regression.test.mjs
+index c35e86b..ae0a4d9 100644
+--- a/scripts/ui-regression.test.mjs
++++ b/scripts/ui-regression.test.mjs
+@@ -19,6 +19,8 @@ try {
+       timing: "src/components/ExecutionTiming.tsx",
+       card: "src/components/ToolCallCard.tsx",
+       planningCard: "src/components/PlanningSummaryCard.tsx",
++      recovery: "src/services/planningRecovery.ts",
++      runtime: "src/services/runtime.ts",
+       extension: "engine/prompt-extension.ts",
+     },
+     bundle: true,
+@@ -40,6 +42,8 @@ try {
+   const { ExecutionTiming } = await import(pathToFileURL(path.join(root, "timing.js")));
+   const { ToolCallCard } = await import(pathToFileURL(path.join(root, "card.js")));
+   const { PlanningSummaryCard, calculateApprovalWaitingTime, calculatePausedTime, parseTimestamp } = await import(pathToFileURL(path.join(root, "planningCard.js")));
++  const { createPlanningRecovery } = await import(pathToFileURL(path.join(root, "recovery.js")));
++  const { runtimeService } = await import(pathToFileURL(path.join(root, "runtime.js")));
+   const registerExtension = (await import(pathToFileURL(path.join(root, "extension.js")))).default;
+ 
+   // Set up extension with mock Pi ExtensionAPI to capture bash tool and tool_result handlers
+@@ -447,9 +451,8 @@ try {
+   });
+ 
+   test("V5-2: Workspace switching, failed planning restoration, and request sequence race condition protection", async () => {
+-    // Model the state management logic from App.tsx
++    // Exercise the same controller used by App.tsx.
+     let failedPlanning = null;
+-    let requestId = 0;
+ 
+     const mockDb = {
+       "/repo/a": [
+@@ -470,28 +473,14 @@ try {
+       ],
+     };
+ 
++    const controller = createPlanningRecovery({
++      listPlannings: async (repo) => mockDb[repo] || [],
++      getPlanning: async () => { throw Error("unexpected lookup"); },
++    }, summary => { failedPlanning = summary; });
+     async function refreshFailedPlanning(targetRepo, currentSnapshot, artificialDelay = 0) {
+-      const currentReqId = ++requestId;
+-      failedPlanning = null; // Clear immediately
+-      if (!targetRepo) return;
+-      if (artificialDelay > 0) {
+-        await new Promise(r => setTimeout(r, artificialDelay));
+-      }
+-      const plannings = mockDb[targetRepo] || [];
+-      if (requestId !== currentReqId) return; // Discard stale response
+-      if (!plannings || plannings.length === 0) {
+-        failedPlanning = null;
+-        return;
+-      }
+-      const latestPlanning = plannings[0];
+-      const isFailed = latestPlanning.status === "failed" || !!latestPlanning.error;
+-      const runPlanningTime = currentSnapshot?.planning?.createdAt || 0;
+-      const latestTime = latestPlanning.createdAt || 0;
+-      if (isFailed && (!currentSnapshot?.runId || !currentSnapshot?.planning || latestTime >= runPlanningTime)) {
+-        failedPlanning = latestPlanning;
+-      } else {
+-        failedPlanning = null;
+-      }
++      const scope = controller.begin(targetRepo);
++      if (artificialDelay) await new Promise(r => setTimeout(r, artificialDelay));
++      await controller.restore(scope, currentSnapshot);
+     }
+ 
+     // 1. Initial workspace A has a failure
+@@ -528,7 +517,56 @@ try {
+     assert.equal(failedPlanning, null, "Stale slow response from Repo A must not overwrite Repo B state");
+   });
+ 
+-  console.log("UI regression tests passed: Header matching, ApprovalModal target, TaskNode state, ExecutionTiming, PlanningSummaryCard, Workspace Switching.");
++  test("V6: delayed history cannot overwrite terminal results or a pending workspace switch", async () => {
++    const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
++    const old = { planningId: "old", repository: "/a", status: "failed", createdAt: 1 };
++    const fresh = { ...old, planningId: "new", createdAt: 2 };
++    for (const terminal of [null, fresh]) {
++      let visible;
++      const list = deferred();
++      const recovery = createPlanningRecovery({ listPlannings: () => list.promise }, value => { visible = value; });
++      const scope = recovery.begin("/a");
++      const pending = recovery.restore(scope);
++      await recovery.finish(scope, terminal || undefined);
++      list.resolve([old]);
++      await pending;
++      assert.equal(visible, terminal);
++    }
++    for (const method of ["list", "lookup"]) {
++      let visible;
++      const result = deferred();
++      const recovery = createPlanningRecovery({ listPlannings: () => result.promise, getPlanning: () => result.promise }, value => { visible = value; });
++      const scope = recovery.begin("/a");
++      const pending = method === "list" ? recovery.restore(scope) : recovery.finish(scope, undefined, "old");
++      // B's detect/load has not completed; invalidation must already have happened.
++      recovery.begin("/b");
++      result.resolve(method === "list" ? [old] : old);
++      await pending;
++      assert.equal(visible, null);
++    }
++    let visible;
++    const recovery = createPlanningRecovery({}, value => { visible = value; });
++    const scope = recovery.begin("/a");
++    await recovery.finish(scope, { ...fresh, repository: "/b" });
++    assert.equal(visible, null);
++    await recovery.finish(scope, fresh, "different-id");
++    assert.equal(visible, null);
++  });
++
++  test("V6: truncated planning SSE fails without fetching an unrelated snapshot", async () => {
++    const originalFetch = globalThis.fetch;
++    const requests = [];
++    globalThis.fetch = async url => {
++      requests.push(url);
++      return new Response('event: route_decision\ndata: {"planType":"graph"}\n\n');
++    };
++    try {
++      await assert.rejects(runtimeService.planGoalStream("goal", {}, () => {}), /完成结果/);
++      assert.deepEqual(requests, ["/api/plan_goal_stream"]);
++    } finally { globalThis.fetch = originalFetch; }
++  });
++
++  console.log("UI regression tests cover rendered components, real Bash results and production planning recovery.");
+ } finally {
+   await rm(root, { recursive: true, force: true });
+ }
+diff --git a/src/App.tsx b/src/App.tsx
+index 068467e..aa2e482 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -11,6 +11,7 @@ import {
+ } from "./types";
+ import { tokens } from "./tokens";
+ import { runtimeService } from "./services/runtime";
++import { createPlanningRecovery } from "./services/planningRecovery";
+ 
+ import { TaskNode, type WorkNode } from "./components/graph/TaskNode";
+ import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
+@@ -101,34 +102,7 @@ export default function App() {
+   const [isPlanning, setIsPlanning] = useState(false);
+   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
+   const [failedPlanning, setFailedPlanning] = useState<PlanningSummary | null>(null);
+-  const planningRequestIdRef = useRef(0);
+-
+-  const refreshFailedPlanning = useCallback(async (targetRepo?: string, currentSnapshot?: Snapshot) => {
+-    const reqId = ++planningRequestIdRef.current;
+-    setFailedPlanning(null);
+-    if (!targetRepo) return;
+-    try {
+-      const plannings = await runtimeService.listPlannings(targetRepo);
+-      if (planningRequestIdRef.current !== reqId) return;
+-      if (!plannings || plannings.length === 0) {
+-        setFailedPlanning(null);
+-        return;
+-      }
+-      const latestPlanning = plannings[0];
+-      const isFailed = latestPlanning.status === "failed" || !!latestPlanning.error;
+-      const runPlanningTime = currentSnapshot?.planning?.createdAt || 0;
+-      const latestTime = latestPlanning.createdAt || 0;
+-      if (isFailed && (!currentSnapshot?.runId || !currentSnapshot?.planning || latestTime >= runPlanningTime)) {
+-        setFailedPlanning(latestPlanning);
+-      } else {
+-        setFailedPlanning(null);
+-      }
+-    } catch {
+-      if (planningRequestIdRef.current === reqId) {
+-        setFailedPlanning(null);
+-      }
+-    }
+-  }, []);
++  const [planningRecovery] = useState(() => createPlanningRecovery(runtimeService, setFailedPlanning));
+ 
+   const recordRunToWorkspace = (runId: string, repo: string = currentRepoPath) => {
+     setWorkspaceRuns((prev) => {
+@@ -214,7 +188,9 @@ export default function App() {
+   };
+ 
+   const load = useCallback(async () => {
++    const scope = planningRecovery.begin();
+     const data = await runtimeService.bootstrap();
++    if (!planningRecovery.current(scope)) return;
+     setConfig(data.config);
+     if (data.repositoryInfo) {
+       const info = data.repositoryInfo;
+@@ -268,13 +244,15 @@ export default function App() {
+     }
+ 
+     const targetRepo = data.config.repository || data.repositoryInfo?.path;
+-    refreshFailedPlanning(targetRepo, data.snapshot);
+-  }, [refreshFailedPlanning]);
++    void planningRecovery.restore(planningRecovery.begin(targetRepo), data.snapshot);
++  }, [planningRecovery]);
+ 
+   const handleOpenProject = () => run(async () => {
++    const pending = planningRecovery.begin(config.repository);
+     const info = await runtimeService.pickRepository();
++    if (!planningRecovery.current(pending)) return;
+     if (info) {
+-      setFailedPlanning(null);
++      const scope = planningRecovery.begin(info.path);
+       setRepoInfo(info);
+       setConfig((prev) => ({ ...prev, repository: info.path }));
+       const item: ProjectItem = {
+@@ -305,14 +283,17 @@ export default function App() {
+       setGoal("");
+       setSelected("");
+       setError("");
+-      refreshFailedPlanning(info.path, nextSnapshot);
++      void planningRecovery.restore(scope, nextSnapshot);
++    } else {
++      void planningRecovery.restore(pending, state);
+     }
+   });
+ 
+   const handleSelectProject = (proj: ProjectItem) => run(async () => {
+     if (config.repository === proj.path) return;
+-    setFailedPlanning(null);
++    const scope = planningRecovery.begin(proj.path);
+     const info = await runtimeService.detectRepository(proj.path);
++    if (!planningRecovery.current(scope)) return;
+     if (info) {
+       setRepoInfo(info);
+       setConfig((prev) => ({ ...prev, repository: info.path }));
+@@ -375,7 +356,7 @@ export default function App() {
+       setMessages([]);
+     }
+     setError("");
+-    refreshFailedPlanning(proj.path, loadedSnapshot);
++    void planningRecovery.restore(scope, loadedSnapshot);
+   });
+ 
+   const handleRemoveWorkspaceConfirm = (project: ProjectItem) => {
+@@ -568,7 +549,7 @@ export default function App() {
+         originalGoal: targetGoal,
+       },
+     }));
+-    setFailedPlanning(null);
++    const scope = planningRecovery.begin(config.repository);
+     try {
+       if (!config.repository) {
+         setModal("settings");
+@@ -579,6 +560,7 @@ export default function App() {
+       let planInTag = false;
+ 
+       const snapshot = await runtimeService.planGoalStream(targetGoal, config, (event) => {
++        if (!planningRecovery.current(scope)) return;
+         if (event.type === "partitioner") {
+           const pEvent = event.event;
+           if (pEvent?.type === "message_update") {
+@@ -792,34 +774,28 @@ export default function App() {
+             }));
+           }
+         } else if (event.type === "error") {
+-          if (event.summary) {
+-            setFailedPlanning(event.summary);
+-          } else if (event.planningId) {
+-            runtimeService.getPlanning(event.planningId).then(setFailedPlanning).catch(() => {});
+-          }
++          void planningRecovery.finish(scope, event.summary, event.planningId);
+         } else if (event.type === "complete") {
+           if (event.snapshot) {
+             setState(event.snapshot);
+             setRouteType(deduceRouteType(event.snapshot));
+             recordRunToWorkspace(event.snapshot.runId);
+-            setFailedPlanning(null);
++            void planningRecovery.finish(scope);
+           }
+         }
+       });
++      if (!planningRecovery.current(scope)) return;
+       setState(snapshot);
+       setRouteType(deduceRouteType(snapshot));
+       setMainTab("graph");
+       recordRunToWorkspace(snapshot.runId);
+-      setFailedPlanning(null);
++      void planningRecovery.finish(scope);
+       setSelected("");
+       setPlannerStream((prev) => ({ ...prev, stage: "done" }));
+     } catch (err: any) {
++      if (!planningRecovery.current(scope)) return;
+       setError(String(err?.message || err));
+-      if (err?.summary) {
+-        setFailedPlanning(err.summary);
+-      } else if (err?.planningId) {
+-        runtimeService.getPlanning(err.planningId).then(setFailedPlanning).catch(() => {});
+-      }
++      void planningRecovery.finish(scope, err?.summary, err?.planningId);
+       setPlannerStream((prev) => ({ ...prev, stage: "error" }));
+     } finally {
+       setIsPlanning(false);
+diff --git a/src/services/runtime.ts b/src/services/runtime.ts
+index d5a15b1..c999369 100644
+--- a/src/services/runtime.ts
++++ b/src/services/runtime.ts
+@@ -120,7 +120,7 @@ export const runtimeService = {
+     }
+ 
+     if (!finalSnapshot) {
+-      finalSnapshot = await this.snapshot();
++      throw new Error("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。");
+     }
+     return finalSnapshot;
+   },

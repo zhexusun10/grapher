@@ -1,0 +1,44 @@
+{
+  "planningId": "6f28ccb3-f667-4403-a87c-7fcaccd35d5b",
+  "roles": {
+    "partition": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789390345977",
+      "lastEvent": "1789390355956",
+      "durationSeconds": 9.978,
+      "assistantMessages": 1,
+      "tools": 0,
+      "toolErrors": 0,
+      "usage": {
+        "input": 234,
+        "output": 261,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 257,
+        "totalTokens": 495
+      }
+    },
+    "planner": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789390355959",
+      "lastEvent": "1789390661399",
+      "durationSeconds": 305.439,
+      "assistantMessages": 15,
+      "tools": 20,
+      "toolErrors": 2,
+      "usage": {
+        "input": 13844,
+        "output": 3985,
+        "cacheRead": 44544,
+        "cacheWrite": 0,
+        "reasoning": 1545,
+        "totalTokens": 62373
+      }
+    }
+  },
+  "totalPlanningDuration": 315.510533166,
+  "modelDuration": 315.41700000000003,
+  "status": "success",
+  "createdAt": 1789390345909,
+  "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-GuQj8f/audit/project"
+}

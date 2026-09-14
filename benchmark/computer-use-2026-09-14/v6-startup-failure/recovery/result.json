@@ -1,0 +1,11 @@
+{
+  "status": "FAIL",
+  "root": "/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-recovery-v6-QWO6v7",
+  "error": "TimeoutError: locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('.project-item').filter({ hasText: 'workspace-b' })\u001b[22m\n",
+  "actions": [
+    {
+      "at": "2026-09-14T12:44:28.176Z",
+      "text": "A: actual persisted failed planning displayed together with previous valid graph"
+    }
+  ]
+}

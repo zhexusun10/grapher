@@ -7,10 +7,11 @@ import {
   defaultConfig, emptyGraph, emptySnapshot,
   type Config, type Graph, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType, type TranscriptItem, type NodeState,
-  type PlanningSummary
+  type PlanningSummary, type Execution
 } from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
+import { createPlanningRecovery } from "./services/planningRecovery";
 
 import { TaskNode, type WorkNode } from "./components/graph/TaskNode";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
@@ -63,6 +64,14 @@ function areFeedbackCountsEqual(a?: Record<string, number>, b?: Record<string, n
   return true;
 }
 
+function areExecutionStreamsEqual(a: Execution[] = [], b: Execution[] = []): boolean {
+  return a.length === b.length && a.every((execution, index) => {
+    const next = b[index];
+    return execution.id === next.id && execution.status === next.status &&
+      execution.output.length === next.output.length;
+  });
+}
+
 const nodeTypes = { work: TaskNode };
 const edgeTypes = { workflow: SmoothWorkflowEdge };
 
@@ -101,34 +110,12 @@ export default function App() {
   const [isPlanning, setIsPlanning] = useState(false);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
   const [failedPlanning, setFailedPlanning] = useState<PlanningSummary | null>(null);
-  const planningRequestIdRef = useRef(0);
-
-  const refreshFailedPlanning = useCallback(async (targetRepo?: string, currentSnapshot?: Snapshot) => {
-    const reqId = ++planningRequestIdRef.current;
-    setFailedPlanning(null);
-    if (!targetRepo) return;
-    try {
-      const plannings = await runtimeService.listPlannings(targetRepo);
-      if (planningRequestIdRef.current !== reqId) return;
-      if (!plannings || plannings.length === 0) {
-        setFailedPlanning(null);
-        return;
-      }
-      const latestPlanning = plannings[0];
-      const isFailed = latestPlanning.status === "failed" || !!latestPlanning.error;
-      const runPlanningTime = currentSnapshot?.planning?.createdAt || 0;
-      const latestTime = latestPlanning.createdAt || 0;
-      if (isFailed && (!currentSnapshot?.runId || !currentSnapshot?.planning || latestTime >= runPlanningTime)) {
-        setFailedPlanning(latestPlanning);
-      } else {
-        setFailedPlanning(null);
-      }
-    } catch {
-      if (planningRequestIdRef.current === reqId) {
-        setFailedPlanning(null);
-      }
-    }
-  }, []);
+  const [planningRecovery] = useState(() => createPlanningRecovery(runtimeService, summary => {
+    setFailedPlanning(summary);
+    // A newer failed attempt is the workspace's current outcome. Loading an
+    // older graph must not hide it behind an automatically selected old node.
+    if (summary) setSelected("");
+  }));
 
   const recordRunToWorkspace = (runId: string, repo: string = currentRepoPath) => {
     setWorkspaceRuns((prev) => {
@@ -214,7 +201,9 @@ export default function App() {
   };
 
   const load = useCallback(async () => {
+    const scope = planningRecovery.begin();
     const data = await runtimeService.bootstrap();
+    if (!planningRecovery.current(scope)) return;
     setConfig(data.config);
     if (data.repositoryInfo) {
       const info = data.repositoryInfo;
@@ -268,13 +257,15 @@ export default function App() {
     }
 
     const targetRepo = data.config.repository || data.repositoryInfo?.path;
-    refreshFailedPlanning(targetRepo, data.snapshot);
-  }, [refreshFailedPlanning]);
+    void planningRecovery.restore(planningRecovery.begin(targetRepo), data.snapshot);
+  }, [planningRecovery]);
 
   const handleOpenProject = () => run(async () => {
+    const pending = planningRecovery.begin(config.repository);
     const info = await runtimeService.pickRepository();
+    if (!planningRecovery.current(pending)) return;
     if (info) {
-      setFailedPlanning(null);
+      const scope = planningRecovery.begin(info.path);
       setRepoInfo(info);
       setConfig((prev) => ({ ...prev, repository: info.path }));
       const item: ProjectItem = {
@@ -305,14 +296,18 @@ export default function App() {
       setGoal("");
       setSelected("");
       setError("");
-      refreshFailedPlanning(info.path, nextSnapshot);
+      void planningRecovery.restore(scope, nextSnapshot);
+    } else {
+      void planningRecovery.restore(pending, state);
     }
   });
 
   const handleSelectProject = (proj: ProjectItem) => run(async () => {
     if (config.repository === proj.path) return;
-    setFailedPlanning(null);
+    const scope = planningRecovery.begin(proj.path);
+    setPlannerStream(initialPlannerStream);
     const info = await runtimeService.detectRepository(proj.path);
+    if (!planningRecovery.current(scope)) return;
     if (info) {
       setRepoInfo(info);
       setConfig((prev) => ({ ...prev, repository: info.path }));
@@ -375,7 +370,7 @@ export default function App() {
       setMessages([]);
     }
     setError("");
-    refreshFailedPlanning(proj.path, loadedSnapshot);
+    void planningRecovery.restore(scope, loadedSnapshot);
   });
 
   const handleRemoveWorkspaceConfirm = (project: ProjectItem) => {
@@ -568,7 +563,7 @@ export default function App() {
         originalGoal: targetGoal,
       },
     }));
-    setFailedPlanning(null);
+    const scope = planningRecovery.begin(config.repository);
     try {
       if (!config.repository) {
         setModal("settings");
@@ -579,6 +574,7 @@ export default function App() {
       let planInTag = false;
 
       const snapshot = await runtimeService.planGoalStream(targetGoal, config, (event) => {
+        if (!planningRecovery.current(scope)) return;
         if (event.type === "partitioner") {
           const pEvent = event.event;
           if (pEvent?.type === "message_update") {
@@ -792,34 +788,28 @@ export default function App() {
             }));
           }
         } else if (event.type === "error") {
-          if (event.summary) {
-            setFailedPlanning(event.summary);
-          } else if (event.planningId) {
-            runtimeService.getPlanning(event.planningId).then(setFailedPlanning).catch(() => {});
-          }
+          void planningRecovery.finish(scope, event.summary, event.planningId);
         } else if (event.type === "complete") {
           if (event.snapshot) {
             setState(event.snapshot);
             setRouteType(deduceRouteType(event.snapshot));
             recordRunToWorkspace(event.snapshot.runId);
-            setFailedPlanning(null);
+            void planningRecovery.finish(scope);
           }
         }
       });
+      if (!planningRecovery.current(scope)) return;
       setState(snapshot);
       setRouteType(deduceRouteType(snapshot));
       setMainTab("graph");
       recordRunToWorkspace(snapshot.runId);
-      setFailedPlanning(null);
+      void planningRecovery.finish(scope);
       setSelected("");
       setPlannerStream((prev) => ({ ...prev, stage: "done" }));
     } catch (err: any) {
+      if (!planningRecovery.current(scope)) return;
       setError(String(err?.message || err));
-      if (err?.summary) {
-        setFailedPlanning(err.summary);
-      } else if (err?.planningId) {
-        runtimeService.getPlanning(err.planningId).then(setFailedPlanning).catch(() => {});
-      }
+      void planningRecovery.finish(scope, err?.summary, err?.planningId);
       setPlannerStream((prev) => ({ ...prev, stage: "error" }));
     } finally {
       setIsPlanning(false);
@@ -841,9 +831,13 @@ export default function App() {
     // 1000ms when actively executing; 3500ms when idle or completed
     const pollInterval = isTaskActive ? 1000 : 3500;
 
-    const interval = setInterval(() => {
-      runtimeService.snapshot()
-        .then((newSnap) => {
+    let cancelled = false;
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+          const newSnap = await runtimeService.snapshot(abort.signal);
+          if (cancelled) return;
           if (!newSnap || !newSnap.runId) {
             setActiveBackendRunId(null);
             setActiveBackendPhase(null);
@@ -862,7 +856,8 @@ export default function App() {
               prev.paused === newSnap.paused &&
               prev.approved === newSnap.approved &&
               prev.events.length === newSnap.events.length &&
-              prev.executions.length === newSnap.executions.length &&
+              areExecutionStreamsEqual(prev.executions, newSnap.executions) &&
+              areExecutionStreamsEqual(prev.mergers, newSnap.mergers) &&
               areNodesEqual(prev.nodes, newSnap.nodes) &&
               areFeedbackCountsEqual(prev.feedbackCounts, newSnap.feedbackCounts)
             ) {
@@ -870,13 +865,20 @@ export default function App() {
             }
             return newSnap;
           });
-        })
-        .catch((err) => {
-          console.warn("Snapshot poll error:", err);
-        });
-    }, pollInterval);
+      } catch (err) {
+        if (!cancelled) console.warn("Snapshot poll error:", err);
+      } finally {
+        // Wait for the current response before scheduling another large snapshot.
+        if (!cancelled) timer = setTimeout(poll, pollInterval);
+      }
+    };
+    timer = setTimeout(poll, pollInterval);
 
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      abort.abort();
+    };
   }, [busy, activeBackendRunId, activeBackendPhase]);
 
   useEffect(() => {
@@ -935,7 +937,7 @@ export default function App() {
         width: 236,
         position: {
           x: (batch.indexOf(node.name) - (batch.length - 1) / 2) * 260 + 160,
-          y: layer * 155 + 24,
+          y: layer * 180 + 24,
         },
         data: {
           name: node.name,
@@ -1056,6 +1058,7 @@ export default function App() {
         activeBackendRunId={activeBackendRunId}
         activeBackendPhase={activeBackendPhase}
         onLoadRun={(id) => run(async () => {
+          setPlannerStream(initialPlannerStream);
           const snapshot = await runtimeService.loadRun(id);
           const deduced = deduceRouteType(snapshot);
           setState(snapshot);
@@ -1090,6 +1093,7 @@ export default function App() {
                 type="button"
                 className="background-run-action-btn"
                 onClick={() => run(async () => {
+                  setPlannerStream(initialPlannerStream);
                   const snapshot = await runtimeService.loadRun(activeBackendRunId);
                   const deduced = deduceRouteType(snapshot);
                   setState(snapshot);

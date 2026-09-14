@@ -1,0 +1,5 @@
+{
+  "node": "release_readiness_assessment",
+  "instruction": "Complete the original release assessment using the two upstream reports and the source files already in this worktree. Keep reports/release.md focused (at most 600 words). Do not repeat disk-image, mount, crash, or ENOSPC experiments: preserve the upstream observed evidence and explicitly label unverified scenarios and reproduction setup limitations. Check the real current date and do not claim placeholder tests verify auth or storage. Correct unsupported statements in the three reports when necessary. Do not change application source or run Git commands. Provide the release recommendation, concrete blockers, tradeoffs, evidence links and remaining limits; avoid repeating exploratory probes that do not change that decision.",
+  "at": "2026-09-14T13:32:26.610Z"
+}

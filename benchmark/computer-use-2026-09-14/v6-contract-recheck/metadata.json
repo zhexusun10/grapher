@@ -1,0 +1,13 @@
+{
+  "root": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-recheck-tcN81S",
+  "model": "dashscope/qwen3.8-flash",
+  "thinking": "medium",
+  "sourceManifest": {
+    "backend/resources/prompts/planner.md": "f36f98ab3b6015dfd4d478bb2827f55fcc7f3aec9c7ecb298890bdb3e9e10ca5",
+    "backend/resources/planner.ts": "0d0ae3350cfbb555cc1c9f3b3da034dfa93c89b70f97d044496d15995b27c756",
+    "engine/prompt-extension.ts": "43a589c8919e8cc02993170b0a4134dc73913cc6cb030ecdce9a344eb489c7f1",
+    "src/App.tsx": "6cae4dd3794d8bc009256d76564349c1bfdfcc5b54ea6bb18d4975e58a4b836b",
+    "src/services/planningRecovery.ts": "f1362f5dc63cd6da9970c497f58459133dbe357e9bc78c0bd4073c39dd4b7321"
+  },
+  "startedAt": "2026-09-14T12:59:05.190Z"
+}

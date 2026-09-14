@@ -1,0 +1,22 @@
+{
+  "executionBatches": [
+    [
+      "catalog_search_filter",
+      "csv_catalog_parser"
+    ],
+    [
+      "catalog_interop_tests"
+    ],
+    [
+      "verification_report"
+    ]
+  ],
+  "roots": [
+    "catalog_search_filter",
+    "csv_catalog_parser"
+  ],
+  "terminals": [
+    "verification_report"
+  ],
+  "warnings": []
+}

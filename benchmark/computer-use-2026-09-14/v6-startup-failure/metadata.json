@@ -1,0 +1,16 @@
+{
+  "baseline": "56316cd1a0e3da56bfd10c600d25dfd3df974602",
+  "sourceSha256": "3bf843871afe75c09d3e530058357e205fd50a67f21402cfc7691684a85d28ea",
+  "root": "/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-a8cyDQ",
+  "model": "dashscope/qwen3.8-flash",
+  "thinking": "medium",
+  "maxParallel": 2,
+  "maxFeedback": 2,
+  "startedAt": "2026-09-14T12:42:32.649Z",
+  "node": "v25.4.0",
+  "backend": "production, no fixture",
+  "evidence": "real browser + shipping API + real Pi provider",
+  "status": "FAIL",
+  "error": "Planner and generic execution extension both registered bash; all three genuine Graph attempts failed at Planner startup.",
+  "roleTimeoutSeconds": 600
+}

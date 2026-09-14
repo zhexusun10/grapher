@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, mkdir, writeFile, readdir, readFile, appendFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readdir, readFile, appendFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import net from "node:net";
@@ -87,6 +87,14 @@ try {
   assert.equal(snapshot.phase, "completed");
   assert.equal(snapshot.nodes.task.status, "done");
   assert.ok(snapshot.executions[0].after);
+  const compact = await call("snapshot", { compact: true });
+  assert.ok(snapshot.events.some(event => event.type === "output"));
+  assert.ok(compact.events.every(event => event.type !== "output"));
+  assert.deepEqual(compact.events, snapshot.events.filter(event => event.type !== "output"));
+  assert.deepEqual(compact.executions, snapshot.executions, "compact polling preserves complete transcripts and execution identity");
+  assert.deepEqual((await call("bootstrap", { compact: true })).snapshot, compact);
+  assert.deepEqual(await call("history", { runId: saved.runId, compact: true }), compact);
+  assert.deepEqual(await call("snapshot"), snapshot, "compact projection must not mutate persistent or active state");
   await writeFile(path.join(root, "snapshot.json"), JSON.stringify(snapshot, null, 2));
   await stop();
   await start();
@@ -126,10 +134,37 @@ fi
     assert.ok(planSummary.createdAt > 0);
 
     // V4-1 Security regression: Path traversal attacks must fail with Invalid planning ID
+    const trace = await call("get_planning_output", { planningId: created[0], role: stage });
+    assert.equal(trace.content, log);
+    assert.equal(trace.complete, true);
+    assert.equal(trace.nextOffset, Buffer.byteLength(log));
     for (const evilId of ["../../outside", "../planning", "/etc/passwd", "sub/dir", "..", "."]) {
       await assert.rejects(call("get_planning", { planningId: evilId }), /Invalid planning ID/);
+      await assert.rejects(call("get_planning_output", { planningId: evilId, role: "planner" }), /Invalid planning ID/);
     }
   }
+
+  const traceDir = path.join(root, "planning", "trace-pagination");
+  await mkdir(traceDir);
+  const utf8Trace = 'a'.repeat(256 * 1024 - 1) + '规划文字'.repeat(100000) + '\n';
+  await writeFile(path.join(traceDir, 'planner.jsonl'), utf8Trace);
+  let text = '', offset = 0, pages = 0;
+  while (true) {
+    const page = await call('get_planning_output', { planningId: 'trace-pagination', role: 'planner', offset });
+    assert.ok(Buffer.byteLength(page.content) <= 256 * 1024);
+    text += page.content; pages++;
+    if (page.complete) break;
+    assert.ok(page.nextOffset > offset);
+    offset = page.nextOffset;
+  }
+  assert.ok(pages > 1);
+  assert.equal(text, utf8Trace, 'UTF-8 pagination must reconstruct the complete trace');
+  await assert.rejects(call('get_planning_output', { planningId: 'trace-pagination', role: '../summary' }), /Invalid planning role/);
+  await assert.rejects(call('get_planning_output', { planningId: 'trace-pagination', role: 'planner', offset: 256 * 1024 }), /UTF-8 offset/);
+  await assert.rejects(call('get_planning_output', { planningId: 'trace-pagination', role: 'planner', offset: -1 }), /Invalid offset/);
+  await writeFile(path.join(root, 'outside-trace'), 'outside');
+  await symlink(path.join(root, 'outside-trace'), path.join(traceDir, 'partition.jsonl'));
+  await assert.rejects(call('get_planning_output', { planningId: 'trace-pagination', role: 'partition' }), /Invalid planning output path/);
 
   // Verify list_plannings sorting (createdAt desc) and repository filtering
   const allPlannings = await call("list_plannings");

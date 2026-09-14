@@ -1,0 +1,18 @@
+{
+  "errors": [],
+  "history": {
+    "onDemand": true,
+    "paginated": true,
+    "partitioner": true,
+    "planner": true,
+    "refreshRestored": true,
+    "toolCards": true,
+    "requests": 7
+  },
+  "liveReplay": {
+    "textAfterComplete": true,
+    "thinkingAfterComplete": true,
+    "toolsAfterComplete": true
+  },
+  "status": "PASS"
+}

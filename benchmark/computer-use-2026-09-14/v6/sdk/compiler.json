@@ -1,0 +1,24 @@
+{
+  "executionBatches": [
+    [
+      "retry-contract"
+    ],
+    [
+      "py-client-retry",
+      "ts-client-retry"
+    ],
+    [
+      "conformance-review"
+    ],
+    [
+      "final-verification"
+    ]
+  ],
+  "roots": [
+    "retry-contract"
+  ],
+  "terminals": [
+    "final-verification"
+  ],
+  "warnings": []
+}

@@ -1,0 +1,54 @@
+[
+  {
+    "sample": "sdk",
+    "planningId": "8340d25f-a7a2-4304-ae7e-febf5a8c4433",
+    "runId": "f592eb05-d6a4-456b-b291-c1c8d8fe9909",
+    "phase": "awaiting_approval",
+    "planningDuration": 257.165722458,
+    "nodes": 4,
+    "normalEdges": 4,
+    "feedbackEdges": 2,
+    "roles": {
+      "partition": {
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789391023359",
+        "lastEvent": "1789391033545",
+        "durationSeconds": 10.186,
+        "assistantMessages": 1,
+        "tools": 0,
+        "toolErrors": 0,
+        "usage": {
+          "input": 300,
+          "output": 379,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 375,
+          "totalTokens": 679
+        },
+        "providerRetries": 0
+      },
+      "planner": {
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789391033549",
+        "lastEvent": "1789391280425",
+        "durationSeconds": 246.877,
+        "assistantMessages": 16,
+        "tools": 23,
+        "toolErrors": 2,
+        "usage": {
+          "input": 13994,
+          "output": 5983,
+          "cacheRead": 59904,
+          "cacheWrite": 0,
+          "reasoning": 1419,
+          "totalTokens": 79881
+        },
+        "providerRetries": 2
+      }
+    },
+    "executions": [],
+    "feedbackCounts": {},
+    "publication": null,
+    "approvalToLastEventSeconds": null
+  }
+]

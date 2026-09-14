@@ -1,0 +1,15 @@
+{
+  "name": "sdk",
+  "port": 1478,
+  "directory": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-GuQj8f/sdk",
+  "project": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-GuQj8f/sdk/project",
+  "data": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-GuQj8f/sdk/data",
+  "config": {
+    "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v6-GuQj8f/sdk/project",
+    "model": "dashscope/qwen3.8-flash",
+    "maxParallel": 2,
+    "maxFeedback": 2
+  },
+  "baseline": "db122fba2d10809ac01447015c0c98303f987ce1",
+  "goal": "Add a consistent retry policy to the TypeScript and Python SDKs. Specify retryable HTTP statuses (429 and 503), Retry-After handling, exponential backoff, maximum attempts and non-idempotent request protection in a new contracts/retry-policy.md before implementation. Implement and unit-test that contract in clients/typescript/client.ts and clients/python/client.py. Review both clients together and write reproducible conformance scenarios and results in tests/sdk-conformance.md, checking both use identical policy semantics. If that review finds nonconformance, request corrections to both client implementations and repeat the conformance review. Do not put retry behavior in the server or browser app."
+}

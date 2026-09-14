@@ -1,12 +1,13 @@
 import { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, Snapshot } from "../types";
 
-async function request<T>(command: string, body: Record<string, unknown> = {}): Promise<T> {
+async function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`/api/${command}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, compact: true }),
+      signal,
     });
   } catch {
     throw new Error("无法连接后端，请在终端运行 npm run backend。");
@@ -20,7 +21,7 @@ async function request<T>(command: string, body: Record<string, unknown> = {}): 
 
 export const runtimeService = {
   bootstrap: () => request<Bootstrap>("bootstrap"),
-  snapshot: () => request<Snapshot>("snapshot"),
+  snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
   history: (runId: string) => request<Snapshot>("history", { runId }),
   loadRun: async (runId: string) => {
     try {
@@ -120,10 +121,13 @@ export const runtimeService = {
     }
 
     if (!finalSnapshot) {
-      finalSnapshot = await this.snapshot();
+      throw new Error("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。");
     }
     return finalSnapshot;
   },
+  getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal) =>
+    request<{ planningId: string; role: string; content: string; nextOffset: number; totalBytes: number; complete: boolean }>(
+      "get_planning_output", { planningId, role, offset }, signal),
   getPlanning: (planningId: string) => request<PlanningSummary>("get_planning", { planningId }),
   listPlannings: (repository?: string) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}),
   control: (action: string, extra?: Record<string, unknown>) => request<Snapshot>("control", { action, ...extra }),
