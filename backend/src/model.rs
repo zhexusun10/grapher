@@ -40,6 +40,51 @@ pub struct Plan {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub input: usize,
+    #[serde(default)]
+    pub output: usize,
+    #[serde(default)]
+    pub cache_read: usize,
+    #[serde(default)]
+    pub cache_write: usize,
+    #[serde(default)]
+    pub reasoning: usize,
+    #[serde(default)]
+    pub total_tokens: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningRoleMetrics {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event: Option<String>,
+    pub duration_seconds: f64,
+    pub assistant_messages: usize,
+    pub tools: usize,
+    pub tool_errors: usize,
+    pub usage: TokenUsage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningSummary {
+    pub planning_id: String,
+    pub roles: BTreeMap<String, PlanningRoleMetrics>,
+    pub total_planning_duration: f64,
+    pub model_duration: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -115,6 +160,10 @@ pub enum EventKind {
     Created {
         graph: Graph,
         config: Config,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        planning_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        planning: Option<PlanningSummary>,
     },
     Approved {
         base: String,
@@ -194,6 +243,10 @@ pub struct Publication {
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning: Option<PlanningSummary>,
     pub graph: Graph,
     pub config: Option<Config>,
     pub plan: Option<Plan>,
@@ -220,9 +273,16 @@ pub fn now() -> u64 {
 
 pub fn apply(state: &mut Snapshot, event: &Event) {
     match &event.kind {
-        EventKind::Created { graph, config } => {
+        EventKind::Created {
+            graph,
+            config,
+            planning_id,
+            planning,
+        } => {
             state.graph = graph.clone();
             state.config = Some(config.clone());
+            state.planning_id = planning_id.clone();
+            state.planning = planning.clone();
             state.plan = crate::compiler::compile(graph, true).ok();
             state.nodes = graph
                 .nodes

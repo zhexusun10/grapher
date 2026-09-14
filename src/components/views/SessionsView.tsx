@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Code2, Terminal, FolderGit2, GitBranch, ArrowRight } from "lucide-react";
 import { Snapshot, Execution } from "../../types";
 import { VirtualizedTranscript } from "../VirtualizedTranscript";
+import { ExecutionTiming } from "../ExecutionTiming";
 import { statusText } from "../graph/TaskNode";
 
 interface SessionsViewProps {
@@ -122,7 +123,7 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
                       <span className="pi-avatar">π</span>
                       <strong>Pi Session Log</strong>
                       <span className="log-status">{execution.status}</span>
-                      <time>{new Date(execution.startedAt).toLocaleString()}</time>
+                      <ExecutionTiming execution={execution} />
                     </div>
                     {execution.worktree && (
                       <span className="worktree-pill" title={execution.worktree}>

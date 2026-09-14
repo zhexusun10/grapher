@@ -62,7 +62,10 @@ Repository paths only; no symlinks or .git. No shell operators, expansion, scrip
     // Echo topology, not every task accumulated so far on every mutation.
     // The planner already authored the tasks; repeated full graphs grow its
     // context quadratically without adding information.
-    return result(JSON.stringify({ accepted: true, nodes: graph.nodes.map(node => node.name), edges: graph.edges, plan: output.plan }));
+    // This validates one intermediate mutation. It does not establish that the
+    // graph covers the user's full goal; the host performs final compilation
+    // after the planner exits.
+    return result(JSON.stringify({ mutationApplied: true, structuralCheck: "passed", nodes: graph.nodes.map(node => node.name), edges: graph.edges, plan: output.plan }));
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node", description: "Upsert a semantic node name and standalone specific task; delete also removes its edges.",

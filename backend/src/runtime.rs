@@ -211,6 +211,16 @@ impl Runtime {
     }
 
     pub fn create(&mut self, graph: Graph, config: Config) -> Result<(), String> {
+        self.create_with_planning(graph, config, None, None)
+    }
+
+    pub fn create_with_planning(
+        &mut self,
+        graph: Graph,
+        config: Config,
+        planning_id: Option<String>,
+        planning: Option<crate::model::PlanningSummary>,
+    ) -> Result<(), String> {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());
         }
@@ -231,7 +241,12 @@ impl Runtime {
             run_id: Uuid::new_v4().to_string(),
             ..Snapshot::default()
         };
-        self.emit(EventKind::Created { graph, config })
+        self.emit(EventKind::Created {
+            graph,
+            config,
+            planning_id,
+            planning,
+        })
     }
 
     pub fn approve(&mut self) -> Result<(), String> {

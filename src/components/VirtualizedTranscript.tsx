@@ -250,9 +250,25 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
             .map((item: { text: string }) => item.text)
             .join("\n");
 
+          const exitCodeMatch = resultText.match(/Command exited with code (\d+)/);
+          const rawExitCode = event.result?.details?.exitCode;
+          const exitCode = typeof rawExitCode === "number"
+            ? rawExitCode
+            : exitCodeMatch
+            ? parseInt(exitCodeMatch[1], 10)
+            : (event.isError || event.result?.isError) ? 1 : 0;
+          const truncated = !!(
+            event.result?.details?.truncation?.truncated ||
+            event.result?.details?.truncated ||
+            resultText.includes("[Showing lines") ||
+            resultText.includes("Full output:")
+          );
+
           if (matched) {
             matched.result = resultText;
-            matched.isError = event.isError || event.result?.isError || false;
+            matched.exitCode = exitCode;
+            matched.truncated = truncated;
+            matched.isError = event.isError || event.result?.isError || exitCode !== 0;
             matched.status = matched.isError ? "error" : "success";
             if (event.toolCallId) pendingTools.delete(event.toolCallId);
           } else {
@@ -264,7 +280,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
                 currentItems[i].status === "running"
               ) {
                 currentItems[i].result = resultText;
-                currentItems[i].isError = event.isError || event.result?.isError || false;
+                currentItems[i].exitCode = exitCode;
+                currentItems[i].truncated = truncated;
+                currentItems[i].isError = event.isError || event.result?.isError || exitCode !== 0;
                 currentItems[i].status = currentItems[i].isError ? "error" : "success";
                 break;
               }

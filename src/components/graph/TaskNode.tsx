@@ -73,7 +73,7 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
           {statusText[data.status]}
         </span>
         <span className="node-attempts-badge">
-          {data.attempts > 0 ? `#${data.attempts} 尝试` : "就绪"}
+          {data.attempts > 0 ? `#${data.attempts} 尝试` : "尚未执行"}
         </span>
       </div>
       <Handle

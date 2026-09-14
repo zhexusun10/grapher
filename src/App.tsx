@@ -461,6 +461,21 @@ export default function App() {
     }
   });
 
+  const handleSaveConfig = () => run(async () => {
+    const info = await runtimeService.detectRepository(config.repository.trim());
+    if (!info) throw new Error("目标路径不存在或无法作为工作区加载。");
+    setRepoInfo(info);
+    setConfig((prev) => ({ ...prev, repository: info.path }));
+    setProjects((prev) => {
+      const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
+      const next = [item, ...prev.filter((project) => project.path !== info.path)];
+      try { localStorage.setItem("grapher_projects", JSON.stringify(next)); } catch {}
+      return next;
+    });
+    setModal(null);
+    setError("");
+  });
+
   const save = (graph: Graph) => run(async () => {
     const snapshot = await runtimeService.saveGraph(graph, config);
     const deduced = deduceRouteType(snapshot);
@@ -706,11 +721,31 @@ export default function App() {
               .filter((i: any) => i.type === "text")
               .map((i: any) => i.text)
               .join("\n");
+            const exitCodeMatch = resText.match(/Command exited with code (\d+)/);
+            const rawExitCode = pEvent.result?.details?.exitCode;
+            const exitCode = typeof rawExitCode === "number"
+              ? rawExitCode
+              : exitCodeMatch
+              ? parseInt(exitCodeMatch[1], 10)
+              : (pEvent.isError || pEvent.result?.isError) ? 1 : 0;
+            const truncated = !!(
+              pEvent.result?.details?.truncation?.truncated ||
+              pEvent.result?.details?.truncated ||
+              resText.includes("[Showing lines") ||
+              resText.includes("Full output:")
+            );
             setPlannerStream((prev) => ({
               ...prev,
               tools: prev.tools.map((t) =>
                 t.toolCallId === pEvent.toolCallId
-                  ? { ...t, result: resText, status: pEvent.isError ? "error" : "success" }
+                  ? {
+                      ...t,
+                      result: resText,
+                      exitCode,
+                      truncated,
+                      isError: pEvent.isError || exitCode !== 0,
+                      status: pEvent.isError || exitCode !== 0 ? "error" : "success",
+                    }
                   : t
               ),
             }));
@@ -797,7 +832,7 @@ export default function App() {
   }, [routeType, state.phase, busy]);
 
   const activeProject = useMemo(() => {
-    return projects.find((p) => p.path === config.repository) || (repoInfo ? {
+    return projects.find((p) => p.path === config.repository) || (repoInfo?.path === config.repository ? {
       id: repoInfo.path,
       name: repoInfo.name,
       path: repoInfo.path,
@@ -1119,10 +1154,7 @@ export default function App() {
             onDetectRepository={handleDetectRepository}
             onResetWorkspace={handleResetWorkspace}
             onClearHistory={handleClearHistory}
-            onSaveConfig={() => {
-              setModal(null);
-              setError("");
-            }}
+            onSaveConfig={handleSaveConfig}
           />
         )}
 

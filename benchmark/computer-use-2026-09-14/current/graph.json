@@ -1,0 +1,47 @@
+{
+  "originalGoal": "Implement the catalog toolkit described by the existing README.md contract: a robust CSV catalog parser and an independent catalog search/filter module, each with its own Node built-in unit tests. Then verify their interoperability with executable integration tests and write a concise verification report recording commands and results. Preserve the published API and default behavior exactly; use no dependencies or network services. Keep package.json and README.md unchanged. The two implementation workstreams should be able to progress independently using the existing contract. The final verifier may fix defects in the composed result and must run the complete test suite.",
+  "nodes": [
+    {
+      "name": "csv-parser-module",
+      "task": "Implement the CSV catalog parser described by the existing README.md contract: create src/csv.mjs exporting parseCatalog(csvText), which returns [{id: string, name: string, price: number}] from an `id,name,price` header CSV. Handle quoted commas, escaped quotes, CRLF line endings, and empty input; reject malformed rows and negative/non-finite prices. Preserve the published API and default behavior exactly as published in README.md — do not redesign or extend it.\n\nAdd this module's own unit tests using only Node's built-in test runner in tests/csv.test.mjs, and make sure they are discovered by the existing `npm test` script (`node --test`). No runtime dependencies, no network services.\n\nBoundary: this workstream must not touch src/search.mjs or tests/search.test.mjs (the search workstream runs in parallel against the same README.md contract), and must leave README.md and package.json unchanged.\n\nCompletion is verified when `node --test tests/csv.test.mjs` passes and the export name, argument shape, return shape, and rejection behavior match README.md."
+    },
+    {
+      "name": "search-filter-module",
+      "task": "Implement the independent catalog search/filter module described by the existing README.md contract: create src/search.mjs exporting searchCatalog(items, {query = '', minPrice = 0, maxPrice = Infinity} = {}) with exactly those defaults. Behavior: case-insensitive substring matching on `name`; inclusive price bounds; preserve input order; never mutate the input array or items; reject invalid bounds.\n\nAdd this module's own unit tests using only Node's built-in test runner in tests/search.test.mjs, discoverable by the existing `npm test` script (`node --test`). No runtime dependencies, no network services.\n\nBoundary: this module must not import or depend on src/csv.mjs, must not touch src/csv.mjs or tests/csv.test.mjs (the CSV workstream runs in parallel against the same README.md contract), and must leave README.md and package.json unchanged.\n\nCompletion is verified when `node --test tests/search.test.mjs` passes and the signature, default option values, ordering/no-mutation guarantees, and bound validation match README.md."
+    },
+    {
+      "name": "interoperability-integration-tests",
+      "task": "Verify that the two catalog modules interoperate, using executable integration tests. Add a Node built-in test-runner file (e.g. tests/integration.test.mjs) that composes src/csv.mjs and src/search.mjs end-to-end: parse catalog CSV text with parseCatalog, feed the resulting items straight into searchCatalog, and assert the combined behavior — parsed rows are accepted as search input without reshaping, name queries filter correctly case-insensitively (including names containing quoted commas), price bounds filter inclusively, order is preserved from the parser, and searching does not mutate the parsed array or its objects. Cover at least one case where a parser-rejected input is never passed to search.\n\nConstraints: no dependencies, no network services, README.md and package.json unchanged, and do not redesign either public API. Fixing a genuine defect found in either module is in scope for this node only if the fix preserves the published contract; otherwise report the mismatch in the test result so it can be routed back to the responsible workstream.\n\nCompletion is verified when the integration tests run under the repo's `node --test` discovery (so `npm test` executes unit plus integration tests) and pass against the composed result."
+    },
+    {
+      "name": "verification-report",
+      "task": "Act as the final verifier of the composed catalog toolkit. Run the complete test suite from the repository root with the contract's own command (`npm test`, which runs `node --test`) and confirm the suite includes the CSV unit tests, the search unit tests, and the interoperability integration tests, with no dependencies and no network access required.\n\nIf a failure traces to a defect in the composed result (wrong export shape, an unhandled CSV edge case, mutated search input, a test that does not run under `node --test` discovery), fix it minimally while preserving the published API and default behavior exactly as documented in README.md, then rerun the complete suite until it passes.\n\nWrite a concise verification report at a new repository-relative markdown file (e.g. VERIFICATION.md) that records: the exact commands executed, the resulting test counts and pass/fail outcome, the contract items checked for src/csv.mjs and src/search.mjs, any defects found with what was changed to resolve them, and confirmation that README.md and package.json are unchanged and that no dependencies or network services are used. Do not modify README.md or package.json.\n\nCompletion is verified when a final full-suite run is green and the report's recorded commands and results match that run."
+    }
+  ],
+  "edges": [
+    {
+      "from": "csv-parser-module",
+      "to": "interoperability-integration-tests",
+      "relation": "provides",
+      "feedback": false
+    },
+    {
+      "from": "search-filter-module",
+      "to": "interoperability-integration-tests",
+      "relation": "provides",
+      "feedback": false
+    },
+    {
+      "from": "interoperability-integration-tests",
+      "to": "verification-report",
+      "relation": "requires",
+      "feedback": false
+    },
+    {
+      "from": "verification-report",
+      "to": "interoperability-integration-tests",
+      "relation": "revises",
+      "feedback": true
+    }
+  ]
+}

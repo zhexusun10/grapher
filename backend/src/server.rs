@@ -67,6 +67,106 @@ mod prompt_tests {
 
     #[cfg(feature = "fixture")]
     #[test]
+    fn partitioner_failure_does_not_create_or_approve_a_run() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("repository");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("README.md"), "Two independent modules").unwrap();
+        let script = temp.path().join("failed-pi.sh");
+        fs::write(&script, "echo 'provider unavailable' >&2\nexit 1\n").unwrap();
+        let root = temp.path().join("runtime");
+        let service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&root).unwrap()),
+            driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let before = service.runtime.lock().unwrap().state.run_id.clone();
+        let result = plan_goal_internal("Build two modules".into(), Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: String::new(), max_parallel: 2, max_feedback: 3,
+        }, &service, |_| {}, |_| panic!("Failure must not emit a route"), |_| {});
+        assert!(result.unwrap_err().contains("Partitioner failed"));
+        let runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.state.run_id, before);
+        assert!(runtime.state.executions.is_empty());
+        assert!(!runtime.state.approved);
+        assert!(!service.planning.load(Ordering::SeqCst));
+        let directory = fs::read_dir(root.join("planning")).unwrap().next().unwrap().unwrap().path();
+        assert!(fs::read_to_string(directory.join("partition.jsonl")).unwrap().contains("provider unavailable"));
+        assert!(!directory.join("route.json").exists());
+    }
+
+    #[test]
+    fn planning_metrics_parsing_and_persistence() {
+        let sample_log = r#"{"type":"grapher_process_started","timestamp":1726300000000}
+{"type":"tool_execution_start","toolName":"bash"}
+{"type":"tool_execution_end","toolName":"bash","isError":true}
+{"type":"tool_execution_start","toolName":"read"}
+{"type":"tool_execution_end","toolName":"read","isError":false}
+{"type":"message_end","message":{"role":"assistant","usage":{"input":200,"output":300,"cacheRead":50,"cacheWrite":0,"reasoning":100,"totalTokens":500}}}
+{"type":"grapher_process_exited","elapsedMs":12345,"success":true,"timestamp":1726300012345}
+"#;
+        let metrics = parse_planning_role_metrics("test-model", sample_log);
+        assert_eq!(metrics.model, "test-model");
+        assert_eq!(metrics.assistant_messages, 1);
+        assert_eq!(metrics.tools, 2);
+        assert_eq!(metrics.tool_errors, 1);
+        assert_eq!(metrics.duration_seconds, 12.345);
+        assert_eq!(metrics.usage.input, 200);
+        assert_eq!(metrics.usage.output, 300);
+        assert_eq!(metrics.usage.total_tokens, 500);
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut runtime = Runtime::open(temp.path()).unwrap();
+        let config = Config {
+            repository: String::new(),
+            #[cfg(feature = "fixture")]
+            engine: "fixture".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: String::new(),
+            #[cfg(feature = "fixture")]
+            pi_args: Vec::new(),
+            model: "test-model".into(),
+            max_parallel: 2,
+            max_feedback: 1,
+        };
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert("planner".to_string(), metrics);
+        let summary = PlanningSummary {
+            planning_id: "test-plan-id".into(),
+            roles,
+            total_planning_duration: 15.0,
+            model_duration: 12.345,
+            status: Some("success".into()),
+            error: None,
+        };
+        runtime
+            .create_with_planning(
+                Graph {
+                    original_goal: "Test plan persistence".into(),
+                    nodes: vec![Node {
+                        name: "task".into(),
+                        task: "Run task".into(),
+                    }],
+                    edges: Vec::new(),
+                },
+                config,
+                Some("test-plan-id".into()),
+                Some(summary.clone()),
+            )
+            .unwrap();
+        assert_eq!(runtime.state.planning_id.as_deref(), Some("test-plan-id"));
+        assert_eq!(runtime.state.planning.as_ref(), Some(&summary));
+
+        // Replay from store to ensure durability across reload
+        let loaded = runtime.store.load(&runtime.state.run_id).unwrap();
+        assert_eq!(loaded.planning_id.as_deref(), Some("test-plan-id"));
+        assert_eq!(loaded.planning.as_ref(), Some(&summary));
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
     fn completed_graph_is_published_by_driver() {
         let temp = tempfile::TempDir::new().unwrap();
         let mut runtime = Runtime::open(temp.path()).unwrap();
@@ -234,6 +334,85 @@ fn save_graph(graph: Graph, mut config: Config, service: &Arc<Service>) -> Resul
     Ok(runtime.state.clone())
 }
 
+pub fn parse_planning_role_metrics(
+    model: &str,
+    log: &str,
+) -> PlanningRoleMetrics {
+    let mut session_start = None;
+    let mut last_event = None;
+    let mut duration_seconds = 0.0;
+    let mut assistant_messages = 0;
+    let mut tools = 0;
+    let mut tool_errors = 0;
+    let mut usage = TokenUsage::default();
+
+    for line in log.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(ts) = value.get("timestamp") {
+                let ts_str = if let Some(s) = ts.as_str() {
+                    s.to_string()
+                } else if let Some(n) = ts.as_u64() {
+                    format!("{n}")
+                } else {
+                    String::new()
+                };
+                if !ts_str.is_empty() {
+                    if session_start.is_none() {
+                        session_start = Some(ts_str.clone());
+                    }
+                    last_event = Some(ts_str);
+                }
+            }
+            match value.get("type").and_then(|v| v.as_str()).unwrap_or_default() {
+                "grapher_process_exited" => {
+                    if let Some(elapsed) = value.get("elapsedMs").and_then(|v| v.as_f64()) {
+                        duration_seconds = elapsed / 1000.0;
+                    }
+                }
+                "message_end" => {
+                    if let Some(msg) = value.get("message") {
+                        if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                            assistant_messages += 1;
+                            if let Some(u) = msg.get("usage") {
+                                usage.input += u.get("input").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.output += u.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.cache_read += u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.cache_write += u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.reasoning += u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.total_tokens += u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                            }
+                        }
+                    }
+                }
+                "tool_execution_start" => {
+                    tools += 1;
+                }
+                "tool_execution_end" => {
+                    if value.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        tool_errors += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    PlanningRoleMetrics {
+        model: model.to_string(),
+        session_start,
+        last_event,
+        duration_seconds,
+        assistant_messages,
+        tools,
+        tool_errors,
+        usage,
+    }
+}
+
 fn plan_goal_internal(
     goal: String,
     config: Config,
@@ -255,6 +434,7 @@ fn plan_goal_internal(
     let service = service.clone();
     let cleanup = service.clone();
     let result = (move || {
+        let planning_start = std::time::Instant::now();
         let root = service
             .runtime
             .lock()
@@ -263,8 +443,10 @@ fn plan_goal_internal(
             .clone();
         let repository = PathBuf::from(&config.repository);
         crate::workspace::verify(&repository)?;
-        let directory = root.join("planning").join(Uuid::new_v4().to_string());
+        let planning_id = Uuid::new_v4().to_string();
+        let directory = root.join("planning").join(&planning_id);
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let plan_outcome = (|| -> Result<Snapshot, String> {
         let route_path = directory.join("route.json");
         let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
         let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
@@ -278,6 +460,7 @@ fn plan_goal_internal(
             partitioner_extra_args.push(thinking.as_str());
         }
         let mut log = String::new();
+        let partition_start = std::time::Instant::now();
         let partition_result = run_pi(
             PiRequest {
                 role: PiRole::Partitioner,
@@ -289,7 +472,10 @@ fn plan_goal_internal(
                 tools: "",
                 session_id: None,
                 extra_args: partitioner_extra_args,
-                environment: Vec::new(),
+                environment: vec![
+                    ("GRAPHER_MODE", "partition".into()),
+                    ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
+                ],
                 system_prompt: Some(&partitioner_system_prompt),
             },
             |text| {
@@ -297,12 +483,20 @@ fn plan_goal_internal(
                 on_partitioner_line(&text);
             },
         );
-        fs::write(directory.join("partition.jsonl"), log).map_err(|error| error.to_string())?;
-        let output = partition_result.unwrap_or_default();
+        let partition_wall_sec = partition_start.elapsed().as_secs_f64();
+        fs::write(directory.join("partition.jsonl"), &log).map_err(|error| error.to_string())?;
+        let mut partition_metrics = parse_planning_role_metrics(&partitioner_config.model, &log);
+        if partition_metrics.duration_seconds == 0.0 {
+            partition_metrics.duration_seconds = partition_wall_sec;
+        }
+        // A failed engine call is not a routing decision. In particular, do not
+        // turn authentication/provider failures into an auto-approved serial run.
+        let output = partition_result.map_err(|error| format!("Partitioner failed: {error}"))?;
         let route = parse_route_decision(&output);
         fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
             .map_err(|error| error.to_string())?;
         on_route(&route);
+        let mut planner_metrics = None;
         let graph = match route.plan_type.as_str() {
             "serial" => Graph {
                 original_goal: goal.clone(),
@@ -335,6 +529,7 @@ fn plan_goal_internal(
                     planner_extra_args.push(thinking.as_str());
                 }
                 let mut log = String::new();
+                let planner_start = std::time::Instant::now();
                 let planner_result = run_pi(
                     PiRequest {
                         role: PiRole::Planner,
@@ -364,8 +559,14 @@ fn plan_goal_internal(
                         on_planner_line(&text);
                     },
                 );
-                fs::write(directory.join("planner.jsonl"), log)
+                let planner_wall_sec = planner_start.elapsed().as_secs_f64();
+                fs::write(directory.join("planner.jsonl"), &log)
                     .map_err(|error| error.to_string())?;
+                let mut m = parse_planning_role_metrics(&planner_config.model, &log);
+                if m.duration_seconds == 0.0 {
+                    m.duration_seconds = planner_wall_sec;
+                }
+                planner_metrics = Some(m);
                 planner_result?;
                 serde_json::from_str(
                     &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
@@ -374,6 +575,31 @@ fn plan_goal_internal(
             }
             _ => return Err("Partitioner returned an invalid route".into()),
         };
+        let total_planning_duration = planning_start.elapsed().as_secs_f64();
+        let model_duration = partition_metrics.duration_seconds
+            + planner_metrics.as_ref().map(|p| p.duration_seconds).unwrap_or(0.0);
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert("partition".to_string(), partition_metrics);
+        if let Some(m) = planner_metrics {
+            roles.insert("planner".to_string(), m);
+        }
+        let summary = PlanningSummary {
+            planning_id: planning_id.clone(),
+            roles,
+            total_planning_duration,
+            model_duration,
+            status: Some("success".to_string()),
+            error: None,
+        };
+        if let Ok(summary_json) = serde_json::to_string_pretty(&summary) {
+            if let Err(err) = fs::write(directory.join("summary.json"), &summary_json) {
+                eprintln!("Failed to write planning summary.json: {}", err);
+            }
+            if let Err(err) = fs::write(directory.join("metrics.json"), &summary_json) {
+                eprintln!("Failed to write planning metrics.json: {}", err);
+            }
+        }
+
         let mut final_config = config;
         if let Ok(model) = std::env::var("PI_MODEL") {
             if !model.trim().is_empty() {
@@ -384,7 +610,7 @@ fn plan_goal_internal(
             final_config.model = "qwen3.8-flash".into();
         }
         let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-        runtime.create(graph, final_config)?;
+        runtime.create_with_planning(graph, final_config, Some(planning_id.clone()), Some(summary))?;
         if route.plan_type == "serial" {
             runtime.approve()?;
         }
@@ -394,6 +620,22 @@ fn plan_goal_internal(
             drive(service.clone());
         }
         Ok(snapshot)
+        })();
+        if let Err(ref err) = plan_outcome {
+            let failure_summary = PlanningSummary {
+                planning_id: planning_id.clone(),
+                roles: Default::default(),
+                total_planning_duration: planning_start.elapsed().as_secs_f64(),
+                model_duration: 0.0,
+                status: Some("failed".to_string()),
+                error: Some(err.clone()),
+            };
+            if let Ok(failure_json) = serde_json::to_string_pretty(&failure_summary) {
+                let _ = fs::write(directory.join("summary.json"), &failure_json);
+                let _ = fs::write(directory.join("metrics.json"), &failure_json);
+            }
+        }
+        plan_outcome
     })();
     cleanup.planning.store(false, Ordering::SeqCst);
     result

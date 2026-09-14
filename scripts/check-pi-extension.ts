@@ -27,7 +27,12 @@ try {
   async function call(name: string, parameters: Record<string, unknown>) {
     return extension.tools.get(name)!.definition.execute("test", parameters, undefined, undefined, context);
   }
-  await call("node", { name: "build", task: "Build it" });
+  const firstMutation = await call("node", { name: "build", task: "Build it" });
+  const firstResult = JSON.parse(firstMutation.content[0].text);
+  assert.equal(firstResult.mutationApplied, true);
+  assert.equal(firstResult.structuralCheck, "passed");
+  assert.equal(firstResult.accepted, undefined);
+  assert.equal(firstResult.graphCompiled, undefined);
   await call("node", { name: "review", task: "Review it" });
   await call("edge", { from: "build", to: "review", feedback: false });
   const before = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");

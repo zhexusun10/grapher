@@ -25,6 +25,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({
   nodesCount,
   eventsCount,
 }) => {
+  const matchingRepo = repoInfo?.path === config.repository ? repoInfo : null;
   return (
     <motion.header
       className="workspace-header"
@@ -36,9 +37,9 @@ export const Header: React.FC<HeaderProps> = React.memo(({
         <div className="workspace-meta">
           <FolderGit2 size={16} />
           <span className="repo-badge" title={config.repository || "未选择本地仓库"}>
-            {activeProject?.name || repoInfo?.name || (config.repository ? config.repository.split("/").pop() : "未选择项目")}
+            {activeProject?.name || matchingRepo?.name || (config.repository ? config.repository.split("/").filter(Boolean).pop() : "未选择项目")}
           </span>
-          {activeProject?.isShadow || repoInfo?.isShadow ? (
+          {activeProject?.isShadow || matchingRepo?.isShadow ? (
             <span className="shadow-tag" title="本地零侵入影子仓库：版本由 Grapher 内部维护，不污染用户目录">
               影子仓库
             </span>

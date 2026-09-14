@@ -8,7 +8,53 @@ export interface NodeState { status: Status; revision: number; head: string | nu
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; startedAt: number; completedAt: number | null }
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; from?: string; to?: string; accepted?: boolean; error?: string; execution?: Execution; instruction?: string; human?: boolean }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
-export interface Snapshot { runId: string; graph: Graph; config: Config | null; plan: Plan | null; nodes: Record<string, NodeState>; executions: Execution[]; mergers?: Execution[]; publication?: Publication | null; events: GraphEvent[]; approved: boolean; paused: boolean; phase: string; base: string; feedbackCounts: Record<string, number> }
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+  totalTokens: number;
+}
+
+export interface PlanningRoleMetrics {
+  model: string;
+  sessionStart?: string;
+  lastEvent?: string;
+  durationSeconds: number;
+  assistantMessages: number;
+  tools: number;
+  toolErrors: number;
+  usage: TokenUsage;
+}
+
+export interface PlanningSummary {
+  planningId: string;
+  roles: Record<string, PlanningRoleMetrics>;
+  totalPlanningDuration: number;
+  modelDuration: number;
+  status?: string;
+  error?: string;
+}
+
+export interface Snapshot {
+  runId: string;
+  planningId?: string;
+  planning?: PlanningSummary | null;
+  graph: Graph;
+  config: Config | null;
+  plan: Plan | null;
+  nodes: Record<string, NodeState>;
+  executions: Execution[];
+  mergers?: Execution[];
+  publication?: Publication | null;
+  events: GraphEvent[];
+  approved: boolean;
+  paused: boolean;
+  phase: string;
+  base: string;
+  feedbackCounts: Record<string, number>;
+}
 export interface RepositoryInfo {
   path: string;
   name: string;
@@ -82,6 +128,8 @@ export interface TranscriptItem {
   result?: string;
   isError?: boolean;
   status?: "running" | "success" | "error";
+  exitCode?: number | null;
+  truncated?: boolean;
   timestamp?: number;
 }
 

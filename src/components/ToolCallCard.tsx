@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import {
   Terminal,
   FileText,
@@ -12,6 +12,7 @@ import {
   ChevronRight,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Loader2,
   Copy,
   Check,
@@ -25,13 +26,45 @@ interface ToolCallCardProps {
 
 export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
   ({ item, defaultExpanded = false }) => {
-    const [isExpanded, setIsExpanded] = useState(defaultExpanded || item.status === "error");
     const [isCopied, setIsCopied] = useState(false);
 
     const toolName = item.toolName || "tool";
     const args = item.args || {};
     const status = item.status || "success";
-    const isError = item.isError || status === "error";
+
+    // Extract structured exit code
+    const exitCode = useMemo(() => {
+      if (typeof item.exitCode === "number") return item.exitCode;
+      if (item.result) {
+        const match = item.result.match(/Command exited with code (\d+)/);
+        if (match) return parseInt(match[1], 10);
+      }
+      if (item.isError || status === "error") return 1;
+      return status === "success" ? 0 : null;
+    }, [item.exitCode, item.result, item.isError, status]);
+
+    const isError = item.isError || status === "error" || (exitCode !== null && exitCode !== 0);
+
+    // Detect if output was truncated
+    const isTruncated = useMemo(() => {
+      if (item.truncated) return true;
+      if (item.result) {
+        return item.result.includes("[Showing lines") || item.result.includes("Full output:");
+      }
+      return false;
+    }, [item.truncated, item.result]);
+
+    // Detect masked subcommand step errors or real test failures (avoiding false positives from mere word FAIL)
+    const hasSubcommandWarning = useMemo(() => {
+      if (isError || exitCode !== 0 || !item.result) return false;
+      const text = item.result;
+      return (
+        text.includes("[grapher:step_error") ||
+        /\b(?:not ok\s+\d+|✖\s+[^\n]+|AssertionError:)\b/.test(text)
+      );
+    }, [isError, exitCode, item.result]);
+
+    const [isExpanded, setIsExpanded] = useState(defaultExpanded || isError || hasSubcommandWarning);
 
     // Select icon & title based on tool type
     const getToolMeta = () => {
@@ -109,7 +142,12 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     };
 
     return (
-      <div className={`tool-call-card ${meta.type} ${status} ${isError ? "error" : ""}`}>
+      <div
+        className={`tool-call-card ${meta.type} ${status} ${
+          isError ? "error" : hasSubcommandWarning ? "warning" : ""
+        }`}
+        data-testid="tool-call-card"
+      >
         <div
           className="tool-call-header"
           onClick={() => setIsExpanded((prev) => !prev)}
@@ -128,22 +166,39 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
           </div>
 
           <div className="tool-header-right">
+            {isTruncated && (
+              <span className="tool-truncated-pill" title="输出已截断，可通过详情或全量输出文件查看完整日志">
+                已截断
+              </span>
+            )}
             {status === "running" && (
               <span className="tool-status running">
                 <Loader2 size={12} className="spin" />
                 <span>执行中...</span>
               </span>
             )}
-            {status === "success" && !isError && (
-              <span className="tool-status success">
+            {status !== "running" && !isError && !hasSubcommandWarning && (
+              <span className="tool-status success" title={`执行成功，退出码: ${exitCode ?? 0}`}>
                 <CheckCircle2 size={13} />
-                <span>完成</span>
+                <span>完成 (Exit {exitCode ?? 0})</span>
+              </span>
+            )}
+            {status !== "running" && !isError && hasSubcommandWarning && (
+              <span
+                className="tool-status warning"
+                title="命令退出码为 0，但输出中包含被遮蔽的子步骤警告"
+              >
+                <AlertTriangle size={13} />
+                <span>包含警告/错误</span>
               </span>
             )}
             {isError && (
-              <span className="tool-status error">
+              <span
+                className="tool-status error"
+                title={`执行失败，退出码: ${exitCode ?? 1}`}
+              >
                 <AlertCircle size={13} />
-                <span>失败</span>
+                <span>失败 (Exit {exitCode ?? 1})</span>
               </span>
             )}
             <button
@@ -159,6 +214,29 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
         {isExpanded && (
           <div className="tool-call-body">
+            {toolName === "bash" && (
+              <div className="tool-meta-bar">
+                <div className="tool-meta-item">
+                  <span className="meta-lbl">退出码:</span>
+                  <span className={`meta-val ${exitCode === 0 ? "success" : "error"}`}>
+                    {exitCode !== null ? exitCode : "未知"}
+                  </span>
+                </div>
+                <div className="tool-meta-item">
+                  <span className="meta-lbl">输出状态:</span>
+                  <span className={`meta-val ${isTruncated ? "warning" : "neutral"}`}>
+                    {isTruncated ? "已截断 (Truncated)" : "完整 (Complete)"}
+                  </span>
+                </div>
+                {args.command && (
+                  <div className="tool-meta-item cmd-full">
+                    <span className="meta-lbl">命令:</span>
+                    <code className="meta-val-code">{args.command}</code>
+                  </div>
+                )}
+              </div>
+            )}
+
             {Object.keys(args).length > 0 && (
               <div className="tool-args-section">
                 <div className="section-label">参数 (Arguments)</div>
@@ -171,7 +249,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
             {item.result !== undefined && item.result !== null && (
               <div className="tool-result-section">
                 <div className="section-label">
-                  {isError ? "错误输出 (Error)" : "执行结果 (Result)"}
+                  {isError ? "错误输出 (Error Output)" : "执行结果 (Result Output)"}
                 </div>
                 <pre className={`tool-result-code ${isError ? "error" : ""}`}>
                   {item.result.trim() || "(无文本输出)"}

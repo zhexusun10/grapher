@@ -165,14 +165,7 @@ Partitioner 是 Grapher 的流量入口。
 
 ## 3.2 Routing
 
-Partitioner 只有一个工具：
-
-```ts
-route_task({
-  plan_type: "serial" | "graph",
-  reasoning: string
-})
-```
+Partitioner 是无工具的单轮分类器，输出 `graph` 或 `serial`，不规划或解决任务。宿主解析分类文本；成功调用但输出含糊时按当前解析策略回退 Serial。模型启动、认证或请求失败不属于分类结果，必须显式报错，不能自动启动 Serial。
 
 ### Serial
 
@@ -621,7 +614,7 @@ Planner 不负责：
 
 参见实际 [Planner prompt](backend/resources/prompts/planner.md) 和 [Partitioner prompt](backend/resources/prompts/partitioner.md)。宿主把 `User query:` 之前的部分作为系统提示词，把原始 goal 单独作为 user message；`PARTITIONER_SYSTEM_PROMPT` / `PLANNER_SYSTEM_PROMPT` 可覆盖系统部分，`PARTITIONER_MODEL` / `PLANNER_MODEL` 可分别覆盖模型，`PARTITIONER_THINKING` / `PLANNER_THINKING` 覆盖对应 thinking 参数；普通节点使用 `PI_MODEL` / `PI_THINKING`。候选图和原始 JSON 输出保存在 runtime 的 `planning/<id>/`。
 
-Partitioner 唯一工具 `route_task` 只能成功调用一次：多个实质工作流能够独立推进才选 Graph，否则 Serial；成功路由即终止，不规划或解决任务。Serial 不调用 Planner，生成唯一名为 `task` 的节点并由后端自动审批启动，直接写用户目录。Graph 则经过 Planner、最终编译与用户审批。
+Partitioner 不注册工具：多个实质工作流能够独立推进才输出 Graph，否则 Serial；分类结束即退出，不规划或解决任务。调用失败保留日志并返回错误，不创建或审批执行图。Serial 不调用 Planner，生成唯一名为 `task` 的节点并由后端自动审批启动，直接写用户目录。Graph 则经过 Planner、最终编译与用户审批。
 
 Prompt 保持简洁，结构性错误由 Compiler diagnostics 纠正。只读检查的具体语法和拒绝行为以 [planning-inspection.md](backend/resources/planning-inspection.md) 为准。
 

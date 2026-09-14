@@ -116,6 +116,7 @@ fn node_network_and_upstream_tools_work_inside_sandbox() {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
             if let Ok((mut socket, _)) = listener.accept() {
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();

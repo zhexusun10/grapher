@@ -1,0 +1,137 @@
+[
+  {
+    "id": "a1cb6a03-7b7c-464f-b4a4-b5a0c36b9862",
+    "node": "csv-parser-module",
+    "revision": 1,
+    "attempt": 1,
+    "sessionId": "fd83abd0-8e12-47f9-8429-24d2ea73eaad",
+    "worktree": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/csv-parser-module-a1cb6a03-7b7c-464f-b4a4-b5a0c36b9862",
+    "before": "8603e8aee8fa3cb51f4f96fa5f7dea7b26305d2b",
+    "after": "4b073060bef0c36d757cc53b11baa88af6eb921e",
+    "status": "done",
+    "startedAt": 1789320030356,
+    "completedAt": 1789320266296,
+    "error": null,
+    "wallSeconds": 235.94,
+    "toolCalls": 15,
+    "toolErrors": 1,
+    "usage": {
+      "input": 25914,
+      "output": 14817,
+      "cacheRead": 146688,
+      "cacheWrite": 0,
+      "reasoning": 6790,
+      "totalTokens": 187419
+    },
+    "providerErrors": []
+  },
+  {
+    "id": "ba428f25-90d5-411c-a314-04bd0abd5264",
+    "node": "search-filter-module",
+    "revision": 1,
+    "attempt": 1,
+    "sessionId": "f86d852d-046e-4d10-be6c-c9463960f396",
+    "worktree": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264",
+    "before": "8603e8aee8fa3cb51f4f96fa5f7dea7b26305d2b",
+    "after": "6bd278cbe096735e0913901deeee006fa89b3a35",
+    "status": "done",
+    "startedAt": 1789320030356,
+    "completedAt": 1789320407689,
+    "error": null,
+    "wallSeconds": 377.333,
+    "toolCalls": 23,
+    "toolErrors": 0,
+    "usage": {
+      "input": 36410,
+      "output": 17901,
+      "cacheRead": 321408,
+      "cacheWrite": 0,
+      "reasoning": 6731,
+      "totalTokens": 375719
+    },
+    "providerErrors": []
+  },
+  {
+    "id": "aafb8791-3a60-493b-ab3a-247fcb4717a2",
+    "node": "interoperability-integration-tests",
+    "revision": 1,
+    "attempt": 1,
+    "sessionId": "2a362d59-df0a-4e3a-99d8-c873c8bbc49a",
+    "worktree": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/interoperability-integration-tests-aafb8791-3a60-493b-ab3a-247fcb4717a2",
+    "before": "8603e8aee8fa3cb51f4f96fa5f7dea7b26305d2b",
+    "after": null,
+    "status": "failed",
+    "startedAt": 1789320407795,
+    "completedAt": 1789322043450,
+    "error": "Subagent timed out after 900 seconds; inspect the saved session before retrying",
+    "wallSeconds": 1635.655,
+    "toolCalls": 19,
+    "toolErrors": 3,
+    "usage": {
+      "input": 78127,
+      "output": 35520,
+      "cacheRead": 184192,
+      "cacheWrite": 0,
+      "reasoning": 13765,
+      "totalTokens": 297839
+    },
+    "providerErrors": [
+      {
+        "timestamp": "2026-09-13T17:46:41.237Z",
+        "error": "terminated"
+      }
+    ]
+  },
+  {
+    "id": "b40568aa-3c73-4d51-890d-be331740c752",
+    "node": "interoperability-integration-tests",
+    "revision": 2,
+    "attempt": 2,
+    "sessionId": "a01d276b-7a38-4505-8582-853d8247bf65",
+    "worktree": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/interoperability-integration-tests-b40568aa-3c73-4d51-890d-be331740c752",
+    "before": "8603e8aee8fa3cb51f4f96fa5f7dea7b26305d2b",
+    "after": "efb146fe4e1661087c83fc54e6f27ab5f64f2b35",
+    "status": "done",
+    "startedAt": 1789348986168,
+    "completedAt": 1789349279111,
+    "error": null,
+    "wallSeconds": 292.943,
+    "toolCalls": 17,
+    "toolErrors": 0,
+    "usage": {
+      "input": 36567,
+      "output": 17176,
+      "cacheRead": 232704,
+      "cacheWrite": 0,
+      "reasoning": 11224,
+      "totalTokens": 286447
+    },
+    "providerErrors": []
+  },
+  {
+    "id": "51302243-dce4-4a9f-af76-7345cc53e2e2",
+    "node": "verification-report",
+    "revision": 2,
+    "attempt": 1,
+    "sessionId": "13ee1e08-0520-4845-a9e6-46588216e667",
+    "worktree": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/verification-report-51302243-dce4-4a9f-af76-7345cc53e2e2",
+    "before": "8603e8aee8fa3cb51f4f96fa5f7dea7b26305d2b",
+    "after": "91fd8214e5b96723f70de93af12603833debfe0c",
+    "status": "done",
+    "startedAt": 1789349279186,
+    "completedAt": 1789349614266,
+    "error": null,
+    "wallSeconds": 335.08,
+    "toolCalls": 28,
+    "toolErrors": 0,
+    "usage": {
+      "input": 48637,
+      "output": 16407,
+      "cacheRead": 559872,
+      "cacheWrite": 0,
+      "reasoning": 5576,
+      "totalTokens": 624916
+    },
+    "providerErrors": []
+  }
+]

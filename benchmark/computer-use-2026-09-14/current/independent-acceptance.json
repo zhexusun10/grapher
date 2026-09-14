@@ -1,0 +1,42 @@
+{
+  "checks": [
+    {
+      "name": "quoted commas, escaped quotes, CRLF and typed rows",
+      "passed": true
+    },
+    {
+      "name": "default options include zero and all finite catalog prices",
+      "passed": true
+    },
+    {
+      "name": "case-insensitive substring query with inclusive bounds",
+      "passed": true
+    },
+    {
+      "name": "upper and lower bounds include exact endpoints",
+      "passed": true
+    },
+    {
+      "name": "order and input contents survive repeated searches",
+      "passed": true
+    },
+    {
+      "name": "empty CSV composes with default search",
+      "passed": true
+    },
+    {
+      "name": "malformed column counts and unterminated quoted field reject",
+      "passed": true
+    },
+    {
+      "name": "negative and non-finite prices reject",
+      "passed": true
+    },
+    {
+      "name": "invalid bounds reject while explicit Infinity remains valid",
+      "passed": true
+    }
+  ],
+  "passed": 9,
+  "total": 9
+}

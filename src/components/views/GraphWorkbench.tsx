@@ -13,7 +13,9 @@ import { PromptBox } from "../ui/chatgpt-prompt-input";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
+import { ExecutionTiming } from "../ExecutionTiming";
 import { VirtualizedTranscript } from "../VirtualizedTranscript";
+import { PlanningSummaryCard } from "../PlanningSummaryCard";
 import { statusText, phaseText } from "../graph/TaskNode";
 
 interface GraphWorkbenchProps {
@@ -225,7 +227,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <div className="session-label">
                     <strong>Pi Session</strong>
                     <span>{execution.status}</span>
-                    <time>{new Date(execution.startedAt).toLocaleTimeString()}</time>
+                    <ExecutionTiming execution={execution} />
                   </div>
                   <div style={{ flex: 1, minHeight: 320, display: "flex", flexDirection: "column", marginTop: 8 }}>
                     <VirtualizedTranscript output={execution.output} />
@@ -344,7 +346,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         {statusText[serialNodeState?.status as Status] ?? serialNodeState?.status ?? "WAITING"}
                       </span>
                       {serialExecution?.startedAt && (
-                        <time>{new Date(serialExecution.startedAt).toLocaleTimeString()}</time>
+                        <ExecutionTiming execution={serialExecution} />
                       )}
                     </div>
 
@@ -425,6 +427,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   </motion.div>
                 )}
               </div>
+
+              {/* 持久化规划阶段摘要 */}
+              {state.planning && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+                >
+                  <PlanningSummaryCard planning={state.planning} state={state} />
+                </motion.div>
+              )}
 
               {routeType === "graph" && state.graph.nodes.length > 0 && (
                 <motion.div
@@ -686,7 +699,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <div className="approval-row">
                     <span>
                       <ShieldCheck size={16} />
-                      {state.approved ? "确定性运行时正在推进" : "需用户审核并批准计划"}
+                      {state.phase === "running" ? "确定性运行时正在推进"
+                        : state.phase === "needs_attention" ? "执行已停止，请检查失败或阻塞节点"
+                        : state.phase === "paused" ? "已暂停后续派发"
+                        : state.phase === "completed" ? "运行已完成"
+                        : state.approved ? phaseText[state.phase] ?? state.phase : "需用户审核并批准计划"}
                     </span>
                     <div>
                       {state.phase === "awaiting_approval" ? (

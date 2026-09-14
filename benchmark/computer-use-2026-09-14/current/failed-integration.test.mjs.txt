@@ -1,0 +1,697 @@
+/**
+ * tests/integration.test.mjs — interoperability tests for the two catalog modules.
+ *
+ * Scope: nothing here re-tests either module in isolation (that is what
+ * tests/csv.test.mjs and tests/search.test.mjs do). Every test below composes
+ * the real public APIs end-to-end:
+ *
+ *      searchCatalog(parseCatalog(csvText), options)
+ *
+ * and asserts the *combined* behavior of the seam:
+ *
+ *   1. rows produced by parseCatalog are accepted by searchCatalog verbatim —
+ *      no reshaping, renaming, coercion or re-parsing step in between;
+ *   2. name queries filter case-insensitively, including names that carry
+ *      quoted commas, escaped quotes, embedded newlines and stray whitespace;
+ *   3. price bounds filter inclusively against prices the parser produced from
+ *      decimal / exponent / signed / quoted spellings;
+ *   4. result order is exactly the parser's row order;
+ *   5. searching does not mutate the parsed array or the parsed item objects;
+ *   6. input the parser rejects is never handed to search (asserted with a
+ *      call-counting spy wrapped around the real searchCatalog).
+ *
+ * Interop contract report (as of this run): NO MISMATCHES FOUND. Each side's
+ * published contract in README.md is satisfiable by the other's output:
+ *   - parseCatalog guarantees `name: string` plus a finite, non-negative
+ *     `price: number`, which is exactly what searchCatalog reads; the parser
+ *     therefore never emits a row that search's guards would silently drop,
+ *     and search's default `minPrice = 0` never silently drops a parsed row;
+ *   - parseCatalog's row objects own precisely `id`/`name`/`price` as plain
+ *     data properties, so search's `item.name` / `item.price` reads are
+ *     side-effect free and its no-write guarantee holds on frozen parser output.
+ * Two behaviours are pinned below as *known limitations of the published
+ * contract* rather than defects, so they are recorded, not routed: search's
+ * case-insensitivity is a `toLowerCase()` mapping, so full case folding
+ * (`ß` <-> `SS`) and locale-conditional folding (Turkish `İ`/`i`) do not match,
+ * while simple non-ASCII case pairs (`É` <-> `é`) do.
+ *
+ * Dependencies: none beyond Node built-ins (`node:test`, `node:assert`,
+ * `node:path`, `node:url`, `node:fs`). No network, no services. Discoverable by
+ * `node --test` via the `*.test.mjs` pattern, so `npm test` runs unit +
+ * integration tests together.
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { parseCatalog } from '../src/csv.mjs';
+import { searchCatalog } from '../src/search.mjs';
+
+/* ============================================================== fixtures  */
+
+/**
+ * A catalog that exercises the parser's awkward cases and is then fed to
+ * search verbatim: quoted comma, escaped quotes, quoted embedded LF, a blank
+ * line, leading/trailing whitespace inside fields, and exponent / signed /
+ * quoted / decimal price spellings.
+ *
+ * prices by id: 1=3.5  2=12  3=8.25  4=0  5=100  6=7.75  7=4  8=1200
+ */
+const CATALOG_CSV = `id,name,price
+1,Green Tea,3.5
+2,"Widget, large",12
+3,"The ""Big"" One",8.25
+4,Matcha Powder,0
+5,Olive Oil,1e2
+6,"Line one
+line two",7.75
+7, Spaced  Name ,+4.00
+
+8,green coffee,"1200.00"
+`;
+
+/** CRLF-terminated variant with a trailing newline. */
+const CRLF_CSV =
+  'id,name,price\r\n1,"Bagel, sesame",6.50\r\n2,Earl GREY,8.25\r\n3,Zebra Cake,30\r\n';
+
+const namesOf = (rows) => rows.map((row) => row.name);
+const idsOf = (rows) => rows.map((row) => row.id);
+const cloneRows = (rows) => rows.map((row) => ({ ...row }));
+
+/** Deep, key-order-sensitive fingerprint of an array of plain rows. */
+function fingerprint(rows) {
+  return JSON.stringify(
+    rows.map((row) => Object.keys(row).sort().map((key) => [key, row[key]])),
+  );
+}
+
+/**
+ * The composition under test, instrumented. `run` parses and then searches; a
+ * recording wrapper around the *real* searchCatalog lets tests assert both
+ * "search was reached with exactly the parser's array" and — the important
+ * one — "search was never reached at all".
+ */
+function makePipeline() {
+  const invocations = [];
+  const recordingSearch = (items, options) => {
+    invocations.push({ items, options });
+    return searchCatalog(items, options);
+  };
+  return {
+    invocations,
+    get callCount() {
+      return invocations.length;
+    },
+    /** The array handed to search, i.e. exactly what parseCatalog returned. */
+    get lastItems() {
+      return invocations.length ? invocations[invocations.length - 1].items : undefined;
+    },
+    run(csvText, options) {
+      // This statement order is the point: a parse throw short-circuits search.
+      const items = parseCatalog(csvText);
+      return recordingSearch(items, options);
+    },
+  };
+}
+
+/* =================================================== 1. the seam itself  */
+
+test('seam: parseCatalog output is accepted by searchCatalog with zero reshaping', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  const found = searchCatalog(items); // no .map(), no renaming, no coercion in between
+
+  assert.equal(found.length, items.length);
+  assert.ok(
+    found.every((row, index) => row === items[index]),
+    'search must return the very objects the parser produced, in place',
+  );
+});
+
+test('seam: every parsed row satisfies the field types search reads', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  assert.ok(items.length > 0);
+
+  for (const row of items) {
+    assert.deepEqual(Object.keys(row), ['id', 'name', 'price']); // plain props, contract order
+    assert.equal(typeof row.id, 'string');
+    assert.equal(typeof row.name, 'string'); // search: `typeof name !== "string" -> skip`
+    assert.equal(typeof row.price, 'number'); // search: `typeof price !== "number" -> skip`
+    assert.equal(Number.isFinite(row.price), true); // search: NaN guard
+    assert.ok(row.price >= 0); // search: default minPrice = 0
+    assert.equal(
+      Object.getOwnPropertyDescriptor(row, 'name').get,
+      undefined,
+      'name must be a data property so search reads cannot have side effects',
+    );
+  }
+});
+
+test('seam: search defaults silently drop nothing the parser accepted', () => {
+  // The load-bearing coupling: the parser's "reject negative / non-finite
+  // price" rule is what makes search's default window (0 .. Infinity) a no-op.
+  for (const csv of [CATALOG_CSV, CRLF_CSV, 'id,name,price\n1,Zero,0', '']) {
+    const items = parseCatalog(csv);
+    assert.equal(items.length > 0 || csv === '' || csv.length > 0, true);
+    assert.deepEqual(
+      searchCatalog(items),
+      items,
+      `defaults filtered a parsed row: ${JSON.stringify(csv)}`,
+    );
+    assert.deepEqual(searchCatalog(items, { query: '' }), items);
+    assert.deepEqual(searchCatalog(items, { minPrice: 0, maxPrice: Infinity }), items);
+  }
+});
+
+test('seam: empty or header-only catalogs flow through both modules as empty', () => {
+  for (const csv of ['', '   ', '\n\r\n', 'id,name,price', 'id,name,price\n', 'id,name,price\r\n']) {
+    const items = parseCatalog(csv);
+    assert.ok(Array.isArray(items));
+    assert.equal(items.length, 0);
+    assert.deepEqual(searchCatalog(items), []);
+    assert.deepEqual(searchCatalog(items, { query: 'anything', minPrice: 1, maxPrice: 2 }), []);
+  }
+});
+
+test('seam: parser output is search-compatible whether or not it is frozen', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  const frozenArray = Object.freeze(items.map((row) => Object.freeze({ ...row })));
+
+  assert.deepEqual(namesOf(searchCatalog(frozenArray, { query: 'WIDGET,' })), ['Widget, large']);
+  assert.deepEqual(searchCatalog(frozenArray), [...frozenArray]);
+});
+
+test('seam: parser validation is what makes the composition safe (division of labour)', () => {
+  // Rows parseCatalog refuses to emit would be silently dropped by
+  // searchCatalog rather than reported: a string price, a NaN price, a missing
+  // name, a negative price. Pinned so the composed pipeline keeps leaning on
+  // the parser's validation instead of search's defensive skipping.
+  const handRolled = [
+    { id: '1', name: 'Good', price: 5 },
+    { id: '2', name: 'String Price', price: '9.99' },
+    { id: '3', name: 'NaN Price', price: Number.NaN },
+    { id: '4', price: 1 },
+    { id: '5', name: 'Negative', price: -3 },
+  ];
+  assert.deepEqual(namesOf(searchCatalog(handRolled)), ['Good']);
+
+  // The same data through the real pipeline is a loud parse error, not a drop.
+  const csv = 'id,name,price\n1,Good,5\n2,String Price,9.99\n3,NaN Price,NaN\n4,No Price,\n5,Negative,-3\n';
+  assert.throws(() => searchCatalog(parseCatalog(csv)), /price/i);
+});
+
+/* ================================== 2. name queries through the pipeline */
+
+test('queries: name filtering is case-insensitive over parsed rows', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'GREEN' })), ['Green Tea', 'green coffee']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'green' })), ['Green Tea', 'green coffee']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'GrEeN tEa' })), ['Green Tea']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'OLIVE OIL' })), ['Olive Oil']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'tea' })), ['Green Tea']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'MATCHA powder' })), ['Matcha Powder']);
+});
+
+test('queries: names containing quoted commas stay intact and are searchable', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  const widget = items.find((row) => row.id === '2');
+  assert.equal(widget.name, 'Widget, large'); // parser un-quoted the field, comma preserved
+
+  for (const query of ['widget,', ', large', 'dgt, lar', 'WIDGET, LARGE', 'Widget, Large']) {
+    assert.deepEqual(namesOf(searchCatalog(items, { query })), ['Widget, large'], query);
+  }
+  // A bare comma query hits exactly the one comma-bearing name in the catalog.
+  assert.deepEqual(namesOf(searchCatalog(items, { query: ',' })), ['Widget, large']);
+});
+
+test('queries: escaped quotes survive parsing and remain searchable', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  assert.equal(items.find((row) => row.id === '3').name, 'The "Big" One');
+
+  assert.deepEqual(namesOf(searchCatalog(items, { query: '"big"' })), ['The "Big" One']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'THE "BIG" ONE' })), ['The "Big" One']);
+  // Doubled quotes are un-escaped exactly once, so a doubled query does not match.
+  assert.deepEqual(searchCatalog(items, { query: 'the "" big' }), []);
+});
+
+test('queries: a quoted line break inside a name survives parsing and still matches', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  assert.ok(namesOf(items).includes('Line one\nline two'));
+
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'line one' })), ['Line one\nline two']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'LINE TWO' })), ['Line one\nline two']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'one\nlin' })), ['Line one\nline two']);
+});
+
+test('queries: the parser keeps field whitespace verbatim and search sees it', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  assert.equal(items.find((row) => row.id === '7').name, ' Spaced  Name ');
+
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'spaced  name' })), [' Spaced  Name ']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: '  ' })), [' Spaced  Name ']); // only double space
+  assert.deepEqual(searchCatalog(items, { query: 'spaced name' }), []); // single space is not a match
+});
+
+test('queries: substring semantics, empty query and no-match survive the composition', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  assert.equal(searchCatalog(items, { query: '' }).length, items.length); // match-all
+  assert.deepEqual(searchCatalog(items, { query: 'zzz-no-such-thing' }), []);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'at' })), ['Matcha Powder']); // substring, not prefix
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'COFFEE' })), ['green coffee']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'coffee' })), ['green coffee']);
+});
+
+test('queries: CSV/regex metacharacters in the query stay literal end-to-end', () => {
+  const items = parseCatalog('id,name,price\n1,A.B,1\n2,AXB,2\n3,"C[a]t, *2*",3\n');
+  assert.deepEqual(namesOf(items), ['A.B', 'AXB', 'C[a]t, *2*']);
+
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'A.B' })), ['A.B']); // '.' is not a wildcard
+  assert.deepEqual(namesOf(searchCatalog(items, { query: '.' })), ['A.B']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'a)b' })), []);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: '[a]' })), ['C[a]t, *2*']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'T, *2*' })), ['C[a]t, *2*']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'c[a]t,' })), ['C[a]t, *2*']);
+});
+
+test('queries: non-ASCII case pairs match; full/locale case folding does not (pinned limitation)', () => {
+  const items = parseCatalog('id,name,price\n1,Éclair au beurre,4.5\n2,Straße Bakery,7\n3,İstanbul Tea,2\n');
+
+  // Simple lower-case mapping is symmetric, so these pairs round-trip fine.
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'éCLAIR AU BEURRE' })), ['Éclair au beurre']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'straßE' })), ['Straße Bakery']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'İSTANBUL' })), ['İstanbul Tea']);
+
+  // Pinned limitation of the published "case-insensitive substring" contract:
+  // comparison uses toLowerCase(), so full case folding (ß <-> ss) and
+  // locale-conditional folding (dotted İ <-> ascii i) do NOT match.
+  assert.deepEqual(searchCatalog(items, { query: 'STRASSE' }), []);
+  assert.deepEqual(searchCatalog(items, { query: 'ISTANBUL' }), []);
+});
+
+/* ================================= 3. price bounds through the pipeline */
+
+test('bounds: parsed price spellings become numbers that filter inclusively', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  assert.equal(items.find((row) => row.id === '5').price, 100, '"1e2" must reach search as the number 100');
+  assert.equal(items.find((row) => row.id === '8').price, 1200, 'quoted "1200.00" reaches search as 1200');
+  assert.equal(items.find((row) => row.id === '7').price, 4, '"+4.00" reaches search as 4');
+
+  // Inclusive low edge: minPrice exactly equals a parsed price.
+  assert.deepEqual(idsOf(searchCatalog(items, { minPrice: 8.25 })), ['2', '3', '5', '8']);
+  // Inclusive high edge: maxPrice exactly equals a parsed price.
+  assert.deepEqual(idsOf(searchCatalog(items, { maxPrice: 8.25 })), ['1', '3', '4', '6', '7']);
+  // A cent off either side excludes that row.
+  assert.equal(searchCatalog(items, { minPrice: 8.26 }).includes(items[2]), false);
+  assert.equal(searchCatalog(items, { maxPrice: 8.24 }).includes(items[2]), false);
+  // Point query on the exact parsed value.
+  assert.deepEqual(idsOf(searchCatalog(items, { minPrice: 12, maxPrice: 12 })), ['2']);
+});
+
+test('bounds: zero, exponent and huge prices behave at the default window edges', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  assert.deepEqual(idsOf(searchCatalog(items, { maxPrice: 0 })), ['4']); // price 0 survives default minPrice 0
+  assert.deepEqual(idsOf(searchCatalog(items, { minPrice: 100 })), ['5', '8']);
+  assert.deepEqual(idsOf(searchCatalog(items, { minPrice: 100, maxPrice: 100 })), ['5']);
+  assert.deepEqual(idsOf(searchCatalog(items, { maxPrice: Number.MAX_VALUE })), idsOf(items));
+  assert.deepEqual(idsOf(searchCatalog(items, { minPrice: 1200 })), ['8']);
+});
+
+test('bounds: query and bounds combine as a logical AND after parsing', () => {
+  const items = parseCatalog(CRLF_CSV);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'E', minPrice: 6.5, maxPrice: 8.25 })), [
+    'Bagel, sesame',
+    'Earl GREY',
+  ]);
+  assert.deepEqual(searchCatalog(items, { query: 'bagel', minPrice: 7 }), []);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'bagel', minPrice: 6.5 })), ['Bagel, sesame']);
+  assert.deepEqual(namesOf(searchCatalog(items, { query: 'cake', maxPrice: 30 })), ['Zebra Cake']);
+});
+
+test('bounds: invalid bounds are still rejected once items come from the parser', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  const before = fingerprint(items);
+
+  assert.throws(() => searchCatalog(items, { minPrice: 20, maxPrice: 10 }), RangeError);
+  assert.throws(() => searchCatalog(items, { minPrice: -1 }), RangeError);
+  assert.throws(() => searchCatalog(items, { maxPrice: 'cheap' }), TypeError);
+  assert.throws(() => searchCatalog(items, { query: 42 }), TypeError);
+  assert.throws(() => searchCatalog(CATALOG_CSV), TypeError); // forgetting parseCatalog is a type error
+
+  assert.equal(fingerprint(items), before, 'a rejected search must leave the parsed catalog untouched');
+});
+
+/* ======================================= 4. order through the pipeline */
+
+test('order: result order is parser row order, not price or name order', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  const result = searchCatalog(items, { query: 'o' });
+
+  // Matching ids have non-monotonic prices (8.25, 0, 100, 7.75, 1200), so an
+  // accidental sort would be visible.
+  assert.deepEqual(idsOf(result), ['3', '4', '5', '6', '8']);
+  assert.deepEqual(namesOf(result), ['The "Big" One', 'Matcha Powder', 'Olive Oil', 'Line one\nline two', 'green coffee']);
+
+  const positions = result.map((row) => items.indexOf(row));
+  assert.deepEqual(positions, [...positions].sort((a, b) => a - b));
+  assert.notEqual(result, items, 'order preservation must not come from returning the input array');
+});
+
+test('order: a 500-row parsed catalog keeps every index monotonic', () => {
+  const lines = ['id,name,price'];
+  for (let n = 1; n <= 500; n += 1) lines.push(`${n},Item ${n},${500 - n + 0.5}`); // descending prices
+  const items = parseCatalog(`${lines.join('\n')}\n`);
+  assert.equal(items.length, 500);
+
+  const result = searchCatalog(items, { query: 'item', minPrice: 100 });
+  assert.equal(result.length, 400); // ids 1..400 have price >= 100.5
+  assert.deepEqual(idsOf(result.slice(0, 3)), ['1', '2', '3']);
+  assert.deepEqual(idsOf(result.slice(-1)), ['400']);
+
+  let last = -1;
+  for (const row of result) {
+    const at = items.indexOf(row);
+    assert.ok(at > last, 'search reordered parser output');
+    last = at;
+  }
+});
+
+test('order: results share references with parsed rows, so result edits cannot disturb input', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  const before = cloneRows(items);
+  const result = searchCatalog(items, { query: 'o' });
+
+  assert.ok(result.length > 0);
+  assert.ok(result.every((row) => items.includes(row)));
+
+  result.push({ id: 'injected', name: 'Injected', price: 1 });
+  result[0] = null;
+  result.reverse();
+  assert.deepEqual(items, before);
+});
+
+/* ===================================== 5. non-mutation through the seam */
+
+test('mutation: searching a parsed catalog never writes to the array or its rows', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  const rowsBefore = cloneRows(items);
+  const fingerprintBefore = fingerprint(items);
+
+  const seen = { set: 0, delete: 0, define: 0 };
+  const trap = {
+    set(t, p, v) {
+      seen.set += 1;
+      t[p] = v;
+      return true;
+    },
+    deleteProperty(t, p) {
+      seen.delete += 1;
+      delete t[p];
+      return true;
+    },
+    defineProperty(t, p, d) {
+      seen.define += 1;
+      Object.defineProperty(t, p, d);
+      return true;
+    },
+  };
+  const watchedArray = new Proxy(items, trap);
+  const watchedRows = items.map((row) => new Proxy(row, trap));
+
+  const hits = searchCatalog(watchedArray, { query: 'E', minPrice: 1, maxPrice: 50 });
+  assert.ok(hits.length > 0, 'the watched pipeline should still find rows');
+  assert.ok(hits.every((row) => items.includes(row)), 'rows must come back as the parsed objects');
+
+  // And again through per-row proxies, so writes to item objects are observed.
+  const hits2 = searchCatalog(watchedRows, { query: 'WIDGET,', minPrice: 10, maxPrice: 20 });
+  assert.deepEqual(namesOf(hits2), ['Widget, large']);
+
+  assert.deepEqual(seen, { set: 0, delete: 0, define: 0 }, 'search attempted a write');
+  assert.deepEqual(items, rowsBefore);
+  assert.equal(fingerprint(items), fingerprintBefore);
+  assert.deepEqual(
+    items.map((row) => Object.keys(row)),
+    items.map(() => ['id', 'name', 'price']),
+    'search must not cache derived fields (e.g. a lower-cased name) onto parsed rows',
+  );
+});
+
+test('mutation: repeated searches over one parsed catalog are stable and idempotent', () => {
+  const items = parseCatalog(CRLF_CSV);
+  const fingerprintBefore = fingerprint(items);
+  const options = { query: 'e', minPrice: 6, maxPrice: 30 };
+
+  const first = searchCatalog(items, options);
+  assert.ok(first.length > 0);
+  for (let n = 0; n < 5; n += 1) {
+    const again = searchCatalog(items, options);
+    assert.notEqual(again, first, 'each call must return a fresh array');
+    assert.deepEqual(namesOf(again), namesOf(first));
+    assert.ok(again.every((row, index) => row === first[index]), 'rows must stay the same references');
+  }
+  assert.equal(fingerprint(items), fingerprintBefore);
+});
+
+test('mutation: searching does not change what the same CSV parses to', () => {
+  const items = parseCatalog(CATALOG_CSV);
+  const snapshot = cloneRows(items);
+
+  searchCatalog(items, { query: 'widget,' });
+  searchCatalog(items, { minPrice: 100 });
+
+  assert.deepEqual(items, snapshot);
+  assert.deepEqual(items, parseCatalog(CATALOG_CSV));
+});
+
+/* ================ 6. parser rejections must never reach search (spy) === */
+
+/** Inputs parseCatalog must refuse; none of them may ever be seen by search. */
+const REJECTED_INPUTS = {
+  'missing header': '1,Widget,9.99\n',
+  'swapped header columns': 'name,id,price\nWidget,1,9.99\n',
+  'extra header column': 'id,name,price,extra\n1,Widget,9.99,x\n',
+  'too few columns in a row': 'id,name,price\n1,Widget\n',
+  'too many columns in a row': 'id,name,price\n1,Widget,9.99,extra\n',
+  'unquoted comma inside a price': 'id,name,price\n1,Widget,1,200.00\n',
+  'empty id': 'id,name,price\n,Widget,9.99\n',
+  'negative price': 'id,name,price\n1,Widget,-9.99\n',
+  'NaN price': 'id,name,price\n1,Widget,NaN\n',
+  'overflowing exponent price': 'id,name,price\n1,Widget,1e400\n',
+  'quoted comma inside a price': 'id,name,price\n1,Widget,"1,200.00"\n',
+  'unterminated quoted field': 'id,name,price\n1,"Widget,9.99\n',
+  'bad row after good rows': 'id,name,price\n1,A,1\n2,B,2\n3,C,oops\n',
+};
+
+test('rejection: nothing reaches search when the CSV is malformed (call-counting spy)', () => {
+  for (const [label, csv] of Object.entries(REJECTED_INPUTS)) {
+    const pipe = makePipeline();
+    assert.throws(
+      () => pipe.run(csv, { query: 'widget' }),
+      (err) => err instanceof Error && /parseCatalog: /.test(err.message),
+      label,
+    );
+    assert.equal(pipe.callCount, 0, `${label}: searchCatalog ran on invalid catalog data`);
+    assert.equal(pipe.lastItems, undefined, `${label}: a rejected catalog leaked into search`);
+  }
+});
+
+test('rejection: a non-string csvText fails in the parser before search is considered', () => {
+  for (const bad of [42, {}, true, ['id,name,price'], Symbol('csv'), () => {}]) {
+    const pipe = makePipeline();
+    assert.throws(() => pipe.run(bad, { query: 'tea' }), TypeError, String(bad));
+    assert.equal(pipe.callCount, 0, 'search must not run for non-string CSV');
+  }
+});
+
+test('rejection: parsing is atomic, so good rows before a bad row are never searched', () => {
+  const pipe = makePipeline();
+  const csv = 'id,name,price\n1,Green Tea,3.5\n2,Olive Oil,100\n3,Broken Row\n';
+
+  assert.throws(() => pipe.run(csv, { query: 'oil' }), /malformed row on line 4/i);
+  assert.equal(pipe.callCount, 0, 'a partially-valid catalog must not be handed to search');
+});
+
+test('rejection: the parser error propagates through the pipeline unchanged', () => {
+  const csv = REJECTED_INPUTS['negative price'];
+  const pipe = makePipeline();
+
+  let direct;
+  let pipelined;
+  try {
+    parseCatalog(csv);
+  } catch (err) {
+    direct = err;
+  }
+  try {
+    pipe.run(csv, {});
+  } catch (err) {
+    pipelined = err;
+  }
+
+  assert.ok(direct instanceof Error);
+  assert.ok(pipelined instanceof Error);
+  assert.equal(pipelined.constructor, direct.constructor); // not swallowed or re-wrapped
+  assert.equal(pipelined.message, direct.message);
+  assert.match(pipelined.message, /negative price/i);
+  assert.equal(pipe.callCount, 0);
+});
+
+test('rejection: the parser runs before search validates its own bounds', () => {
+  // Bad CSV *and* invalid bounds: the catalog error must win, search must not run.
+  const pipe = makePipeline();
+  assert.throws(
+    () => pipe.run(REJECTED_INPUTS['too many columns in a row'], { minPrice: 20, maxPrice: 10 }),
+    /malformed row/i,
+  );
+  assert.equal(pipe.callCount, 0);
+
+  // Conversely, a parseable catalog does reach search, which then rejects bounds.
+  const pipe2 = makePipeline();
+  assert.throws(() => pipe2.run(CATALOG_CSV, { minPrice: 20, maxPrice: 10 }), RangeError);
+  assert.equal(pipe2.callCount, 1, 'search should be reached for a parseable catalog');
+  assert.equal(pipe2.lastItems, pipe2.invocations[0].items);
+});
+
+test('rejection: nullish and blank CSV are legitimate empty input, not errors', () => {
+  for (const csv of [null, undefined, '', '   \n\t\n']) {
+    const pipe = makePipeline();
+    assert.deepEqual(pipe.run(csv, { query: 'anything' }), [], JSON.stringify(csv) ?? 'undefined');
+    assert.equal(pipe.callCount, 1, 'an empty catalog is legitimate search input');
+    assert.deepEqual(pipe.lastItems, []);
+  }
+});
+
+test('rejection: the array handed to search is literally the array the parser returned', () => {
+  const pipe = makePipeline();
+  const parsed = parseCatalog(CATALOG_CSV);
+  const found = pipe.run(CATALOG_CSV, { query: 'MATCHA' });
+
+  assert.equal(pipe.lastItems, parsed, 'the pipeline must not copy or reshape before searching');
+  assert.deepEqual(namesOf(found), ['Matcha Powder']);
+  assert.equal(found[0], parsed[3], 'search must return the parser row object itself');
+});
+
+/* =========================== 7. deterministic property sweep over the seam */
+
+/** Tiny deterministic LCG so the sweep is reproducible without dependencies. */
+function lcg(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+/** Random-but-reproducible CSV; ASCII-only so a toUpperCase cross-check is valid. */
+function sweepCsv(seed) {
+  const rand = lcg(seed);
+  const pick = (list) => list[Math.floor(rand() * list.length)];
+  const alphabet = ['a', 'A', 'b', 'B', 'c', ' ', ',', '"', '\n', '.', '1', '2', '', '-', '\t'];
+  const cell = () => {
+    let raw = '';
+    const len = Math.floor(rand() * 5);
+    for (let i = 0; i < len; i += 1) raw += pick(alphabet);
+    const mustQuote = raw.includes(',') || raw.includes('"') || raw.includes('\n');
+    return mustQuote || rand() < 0.25 ? `"${raw.replace(/"/g, '""')}"` : raw;
+  };
+  const price = () => pick(['0', '1', '2.5', '10', '100', '1e2', '+4.00', '.5', '"7"', '1200.00']);
+
+  const rows = [];
+  const count = Math.floor(rand() * 6);
+  for (let n = 0; n < count; n += 1) rows.push([String(n + 1), cell(), price()].join(','));
+  return `id,name,price\n${rows.join(pick(['\n', '\r\n']))}\n`;
+}
+
+const SWEEP_OPTIONS = [];
+for (const query of ['', 'a', 'A', ' , ', '.', '1']) {
+  for (const bounds of [
+    { minPrice: 0, maxPrice: Infinity },
+    { minPrice: 2.5, maxPrice: 100 },
+    { maxPrice: 7 },
+    { minPrice: 100 },
+  ]) {
+    SWEEP_OPTIONS.push({ query, ...bounds });
+  }
+}
+
+test('sweep: composed invariants hold over a generated corpus of parseable catalogs', () => {
+  let parsedCatalogs = 0;
+  let rejectedInputs = 0;
+  let checks = 0;
+
+  for (let seed = 1; seed <= 120; seed += 1) {
+    const csv = sweepCsv(seed);
+
+    let items;
+    try {
+      items = parseCatalog(csv);
+    } catch (err) {
+      // Rejected input never reaches search by construction (see suite 6); the
+      // only thing to assert here is that failures are the parser's own.
+      rejectedInputs += 1;
+      assert.match(err.message, /^parseCatalog: /, `seed ${seed}: unexpected error shape`);
+      continue;
+    }
+    parsedCatalogs += 1;
+
+    // (a) parsed rows are accepted verbatim: defaults drop nothing
+    assert.deepEqual(searchCatalog(items), items, `seed ${seed}: defaults dropped a parsed row`);
+
+    // (b) every option set agrees with an independent reference filter,
+    //     including order and object identity, and never writes anything.
+    const before = fingerprint(items);
+    const frozen = Object.freeze(items.map((row) => Object.freeze({ ...row })));
+
+    for (const options of SWEEP_OPTIONS) {
+      checks += 1;
+      const result = searchCatalog(items, options);
+      const needle = options.query.toUpperCase(); // uppercase probe: independent of search's toLowerCase
+      const low = options.minPrice ?? 0;
+      const high = options.maxPrice ?? Infinity;
+      const expected = items.filter(
+        (row) => row.name.toUpperCase().includes(needle) && row.price >= low && row.price <= high,
+      );
+
+      assert.equal(
+        result.length,
+        expected.length,
+        `seed ${seed} ${JSON.stringify(options)}: ${JSON.stringify(namesOf(result))} vs ${JSON.stringify(namesOf(expected))}`,
+      );
+      result.forEach((row, index) => {
+        assert.equal(row, expected[index], `seed ${seed} ${JSON.stringify(options)}: wrong row or wrong order`);
+      });
+      assert.equal(result, items ? result : result, 'sanity');
+      assert.ok(Array.isArray(result) && result.every((row) => items.includes(row)));
+      assert.deepEqual(searchCatalog(frozen, options).length, result.length, `seed ${seed}: frozen parser output rejected`);
+    }
+
+    assert.equal(fingerprint(items), before, `seed ${seed}: search mutated the parsed catalog`);
+  }
+
+  assert.ok(parsedCatalogs >= 20, `sweep parsed only ${parsedCatalogs} catalogs; corpus is not exercising the seam`);
+  assert.ok(rejectedInputs >= 10, `sweep rejected only ${rejectedInputs} inputs; add malformed coverage`);
+  assert.ok(checks >= 700, `sweep only checked ${checks} option sets`);
+});
+
+/* ================================== 8. discovery + dependency hygiene  */
+
+test("harness: this file is discoverable by the repo's `node --test` script", () => {
+  // package.json runs `node --test`, which discovers `*.test.mjs`; integration
+  // coverage only counts if this filename matches that discovery pattern.
+  assert.match(basename(fileURLToPath(import.meta.url)), /\.test\.mjs$/);
+});
+
+test('harness: the integration tests use only the two modules and Node built-ins', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(fileURLToPath(new URL('./integration.test.mjs', import.meta.url)), 'utf8');
+  const specs = [...source.matchAll(/^import[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]);
+
+  assert.ok(specs.includes('../src/csv.mjs'), 'must compose the CSV workstream');
+  assert.ok(specs.includes('../src/search.mjs'), 'must compose the search workstream');
+  assert.deepEqual(
+    specs.filter((spec) => !spec.startsWith('node:') && !spec.startsWith('../')),
+    [],
+    `unexpected non-builtin imports: ${specs.join(', ')}`,
+  );
+  assert.equal(/\bfetch\(|\bnode:(http|https|net|dns|tls|worker)\b/.test(source), false, 'no network services');
+});

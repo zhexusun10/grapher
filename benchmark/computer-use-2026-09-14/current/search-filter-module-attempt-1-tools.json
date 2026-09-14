@@ -1,0 +1,296 @@
+[
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "pwd && ls -la && find . -type f -not -path './node_modules/*' -not -path './.git/*' | head -50"
+    },
+    "requestedAt": "2026-09-13T17:20:37.617Z",
+    "finishedAt": "2026-09-13T17:20:37.636Z",
+    "isError": false,
+    "result": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264\ntotal 24\ndrwxr-xr-x@ 5 jerry  wheel  160 Sep 14 01:20 .\ndrwxr-xr-x@ 4 jerry  wheel  128 Sep 14 01:20 ..\n-rw-r--r--@ 1 jerry  wheel  167 Sep 14 01:20 .git\n-rw-r--r--@ 1 jerry  wheel  703 Sep 14 01:20 README.md\n-rw-r--r--@ 1 jerry  wheel  105 Sep 14 01:20 package.json\n./README.md\n./package.json\n./.git\n"
+  },
+  {
+    "tool": "read",
+    "arguments": {
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/README.md"
+    },
+    "requestedAt": "2026-09-13T17:20:37.617Z",
+    "finishedAt": "2026-09-13T17:20:37.636Z",
+    "isError": false,
+    "result": "# Catalog toolkit\nImplement two independent, dependency-free Node.js modules and then verify their interoperability.\nExisting public contract (do not redesign):\n- src/csv.mjs exports parseCatalog(csvText), returning [{id: string, name: string, price: number}]. Header is id,name,price; handle quoted commas, escaped quotes, CRLF, empty input, and reject malformed rows and negative/non-finite prices.\n- src/search.mjs exports searchCatalog(items, {query = '', minPrice = 0, maxPrice = Infinity} = {}). Case-insensitive substring search on name; inclusive price bounds; preserve order, do not mutate input; reject invalid bounds.\n- No runtime dependencies, no network services, Node built-in tests only.\n"
+  },
+  {
+    "tool": "read",
+    "arguments": {
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/package.json"
+    },
+    "requestedAt": "2026-09-13T17:20:43.455Z",
+    "finishedAt": "2026-09-13T17:20:43.529Z",
+    "isError": false,
+    "result": "{\"name\": \"catalog-cu-evaluation\", \"private\": true, \"type\": \"module\", \"scripts\": {\"test\": \"node --test\"}}\n"
+  },
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "cat .git; git status --short 2>&1 | head -20; git log --oneline -5 2>&1 | head; node --version"
+    },
+    "requestedAt": "2026-09-13T17:20:43.455Z",
+    "finishedAt": "2026-09-13T17:20:43.529Z",
+    "isError": false,
+    "result": "gitdir: /private/tmp/grapher-cu-20260914/runtime-current/shadow_repos/catalog_987b6497c1b3a490.git/worktrees/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264\nfatal: not a git repository: /private/tmp/grapher-cu-20260914/runtime-current/shadow_repos/catalog_987b6497c1b3a490.git/worktrees/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264\nfatal: not a git repository: /private/tmp/grapher-cu-20260914/runtime-current/shadow_repos/catalog_987b6497c1b3a490.git/worktrees/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264\nv25.4.0\n"
+  },
+  {
+    "tool": "write",
+    "arguments": {
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs",
+      "content": "/**\n * src/search.mjs — independent catalog search/filter module.\n *\n * Public contract (README.md):\n *   searchCatalog(items, { query = '', minPrice = 0, maxPrice = Infinity } = {})\n *     - case-insensitive substring search on `name`\n *     - inclusive price bounds\n *     - preserves input order\n *     - never mutates the input array or the item objects\n *     - rejects invalid bounds\n *\n * This module is dependency-free: no imports, no runtime deps, no network,\n * and it deliberately does NOT depend on src/csv.mjs (parallel workstream).\n */\n\n/** Format a value for an error message without ever throwing on weird input. */\nfunction describe(value) {\n  if (typeof value === 'number') return value;\n  if (typeof value === 'string') return JSON.stringify(value);\n  if (value === null) return 'null';\n  if (typeof value === 'object') {\n    const ctor = value.constructor && value.constructor.name;\n    return `an object (${typeof ctor === 'string' && ctor !== 'Object' ? ctor : 'Object'})`;\n  }\n  return `${typeof value} ${String(value)}`;\n}\n\n/**\n * Validate a single numeric bound.\n *\n * @param {string} name  option name, used in error messages\n * @param {unknown} value\n * @param {boolean} allowPositiveInfinity  only `maxPrice` may be Infinity\n */\nfunction assertBound(name, value, { allowPositiveInfinity }) {\n  if (typeof value !== 'number' || Number.isNaN(value)) {\n    throw new TypeError(\n      `searchCatalog: ${name} must be a number, received ${describe(value)}`,\n    );\n  }\n  if (value < 0) {\n    throw new RangeError(\n      `searchCatalog: ${name} must not be negative, received ${value}`,\n    );\n  }\n  if (!Number.isFinite(value) && !allowPositiveInfinity) {\n    throw new RangeError(\n      `searchCatalog: ${name} must be a finite number, received ${value}`,\n    );\n  }\n}\n\n/** Validate every option that influences matching. Returns the normalized filter. */\nfunction normalizeOptions(query, minPrice, maxPrice) {\n  if (typeof query !== 'string') {\n    throw new TypeError(\n      `searchCatalog: query must be a string, received ${describe(query)}`,\n    );\n  }\n  assertBound('minPrice', minPrice, { allowPositiveInfinity: false });\n  assertBound('maxPrice', maxPrice, { allowPositiveInfinity: true });\n  if (minPrice > maxPrice) {\n    throw new RangeError(\n      `searchCatalog: invalid price bounds, minPrice (${minPrice}) exceeds maxPrice (${maxPrice})`,\n    );\n  }\n  return { needle: query.toLowerCase(), minPrice, maxPrice };\n}\n\n/**\n * A catalog item is filterable only if it is an object exposing a string\n * `name` and a comparable numeric `price`. Anything else is simply not a\n * match (we do not throw, and we never touch the item).\n */\nfunction isMatchable(item) {\n  return (\n    item !== null &&\n    typeof item === 'object' &&\n    typeof item.name === 'string' &&\n    typeof item.price === 'number' &&\n    !Number.isNaN(item.price)\n  );\n}\n\n/**\n * Filter a catalog by a case-insensitive substring of `name` plus an\n * inclusive price window, preserving input order.\n *\n * @template {object} T\n * @param {readonly T[]} items           catalog rows (never mutated)\n * @param {object} [options]\n * @param {string} [options.query='']    substring searched in `name`, case-insensitive\n * @param {number} [options.minPrice=0]  inclusive lower price bound\n * @param {number} [options.maxPrice=Infinity] inclusive upper price bound\n * @returns {T[]} new array holding references to the matching input items\n */\nexport function searchCatalog(items, { query = '', minPrice = 0, maxPrice = Infinity } = {}) {\n  if (!Array.isArray(items)) {\n    throw new TypeError(\n      `searchCatalog: items must be an array, received ${describe(items)}`,\n    );\n  }\n\n  const { needle, minPrice: low, maxPrice: high } = normalizeOptions(query, minPrice, maxPrice);\n  const matches = [];\n\n  for (const item of items) {\n    if (!isMatchable(item)) continue;\n    if (needle !== '' && !item.name.toLowerCase().includes(needle)) continue;\n    if (item.price < low || item.price > high) continue;\n    matches.push(item);\n  }\n\n  return matches;\n}\n\nexport default searchCatalog;\n"
+    },
+    "requestedAt": "2026-09-13T17:22:00.104Z",
+    "finishedAt": "2026-09-13T17:22:00.108Z",
+    "isError": false,
+    "result": "Successfully wrote to /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs"
+  },
+  {
+    "tool": "write",
+    "arguments": {
+      "content": "/**\n * tests/search.test.mjs — unit tests for src/search.mjs.\n *\n * Uses only Node's built-in test runner (`node --test`), which discovers this\n * file via the `*.test.mjs` pattern. No third-party deps, no network, and no\n * dependency on the parallel CSV workstream (src/csv.mjs / tests/csv.test.mjs).\n */\n\nimport test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\n\nimport { searchCatalog } from '../src/search.mjs';\n\n/* ------------------------------------------------------------------ helpers */\n\n/** Fixture factory: a fresh array of fresh objects for every test. */\nfunction fixtures() {\n  return [\n    { id: '1', name: 'Green Tea', price: 3.5 },\n    { id: '2', name: 'green coffee', price: 12 },\n    { id: '3', name: 'Earl GREY', price: 8.25 },\n    { id: '4', name: 'Matcha Powder', price: 0 },\n    { id: '5', name: 'Olive Oil', price: 100 },\n  ];\n}\n\nconst names = (rows) => rows.map((r) => r.name);\nconst clone = (rows) => rows.map((r) => ({ ...r }));\n\n/** Snapshot every observable mutation channel on the input. */\nfunction mutationGuard(rows) {\n  const snapshot = JSON.stringify(rows);\n  return {\n    assertClean(label = 'input') {\n      assert.equal(JSON.stringify(rows), snapshot, `${label}: array contents were mutated`);\n      assert.ok(Array.isArray(rows), `${label}: array was replaced`);\n    },\n  };\n}\n\n/* --------------------------------------------------------------- signature */\n\ntest('searchCatalog is exported as a function of arity 2', () => {\n  assert.equal(typeof searchCatalog, 'function');\n  // (items, options) — rest not required; default `= {}` keeps arity at 2.\n  assert.equal(searchCatalog.length, 2);\n});\n\ntest('second argument is optional (omitted entirely)', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items)), names(items));\n});\n\ntest('options may be an empty object, applying all documented defaults', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items, {})), names(items));\n});\n\ntest('defaults are query=\"\", minPrice=0, maxPrice=Infinity (per README)', () => {\n  const items = fixtures();\n\n  // minPrice defaults to 0: a 0-priced item survives, a negative-priced one does not.\n  const withNegatives = [\n    { id: 'n', name: 'Refund', price: -1 },\n    { id: 'z', name: 'Sample', price: 0 },\n  ];\n  assert.deepEqual(names(searchCatalog(withNegatives)), ['Sample']);\n  assert.deepEqual(names(searchCatalog(withNegatives, { minPrice: 0 })), ['Sample']);\n\n  // maxPrice defaults to Infinity: huge prices survive with only minPrice given.\n  const expensive = [{ id: 'e', name: 'Telescope', price: Number.MAX_VALUE }];\n  assert.deepEqual(names(searchCatalog(expensive, { minPrice: 10 })), ['Telescope']);\n  assert.deepEqual(names(searchCatalog(expensive, { minPrice: 10, maxPrice: Infinity })), [\n    'Telescope',\n  ]);\n\n  // query defaults to '': no name filtering.\n  assert.equal(searchCatalog(items, { minPrice: 1 }).length, 4);\n  assert.deepEqual(searchCatalog(items, { query: '' }), searchCatalog(items, { query: undefined }));\n});\n\ntest('undefined option values fall back to the documented defaults', () => {\n  const items = fixtures();\n  const explicit = searchCatalog(items, {\n    query: undefined,\n    minPrice: undefined,\n    maxPrice: undefined,\n  });\n  assert.deepEqual(names(explicit), names(items));\n});\n\n/* ---------------------------------------------------------- name matching */\n\ntest('name matching is case-insensitive in both directions', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items, { query: 'GREEN' })), [\n    'Green Tea',\n    'green coffee',\n  ]);\n  assert.deepEqual(names(searchCatalog(items, { query: 'green' })), ['Green Tea', 'green coffee']);\n  assert.deepEqual(names(searchCatalog(items, { query: 'GrEy' })), ['Earl GREY']);\n});\n\ntest('matching is a substring test, not a prefix or word test', () =>\n  assert.deepEqual(names(searchCatalog(fixtures(), { query: 'at' })), ['Matcha Powder']));\n\ntest('query containing spaces matches inside names', () => {\n  assert.deepEqual(names(searchCatalog(fixtures(), { query: 'Green ' })), ['Green Tea']);\n});\n\ntest('whitespace-only query is not treated as empty', () => {\n  assert.deepEqual(names(searchCatalog(fixtures(), { query: ' ' })), ['Earl GREY']);\n});\n\ntest('a query that matches nothing returns an empty array', () => {\n  const result = searchCatalog(fixtures(), { query: 'zzz' });\n  assert.ok(Array.isArray(result));\n  assert.equal(result.length, 0);\n});\n\ntest('search only looks at `name` (not id, not numeric price text)', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items, { query: 'id' })), []);\n  assert.deepEqual(searchCatalog(items, { query: '100' }), []);\n  assert.deepEqual(searchCatalog(items, { query: '3.5' }), []);\n});\n\ntest('regex metacharacters in the query are literal', () => {\n  const items = [\n    { id: '1', name: 'A.B', price: 1 },\n    { id: '2', name: 'AXB', price: 1 },\n  ];\n  assert.deepEqual(names(searchCatalog(items, { query: 'A.B' })), ['A.B']);\n  assert.deepEqual(names(searchCatalog(items, { query: '.' })), ['A.B', 'AXB']);\n});\n\n/* ------------------------------------------------------------ price bounds */\n\ntest('price bounds are inclusive on both ends', () => {\n  const items = [{ id: '1', name: 'Thing', price: 10 }];\n  assert.equal(searchCatalog(items, { minPrice: 10 }).length, 1);\n  assert.equal(searchCatalog(items, { maxPrice: 10 }).length, 1);\n  assert.equal(searchCatalog(items, { minPrice: 10, maxPrice: 10 }).length, 1);\n  assert.equal(searchCatalog(items, { minPrice: 10.01 }).length, 0);\n  assert.equal(searchCatalog(items, { maxPrice: 9.99 }).length, 0);\n});\n\ntest('bounds window filters correctly and keeps order', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 3.5, maxPrice: 100 })), [\n    'Green Tea',\n    'Earl GREY',\n    'Olive Oil',\n  ]);\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 8, maxPrice: 12 })), [\n    'green coffee',\n    'Earl GREY',\n  ]);\n});\n\ntest('fractional bounds work with floating point prices', () => {\n  const items = [\n    { id: '1', name: 'Under', price: 4.999 },\n    { id: '2', name: 'Exact', price: 5 },\n    { id: '3', name: 'Over', price: 5.001 },\n  ];\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 5, maxPrice: 5 })), ['Exact']);\n  assert.deepEqual(names(searchCatalog(items, { maxPrice: 5 })), ['Under', 'Exact']);\n});\n\ntest('maxPrice=Infinity includes everything above minPrice', () => {\n  const items = [{ id: '1', name: 'Astronomical', price: 1e308 }];\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 0, maxPrice: Infinity })), [\n    'Astronomical',\n  ]);\n});\n\ntest('query and bounds combine (logical AND)', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items, { query: 'e', minPrice: 5, maxPrice: 50 })), [\n    'green coffee',\n    'Earl GREY',\n  ]);\n});\n\n/* ------------------------------------------------------- order and safety */\n\ntest('input order is preserved even when output order differs from sorted', () => {\n  const items = [\n    { id: 'a', name: 'Zebra Cake', price: 30 },\n    { id: 'b', name: 'Apple Cake', price: 10 },\n    { id: 'c', name: 'Kiwi Cake', price: 20 },\n  ];\n  assert.deepEqual(names(searchCatalog(items, { query: 'Cake' })), [\n    'Zebra Cake',\n    'Apple Cake',\n    'Kiwi Cake',\n  ]);\n});\n\ntest('the input array and its items are never mutated', () => {\n  const items = fixtures();\n  const before = clone(items);\n  const guard = mutationGuard(items);\n  const originalLength = items.length;\n  const originalArray = items;\n\n  const result = searchCatalog(items, { query: 'n', minPrice: 1, maxPrice: 50 });\n\n  assert.equal(items, originalArray, 'items argument reference untouched');\n  assert.equal(items.length, originalLength, 'array length unchanged');\n  guard.assertClean();\n  assert.deepEqual(items, before);\n  assert.notEqual(result, items, 'result is a new array');\n});\n\ntest('a mutation-observing proxy confirms only reads happen', () => {\n  const seen = { set: 0, delete: 0, define: 0 };\n  const rows = [\n    { id: '1', name: 'Green Tea', price: 3.5 },\n    { id: '2', name: 'Olive Oil', price: 100 },\n  ];\n  const watchedArray = new Proxy(rows, {\n    set(t, p, v) {\n      seen.set += 1;\n      t[p] = v;\n      return true;\n    },\n    deleteProperty(t, p) {\n      seen.delete += 1;\n      delete t[p];\n      return true;\n    },\n    defineProperty(t, p, d) {\n      seen.define += 1;\n      Object.defineProperty(t, p, d);\n      return true;\n    },\n  });\n  const watchedItems = rows.map(\n    (row) =>\n      new Proxy(row, {\n        set(t, p, v) {\n          seen.set += 1;\n          t[p] = v;\n          return true;\n        },\n        deleteProperty(t, p) {\n          seen.delete += 1;\n          delete t[p];\n          return true;\n        },\n        defineProperty(t, p, d) {\n          seen.define += 1;\n          Object.defineProperty(t, p, d);\n          return true;\n        },\n      }),\n  );\n\n  const result = searchCatalog(watchedArray, { query: 'OIL', minPrice: 10 });\n  assert.deepEqual(names(watchedItems), ['Green Tea', 'Olive Oil']);\n  assert.equal(result.length, 1);\n  assert.deepEqual(seen, { set: 0, delete: 0, define: 0 });\n\n  // Item objects are also untouched when only bounds filter.\n  searchCatalog(watchedItems, { maxPrice: 50 });\n  assert.equal(seen.set, 0);\n});\n\ntest('frozen input (array and items) is accepted, proving no writes are attempted', () => {\n  const items = Object.freeze([\n    Object.freeze({ id: '1', name: 'Green Tea', price: 3.5 }),\n    Object.freeze({ id: '2', name: 'Olive Oil', price: 100 }),\n  ]);\n  assert.deepEqual(names(searchCatalog(items, { query: 'tea' })), ['Green Tea']);\n  assert.deepEqual(names(searchCatalog(items)), ['Green Tea', 'Olive Oil']);\n});\n\ntest('result holds references to the original items, not copies', () => {\n  const items = fixtures();\n  const result = searchCatalog(items, { query: 'Tea' });\n  assert.equal(result.length, 1);\n  assert.equal(result[0], items[0]);\n});\n\ntest('mutating the result does not affect the input (and vice versa)', () => {\n  const items = fixtures();\n  const before = clone(items);\n  const result = searchCatalog(items, { query: 'e' });\n  result.push({ id: 'x', name: 'Injected', price: 1 });\n  result[0] = null;\n  assert.deepEqual(items, before);\n});\n\ntest('extra/unknown properties on items are ignored and preserved by reference', () => {\n  const items = [\n    { id: '1', name: 'Green Tea', price: 3.5, tags: ['a'], stock: 4 },\n    { id: '2', name: 'Kettle', price: 3.5 },\n  ];\n  const result = searchCatalog(items, { minPrice: 3.5, maxPrice: 3.5 });\n  assert.equal(result[0], items[0]);\n  assert.deepEqual(result[0].tags, ['a']);\n});\n\ntest('empty input returns an empty array', () => {\n  assert.deepEqual(searchCatalog([]), []);\n  assert.deepEqual(searchCatalog([], { query: 'anything' }), []);\n});\n\ntest('items with unusable name/price are skipped rather than crashing', () => {\n  const items = [\n    { id: '1', name: 'Good', price: 5 },\n    { id: '2', price: 5 }, // no name\n    { id: '3', name: 'No Price' }, // no price\n    { id: '4', name: 42, price: 5 }, // non-string name\n    { id: '5', name: 'String Price', price: '5' }, // non-number price\n    { id: '6', name: 'NaN Price', price: Number.NaN },\n    { id: '7', name: null, price: 5 },\n    null,\n    undefined,\n    'not an object',\n  ];\n  assert.deepEqual(names(searchCatalog(items)), ['Good']);\n  assert.deepEqual(names(searchCatalog(items, { query: 'o' })), ['Good']);\n});\n\n/* -------------------------------------------------------- bound validation */\n\ntest('non-array items are rejected with a TypeError', () => {\n  for (const bad of [undefined, null, 'Green Tea', 42, {}, new Set(), new Map()]) {\n    assert.throws(\n      () => searchCatalog(bad, { query: 'tea' }),\n      (err) => err instanceof TypeError && /items must be an array/i.test(err.message),\n      `expected TypeError for items=${String(bad)}`,\n    );\n  }\n});\n\ntest('non-string query is rejected with a TypeError', () => {\n  for (const bad of [0, NaN, true, null, {}, ['tea'], () => {}]) {\n    assert.throws(\n      () => searchCatalog(fixtures(), { query: bad }),\n      (err) => err instanceof TypeError && /query must be a string/i.test(err.message),\n      `expected TypeError for query=${String(bad)}`,\n    );\n  }\n});\n\ntest('non-numeric bounds are rejected with a TypeError', () => {\n  for (const bad of ['10', '', true, false, null, {}, [], Symbol('n'), () => {}]) {\n    assert.throws(\n      () => searchCatalog(fixtures(), { minPrice: bad }),\n      (err) => err instanceof TypeError && /minPrice must be a number/i.test(err.message),\n      `expected TypeError for minPrice=${String(bad)}`,\n    );\n    assert.throws(\n      () => searchCatalog(fixtures(), { maxPrice: bad }),\n      (err) => err instanceof TypeError && /maxPrice must be a number/i.test(err.message),\n      `expected TypeError for maxPrice=${String(bad)}`,\n    );\n  }\n});\n\ntest('NaN bounds are rejected', () => {\n  assert.throws(() => searchCatalog(fixtures(), { minPrice: Number.NaN }), TypeError);\n  assert.throws(() => searchCatalog(fixtures(), { maxPrice: Number.NaN }), TypeError);\n});\n\ntest('negative bounds are rejected with a RangeError', () => {\n  assert.throws(\n    () => searchCatalog(fixtures(), { minPrice: -0.01 }),\n    (err) => err instanceof RangeError && /minPrice must not be negative/i.test(err.message),\n  );\n  assert.throws(\n    () => searchCatalog(fixtures(), { maxPrice: -1 }),\n    (err) => err instanceof RangeError && /maxPrice must not be negative/i.test(err.message),\n  );\n  assert.throws(() => searchCatalog(fixtures(), { maxPrice: Number.NEGATIVE_INFINITY }), RangeError);\n});\n\ntest('-Infinity minPrice is rejected, +Infinity minPrice is rejected too', () => {\n  assert.throws(() => searchCatalog(fixtures(), { minPrice: Number.NEGATIVE_INFINITY }), RangeError);\n  assert.throws(\n    () => searchCatalog(fixtures(), { minPrice: Number.POSITIVE_INFINITY }),\n    (err) => err instanceof RangeError && /minPrice must be a finite number/i.test(err.message),\n  );\n});\n\ntest('minPrice greater than maxPrice is rejected', () => {\n  assert.throws(\n    () => searchCatalog(fixtures(), { minPrice: 20, maxPrice: 10 }),\n    (err) => err instanceof RangeError && /minPrice \\(20\\) exceeds maxPrice \\(10\\)/i.test(err.message),\n  );\n  assert.throws(() => searchCatalog(fixtures(), { minPrice: 10.5, maxPrice: 10.4 }), RangeError);\n  assert.throws(\n    () => searchCatalog(fixtures(), { minPrice: 1, maxPrice: 1 - Number.EPSILON }),\n    RangeError,\n  );\n});\n\ntest('equal bounds are valid (point query)', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 12, maxPrice: 12 })), ['green coffee']);\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 0, maxPrice: 0 })), ['Matcha Powder']);\n});\n\ntest('validation happens before filtering (no partial work, input untouched)', () => {\n  const items = fixtures();\n  const before = clone(items);\n  assert.throws(() => searchCatalog(items, { minPrice: -5 }), RangeError);\n  assert.deepEqual(items, before);\n});\n\n/* ------------------------------------------------------------ independence */\n\ntest('module source imports nothing and never references the CSV workstream', () => {\n  const source = readFileSync(fileURLToPath(new URL('../src/search.mjs', import.meta.url)), 'utf8');\n  assert.equal(/(^|\\n)\\s*import[\\s\\S]*?from/.test(source), false, 'no static imports allowed');\n  assert.equal(/\\brequire\\s*\\(/.test(source), false, 'no require() allowed');\n  assert.equal(/node:/.test(source.replace(/^\\/\\/.*$/gm, '').replace(/\\*[\\s\\S]*?\\*\\//g, '')), false);\n  assert.equal(/csv/i.test(source), false, 'search.mjs must not depend on csv');\n});\n\ntest('search results are usable as plain rows (interop-ready shape)', () => {\n  const rows = [\n    { id: '1', name: 'Green Tea', price: 3.5 },\n    { id: '2', name: 'Olive Oil', price: 100 },\n  ];\n  const found = searchCatalog(rows, { query: 'oil', minPrice: 10, maxPrice: 1000 });\n  assert.deepEqual(found, [{ id: '2', name: 'Olive Oil', price: 100 }]);\n  assert.deepEqual(Object.keys(found[0]).sort(), ['id', 'name', 'price']);\n});\n",
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs"
+    },
+    "requestedAt": "2026-09-13T17:23:04.893Z",
+    "finishedAt": "2026-09-13T17:23:04.895Z",
+    "isError": false,
+    "result": "Successfully wrote to /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs"
+  },
+  {
+    "tool": "edit",
+    "arguments": {
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs",
+      "edits": [
+        {
+          "oldText": " * This module is dependency-free: no imports, no runtime deps, no network,\n * and it deliberately does NOT depend on src/csv.mjs (parallel workstream).\n */",
+          "newText": " * This module is dependency-free: no imports, no runtime deps, no network\n * services, and it deliberately depends on nothing else in this repo (the\n * parallel parser workstream owns its own module file).\n */"
+        }
+      ]
+    },
+    "requestedAt": "2026-09-13T17:23:31.128Z",
+    "finishedAt": "2026-09-13T17:23:31.135Z",
+    "isError": false,
+    "result": "Successfully replaced 1 block(s) in /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs."
+  },
+  {
+    "tool": "edit",
+    "arguments": {
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs",
+      "edits": [
+        {
+          "oldText": "  const source = readFileSync(fileURLToPath(new URL('../src/search.mjs', import.meta.url)), 'utf8');\n  assert.equal(/(^|\\n)\\s*import[\\s\\S]*?from/.test(source), false, 'no static imports allowed');\n  assert.equal(/\\brequire\\s*\\(/.test(source), false, 'no require() allowed');\n  assert.equal(/node:/.test(source.replace(/^\\/\\/.*$/gm, '').replace(/\\*[\\s\\S]*?\\*\\//g, '')), false);\n  assert.equal(/csv/i.test(source), false, 'search.mjs must not depend on csv');\n});",
+          "newText": "  const url = fileURLToPath(new URL('../src/search.mjs', import.meta.url));\n  const source = readFileSync(url, 'utf8');\n  assert.equal(/^\\s*import\\s/m.test(source), false, 'no static imports allowed');\n  assert.equal(/\\bimport\\s*\\(/.test(source), false, 'no dynamic import() allowed');\n  assert.equal(/\\brequire\\s*\\(/.test(source), false, 'no require() allowed');\n  assert.equal(/\\bnode:\\w/.test(source), false, 'no built-in modules allowed');\n  assert.equal(/csv/i.test(source), false, 'must not reference the csv workstream');\n});"
+        }
+      ]
+    },
+    "requestedAt": "2026-09-13T17:23:31.128Z",
+    "finishedAt": "2026-09-13T17:23:31.136Z",
+    "isError": false,
+    "result": "Successfully replaced 1 block(s) in /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs."
+  },
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "cd \"$PWD\" && node --test tests/search.test.mjs 2>&1 | tail -60"
+    },
+    "requestedAt": "2026-09-13T17:23:35.891Z",
+    "finishedAt": "2026-09-13T17:23:36.098Z",
+    "isError": false,
+    "result": "      at async Test.processPendingSubtests (node:internal/test_runner/test:777:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: [ 'Green Tea', 'green coffee', 'Earl GREY', 'Matcha Powder', 'Olive Oil' ],\n    expected: [ 'Earl GREY' ],\n    operator: 'deepStrictEqual',\n    diff: 'simple'\n  }\n\ntest at tests/search.test.mjs:130:1\n✖ regex metacharacters in the query are literal (0.128208ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n  + actual - expected\n  \n    [\n      'A.B',\n  -   'AXB'\n    ]\n  \n      at TestContext.<anonymous> (file:///private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs:136:10)\n      at Test.runInAsyncScope (node:async_hooks:213:14)\n      at Test.run (node:internal/test_runner/test:1095:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:777:18)\n      at Test.postRun (node:internal/test_runner/test:1224:19)\n      at Test.run (node:internal/test_runner/test:1152:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:777:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: [ 'A.B' ],\n    expected: [ 'A.B', 'AXB' ],\n    operator: 'deepStrictEqual',\n    diff: 'simple'\n  }\n\ntest at tests/search.test.mjs:150:1\n✖ bounds window filters correctly and keeps order (0.165ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n  + actual - expected\n  \n    [\n      'Green Tea',\n  +   'green coffee',\n      'Earl GREY',\n      'Olive Oil'\n    ]\n  \n      at TestContext.<anonymous> (file:///private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs:152:10)\n      at Test.runInAsyncScope (node:async_hooks:213:14)\n      at Test.run (node:internal/test_runner/test:1095:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:777:18)\n      at Test.postRun (node:internal/test_runner/test:1224:19)\n      at Test.run (node:internal/test_runner/test:1152:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:777:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: [ 'Green Tea', 'green coffee', 'Earl GREY', 'Olive Oil' ],\n    expected: [ 'Green Tea', 'Earl GREY', 'Olive Oil' ],\n    operator: 'deepStrictEqual',\n    diff: 'simple'\n  }\n"
+  },
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "cd \"$PWD\" && node --test tests/search.test.mjs 2>&1 | grep -E \"^(✔|✖|ℹ)\" | head -60"
+    },
+    "requestedAt": "2026-09-13T17:23:45.781Z",
+    "finishedAt": "2026-09-13T17:23:45.987Z",
+    "isError": false,
+    "result": "✖ searchCatalog is exported as a function of arity 2 (1.6465ms)\n✔ second argument is optional (omitted entirely) (0.855417ms)\n✔ options may be an empty object, applying all documented defaults (0.079583ms)\n✔ defaults are query=\"\", minPrice=0, maxPrice=Infinity (per README) (0.125792ms)\n✔ undefined option values fall back to the documented defaults (0.22225ms)\n✔ name matching is case-insensitive in both directions (0.147625ms)\n✔ matching is a substring test, not a prefix or word test (0.076667ms)\n✖ query containing spaces matches inside names (0.920042ms)\n✖ whitespace-only query is not treated as empty (0.223042ms)\n✔ a query that matches nothing returns an empty array (0.148042ms)\n✔ search only looks at `name` (not id, not numeric price text) (0.090625ms)\n✖ regex metacharacters in the query are literal (0.147084ms)\n✔ price bounds are inclusive on both ends (0.069875ms)\n✖ bounds window filters correctly and keeps order (0.111625ms)\n✔ fractional bounds work with floating point prices (0.168ms)\n✔ maxPrice=Infinity includes everything above minPrice (0.054375ms)\n✔ query and bounds combine (logical AND) (0.064375ms)\n✔ input order is preserved even when output order differs from sorted (0.050625ms)\n✔ the input array and its items are never mutated (0.15825ms)\n✔ a mutation-observing proxy confirms only reads happen (0.09725ms)\n✔ frozen input (array and items) is accepted, proving no writes are attempted (0.055ms)\n✔ result holds references to the original items, not copies (0.03825ms)\n✔ mutating the result does not affect the input (and vice versa) (0.047833ms)\n✔ extra/unknown properties on items are ignored and preserved by reference (0.052833ms)\n✔ empty input returns an empty array (0.037792ms)\n✔ items with unusable name/price are skipped rather than crashing (0.053792ms)\n✔ non-array items are rejected with a TypeError (0.369375ms)\n✔ non-string query is rejected with a TypeError (0.198625ms)\n✔ non-numeric bounds are rejected with a TypeError (0.295709ms)\n✔ NaN bounds are rejected (0.069042ms)\n✔ negative bounds are rejected with a RangeError (0.151709ms)\n✔ -Infinity minPrice is rejected, +Infinity minPrice is rejected too (0.081583ms)\n✔ minPrice greater than maxPrice is rejected (0.109042ms)\n✔ equal bounds are valid (point query) (0.04025ms)\n✔ validation happens before filtering (no partial work, input untouched) (0.067958ms)\n✔ module source imports nothing and never references the CSV workstream (0.458375ms)\n✔ search results are usable as plain rows (interop-ready shape) (0.12925ms)\nℹ tests 37\nℹ suites 0\nℹ pass 32\nℹ fail 5\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 111.920875\n✖ failing tests:\n✖ searchCatalog is exported as a function of arity 2 (1.6465ms)\n✖ query containing spaces matches inside names (0.920042ms)\n✖ whitespace-only query is not treated as empty (0.223042ms)\n✖ regex metacharacters in the query are literal (0.147084ms)\n✖ bounds window filters correctly and keeps order (0.111625ms)\n"
+  },
+  {
+    "tool": "edit",
+    "arguments": {
+      "edits": [
+        {
+          "newText": "test('searchCatalog is exported as a function taking (items, options?)', () => {\n  assert.equal(typeof searchCatalog, 'function');\n  // Function.length stops at the first parameter with a default, so the\n  // defaulted options object is not counted: arity is 1 for items only.\n  assert.equal(searchCatalog.length, 1);\n  assert.ok(searchCatalog('' , undefined) === undefined || true); // never throws on arg shape check here\n});",
+          "oldText": "test('searchCatalog is exported as a function of arity 2', () => {\n  assert.equal(typeof searchCatalog, 'function');\n  // (items, options) — rest not required; default `= {}` keeps arity at 2.\n  assert.equal(searchCatalog.length, 2);\n});"
+        },
+        {
+          "newText": "test('query containing spaces matches inside names', () => {\n  assert.deepEqual(names(searchCatalog(fixtures(), { query: 'Green ' })), [\n    'Green Tea',\n    'green coffee',\n  ]);\n  assert.deepEqual(names(searchCatalog(fixtures(), { query: 'Earl GR' })), ['Earl GREY']);\n});\n\ntest('whitespace-only query is not treated as empty', () => {\n  const items = [\n    { id: '1', name: 'Matcha', price: 1 },\n    { id: '2', name: 'Two Words', price: 1 },\n  ];\n  assert.deepEqual(names(searchCatalog(items, { query: ' ' })), ['Two Words']);\n  assert.deepEqual(names(searchCatalog(items, { query: '' })), ['Matcha', 'Two Words']);\n});",
+          "oldText": "test('query containing spaces matches inside names', () => {\n  assert.deepEqual(names(searchCatalog(fixtures(), { query: 'Green ' })), ['Green Tea']);\n});\n\ntest('whitespace-only query is not treated as empty', () => {\n  assert.deepEqual(names(searchCatalog(fixtures(), { query: ' ' })), ['Earl GREY']);\n});"
+        },
+        {
+          "newText": "test('regex metacharacters in the query are literal', () => {\n  const items = [\n    { id: '1', name: 'A.B', price: 1 },\n    { id: '2', name: 'AXB', price: 1 },\n  ];\n  // '.' matches only a literal dot, not \"any character\".\n  assert.deepEqual(names(searchCatalog(items, { query: '.' })), ['A.B']);\n  assert.deepEqual(names(searchCatalog(items, { query: 'A.B' })), ['A.B']);\n  assert.deepEqual(names(searchCatalog(items, { query: 'A*B' })), []);\n});",
+          "oldText": "test('regex metacharacters in the query are literal', () => {\n  const items = [\n    { id: '1', name: 'A.B', price: 1 },\n    { id: '2', name: 'AXB', price: 1 },\n  ];\n  assert.deepEqual(names(searchCatalog(items, { query: 'A.B' })), ['A.B']);\n  assert.deepEqual(names(searchCatalog(items, { query: '.' })), ['A.B', 'AXB']);\n});"
+        },
+        {
+          "newText": "test('bounds window filters correctly and keeps order', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 3.5, maxPrice: 100 })), [\n    'Green Tea',\n    'green coffee',\n    'Earl GREY',\n    'Olive Oil',\n  ]);\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 8, maxPrice: 12 })), [\n    'green coffee',\n    'Earl GREY',\n  ]);\n});",
+          "oldText": "test('bounds window filters correctly and keeps order', () => {\n  const items = fixtures();\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 3.5, maxPrice: 100 })), [\n    'Green Tea',\n    'Earl GREY',\n    'Olive Oil',\n  ]);\n  assert.deepEqual(names(searchCatalog(items, { minPrice: 8, maxPrice: 12 })), [\n    'green coffee',\n    'Earl GREY',\n  ]);\n});"
+        }
+      ],
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs"
+    },
+    "requestedAt": "2026-09-13T17:24:06.312Z",
+    "finishedAt": "2026-09-13T17:24:06.316Z",
+    "isError": false,
+    "result": "Successfully replaced 4 block(s) in /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs."
+  },
+  {
+    "tool": "edit",
+    "arguments": {
+      "edits": [
+        {
+          "newText": "  assert.equal(searchCatalog.length, 1);\n});",
+          "oldText": "  assert.equal(searchCatalog.length, 1);\n  assert.ok(searchCatalog('' , undefined) === undefined || true); // never throws on arg shape check here\n});"
+        }
+      ],
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs"
+    },
+    "requestedAt": "2026-09-13T17:24:16.189Z",
+    "finishedAt": "2026-09-13T17:24:16.191Z",
+    "isError": false,
+    "result": "Successfully replaced 1 block(s) in /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs."
+  },
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "cd \"$PWD\" && node --test tests/search.test.mjs 2>&1 | tail -30"
+    },
+    "requestedAt": "2026-09-13T17:24:23.007Z",
+    "finishedAt": "2026-09-13T17:24:23.216Z",
+    "isError": false,
+    "result": "✔ maxPrice=Infinity includes everything above minPrice (0.04525ms)\n✔ query and bounds combine (logical AND) (0.03575ms)\n✔ input order is preserved even when output order differs from sorted (0.036834ms)\n✔ the input array and its items are never mutated (0.146666ms)\n✔ a mutation-observing proxy confirms only reads happen (0.094708ms)\n✔ frozen input (array and items) is accepted, proving no writes are attempted (0.05075ms)\n✔ result holds references to the original items, not copies (0.036334ms)\n✔ mutating the result does not affect the input (and vice versa) (0.053458ms)\n✔ extra/unknown properties on items are ignored and preserved by reference (0.044083ms)\n✔ empty input returns an empty array (0.043875ms)\n✔ items with unusable name/price are skipped rather than crashing (0.089791ms)\n✔ non-array items are rejected with a TypeError (0.448875ms)\n✔ non-string query is rejected with a TypeError (0.18925ms)\n✔ non-numeric bounds are rejected with a TypeError (0.290042ms)\n✔ NaN bounds are rejected (0.065833ms)\n✔ negative bounds are rejected with a RangeError (0.344ms)\n✔ -Infinity minPrice is rejected, +Infinity minPrice is rejected too (0.155625ms)\n✔ minPrice greater than maxPrice is rejected (0.136166ms)\n✔ equal bounds are valid (point query) (0.051459ms)\n✔ validation happens before filtering (no partial work, input untouched) (0.06275ms)\n✔ module source imports nothing and never references the CSV workstream (0.472833ms)\n✔ search results are usable as plain rows (interop-ready shape) (0.077917ms)\nℹ tests 37\nℹ suites 0\nℹ pass 37\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 112.134417\n"
+  },
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "cd \"$PWD\" && npm test 2>&1 | tail -12 && echo \"--- files ---\" && find . -type f -not -path './.git' | sort && echo \"--- README/package.json untouched ---\" && cat README.md package.json && grep -n \"csv\" src/search.mjs tests/search.test.mjs || true"
+    },
+    "requestedAt": "2026-09-13T17:24:31.138Z",
+    "finishedAt": "2026-09-13T17:24:31.533Z",
+    "isError": false,
+    "result": "✔ equal bounds are valid (point query) (0.038959ms)\n✔ validation happens before filtering (no partial work, input untouched) (0.052542ms)\n✔ module source imports nothing and never references the CSV workstream (0.289125ms)\n✔ search results are usable as plain rows (interop-ready shape) (0.066167ms)\nℹ tests 37\nℹ suites 0\nℹ pass 37\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 111.613625\n--- files ---\n./README.md\n./package.json\n./src/search.mjs\n./tests/search.test.mjs\n--- README/package.json untouched ---\n# Catalog toolkit\nImplement two independent, dependency-free Node.js modules and then verify their interoperability.\nExisting public contract (do not redesign):\n- src/csv.mjs exports parseCatalog(csvText), returning [{id: string, name: string, price: number}]. Header is id,name,price; handle quoted commas, escaped quotes, CRLF, empty input, and reject malformed rows and negative/non-finite prices.\n- src/search.mjs exports searchCatalog(items, {query = '', minPrice = 0, maxPrice = Infinity} = {}). Case-insensitive substring search on name; inclusive price bounds; preserve order, do not mutate input; reject invalid bounds.\n- No runtime dependencies, no network services, Node built-in tests only.\n{\"name\": \"catalog-cu-evaluation\", \"private\": true, \"type\": \"module\", \"scripts\": {\"test\": \"node --test\"}}\ntests/search.test.mjs:6: * dependency on the parallel CSV workstream (src/csv.mjs / tests/csv.test.mjs).\ntests/search.test.mjs:439:  assert.equal(/csv/i.test(source), false, 'must not reference the csv workstream');\n"
+  },
+  {
+    "tool": "read",
+    "arguments": {
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs",
+      "offset": "60",
+      "limit": "55"
+    },
+    "requestedAt": "2026-09-13T17:24:39.866Z",
+    "finishedAt": "2026-09-13T17:24:39.867Z",
+    "isError": false,
+    "result": "  }\n  assertBound('minPrice', minPrice, { allowPositiveInfinity: false });\n  assertBound('maxPrice', maxPrice, { allowPositiveInfinity: true });\n  if (minPrice > maxPrice) {\n    throw new RangeError(\n      `searchCatalog: invalid price bounds, minPrice (${minPrice}) exceeds maxPrice (${maxPrice})`,\n    );\n  }\n  return { needle: query.toLowerCase(), minPrice, maxPrice };\n}\n\n/**\n * A catalog item is filterable only if it is an object exposing a string\n * `name` and a comparable numeric `price`. Anything else is simply not a\n * match (we do not throw, and we never touch the item).\n */\nfunction isMatchable(item) {\n  return (\n    item !== null &&\n    typeof item === 'object' &&\n    typeof item.name === 'string' &&\n    typeof item.price === 'number' &&\n    !Number.isNaN(item.price)\n  );\n}\n\n/**\n * Filter a catalog by a case-insensitive substring of `name` plus an\n * inclusive price window, preserving input order.\n *\n * @template {object} T\n * @param {readonly T[]} items           catalog rows (never mutated)\n * @param {object} [options]\n * @param {string} [options.query='']    substring searched in `name`, case-insensitive\n * @param {number} [options.minPrice=0]  inclusive lower price bound\n * @param {number} [options.maxPrice=Infinity] inclusive upper price bound\n * @returns {T[]} new array holding references to the matching input items\n */\nexport function searchCatalog(items, { query = '', minPrice = 0, maxPrice = Infinity } = {}) {\n  if (!Array.isArray(items)) {\n    throw new TypeError(\n      `searchCatalog: items must be an array, received ${describe(items)}`,\n    );\n  }\n\n  const { needle, minPrice: low, maxPrice: high } = normalizeOptions(query, minPrice, maxPrice);\n  const matches = [];\n\n  for (const item of items) {\n    if (!isMatchable(item)) continue;\n    if (needle !== '' && !item.name.toLowerCase().includes(needle)) continue;\n    if (item.price < low || item.price > high) continue;\n    matches.push(item);\n  }\n\n\n[5 more lines in file. Use offset=115 to continue.]"
+  },
+  {
+    "tool": "edit",
+    "arguments": {
+      "edits": [
+        {
+          "newText": "/**\n * A catalog item is filterable only if it is an object exposing a string\n * `name` and a comparable numeric `price`. Anything else is simply not a\n * match: we never throw on odd rows and we never write to them.\n */",
+          "oldText": "/**\n * A catalog item is filterable only if it is an object exposing a string\n * `name` and a comparable numeric `price`. Anything else is simply not a\n * match (we do not throw, and we never touch the item).\n */"
+        },
+        {
+          "newText": "  for (const item of items) {\n    if (item === null || typeof item !== 'object') continue;\n\n    // Read each field at most once (getter-friendly) and only as needed.\n    const name = item.name;\n    if (typeof name !== 'string') continue;\n    if (needle !== '' && !name.toLowerCase().includes(needle)) continue;\n\n    const price = item.price;\n    if (typeof price !== 'number' || Number.isNaN(price)) continue;\n    if (price < low || price > high) continue;\n\n    matches.push(item);\n  }",
+          "oldText": "  for (const item of items) {\n    if (!isMatchable(item)) continue;\n    if (needle !== '' && !item.name.toLowerCase().includes(needle)) continue;\n    if (item.price < low || item.price > high) continue;\n    matches.push(item);\n  }"
+        }
+      ],
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs"
+    },
+    "requestedAt": "2026-09-13T17:25:00.222Z",
+    "finishedAt": "2026-09-13T17:25:00.225Z",
+    "isError": false,
+    "result": "Successfully replaced 2 block(s) in /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs."
+  },
+  {
+    "tool": "read",
+    "arguments": {
+      "limit": "30",
+      "offset": "68",
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs"
+    },
+    "requestedAt": "2026-09-13T17:25:05.234Z",
+    "finishedAt": "2026-09-13T17:25:05.235Z",
+    "isError": false,
+    "result": "  return { needle: query.toLowerCase(), minPrice, maxPrice };\n}\n\n/**\n * A catalog item is filterable only if it is an object exposing a string\n * `name` and a comparable numeric `price`. Anything else is simply not a\n * match: we never throw on odd rows and we never write to them.\n */\nfunction isMatchable(item) {\n  return (\n    item !== null &&\n    typeof item === 'object' &&\n    typeof item.name === 'string' &&\n    typeof item.price === 'number' &&\n    !Number.isNaN(item.price)\n  );\n}\n\n/**\n * Filter a catalog by a case-insensitive substring of `name` plus an\n * inclusive price window, preserving input order.\n *\n * @template {object} T\n * @param {readonly T[]} items           catalog rows (never mutated)\n * @param {object} [options]\n * @param {string} [options.query='']    substring searched in `name`, case-insensitive\n * @param {number} [options.minPrice=0]  inclusive lower price bound\n * @param {number} [options.maxPrice=Infinity] inclusive upper price bound\n * @returns {T[]} new array holding references to the matching input items\n */\n\n[30 more lines in file. Use offset=98 to continue.]"
+  },
+  {
+    "tool": "edit",
+    "arguments": {
+      "edits": [
+        {
+          "newText": "/**\n * Filter a catalog",
+          "oldText": "/**\n * A catalog item is filterable only if it is an object exposing a string\n * `name` and a comparable numeric `price`. Anything else is simply not a\n * match: we never throw on odd rows and we never write to them.\n */\nfunction isMatchable(item) {\n  return (\n    item !== null &&\n    typeof item === 'object' &&\n    typeof item.name === 'string' &&\n    typeof item.price === 'number' &&\n    !Number.isNaN(item.price)\n  );\n}\n\n/**\n * Filter a catalog"
+        }
+      ],
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs"
+    },
+    "requestedAt": "2026-09-13T17:26:00.703Z",
+    "finishedAt": "2026-09-13T17:26:00.705Z",
+    "isError": false,
+    "result": "Successfully replaced 1 block(s) in /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs."
+  },
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "cd \"$PWD\" && node --check src/search.mjs 2>&1 | head -5; node -e \"import('./src/search.mjs').then(m=>console.log('ok', typeof m.searchCatalog))\" 2>&1 | head -5"
+    },
+    "requestedAt": "2026-09-13T17:26:05.284Z",
+    "finishedAt": "2026-09-13T17:26:05.466Z",
+    "isError": false,
+    "result": "ok function\n"
+  },
+  {
+    "tool": "read",
+    "arguments": {
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/src/search.mjs"
+    },
+    "requestedAt": "2026-09-13T17:26:08.795Z",
+    "finishedAt": "2026-09-13T17:26:08.797Z",
+    "isError": false,
+    "result": "/**\n * src/search.mjs — independent catalog search/filter module.\n *\n * Public contract (README.md):\n *   searchCatalog(items, { query = '', minPrice = 0, maxPrice = Infinity } = {})\n *     - case-insensitive substring search on `name`\n *     - inclusive price bounds\n *     - preserves input order\n *     - never mutates the input array or the item objects\n *     - rejects invalid bounds\n *\n * This module is dependency-free: no imports, no runtime deps, no network\n * services, and it deliberately depends on nothing else in this repo (the\n * parallel parser workstream owns its own module file).\n */\n\n/** Format a value for an error message without ever throwing on weird input. */\nfunction describe(value) {\n  if (typeof value === 'number') return value;\n  if (typeof value === 'string') return JSON.stringify(value);\n  if (value === null) return 'null';\n  if (typeof value === 'object') {\n    const ctor = value.constructor && value.constructor.name;\n    return `an object (${typeof ctor === 'string' && ctor !== 'Object' ? ctor : 'Object'})`;\n  }\n  return `${typeof value} ${String(value)}`;\n}\n\n/**\n * Validate a single numeric bound.\n *\n * @param {string} name  option name, used in error messages\n * @param {unknown} value\n * @param {boolean} allowPositiveInfinity  only `maxPrice` may be Infinity\n */\nfunction assertBound(name, value, { allowPositiveInfinity }) {\n  if (typeof value !== 'number' || Number.isNaN(value)) {\n    throw new TypeError(\n      `searchCatalog: ${name} must be a number, received ${describe(value)}`,\n    );\n  }\n  if (value < 0) {\n    throw new RangeError(\n      `searchCatalog: ${name} must not be negative, received ${value}`,\n    );\n  }\n  if (!Number.isFinite(value) && !allowPositiveInfinity) {\n    throw new RangeError(\n      `searchCatalog: ${name} must be a finite number, received ${value}`,\n    );\n  }\n}\n\n/** Validate every option that influences matching. Returns the normalized filter. */\nfunction normalizeOptions(query, minPrice, maxPrice) {\n  if (typeof query !== 'string') {\n    throw new TypeError(\n      `searchCatalog: query must be a string, received ${describe(query)}`,\n    );\n  }\n  assertBound('minPrice', minPrice, { allowPositiveInfinity: false });\n  assertBound('maxPrice', maxPrice, { allowPositiveInfinity: true });\n  if (minPrice > maxPrice) {\n    throw new RangeError(\n      `searchCatalog: invalid price bounds, minPrice (${minPrice}) exceeds maxPrice (${maxPrice})`,\n    );\n  }\n  return { needle: query.toLowerCase(), minPrice, maxPrice };\n}\n\n/**\n * Filter a catalog by a case-insensitive substring of `name` plus an\n * inclusive price window, preserving input order.\n *\n * @template {object} T\n * @param {readonly T[]} items           catalog rows (never mutated)\n * @param {object} [options]\n * @param {string} [options.query='']    substring searched in `name`, case-insensitive\n * @param {number} [options.minPrice=0]  inclusive lower price bound\n * @param {number} [options.maxPrice=Infinity] inclusive upper price bound\n * @returns {T[]} new array holding references to the matching input items\n */\nexport function searchCatalog(items, { query = '', minPrice = 0, maxPrice = Infinity } = {}) {\n  if (!Array.isArray(items)) {\n    throw new TypeError(\n      `searchCatalog: items must be an array, received ${describe(items)}`,\n    );\n  }\n\n  const { needle, minPrice: low, maxPrice: high } = normalizeOptions(query, minPrice, maxPrice);\n  const matches = [];\n\n  for (const item of items) {\n    if (item === null || typeof item !== 'object') continue;\n\n    // Read each field at most once (getter-friendly) and only as needed.\n    const name = item.name;\n    if (typeof name !== 'string') continue;\n    if (needle !== '' && !name.toLowerCase().includes(needle)) continue;\n\n    const price = item.price;\n    if (typeof price !== 'number' || Number.isNaN(price)) continue;\n    if (price < low || price > high) continue;\n\n    matches.push(item);\n  }\n\n  return matches;\n}\n\nexport default searchCatalog;\n"
+  },
+  {
+    "tool": "edit",
+    "arguments": {
+      "edits": [
+        {
+          "newText": "test('item fields are read (at most once) and never written', () => {\n  const reads = { name: 0, price: 0 };\n  const makeRow = (label) => ({\n    get name() {\n      reads.name += 1;\n      return label;\n    },\n    get price() {\n      reads.price += 1;\n      return 3.5;\n    },\n  });\n\n  const hit = makeRow('Green Tea');\n  const miss = makeRow('Olive Oil');\n  const result = searchCatalog([hit, miss], { query: 'tea', minPrice: 1, maxPrice: 5 });\n\n  assert.equal(result.length, 1);\n  assert.equal(result[0], hit);\n  assert.deepEqual(reads, { name: 2, price: 1 }, 'price of a name-mismatched row is never read');\n});\n\ntest('frozen input (array and items) is accepted, proving no writes are attempted', () => {",
+          "oldText": "test('frozen input (array and items) is accepted, proving no writes are attempted', () => {"
+        }
+      ],
+      "path": "/private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs"
+    },
+    "requestedAt": "2026-09-13T17:26:18.498Z",
+    "finishedAt": "2026-09-13T17:26:18.501Z",
+    "isError": false,
+    "result": "Successfully replaced 1 block(s) in /private/tmp/grapher-cu-20260914/.grapher-worktrees/035972f3-4e96-40c2-b7d7-678f830c268f/search-filter-module-ba428f25-90d5-411c-a314-04bd0abd5264/tests/search.test.mjs."
+  },
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "cd \"$PWD\" && node --test tests/search.test.mjs 2>&1 | tail -15 && echo \"=== npm test ===\" && npm test 2>&1 | tail -8"
+    },
+    "requestedAt": "2026-09-13T17:26:22.536Z",
+    "finishedAt": "2026-09-13T17:26:23.590Z",
+    "isError": false,
+    "result": "✔ negative bounds are rejected with a RangeError (0.194584ms)\n✔ -Infinity minPrice is rejected, +Infinity minPrice is rejected too (0.142166ms)\n✔ minPrice greater than maxPrice is rejected (0.173625ms)\n✔ equal bounds are valid (point query) (0.0605ms)\n✔ validation happens before filtering (no partial work, input untouched) (0.08825ms)\n✔ module source imports nothing and never references the CSV workstream (0.478792ms)\n✔ search results are usable as plain rows (interop-ready shape) (0.09325ms)\nℹ tests 38\nℹ suites 0\nℹ pass 38\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 161.088833\n=== npm test ===\nℹ tests 38\nℹ suites 0\nℹ pass 38\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 230.41925\n"
+  },
+  {
+    "tool": "bash",
+    "arguments": {
+      "command": "cd \"$PWD\" && ls -R src tests && md5 README.md package.json && node -e \"\nimport('./src/search.mjs').then(({searchCatalog}) => {\n  const items=[{id:'1',name:'Green Tea',price:3.5},{id:'2',name:'OLIVE oil',price:100}];\n  console.log(JSON.stringify(searchCatalog(items,{query:'oil',minPrice:5})));\n  console.log(JSON.stringify(items));\n  try{searchCatalog(items,{minPrice:20,maxPrice:10})}catch(e){console.log(e.constructor.name+': '+e.message)}\n});\""
+    },
+    "requestedAt": "2026-09-13T17:26:33.025Z",
+    "finishedAt": "2026-09-13T17:26:33.143Z",
+    "isError": false,
+    "result": "src:\nsearch.mjs\n\ntests:\nsearch.test.mjs\nMD5 (README.md) = fd0eee4dc3d78701757bab0d83e99582\nMD5 (package.json) = 472a13b5f59b109e7f1a968145d54bca\n[{\"id\":\"2\",\"name\":\"OLIVE oil\",\"price\":100}]\n[{\"id\":\"1\",\"name\":\"Green Tea\",\"price\":3.5},{\"id\":\"2\",\"name\":\"OLIVE oil\",\"price\":100}]\nRangeError: searchCatalog: invalid price bounds, minPrice (20) exceeds maxPrice (10)\n"
+  }
+]
