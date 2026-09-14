@@ -115,6 +115,8 @@ export interface PlanStreamEvent {
   planType?: "serial" | "graph";
   snapshot?: Snapshot;
   error?: string;
+  planningId?: string;
+  summary?: PlanningSummary;
 }
 
 export interface TranscriptItem {

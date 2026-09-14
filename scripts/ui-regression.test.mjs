@@ -19,11 +19,15 @@ try {
       timing: "src/components/ExecutionTiming.tsx",
       card: "src/components/ToolCallCard.tsx",
       planningCard: "src/components/PlanningSummaryCard.tsx",
+      extension: "engine/prompt-extension.ts",
     },
     bundle: true,
     platform: "node",
     format: "esm",
-    packages: "external",
+    nodePaths: ["pi/node_modules"],
+    banner: {
+      js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);",
+    },
     jsx: "automatic",
     loader: { ".css": "empty" },
     external: ["react", "react-dom", "react/jsx-runtime", "motion", "lucide-react", "@xyflow/react"],
@@ -36,6 +40,65 @@ try {
   const { ExecutionTiming } = await import(pathToFileURL(path.join(root, "timing.js")));
   const { ToolCallCard } = await import(pathToFileURL(path.join(root, "card.js")));
   const { PlanningSummaryCard, calculateApprovalWaitingTime, calculatePausedTime, parseTimestamp } = await import(pathToFileURL(path.join(root, "planningCard.js")));
+  const registerExtension = (await import(pathToFileURL(path.join(root, "extension.js")))).default;
+
+  // Set up extension with mock Pi ExtensionAPI to capture bash tool and tool_result handlers
+  let registeredBash = null;
+  const listeners = new Map();
+  const mockPi = {
+    on(event, handler) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(handler);
+    },
+    registerTool(tool) {
+      if (tool.name === "bash") registeredBash = tool;
+    },
+  };
+  registerExtension(mockPi);
+
+  async function runBashThroughExtension(command) {
+    const toolCallId = "tc-" + Math.random().toString(36).slice(2);
+    let res;
+    let isErr = false;
+    try {
+      res = await registeredBash.execute(toolCallId, { command }, null, () => {}, undefined);
+    } catch (e) {
+      isErr = true;
+      res = { content: [{ type: "text", text: String(e) }] };
+    }
+
+    const event = {
+      toolCallId,
+      toolName: "bash",
+      input: { command },
+      isError: isErr || Boolean(res?.isError),
+      details: res?.details,
+    };
+
+    for (const h of listeners.get("tool_result") || []) {
+      const patch = await h(event);
+      if (patch) Object.assign(event, patch);
+    }
+
+    const rawExitCode = event.details?.exitCode;
+    const exitCode = typeof rawExitCode === "number" ? rawExitCode : null;
+    const finalIsError = Boolean(event.isError || (exitCode !== null && exitCode !== 0));
+
+    const textContent = Array.isArray(res?.content)
+      ? res.content.map(c => c.text || "").join("\n")
+      : (typeof res?.content === "string" ? res.content : "");
+
+    return {
+      id: toolCallId,
+      toolName: "bash",
+      status: finalIsError ? "error" : "success",
+      args: { command },
+      result: textContent,
+      isError: finalIsError,
+      exitCode,
+      truncated: Boolean(event.details?.truncated),
+    };
+  }
 
   test("Header matches repoInfo against current config.repository and avoids stale project info", () => {
     // Case 1: Matching repository
@@ -149,72 +212,76 @@ try {
     assert.equal(phaseText.paused, "已暂停");
   });
 
-  test("ToolCallCard provides structured exit status across the 4 critical cases (V2-2) without false positives or silent failure omissions", () => {
-    // Case 1: false | true; true (piped command failure) -> must NOT report all green!
-    const case1Html = renderToStaticMarkup(createElement(ToolCallCard, {
-      item: {
-        id: "call-1",
-        toolName: "bash",
-        status: "error",
-        args: { command: "false | true; true" },
-        result: "Command exited with code 1",
-        isError: true,
-        exitCode: 1,
-      },
-    }));
-    assert.match(case1Html, /失败 \(Exit 1\)/);
-    assert.doesNotMatch(case1Html, /完成/);
+  test("ToolCallCard provides structured exit status across the critical cases (V2-2 & V3-2) via real bash execution through prompt extension", async () => {
+    // Case 1: Output contains 'Command exited with code 1' but process exit code is 0
+    // Must NOT be tricked by regex scraping in output! Real process exitCode is 0.
+    const case1Item = await runBashThroughExtension('printf "Command exited with code 1\\n"');
+    assert.equal(case1Item.exitCode, 0, "printf command should have exit code 0");
+    assert.equal(case1Item.isError, false, "printf command should not be marked as error");
+    const case1Html = renderToStaticMarkup(createElement(ToolCallCard, { item: case1Item }));
+    assert.match(case1Html, /完成 \(Exit 0\)/);
+    assert.doesNotMatch(case1Html, /包含警告\/错误/);
+    assert.doesNotMatch(case1Html, /失败/);
 
-    // Case 2: Silent failure (exit code 1, empty text) -> must NOT report all green!
-    const case2Html = renderToStaticMarkup(createElement(ToolCallCard, {
-      item: {
-        id: "call-2",
-        toolName: "bash",
-        status: "error",
-        args: { command: "exit 1" },
-        result: "",
-        isError: true,
-        exitCode: 1,
-      },
-    }));
-    assert.match(case2Html, /失败 \(Exit 1\)/);
+    // Case 2: Silent failure with non-zero exit code (exit 7)
+    // Must NOT report green just because output is empty! Real process exitCode is 7.
+    const case2Item = await runBashThroughExtension("exit 7");
+    assert.equal(case2Item.exitCode, 7, "exit 7 command should have exit code 7");
+    assert.equal(case2Item.isError, true, "exit 7 command should be marked as error");
+    const case2Html = renderToStaticMarkup(createElement(ToolCallCard, { item: case2Item }));
+    assert.match(case2Html, /失败 \(Exit 7\)/);
     assert.doesNotMatch(case2Html, /完成/);
 
-    // Case 3: Output contains the word FAIL but exit code is 0 -> MUST NOT falsely report warning or error!
-    const case3Html = renderToStaticMarkup(createElement(ToolCallCard, {
-      item: {
-        id: "call-3",
-        toolName: "bash",
-        status: "success",
-        args: { command: 'echo "TEST: 0 FAILS, ALL PASSED"' },
-        result: "TEST: 0 FAILS, ALL PASSED",
-        isError: false,
-        exitCode: 0,
-      },
-    }));
-    assert.match(case3Html, /完成 \(Exit 0\)/);
-    assert.doesNotMatch(case3Html, /包含警告\/错误/);
-    assert.doesNotMatch(case3Html, /失败/);
+    // Case 3: Pipeline failure 'false | true; true' under pipefail
+    // Must fail because 'false | true' fails with code 1, and 'set -e' aborts before '; true'
+    const case3Item = await runBashThroughExtension("false | true; true");
+    assert.equal(case3Item.exitCode, 1, "piped failure should have exit code 1");
+    assert.equal(case3Item.isError, true, "piped failure should be marked as error");
+    const case3Html = renderToStaticMarkup(createElement(ToolCallCard, { item: case3Item }));
+    assert.match(case3Html, /失败 \(Exit 1\)/);
+    assert.doesNotMatch(case3Html, /完成/);
 
-    // Case 4: Real npm test failure -> must NOT report all green!
-    const case4Html = renderToStaticMarkup(createElement(ToolCallCard, {
-      item: {
-        id: "call-4",
-        toolName: "bash",
-        status: "error",
-        args: { command: "npm test" },
-        result: "✖ parseCatalog returns identical reference\n  AssertionError [ERR_ASSERTION]: Expected values to be identical\nCommand exited with code 1",
-        isError: true,
-        exitCode: 1,
-      },
-    }));
-    assert.match(case4Html, /失败 \(Exit 1\)/);
-    assert.doesNotMatch(case4Html, /完成 \(Exit 0\)/);
+    // Case 4: Real process exit code 2
+    const case4Item = await runBashThroughExtension(`${process.execPath} -e "process.exit(2)"`);
+    assert.equal(case4Item.exitCode, 2, "process.exit(2) should have exit code 2");
+    assert.equal(case4Item.isError, true, "process.exit(2) should be marked as error");
+    const case4Html = renderToStaticMarkup(createElement(ToolCallCard, { item: case4Item }));
+    assert.match(case4Html, /失败 \(Exit 2\)/);
+    assert.doesNotMatch(case4Html, /完成/);
 
-    // Truncation indicator & structured metadata bar
+    // Case 5: Unknown / null exit code (interrupted or synthetic error without exit code)
+    // Must display '失败 (退出码未知)' instead of faking 'Exit 1'
+    const case5Item = {
+      id: "call-unk",
+      toolName: "bash",
+      status: "error",
+      args: { command: "sleep 10" },
+      result: "Process interrupted",
+      isError: true,
+      exitCode: null,
+    };
+    const case5Html = renderToStaticMarkup(createElement(ToolCallCard, { item: case5Item }));
+    assert.match(case5Html, /失败 \(退出码未知\)/);
+    assert.doesNotMatch(case5Html, /Exit 1/);
+
+    // Case 6: Non-bash tool (e.g. read/write tool)
+    // Non-bash tools do not have bash process exit codes; must display clean '完成' or '失败' without 'Exit'
+    const nonBashItem = {
+      id: "call-read",
+      toolName: "read",
+      status: "success",
+      args: { path: "src/index.ts" },
+      result: "export const x = 1;",
+      isError: false,
+    };
+    const nonBashHtml = renderToStaticMarkup(createElement(ToolCallCard, { item: nonBashItem }));
+    assert.match(nonBashHtml, /完成/);
+    assert.doesNotMatch(nonBashHtml, /Exit/);
+
+    // Case 7: Truncation indicator & structured metadata bar
     const truncatedHtml = renderToStaticMarkup(createElement(ToolCallCard, {
       item: {
-        id: "call-5",
+        id: "call-trunc",
         toolName: "bash",
         status: "success",
         args: { command: "git log" },
@@ -298,6 +365,10 @@ try {
       },
     }));
     assert.match(failedHtml, /规划未通过：Partitioner returned an invalid route/);
+
+    // Check footer note clarifies SQLite authority and avoids unconditional claims
+    assert.match(approvedHtml, /运行态生命周期以 SQLite 事件为权威源/);
+    assert.doesNotMatch(approvedHtml, /完全对账/);
 
     // Check no thought leakage
     assert.doesNotMatch(approvedHtml, /thought/i);

@@ -7,7 +7,7 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import {
   Snapshot, PlanRouteType, RepositoryInfo, Config,
-  Graph, Execution, Status, emptyGraph
+  Graph, Execution, Status, PlanningSummary, emptyGraph
 } from "../../types";
 import { PromptBox } from "../ui/chatgpt-prompt-input";
 import { MarkdownRenderer } from "../MarkdownRenderer";
@@ -45,6 +45,7 @@ interface GraphWorkbenchProps {
   nodeTypes: any;
   edgeTypes: any;
   tokens: any;
+  failedPlanning?: PlanningSummary | null;
 }
 
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
@@ -52,6 +53,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   routeType,
   selected,
   setSelected,
+  failedPlanning,
   effectiveMessages,
   isPlanning,
   plannerStream,
@@ -429,13 +431,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               </div>
 
               {/* 持久化规划阶段摘要 */}
-              {state.planning && (
+              {(state.planning || failedPlanning) && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 >
-                  <PlanningSummaryCard planning={state.planning} state={state} />
+                  <PlanningSummaryCard
+                    planning={state.planning || failedPlanning!}
+                    state={state}
+                    defaultExpanded={!state.planning && !!failedPlanning}
+                  />
                 </motion.div>
               )}
 

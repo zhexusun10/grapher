@@ -250,13 +250,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
             .map((item: { text: string }) => item.text)
             .join("\n");
 
-          const exitCodeMatch = resultText.match(/Command exited with code (\d+)/);
           const rawExitCode = event.result?.details?.exitCode;
-          const exitCode = typeof rawExitCode === "number"
-            ? rawExitCode
-            : exitCodeMatch
-            ? parseInt(exitCodeMatch[1], 10)
-            : (event.isError || event.result?.isError) ? 1 : 0;
+          const exitCode = typeof rawExitCode === "number" ? rawExitCode : null;
+          const isError = !!(event.isError || event.result?.isError || (exitCode !== null && exitCode !== 0));
           const truncated = !!(
             event.result?.details?.truncation?.truncated ||
             event.result?.details?.truncated ||
@@ -268,8 +264,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
             matched.result = resultText;
             matched.exitCode = exitCode;
             matched.truncated = truncated;
-            matched.isError = event.isError || event.result?.isError || exitCode !== 0;
-            matched.status = matched.isError ? "error" : "success";
+            matched.isError = isError;
+            matched.status = isError ? "error" : "success";
             if (event.toolCallId) pendingTools.delete(event.toolCallId);
           } else {
             // Find in currentItems from end
@@ -282,8 +278,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
                 currentItems[i].result = resultText;
                 currentItems[i].exitCode = exitCode;
                 currentItems[i].truncated = truncated;
-                currentItems[i].isError = event.isError || event.result?.isError || exitCode !== 0;
-                currentItems[i].status = currentItems[i].isError ? "error" : "success";
+                currentItems[i].isError = isError;
+                currentItems[i].status = isError ? "error" : "success";
                 break;
               }
             }

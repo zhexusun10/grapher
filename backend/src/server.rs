@@ -86,7 +86,7 @@ mod prompt_tests {
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
             model: String::new(), max_parallel: 2, max_feedback: 3,
         }, &service, |_| {}, |_| panic!("Failure must not emit a route"), |_| {});
-        assert!(result.unwrap_err().contains("Partitioner failed"));
+        assert!(result.unwrap_err().0.contains("Partitioner failed"));
         let runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.state.run_id, before);
         assert!(runtime.state.executions.is_empty());
@@ -95,6 +95,10 @@ mod prompt_tests {
         let directory = fs::read_dir(root.join("planning")).unwrap().next().unwrap().unwrap().path();
         assert!(fs::read_to_string(directory.join("partition.jsonl")).unwrap().contains("provider unavailable"));
         assert!(!directory.join("route.json").exists());
+        let summary_content = fs::read_to_string(directory.join("summary.json")).unwrap();
+        let failure_summary: PlanningSummary = serde_json::from_str(&summary_content).unwrap();
+        assert_eq!(failure_summary.status.as_deref(), Some("failed"));
+        assert!(failure_summary.roles.contains_key("partition"));
     }
 
     #[test]
@@ -420,16 +424,16 @@ fn plan_goal_internal(
     mut on_partitioner_line: impl FnMut(&str),
     mut on_route: impl FnMut(&Route),
     mut on_planner_line: impl FnMut(&str),
-) -> Result<Snapshot, String> {
+) -> Result<Snapshot, (String, Option<PlanningSummary>)> {
     if goal.trim().is_empty() {
-        return Err("Enter a goal".into());
+        return Err(("Enter a goal".into(), None));
     }
     #[cfg(feature = "fixture")]
     if config.engine != "pi" {
-        return Err("Automatic planning requires the Execution Instance Engine".into());
+        return Err(("Automatic planning requires the Execution Instance Engine".into(), None));
     }
     if service.driving.load(Ordering::SeqCst) || service.planning.swap(true, Ordering::SeqCst) {
-        return Err("Another operation is running".into());
+        return Err(("Another operation is running".into(), None));
     }
     let service = service.clone();
     let cleanup = service.clone();
@@ -438,14 +442,14 @@ fn plan_goal_internal(
         let root = service
             .runtime
             .lock()
-            .map_err(|error| error.to_string())?
+            .map_err(|error| (error.to_string(), None))?
             .root
             .clone();
         let repository = PathBuf::from(&config.repository);
-        crate::workspace::verify(&repository)?;
+        crate::workspace::verify(&repository).map_err(|error| (error, None))?;
         let planning_id = Uuid::new_v4().to_string();
         let directory = root.join("planning").join(&planning_id);
-        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&directory).map_err(|error| (error.to_string(), None))?;
         let plan_outcome = (|| -> Result<Snapshot, String> {
         let route_path = directory.join("route.json");
         let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
@@ -592,20 +596,13 @@ fn plan_goal_internal(
             error: None,
         };
         if let Ok(summary_json) = serde_json::to_string_pretty(&summary) {
-            if let Err(err) = fs::write(directory.join("summary.json"), &summary_json) {
-                eprintln!("Failed to write planning summary.json: {}", err);
-            }
-            if let Err(err) = fs::write(directory.join("metrics.json"), &summary_json) {
-                eprintln!("Failed to write planning metrics.json: {}", err);
-            }
+            let _ = fs::write(directory.join("summary.json"), &summary_json);
+            let _ = fs::write(directory.join("metrics.json"), &summary_json);
         }
 
-        let mut final_config = config;
-        if let Ok(model) = std::env::var("PI_MODEL") {
-            if !model.trim().is_empty() {
-                final_config.model = model;
-            }
-        }
+        #[allow(unused_mut)]
+        let mut final_config = config.clone();
+        #[cfg(not(feature = "fixture"))]
         if final_config.model.trim().is_empty() {
             final_config.model = "qwen3.8-flash".into();
         }
@@ -621,21 +618,46 @@ fn plan_goal_internal(
         }
         Ok(snapshot)
         })();
-        if let Err(ref err) = plan_outcome {
-            let failure_summary = PlanningSummary {
-                planning_id: planning_id.clone(),
-                roles: Default::default(),
-                total_planning_duration: planning_start.elapsed().as_secs_f64(),
-                model_duration: 0.0,
-                status: Some("failed".to_string()),
-                error: Some(err.clone()),
-            };
-            if let Ok(failure_json) = serde_json::to_string_pretty(&failure_summary) {
-                let _ = fs::write(directory.join("summary.json"), &failure_json);
-                let _ = fs::write(directory.join("metrics.json"), &failure_json);
+        match plan_outcome {
+            Ok(snapshot) => Ok(snapshot),
+            Err(err) => {
+                let mut roles: std::collections::BTreeMap<String, PlanningRoleMetrics> = Default::default();
+                let mut model_duration = 0.0;
+                let partition_file = directory.join("partition.jsonl");
+                if partition_file.exists() {
+                    if let Ok(content) = fs::read_to_string(&partition_file) {
+                        let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+                        let partitioner_config = partitioner_model_cfg.effective_config(&config);
+                        let m = parse_planning_role_metrics(&partitioner_config.model, &content);
+                        model_duration += m.duration_seconds;
+                        roles.insert("partition".into(), m);
+                    }
+                }
+                let planner_file = directory.join("planner.jsonl");
+                if planner_file.exists() {
+                    if let Ok(content) = fs::read_to_string(&planner_file) {
+                        let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
+                        let planner_config = planner_model_cfg.effective_config(&config);
+                        let m = parse_planning_role_metrics(&planner_config.model, &content);
+                        model_duration += m.duration_seconds;
+                        roles.insert("planner".into(), m);
+                    }
+                }
+                let failure_summary = PlanningSummary {
+                    planning_id: planning_id.clone(),
+                    roles,
+                    total_planning_duration: planning_start.elapsed().as_secs_f64(),
+                    model_duration,
+                    status: Some("failed".to_string()),
+                    error: Some(err.clone()),
+                };
+                if let Ok(failure_json) = serde_json::to_string_pretty(&failure_summary) {
+                    let _ = fs::write(directory.join("summary.json"), &failure_json);
+                    let _ = fs::write(directory.join("metrics.json"), &failure_json);
+                }
+                Err((err, Some(failure_summary)))
             }
         }
-        plan_outcome
     })();
     cleanup.planning.store(false, Ordering::SeqCst);
     result
@@ -643,6 +665,7 @@ fn plan_goal_internal(
 
 fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
     plan_goal_internal(goal, config, service, |_| {}, |_| {}, |_| {})
+        .map_err(|(error, _)| error)
 }
 
 fn drive(service: Arc<Service>) {
@@ -840,6 +863,40 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     runtime.delete_run(&run_id)
 }
 
+fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningSummary, String> {
+    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    let summary_path = runtime.root.join("planning").join(&planning_id).join("summary.json");
+    if summary_path.exists() {
+        let content = fs::read_to_string(&summary_path).map_err(|error| error.to_string())?;
+        serde_json::from_str(&content).map_err(|error| error.to_string())
+    } else {
+        Err(format!("Planning summary not found: {planning_id}"))
+    }
+}
+
+fn list_plannings(service: &Arc<Service>) -> Result<Vec<PlanningSummary>, String> {
+    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    let planning_dir = runtime.root.join("planning");
+    if !planning_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut summaries = Vec::new();
+    if let Ok(entries) = fs::read_dir(planning_dir) {
+        for entry in entries.flatten() {
+            let summary_path = entry.path().join("summary.json");
+            if summary_path.exists() {
+                if let Ok(content) = fs::read_to_string(&summary_path) {
+                    if let Ok(summary) = serde_json::from_str::<PlanningSummary>(&content) {
+                        summaries.push(summary);
+                    }
+                }
+            }
+        }
+    }
+    summaries.sort_by(|a, b| b.planning_id.cmp(&a.planning_id));
+    Ok(summaries)
+}
+
 fn argument<T: serde::de::DeserializeOwned>(
     body: &serde_json::Value,
     key: &str,
@@ -874,6 +931,8 @@ pub fn dispatch(
             argument(&body, "config")?,
             service,
         )?),
+        "get_planning" => to_value(get_planning(argument(&body, "planningId")?, service)?),
+        "list_plannings" => to_value(list_plannings(service)?),
         "control" => to_value(control(
             argument(&body, "action")?,
             argument(&body, "node")?,
@@ -1079,8 +1138,13 @@ pub fn run() -> Result<(), String> {
                             Ok(snapshot) => {
                                 send_sse_event(&tx, "complete", &serde_json::json!({ "snapshot": snapshot }));
                             }
-                            Err(err) => {
-                                send_sse_event(&tx, "error", &serde_json::json!({ "error": err }));
+                            Err((err, summary)) => {
+                                let mut err_payload = serde_json::json!({ "error": err });
+                                if let Some(s) = summary {
+                                    err_payload["planningId"] = serde_json::json!(s.planning_id);
+                                    err_payload["summary"] = serde_json::json!(s);
+                                }
+                                send_sse_event(&tx, "error", &err_payload);
                             }
                         }
                         let _ = tx.send(Vec::new());

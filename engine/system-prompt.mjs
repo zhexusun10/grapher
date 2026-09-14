@@ -21,7 +21,7 @@ Execution Instance Guidelines:
 
 3. Command Execution & Exit Codes:
 - Always preserve exit codes of verification commands. Do not mask command failures with piping into tail/head/cat/grep, appending '|| true', or chaining with '; true'.
-- Verification commands MUST be executed as standalone commands (e.g. `npm test` or `node --test <file>`) without compound chaining (`;`, `&&`, `||`) or piped filters.
+- Verification commands MUST be executed as standalone commands (e.g. 'npm test' or 'node --test <file>') without compound chaining (';', '&&', '||') or piped filters.
 - If multiple verification checks are needed, run each check in a separate bash tool call so each step's exit code is independently captured and verified.
 - Inspect actual test outputs and exit codes directly.`;
 

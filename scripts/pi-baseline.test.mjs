@@ -18,3 +18,19 @@ test("owned entrypoint starts the pinned CLI without a global Pi executable", ()
   });
   assert.equal(version.trim(), lock.packageVersion);
 });
+
+test("engine prompt adapter system prompt passes syntax validation", () => {
+  execFileSync(process.execPath, ["--check", join(root, "engine/system-prompt.mjs")], {
+    cwd: root, encoding: "utf8",
+  });
+});
+
+test("worker extension engine/prompt-extension.ts loads cleanly without syntax or import errors", () => {
+  execFileSync(process.execPath, [
+    join(root, "pi/node_modules/tsx/dist/cli.mjs"),
+    "-e",
+    "import('./engine/prompt-extension.ts').catch(e => { console.error(e); process.exit(1); })",
+  ], {
+    cwd: root, encoding: "utf8", timeout: 20000,
+  });
+});

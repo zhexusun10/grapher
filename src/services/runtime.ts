@@ -1,4 +1,4 @@
-import { Bootstrap, Config, Graph, Plan, RepositoryInfo, Snapshot } from "../types";
+import { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, Snapshot } from "../types";
 
 async function request<T>(command: string, body: Record<string, unknown> = {}): Promise<T> {
   let response: Response;
@@ -101,8 +101,16 @@ export const runtimeService = {
             } else if (eventType === "planner") {
               onEvent({ type: "planner", raw: dataObj.raw, event: dataObj.event });
             } else if (eventType === "error") {
-              onEvent({ type: "error", error: dataObj.error });
-              throw new Error(dataObj.error || "规划失败");
+              onEvent({
+                type: "error",
+                error: dataObj.error,
+                planningId: dataObj.planningId,
+                summary: dataObj.summary,
+              });
+              const err = new Error(dataObj.error || "规划失败");
+              (err as any).planningId = dataObj.planningId;
+              (err as any).summary = dataObj.summary;
+              throw err;
             }
           } catch (e) {
             if (eventType === "error") throw e;
@@ -116,6 +124,8 @@ export const runtimeService = {
     }
     return finalSnapshot;
   },
+  getPlanning: (planningId: string) => request<PlanningSummary>("get_planning", { planningId }),
+  listPlannings: () => request<PlanningSummary[]>("list_plannings"),
   control: (action: string, extra?: Record<string, unknown>) => request<Snapshot>("control", { action, ...extra }),
   detectRepository: (path?: string | null) => request<RepositoryInfo | null>("detect_repository", { path: path || null }),
   async pickRepository(): Promise<RepositoryInfo | null> {

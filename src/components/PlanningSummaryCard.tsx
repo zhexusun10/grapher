@@ -203,10 +203,10 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
       </div>
 
       {/* 规划失败提示 */}
-      {planning.error && (
-        <div className="planning-error-notice" style={{ marginBottom: 10, padding: "6px 10px", background: "rgba(239, 68, 68, 0.1)", borderRadius: 6, color: "#ef4444", fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}>
-          <AlertCircle size={13} />
-          <span>规划未通过：{planning.error}</span>
+      {(planning.error || planning.status === "failed") && (
+        <div className="planning-error-notice" style={{ marginBottom: 10, padding: "8px 12px", background: "rgba(239, 68, 68, 0.1)", borderRadius: 6, color: "#ef4444", fontSize: 11, display: "flex", alignItems: "flex-start", gap: 6, border: "1px solid rgba(239, 68, 68, 0.2)" }}>
+          <AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>规划未通过：{planning.error || "规划阶段异常中断"}</span>
         </div>
       )}
 
@@ -347,7 +347,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
           <div className="planning-footer-note">
             <FileText size={11} />
             <span>
-              已持久化于 <code>planning/{planning.planningId}/summary.json</code>，不记录模型思考文本，可与磁盘日志完全对账。
+              摘要已持久化于 <code>planning/{planning.planningId}/summary.json</code>。运行态生命周期以 SQLite 事件为权威源；磁盘摘要记录分阶段耗时与 Token 指标，不记录模型思考文本。
             </span>
           </div>
         </div>

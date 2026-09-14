@@ -35,13 +35,8 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     // Extract structured exit code
     const exitCode = useMemo(() => {
       if (typeof item.exitCode === "number") return item.exitCode;
-      if (item.result) {
-        const match = item.result.match(/Command exited with code (\d+)/);
-        if (match) return parseInt(match[1], 10);
-      }
-      if (item.isError || status === "error") return 1;
-      return status === "success" ? 0 : null;
-    }, [item.exitCode, item.result, item.isError, status]);
+      return null;
+    }, [item.exitCode]);
 
     const isError = item.isError || status === "error" || (exitCode !== null && exitCode !== 0);
 
@@ -178,9 +173,22 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
               </span>
             )}
             {status !== "running" && !isError && !hasSubcommandWarning && (
-              <span className="tool-status success" title={`执行成功，退出码: ${exitCode ?? 0}`}>
+              <span
+                className="tool-status success"
+                title={
+                  toolName === "bash"
+                    ? `执行成功${exitCode !== null ? `，退出码: ${exitCode}` : ""}`
+                    : "执行成功"
+                }
+              >
                 <CheckCircle2 size={13} />
-                <span>完成 (Exit {exitCode ?? 0})</span>
+                <span>
+                  {toolName === "bash"
+                    ? exitCode !== null
+                      ? `完成 (Exit ${exitCode})`
+                      : "完成"
+                    : "完成"}
+                </span>
               </span>
             )}
             {status !== "running" && !isError && hasSubcommandWarning && (
@@ -195,10 +203,20 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
             {isError && (
               <span
                 className="tool-status error"
-                title={`执行失败，退出码: ${exitCode ?? 1}`}
+                title={
+                  toolName === "bash"
+                    ? `执行失败${exitCode !== null ? `，退出码: ${exitCode}` : " (退出码未知)"}`
+                    : "执行失败"
+                }
               >
                 <AlertCircle size={13} />
-                <span>失败 (Exit {exitCode ?? 1})</span>
+                <span>
+                  {toolName === "bash"
+                    ? exitCode !== null
+                      ? `失败 (Exit ${exitCode})`
+                      : "失败 (退出码未知)"
+                    : "失败"}
+                </span>
               </span>
             )}
             <button
@@ -218,8 +236,12 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
               <div className="tool-meta-bar">
                 <div className="tool-meta-item">
                   <span className="meta-lbl">退出码:</span>
-                  <span className={`meta-val ${exitCode === 0 ? "success" : "error"}`}>
-                    {exitCode !== null ? exitCode : "未知"}
+                  <span
+                    className={`meta-val ${
+                      exitCode === 0 ? "success" : exitCode !== null ? "error" : "neutral"
+                    }`}
+                  >
+                    {exitCode !== null ? exitCode : "退出码未知"}
                   </span>
                 </div>
                 <div className="tool-meta-item">

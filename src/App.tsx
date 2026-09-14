@@ -6,7 +6,8 @@ import { motion, AnimatePresence } from "motion/react";
 import {
   defaultConfig, emptyGraph, emptySnapshot,
   type Config, type Graph, type ProjectItem, type RepositoryInfo,
-  type Snapshot, type PlanRouteType, type TranscriptItem, type NodeState
+  type Snapshot, type PlanRouteType, type TranscriptItem, type NodeState,
+  type PlanningSummary
 } from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
@@ -99,6 +100,7 @@ export default function App() {
   const [dataPath, setDataPath] = useState("");
   const [isPlanning, setIsPlanning] = useState(false);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
+  const [failedPlanning, setFailedPlanning] = useState<PlanningSummary | null>(null);
 
   const recordRunToWorkspace = (runId: string, repo: string = currentRepoPath) => {
     setWorkspaceRuns((prev) => {
@@ -224,6 +226,7 @@ export default function App() {
       });
     }
     if (data.snapshot.runId) {
+      setFailedPlanning(null);
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       setActiveBackendRunId(data.snapshot.runId);
@@ -235,6 +238,13 @@ export default function App() {
       } else {
         setSelected("");
       }
+    } else {
+      runtimeService.listPlannings().then((plannings) => {
+        const latestFailed = plannings.find((p) => p.status === "failed" || p.error);
+        if (latestFailed) {
+          setFailedPlanning(latestFailed);
+        }
+      }).catch(() => {});
     }
   }, []);
 
@@ -524,6 +534,7 @@ export default function App() {
         originalGoal: targetGoal,
       },
     }));
+    setFailedPlanning(null);
     try {
       if (!config.repository) {
         setModal("settings");
@@ -721,13 +732,9 @@ export default function App() {
               .filter((i: any) => i.type === "text")
               .map((i: any) => i.text)
               .join("\n");
-            const exitCodeMatch = resText.match(/Command exited with code (\d+)/);
             const rawExitCode = pEvent.result?.details?.exitCode;
-            const exitCode = typeof rawExitCode === "number"
-              ? rawExitCode
-              : exitCodeMatch
-              ? parseInt(exitCodeMatch[1], 10)
-              : (pEvent.isError || pEvent.result?.isError) ? 1 : 0;
+            const exitCode = typeof rawExitCode === "number" ? rawExitCode : null;
+            const isErr = !!(pEvent.isError || pEvent.result?.isError || (exitCode !== null && exitCode !== 0));
             const truncated = !!(
               pEvent.result?.details?.truncation?.truncated ||
               pEvent.result?.details?.truncated ||
@@ -743,12 +750,16 @@ export default function App() {
                       result: resText,
                       exitCode,
                       truncated,
-                      isError: pEvent.isError || exitCode !== 0,
-                      status: pEvent.isError || exitCode !== 0 ? "error" : "success",
+                      isError: isErr,
+                      status: isErr ? "error" : "success",
                     }
                   : t
               ),
             }));
+          }
+        } else if (event.type === "error") {
+          if (event.summary) {
+            setFailedPlanning(event.summary);
           }
         } else if (event.type === "complete") {
           if (event.snapshot) {
@@ -764,8 +775,11 @@ export default function App() {
       recordRunToWorkspace(snapshot.runId);
       setSelected("");
       setPlannerStream((prev) => ({ ...prev, stage: "done" }));
-    } catch (err) {
-      setError(String(err));
+    } catch (err: any) {
+      setError(String(err?.message || err));
+      if (err?.summary) {
+        setFailedPlanning(err.summary);
+      }
       setPlannerStream((prev) => ({ ...prev, stage: "error" }));
     } finally {
       setIsPlanning(false);
@@ -1096,6 +1110,7 @@ export default function App() {
                   routeType={routeType}
                   selected={selected}
                   setSelected={setSelected}
+                  failedPlanning={failedPlanning}
                   effectiveMessages={effectiveMessages}
                   isPlanning={isPlanning}
                   plannerStream={plannerStream}
