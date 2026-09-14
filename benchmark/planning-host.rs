@@ -54,7 +54,7 @@ pub fn main(input_path: &str) -> Result<(), String> {
     let role = match stage {
         "partition" => PiRole::Partitioner,
         "planner" => PiRole::Planner,
-        _ => PiRole::Subagent,
+        _ => PiRole::NodeAgent,
     };
     let result = run_pi(PiRequest {
         role,

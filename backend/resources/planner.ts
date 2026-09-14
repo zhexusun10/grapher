@@ -51,7 +51,7 @@ Repository paths only; no symlinks or .git. No shell operators, expansion, scrip
     change(graph);
     for (const node of graph.nodes) {
       if (inspectionRoots.some((root) => node.task.includes(root))) {
-        return result("workspace-portability: node tasks must not contain the planner repository absolute path. Use repository-relative paths within the executing subagent's assigned worktree.", true);
+        return result("workspace-portability: node tasks must not contain the planner repository absolute path. Use repository-relative paths within the executing node agent's assigned worktree.", true);
       }
     }
     const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false }), encoding: "utf8", timeout: 10000 });

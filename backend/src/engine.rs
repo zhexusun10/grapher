@@ -41,7 +41,7 @@ pub fn terminate_all() {
 pub enum PiRole {
     Partitioner,
     Planner,
-    Subagent,
+    NodeAgent,
     Merger,
 }
 
@@ -50,7 +50,7 @@ impl PiRole {
         match self {
             PiRole::Partitioner => "Partitioner",
             PiRole::Planner => "Planner",
-            PiRole::Subagent => "Subagent",
+            PiRole::NodeAgent => "NodeAgent",
             PiRole::Merger => "Merger",
         }
     }
@@ -59,7 +59,7 @@ impl PiRole {
         match self {
             PiRole::Partitioner => 60,
             PiRole::Planner => 300,
-            PiRole::Subagent => 900,
+            PiRole::NodeAgent => 900,
             PiRole::Merger => 900,
         }
     }
@@ -68,7 +68,7 @@ impl PiRole {
         match self {
             PiRole::Partitioner => "PARTITIONER_TIMEOUT_SECONDS",
             PiRole::Planner => "PLANNER_TIMEOUT_SECONDS",
-            PiRole::Subagent => "SUBAGENT_TIMEOUT_SECONDS",
+            PiRole::NodeAgent => "NODE_AGENT_TIMEOUT_SECONDS",
             PiRole::Merger => "MERGER_TIMEOUT_SECONDS",
         }
     }
@@ -77,7 +77,7 @@ impl PiRole {
         match self {
             PiRole::Partitioner => "PARTITIONER_MODEL",
             PiRole::Planner => "PLANNER_MODEL",
-            PiRole::Subagent => "SUBAGENT_MODEL",
+            PiRole::NodeAgent => "NODE_AGENT_MODEL",
             PiRole::Merger => "MERGER_MODEL",
         }
     }
@@ -86,7 +86,7 @@ impl PiRole {
         match self {
             PiRole::Partitioner => "PARTITIONER_THINKING",
             PiRole::Planner => "PLANNER_THINKING",
-            PiRole::Subagent => "SUBAGENT_THINKING",
+            PiRole::NodeAgent => "NODE_AGENT_THINKING",
             PiRole::Merger => "MERGER_THINKING",
         }
     }
@@ -96,7 +96,7 @@ impl PiRole {
             Some("partition") => PiRole::Partitioner,
             Some("planner") => PiRole::Planner,
             Some("merger") => PiRole::Merger,
-            _ => PiRole::Subagent,
+            _ => PiRole::NodeAgent,
         }
     }
 }
@@ -305,7 +305,7 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         "--no-prompt-templates",
         "--no-themes",
     ]);
-    if request.role == PiRole::Subagent {
+    if request.role == PiRole::NodeAgent {
         command.arg("--approve");
     } else {
         command.args(["--no-extensions", "--no-skills", "--no-approve"]);
@@ -526,7 +526,7 @@ pub fn execute(
     let session_dir = root
         .join("sessions")
         .join(&execution.id);
-    let model_config = PiModelConfig::resolve(PiRole::Subagent, config);
+    let model_config = PiModelConfig::resolve(PiRole::NodeAgent, config);
     let effective_config = model_config.effective_config(config);
     let mut extra_args = Vec::new();
     if let Some(thinking) = &model_config.thinking {
@@ -535,7 +535,7 @@ pub fn execute(
     }
     run_pi(
         PiRequest {
-            role: PiRole::Subagent,
+            role: PiRole::NodeAgent,
             config: &effective_config,
             cwd: Path::new(&execution.worktree),
             task: &task,

@@ -63,7 +63,7 @@
     "status": "failed",
     "startedAt": 1789320407795,
     "completedAt": 1789322043450,
-    "error": "Subagent timed out after 900 seconds; inspect the saved session before retrying",
+    "error": "NodeAgent timed out after 900 seconds; inspect the saved session before retrying",
     "wallSeconds": 1635.655,
     "toolCalls": 19,
     "toolErrors": 3,

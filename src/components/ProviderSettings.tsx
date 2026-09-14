@@ -301,7 +301,7 @@ export function ProviderSettings({
               </span>
             </div>
             <p className="section-desc pi-auth-desc">
-              凭证由本地 Pi 内核统一加密管理（保存在 <code>~/.pi/agent/auth.json</code>），Partitioner、Planner、Subagent、Merger 天然共享，无需重复绑定。
+              凭证由本地 Pi 内核统一加密管理（保存在 <code>~/.pi/agent/auth.json</code>），Partitioner、Planner、Node Agent、Merger 天然共享，无需重复绑定。
             </p>
           </div>
         </div>

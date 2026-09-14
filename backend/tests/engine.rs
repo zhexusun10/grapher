@@ -194,7 +194,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     let mut output = String::new();
     let result = run_pi(
         PiRequest {
-            role: PiRole::Subagent,
+            role: PiRole::NodeAgent,
             config: &config,
             cwd: temp.path(),
             task: "Do not run a model",
@@ -214,7 +214,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
 }
 
 #[test]
-fn subagent_allows_skills_and_plugins_while_planner_and_partitioner_disable_them() {
+fn node_agent_allows_skills_and_plugins_while_planner_and_partitioner_disable_them() {
     let temp = TempDir::new().unwrap();
     let script_path = temp.path().join("fake-pi.sh");
     let script = r#"cat >/dev/null
@@ -232,29 +232,29 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         max_feedback: 3,
     };
 
-    // 1. Subagent: must NOT have --no-skills or --no-extensions, MUST have --approve, must NOT restrict tools
-    let mut subagent_out = String::new();
+    // 1. Node Agent: must NOT have --no-skills or --no-extensions, MUST have --approve, must NOT restrict tools
+    let mut node_agent_out = String::new();
     let _ = run_pi(
         PiRequest {
-            role: PiRole::Subagent,
+            role: PiRole::NodeAgent,
             config: &config,
             cwd: temp.path(),
             task: "task",
-            session_dir: &temp.path().join("session-subagent"),
+            session_dir: &temp.path().join("session-node-agent"),
             extension: None,
             tools: None,
-            session_id: Some("subagent-session"),
+            session_id: Some("node-agent-session"),
             extra_args: Vec::new(),
             environment: Vec::new(),
             system_prompt: None,
         },
-        |text| subagent_out.push_str(&text),
+        |text| node_agent_out.push_str(&text),
     );
-    assert!(!subagent_out.contains("--no-skills"), "Subagent must not have --no-skills");
-    assert!(!subagent_out.contains("--no-extensions"), "Subagent must not have --no-extensions");
-    assert!(!subagent_out.contains("--no-approve"), "Subagent must not have --no-approve");
-    assert!(subagent_out.contains("--approve"), "Subagent must have --approve for workspace trust");
-    assert!(!subagent_out.contains("--tools"), "Subagent must not restrict tools via --tools");
+    assert!(!node_agent_out.contains("--no-skills"), "Node agent must not have --no-skills");
+    assert!(!node_agent_out.contains("--no-extensions"), "Node agent must not have --no-extensions");
+    assert!(!node_agent_out.contains("--no-approve"), "Node agent must not have --no-approve");
+    assert!(node_agent_out.contains("--approve"), "Node agent must have --approve for workspace trust");
+    assert!(!node_agent_out.contains("--tools"), "Node agent must not restrict tools via --tools");
 
     // 2. Planner: MUST have --no-skills, --no-extensions, --no-approve, and restricted tools
     let mut planner_out = String::new();
@@ -304,7 +304,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
 }
 
 #[test]
-fn external_pi_model_env_does_not_override_subagent_or_leak_to_child() {
+fn external_pi_model_env_does_not_override_node_agent_or_leak_to_child() {
     let temp = TempDir::new().unwrap();
     let script_path = temp.path().join("fake-pi.sh");
     let script = r#"cat >/dev/null
@@ -338,18 +338,24 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         max_feedback: 3,
     };
 
-    // Verify PiModelConfig::resolve for Subagent ignores PI_MODEL and uses base_config.model
+    // Verify PiModelConfig::resolve for NodeAgent ignores PI_MODEL and uses base_config.model
     use grapher::engine::PiModelConfig;
-    let resolved = PiModelConfig::resolve(PiRole::Subagent, &base_config);
+    let resolved = PiModelConfig::resolve(PiRole::NodeAgent, &base_config);
     assert_eq!(resolved.model, "internal-grapher-model");
     assert_eq!(resolved.thinking, None);
+
+    // Verify NODE_AGENT_MODEL overrides base_config.model
+    std::env::set_var("NODE_AGENT_MODEL", "override-node-model");
+    let resolved_override = PiModelConfig::resolve(PiRole::NodeAgent, &base_config);
+    assert_eq!(resolved_override.model, "override-node-model");
+    std::env::remove_var("NODE_AGENT_MODEL");
 
     // Verify run_pi strips PI_MODEL, PI_THINKING, PI_SESSION_ID, PI_SESSION_FILE from child process environment
     let effective = resolved.effective_config(&base_config);
     let mut output = String::new();
     let _ = run_pi(
         PiRequest {
-            role: PiRole::Subagent,
+            role: PiRole::NodeAgent,
             config: &effective,
             cwd: temp.path(),
             task: "task",

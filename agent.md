@@ -2,7 +2,7 @@
 
 > **Core Philosophy**  
 > 用少量 Planner 结构化开销换掉大量 Multi-Agent 运行期 Coordination Token。  
-> 从始至终都不存在“派发子 Agent”这个 Planner 工具。  
+> 从始至终都不存在“派发 Node Agent”这个 Planner 工具。  
 >
 > **Pi 只是执行引擎。**  
 > Grapher 真正拥有的是：
@@ -110,7 +110,7 @@ Planner 在 Graph 编译成功后立即退出。
 flowchart TD
     User([User Request]) --> Partitioner[Partitioner]
 
-    Partitioner -->|Serial| SerialPi[Single Execution Instance]
+    Partitioner -->|Serial| SerialPi[Single Node Agent]
     Partitioner -->|Graph| Planner[Graph Planner]
 
     subgraph CompilationPhase
@@ -127,9 +127,9 @@ flowchart TD
     subgraph RuntimePhase
         Runtime --> Workspace[Workspace Runtime]
         Runtime --> EventStore[(Execution Event Store)]
-        Runtime --> PiA[Fresh Execution Instance]
-        Runtime --> PiB[Fresh Execution Instance]
-        Runtime --> PiC[Fresh Execution Instance]
+        Runtime --> PiA[Node Agent A (Fresh Instance)]
+        Runtime --> PiB[Node Agent B (Fresh Instance)]
+        Runtime --> PiC[Node Agent C (Fresh Instance)]
 
         Workspace --> WorktreeA[Git Worktree A]
         Workspace --> WorktreeB[Git Worktree B]
@@ -177,7 +177,7 @@ Partitioner 是无工具的单轮分类器，输出 `graph` 或 `serial`，不�
 - 高度线性的任务
 - 分解后几乎不存在有效并行度的任务
 
-直接交给一个原生 Execution Instance。
+直接交给一个原生 Node Agent (Execution Instance)。
 
 ### Graph
 
@@ -235,7 +235,7 @@ send_message
 
 等任何派发 Agent 或运行 Agent 的能力。
 
-Planner 无法直接创建或运行任何 Execution Instance。
+Planner 无法直接创建或运行任何 Node Agent (Execution Instance)。
 
 其中：
 
@@ -276,10 +276,10 @@ interface NodeToolInput {
   name: string;
 
   /**
-   * 给这个 Node Execution 对应 fresh Execution Instance
+   * 给这个 Node Execution 对应 fresh Node Agent (Execution Instance)
    * 使用的 Specific Task。
    *
-   * Agent 不知道 Graph 的存在，因此 task 应该能够独立表达
+   * Node Agent 不知道 Graph 的存在，因此 task 应该能够独立表达
    * 这个 Node 需要完成的工作。
    *
    * delete=true 时可以省略。
@@ -582,7 +582,7 @@ Planner 的唯一核心产物是：
 
 Planner 在规划时需要知道：
 
-- 每一次 Node Execution 都由一个 fresh Execution Instance 执行。
+- 每一次 Node Execution 都由一个全新的 Node Agent (fresh Execution Instance) 执行。
 - 普通 Dependency Edge 表示执行依赖。
 - Feedback Edge 可以产生受控 Cycle。
 - 删除所有 Feedback Edge 后，Dependency Graph 必须可以作为 DAG 调度。
@@ -595,7 +595,7 @@ Planner 在规划时需要知道：
 
 Planner 不负责：
 
-- 创建或派发 Execution Instance
+- 创建或派发 Node Agent (Execution Instance)
 - 执行任何 Graph Node
 - Runtime Scheduling
 - 创建或管理 Git Worktree
@@ -612,7 +612,7 @@ Planner 不负责：
 
 ## Planner Prompt
 
-参见实际 [Planner prompt](backend/resources/prompts/planner.md) 和 [Partitioner prompt](backend/resources/prompts/partitioner.md)。宿主把 `User query:` 之前的部分作为系统提示词，把原始 goal 单独作为 user message；`PARTITIONER_SYSTEM_PROMPT` / `PLANNER_SYSTEM_PROMPT` 可覆盖系统部分，`PARTITIONER_MODEL` / `PLANNER_MODEL` 可分别覆盖模型，`PARTITIONER_THINKING` / `PLANNER_THINKING` 覆盖对应 thinking 参数；普通节点使用 `SUBAGENT_MODEL` / `SUBAGENT_THINKING`。候选图和原始 JSON 输出保存在 runtime 的 `planning/<id>/`。
+参见实际 [Planner prompt](backend/resources/prompts/planner.md) 和 [Partitioner prompt](backend/resources/prompts/partitioner.md)。宿主把 `User query:` 之前的部分作为系统提示词，把原始 goal 单独作为 user message；各角色拥有独立配置（支持 `PARTITIONER_MODEL` / `PARTITIONER_THINKING`、`PLANNER_MODEL` / `PLANNER_THINKING`、`NODE_AGENT_MODEL` / `NODE_AGENT_THINKING`、`MERGER_MODEL` / `MERGER_THINKING`，超时通过 `*_TIMEOUT_SECONDS` 配置）。普通节点（Node Agent）使用 `NODE_AGENT_MODEL` / `NODE_AGENT_THINKING`。候选图和原始 JSON 输出保存在 runtime 的 `planning/<id>/`。
 
 Partitioner 不注册工具：多个实质工作流能够独立推进才输出 Graph，否则 Serial；分类结束即退出，不规划或解决任务。调用失败保留日志并返回错误，不创建或审批执行图。Serial 不调用 Planner，生成唯一名为 `task` 的节点并由后端自动审批启动，直接写用户目录。Graph 则经过 Planner、最终编译与用户审批。
 
@@ -940,13 +940,13 @@ Graph Runtime 是 Grapher 的核心确定性执行引擎。
 
 ---
 
-# 12. Node ≠ Execution Instance
+# 12. Node ≠ Node Agent (Execution Instance)
 
 这是 Grapher 的核心约束。
 
 **Graph Node 是稳定的 Task Definition。**
 
-**Execution Instance 是一次 Node Execution Attempt。**
+**Node Agent (Execution Instance) 是一次 Node Execution Attempt。**
 
 例如：
 
@@ -954,20 +954,20 @@ Graph Runtime 是 Grapher 的核心确定性执行引擎。
 frontend
 │
 ├── Execution #1
-│      └── Execution Instance A
+│      └── Node Agent A (Execution Instance)
 │
 ├── Execution #2
-│      └── Execution Instance B
+│      └── Node Agent B (Execution Instance)
 │
 └── Execution #3
-       └── Execution Instance C
+       └── Node Agent C (Execution Instance)
 ```
 
 每一次 Execution：
 
-> **必须创建全新的 Execution Instance。**
+> **必须创建全新的 Node Agent (Execution Instance)。**
 
-永远不恢复上一轮 Execution Instance Session 继续执行。
+永远不恢复上一轮 Node Agent Session 继续执行。
 
 ---
 
@@ -994,15 +994,15 @@ frontend #1 ≠ frontend #2
 review #1 ≠ review #2
 ```
 
-四次 execution 对应四个独立 Execution Instance。
+四次 execution 对应四个独立 Node Agent (Execution Instance)。
 
 旧 Conversation 保留在 Execution History。
 
 ---
 
-# 13. Execution Instance 的上下文与文件边界
+# 13. Node Agent 的上下文与文件边界
 
-普通 Graph 节点使用全新会话、节点 task 和当前 worktree，不获得 Graph mutation、调度或派发工具。Pi 是唯一 Execution Instance Engine，原生 read/write/edit/bash 工具通过 macOS Seatbelt 受同一个进程级文件策略约束，Bash 子进程继承策略。
+普通 Graph 节点的 Node Agent 使用全新会话、节点 task 和当前 worktree，不获得 Graph mutation、调度或派发工具。Pi 是唯一 Execution Instance Engine，原生 read/write/edit/bash 工具通过 macOS Seatbelt 受同一个进程级文件策略约束，Bash 子进程继承策略。
 
 策略以 canonical 源目录、`.grapher-worktrees` 根和当前节点目录生成。默认允许宿主其他路径和网络，拒绝源目录与整个 worktree 根中当前节点以外的目录。因此对其他 run、稍后创建的 worktree、`..` 和解析到受保护目录的符号链接同样生效，不是先扫描现有 sibling 再生成固定列表。
 
@@ -2189,7 +2189,7 @@ Independent Execution Instances
 
 # 42. Execution Instance Engine 与 Provider/Auth Adapter
 
-Pi fork 是唯一生产 Execution Instance Engine，由 submodule 锁定完整 commit；Grapher 不提供其他引擎实现或切换接口。生产入口固定为 `engine/entrypoint.mjs`，版本与构建输入校验见 [engine/README.md](engine/README.md)。一次实际执行统一称为 Execution Instance，包括节点和专用 merger。
+Pi fork 是唯一生产 Execution Instance Engine，由 submodule 锁定完整 commit；Grapher 不提供其他引擎实现或切换接口。生产入口固定为 `engine/entrypoint.mjs`，版本与构建输入校验见 [engine/README.md](engine/README.md)。一次实际执行统一称为 Execution Instance（节点执行实例统一称为 **Node Agent**，冲突修复实例为专用 merger）。
 
 Grapher 拥有进程生命周期、sandbox、图编译、审批、调度、工作区和仪表记录。Provider/Auth Adapter 委托 upstream `ModelRuntime` 枚举 provider/model、登录、登出、认证状态和凭据管理；前端选择模型/provider、提交认证交互，不自行维护 OAuth/provider 实现。未来 provider/auth 更新通过同步 upstream 继承，边界变化由 Adapter 合约测试发现。
 
@@ -2242,7 +2242,7 @@ Execution History
            Serial             Graph
               │                 │
               ▼                 ▼
-             Pi              Planner
+          Node Agent         Planner
                                 │
                                 ▼
                             Graph IR
@@ -2259,7 +2259,8 @@ Execution History
                          Graph Runtime
                         /      |      \
                        /       |       \
-                  fresh Execution Instance  fresh Execution Instance  fresh Execution Instance
+                  Node Agent  Node Agent  Node Agent
+                  (Fresh Pi)  (Fresh Pi)  (Fresh Pi)
                       │         │         │
                   worktree  worktree  worktree
                        \        |        /

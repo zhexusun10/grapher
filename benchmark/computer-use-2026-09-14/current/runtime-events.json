@@ -161,7 +161,7 @@
     "type": "failed",
     "node": "interoperability-integration-tests",
     "execution_id": "aafb8791-3a60-493b-ab3a-247fcb4717a2",
-    "error": "Subagent timed out after 900 seconds; inspect the saved session before retrying"
+    "error": "NodeAgent timed out after 900 seconds; inspect the saved session before retrying"
   },
   {
     "sequence": 21236,
