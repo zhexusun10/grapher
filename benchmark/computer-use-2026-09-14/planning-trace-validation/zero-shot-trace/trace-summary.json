@@ -1,0 +1,216 @@
+[
+  {
+    "task": "P001",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 5955,
+        "firstAssistantMs": 2245,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 183,
+          "output": 120,
+          "reasoning": 116,
+          "cacheRead": 0
+        }
+      }
+    },
+    "route": "serial"
+  },
+  {
+    "task": "P005",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 9753,
+        "firstAssistantMs": 2158,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 274,
+          "output": 348,
+          "reasoning": 344,
+          "cacheRead": 0
+        }
+      },
+      "planner": {
+        "status": "PASS",
+        "durationMs": 158603,
+        "firstAssistantMs": 1728,
+        "afterLastToolMs": 13350,
+        "toolMs": 858,
+        "tools": {
+          "bash": 17,
+          "read": 1,
+          "node": 4,
+          "edge": 6
+        },
+        "errors": 5,
+        "usage": {
+          "input": 20314,
+          "output": 6901,
+          "reasoning": 2170,
+          "cacheRead": 66944
+        }
+      }
+    },
+    "route": "graph",
+    "graph": {
+      "nodes": [
+        "retry-policy-contract",
+        "typescript-client-retry",
+        "python-client-retry",
+        "sdk-conformance-review"
+      ],
+      "edges": [
+        {
+          "from": "retry-policy-contract",
+          "to": "typescript-client-retry",
+          "relation": "The TypeScript client must implement the retry contract written in contracts/retry-policy.md, so it needs that file present.",
+          "feedback": false
+        },
+        {
+          "from": "retry-policy-contract",
+          "to": "python-client-retry",
+          "relation": "The Python client must implement the retry contract written in contracts/retry-policy.md, so it needs that file present.",
+          "feedback": false
+        },
+        {
+          "from": "typescript-client-retry",
+          "to": "sdk-conformance-review",
+          "relation": "Conformance review needs the finished TypeScript client and its unit tests present in the worktree.",
+          "feedback": false
+        },
+        {
+          "from": "python-client-retry",
+          "to": "sdk-conformance-review",
+          "relation": "Conformance review needs the finished Python client and its unit tests present in the worktree.",
+          "feedback": false
+        },
+        {
+          "from": "sdk-conformance-review",
+          "to": "typescript-client-retry",
+          "relation": "If the joint review finds the TypeScript client nonconformant with contracts/retry-policy.md (or diverging from the Python client), it requests corrections; the rerun invalidates the review so conformance is re-checked.",
+          "feedback": true
+        },
+        {
+          "from": "sdk-conformance-review",
+          "to": "python-client-retry",
+          "relation": "If the joint review finds the Python client nonconformant with contracts/retry-policy.md (or diverging from the TypeScript client), it requests corrections; the rerun invalidates the review so conformance is re-checked.",
+          "feedback": true
+        }
+      ],
+      "taskWords": 1915,
+      "compiled": true
+    }
+  },
+  {
+    "task": "P006",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 10385,
+        "firstAssistantMs": 2410,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 234,
+          "output": 334,
+          "reasoning": 330,
+          "cacheRead": 0
+        }
+      },
+      "planner": {
+        "status": "PASS",
+        "durationMs": 156286,
+        "firstAssistantMs": 2068,
+        "afterLastToolMs": 10825,
+        "toolMs": 300,
+        "tools": {
+          "bash": 12,
+          "read": 3,
+          "node": 5,
+          "edge": 8
+        },
+        "errors": 4,
+        "usage": {
+          "input": 18239,
+          "output": 7017,
+          "reasoning": 2376,
+          "cacheRead": 88832
+        }
+      }
+    },
+    "route": "graph",
+    "graph": {
+      "nodes": [
+        "audit-auth",
+        "audit-storage",
+        "release-review",
+        "verify-assessment"
+      ],
+      "edges": [
+        {
+          "from": "audit-auth",
+          "to": "release-review",
+          "relation": "release.md prioritizes auth/session findings from reports/auth.md",
+          "feedback": false
+        },
+        {
+          "from": "audit-storage",
+          "to": "release-review",
+          "relation": "release.md prioritizes crash-consistency findings from reports/storage.md",
+          "feedback": false
+        },
+        {
+          "from": "audit-auth",
+          "to": "verify-assessment",
+          "relation": "verifier reads reports/auth.md and the source it cites",
+          "feedback": false
+        },
+        {
+          "from": "audit-storage",
+          "to": "verify-assessment",
+          "relation": "verifier reads reports/storage.md and the source it cites",
+          "feedback": false
+        },
+        {
+          "from": "release-review",
+          "to": "verify-assessment",
+          "relation": "verifier checks cross-references in reports/release.md against both audits",
+          "feedback": false
+        },
+        {
+          "from": "verify-assessment",
+          "to": "release-review",
+          "relation": "revise release.md if the decision, prioritization or cross-reference appendix is unsupported",
+          "feedback": true
+        },
+        {
+          "from": "verify-assessment",
+          "to": "audit-auth",
+          "relation": "revise reports/auth.md if evidence, reproduction cases or severity rationale are unsupported or missing",
+          "feedback": true
+        },
+        {
+          "from": "verify-assessment",
+          "to": "audit-storage",
+          "relation": "revise reports/storage.md if failure scenarios, severity rationale or recommended fixes are unsupported or missing",
+          "feedback": true
+        }
+      ],
+      "taskWords": 1657,
+      "compiled": true
+    }
+  }
+]

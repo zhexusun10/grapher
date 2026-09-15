@@ -28,17 +28,30 @@ pub fn main(input_path: &str) -> Result<(), String> {
         .ok().filter(|v| !v.trim().is_empty())
         .or_else(|| std::env::var(model_variable).ok().filter(|v| !v.trim().is_empty()))
         .unwrap_or("qwen3.8-flash".into());
+    let role = match stage {
+        "partition" => PiRole::Partitioner,
+        "planner" => PiRole::Planner,
+        _ => PiRole::NodeAgent,
+    };
+    let role_config = PiModelConfig::resolve(role, &config);
+    // Match production role-specific model/thinking configuration for candidates.
+    if stage != "judge" { config = role_config.effective_config(&config); }
     let extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/planner.ts");
     let graph_path = root.join(if stage == "partition" { "route.json" } else { "graph.json" });
     if stage == "planner" {
         write_json(&graph_path, &json!({"originalGoal":goal,"nodes":[],"edges":[]}));
     }
-    let (system, task, tools, extra_args) = match stage {
-        "partition" => (std::env::var("PARTITIONER_SYSTEM_PROMPT").unwrap_or_else(|_| split_prompt_template(PARTITIONER_PROMPT).0.into()), format!("User query:\n\n{goal}"), "", vec!["--no-tools", "--no-context-files", "--thinking", "off"]),
+    let (system, task, tools, mut extra_args) = match stage {
+        "partition" => (std::env::var("PARTITIONER_SYSTEM_PROMPT").unwrap_or_else(|_| split_prompt_template(PARTITIONER_PROMPT).0.into()), format!("User query:\n\n{goal}"), "", vec!["--no-tools", "--no-context-files"]),
         "planner" => (std::env::var("PLANNER_SYSTEM_PROMPT").unwrap_or_else(|_| split_prompt_template(PLANNER_PROMPT).0.into()), format!("User query:\n\n{goal}"), "node,edge,read,bash", vec![]),
         "judge" => (input["system"].as_str().ok_or("Missing judge system")?.into(), goal.into(), "", vec!["--no-tools", "--no-context-files", "--thinking", "off"]),
         _ => unreachable!(),
     };
+    if stage != "judge" {
+        if let Some(thinking) = &role_config.thinking {
+            extra_args.extend(["--thinking", thinking.as_str()]);
+        }
+    }
     let compiler = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/grapher");
     let environment = if stage == "judge" || stage == "partition" { vec![] } else { vec![
         ("GRAPHER_MODE", stage.into()),
@@ -47,15 +60,10 @@ pub fn main(input_path: &str) -> Result<(), String> {
     ] };
     // Persist the effective prompt/model, including overrides, for reproducible comparisons.
     fs::write(root.join("system-prompt.txt"), &system).map_err(|e| e.to_string())?;
-    write_json(&root.join("stage.json"), &json!({"stage":stage,"model":config.model,"tools":tools,"inspectionPolicy":if stage == "planner" { Some("repository-inspection-v1") } else { None }}));
+    write_json(&root.join("stage.json"), &json!({"stage":stage,"model":config.model,"thinking":if stage == "judge" { Some("off") } else { role_config.thinking.as_deref() },"tools":tools,"inspectionPolicy":if stage == "planner" { Some("repository-inspection-v1") } else { None }}));
     let mut log = fs::File::create(root.join("events.jsonl")).map_err(|e| e.to_string())?;
     let mut log_error = None;
     let started = Instant::now();
-    let role = match stage {
-        "partition" => PiRole::Partitioner,
-        "planner" => PiRole::Planner,
-        _ => PiRole::NodeAgent,
-    };
     let result = run_pi(PiRequest {
         role,
         config: &config, cwd: &repository, task: &task,
@@ -65,11 +73,10 @@ pub fn main(input_path: &str) -> Result<(), String> {
     let result = match log_error { Some(error) => Err(format!("Cannot retain planning evidence: {error}")), None => result };
     write_json(&root.join("result.json"), &json!({"status":if result.is_ok(){"PASS"}else{"FAIL"},"durationMs":started.elapsed().as_millis(),"response":result.as_ref().ok(),"error":result.as_ref().err()}));
     if stage == "partition" {
-        let route = match &result {
-            Ok(output) => parse_route_decision(output),
-            Err(_) => parse_route_decision(""),
-        };
-        write_json(&graph_path, &serde_json::to_value(&route).unwrap());
+        if let Ok(output) = &result {
+            let route = parse_route_decision(output);
+            write_json(&graph_path, &serde_json::to_value(&route).unwrap());
+        }
     }
     if stage == "planner" {
         let graph = serde_json::from_slice::<Graph>(&fs::read(&graph_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;

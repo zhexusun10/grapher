@@ -44,6 +44,10 @@ test('search filters, deduplicates, limits output and supports cancellation', as
   writeFileSync(join(repo, 'src', 'notes.txt'), 'alpha\n');
   assert.equal(await inspectCommand(repo, 'rg -l -g "*.ts" -g "!*.test.ts" alpha src .'), 'src/a.ts');
   assert.equal(await inspectCommand(repo, 'rg -l --glob "src/*.txt" alpha .'), 'src/notes.txt');
+  assert.equal(await inspectCommand(repo, 'rg --files . -g "*.ts" -g "!*.test.ts"'), 'src/a.ts');
+  assert.equal(await inspectCommand(repo, 'rg --files src --glob "src/*.txt"'), 'src/notes.txt');
+  assert.equal(await inspectCommand(repo, 'rg --files . -g "!node_modules/**"'), 'space name.txt\nsrc/a.test.ts\nsrc/a.ts\nsrc/notes.txt');
+  await assert.rejects(inspectCommand(repo, 'rg --files . -g'), /requires a file glob/);
   assert.equal(await inspectCommand(repo, 'rg -F missing src'), '');
   assert.equal(await inspectCommand(repo, 'rg -l -g "*.txt" -g "*.test.ts" alpha src'), 'src/a.test.ts\nsrc/notes.txt');
   await assert.rejects(inspectCommand(repo, 'rg -g'), /requires a file glob/);

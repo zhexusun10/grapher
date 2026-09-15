@@ -139,7 +139,7 @@ try {
       log(`${testCase.id}/${sample}: evaluating Partitioner`);
       result.partitioner = stage('partition', sampleDir, repository, testCase.goal);
       if (result.partitioner.status === 'PASS') {
-        try { result.actualRoute = readJson(path.join(sampleDir, 'partition/route.json')).plan_type; } catch (error) { result.failures.push({ classification: 'PARTITIONER_ERROR', error: String(error) }); }
+        try { result.actualRoute = readJson(path.join(sampleDir, 'partition/route.json')).planType; } catch (error) { result.failures.push({ classification: 'PARTITIONER_ERROR', error: String(error) }); }
       }
       const routing = scoreRouting(testCase.expectedRoute, result.actualRoute, result.partitioner);
       result.routeStatus = routing.routeStatus;

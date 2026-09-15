@@ -1,0 +1,6 @@
+{
+  "output": "/Users/jerry/Desktop/grapher/benchmark-results/partition-off-trace/P002/partition",
+  "repository": "/Users/jerry/Desktop/grapher/benchmark-results/partition-off-trace/P002/repository",
+  "goal": "Improve the small CSV importRows function in src/importer.ts. First parse quoted fields and escaped quotes correctly, then validate every parsed row has the header column count, then return one consistent error containing the offending row number. Keep these changes in the existing function and add focused regression tests. Preserve the existing array-of-rows result for valid input.",
+  "stage": "partition"
+}

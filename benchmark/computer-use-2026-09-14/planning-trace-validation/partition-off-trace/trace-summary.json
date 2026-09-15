@@ -1,0 +1,134 @@
+[
+  {
+    "task": "P001",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 3471,
+        "firstAssistantMs": 2168,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 185,
+          "output": 1,
+          "reasoning": 0,
+          "cacheRead": 0
+        }
+      }
+    },
+    "route": "serial"
+  },
+  {
+    "task": "P002",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 2935,
+        "firstAssistantMs": 1590,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 211,
+          "output": 1,
+          "reasoning": 0,
+          "cacheRead": 0
+        }
+      }
+    },
+    "route": "serial"
+  },
+  {
+    "task": "P003",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 2913,
+        "firstAssistantMs": 1616,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 198,
+          "output": 1,
+          "reasoning": 0,
+          "cacheRead": 0
+        }
+      }
+    },
+    "route": "serial"
+  },
+  {
+    "task": "P004",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 2891,
+        "firstAssistantMs": 1587,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 245,
+          "output": 1,
+          "reasoning": 0,
+          "cacheRead": 0
+        }
+      }
+    },
+    "route": "graph"
+  },
+  {
+    "task": "P005",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 3132,
+        "firstAssistantMs": 1609,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 276,
+          "output": 1,
+          "reasoning": 0,
+          "cacheRead": 0
+        }
+      }
+    },
+    "route": "graph"
+  },
+  {
+    "task": "P006",
+    "repositoryUnchanged": true,
+    "stages": {
+      "partition": {
+        "status": "PASS",
+        "durationMs": 2977,
+        "firstAssistantMs": 1586,
+        "afterLastToolMs": null,
+        "toolMs": 0,
+        "tools": {},
+        "errors": 0,
+        "usage": {
+          "input": 236,
+          "output": 1,
+          "reasoning": 0,
+          "cacheRead": 0
+        }
+      }
+    },
+    "route": "graph"
+  }
+]

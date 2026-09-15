@@ -42,7 +42,7 @@ export function splitCommand(command) {
       if (c === quote) quote = null; else word += c;
     } else if (c === '"' || c === "'") { quote = c; started = true; }
     else if (/\s/.test(c)) { if (started) { args.push(word); word = ''; started = false; } }
-    else if (/[;&|<>\\()]/.test(c)) fail('no chaining, pipes, redirects, escapes or substitutions; use separate calls');
+    else if (/[;&|<>\\()]/.test(c)) fail('no chaining, pipes, redirects, escapes or substitutions; use separate calls. File discovery already skips .git and node_modules and caps output; use rg --files [path] or find [path] -maxdepth N without a pipe');
     else { word += c; started = true; }
   }
   if (quote) fail('unclosed quote');
@@ -190,14 +190,26 @@ export async function inspectCommand(root, command, signal) {
     if (program === 'rg') tokens.shift();
     const path = tokens[0] && !tokens[0].startsWith('-') ? tokens.shift() : '.';
     let pattern = null, type = program === 'rg' ? 'f' : null, depth = 32;
+    const includes = [], excludes = [];
     while (tokens.length) {
       const flag = tokens.shift(), value = tokens.shift();
-      if (flag === '-name' || flag === '-iname') pattern = glob(value ?? '', flag === '-iname');
+      if (program === 'rg' && (flag === '-g' || flag === '--glob')) {
+        if (!value) fail('-g/--glob requires a file glob');
+        const negative = value.startsWith('!');
+        const input = negative ? value.slice(1) : value;
+        (negative ? excludes : includes).push({ regex: glob(input, false), fullPath: input.includes('/') });
+      }
+      else if (flag === '-name' || flag === '-iname') pattern = glob(value ?? '', flag === '-iname');
       else if (flag === '-type' && ['f', 'd'].includes(value)) type = value;
       else if (flag === '-maxdepth') depth = number(value, 32);
-      else fail('find supports only path, -name/-iname glob, -type f/d and -maxdepth N');
+      else fail('find supports only path, -name/-iname glob, -type f/d and -maxdepth N. For filtered file discovery use rg --files [path] -g glob; .git and node_modules are skipped automatically');
     }
-    text = walk(root, path, depth).filter(e => (!type || e.directory === (type === 'd')) && (!pattern || pattern.test(e.path.split(sep).at(-1)))).map(e => display(root, e.path)).join('\n');
+    text = walk(root, path, depth).filter(e => {
+      const name = display(root, e.path);
+      const matches = ({ regex, fullPath }) => regex.test(fullPath ? name : name.split(sep).at(-1));
+      return (!type || e.directory === (type === 'd')) && (!pattern || pattern.test(e.path.split(sep).at(-1)))
+        && (!includes.length || includes.some(matches)) && !excludes.some(matches);
+    }).map(e => display(root, e.path)).join('\n');
   } else if (['cat', 'head', 'tail'].includes(program)) {
     const tokens = [...args]; let count = 10;
     if (program !== 'cat') {

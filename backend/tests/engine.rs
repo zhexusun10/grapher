@@ -343,6 +343,15 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     let resolved = PiModelConfig::resolve(PiRole::NodeAgent, &base_config);
     assert_eq!(resolved.model, "internal-grapher-model");
     assert_eq!(resolved.thinking, None);
+    let saved_thinking = std::env::var("PARTITIONER_THINKING").ok();
+    std::env::remove_var("PARTITIONER_THINKING");
+    assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &base_config).thinking.as_deref(), Some("off"));
+    std::env::set_var("PARTITIONER_THINKING", "medium");
+    assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &base_config).thinking.as_deref(), Some("medium"));
+    match saved_thinking {
+        Some(value) => std::env::set_var("PARTITIONER_THINKING", value),
+        None => std::env::remove_var("PARTITIONER_THINKING"),
+    }
 
     // Verify NODE_AGENT_MODEL overrides base_config.model
     std::env::set_var("NODE_AGENT_MODEL", "override-node-model");

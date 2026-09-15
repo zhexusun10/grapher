@@ -1,0 +1,6 @@
+{
+  "output": "/Users/jerry/Desktop/grapher/benchmark-results/partition-off-trace/P001/partition",
+  "repository": "/Users/jerry/Desktop/grapher/benchmark-results/partition-off-trace/P001/repository",
+  "goal": "Fix normalizeEmail in src/normalize.ts so surrounding whitespace is removed before lowercasing. Add regression tests in tests/normalize.test.ts for spaces, tabs, mixed case and the empty string. Preserve the exported signature.",
+  "stage": "partition"
+}

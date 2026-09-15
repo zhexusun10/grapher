@@ -1,0 +1,7 @@
+{
+  "inspectionPolicy": null,
+  "model": "dashscope/qwen3.8-flash",
+  "stage": "partition",
+  "thinking": "off",
+  "tools": ""
+}

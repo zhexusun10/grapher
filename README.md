@@ -53,6 +53,7 @@ npm start
 ### 角色环境隔离与 Node Agent 技能/插件支持
 
 1. **环境与模型隔离（解耦与防泄漏）**：
+   - Partitioner 默认 `thinking=off`，用于单轮路由；显式设置 `PARTITIONER_THINKING` 可覆盖。其他角色继续使用各自配置或 Pi 默认值。
    - 各角色拥有专属配置环境变量：`PARTITIONER_MODEL` / `PARTITIONER_THINKING`、`PLANNER_MODEL` / `PLANNER_THINKING`、`NODE_AGENT_MODEL` / `NODE_AGENT_THINKING`、`MERGER_MODEL` / `MERGER_THINKING`，超时通过对应 `*_TIMEOUT_SECONDS` 配置。
    - 子进程环境净化：每次调用 Pi 启动子进程前，后端显式调用 `env_remove` 剔除父环境中的 `PI_MODEL`、`PI_THINKING`、`PI_PROVIDER`、`PI_REASONING_LEVEL`、`PI_SESSION_ID`、`PI_SESSION_FILE`，避免终端或外部 Pi 会话残留污染内部子进程。
    - 命令行显式指定 `--model <resolved_model>` 覆盖外部 `~/.pi/agent/settings.json` 的 `defaultModel`。

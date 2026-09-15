@@ -8,7 +8,7 @@ Supported forms (one command per call):
 pwd
 ls [-lah] [path]
 find [path] [-name/-iname glob] [-type f/d] [-maxdepth N]
-rg --files [path]
+rg --files [path] [-g/--glob glob]
 rg/grep [-nilFrR] [-g/--glob glob] pattern [paths]
 cat paths
 head/tail [-n N / -nN / -N] paths
@@ -17,7 +17,7 @@ curl [-fsSIL] URL
 
 Quotes group arguments. Shell expansion, escapes, pipes, chaining, redirection, scripts, tests and arbitrary programs are rejected. This is deliberately not full Bash/Unix-command compatibility: pwd returns `.`; ls returns names rather than long stat formatting; recursive search skips `.git`, `node_modules` and symlinks; regex search uses system grep's extended expressions over stdin, not ripgrep's full option set. No user-controlled executable, environment or command flags reach that subprocess.
 
-Search options precede the pattern. Repeat `-g` to include file globs (OR); `-g '!*.test.ts'` excludes matches. Globs without `/` match basenames; others match repository-relative paths. Filtering happens before reading files. Overlapping search paths are deduplicated. Search subprocesses are asynchronous and cancellable; `-l` stops each file scan at the first match. Search stops collecting output at 64 KiB rather than continuing through the repository. Prefer discovering paths first, then searching a narrow directory. An empty search result means no matches.
+File discovery also accepts include/exclude globs, skips `.git` and `node_modules`, and caps output without shell pipelines. Search options precede the pattern. Repeat `-g` to include file globs (OR); `-g '!*.test.ts'` excludes matches. Globs without `/` match basenames; others match repository-relative paths. Filtering happens before reading files. Overlapping search paths are deduplicated. Search subprocesses are asynchronous and cancellable; `-l` stops each file scan at the first match. Search stops collecting output at 64 KiB rather than continuing through the repository. Prefer discovering paths first, then searching a narrow directory. An empty search result means no matches.
 
 All local paths must resolve within the captured inspection root. Symlink components, `.git`, devices, sockets and other non-regular inputs are rejected. `read` uses the same guard and supports pagination for larger files. Bash reads up to 256 KiB per file, searches up to 4 MiB / 10000 entries, and limits output to 64 KiB. No shell process or repository code runs. Node/edge graph mutation remains an intentional write capability to the host-selected graph artifact, not to arbitrary paths.
 

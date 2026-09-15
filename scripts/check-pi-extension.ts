@@ -37,17 +37,36 @@ try {
   assert.equal(firstResult.accepted, undefined);
   assert.equal(firstResult.graphCompiled, undefined);
   await call("node", { name: "review", task: "Review it" });
+  const beforeFeedback = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
+  const prematureFeedback = JSON.parse((await call("edge", { from: "review", to: "build", feedback: true })).content[0].text);
+  assert.equal(prematureFeedback.mutationApplied, false);
+  assert.equal(prematureFeedback.structuralCheck, "failed");
+  assert.equal(prematureFeedback.diagnostics[0].code, "E207");
+  assert.match(prematureFeedback.diagnostics[0].message, /dependency path from build to review/);
+  assert.deepEqual(prematureFeedback.savedTopology.edges, []);
+  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeFeedback);
+  const missingEndpoint = JSON.parse((await call("edge", { from: "build", to: "missing", feedback: false })).content[0].text);
+  assert.equal(missingEndpoint.diagnostics[0].code, "E204");
+  assert.match(missingEndpoint.diagnostics[0].message, /Missing: missing/);
+  assert.deepEqual(missingEndpoint.savedTopology.nodes.sort(), ["build", "review"]);
   await call("edge", { from: "build", to: "review", feedback: false });
   const before = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
   const rejected = await call("edge", { from: "review", to: "build", feedback: false });
   assert.match(JSON.stringify(rejected), /E101/);
+  const cycle = JSON.parse(rejected.content[0].text);
+  assert.equal(cycle.mutationApplied, false);
+  assert.deepEqual(cycle.savedTopology.edges, JSON.parse(before).edges);
+  assert.match(cycle.diagnostics[0].message, /build → review/);
+  assert.match(cycle.diagnostics[0].message, /review → build/);
   const toolResultHook = extension.handlers.get("tool_result")![0];
   assert.deepEqual(await toolResultHook({ toolName: "edge", details: rejected.details, isError: false }), { isError: true });
   const accepted = await call("node", { name: "review", task: "Review it" });
   assert.equal(await toolResultHook({ toolName: "node", details: accepted.details, isError: false }), undefined);
   assert.equal(JSON.parse(accepted.content[0].text).graph, undefined);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), before);
-  await call("edge", { from: "review", to: "build", feedback: true });
+  const repairedFeedback = JSON.parse((await call("edge", { from: "review", to: "build", feedback: true })).content[0].text);
+  assert.equal(repairedFeedback.mutationApplied, true);
+  assert.equal(repairedFeedback.structuralCheck, "passed");
   const portableGraph = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   for (const task of [`Work at ${repository}.`, `Read ${repository}/sample.txt`]) {
     assert.match(JSON.stringify(await call("node", { name: "build", task })), /workspace-portability/);
@@ -82,7 +101,7 @@ try {
   assert.deepEqual(extracted.errors, []);
   const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
   assert.match(JSON.stringify(listed), /sample.txt/);
-  console.log("Pi extension smoke passed: mutation rollback, portability, read-only bash override, repository guards.");
+  console.log("Pi extension smoke passed: compiler rejection and repair, saved topology, mutation rollback, portability, read-only bash override, repository guards.");
 } finally {
   process.chdir(source);
   rmSync(root, { recursive: true, force: true });
