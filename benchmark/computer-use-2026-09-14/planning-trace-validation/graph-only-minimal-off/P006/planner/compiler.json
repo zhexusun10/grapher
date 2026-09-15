@@ -1,0 +1,22 @@
+{
+  "diagnostics": [],
+  "plan": {
+    "executionBatches": [
+      [
+        "auth-audit",
+        "storage-audit"
+      ],
+      [
+        "release-decision"
+      ]
+    ],
+    "roots": [
+      "auth-audit",
+      "storage-audit"
+    ],
+    "terminals": [
+      "release-decision"
+    ],
+    "warnings": []
+  }
+}

@@ -23,11 +23,11 @@ npm run pi:build     # upstream 完整 build:offline；不会重新抓取浮动�
 
 需要 Node >=22.19、Git、npm；依赖安装需要网络及平台相关原生依赖。开发入口使用 upstream 源码与锁定的 tsx，不要求完整 dist 构建通过。这里承诺源码/依赖/模型目录输入可追踪，不承诺跨 OS/Node 的产物字节一致。
 
-锁定详情见 `pi-lock.json`。当前 upstream/fork commit 均为 `71dca871bc80b6bc97be37f0ca3189399d651fff`，Pi 0.85.1；本地 fork 分支 `grapher/engine` 没有独立 patch。submodule URL 暂用可公开获取此 commit 的 upstream；没有推送或创建远程 fork 仓库。
+锁定详情见 `pi-lock.json`。当前 upstream/fork commit 均为 `ceea48f5d5d12fd7915dfefba2835ccd55f23bb9`，Pi 0.85.1；本地 fork 分支 `grapher/engine` 没有独立 patch。submodule URL 指向可公开获取此 commit 的 upstream；没有推送或创建远程 fork 仓库。
 
-### 已知 upstream 构建阻塞
+### Upstream build status
 
-`npm ci`、模型目录校验及源码 CLI `--version` 通过。完整 `build:offline` 在 `packages/ai/src/api/google-shared.ts:402` 失败：`FinishReason.TOO_MANY_TOOL_CALLS` 不能赋给 `never`。这是当前锁定 upstream/依赖组合的类型检查失败；未通过删除分支或改写 provider 来规避。完整发布构建必须在 upstream 修复后重新验证。
+完整 `build:offline` 通过。此前锁定的 `71dca871bc80b6bc97be37f0ca3189399d651fff` 漏掉 `FinishReason.TOO_MANY_TOOL_CALLS` 的映射，导致 `packages/ai/src/api/google-shared.ts` 的 exhaustive switch 无法编译。当前 upstream commit 将该 provider 终止原因显式映射为 Pi 的 `error`，同时保留未来枚举变化的编译期穷举检查。
 
 Grapher 验证：`npm run test:pi`、`npm run check`、`cargo check --no-default-features`、`cargo test --no-default-features --features fixture` 通过（Cargo 命令使用 `--manifest-path backend/Cargo.toml`）。无 fixture 的完整 `cargo test` 目前被已有 `tests/core.rs` 两处未门控的 `grapher::fixture` 引用阻塞；未改动这些既有测试逻辑。
 

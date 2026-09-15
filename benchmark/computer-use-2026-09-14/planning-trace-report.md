@@ -1,56 +1,68 @@
-# Partitioner + Planner 真实规划轨迹复测
+# Partitioner + Planner planning trace review
 
-仅运行规划阶段，没有审批、Node Agent、Merger 或发布。模型均为 `dashscope/qwen3.8-flash`，Planner thinking=medium。首轮三个 Partitioner、两次 Planner；随后六个 Partitioner thinking=off 对照；小幅修改后再次运行两个 Partitioner 和两个 Planner。合计 **11 次分类、4 次规划，节点执行 0**。所有分类正确，四张图均编译通过；人工检查四张图都有语义问题，不能计作规划质量通过。
+This review stops at planning. It does not approve a graph, run Node Agents, merge worktrees, publish output, or run an execution-success judge. Raw Pi events, effective prompts, graphs, compiler results, role settings, and source snapshots are retained under [planning-trace-validation](planning-trace-validation/). Repository fixtures remained unchanged in every sample.
 
-原始事件（gzip）、实际提示、目标、图、compiler 输出、角色配置和源码快照保存在 [planning-trace-validation](planning-trace-validation/)。各批 trace-summary.json 从原始事件计算，并逐文件确认规划仓库与原始 fixture 完全一致。没有执行模型 judge，以下质量判断来自本轮对任务与仓库的直接检查。
+## Evidence reviewed
 
-## Partitioner
+The committed read-only-inspection baseline contains 11 Partitioner calls and 4 Planner calls. This continuation added 10 Planner-only calls across P004/P005/P006: graph-only with the longer prompt, graph-only with the minimal prompt, a `thinking=off` comparison, and a final P004 tool-affordance check. Node execution count is zero.
 
-| 任务 | medium 首轮 | off 对照 | 路由 |
-| --- | ---: | ---: | --- |
-| P001 单函数修复 | 5.955s | 3.471s | Serial |
-| P005 契约与双 SDK | 9.753s | 3.132s | Graph |
-| P006 独立审计与发布判断 | 10.385s | 2.977s | Graph |
+All calls used `dashscope/qwen3.8-flash`. Planner comparisons used `thinking=medium` except the explicitly named off batch. No few-shot examples or sample topologies were added to any candidate prompt. No model judge was used; quality findings below are direct graph/task review against the goals and fixtures.
 
-额外 Serial 对照 P002/P003 为 2.935s / 2.913s，Graph 对照 P004 为 2.891s。六个 off 样本中位数 **2.956s**，范围 **2.891–3.471s**，全部只输出 1 个 token、reasoning=0。medium 三次分别产生 116/344/330 reasoning token，轨迹显示分类器在重复展开实施步骤。
+## Baseline findings
 
-随后随 Planner 复测的两次 off 分类为 **4.133s / 4.922s**，仍正确。这提醒我们：关闭 thinking 减少了这批样本的生成工作，但不能承诺恒定 3 秒；进程启动、网络、provider 排队和输出收尾都计入墙钟。首个 assistant 可见时间约 1.6–2.4s，无法从宿主事件把它进一步分解成纯模型/网络时间。
+The last inspection-enabled P005/P006 samples compiled, but both failed semantic review. Planner inspected unrelated files, treated the server/browser `retryCount=3` setting as an SDK contract, pre-authored audit findings, added redundant verification work, and repeated host-owned feedback marker syntax. Inspection itself took less than 1.2 seconds while generation took 130-137 seconds, so shell execution was not the direct bottleneck. Its larger cost was additional model turns, context, and unsupported planning commitments.
 
-已将 Partitioner 默认 thinking 改为 off，显式 `PARTITIONER_THINKING` 仍可覆盖，角色超时保持原值。这批 off 对照与第一轮 P006 Planner 有部分并发，其他样本也受 provider 随机延迟影响，不是严格随机 A/B。
+| Inspection-enabled sample | Wall time | Inspection calls | Tool errors | Task words |
+| --- | ---: | ---: | ---: | ---: |
+| P005 refined | 137.181s | 15 | 4 | 1,777 |
+| P006 refined | 130.467s | 15 | 3 | 1,966 |
 
-## Planner
+## Architecture result
 
-| 任务 | 首轮 → 调整后 | 检查调用数 | 全部工具错误 | task 空白分词 | 工具实际累计耗时 |
-| --- | --- | --- | --- | --- | --- |
-| P005 双 SDK | 158.603 → 137.181s | 18 → 15 | 5 → 4 | 1,915 → 1,777 | 0.858 → 1.147s |
-| P006 审计 | 156.286 → 130.467s | 15 → 15 | 4 → 3 | 1,657 → 1,966 | 0.300 → 0.419s |
+Planner now exposes only `node` and `edge`. It cannot read/search the repository, invoke a shell, access the network, or write repository files. Workers investigate implementation details in their own isolated worktrees. This narrows Planner to outcome decomposition and removes the source of the observed cross-subsystem assumption leak.
 
-检查调用数为 read+bash；工具错误包含参数 schema 错误，不能全部算作编译器拒绝。调整后 P005 有一次 edge 漏 feedback 参数，自行补齐成功。工具累计耗时是 start/end 的宿主接收间隔，可能有重叠，不是 CPU 时间。最后一个工具结束至进程退出仍花费约 10.8–15.1s。
+Every graph mutation still invokes the shipping Rust compiler atomically. Failure returns `mutationApplied=false`, detailed diagnostics, and `savedTopology`; the graph file remains unchanged. In a graph-only P005 sample, an absolute planner-checkout path was rejected with `workspace-portability`, and the model immediately replaced it with a repository-relative task. Compiler cycle, endpoint, and feedback-ancestor diagnostics remain covered by extension tests.
 
-首轮模型多次调用 `find ... | head`、不支持的 `find -not`、`node --version` / `python3 --version`；还读了无关业务模块，随后把这些内容写入 worker 任务。任务生成和多轮模型请求才是主要耗时，工具执行不到两秒。调整后两次墙钟降低约 13.5% / 16.5%，但仅各一个样本，而且审计任务文字反而更多；不能声称已经证明稳定提速或避免过度规划。
+Normal dependencies may now omit `feedback`; omission means `false`. This matches the common operation and removes repeated schema-only retries. If a reverse review edge mistakenly omits `feedback:true`, the dependency-cycle/feedback checks still reject the structure with corrective diagnostics. The final P004 sample omitted the field on both dependencies, produced zero tool errors, and compiled the intended graph.
 
-## 已实施的小幅调整
+Successful mutation results return only the current compiler plan instead of replaying every accumulated edge. Failure results retain the saved topology because that state is needed for correction.
 
-- 主提示增加通用的检查目的：只调查会改变边界、依赖或权威约束的问题；实现调查留给 worker；事实进入任务前先建立其适用性。没有增加示例图、固定审计分工、节点数或调用数限制。
-- 检查工具支持 `rg --files [path] -g/--glob` 的 include/exclude；这是轨迹里实际被拒绝的合理文件发现操作。仍经受限路径解析，不调用任意 shell。拒绝管道/非法 find 时说明目录过滤及输出截断已经内置，并指出可用文件发现形式。复测中该命令成功，但模型仍尝试过不支持的写法，说明问题未关闭。
-- Partitioner 默认 off；测试宿主与生产共用角色配置，元数据记录 thinking。之前测试入口硬编码 off，无法反映生产显式 medium 的成本。
-- 修正旧 benchmark runner 读取 `route.json` 的字段：Rust 输出为 `planType`，不是 `plan_type`。新轨迹脚本首批也遇到这一记录错误：原始 route.json 正确，trace-summary 按真实文件重新派生路由，未改写原始结果。
-- 测试宿主不再在分类调用失败时写一个伪 Serial route；失败保留为失败。该修正发生在模型采样之后，本轮没有失败分类样本验证它的模型路径。
+## Prompt result
 
-## 尚未解决的质量问题
+The final system prompt is zero-shot and 246 English whitespace-delimited words, down from the interrupted 484-word candidate. It contains only role boundaries and general execution invariants: fresh worker sessions, standalone outcomes, authoritative inputs, ownership, dependency-as-state-flow, independent branches, requested feedback, and compiler correction. It has no example graph, fixed node count, audit checklist, SDK rule, or benchmark-specific forbidden path.
 
-**SDK 两张图：** 正确表达契约前置、两条并行实现、共同 review 和反馈到两个实现者。但都把 `src/settings.ts` / `docs/configuration.md` 的 retryCount=3 强制用作新 SDK 默认值；仓库只显示该设置被 server/web 配置读取，未建立 SDK 与它的依赖。首轮还根据已有 .ts 测试文件断言 Node 工具链可以执行这些测试。调整后仍过度规定注入接口、runner、额外 cap 等实现细节。
+Operational edge cases live in the `node` and `edge` tool descriptions. The compiler owns structural enforcement and returns repair information. This follows Pi's compact custom-prompt style and avoids turning P004/P005/P006 fixes into a planning prior.
 
-调整后 reviewer 任务原文包含：`end with <REVISE> on the final line, followed by a numbered correction list`。最终行后再附列表自相矛盾。宿主实际会注入正确协议，但不能据此认为 Planner 的任务没有冲突。
+## Quality and timing
 
-**审计两张图：** 都增加了最后的全报告验证节点，重复检查证据和报告一致性，最终 review 一次拒绝会重试三个作者。节点数量本身不是失败原因，问题在职责重复和额外验证要求。模型预写了漏洞、实验和修复方向，并将未证实的调用关联带入任务。
+With the minimal prompt and `thinking=medium`, all three graph tasks produced usable graphs on direct review:
 
-调整后稍有进步：让存储 auditor 核实是否真的存在 retry 包装，而不是断言有关系。但仍要求用报告中的引文证明源码未改动，这不构成基线比较；要求运行“primitive 的副本”也可能验证复制片段而非实际源码。新 verifier 又编造“至少检查 8 项”的硬指标。这些要求是模型生成的，当前宿主没有用词法规则拒绝它们。
+| Sample | Topology | Wall time | Tool calls | Errors | Task words |
+| --- | --- | ---: | ---: | ---: | ---: |
+| P004 users flow | backend + web in parallel, then integration | 49.779s | 7 | 2 schema retries | 433 |
+| P005 retry contract | contract, parallel SDKs, joint conformance + requested feedback | 58.533s | 10 | 0 | 804 |
+| P006 release audit | parallel audits, then release decision | 36.504s | 5 | 0 | 219 |
 
-## 判断与后续架构方向
+The final P004 affordance rerun used the same three-node topology with 5 calls and zero errors. It took 70.439s and produced 829 task words. This variance is important: the model/provider and generated text dominate wall time. Tool execution was about 0.1 seconds in that run, while process completion after the final tool took 9.3 seconds.
 
-本轮支持 Partitioner 使用轻量单轮分类，也支持补足文件发现能力；不支持“精简提示已经解决 Planner 质量”。不要继续根据每一个生成缺陷添加一条规则。
+Compared with the last inspection-enabled run, the minimal medium samples reduced P005 from 137.181s to 58.533s (57%) and P006 from 130.467s to 36.504s (72%). These are same-case single-sample comparisons, not stable latency guarantees. The retained traces support the causal reduction in tool turns and context, but not a fixed percentage SLA.
 
-值得下一轮单独评估的是协议职责：宿主已经为带 feedback 的节点注入 verdict 格式，Planner 工具应更明确地把责任定位为定义验收条件和修正目标，避免它重复编写运行协议。另一个候选是让仓库检查以结构化操作表达文件发现和搜索，减少 `bash` 名称诱发的完整 shell 预期；需要评估工具可发现性和兼容成本，不能只换名字就宣称有效。本轮没有引入额外工具或自动语义拒绝。
+Quality was not traded for speed in the three medium samples: P004 kept the existing contract as shared input and omitted an unrequested review node; P005 stopped importing unrelated server/browser retry configuration and preserved the requested two-target correction loop; P006 removed the redundant verifier and mapped one node to each requested report.
 
-确定性验证：Rust fixture 套件 50 项、规划/检查边界 17 项通过；包含 Partitioner 默认与显式覆盖、文件发现 glob 的正负过滤和越界约束。规划宿主与生产二进制编译通过。历史真实审计 0/2 不因本轮规划测试发生变化。
+## Thinking comparison
+
+`thinking=off` is not suitable as the Planner default. It reduced P005/P006 to 44.399s/35.612s, but P004 slowed to 68.186s and regressed semantically: it invented `docs/users-contract.md`, added a contract-summary producer, and added an unrequested final verifier. Medium remains the evaluated Planner setting. Partitioner stays at off based on the earlier classification-only evidence; that is separate from this Planner decision.
+
+## Decision
+
+On this small three-case graph corpus, the final medium zero-shot design is above the stated 80% stop threshold by direct review, so no few-shot should be added. The evidence supports keeping the compact prompt, graph-only tool boundary, compiler repair loop, and dependency default. It does not establish general planning quality or execution success.
+
+The next evaluation should add new held-out goals, especially goals whose work boundaries genuinely depend on repository architecture. If those fail, first add a narrow structured affordance for the missing planning fact and strengthen its edge-case description and compiler/validator feedback. Do not restore shell-shaped exploration or add example graphs without evidence that a residual problem survives those measures.
+
+## Deterministic verification
+
+- Planning grade, boundary, and retained inspection-security tests: 20/20 pass.
+- Rust engine tests: 12/12 pass.
+- Rust benchmark host and product binary build with `benchmark` feature.
+- Planner extension smoke passes: exact `node,edge` surface, default dependency flag, compiler rejection/repair, atomic rollback, saved topology, and workspace portability.
+- Full Pi offline build passes at the publicly available upstream commit pinned in `engine/pi-lock.json`; that commit maps `FinishReason.TOO_MANY_TOOL_CALLS` to `error` and restores the exhaustive type check.

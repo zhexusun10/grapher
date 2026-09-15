@@ -1,0 +1,21 @@
+{
+  "startedAt": "2026-09-15T05:31:22.814Z",
+  "selected": [
+    "P005",
+    "P006"
+  ],
+  "plannerOnly": true,
+  "partitionerModel": "dashscope/qwen3.8-flash",
+  "plannerModel": "dashscope/qwen3.8-flash",
+  "partitionerThinking": "medium",
+  "plannerThinking": "medium",
+  "nodeExecutionCount": 0,
+  "sources": {
+    "backend/resources/prompts/partitioner.md": "0dd6ced0ee1cf36a62ae886c0ae2d9d7aa82dd3241d0441259f9cdbede30bdbb",
+    "backend/resources/prompts/planner.md": "b6e3a625c8e6afd430798fbf88269aba9b722b08f97b21e1dcc3361d2073fc03",
+    "backend/resources/planner.ts": "32e59c6cc0cd21cfdd157b4be421e7c997d8bdf15b0b33f39909a982a73066d6",
+    "backend/src/compiler.rs": "efde8dd511a2ba19cc22517f20d85bacf7a51ec6f539bcfe3496e3bc3ecad7b5",
+    "backend/src/engine.rs": "682dec470f04be9f9d75f48e9b8e3102bebf29784e725b4a4fa3e97087ffc6d8",
+    "benchmark/planning-host.rs": "9b74a89283d2cb229e3cd8e970dc91ab4763268c6cca1aa06d735bb9ea484dcb"
+  }
+}

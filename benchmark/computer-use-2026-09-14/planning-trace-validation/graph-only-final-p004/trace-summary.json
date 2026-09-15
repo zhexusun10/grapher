@@ -1,0 +1,49 @@
+[
+  {
+    "task": "P004",
+    "repositoryUnchanged": true,
+    "stages": {
+      "planner": {
+        "status": "PASS",
+        "durationMs": 70439,
+        "firstAssistantMs": 1656,
+        "afterLastToolMs": 9256,
+        "toolMs": 104,
+        "tools": {
+          "node": 3,
+          "edge": 2
+        },
+        "errors": 0,
+        "usage": {
+          "input": 5356,
+          "output": 3152,
+          "reasoning": 1289,
+          "cacheRead": 8192
+        }
+      }
+    },
+    "graph": {
+      "nodes": [
+        "server-users",
+        "web-users",
+        "users-flow-acceptance"
+      ],
+      "edges": [
+        {
+          "from": "server-users",
+          "to": "users-flow-acceptance",
+          "relation": "Acceptance test imports and drives the implemented server/users.ts endpoint and its 400/500 behavior.",
+          "feedback": false
+        },
+        {
+          "from": "web-users",
+          "to": "users-flow-acceptance",
+          "relation": "Acceptance test drives the implemented web/users.ts client (debounce, pagination, stale-response guard, UI states).",
+          "feedback": false
+        }
+      ],
+      "taskWords": 829,
+      "compiled": true
+    }
+  }
+]

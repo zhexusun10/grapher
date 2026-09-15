@@ -266,7 +266,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             task: "task",
             session_dir: &temp.path().join("session-planner"),
             extension: None,
-            tools: Some("node,edge,read,bash"),
+            tools: Some("node,edge"),
             session_id: Some("planner-session"),
             extra_args: Vec::new(),
             environment: Vec::new(),
@@ -277,7 +277,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(planner_out.contains("--no-skills"), "Planner must have --no-skills");
     assert!(planner_out.contains("--no-extensions"), "Planner must have --no-extensions");
     assert!(planner_out.contains("--no-approve"), "Planner must have --no-approve");
-    assert!(planner_out.contains("--tools node,edge,read,bash"), "Planner must restrict tools");
+    assert!(planner_out.contains("--tools node,edge"), "Planner must restrict tools");
 
     // 3. Partitioner: MUST have --no-skills, --no-extensions, --no-approve, and --no-tools
     let mut partitioner_out = String::new();

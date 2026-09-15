@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync, mkdirSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { loadExtensions } from "../pi/packages/coding-agent/src/core/extensions/loader.ts";
@@ -9,9 +9,7 @@ const source = process.cwd();
 const root = realpathSync(mkdtempSync(join(tmpdir(), "grapher-extension-")));
 const repository = join(root, "repository");
 mkdirSync(repository);
-writeFileSync(join(repository, "sample.txt"), "inspection marker\n");
-writeFileSync(join(root, "rubric.json"), "hidden grading criteria");
-symlinkSync(root, join(repository, "outside"));
+writeFileSync(join(repository, "sample.txt"), "planner fixture\n");
 process.env.GRAPHER_GRAPH_PATH = join(root, "graph.json");
 process.env.GRAPHER_COMPILER_PATH = resolve("backend/target/debug/grapher");
 process.env.GRAPHER_MODE = "planner";
@@ -22,10 +20,10 @@ try {
   const adapterPath = join(source, "engine/prompt-extension.ts");
   const loaded = await loadExtensions([join(source, "backend/resources/planner.ts"), adapterPath], repository);
   assert.deepEqual(loaded.errors, []);
-  assert.equal(loaded.extensions[1].tools.size, 0, "Planner adapter must not override restricted bash");
-  assert.equal(loaded.extensions[1].handlers.has("tool_call"), false, "Planner inspection commands must not get shell prefixes");
+  assert.equal(loaded.extensions[1].tools.size, 0, "Planner adapter must not add execution tools");
+  assert.equal(loaded.extensions[1].handlers.has("tool_call"), false, "Planner graph tools must not get shell hooks");
   const extension = loaded.extensions[0];
-  assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edge", "node"]);
+  assert.deepEqual([...extension.tools.keys()].sort(), ["edge", "node"]);
   const context = {} as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
     return extension.tools.get(name)!.definition.execute("test", parameters, undefined, undefined, context);
@@ -49,7 +47,9 @@ try {
   assert.equal(missingEndpoint.diagnostics[0].code, "E204");
   assert.match(missingEndpoint.diagnostics[0].message, /Missing: missing/);
   assert.deepEqual(missingEndpoint.savedTopology.nodes.sort(), ["build", "review"]);
-  await call("edge", { from: "build", to: "review", feedback: false });
+  const dependency = JSON.parse((await call("edge", { from: "build", to: "review" })).content[0].text);
+  assert.equal(dependency.mutationApplied, true);
+  assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges[0].feedback, false);
   const before = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
   const rejected = await call("edge", { from: "review", to: "build", feedback: false });
   assert.match(JSON.stringify(rejected), /E101/);
@@ -73,35 +73,22 @@ try {
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), portableGraph);
   }
   await call("node", { name: "build", task: "In your assigned worktree, update sample.txt and verify it." });
-  const handlers = extension.handlers.get("tool_call")!;
-  assert.equal(await handlers[0]({ toolName: "read", input: { path: "sample.txt" } }), undefined);
-  for (const path of ["../rubric.json", "outside/rubric.json", root, "missing", "."]) {
-    assert.equal((await handlers[0]({ toolName: "read", input: { path } }) as { block: boolean }).block, true);
-  }
-  const inspected = await call("bash", { command: 'grep -n "inspection marker" sample.txt' });
-  assert.match(JSON.stringify(inspected), /sample.txt:1:inspection marker/);
-  assert.match(JSON.stringify(inspected), /repository-inspection-v1/);
-  for (const command of ["cat ../rubric.json", "cat outside/rubric.json", "touch changed", "curl file:///etc/passwd", "ls; rm -rf ."]) {
-    const response = await call("bash", { command });
-    assert.equal((response as { isError: boolean }).isError, true, command);
-  }
   for (const file of ["backend/src/server.rs", "benchmark/planning-host.rs"]) {
     const text = readFileSync(join(source, file), "utf8");
-    assert.ok(text.includes('"node,edge,read,bash"'), `${file}: tool surface`);
-    assert.ok(!text.includes('"node,edge,read,ls,find,grep"'));
+    assert.ok(text.includes('"node,edge"'), `${file}: tool surface`);
+    assert.ok(!text.includes('"node,edge,inspect"'));
+    assert.ok(!text.includes('"node,edge,read,bash"'));
   }
-  assert.match(readFileSync(join(source, "backend/src/server.rs"), "utf8"), /include_str!\("\.\.\/resources\/planning-inspection.mjs"\)/);
+  assert.doesNotMatch(readFileSync(join(source, "backend/src/server.rs"), "utf8"), /include_str!\("\.\.\/resources\/planning-inspection\.mjs"\)/);
   await call("node", { name: "build", delete: true });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
-  // Production extracts both resources outside the source tree.
+  // Production extracts one self-contained Planner extension outside the source tree.
   process.env.GRAPHER_MODE = "planner";
   writeFileSync(join(root, "grapher-planner.ts"), readFileSync(join(source, "backend/resources/planner.ts")));
-  writeFileSync(join(root, "planning-inspection.mjs"), readFileSync(join(source, "backend/resources/planning-inspection.mjs")));
   const extracted = await loadExtensions([join(root, "grapher-planner.ts"), adapterPath], repository);
   assert.deepEqual(extracted.errors, []);
-  const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
-  assert.match(JSON.stringify(listed), /sample.txt/);
-  console.log("Pi extension smoke passed: compiler rejection and repair, saved topology, mutation rollback, portability, read-only bash override, repository guards.");
+  assert.deepEqual([...extracted.extensions[0].tools.keys()].sort(), ["edge", "node"]);
+  console.log("Pi extension smoke passed: graph-only tool surface, compiler rejection and repair, saved topology, mutation rollback, portability.");
 } finally {
   process.chdir(source);
   rmSync(root, { recursive: true, force: true });

@@ -1,0 +1,238 @@
+{
+  "id": "P004",
+  "expectedRoute": "graph",
+  "planner": {
+    "code": 0,
+    "signal": null,
+    "durationMs": 59046,
+    "error": null,
+    "response": "Graph is complete.\n\n**Structure**\n\n- **Batch 1 (parallel):** `server-users` and `web-users`\n  - `server-users` → `server/users.ts` (`q` filtering, opaque cursor pagination, contract-specified 400 for invalid cursors and 500 for internal failures) plus its unit tests, deriving all parameter/field/status names from `contracts/users.json`.\n  - `web-users` → `web/users.ts` (debounced input, cursor-driven paging, distinct loading/empty/error states, stale-response guard keyed to request identity) plus browser unit tests with a stubbed transport, including an out-of-order-resolution case.\n  - The published contract is an *input* both workers read, not a dependency between them, so they proceed independently.\n- **Batch 2 (terminal):** `users-flow-acceptance` → `tests/users-flow.test.ts`, wiring the real browser layer to the real endpoint in-process and covering match/non-match paging to exhaustion, a tampered cursor hitting the server's actual 400, an injected 500, and delayed-response reordering; it also runs the combined verification and confirms the contract and manifest are unchanged.\n\n**Guardrails baked into every task:** `contracts/users.json` and the package manifest stay byte-for-byte unchanged, no new dependencies (small local helpers instead), and each worker inspects the repo's existing framework and test-runner conventions rather than me preselecting them.\n\n**Deliberately not added:** a review/feedback loop — you asked for acceptance *coverage* (a test artifact), not independent sign-off and rework, so the acceptance node owns combined verification.",
+    "status": "PASS",
+    "firstAssistantMs": 2176,
+    "tools": [
+      {
+        "tool": "node",
+        "args": {
+          "name": "server-users",
+          "task": "Implement the users search server side in this repository.\n\nAuthoritative input: the published immutable contract at contracts/users.json. Read it first and derive from it the exact request parameters (including the search term and cursor parameters), response envelope shape, pagination fields and the meaning of the 400 and 500 error cases. Do not invent alternative field names, status codes or semantics where the contract already defines them. Also inspect the existing server code and test setup in the repository to follow the established framework, module layout and test runner conventions rather than introducing a new stack.\n\nDeliverables:\n1. server/users.ts — a users search handler/module exposing the contract operation. Requirements:\n   - Filtering by the search term `q` against the user record fields defined by the contract (match semantics, field selection and case handling follow the contract; if the contract is silent on a detail, choose a reasonable behavior and document it in a short comment).\n   - Cursor-based pagination: opaque cursor, page/limit handling, and a next-cursor (or equivalent) in the response exactly as the contract specifies. An invalid or unparseable cursor must produce the contract's client error (400) response, not a crash.\n   - The contract's 500 error response for unexpected internal failures: failures are caught and mapped to the specified 500 payload shape, with no stack trace or partial output leaked to the caller.\n2. Server unit tests colocated per repository convention (create the directory/file if none exists) covering: no `q` returns the full first page, `q` filtering matches and excludes correctly, valid cursor pagination advances through pages to exhaustion, an invalid cursor yields the specified 400, and a forced internal failure yields the specified 500. Assert on the response shape and status, not on incidental formatting.\n\nConstraints: contracts/users.json and the package manifest must remain byte-for-byte unchanged — no dependency additions, no contract edits. If a needed helper library is not already available, implement the small amount of logic locally instead of editing the manifest.\n\nCompletion evidence: the new server module and its unit tests exist and the new unit tests pass when run with the repository's existing test command (or, if the runner cannot be invoked without manifest changes, the tests are written for that runner and the exact command to run them is stated in a comment at the top of the test file). Report the file paths you created and the observed test result."
+        }
+      },
+      {
+        "tool": "node",
+        "args": {
+          "name": "web-users",
+          "task": "Implement the users search browser/UI side in this repository.\n\nAuthoritative input: the published immutable contract at contracts/users.json. Read it first and use its exact request parameter names, response field names, pagination fields and error payload shape as the client-side model. Inspect the existing web code and test setup to follow the established UI framework, module layout, and browser test runner/harness conventions rather than introducing a new stack.\n\nDeliverables:\n1. web/users.ts — the users search UI logic/module talking to the search endpoint defined by the contract. Required behaviors:\n   - Debounced search: keystrokes coalesce into one request per quiet period; no request is issued for an empty/whitespace-only term unless the contract treats it as \"list all\" (follow the contract, and state the chosen behavior in a comment).\n   - Pagination: subsequent pages are requested with the cursor returned by the previous response; the UI knows when it has reached the end.\n   - Explicit states: loading, empty (no results for a term that is a valid query), and error (both the contract's 400 and 500 outcomes are surfaced as recoverable error state). These states must be distinguishable in the rendered/exposed state, not conflated.\n   - Stale-response protection: responses are matched to the request that produced them (e.g. by request sequence/token/term identity) so a late response for an older term or older page can never overwrite current results.\n2. Browser unit tests in the repository's existing browser test location (create it if missing), with the network layer stubbed so no real server is needed. Cover: debounce timing collapses rapid input into one call; a valid search renders results and enters the loaded state; a query with no matches renders the empty state; a stubbed 400 (invalid cursor) and a stubbed 500 render the error state; requesting the next page uses the previous response's cursor and an exhausted cursor set stops further requests; and an out-of-order scenario where the request for term A resolves after the request for term B leaves B's results displayed and A's discarded.\n\nConstraints: contracts/users.json and the package manifest must remain byte-for-byte unchanged — no dependency additions and no contract edits. Implement any needed debounce/stale-guard logic locally inside web/users.ts if it is not already available. The transport call must be built against the contract's documented parameter and field names so it lines up with a server implementing the same contract.\n\nCompletion evidence: the new module and its browser unit tests exist and pass under the repository's existing browser test command (or, if the runner cannot be invoked without manifest changes, the tests are written for that runner and the exact command to run them is stated in a comment at the top of the test file). Report file paths created and observed results."
+        }
+      },
+      {
+        "tool": "node",
+        "args": {
+          "name": "users-flow-acceptance",
+          "task": "Add the integrated acceptance coverage for users search and run the combined verification.\n\nInherited state: server/users.ts with its server unit tests, and web/users.ts with its browser unit tests, both implemented against the immutable contract at contracts/users.json. Read the contract, then read both modules to learn their actual exported entry points and the repository's existing test harness configuration before writing the test.\n\nDeliverable: tests/users-flow.test.ts — an end-to-end acceptance test that drives the browser-side users search against the real server-side users endpoint in the same process (use the repository's existing harness to wire the two together; no external network and no hand-written response fixtures for the happy path). It must cover at least:\n1. Initial search with `q` returning matching users and a loaded state in the browser layer.\n2. A non-matching `q` producing the empty state through the real endpoint.\n3. Cursor pagination walking page by page to the end, asserting the browser only ever sends cursors the server issued and that the final page is reached exactly once.\n4. Invalid cursor: the browser layer requests a tampered/garbage cursor and the server returns the contract's 400 payload, which the browser surfaces as its error state (assert the status/payload actually came from the server implementation).\n5. Out-of-order responses: with a small controllable delay or deferred resolution injected at the transport boundary, arrange for the first issued request to resolve after the second, and assert the UI displays only the newest term's server-provided results and the stale response cannot overwrite them.\n6. A server failure path returning the contract's 500 (force it in the injected data source used by the server), surfaced by the browser as the error state.\n\nThen run the full relevant verification from a single place: the new acceptance test plus the existing server unit tests and browser unit tests. Fix nothing outside tests/users-flow.test.ts unless a genuine mismatch between the two modules is discovered; if the mismatch is a real defect in server/users.ts or web/users.ts (contract violation, or missing one of the required behaviors), correct that module minimally and note precisely what was changed and why in your report.\n\nCompletion evidence: tests/users-flow.test.ts exists and passes, and the complete test run (server unit + browser unit + acceptance) is reported as passing with the command used. Also confirm and state that contracts/users.json and the package manifest are unchanged relative to their committed content.\n\nConstraints: contracts/users.json and the package manifest must remain byte-for-byte unchanged. Do not add dependencies."
+        }
+      },
+      {
+        "tool": "edge",
+        "args": {
+          "feedback": false,
+          "from": "server-users",
+          "relation": "Acceptance drives the browser layer against the real server endpoint, so it needs server/users.ts and its unit tests in the worktree.",
+          "to": "users-flow-acceptance"
+        }
+      },
+      {
+        "tool": "edge",
+        "args": {
+          "feedback": false,
+          "from": "web-users",
+          "relation": "Acceptance exercises web/users.ts behavior (debounce, pagination, states, stale guard) end to end, so it needs the browser module in the worktree.",
+          "to": "users-flow-acceptance"
+        }
+      }
+    ],
+    "toolErrors": [],
+    "assistant": [
+      {
+        "api": "openai-completions",
+        "content": [
+          {
+            "thinking": "Let me plan. The graph: contract users.json exists (immutable). Need server/users.ts + unit tests; web/users.ts + browser unit tests; integrated acceptance test tests/users-flow.test.ts. Also need investigation of repo conventions? The worker can inspect. But contract discovery is an input for consumers. Since contract already exists at contracts/users.json, both server and web can read it in parallel. Integration depends on both.\n\nShould I add a node to inspect the contract and produce a summary? Not necessary — each worker can read contracts/users.json itself. But the exact error semantics (400/500 \"specified\") presumably specified in the contract. Workers read it.\n\nLet's design 4 nodes:\n1. server-users: implement server/users.ts with q filtering, cursor pagination, 400/500 errors + server unit tests; verify by running tests.\n2. web-users: implement web/users.ts with debounced search, pagination, loading/empty/error states, stale-response protection + browser unit tests.\n3. acceptance: tests/users-flow.test.ts integrated coverage exercising browser against endpoint, including invalid cursors and out-of-order responses; must keep contract & manifest unchanged.\n\nMaybe add a final integration node = acceptance node itself owns full verification. Then a review node if user requested independent acceptance — user said \"integrated acceptance coverage\" which is a test artifact, not a review request. So no feedback loop.\n\nAdd a fourth node? A final verification that full suite passes and contract/manifest unchanged — that's the acceptance node's job. Keep 3 nodes.\n\nDependencies: web-users and server-users parallel (shared contract is input). acceptance depends on both.\n\nI should include in tasks: read contracts/users.json as authoritative for query params, response shapes, error codes; don't modify it or package manifest; inspect existing repo layout/frameworks.\n\nLet me write tasks.",
+            "thinkingSignature": "reasoning_content",
+            "type": "thinking"
+          },
+          {
+            "arguments": {
+              "name": "server-users",
+              "task": "Implement the users search server side in this repository.\n\nAuthoritative input: the published immutable contract at contracts/users.json. Read it first and derive from it the exact request parameters (including the search term and cursor parameters), response envelope shape, pagination fields and the meaning of the 400 and 500 error cases. Do not invent alternative field names, status codes or semantics where the contract already defines them. Also inspect the existing server code and test setup in the repository to follow the established framework, module layout and test runner conventions rather than introducing a new stack.\n\nDeliverables:\n1. server/users.ts — a users search handler/module exposing the contract operation. Requirements:\n   - Filtering by the search term `q` against the user record fields defined by the contract (match semantics, field selection and case handling follow the contract; if the contract is silent on a detail, choose a reasonable behavior and document it in a short comment).\n   - Cursor-based pagination: opaque cursor, page/limit handling, and a next-cursor (or equivalent) in the response exactly as the contract specifies. An invalid or unparseable cursor must produce the contract's client error (400) response, not a crash.\n   - The contract's 500 error response for unexpected internal failures: failures are caught and mapped to the specified 500 payload shape, with no stack trace or partial output leaked to the caller.\n2. Server unit tests colocated per repository convention (create the directory/file if none exists) covering: no `q` returns the full first page, `q` filtering matches and excludes correctly, valid cursor pagination advances through pages to exhaustion, an invalid cursor yields the specified 400, and a forced internal failure yields the specified 500. Assert on the response shape and status, not on incidental formatting.\n\nConstraints: contracts/users.json and the package manifest must remain byte-for-byte unchanged — no dependency additions, no contract edits. If a needed helper library is not already available, implement the small amount of logic locally instead of editing the manifest.\n\nCompletion evidence: the new server module and its unit tests exist and the new unit tests pass when run with the repository's existing test command (or, if the runner cannot be invoked without manifest changes, the tests are written for that runner and the exact command to run them is stated in a comment at the top of the test file). Report the file paths you created and the observed test result."
+            },
+            "id": "call_737685ca63714a909349a14b",
+            "name": "node",
+            "type": "toolCall"
+          },
+          {
+            "arguments": {
+              "name": "web-users",
+              "task": "Implement the users search browser/UI side in this repository.\n\nAuthoritative input: the published immutable contract at contracts/users.json. Read it first and use its exact request parameter names, response field names, pagination fields and error payload shape as the client-side model. Inspect the existing web code and test setup to follow the established UI framework, module layout, and browser test runner/harness conventions rather than introducing a new stack.\n\nDeliverables:\n1. web/users.ts — the users search UI logic/module talking to the search endpoint defined by the contract. Required behaviors:\n   - Debounced search: keystrokes coalesce into one request per quiet period; no request is issued for an empty/whitespace-only term unless the contract treats it as \"list all\" (follow the contract, and state the chosen behavior in a comment).\n   - Pagination: subsequent pages are requested with the cursor returned by the previous response; the UI knows when it has reached the end.\n   - Explicit states: loading, empty (no results for a term that is a valid query), and error (both the contract's 400 and 500 outcomes are surfaced as recoverable error state). These states must be distinguishable in the rendered/exposed state, not conflated.\n   - Stale-response protection: responses are matched to the request that produced them (e.g. by request sequence/token/term identity) so a late response for an older term or older page can never overwrite current results.\n2. Browser unit tests in the repository's existing browser test location (create it if missing), with the network layer stubbed so no real server is needed. Cover: debounce timing collapses rapid input into one call; a valid search renders results and enters the loaded state; a query with no matches renders the empty state; a stubbed 400 (invalid cursor) and a stubbed 500 render the error state; requesting the next page uses the previous response's cursor and an exhausted cursor set stops further requests; and an out-of-order scenario where the request for term A resolves after the request for term B leaves B's results displayed and A's discarded.\n\nConstraints: contracts/users.json and the package manifest must remain byte-for-byte unchanged — no dependency additions and no contract edits. Implement any needed debounce/stale-guard logic locally inside web/users.ts if it is not already available. The transport call must be built against the contract's documented parameter and field names so it lines up with a server implementing the same contract.\n\nCompletion evidence: the new module and its browser unit tests exist and pass under the repository's existing browser test command (or, if the runner cannot be invoked without manifest changes, the tests are written for that runner and the exact command to run them is stated in a comment at the top of the test file). Report file paths created and observed results."
+            },
+            "id": "call_558497e7ebf34f3996428dd6",
+            "name": "node",
+            "type": "toolCall"
+          }
+        ],
+        "model": "qwen3.8-flash",
+        "provider": "dashscope",
+        "rawStopReason": "tool_calls",
+        "responseId": "chatcmpl-152fe59a-e98d-9d3f-8ba8-a9a1bead3cfe",
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "timestamp": 1789450470665,
+        "usage": {
+          "cacheRead": 1024,
+          "cacheWrite": 0,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0,
+            "total": 0
+          },
+          "input": 588,
+          "output": 1563,
+          "reasoning": 391,
+          "totalTokens": 3175
+        }
+      },
+      {
+        "api": "openai-completions",
+        "content": [
+          {
+            "thinking": "Now add the acceptance node depending on both, then it becomes the single terminal.",
+            "thinkingSignature": "reasoning_content",
+            "type": "thinking"
+          },
+          {
+            "arguments": {
+              "name": "users-flow-acceptance",
+              "task": "Add the integrated acceptance coverage for users search and run the combined verification.\n\nInherited state: server/users.ts with its server unit tests, and web/users.ts with its browser unit tests, both implemented against the immutable contract at contracts/users.json. Read the contract, then read both modules to learn their actual exported entry points and the repository's existing test harness configuration before writing the test.\n\nDeliverable: tests/users-flow.test.ts — an end-to-end acceptance test that drives the browser-side users search against the real server-side users endpoint in the same process (use the repository's existing harness to wire the two together; no external network and no hand-written response fixtures for the happy path). It must cover at least:\n1. Initial search with `q` returning matching users and a loaded state in the browser layer.\n2. A non-matching `q` producing the empty state through the real endpoint.\n3. Cursor pagination walking page by page to the end, asserting the browser only ever sends cursors the server issued and that the final page is reached exactly once.\n4. Invalid cursor: the browser layer requests a tampered/garbage cursor and the server returns the contract's 400 payload, which the browser surfaces as its error state (assert the status/payload actually came from the server implementation).\n5. Out-of-order responses: with a small controllable delay or deferred resolution injected at the transport boundary, arrange for the first issued request to resolve after the second, and assert the UI displays only the newest term's server-provided results and the stale response cannot overwrite them.\n6. A server failure path returning the contract's 500 (force it in the injected data source used by the server), surfaced by the browser as the error state.\n\nThen run the full relevant verification from a single place: the new acceptance test plus the existing server unit tests and browser unit tests. Fix nothing outside tests/users-flow.test.ts unless a genuine mismatch between the two modules is discovered; if the mismatch is a real defect in server/users.ts or web/users.ts (contract violation, or missing one of the required behaviors), correct that module minimally and note precisely what was changed and why in your report.\n\nCompletion evidence: tests/users-flow.test.ts exists and passes, and the complete test run (server unit + browser unit + acceptance) is reported as passing with the command used. Also confirm and state that contracts/users.json and the package manifest are unchanged relative to their committed content.\n\nConstraints: contracts/users.json and the package manifest must remain byte-for-byte unchanged. Do not add dependencies."
+            },
+            "id": "call_740a0a2039384a2582273beb",
+            "name": "node",
+            "type": "toolCall"
+          }
+        ],
+        "model": "qwen3.8-flash",
+        "provider": "dashscope",
+        "rawStopReason": "tool_calls",
+        "responseId": "chatcmpl-4fe36b9c-0c32-95b3-9d56-32f82ef0a8c4",
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "timestamp": 1789450499656,
+        "usage": {
+          "cacheRead": 1024,
+          "cacheWrite": 0,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0,
+            "total": 0
+          },
+          "input": 2313,
+          "output": 589,
+          "reasoning": 16,
+          "totalTokens": 3926
+        }
+      },
+      {
+        "api": "openai-completions",
+        "content": [
+          {
+            "thinking": "The execution order got messed up because the acceptance check is running in parallel with the web-users step instead of waiting for both server and web to finish. I need to add explicit dependency edges to enforce that acceptance depends on both server-users and web-users completing first.",
+            "thinkingSignature": "reasoning_content",
+            "type": "thinking"
+          },
+          {
+            "arguments": {
+              "feedback": false,
+              "from": "server-users",
+              "relation": "Acceptance drives the browser layer against the real server endpoint, so it needs server/users.ts and its unit tests in the worktree.",
+              "to": "users-flow-acceptance"
+            },
+            "id": "call_a6af2f8ad6d34b9db4b02cb2",
+            "name": "edge",
+            "type": "toolCall"
+          },
+          {
+            "arguments": {
+              "feedback": false,
+              "from": "web-users",
+              "relation": "Acceptance exercises web/users.ts behavior (debounce, pagination, states, stale guard) end to end, so it needs the browser module in the worktree.",
+              "to": "users-flow-acceptance"
+            },
+            "id": "call_51c2bb6b74194b078226044a",
+            "name": "edge",
+            "type": "toolCall"
+          }
+        ],
+        "model": "qwen3.8-flash",
+        "provider": "dashscope",
+        "rawStopReason": "tool_calls",
+        "responseId": "chatcmpl-79c86eb3-d3bb-9c93-b6ca-90b4de35b093",
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "timestamp": 1789450513175,
+        "usage": {
+          "cacheRead": 3328,
+          "cacheWrite": 0,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0,
+            "total": 0
+          },
+          "input": 757,
+          "output": 244,
+          "reasoning": 52,
+          "totalTokens": 4329
+        }
+      },
+      {
+        "api": "openai-completions",
+        "content": [
+          {
+            "thinking": "Graph is now: batch 1 = server-users, web-users in parallel; batch 2 = users-flow-acceptance as sole terminal. No warnings.\n\nNote: I mentioned \"shared immutable contract is input to both consumers, not a dependency between them\" — correct.\n\nDone. Summarize.",
+            "thinkingSignature": "reasoning_content",
+            "type": "thinking"
+          },
+          {
+            "text": "Graph is complete.\n\n**Structure**\n\n- **Batch 1 (parallel):** `server-users` and `web-users`\n  - `server-users` → `server/users.ts` (`q` filtering, opaque cursor pagination, contract-specified 400 for invalid cursors and 500 for internal failures) plus its unit tests, deriving all parameter/field/status names from `contracts/users.json`.\n  - `web-users` → `web/users.ts` (debounced input, cursor-driven paging, distinct loading/empty/error states, stale-response guard keyed to request identity) plus browser unit tests with a stubbed transport, including an out-of-order-resolution case.\n  - The published contract is an *input* both workers read, not a dependency between them, so they proceed independently.\n- **Batch 2 (terminal):** `users-flow-acceptance` → `tests/users-flow.test.ts`, wiring the real browser layer to the real endpoint in-process and covering match/non-match paging to exhaustion, a tampered cursor hitting the server's actual 400, an injected 500, and delayed-response reordering; it also runs the combined verification and confirms the contract and manifest are unchanged.\n\n**Guardrails baked into every task:** `contracts/users.json` and the package manifest stay byte-for-byte unchanged, no new dependencies (small local helpers instead), and each worker inspects the repo's existing framework and test-runner conventions rather than me preselecting them.\n\n**Deliberately not added:** a review/feedback loop — you asked for acceptance *coverage* (a test artifact), not independent sign-off and rework, so the acceptance node owns combined verification.",
+            "type": "text"
+          }
+        ],
+        "model": "qwen3.8-flash",
+        "provider": "dashscope",
+        "rawStopReason": "stop",
+        "responseId": "chatcmpl-a830cf23-ae92-9a98-967a-0fdcd0d3aae1",
+        "role": "assistant",
+        "stopReason": "stop",
+        "timestamp": 1789450518921,
+        "usage": {
+          "cacheRead": 3328,
+          "cacheWrite": 0,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0,
+            "total": 0
+          },
+          "input": 1326,
+          "output": 416,
+          "reasoning": 63,
+          "totalTokens": 5070
+        }
+      }
+    ]
+  }
+}

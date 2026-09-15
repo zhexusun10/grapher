@@ -46,9 +46,9 @@ npm start
 
 1. 运行设置中填写项目目录。标准 Git 仓库要求已有 commit 且工作树干净；普通文件夹通过外置 shadow repository 保存基线、执行和自动回写，用户目录不创建 `.git`。
 2. 选择模型（可用 `provider/model` 指定 provider）。生产后端固定使用 `engine/entrypoint.mjs`；旧配置中的可执行文件和参数不再控制生产启动。
-3. 先执行 `npm run pi:setup` 安装锁定依赖及恢复固定模型目录。不能用全局安装的 Pi 替代 submodule。当前 upstream 完整构建有已记录的类型检查阻塞，源码 CLI 可启动；详见基线文档。
+3. 先执行 `npm run pi:setup` 安装锁定依赖及恢复固定模型目录。不能用全局安装的 Pi 替代 submodule。完整离线构建通过；详见基线文档。
 4. Partitioner 是无工具的极简单轮文本分类器，直接输出 `graph` 或 `serial`：仅当存在多个可独立推进的实质工作流时选择 Graph，否则选择 Serial；不解决或规划任务。后端采用鲁棒关键词提取判定分支，即使模型输出多余解释或未严格遵守单词要求，只要检测到对应词即转入相应分支，成功响应但文本含糊时兜底为 Serial；启动、认证或请求失败则显式报错，不创建或自动审批执行图。Serial 跳过 Planner，后端创建名为 `task` 的单节点图并自动审批、开始执行，直接修改用户目录。各角色（Partitioner / Planner / Node Agent / Merger）在统一的 `PiModelConfig` API 层解析模型与思考预算（支持 `PARTITIONER_MODEL`、`PLANNER_MODEL`、`NODE_AGENT_MODEL`、`MERGER_MODEL` 覆盖）。
-5. Graph Planner 使用 `node / edge / read / bash` 生成完整可执行图。每次 mutation 调用 Rust 编译器，校验失败不会写入候选图；Planner 退出后展示图，用户批准才启动节点。也可以导入手写 Graph IR。
+5. Graph Planner 使用 `node / edge` 生成完整可执行图，不读取仓库内容；实现调查由后续 worker 完成。每次 mutation 调用 Rust 编译器，校验失败不会写入候选图；Planner 退出后展示图，用户批准才启动节点。也可以导入手写 Graph IR。
 
 ### 角色环境隔离与 Node Agent 技能/插件支持
 
@@ -69,9 +69,9 @@ npm start
 
 实际提示词以 [partitioner.md](backend/resources/prompts/partitioner.md) 和 [planner.md](backend/resources/prompts/planner.md) 为准。Planner 将任务划分为独立工作成果，不提前替节点探索实现步骤；节点数不是优化目标。节点 task 必须自包含目标、用户约束、职责及验收方式。
 
-只有当检查可能改变节点边界、依赖、并行性、可合并性或权威契约时才读取仓库/公开文档。普通边传递上游文件系统状态，不传递对话；只为有意义的有限审查修正流程添加 feedback 边。路径必须相对于当前节点 worktree，禁止嵌入 Planner 所在原仓库的绝对路径。通过编译、覆盖完整后停止规划。
+Planner 不读取仓库或公开文档，也不猜测文件内容、调用关系、运行时版本或路径名所暗示的约定；这些调查由拥有对应成果的 worker 在执行阶段完成。普通边传递上游文件系统状态，不传递对话。只有用户明确要求独立验收、纠正并重复时才添加 feedback 边。路径必须相对于当前节点 worktree，禁止嵌入 Planner 所在原仓库的绝对路径。通过编译、覆盖完整后停止规划。
 
-**规划检查边界：**Planner 的 bash 是自定义只读检查接口，不是任意 shell：只接受列目录、搜索、读文件和公开 HTTP(S) 的 curl GET/HEAD；禁止写入、执行脚本、仓库外读取、符号链接、Git 元数据及本机/内网访问。read 使用相同边界。公网请求仍可能携带 URL 信息，GET 不保证远端没有副作用。详见 [规划检查权限](backend/resources/planning-inspection.md)。Graph 执行节点的 OS sandbox 是下述另一层边界。
+**Planner 工具边界：**Planner 只暴露 `node` 和 `edge`，没有 shell、read、search、网络或写仓库能力。它只能修改宿主指定的候选 Graph IR；每次 mutation 都经编译器原子校验，拒绝时保留原图。Graph 执行节点的 OS sandbox 是下述另一层边界。
 
 ## 已实现
 
@@ -197,4 +197,4 @@ npm run benchmark:runtime                  # B001–B009/B011 执行机制回归
 
 结果在 `benchmark-results/<run-id>/`：保存目标、仓库、隐藏评分标准、实际生成图、路由、编译诊断、模型原始输出、评审证据、耗时和 token。`--replay <结果目录>` 可以离线重算；加 `--rejudge` 则仅重跑评审，复用原始候选图。新结果使用 schema v2 / `planning-quality-v1`，不与旧 B010 写文件成绩混用。设计与覆盖边界见 [benchmark contract](benchmark/architecture.md) 和 [system under test](benchmark/system-under-test.md)。
 
-历史执行机制报告和原始失败证据继续保留；其中的通过率不作为 Partitioner／Planner 质量成绩。本次实测与发现见 [规划 benchmark 报告](benchmark/report-planning.md)。
+当前规划评估见 [planning trace 报告](benchmark/computer-use-2026-09-14/planning-trace-report.md)。2026-09-12 的历史 benchmark 产物和报告已清理，其通过率不作为当前 Partitioner／Planner 质量成绩。

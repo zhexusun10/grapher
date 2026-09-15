@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { checkPlanningBoundary } from './planning-boundary.mjs';
-import { cases, corpusVersion, repositoryFiles } from './planning-cases.mjs';
+import { cases, corpusVersion, dimensionRubric, repositoryFiles } from './planning-cases.mjs';
 import { judgeRequest, judgeSystem, parseReview, scoreGraph, scoreRouting, staticGraphChecks } from './planning-grade.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -36,7 +36,7 @@ function git(args, cwd = repo) {
   return r.stdout.trim();
 }
 const startedAt = new Date().toISOString();
-const metadata = { schemaVersion: 2, benchmarkCaseId: 'B010', variant: 'planning-quality-v1', corpusVersion, benchmarkRunId: runId, startedAt, selection: selected.map(c => c.id), repeats, plannerOnly: options['planner-only'], stageTimeoutMs: 930000, gradingVersion: 'graph-quality-rubric-v3-readonly-boundary', judgeEvidenceSchema: evidenceRoot && !options.rejudge ? (evidenceMetadata.judgeEvidenceSchema ?? 1) : 2, rejudge: options.rejudge, evidenceRun: evidenceMetadata ? { path: evidenceRoot, benchmarkRunId: evidenceMetadata.benchmarkRunId, sourceSha256: evidenceMetadata.sourceSha256 } : null, gitCommit: git(['rev-parse', 'HEAD']), dirtyWorkingTree: git(['status', '--porcelain']), nodeVersion: process.version };
+const metadata = { schemaVersion: 2, benchmarkCaseId: 'B010', variant: 'planning-quality-v1', corpusVersion, benchmarkRunId: runId, startedAt, selection: selected.map(c => c.id), repeats, plannerOnly: options['planner-only'], stageTimeoutMs: 930000, gradingVersion: 'graph-quality-rubric-v4-fidelity-economy', judgeEvidenceSchema: evidenceRoot && !options.rejudge ? (evidenceMetadata.judgeEvidenceSchema ?? 1) : 2, rejudge: options.rejudge, evidenceRun: evidenceMetadata ? { path: evidenceRoot, benchmarkRunId: evidenceMetadata.benchmarkRunId, sourceSha256: evidenceMetadata.sourceSha256 } : null, gitCommit: git(['rev-parse', 'HEAD']), dirtyWorkingTree: git(['status', '--porcelain']), nodeVersion: process.version };
 const results = [];
 let fatal = null;
 
@@ -51,7 +51,7 @@ function stageMetrics(directory) {
     if (e.type === 'tool_execution_start') metrics.toolCalls[e.toolName] = (metrics.toolCalls[e.toolName] ?? 0) + 1;
     if (e.type === 'tool_execution_end' && (e.isError || e.result?.isError)) {
       if (['node', 'edge'].includes(e.toolName)) metrics.compilerRejections++;
-      if (['bash', 'read'].includes(e.toolName)) metrics.inspectionRejections++;
+      if (e.toolName === 'inspect') metrics.inspectionRejections++;
     }
     if (e.type === 'message_end' && e.message?.role === 'assistant') {
       metrics.model = e.message.model ?? metrics.model;
@@ -92,12 +92,12 @@ function saveSummary() {
   const summary = { ...metadata, endedAt: new Date().toISOString(), durationMs: Date.now() - Date.parse(startedAt), status: fatal || results.length !== selected.length * repeats || results.some(r => r.status !== 'PASS') ? 'FAIL' : 'PASS', fatalError: fatal, total: results.length,
     counts: { PASS: results.filter(r => r.status === 'PASS').length, FAIL: results.filter(r => r.status === 'FAIL').length },
     routing: { total: routed.length, correct: routed.filter(r => r.routeStatus === 'PASS').length, protocolCorrect: routed.filter(r => r.routingProtocolStatus === 'PASS').length, accuracy: routed.length ? routed.filter(r => r.routeStatus === 'PASS').length / routed.length : null, confusion },
-    planner: { expected: generated.length, compiled: generated.filter(r => r.compilerStatus === 'PASS').length, staticPass: generated.filter(r => r.staticChecks?.every(c => c.pass)).length, assessed: quality.length, qualityPass: quality.filter(r => r.quality.status === 'PASS').length, averageScore: quality.length ? quality.reduce((sum, r) => sum + r.quality.score, 0) / quality.length : null, missingJudgments: generated.length - quality.length },
+    planner: { expected: generated.length, compiled: generated.filter(r => r.compilerStatus === 'PASS').length, staticPass: generated.filter(r => r.staticChecks?.every(c => c.pass)).length, assessed: quality.length, qualityPass: quality.filter(r => r.quality.status === 'PASS').length, averageScore: quality.length ? quality.reduce((sum, r) => sum + r.quality.score, 0) / quality.length : null, maxScore: Object.keys(dimensionRubric).length * 2, missingJudgments: generated.length - quality.length },
     nodeExecutionCount: 0, executionBoundary: 'No Runtime construction, approval, drive, node execution or worktree creation; planning processes and separate judge only.',
     limitations: ['Six authored tasks, not general routing accuracy.', 'Semantic scores are model judgments with validated quotations, not independent human gold labels.', 'Graph quality is evaluated before execution; no claim of implementation success.', 'Planner runs on gold graph tasks even if routing is wrong; route accuracy and isolated Planner quality are separate.'], results };
   write(path.join(root, 'summary.json'), summary);
   fs.writeFileSync(path.join(root, 'cases.jsonl'), results.map(r => JSON.stringify(r)).join('\n') + '\n');
-  fs.writeFileSync(path.join(root, 'report.md'), `# B010 Partitioner and Planner evaluation\n\nStatus: ${summary.status}. Routing: ${summary.routing.correct}/${summary.routing.total}. Graph quality: ${summary.planner.qualityPass}/${summary.planner.expected}; assessed ${summary.planner.assessed}, mean score ${summary.planner.averageScore ?? 'N/A'}/10. Node executions: 0.\n\n| Task | Sample | Expected | Actual | Route | Protocol | Compile | Quality | Status |\n|---|---:|---|---|---|---|---|---|---|\n${results.map(r => `| ${r.taskId} | ${r.sample} | ${r.expectedRoute} | ${r.actualRoute ?? '—'} | ${r.routeStatus} | ${r.routingProtocolStatus} | ${r.compilerStatus} | ${r.quality ? `${r.quality.score}/10 (${r.quality.status})` : '—'} | ${r.status} |`).join('\n')}\n\nGraph tasks are assessed independently even after a routing error. See each task's graph, compiler output, judge response, exact evidence and quality checks in result.json. Semantic judgment is fallible; do not treat this score as proof of execution success.\n`);
+  fs.writeFileSync(path.join(root, 'report.md'), `# B010 Partitioner and Planner evaluation\n\nStatus: ${summary.status}. Routing: ${summary.routing.correct}/${summary.routing.total}. Graph quality: ${summary.planner.qualityPass}/${summary.planner.expected}; assessed ${summary.planner.assessed}, mean score ${summary.planner.averageScore ?? 'N/A'}/${summary.planner.maxScore}. Node executions: 0.\n\n| Task | Sample | Expected | Actual | Route | Protocol | Compile | Quality | Status |\n|---|---:|---|---|---|---|---|---|---|\n${results.map(r => `| ${r.taskId} | ${r.sample} | ${r.expectedRoute} | ${r.actualRoute ?? '—'} | ${r.routeStatus} | ${r.routingProtocolStatus} | ${r.compilerStatus} | ${r.quality ? `${r.quality.score}/${r.quality.maxScore} (${r.quality.status})` : '—'} | ${r.status} |`).join('\n')}\n\nGraph tasks are assessed independently even after a routing error. See each task's graph, compiler output, judge response, exact evidence and quality checks in result.json. Semantic judgment is fallible; do not treat this score as proof of execution success.\n`);
   return summary;
 }
 

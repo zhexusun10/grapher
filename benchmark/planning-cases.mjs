@@ -26,7 +26,9 @@ const dimensionRubric = {
   standalone: 'Each task tells a fresh worker what to change, where to work, relevant inputs/contract, constraints and what constitutes completion. It must not rely on another node\'s conversation.',
   boundaries: 'Substantial responsibilities have coherent ownership. Avoid duplicate implementation, gratuitous tiny steps and pure Git merge/scheduling nodes.',
   mergeability: 'Independent workers have separate output files; shared contracts precede their consumers. Review reads are not writes. Identify overlapping writes and unjustified serialization.',
-  verification: 'Verification checks concrete acceptance behavior using the outputs of all required implementation branches. Requested revision feedback is assigned to the correct reviewer and targets.',
+  verification: 'Verification checks concrete acceptance behavior using the outputs of all required implementation branches. Requested revision feedback is assigned to the correct reviewer and targets. Extra reruns and quality gates do not improve this score.',
+  fidelity: 'Tasks preserve the user goal and authoritative repository contracts. They do not pre-solve domain findings, mandate unsupported repository relationships, or turn unspecified behavior and speculative implementation choices into requirements.',
+  economy: 'Every node produces a requested deliverable or owns a distinct acceptance responsibility needed by the goal. Reject redundant review/report nodes, repeated evidence generation and stricter process obligations the user did not request.',
 };
 export { dimensionRubric };
 
@@ -70,6 +72,7 @@ export const cases = [
     },
     dependencies: [['contract', 'typescript'], ['contract', 'python'], ['typescript', 'conformance'], ['python', 'conformance']],
     independent: [['typescript', 'python']], feedback: [['conformance', 'typescript'], ['conformance', 'python']], maxNodes: 8,
+    forbiddenTaskReferences: ['src/settings.ts', 'server/config.ts', 'web/config.ts', 'docs/configuration.md'],
   },
   {
     id: 'P006', title: 'Independent audits and release decision', expectedRoute: 'graph',

@@ -1,0 +1,24 @@
+{
+  "diagnostics": [],
+  "plan": {
+    "executionBatches": [
+      [
+        "contract"
+      ],
+      [
+        "implement-python",
+        "implement-typescript"
+      ],
+      [
+        "conformance-review"
+      ]
+    ],
+    "roots": [
+      "contract"
+    ],
+    "terminals": [
+      "conformance-review"
+    ],
+    "warnings": []
+  }
+}

@@ -20,10 +20,12 @@ test('accepts coherent graph regardless of node names, order or transitive depen
   assert.equal(score(g).status, 'PASS');
   g.nodes.reverse(); g.edges.reverse();
   assert.equal(score(g).status, 'PASS');
-  g.nodes.push({ name: 'api_check', task: 'Check server behavior and retain its workspace state.' });
+  g.nodes.push({ name: 'api_check', task: 'Complete and verify server/users.ts behavior and retain its workspace state.' });
   g.edges = g.edges.filter(e => e.from !== 'api_work');
   g.edges.push({ from: 'api_work', to: 'api_check', feedback: false }, { from: 'api_check', to: 'acceptance', feedback: false });
-  assert.equal(score(g).status, 'PASS');
+  const transitiveReview = review(g);
+  transitiveReview.unitOwners.backend = ['api_work', 'api_check'];
+  assert.equal(score(g, transitiveReview).status, 'PASS');
 });
 test('a positive judge cannot hide missing dependencies or artificial serialization', () => {
   const missing = graph(); missing.edges.pop();
@@ -62,6 +64,9 @@ test('line-based evidence is extracted from task text and out-of-range reference
   for (const d of r.dimensions) d.evidence = [{ node: g.nodes[0].name, line: 1 }];
   const graded = score(g, r);
   assert.equal(graded.dimensions[0].evidence[0].quote, g.nodes[0].task);
+  g.nodes[0].task = 'A\nImplement server/users.ts with filtering, cursor pagination and error handling. Add API unit tests.';
+  for (const d of r.dimensions) d.evidence = [{ node: g.nodes[0].name, line: 1 }];
+  assert.equal(score(g, r).dimensions[0].evidence[0].quote, 'A');
   r.dimensions[0].evidence = [{ node: g.nodes[0].name, line: 900 }];
   assert.throws(() => score(g, r), /evidence line/);
 });
@@ -69,7 +74,42 @@ test('a compiler-valid graph cannot bind fresh workers to the original repositor
   const g = graph(); g.nodes[0].task = '/tmp/source-repository: ' + g.nodes[0].task;
   const graded = scoreGraph(task, g, compiled, review(g), '/tmp/source-repository');
   assert.equal(graded.status, 'FAIL');
+  assert.equal(graded.maxScore, 14);
   assert.ok(graded.checks.some(c => c.id === 'workspace-portability' && !c.pass));
+});
+
+test('rejects unrequested feedback and nodes that own no requested work unit', () => {
+  const g = graph();
+  g.nodes.push({ name: 'extra_review', task: 'Review all work again without producing a requested deliverable.' });
+  g.edges.push(
+    { from: 'acceptance', to: 'extra_review', feedback: false },
+    { from: 'extra_review', to: 'api_work', feedback: true },
+  );
+  const r = review(g);
+  assert.equal(score(g, r).status, 'FAIL');
+  const checks = score(g, r).checks;
+  assert.ok(checks.some(c => c.id === 'economy:owned-nodes' && !c.pass));
+  assert.ok(checks.some(c => c.id === 'feedback:no-unrequested-routes' && !c.pass));
+});
+
+test('rejects case-specific repository references that are not authoritative', () => {
+  const c = cases.find(c => c.id === 'P005');
+  const g = { nodes: Object.entries(c.units).map(([name, u]) => ({ name, task: `Implement ${u.paths.join(', ')}. ${u.requirement}` })), edges: c.dependencies.map(([from, to]) => ({ from, to, feedback: false })) };
+  const r = review(g); r.unitOwners = Object.fromEntries(Object.keys(c.units).map(id => [id, [id]]));
+  g.edges.push(...c.feedback.map(([from, to]) => ({ from, to, feedback: true })));
+  g.nodes[0].task += ' Inherit the default from src/settings.ts.';
+  const graded = scoreGraph(c, g, compiled, r);
+  assert.ok(graded.checks.some(check => check.id === 'fidelity:irrelevant-reference:src/settings.ts' && !check.pass));
+});
+
+test('semantic quality requires at least 12/14 with no zero dimension', () => {
+  const g = graph();
+  const partial = review(g);
+  partial.dimensions.find(d => d.id === 'fidelity').score = 1;
+  partial.dimensions.find(d => d.id === 'economy').score = 1;
+  assert.equal(score(g, partial).status, 'PASS');
+  partial.dimensions.find(d => d.id === 'economy').score = 0;
+  assert.equal(score(g, partial).status, 'FAIL');
 });
 
 test('route accuracy remains separate from repeated routing-tool calls', () => {

@@ -1,0 +1,206 @@
+[
+  {
+    "task": "P004",
+    "repositoryUnchanged": true,
+    "stages": {
+      "planner": {
+        "status": "PASS",
+        "durationMs": 68186,
+        "firstAssistantMs": 2033,
+        "afterLastToolMs": 11989,
+        "toolMs": 293,
+        "tools": {
+          "node": 6,
+          "edge": 10
+        },
+        "errors": 2,
+        "usage": {
+          "input": 8629,
+          "output": 3077,
+          "reasoning": 0,
+          "cacheRead": 21760
+        }
+      }
+    },
+    "graph": {
+      "nodes": [
+        "contract-users",
+        "server-users",
+        "web-users",
+        "acceptance-users-flow",
+        "verify-unchanged-contract"
+      ],
+      "edges": [
+        {
+          "from": "contract-users",
+          "to": "server-users",
+          "relation": "Server implementation and its tests must use the parameter, field, and error-code names recorded in docs/users-contract.md",
+          "feedback": false
+        },
+        {
+          "from": "contract-users",
+          "to": "web-users",
+          "relation": "Web client and its browser tests must match the request/response envelope documented in docs/users-contract.md",
+          "feedback": false
+        },
+        {
+          "from": "server-users",
+          "to": "acceptance-users-flow",
+          "relation": "Acceptance test drives the real endpoint implementation",
+          "feedback": false
+        },
+        {
+          "from": "web-users",
+          "to": "acceptance-users-flow",
+          "relation": "Acceptance test drives the real browser-side client including stale-response protection",
+          "feedback": false
+        },
+        {
+          "from": "contract-users",
+          "to": "verify-unchanged-contract",
+          "relation": "Verifier checks naming consistency against docs/users-contract.md",
+          "feedback": false
+        },
+        {
+          "from": "server-users",
+          "to": "verify-unchanged-contract",
+          "relation": "Verifier inspects the finished server implementation and its unit tests",
+          "feedback": false
+        },
+        {
+          "from": "web-users",
+          "to": "verify-unchanged-contract",
+          "relation": "Verifier inspects the finished web implementation and its browser tests",
+          "feedback": false
+        },
+        {
+          "from": "acceptance-users-flow",
+          "to": "verify-unchanged-contract",
+          "relation": "Verifier inspects tests/users-flow.test.ts for contract naming consistency",
+          "feedback": false
+        }
+      ],
+      "taskWords": 870,
+      "compiled": true
+    }
+  },
+  {
+    "task": "P005",
+    "repositoryUnchanged": true,
+    "stages": {
+      "planner": {
+        "status": "PASS",
+        "durationMs": 44399,
+        "firstAssistantMs": 2194,
+        "afterLastToolMs": 7361,
+        "toolMs": 243,
+        "tools": {
+          "node": 4,
+          "edge": 8
+        },
+        "errors": 2,
+        "usage": {
+          "input": 5099,
+          "output": 2041,
+          "reasoning": 0,
+          "cacheRead": 15872
+        }
+      }
+    },
+    "graph": {
+      "nodes": [
+        "contracts_retry_policy",
+        "ts_client_retry",
+        "py_client_retry",
+        "sdk_conformance_review"
+      ],
+      "edges": [
+        {
+          "from": "contracts_retry_policy",
+          "to": "ts_client_retry",
+          "relation": "TS client implements the retry contract document",
+          "feedback": false
+        },
+        {
+          "from": "contracts_retry_policy",
+          "to": "py_client_retry",
+          "relation": "Python client implements the retry contract document",
+          "feedback": false
+        },
+        {
+          "from": "ts_client_retry",
+          "to": "sdk_conformance_review",
+          "relation": "Reviewer reads the TypeScript client implementation and its unit tests",
+          "feedback": false
+        },
+        {
+          "from": "py_client_retry",
+          "to": "sdk_conformance_review",
+          "relation": "Reviewer reads the Python client implementation and its unit tests",
+          "feedback": false
+        },
+        {
+          "from": "sdk_conformance_review",
+          "to": "ts_client_retry",
+          "relation": "If conformance scenarios show TS and Python diverge from contracts/retry-policy.md or from each other, report the exact scenario, file, and required correction so both clients are fixed and the review reruns.",
+          "feedback": true
+        },
+        {
+          "from": "sdk_conformance_review",
+          "to": "py_client_retry",
+          "relation": "If conformance scenarios show TS and Python diverge from contracts/retry-policy.md or from each other, report the exact scenario, file, and required correction so both clients are fixed and the review reruns.",
+          "feedback": true
+        }
+      ],
+      "taskWords": 581,
+      "compiled": true
+    }
+  },
+  {
+    "task": "P006",
+    "repositoryUnchanged": true,
+    "stages": {
+      "planner": {
+        "status": "PASS",
+        "durationMs": 35612,
+        "firstAssistantMs": 1650,
+        "afterLastToolMs": 5135,
+        "toolMs": 66,
+        "tools": {
+          "node": 3,
+          "edge": 2
+        },
+        "errors": 0,
+        "usage": {
+          "input": 4853,
+          "output": 1480,
+          "reasoning": 0,
+          "cacheRead": 9216
+        }
+      }
+    },
+    "graph": {
+      "nodes": [
+        "auth-audit",
+        "storage-audit",
+        "release-decision"
+      ],
+      "edges": [
+        {
+          "from": "auth-audit",
+          "to": "release-decision",
+          "relation": "release-decision consumes reports/auth.md findings and IDs",
+          "feedback": false
+        },
+        {
+          "from": "storage-audit",
+          "to": "release-decision",
+          "relation": "release-decision consumes reports/storage.md findings and IDs",
+          "feedback": false
+        }
+      ],
+      "taskWords": 665,
+      "compiled": true
+    }
+  }
+]

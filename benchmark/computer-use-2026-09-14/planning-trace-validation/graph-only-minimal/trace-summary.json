@@ -1,0 +1,168 @@
+[
+  {
+    "task": "P004",
+    "repositoryUnchanged": true,
+    "stages": {
+      "planner": {
+        "status": "PASS",
+        "durationMs": 49779,
+        "firstAssistantMs": 1810,
+        "afterLastToolMs": 5614,
+        "toolMs": 1145,
+        "tools": {
+          "node": 3,
+          "edge": 4
+        },
+        "errors": 2,
+        "usage": {
+          "input": 4468,
+          "output": 1699,
+          "reasoning": 475,
+          "cacheRead": 8192
+        }
+      }
+    },
+    "graph": {
+      "nodes": [
+        "server-users",
+        "web-users",
+        "users-flow-acceptance"
+      ],
+      "edges": [
+        {
+          "from": "server-users",
+          "to": "users-flow-acceptance",
+          "relation": "Acceptance test drives the implemented endpoint",
+          "feedback": false
+        },
+        {
+          "from": "web-users",
+          "to": "users-flow-acceptance",
+          "relation": "Acceptance test drives the implemented browser search layer",
+          "feedback": false
+        }
+      ],
+      "taskWords": 433,
+      "compiled": true
+    }
+  },
+  {
+    "task": "P005",
+    "repositoryUnchanged": true,
+    "stages": {
+      "planner": {
+        "status": "PASS",
+        "durationMs": 58533,
+        "firstAssistantMs": 1680,
+        "afterLastToolMs": 9127,
+        "toolMs": 161,
+        "tools": {
+          "node": 4,
+          "edge": 6
+        },
+        "errors": 0,
+        "usage": {
+          "input": 7017,
+          "output": 2682,
+          "reasoning": 481,
+          "cacheRead": 17408
+        }
+      }
+    },
+    "graph": {
+      "nodes": [
+        "retry-contract",
+        "ts-client-retry",
+        "py-client-retry",
+        "sdk-conformance-review"
+      ],
+      "edges": [
+        {
+          "from": "retry-contract",
+          "to": "ts-client-retry",
+          "relation": "TypeScript client implements the retry contract, which must exist first",
+          "feedback": false
+        },
+        {
+          "from": "retry-contract",
+          "to": "py-client-retry",
+          "relation": "Python client implements the retry contract, which must exist first",
+          "feedback": false
+        },
+        {
+          "from": "ts-client-retry",
+          "to": "sdk-conformance-review",
+          "relation": "Review consumes the delivered TypeScript client and its unit tests",
+          "feedback": false
+        },
+        {
+          "from": "py-client-retry",
+          "to": "sdk-conformance-review",
+          "relation": "Review consumes the delivered Python client and its unit tests",
+          "feedback": false
+        },
+        {
+          "from": "sdk-conformance-review",
+          "to": "ts-client-retry",
+          "relation": "If conformance fails, request corrections to the TypeScript client implementation/tests",
+          "feedback": true
+        },
+        {
+          "from": "sdk-conformance-review",
+          "to": "py-client-retry",
+          "relation": "If conformance fails, request corrections to the Python client implementation/tests",
+          "feedback": true
+        }
+      ],
+      "taskWords": 804,
+      "compiled": true
+    }
+  },
+  {
+    "task": "P006",
+    "repositoryUnchanged": true,
+    "stages": {
+      "planner": {
+        "status": "PASS",
+        "durationMs": 36504,
+        "firstAssistantMs": 2084,
+        "afterLastToolMs": 20644,
+        "toolMs": 141,
+        "tools": {
+          "node": 3,
+          "edge": 2
+        },
+        "errors": 0,
+        "usage": {
+          "input": 2036,
+          "output": 1089,
+          "reasoning": 362,
+          "cacheRead": 4096
+        }
+      }
+    },
+    "graph": {
+      "nodes": [
+        "audit-auth",
+        "audit-storage",
+        "release-decision"
+      ],
+      "edges": [
+        {
+          "from": "audit-auth",
+          "to": "release-decision",
+          "relation": "release-decision consumes reports/auth.md produced by this audit",
+          "feedback": false
+        },
+        {
+          "from": "audit-storage",
+          "to": "release-decision",
+          "relation": "release-decision consumes reports/storage.md produced by this audit",
+          "feedback": false
+        }
+      ],
+      "taskWords": 219,
+      "compiled": true
+    }
+  }
+]

@@ -7,7 +7,7 @@ The architecture contract is [agent.md](../agent.md). The primary benchmark eval
 `benchmark/run.mjs` creates isolated repository fixtures and calls the planning-only Rust host in `benchmark/planning-host.rs`. The host reuses:
 
 - `backend/resources/prompts/partitioner.md` and `planner.md`, including configured product overrides.
-- `backend/resources/planner.ts`: real route_task/node/edge tools and the repository-scoped read guard plus a custom read-only bash override (`planning-inspection.mjs`). No arbitrary shell is exposed; curl is limited to public HTTP(S) GET/HEAD with validated/pinned DNS and redirects. This is a tool-level boundary, not an OS sandbox.
+- `backend/resources/planner.ts`: real node/edge graph mutation tools with compiler-backed atomic rollback and workspace-portability checks. Planner has no repository inspection or execution tool.
 - `backend/src/engine.rs::run_pi`: fresh Pi processes, actual configured model, JSON output and provider retry behavior.
 - The shipping `grapher --compile` CLI for each mutation and Rust final graph validation.
 

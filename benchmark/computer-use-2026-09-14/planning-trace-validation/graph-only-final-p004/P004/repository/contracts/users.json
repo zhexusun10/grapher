@@ -1,0 +1,1 @@
+{"endpoint":"GET /users","query":{"q":"string","cursor":"optional string"},"response":{"items":[{"id":"string","name":"string"}],"nextCursor":"string or null"},"errors":{"400":"invalid cursor","500":"server error"}}

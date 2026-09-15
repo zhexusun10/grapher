@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "upstream": "https://github.com/earendil-works/pi.git",
-  "upstreamCommit": "71dca871bc80b6bc97be37f0ca3189399d651fff",
-  "forkCommit": "71dca871bc80b6bc97be37f0ca3189399d651fff",
+  "upstreamCommit": "ceea48f5d5d12fd7915dfefba2835ccd55f23bb9",
+  "forkCommit": "ceea48f5d5d12fd7915dfefba2835ccd55f23bb9",
   "packageVersion": "0.85.1",
   "packageLockSha256": "b9ab7cb9d02e818ba16dd0874285175f3b2cad117326761de0e2c61f285a5e2b",
   "modelData": {

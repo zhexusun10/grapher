@@ -1,33 +1,33 @@
-# Planner zero-shot 基线
+# Planner zero-shot architecture
 
-后续已完成 Partitioner + Planner 真实采样与小幅调整，见 [运行轨迹报告](planning-trace-report.md)。下面保留初版基线设计；“本次未运行真实模型采样”指初版提交阶段，新的质量结论以轨迹报告为准。
+The final Planner starts zero-shot. Its system prompt is 246 English whitespace-delimited words and contains no example graph, fixed topology, node-count target, audit recipe, SDK policy, or benchmark-specific path. Real planning evidence and timing are in [planning-trace-report.md](planning-trace-report.md).
 
-这次重新从角色、执行语义、工具能力和编译反馈组织 Planner。主提示从 1,235 个英文空白分词缩到 248 个；这是文本长度统计，不是模型 tokenizer 的 token 数。没有加入 few-shot 或示例拓扑。
+## Responsibility split
 
-## 职责分配
+| Layer | Responsibility |
+| --- | --- |
+| System prompt | Convert the user goal into the smallest executable graph; describe fresh worker sessions, standalone outcomes, ownership, state-carrying dependencies, independent branches, requested feedback, and semantic self-review. |
+| `node` tool | Create, replace, or delete a standalone work outcome. Its description defines task inputs, path portability, replacement/delete behavior, and the distinction between structural success and goal coverage. |
+| `edge` tool | Define dependency and bounded feedback runtime semantics. Ordinary dependencies default `feedback` to false; reverse revision routes must use true and target a dependency ancestor. |
+| Compiler | Validate every mutation atomically. Rejection returns detailed diagnostics and unchanged `savedTopology`; success returns only the current structural plan and warnings. |
+| Worker | Inspect its own worktree, resolve repository conventions and implementation choices, implement its owned outcome, and establish completion evidence. |
 
-| 层 | 提供什么 | 本次改动 |
-| --- | --- | --- |
-| 主提示 | 用户目标到可执行图；fresh session、文件传递、工作所有权和完成证据 | 删除按历史审计失败添加的报告格式、固定 reviewer 分工、指定实验方法、重复工具语法和固定探索停止条件。保留目标覆盖、约束一致性和事实依据等通用质量要求。 |
-| node 工具 | 创建、完整替换、删除及工作上下文 | 说明更新保留边、删除移除关联边、重命名方式、worker 的输入与路径语义；字段说明表达名称和任务约束。 |
-| edge 工具 | 依赖与反馈的实际运行行为 | 说明失败阻塞、DAG、先有依赖路径、最终行 verdict、多反馈目标一起重试、受影响下游失效，以及 relation 不改变调度语义。 |
-| 检查工具 | 仓库只读检查的真实能力 | 使用已有工具说明中的命令语法与边界，主提示不重复白名单，也不规定读过特定文件就必须停止。 |
-| 编译反馈 | 当前修改能否落盘、错误位置和恢复所需状态 | 拒绝返回 mutationApplied=false、diagnostics、savedTopology；成功继续返回结构计划及 warnings。缺失端点、依赖环、反馈祖先错误提供可操作的信息。 |
+Planner intentionally has no repository read, search, shell, network, or repository-write tool. It can only mutate the host-selected Graph IR through `node` and `edge`. This is a capability boundary, not a prompt request.
 
-节点数、reviewer 是否单独存在、是否需要汇总以及如何分配证据，由目标和依赖决定。没有为历史失败新增关键词拒绝、自动改图或新的 Graph IR 字段。工具说明中的约束对应现有执行机制；它们不承担任务领域的流程模板。
+## Why no few-shot
 
-编译器检查结构，无法证明自然语言任务没有契约漂移或所有权冲突。主提示明确由 Planner 判断这些语义。当前每次 node/edge 修改都会编译；最终仍由宿主编译，未增加完成工具或模型调用轮次。独立终端允许存在，已有孤立节点和无反馈 REVISE 警告仍是非阻断提示。
+The medium-thinking graph-only samples produced usable P004/P005/P006 graphs on direct review. They removed the observed unsupported cross-subsystem assumptions and redundant review nodes while preserving parallel producers, integration dependencies, and the one user-requested feedback loop. That is above the current 80% stop threshold on this small corpus, so adding examples would add token cost and a topology prior without evidence of need.
 
-## 预算撤回
+The earlier failures were addressed below the example layer:
 
-撤回上一轮新增的 120 秒默认 bash 预算、相关诊断、测试和验收声明。执行适配层恢复本次讨论前的版本，显式 timeout 使用原 Pi 行为。原有角色总超时不变。
+- Removed shell-shaped planning exploration that caused extra turns and leaked unrelated repository facts into tasks.
+- Kept runtime semantics in focused tool descriptions rather than repeating them in the system prompt.
+- Preserved compiler diagnostics and saved topology so the model can repair rejected mutations.
+- Made the common dependency operation ergonomic by allowing omitted `feedback` to mean false; incorrect reverse dependencies still receive cycle/ancestor feedback.
+- Stopped replaying accumulated edges after every successful mutation.
 
-## 验证与下一轮判断
+## Limits and next step
 
-已通过 Rust fixture 套件 50 项、Pi 基线 4 项、规划/边界 17 项、Planner 扩展真实加载与编译器修正回归。扩展回归验证缺失端点、过早创建反馈、依赖环均不改写保存图，并验证修正后的反馈边成功。编译器错误码和合法图判定保持兼容。git diff --check 通过。
+Three authored graph cases do not establish general quality or execution success. `thinking=off` is not the Planner default because it invented an extra contract artifact and verifier on P004 despite mixed latency results. Medium is the evaluated setting.
 
-本次未运行真实模型采样。v7 的历史首次审计完成率仍为 0/2，不能将确定性回归计为新的模型质量成绩。
-
-后续采样先使用这一 zero-shot 版本，固定源码、模型、thinking、目标与契约，保留每次调用和失败记录。任务覆盖独立并行、共享前置、最终汇合、线性工作及需要修复反馈的情况；这些是评估任务，不进入 Planner 提示。分别统计路由、编译成功、语义质量、规划耗时和首次执行完成，避免用编译成功替代目标完成。
-
-如果 zero-shot 在独立评估中已达到约 80% 的目标质量，优先保留这一基线。失败时先定位：工具能力是否缺失、说明是否含糊、编译反馈是否足够、约束是否与运行机制一致，再判断是否需要调整主提示。few-shot 只有在明确的残余问题和独立泛化评估支持时才考虑；任何新增示例都需要检验它是否诱导无关任务套用相同图结构。
+The next benchmark expansion should use held-out goals where decomposition genuinely depends on repository architecture. If failures reveal a missing planning input, add the narrowest structured tool affordance and precise edge-case/error descriptions first. Keep compiler feedback actionable. Consider few-shot only if a well-defined residual failure survives those changes and independent evaluation shows that examples generalize without imposing their topology on unrelated goals.

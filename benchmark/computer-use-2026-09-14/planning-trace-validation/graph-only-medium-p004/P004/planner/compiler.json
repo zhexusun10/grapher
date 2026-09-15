@@ -1,0 +1,22 @@
+{
+  "diagnostics": [],
+  "plan": {
+    "executionBatches": [
+      [
+        "server-users",
+        "web-users"
+      ],
+      [
+        "users-flow-acceptance"
+      ]
+    ],
+    "roots": [
+      "server-users",
+      "web-users"
+    ],
+    "terminals": [
+      "users-flow-acceptance"
+    ],
+    "warnings": []
+  }
+}

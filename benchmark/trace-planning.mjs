@@ -8,10 +8,11 @@ const repo = path.resolve(import.meta.dirname, '..');
 const root = path.resolve(process.argv[2] || `benchmark-results/planning-trace-${Date.now()}`);
 if (fs.existsSync(root) && fs.existsSync(path.join(root, 'metadata.json'))) throw Error(`Refusing to overwrite existing evidence: ${root}`);
 const selected = (process.env.TRACE_CASES || 'P001,P005,P006').split(',');
+const plannerOnly = process.env.TRACE_PLANNER_ONLY === '1';
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); };
 const env = { ...process.env, PARTITIONER_MODEL: process.env.PARTITIONER_MODEL || 'dashscope/qwen3.8-flash', PLANNER_MODEL: process.env.PLANNER_MODEL || 'dashscope/qwen3.8-flash', PARTITIONER_THINKING: process.env.PARTITIONER_THINKING || 'medium', PLANNER_THINKING: process.env.PLANNER_THINKING || 'medium' };
-const sources = ['backend/resources/prompts/partitioner.md', 'backend/resources/prompts/planner.md', 'backend/resources/planner.ts', 'backend/resources/planning-inspection.mjs', 'backend/src/compiler.rs', 'backend/src/engine.rs', 'benchmark/planning-host.rs'];
-write(path.join(root, 'metadata.json'), { startedAt: new Date().toISOString(), selected, partitionerModel: env.PARTITIONER_MODEL, plannerModel: env.PLANNER_MODEL, partitionerThinking: env.PARTITIONER_THINKING, plannerThinking: env.PLANNER_THINKING, nodeExecutionCount: 0, sources: Object.fromEntries(sources.map(file => { const data = fs.readFileSync(path.join(repo, file)); const target = path.join(root, 'sources', file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, data); return [file, createHash('sha256').update(data).digest('hex')]; })) });
+const sources = ['backend/resources/prompts/partitioner.md', 'backend/resources/prompts/planner.md', 'backend/resources/planner.ts', 'backend/src/compiler.rs', 'backend/src/engine.rs', 'benchmark/planning-host.rs'];
+write(path.join(root, 'metadata.json'), { startedAt: new Date().toISOString(), selected, plannerOnly, partitionerModel: env.PARTITIONER_MODEL, plannerModel: env.PLANNER_MODEL, partitionerThinking: env.PARTITIONER_THINKING, plannerThinking: env.PLANNER_THINKING, nodeExecutionCount: 0, sources: Object.fromEntries(sources.map(file => { const data = fs.readFileSync(path.join(repo, file)); const target = path.join(root, 'sources', file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, data); return [file, createHash('sha256').update(data).digest('hex')]; })) });
 const results = [];
 for (const id of selected) {
   const task = cases.find(c => c.id === id);
@@ -19,7 +20,8 @@ for (const id of selected) {
   const directory = path.join(root, id), repository = path.join(directory, 'repository');
   for (const [file, content] of Object.entries(repositoryFiles)) { const target = path.join(repository, file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, content); }
   const result = { id, expectedRoute: task.expectedRoute };
-  for (const stage of process.env.TRACE_PARTITION_ONLY === '1' || task.expectedRoute !== 'graph' ? ['partition'] : ['partition', 'planner']) {
+  const stages = plannerOnly ? ['planner'] : process.env.TRACE_PARTITION_ONLY === '1' || task.expectedRoute !== 'graph' ? ['partition'] : ['partition', 'planner'];
+  for (const stage of stages) {
     const output = path.join(directory, stage), input = path.join(directory, `${stage}-input.json`);
     write(input, { output, repository, goal: task.goal, stage });
     console.log(id, stage, 'started', new Date().toISOString());

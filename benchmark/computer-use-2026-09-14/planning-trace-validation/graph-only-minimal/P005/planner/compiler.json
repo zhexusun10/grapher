@@ -1,0 +1,24 @@
+{
+  "diagnostics": [],
+  "plan": {
+    "executionBatches": [
+      [
+        "retry-contract"
+      ],
+      [
+        "py-client-retry",
+        "ts-client-retry"
+      ],
+      [
+        "sdk-conformance-review"
+      ]
+    ],
+    "roots": [
+      "retry-contract"
+    ],
+    "terminals": [
+      "sdk-conformance-review"
+    ],
+    "warnings": []
+  }
+}

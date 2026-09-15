@@ -9,7 +9,7 @@ The primary benchmark is **B010, variant `planning-quality-v1`, schema v2**. The
 
 There is no Runtime construction, graph approval, `drive`, node execution, worktree preparation or implementation-success criterion. Pi is used only as the production planning engine and, in a separate process, as the semantic judge.
 
-`planning-host.rs` uses the production Pi adapter, Partitioner/Planner prompts, tool extension, mutation compiler and final compiler. This is a component evaluation of planning behavior, not a test of the HTTP `plan_goal` handler. The planner receives the same goal/system prompt and node/edge/read/bash surface (bash is the custom read-only inspection override, not Pi's unrestricted shell) as production. The partitioner receives route_task only.
+`planning-host.rs` uses the production Pi adapter, Partitioner/Planner prompts, graph mutation extension, compiler and final compiler. This is a component evaluation of planning behavior, not a test of the HTTP `plan_goal` handler. The planner receives the same goal/system prompt and exact `node,edge` surface as production. Repository and contract investigation belongs to workers during execution. The partitioner receives route_task only.
 
 ## Corpus
 
@@ -32,15 +32,15 @@ Routing accuracy depends only on the final valid route and successful process re
 
 For each **gold graph task**, the harness independently calls the Planner even if the Partitioner predicted serial. This exposes Planner quality despite a routing mistake. Routing accuracy and isolated Planner quality are reported separately; an incorrect route still fails the overall sample. Serial cases have no Planner requirement. `--planner-only` selects the three graph cases and does not call the Partitioner at all; routing is NOT_RUN, not PASS.
 
-## Candidate inspection boundary
+## Planner tool boundary
 
-The Planner's bash name refers to `backend/resources/planning-inspection.mjs`, a restricted command dispatcher, not a shell. Local read/search inputs cannot leave the fixture or follow symlinks; public HTTP(S) GET/HEAD cannot access local/private addresses and every redirect is validated. This is a trusted tool boundary, not a process-level sandbox. See [inspection policy](../backend/resources/planning-inspection.md).
+Planner exposes only `node` and `edge`, which atomically mutate the host-selected graph artifact through the shipping compiler. It has no shell, file read/search/listing, network or repository-write tool. This prevents planning-time implementation exploration and cross-subsystem facts from leaking into tasks merely because the model discovered similarly named files. Workers inspect their isolated worktrees during execution.
 
-Rubrics are written only after candidate generation. `planning-boundary.mjs` checks the recorded policy, tool start/end pairing, successful bash policy evidence, and successful read paths before invoking the judge. Missing policy or unsafe historical evidence is PLANNING_BOUNDARY failure even if Git is clean, the graph compiles and an old judge gave full marks. Old unrestricted P004 read its hidden rubric and executed temporary probes; its automatic PASS is not valid evidence. Replay retains originals but excludes unverified candidates from quality passes. Both outer `isError` and nested `result.isError` count as tool errors; inspection rejections and mutation rejections are reported separately.
+Rubrics are written only after candidate generation. `planning-boundary.mjs` checks policy `planner-graph-tools-v1`, the exact `node,edge` surface and tool start/end pairing before invoking the judge. Missing policy or any successful historical inspection tool is PLANNING_BOUNDARY failure even if Git is clean, the graph compiles and an old judge gave full marks. Replay retains originals but excludes unverified candidates from quality passes. Rejected unknown-tool attempts are not successful boundary breaches.
 
 ## Quality assessment
 
-The shipping compiler checks final graph validity. A separate tool-free semantic judge sees the goal, repository, candidate graph and hidden rubric. It maps deliverable producers to node names and scores five dimensions 0/1/2: goal coverage, standalone instructions, task boundaries, mergeability, and verification. Each nonzero score needs a node and task-line reference; the grader extracts the exact original line as its quotation. Invalid references and incomplete schemas are JUDGE_FAILURE. Legacy quotation-based reviews remain readable only when their quotations match verbatim; ellipses/paraphrases are rejected. The initial development judge produced such invalid quotations, motivating the line-reference format rather than relaxing evidence validation.
+The shipping compiler checks final graph validity. A separate tool-free semantic judge sees the goal, repository, candidate graph and hidden rubric. It maps deliverable producers to node names and scores seven dimensions 0/1/2: goal coverage, standalone instructions, task boundaries, mergeability, verification, fidelity to authoritative requirements, and graph economy. Fidelity rejects unsupported cross-subsystem assumptions and planner-invented contract choices. Economy rejects redundant reviewers, reports and repeated evidence work that the user did not request. Each nonzero score needs a node and task-line reference; the grader extracts the exact original line as its quotation. Invalid references and incomplete schemas are JUDGE_FAILURE. Legacy quotation-based reviews remain readable only when their quotations match verbatim; ellipses/paraphrases are rejected. The initial development judge produced such invalid quotations, motivating the line-reference format rather than relaxing evidence validation.
 
 The deterministic grader then checks:
 
@@ -49,8 +49,10 @@ The deterministic grader then checks:
 - Required deliverable ownership, with concrete output paths in producer tasks.
 - Prerequisite reachability, accepting transitive dependency paths.
 - Independent producers remain distinct and are not artificially serialized.
-- P005's reviewer has feedback edges to both SDK implementation owners.
-- At least 8/10 semantic points with no zero dimension.
+- Required feedback appears only for user-requested revision loops, maps to the expected reviewer/owner pairs, and no additional feedback route is accepted.
+- Every node maps to an actual requested work unit; a pure extra reader, report or quality gate cannot hide behind compiler validity.
+- Case-specific inapplicable repository references are rejected. In P005, the server/browser `retryCount` configuration files are not an SDK contract and may not be carried into node tasks.
+- At least 12/14 semantic points with no zero dimension.
 
 A positive judge cannot override failed topology/ownership checks. Tests include monolithic keyword stuffing, missing prerequisites, unnecessary serialization, omitted feedback and fabricated quotations. Semantic role mapping and scores remain model judgments: validated quotations ground the evidence but do not prove the judgment correct. Default judge may use the same model as the candidate in a fresh process; use BENCHMARK_JUDGE_MODEL for a different model. Inspect retained graphs/reviews and calibrate against human judgments before treating scores as independent gold truth.
 
