@@ -1,0 +1,153 @@
+{
+  "name": "CATALOG-2",
+  "project": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-Wcrgnr/CATALOG-2/project",
+  "data": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-Wcrgnr/CATALOG-2/data",
+  "baseline": "5d3a4af4b34469f49c6016dda7d133c3d3d7ae03",
+  "startedAt": "2026-09-14T16:33:42.812Z",
+  "status": "PASS",
+  "route": "graph",
+  "expectedRoute": "graph",
+  "planning": {
+    "createdAt": 1789403622989,
+    "modelDuration": 164.79299999999998,
+    "planningId": "4a3a841e-1d87-40be-80fb-17f2390a28a7",
+    "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-Wcrgnr/CATALOG-2/project",
+    "roles": {
+      "partition": {
+        "assistantMessages": 2,
+        "durationSeconds": 27.147,
+        "lastEvent": "1789403650189",
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789403623041",
+        "toolErrors": 0,
+        "tools": 0,
+        "usage": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 289,
+          "output": 425,
+          "reasoning": 421,
+          "totalTokens": 714
+        }
+      },
+      "planner": {
+        "assistantMessages": 9,
+        "durationSeconds": 137.646,
+        "lastEvent": "1789403787838",
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789403650191",
+        "toolErrors": 1,
+        "tools": 13,
+        "usage": {
+          "cacheRead": 33920,
+          "cacheWrite": 0,
+          "input": 9415,
+          "output": 3776,
+          "reasoning": 1035,
+          "totalTokens": 47111
+        }
+      }
+    },
+    "status": "success",
+    "totalPlanningDuration": 164.851411709
+  },
+  "partition": {
+    "elapsedMs": 27147,
+    "firstAssistantObservedMs": 2230,
+    "afterLastToolMs": null,
+    "toolsByName": {},
+    "errors": 0,
+    "commands": [],
+    "toolDurationsMs": [],
+    "usage": {
+      "input": 289,
+      "output": 425,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "reasoning": 421,
+      "totalTokens": 714
+    }
+  },
+  "planner": {
+    "elapsedMs": 137646,
+    "firstAssistantObservedMs": 2651,
+    "afterLastToolMs": 23374,
+    "toolsByName": {
+      "bash": 6,
+      "node": 4,
+      "edge": 3
+    },
+    "errors": 1,
+    "commands": [
+      "ls -la",
+      "cat README.md",
+      "cat package.json",
+      "ls -la src",
+      "head -n 40 src/csv.mjs src/search.mjs",
+      "find . -name node_modules -o -name tests -maxdepth 2"
+    ],
+    "toolDurationsMs": [
+      {
+        "tool": "bash",
+        "ms": 5
+      },
+      {
+        "tool": "bash",
+        "ms": 3
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 3
+      },
+      {
+        "tool": "bash",
+        "ms": 3
+      },
+      {
+        "tool": "node",
+        "ms": 12
+      },
+      {
+        "tool": "node",
+        "ms": 11
+      },
+      {
+        "tool": "node",
+        "ms": 6
+      },
+      {
+        "tool": "edge",
+        "ms": 19
+      },
+      {
+        "tool": "edge",
+        "ms": 18
+      },
+      {
+        "tool": "node",
+        "ms": 8
+      },
+      {
+        "tool": "edge",
+        "ms": 11
+      }
+    ],
+    "usage": {
+      "input": 9415,
+      "output": 3776,
+      "cacheRead": 33920,
+      "cacheWrite": 0,
+      "reasoning": 1035,
+      "totalTokens": 47111
+    }
+  },
+  "endedAt": "2026-09-14T16:36:27.859Z"
+}

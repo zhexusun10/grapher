@@ -322,10 +322,16 @@ impl Runtime {
     }
 
     pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
-        if !self.state.approved || self.state.paused || self.active() {
+        if !self.state.approved || self.state.paused
+            || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed" | "completed")
+            // Feedback may invalidate ancestors and their consumers. Drain the current
+            // wave before applying revisions; ordinary DAGs can fill idle slots.
+            || (self.active() && self.state.graph.edges.iter().any(|edge| edge.feedback)) {
             return Ok(Vec::new());
         }
         let config = self.state.config.clone().ok_or("Missing config")?;
+        let running = self.state.nodes.values().filter(|node| node.status == "running").count();
+        let available = config.max_parallel.saturating_sub(running);
         loop {
             let blocked: Vec<_> = self
                 .state
@@ -374,7 +380,7 @@ impl Runtime {
                     .filter(|edge| !edge.feedback && edge.to == node.name)
                     .all(|edge| self.state.nodes[&edge.from].status == "done")
             })
-            .take(config.max_parallel)
+            .take(available)
             .cloned()
             .collect();
         let mut jobs = Vec::new();
@@ -438,7 +444,7 @@ impl Runtime {
                 reviewer,
             });
         }
-        if jobs.is_empty() && !matches!(self.state.phase.as_str(), "completed" | "needs_attention") {
+        if jobs.is_empty() && !self.active() && !matches!(self.state.phase.as_str(), "completed" | "needs_attention") {
             let serial = self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task";
             if !serial && self.state.nodes.values().all(|node| node.status == "done") {
                 let heads = self.state.graph.nodes.iter().map(|node|
@@ -460,7 +466,7 @@ impl Runtime {
             .edges
             .iter()
             .filter(|edge| !edge.feedback && edge.to == node)
-            .filter_map(|edge| self.state.nodes[&edge.from].head.clone())
+            .map(|edge| edge.from.clone())
             .collect()
     }
 
@@ -497,7 +503,7 @@ impl Runtime {
                 self.emit(EventKind::Finished {
                     execution_id: execution.id.clone(),
                     head,
-                    output: format!("{raw}\n── Final response ──\n{output}"),
+                    output: format!("{raw}\n── Final response ──\n{output}\n"),
                 })?;
                 Ok(if reviewer {
                     Some((execution.node.clone(), output))
@@ -588,7 +594,7 @@ pub fn perform(
 ) -> Result<(String, String), String> {
     let repository = resolve_repository(root, &job.config)?;
     let path = Path::new(&job.execution.worktree);
-    let before = workspace::prepare(&repository, path, &job.execution.before, parents)?;
+    let before = workspace::prepare_node(&repository, path, Some(&job.execution.node), &job.execution.before, parents)?;
     on_prepared(before)?;
     let output = engine::execute(
         &job.config,

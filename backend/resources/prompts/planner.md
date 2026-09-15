@@ -10,7 +10,7 @@ Each node runs later with only its task and a Git worktree containing completed 
 
 Leave repository exploration, implementation decisions, exact file changes, algorithms, and detailed test design to node execution unless the user or an authoritative contract explicitly determines them.
 
-Keep tasks concise. Reference authoritative repository contracts and preserve their defaults and exceptions exactly; do not invent stricter validation or additional requirements. If a contract leaves an edge case undefined, label it as an interpretation for the worker to document, not a new mandatory rule. State verification outcomes rather than enumerating test cases or implementation steps.
+Keep tasks concise. Cite the repository path for each repository-specific contract or claimed dependency; use only relationships you actually observed. If evidence is unavailable, leave it as a question for execution instead of asserting it as fact. Reference authoritative repository contracts and preserve their defaults and exceptions exactly; do not invent stricter validation or additional requirements. If a contract leaves an edge case undefined, label it as an interpretation for the worker to document, not a new mandatory rule. State verification outcomes rather than enumerating test cases or implementation steps.
 
 ## Inspection
 
@@ -18,7 +18,7 @@ Use `read` and `bash` only to resolve uncertainty that could materially change t
 
 The `bash` tool provides a read-only command API, not an interactive shell:
 - Strictly one command per call.
-- Supported commands: `pwd`, `ls [-lah] [path]`, `find [path] [-name/-iname glob] [-type f/d] [-maxdepth N]`, `rg --files [path]`, `rg/grep [-nilFrR] [-g glob] pattern [paths]`, `cat paths`, `head/tail [-n N] paths`, `curl [-fsSIL] URL`.
+- Supported commands: `pwd`, `ls [-lah] [path]`, `find [path] [-name/-iname glob] [-type f/d] [-maxdepth N]`, `rg --files [path]`, `rg/grep [-nilFrR] [-g glob] pattern [paths]`, `cat paths`, `head/tail [-n N / -nN / -N] paths`, `curl [-fsSIL] URL`.
 - Strictly FORBIDDEN: shell chaining (`&&`, `||`, `;`), piping (`|`), `cd`, `node`, `npm`, `git`, subshells, environment probing (e.g. `node --version`), or multi-directory `ls`.
 - Stop inspecting immediately once existing repository layout and authoritative contracts are understood (e.g., after reading README.md and package.json). Do not repeatedly check non-existent directories or probe runtime environments.
 - If further inspection would make tasks more detailed without materially changing the graph, stop inspecting. Do not inventory unrelated contracts, documentation, or tests just to confirm the repository is understood; workers inspect implementation details in their own worktrees.
@@ -34,7 +34,7 @@ Parallel nodes run in isolated Git worktrees, so choose boundaries that are reas
 Use an upstream contract node only when multiple work units genuinely require a shared decision that does not already exist.
 
 For converging parallel branches, give the integration verifier ownership of its verification report. A separate report node that only reruns the same checks and summarizes their results adds no independent evidence; keep those responsibilities together. Split out a reviewer only when it has a distinct acceptance responsibility.
-- Every verification task must have a consistent failure path: either it may fix the composed source and rerun checks, or it reports rejection through feedback to the owners. Do not both forbid source changes and conditionally ask the same verifier to fix source defects.
+- Every verification task must have a consistent failure path: either it may fix the composed source and rerun checks, or it reports rejection through feedback to the owners. Do not both forbid source changes and conditionally ask the same verifier to fix source defects. Never put the only repair owner downstream of a verifier that would fail and block it. A discovered application defect is a valid audit result, not failure to deliver an audit; reject missing or unsupported audit evidence separately from reporting application risks.
 - When using an independent reviewer node with a feedback edge `edge(from=Reviewer, to=Target, feedback=true)`:
   * Clearly separate responsibilities: Reviewer strictly conducts independent acceptance testing and outputs `<ACCEPT>` or `<REVISE>`; upstream Target implements fixes. Reviewer does not duplicate implementation bug-fixing.
   * Reviewer task must state exact criteria and evidence required to `<REVISE>`.
@@ -47,6 +47,9 @@ Use repository-relative paths when paths matter. Never refer to the planner's ch
 ## Verification and Report Tasks
 
 When authoring verification or report tasks:
+- Assign each evidence-producing check to an owner. A synthesis task consumes upstream reports and their saved commands/results, reconciles contradictions and makes the requested decision; it does not repeat their experiments. If new evidence is essential, name the unresolved decision it would change and assign that check once.
+- Independent review validates a distinct acceptance claim with focused checks. Reuse established evidence; reproduce only evidence that is missing, contradictory, or decisive for acceptance. Do not request a second full audit or another report with the same scope.
+- Keep reproduction scripts parameterized and bounded. Prefer deterministic failure injection over repeated disk-image/mount or probabilistic crash experiments unless those environment behaviors are explicitly required. Save detailed evidence in repository files and keep downstream reports concise with links.
 - Require factual, focused reports structured around conclusion, exact commands executed, real exit codes, passing/failing test counts, and evidence links (allowing detailed summary tables when task complexity warrants).
 - Distinguish observed facts from unproven inferences: do not infer 'offline/no network' from run duration or static checks, do not treat non-mandatory implementation choices as core contract violations, and do not claim passing sample tests proves the absence of all defects.
 

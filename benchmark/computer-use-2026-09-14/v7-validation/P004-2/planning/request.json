@@ -1,0 +1,9 @@
+{
+  "config": {
+    "maxFeedback": 2,
+    "maxParallel": 2,
+    "model": "dashscope/qwen3.8-flash",
+    "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P004-2/project"
+  },
+  "goal": "Deliver users search using the existing immutable contracts/users.json contract. Implement server/users.ts with q filtering, cursor pagination and the specified 400/500 errors, and server unit tests. Implement web/users.ts with debounced search, pagination, loading/empty/error states and protection against stale responses, with browser unit tests. Add integrated acceptance coverage in tests/users-flow.test.ts exercising the browser against the endpoint, including invalid cursors and out-of-order responses. Keep the published contract and package manifest unchanged."
+}

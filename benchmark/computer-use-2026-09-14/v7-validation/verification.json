@@ -1,0 +1,30 @@
+{
+  "status": "PASS",
+  "scope": "deterministic engineering checks only; model quality is tracked separately",
+  "checks": {
+    "rustFixtureTests": 48,
+    "rustIncludesRealMacSandboxTests": 3,
+    "piBaseline": 4,
+    "planningAndBoundary": 17,
+    "uiAndRecoveryRendering": 14,
+    "build": "PASS",
+    "httpPlanningAndOutput": "PASS",
+    "httpPublicationGitAndPlainFolder": "PASS",
+    "jointPiExtensionSmoke": "PASS",
+    "finalBrowserProjectStream": "PASS",
+    "longBrowserStress": "PASS"
+  },
+  "evidence": {
+    "rust": "rust-tests.log",
+    "focused": "rust-focused.log",
+    "projection": "projection.json",
+    "browser": "browser.json",
+    "finalBrowser": "project-stream.json"
+  },
+  "limitations": [
+    "40-minute browser run used preserved v6 traces and transport fixtures, not continuous real provider traffic",
+    "later minor UI changes were checked on final build separately",
+    "no Serial classification samples in this batch",
+    "passing compilation is not semantic graph acceptance"
+  ]
+}

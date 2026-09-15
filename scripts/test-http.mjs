@@ -22,7 +22,7 @@ let backend;
 let logs = "";
 async function start(extraEnv = {}) {
   let spawnError;
-  backend = spawn(path.resolve("backend/target/debug/grapher"), [], {
+  backend = spawn(path.resolve(process.env.GRAPHER_TEST_BINARY || "backend/target/debug/grapher"), [], {
     env: { ...process.env, ...extraEnv, GRAPHER_DATA_DIR: root, GRAPHER_PORT: String(port) },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -95,6 +95,17 @@ try {
   assert.deepEqual((await call("bootstrap", { compact: true })).snapshot, compact);
   assert.deepEqual(await call("history", { runId: saved.runId, compact: true }), compact);
   assert.deepEqual(await call("snapshot"), snapshot, "compact projection must not mutate persistent or active state");
+  const metadata = await call("snapshot", { detail: "metadata" });
+  assert.equal(metadata.executions[0].output, "");
+  assert.equal(metadata.executions[0].outputBytes, Buffer.byteLength(snapshot.executions[0].output));
+  assert.ok(metadata.events.every(event => event.type !== "output" && !event.output));
+  assert.deepEqual((await call("bootstrap", { detail: "metadata" })).snapshot, metadata);
+  assert.deepEqual(await call("history", { runId: saved.runId, detail: "metadata" }), metadata);
+  const executionPage = await call("get_execution_output", { runId: saved.runId, executionId: snapshot.executions[0].id });
+  assert.equal(executionPage.content, snapshot.executions[0].output);
+  await assert.rejects(call("get_execution_output", { runId: "missing", executionId: snapshot.executions[0].id }), /No events|not found|Unknown|Missing/);
+  await assert.rejects(call("get_execution_output", { runId: saved.runId, executionId: "other" }), /not found/);
+  await assert.rejects(call("get_execution_output", { runId: saved.runId, executionId: snapshot.executions[0].id, offset: -1 }), /Invalid offset/);
   await writeFile(path.join(root, "snapshot.json"), JSON.stringify(snapshot, null, 2));
   await stop();
   await start();
@@ -143,6 +154,40 @@ fi
       await assert.rejects(call("get_planning_output", { planningId: evilId, role: "planner" }), /Invalid planning ID/);
     }
   }
+
+  // Disconnect the initiator while a real child is still writing. A second client
+  // resumes the same durable identity and cursor, and restart marks interruption.
+  const liveScript = path.join(root, 'planning-live.sh');
+  await writeFile(liveScript, `cat >/dev/null
+printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"live planning 规划"}}'
+while [ ! -f '${root}/release-planning' ]; do sleep 0.02; done
+exit 7
+`);
+  const disconnect = new AbortController();
+  const live = fetch(`${base}/api/plan_goal_stream`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: disconnect.signal,
+    body: JSON.stringify({ goal: 'Live recovery', config: { ...config, engine: 'pi', repository: path.join(root, 'fixture-repository'), piCommand: '/bin/sh', piArgs: [liveScript] } }),
+  }).catch(() => null);
+  let activePlan, livePage;
+  for (let i = 0; i < 100; i++) {
+    activePlan = (await call('list_plannings', { repository: path.join(root, 'fixture-repository') })).find(p => p.status === 'running');
+    if (activePlan) {
+      livePage = await call('get_planning_output', { planningId: activePlan.planningId, role: 'partition' });
+      if (livePage.content.includes('live planning')) break;
+    }
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.ok(activePlan);
+  assert.match(livePage.content, /live planning/);
+  assert.equal(livePage.running, true);
+  disconnect.abort(); await live;
+  assert.equal((await call('get_planning', { planningId: activePlan.planningId })).status, 'running');
+  assert.equal((await call('get_planning_output', { planningId: activePlan.planningId, role: 'partition', offset: livePage.nextOffset })).content, '');
+  assert.equal((await call('list_plannings', { repository: '/other/project' })).some(p => p.planningId === activePlan.planningId), false);
+  await assert.rejects(call('plan_goal', { goal: 'Must not duplicate', config: { ...config, engine: 'pi' } }), /Another operation/);
+  await stop(); await start();
+  assert.equal((await call('get_planning', { planningId: activePlan.planningId })).status, 'failed');
+  assert.match((await call('get_planning_output', { planningId: activePlan.planningId, role: 'partition' })).content, /live planning/);
 
   const traceDir = path.join(root, "planning", "trace-pagination");
   await mkdir(traceDir);
@@ -220,6 +265,23 @@ fi
   const allWithLegacy = await call("list_plannings");
   assert.ok(allWithLegacy.some(p => p.planningId === "legacy-unattributed"));
   assert.ok(allWithLegacy.some(p => p.planningId === "workspace-b-plan"));
+
+  const successScript = path.join(root, 'planning-success.sh');
+  await writeFile(successScript, `cat >/dev/null
+if [ "$GRAPHER_MODE" = "planner" ]; then
+  printf '%s' '{"originalGoal":"Recovered planning success","nodes":[{"name":"planned","task":"Produce a report"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+fi
+printf '%s\\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"graph"}]}}'
+`);
+  const planned = await call('plan_goal', { goal: 'Recovered planning success', config: { ...config, engine: 'pi', repository: path.join(root, 'fixture-repository'), piCommand: '/bin/sh', piArgs: [successScript] } });
+  assert.equal(planned.phase, 'awaiting_approval');
+  const plannedLookup = { planningId: planned.planningId, repository: path.join(root, 'fixture-repository') };
+  assert.equal((await call('get_planning_snapshot', plannedLookup)).runId, planned.runId);
+  await assert.rejects(call('get_planning_snapshot', { ...plannedLookup, repository: '/other/project' }), /repository mismatch/);
+  const newer = await call('save_graph', { graph, config });
+  assert.equal((await call('get_planning_snapshot', plannedLookup)).runId, planned.runId, 'Recovery finds the requested planning run even after a different run became active');
+  assert.equal((await call('snapshot')).runId, newer.runId, 'Planning lookup must not switch active runs');
+  assert.equal((await call('get_execution_output', { runId: saved.runId, executionId: snapshot.executions[0].id })).content, snapshot.executions[0].output, 'Historical execution output uses the requested run');
 
   await call("delete_run", { runId: saved.runId });
   assert.ok(!(await call("bootstrap")).runs.includes(saved.runId));

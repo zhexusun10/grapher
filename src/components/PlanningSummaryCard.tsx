@@ -117,7 +117,8 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
     [state, now]
   );
 
-  const needsClock = approvalWaiting.isWaiting || !!state?.paused;
+  const running = planning.status === "running";
+  const needsClock = running || approvalWaiting.isWaiting || !!state?.paused;
   useEffect(() => {
     if (!needsClock) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -218,18 +219,18 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
             <Cpu size={12} />
             Pi 会话耗时
           </span>
-          <span className="stat-value planning-duration">{formatSeconds(planning.modelDuration)}</span>
+          <span className="stat-value planning-duration">{running ? "完成后统计" : formatSeconds(planning.modelDuration)}</span>
         </div>
 
-        <div className="planning-stat-box" title={planning.status === "failed" || planning.error ? "规划状态" : "规划创建至用户点击审批的等待耗时"}>
+        <div className="planning-stat-box" title={planning.status === "failed" || planning.error || running ? "规划状态" : "规划创建至用户点击审批的等待耗时"}>
           <span className="stat-label">
             {planning.status === "failed" || planning.error ? <AlertCircle size={12} /> : <Clock size={12} />}
-            {planning.status === "failed" || planning.error ? "规划状态" : "审批等待"}
+            {planning.status === "failed" || planning.error || running ? "规划状态" : "审批等待"}
           </span>
           <span className={`stat-value ${planning.status === "failed" || planning.error ? "error" : approvalWaiting.isWaiting ? "warning" : "neutral"}`}>
             {planning.status === "failed" || planning.error ? (
               <span style={{ color: "#ef4444" }}>未通过</span>
-            ) : (
+            ) : running ? "规划中" : (
               <>
                 {formatSeconds(approvalWaiting.durationSeconds)}
                 {approvalWaiting.isWaiting && <span className="waiting-pill">等待中</span>}
@@ -243,7 +244,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
             <CheckCircle2 size={12} />
             规划耗时
           </span>
-          <span className="stat-value neutral">{formatSeconds(planning.totalPlanningDuration)}</span>
+          <span className="stat-value neutral">{formatSeconds(running && planning.createdAt ? Math.max(0, now - planning.createdAt) / 1000 : planning.totalPlanningDuration)}</span>
         </div>
 
         <div className="planning-stat-box" title="规划过程中工具调用总数与失败数">
@@ -252,7 +253,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
             工具调用
           </span>
           <span className="stat-value neutral">
-            {totalToolCalls}
+            {running ? "完成后统计" : totalToolCalls}
             {totalToolErrors > 0 ? (
               <span className="tool-errors-tag" title={`${totalToolErrors} 次工具执行报错`}>
                 <AlertTriangle size={10} />

@@ -4,10 +4,10 @@ import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
 export function PlanningActivity({ planning }: { planning: PlanningSummary }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(planning.status === "running");
   const [role, setRole] = useState<"partition" | "planner">(planning.roles?.planner ? "planner" : "partition");
-  const [record, setRecord] = useState({ role: "", content: "" });
-  const output = record.role === role ? record.content : "";
+  const [record, setRecord] = useState({ id: "", role: "", content: "" });
+  const output = record.id === planning.planningId && record.role === role ? record.content : "";
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -15,29 +15,36 @@ export function PlanningActivity({ planning }: { planning: PlanningSummary }) {
   useEffect(() => {
     if (!open) return;
     const abort = new AbortController();
-    setRecord({ role, content: "" });
+    setRecord({ id: planning.planningId, role, content: "" });
     setError("");
     setLoading(true);
-    void (async () => {
+    let timer: ReturnType<typeof setTimeout>;
+    let offset = 0;
+    let text = "";
+    const poll = async () => {
       try {
-        let offset = 0;
-        let text = "";
         while (!abort.signal.aborted) {
           const page = await runtimeService.getPlanningOutput(planning.planningId, role, offset, abort.signal);
           if (abort.signal.aborted) return;
+          if (page.planningId !== planning.planningId || page.role !== role || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
+            throw new Error("规划记录与请求不匹配，请重试。");
+          }
           text += page.content;
-          setRecord({ role, content: text });
-          if (page.complete) break;
-          if (page.nextOffset <= offset) throw new Error("规划记录读取未取得进展，请重试。");
+          if (page.content) setRecord({ id: planning.planningId, role, content: text });
           offset = page.nextOffset;
+          if (page.complete) {
+            if (page.running) timer = setTimeout(poll, 1000);
+            break;
+          }
         }
       } catch (error) {
         if (!abort.signal.aborted) setError(error instanceof Error ? error.message : String(error));
       } finally {
         if (!abort.signal.aborted) setLoading(false);
       }
-    })();
-    return () => abort.abort();
+    };
+    void poll();
+    return () => { abort.abort(); clearTimeout(timer); };
   }, [open, planning.planningId, role, retry]);
 
   return <section className="planning-activity" aria-label="规划活动记录">

@@ -1,5 +1,7 @@
 # 当前测试项目：逐节点耗时分析
 
+> 后续实现与复测见 [v7 架构优化记录](architecture-v7.md)。本文保留 v6 的原始时长与归因，不将后续投影/调度优化倒算成旧任务的模型提速。
+
 对象为已完成的 Atlas 审计 Graph，run `1ee4611f-077b-4d2f-96dc-bfb5f4c51f25`。4 个节点、5 次 fresh execution，模型均为 `dashscope/qwen3.8-flash`、thinking=medium，最大并发 2。最终发布 `c2d5c422c45e33ed55d684ab931505e7295ff93c`，经过一次 UI 介入。原始证据：[最终完整 snapshot](v6-e2e-recovery/snapshot.json)、[离线指标](v6-e2e-recovery/metrics.json)、[独立发布验收](v6-browser-final/independent-acceptance.json)。
 
 时间以宿主毫秒时间戳计算；Runtime 耗时包括 worktree 准备、Pi 执行及快照提交，Pi 进程时间包括模型等待、推理、工具、进程启动/退出，不等于纯计算时间。最后工具后尾段也不能直接解释为推理时间。

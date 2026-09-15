@@ -280,8 +280,8 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         if current != repository {
             let profile = request.session_dir.join("execution-instance.sb");
             let worktree_root = current.parent().and_then(Path::parent)
-                .filter(|path| path.file_name().is_some_and(|name| name == ".grapher-worktrees"))
-                .ok_or("Graph execution must use .grapher-worktrees/<run>/<instance>; rerun legacy workspaces")?;
+                .filter(|path| path.file_name().is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces"))
+                .ok_or("Graph execution must use .grapher-workspaces/<run>/<instance>; rerun legacy workspaces")?;
             crate::sandbox::write_graph_profile(&profile, &repository, worktree_root, &current)?;
             let mut command = Command::new("/usr/bin/sandbox-exec");
             command.args(["-f", profile.to_str().ok_or("Invalid sandbox profile path")?, "node"]);
@@ -471,7 +471,13 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
                         _ => {}
                     }
                 }
-                on_output(format!("{line}\n"));
+                let received_line = if let Ok(mut event) = serde_json::from_str::<Value>(&line) {
+                    if let Some(object) = event.as_object_mut() {
+                        object.insert("grapherReceivedAt".into(), crate::model::now().into());
+                    }
+                    Some(serde_json::to_string(&event).map_err(|error| error.to_string())?)
+                } else { None };
+                on_output(format!("{}\n", received_line.as_deref().unwrap_or(&line)));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -523,6 +529,13 @@ pub fn execute(
     } else {
         task.into()
     };
+    let execution_date = Command::new("/bin/date").args(["-u", "+%Y-%m-%d"]).output()
+        .ok().filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|date| date.trim().to_string());
+    let task = if let Some(date) = execution_date {
+        format!("{task}\n\nHost execution date (UTC): {date}. If your deliverable requires a date, use this observed date rather than guessing.")
+    } else { task };
     let session_dir = root
         .join("sessions")
         .join(&execution.id);
@@ -544,7 +557,7 @@ pub fn execute(
             tools: None,
             session_id: Some(&execution.session_id),
             extra_args,
-            environment: Vec::new(),
+            environment: vec![("GRAPHER_MODE", "node".into())],
             system_prompt: None,
         },
         on_output,

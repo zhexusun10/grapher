@@ -9,6 +9,8 @@ export interface ThinkingCardProps {
   isStreaming?: boolean;
   title?: string;
   defaultExpanded?: boolean;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
   className?: string;
 }
 
@@ -19,6 +21,8 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     isStreaming: directStreaming,
     title = "思维链推理 (Chain of Thought)",
     defaultExpanded = true,
+    expanded,
+    onExpandedChange,
     className = "",
   }) => {
     const rawContent = (item ? item.content : directContent) || "";
@@ -30,7 +34,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const bodyRef = useRef<HTMLDivElement>(null);
     const userScrolledUpRef = useRef(false);
 
-    const isExpanded = userToggled !== null ? userToggled : defaultExpanded || isStreaming;
+    const isExpanded = expanded ?? (userToggled !== null ? userToggled : defaultExpanded || isStreaming);
 
     // Auto-scroll within the thinking box while streaming if user hasn't scrolled up
     useEffect(() => {
@@ -56,7 +60,8 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     };
 
     const toggleExpand = () => {
-      setUserToggled((prev) => (prev !== null ? !prev : !isExpanded));
+      setUserToggled(!isExpanded);
+      onExpandedChange?.(!isExpanded);
     };
 
     // Calculate approximate token/char stats

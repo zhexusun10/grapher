@@ -235,3 +235,52 @@ fn shared_git_metadata_outside_source_is_protected() {
             .success());
     }
 }
+
+#[test]
+fn standalone_workspace_allows_git_diff_inside_sandbox_while_protecting_source() {
+    use grapher::workspace;
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let source = base.join("source");
+    let root = base.join(".grapher-worktrees");
+    let current = root.join("run/current");
+
+    fs::create_dir_all(&source).unwrap();
+    workspace::git(&source, &["init"]).unwrap();
+    fs::write(source.join("file.txt"), "initial content\n").unwrap();
+    workspace::git(&source, &["add", "."]).unwrap();
+    workspace::git(&source, &["commit", "-m", "init"]).unwrap();
+    let head = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
+
+    // Prepare standalone workspace
+    workspace::prepare(&source, &current, &head, &[]).unwrap();
+
+    // Modify file in workspace
+    fs::write(current.join("file.txt"), "modified in workspace\n").unwrap();
+
+    // Write sandbox profile
+    let profile = base.join("profile.sb");
+    sandbox::write_graph_profile(&profile, &source, &root, &current).unwrap();
+
+    // Inside sandbox: git diff must succeed!
+    let diff_output = run(&profile, &current, "git diff", &[]);
+    assert!(
+        diff_output.status.success(),
+        "git diff failed inside sandbox: {}",
+        String::from_utf8_lossy(&diff_output.stderr)
+    );
+    let diff_str = String::from_utf8_lossy(&diff_output.stdout);
+    assert!(diff_str.contains("-initial content"));
+    assert!(diff_str.contains("+modified in workspace"));
+
+    // Inside sandbox: git status must succeed!
+    let status_output = run(&profile, &current, "git status --porcelain", &[]);
+    assert!(status_output.status.success());
+    let status_str = String::from_utf8_lossy(&status_output.stdout);
+    assert!(status_str.contains("M file.txt"));
+
+    // Inside sandbox: source repository must remain DENIED!
+    let leak_check = run(&profile, &current, "/bin/cat \"$1/file.txt\"", &[&source]);
+    assert!(!leak_check.status.success(), "sandbox allowed reading source repository");
+}
+

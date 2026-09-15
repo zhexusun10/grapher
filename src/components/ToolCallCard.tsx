@@ -22,10 +22,12 @@ import { TranscriptItem } from "../types";
 interface ToolCallCardProps {
   item: TranscriptItem;
   defaultExpanded?: boolean;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }
 
 export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
-  ({ item, defaultExpanded = false }) => {
+  ({ item, defaultExpanded = false, expanded, onExpandedChange }) => {
     const [isCopied, setIsCopied] = useState(false);
 
     const toolName = item.toolName || "tool";
@@ -59,7 +61,12 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       );
     }, [isError, exitCode, item.result]);
 
-    const [isExpanded, setIsExpanded] = useState(defaultExpanded || isError || hasSubcommandWarning);
+    const [localExpanded, setIsExpanded] = useState(defaultExpanded || isError || hasSubcommandWarning);
+    const isExpanded = expanded ?? localExpanded;
+    const toggleExpanded = () => {
+      setIsExpanded(!isExpanded);
+      onExpandedChange?.(!isExpanded);
+    };
 
     // Select icon & title based on tool type
     const getToolMeta = () => {
@@ -145,7 +152,8 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       >
         <div
           className="tool-call-header"
-          onClick={() => setIsExpanded((prev) => !prev)}
+          onClick={toggleExpanded}
+          onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleExpanded(); } }}
           role="button"
           tabIndex={0}
         >

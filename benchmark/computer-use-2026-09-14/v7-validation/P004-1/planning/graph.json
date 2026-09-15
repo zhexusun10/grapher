@@ -1,0 +1,43 @@
+{
+  "originalGoal": "Deliver users search using the existing immutable contracts/users.json contract. Implement server/users.ts with q filtering, cursor pagination and the specified 400/500 errors, and server unit tests. Implement web/users.ts with debounced search, pagination, loading/empty/error states and protection against stale responses, with browser unit tests. Add integrated acceptance coverage in tests/users-flow.test.ts exercising the browser against the endpoint, including invalid cursors and out-of-order responses. Keep the published contract and package manifest unchanged.",
+  "nodes": [
+    {
+      "name": "server_users_search",
+      "task": "Implement the users search endpoint in `server/users.ts` of the Atlas workspace (see `README.md`), conforming exactly to the published contract `contracts/users.json`: `GET /users` accepting query `q` (string) and `cursor` (optional string), returning `{ items: [{ id, name }], nextCursor: string | null }`, with a `400` for an invalid cursor and a `500` for a server error. The current file is a TODO stub exporting `users = []`; replace it with the real handler while keeping it importable by other modules.\n\nAdd server unit tests for this endpoint. `README.md` reserves `tests/` for integration tests, so keep these unit tests with the server code. Cover, as observable behavior: `q` filtering (document the matching semantics you implement), cursor pagination yielding stable, non-overlapping pages that terminate with `nextCursor: null`, an invalid cursor producing the `400` error response, and an induced internal failure producing the `500` error response.\n\nHard constraints: `contracts/users.json` and `package.json` must remain byte-identical (package is `atlas-fixture`, private, `\"type\": \"module\"`, single script `\"test\": \"node --test\"`) — add no dependencies and do not change the test script or add generated files. Complete when the new server tests pass under `node --test`."
+    },
+    {
+      "name": "web_users_search_ui",
+      "task": "Implement browser users search in `web/users.ts` of the Atlas workspace (see `README.md`). The current file is a TODO stub that only writes \"Users\" into a mounted element; replace it with a search UI that consumes the `GET /users` endpoint exactly as published in `contracts/users.json` (`q` filter, optional `cursor`, response `{ items: [{ id, name }], nextCursor: string | null }`).\n\nRequired behavior: a debounce on the search input before issuing a request; cursor-driven pagination using `nextCursor`; explicit rendering of loading, empty, and error states (including the endpoint's `400`/`500` error responses); and protection against stale responses so that an out-of-order reply from an earlier query never overwrites the results of the newest query. No UI framework is available or permitted — plain DOM via the element passed to the mount function. Expose a small, clearly named mount/query surface so an integration test can drive the flow and inject or observe requests.\n\nHard constraints: `contracts/users.json` and `package.json` must remain byte-identical (no new dependencies; the only runner is `node --test`), so any DOM test double must be local to this repository. Complete when your browser unit tests for the above behaviors pass under `node --test`."
+    },
+    {
+      "name": "users_flow_acceptance",
+      "task": "Add integrated acceptance coverage in `tests/users-flow.test.ts` (currently a placeholder) that exercises the browser search UI in `web/users.ts` against the real `GET /users` endpoint implemented in `server/users.ts`, with the shape published in the immutable contract `contracts/users.json`. Inspect the actual exported surface of both files in this worktree rather than assuming names.\n\nThe flow must demonstrate end to end: `q` filtering reaching the server and rendering results, cursor pagination through successive pages until `nextCursor` is null, loading/empty/error rendering, the endpoint's `400` on an invalid cursor (including a cursor tampered with or replayed by the UI), the `500` error surface, and out-of-order/stale responses where a slower earlier request resolves after a newer one and must not corrupt the displayed results. Run the complete suite with `node --test` (the existing normalize tests and the new server/web unit tests included).\n\nAlso audit immutability: `contracts/users.json` must equal `{\"endpoint\":\"GET /users\",\"query\":{\"q\":\"string\",\"cursor\":\"optional string\"},\"response\":{\"items\":[{\"id\":\"string\",\"name\":\"string\"}],\"nextCursor\":\"string or null\"},\"errors\":{\"400\":\"invalid cursor\",\"500\":\"server error\"}}` and `package.json` must still be the `atlas-fixture` manifest with `\"type\": \"module\"` and only the `\"test\": \"node --test\"` script; no new dependencies, no committed generated files.\n\nResponsibility boundary: you own `tests/users-flow.test.ts` and may repair wiring/fixtures in that file and rerun the suite. Do not reimplement or patch `server/users.ts` or `web/users.ts` to make the flow pass — report such a defect and end with `<REVISE>`. Otherwise write a concise acceptance report under `reports/` recording the commands run, real exit codes, passing/failing counts, and the contract/manifest audit result, and end with `<ACCEPT>`. Verdict marker goes on the final line."
+    }
+  ],
+  "edges": [
+    {
+      "from": "server_users_search",
+      "to": "users_flow_acceptance",
+      "relation": "",
+      "feedback": false
+    },
+    {
+      "from": "web_users_search_ui",
+      "to": "users_flow_acceptance",
+      "relation": "",
+      "feedback": false
+    },
+    {
+      "from": "users_flow_acceptance",
+      "to": "server_users_search",
+      "relation": "revise on contract/behavior defects in server/users.ts",
+      "feedback": true
+    },
+    {
+      "from": "users_flow_acceptance",
+      "to": "web_users_search_ui",
+      "relation": "revise on behavior defects in web/users.ts",
+      "feedback": true
+    }
+  ]
+}

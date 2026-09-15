@@ -1,0 +1,116 @@
+[
+  {
+    "graph": "v7-catalog/CATALOG-1/graph.json",
+    "method": "Direct source/task review by coding assistant; no model score or exact-topology gold",
+    "issues": [
+      {
+        "issue": "Repair owner is downstream of the verifier",
+        "status": "open",
+        "evidence": {
+          "node": "integration_test",
+          "line": 7,
+          "quote": "Inspect the actual behaviour and any documented edge-case interpretations in the two source modules and their unit tests before writing assertions; test against the contract as implemented rather than assumed behaviour. Do not modify src/csv.mjs or src/search.mjs — if you find a genuine contract violation, report it clearly in your notes instead of redesigning either module's public API. Verify by running the new integration test file and the full test suite, and confirm all tests pass."
+        },
+        "explanation": "The integration node forbids source repairs and has no feedback edge; verification_report owns repairs but depends on integration success. A real failing check can block its repair owner."
+      },
+      {
+        "issue": "Repeated integration/report acceptance",
+        "status": "open",
+        "evidence": {
+          "node": "verification_report",
+          "line": 6,
+          "quote": "1. Run the full suite from the composed state (the repo's `npm test` script is `node --test`) and record the command, exit status, and pass/fail counts."
+        },
+        "explanation": "integration_test already runs the full suite. The later report repeats it with coverage review; responsibilities are still overlapping despite prompt guidance."
+      },
+      {
+        "issue": "Undefined edge cases left as interpretations",
+        "status": "improved",
+        "evidence": {
+          "node": "implement_search_filter",
+          "line": 9,
+          "quote": "Where README.md does not define an edge case (for example what counts as invalid bounds, or behaviour on non-array/empty input), choose behaviour consistent with the stated contract and document it in code comments or test names so downstream integration work can rely on it."
+        },
+        "explanation": "The task preserves maxPrice=Infinity and leaves unspecified cases as documented decisions rather than imposing finite-only bounds."
+      }
+    ]
+  },
+  {
+    "graph": "v7-validation/P006-1/graph.json",
+    "method": "Direct source/task review by coding assistant; no model score or exact-topology gold",
+    "issues": [
+      {
+        "issue": "Baseline claim cannot be established inside the worktree",
+        "status": "open",
+        "evidence": {
+          "node": "reports_integrity_review",
+          "line": 7,
+          "quote": "4) Strict constraint: application source must not be changed. Do not edit anything outside reports/, and do not implement any recommended fix. Note: worktrees do not expose the original checkout, so verify this by inspection (source files still contain the constructs the reports cite, and no fix code was added) rather than by comparing with a base commit or relying on git status/diff."
+        },
+        "explanation": "Source inspection cannot prove byte identity to an inaccessible baseline. Only host diff can establish the claim."
+      },
+      {
+        "issue": "Verdict without routing edge",
+        "status": "open",
+        "evidence": {
+          "node": "reports_integrity_review",
+          "line": 11,
+          "quote": "Final line of reports/README.md: <ACCEPT> if the assessment is complete, internally consistent, and no application source was modified; otherwise fix what you own, re-run the checks, and if a defect remains outside your authority (e.g. application source was altered or an entire audit deliverable is missing), state the specific problem and end with <REVISE>."
+        },
+        "explanation": "This node has no outgoing feedback edge, and the marker is requested inside a report file. Neither creates a Runtime retry. W302 was added after this initial sample."
+      },
+      {
+        "issue": "Synthesis still asks for reproductions",
+        "status": "open",
+        "evidence": {
+          "node": "release_assessment",
+          "line": 8,
+          "quote": "5) Verification evidence: record the actual commands you ran to confirm the reports' claims or reproduce cited cases, with their real exit codes, and clearly separate observed facts from inferences."
+        },
+        "explanation": "The task delegates repeated claim confirmation to synthesis. The actual run timed out at 900s; host overhead was about 0.137s."
+      }
+    ]
+  },
+  {
+    "graph": "v7-validation/P004-1/graph.json",
+    "method": "Direct source/task review by coding assistant; no model score or exact-topology gold",
+    "issues": [
+      {
+        "issue": "Unspecified cursor behavior becomes an acceptance obligation",
+        "status": "open",
+        "evidence": {
+          "node": "users_flow_acceptance",
+          "line": 3,
+          "quote": "The flow must demonstrate end to end: `q` filtering reaching the server and rendering results, cursor pagination through successive pages until `nextCursor` is null, loading/empty/error rendering, the endpoint's `400` on an invalid cursor (including a cursor tampered with or replayed by the UI), the `500` error surface, and out-of-order/stale responses where a slower earlier request resolves after a newer one and must not corrupt the displayed results. Run the complete suite with `node --test` (the existing normalize tests and the new server/web unit tests included)."
+        },
+        "explanation": "contracts/users.json requires 400 for invalid cursors but does not state that a valid replayed cursor is invalid. This wording can induce an unsupported restriction."
+      }
+    ]
+  },
+  {
+    "graph": "v7-validation/P005-3/graph.json",
+    "method": "Direct source/task review by coding assistant; no model score or exact-topology gold",
+    "issues": [
+      {
+        "issue": "Required feedback owners are present",
+        "status": "observed",
+        "evidence": {
+          "node": "sdk_conformance_review",
+          "line": 11,
+          "quote": "- Emit `<REVISE>` when any clause mismatches between the two SDKs or deviates from the contract, or a suite fails. List each defect as a numbered correction request naming the offending file (clients/typescript/client.ts and/or clients/python/client.py), the contract clause, and the observed-versus-expected behavior, so both client owners can fix their own code. Do not modify the client implementations or their tests yourself; you own only tests/sdk-conformance.md."
+        },
+        "explanation": "The graph has dependency paths from the shared contract through both SDKs and feedback from the joint reviewer to both implementation owners, matching the user requested retry semantics."
+      },
+      {
+        "issue": "Parallel Python task refers to a sibling API",
+        "status": "risk",
+        "evidence": {
+          "node": "python_client_retry",
+          "line": 5,
+          "quote": "Mirror the TypeScript client's public surface and naming as closely as the language allows, since a later conformance review compares the two for identical policy semantics. Put tests in a new Python test file colocated with the SDK (clients/python/) or under tests/ — the repository has no established Python runner, so pick one, keep it self-contained and dependency-light, and document the run command in the test module or a short note. Inject the sleep/transport so tests are deterministic and fast. Do not add retry behavior to server/ or web/, and do not change unrelated public client behavior."
+        },
+        "explanation": "The TypeScript implementation is not a dependency and cannot be inspected in the Python worktree. Shared surface decisions should live in the upstream contract if required."
+      }
+    ]
+  }
+]

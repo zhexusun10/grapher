@@ -1,0 +1,57 @@
+{
+  "originalGoal": "Implement the two independent modules defined in README.md: the CSV catalog parser and the catalog search/filter module. Each needs thorough Node built-in unit tests in separate test files. Then add tests/integration.test.mjs that verifies their interoperability, and write reports/verification.md with commands, results and remaining limitations. Preserve the existing public contract and package.json, use no dependencies or network services. Verify malformed CSV, quoted commas and escaped quotes, CRLF, empty input, price validation, case-insensitive query, inclusive bounds, stable ordering and no mutation. Deliver working source files, tests and the final verification report.",
+  "nodes": [
+    {
+      "name": "csv_catalog_parser",
+      "task": "Implement the CSV catalog parser module described in README.md of this repository (package `catalog-acceptance`, ESM, zero dependencies).\n\nDeliverables:\n- src/csv.mjs exporting `parseCatalog(csvText)`, exactly as specified by the \"Existing public contract (do not redesign)\" section of README.md: returns `[{id: string, name: string, price: number}]`; header is `id,name,price`; handles quoted fields containing commas, escaped quotes inside quoted fields, CRLF line endings, and empty input; rejects malformed rows and negative / non-finite prices.\n- tests/csv.test.mjs: thorough unit tests using only the Node built-in test runner (`node:test` + `node:assert`), runnable via the existing `npm test` script (`node --test`).\n\nConstraints:\n- Preserve the README public contract; do not rename exports, change the row shape, or add configuration options.\n- No runtime dependencies and no network services.\n- Keep this module independent of src/search.mjs so both modules can be developed in parallel.\n\nCompletion: the contract behaviors listed above (including rejection of malformed rows and invalid prices) are each covered by a passing named test; the file imports cleanly as ESM."
+    },
+    {
+      "name": "search_filter_module",
+      "task": "Implement the catalog search/filter module described in README.md of this repository (package `catalog-acceptance`, ESM, zero dependencies).\n\nDeliverables:\n- src/search.mjs exporting `searchCatalog(items, {query = '', minPrice = 0, maxPrice = Infinity} = {})`, exactly as specified by the \"Existing public contract (do not redesign)\" section of README.md: case-insensitive substring match on `name`, inclusive price bounds, original order preserved for matching items, input array and objects not mutated, invalid bounds rejected.\n- tests/search.test.mjs: thorough unit tests using only the Node built-in test runner (`node:test` + `node:assert`), runnable via the existing `npm test` script (`node --test`).\n\nConstraints:\n- Preserve the README signature and its defaults; do not introduce extra options, scoring, or sorting.\n- No runtime dependencies and no network services.\n- Keep this module independent of src/csv.mjs (it consumes plain row objects, it must not parse CSV) so both modules can be developed in parallel.\n\nCompletion: contract behaviors (case-insensitive substring, inclusive min/max boundaries, stable ordering, non-mutation of input, and rejection of invalid bounds) are each covered by a passing named test."
+    },
+    {
+      "name": "integration_test",
+      "task": "Add interoperability tests for the two catalog modules in this repository (package `catalog-acceptance`, ESM, zero dependencies), as requested in README.md.\n\nContext: `src/csv.mjs` exports `parseCatalog(csvText)` returning `[{id: string, name: string, price: number}]`; `src/search.mjs` exports `searchCatalog(items, {query, minPrice, maxPrice})`. Both have their own unit test files under tests/. Consult README.md and the two source files for the exact contract; do not redesign either module.\n\nDeliverable:\n- tests/integration.test.mjs using only `node:test` and `node:assert`, runnable via the existing `npm test` script (`node --test`), exercising the pipeline end to end: CSV text -> parseCatalog -> searchCatalog.\n\nCover at least: parsed rows feed search directly; a realistic fixture with quoted commas, escaped quotes and CRLF endings; case-insensitive query results on parsed data; inclusive price bounds against parsed prices; output order matches parsed order; and the parsed input array/objects are unchanged after searching.\n\nIf you find a genuine contract mismatch between the two modules while writing these tests, report it in the test file's comments and the task result rather than silently changing the public API.\n\nCompletion: tests/integration.test.mjs exists, passes under `npm test`, and demonstrates the two modules working together on shared fixtures."
+    },
+    {
+      "name": "contract_acceptance_review",
+      "task": "Independently accept or reject the delivered catalog toolkit against the user's request and README.md's public contract. You do not modify source or test files; the verification_report owner does.\n\nIn the worktree containing src/csv.mjs, src/search.mjs, the three tests/ files and reports/verification.md, do the following (reuse the established evidence; reproduce only what is missing, contradictory, or decisive):\n- Run the full suite once (`npm test`) and record exit code and test counts.\n- Spot-check the contract points the report claims but where evidence is thin: escaped quotes and quoted commas in CSV, CRLF handling, empty input, rejection of negative/non-finite price and malformed rows; case-insensitive query, inclusive min/max bounds, order stability, and non-mutation of the input in search; interoperability proven by tests/integration.test.mjs.\n- Confirm package.json and README.md were not modified (no added dependencies, scripts still `node --test`) and that no test or module reaches the network.\n- Judge whether reports/verification.md accurately reflects what you observed: commands, real results, and stated limitations. Flag any claim not backed by executed evidence.\n\nOutput findings and correction requests first, then a final line with exactly `<ACCEPT>` or `<REVISE>`. Use `<REVISE>` only for: a failing or missing check on a README contract point, contract drift (API/exports/package.json), a fabricated or unsupported claim in the report, or a missing/defective required file."
+    },
+    {
+      "name": "verification_report",
+      "task": "Verify the composed catalog toolkit in this repository (package `catalog-acceptance`: src/csv.mjs, src/search.mjs, tests/csv.test.mjs, tests/search.test.mjs, tests/integration.test.mjs) and produce the final report. You are also the sole repair owner for this worktree.\n\nSteps:\n1. Run the full suite with the repo's existing script (`npm test`, i.e. `node --test`) from the project root, and any focused runs needed to isolate a failing file. Record the exact commands and their real exit codes and pass/fail counts.\n2. Check the observable contract in README.md for both exports: row shape `{id: string, name: string, price: number}`, header `id,name,price`, quoted commas, escaped quotes, CRLF, empty input, rejection of malformed rows and negative/non-finite prices; and for search: case-insensitive substring on `name`, inclusive bounds, order preservation, no input mutation, invalid bounds rejection. Also confirm no runtime dependencies were added (package.json unchanged) and no network services are used.\n3. If a check fails, fix src/ or tests/ within the existing public contract, rerun the full suite, and record before/after evidence in the report. Do not redesign the API or change package.json's scripts/dependencies.\n\nDeliverable:\n- reports/verification.md with: a short conclusion, the exact commands executed with their real exit codes and test counts, a mapping of each README contract requirement to the evidence (test name / observation) supporting it, repairs performed if any, and remaining limitations or unproven inferences (clearly labeled as such, e.g. behaviors only covered indirectly).\n\nKeep the report factual and reproducible; do not claim a behavior passes without an executed command or test backing it.\n\nIf this node is re-run because the independent reviewer rejected the delivery, the reviewer's result will list the rejected contract points or unsupported report claims: address each one in src/, tests/ or reports/verification.md, rerun the full suite, and update the report with the new evidence rather than repeating the previous summary."
+    }
+  ],
+  "edges": [
+    {
+      "from": "csv_catalog_parser",
+      "to": "integration_test",
+      "relation": "requires src/csv.mjs and its unit tests",
+      "feedback": false
+    },
+    {
+      "from": "search_filter_module",
+      "to": "integration_test",
+      "relation": "requires src/search.mjs and its unit tests",
+      "feedback": false
+    },
+    {
+      "from": "integration_test",
+      "to": "verification_report",
+      "relation": "composed parser, search and integration tests must exist before verification",
+      "feedback": false
+    },
+    {
+      "from": "verification_report",
+      "to": "contract_acceptance_review",
+      "relation": "review requires the composed suite and verification report",
+      "feedback": false
+    },
+    {
+      "from": "contract_acceptance_review",
+      "to": "verification_report",
+      "relation": "rejected contract or report evidence returns to the repair owner",
+      "feedback": true
+    }
+  ]
+}

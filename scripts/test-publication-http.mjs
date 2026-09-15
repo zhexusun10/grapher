@@ -7,7 +7,7 @@ import path from "node:path";
 import net from "node:net";
 
 const root = await mkdtemp(path.join(tmpdir(), "grapher-publication-"));
-const binary = path.resolve("backend/target/debug/grapher");
+const binary = path.resolve(process.env.GRAPHER_TEST_BINARY || "backend/target/debug/grapher");
 const listen = net.createServer();
 await new Promise(resolve => listen.listen(0, "127.0.0.1", resolve));
 const port = listen.address().port;

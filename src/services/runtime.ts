@@ -6,7 +6,7 @@ async function request<T>(command: string, body: Record<string, unknown> = {}, s
     response = await fetch(`/api/${command}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, compact: true }),
+      body: JSON.stringify({ ...body, compact: true, detail: "metadata" }),
       signal,
     });
   } catch {
@@ -125,11 +125,16 @@ export const runtimeService = {
     }
     return finalSnapshot;
   },
+  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal) =>
+    request<{ runId: string; executionId: string; content: string; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
+      "get_execution_output", { runId, executionId, offset }, signal),
+  getPlanningSnapshot: (planningId: string, repository: string, signal?: AbortSignal) =>
+    request<Snapshot>("get_planning_snapshot", { planningId, repository }, signal),
   getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal) =>
-    request<{ planningId: string; role: string; content: string; nextOffset: number; totalBytes: number; complete: boolean }>(
+    request<{ planningId: string; role: string; content: string; nextOffset: number; totalBytes: number; complete: boolean; running: boolean }>(
       "get_planning_output", { planningId, role, offset }, signal),
-  getPlanning: (planningId: string) => request<PlanningSummary>("get_planning", { planningId }),
-  listPlannings: (repository?: string) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}),
+  getPlanning: (planningId: string, signal?: AbortSignal) => request<PlanningSummary>("get_planning", { planningId }, signal),
+  listPlannings: (repository?: string, signal?: AbortSignal) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}, signal),
   control: (action: string, extra?: Record<string, unknown>) => request<Snapshot>("control", { action, ...extra }),
   detectRepository: (path?: string | null) => request<RepositoryInfo | null>("detect_repository", { path: path || null }),
   async pickRepository(): Promise<RepositoryInfo | null> {

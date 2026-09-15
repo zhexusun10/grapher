@@ -1,0 +1,587 @@
+{
+  "name": "P006-1",
+  "project": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P006-1/project",
+  "data": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P006-1/data",
+  "baseline": "67efbe21b2cedc70988f98d1541304766b68b9bd",
+  "startedAt": "2026-09-14T16:03:45.877Z",
+  "status": "FAIL",
+  "route": "graph",
+  "expectedRoute": "graph",
+  "planning": {
+    "createdAt": 1789401826509,
+    "modelDuration": 218.273,
+    "planningId": "067f3829-7c22-461d-be5e-4ed748ca250c",
+    "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P006-1/project",
+    "roles": {
+      "partition": {
+        "assistantMessages": 1,
+        "durationSeconds": 12.962,
+        "lastEvent": "1789401839571",
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789401826609",
+        "toolErrors": 0,
+        "tools": 0,
+        "usage": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 266,
+          "output": 195,
+          "reasoning": 191,
+          "totalTokens": 461
+        }
+      },
+      "planner": {
+        "assistantMessages": 9,
+        "durationSeconds": 205.311,
+        "lastEvent": "1789402044887",
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789401839574",
+        "toolErrors": 1,
+        "tools": 14,
+        "usage": {
+          "cacheRead": 29056,
+          "cacheWrite": 0,
+          "input": 12121,
+          "output": 4244,
+          "reasoning": 1942,
+          "totalTokens": 45421
+        }
+      }
+    },
+    "status": "success",
+    "totalPlanningDuration": 218.4013225
+  },
+  "partition": {
+    "elapsedMs": 12962,
+    "firstAssistantObservedMs": 5805,
+    "afterLastToolMs": null,
+    "toolsByName": {},
+    "errors": 0,
+    "commands": [],
+    "toolDurationsMs": [],
+    "usage": {
+      "input": 266,
+      "output": 195,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "reasoning": 191,
+      "totalTokens": 461
+    }
+  },
+  "planner": {
+    "elapsedMs": 205311,
+    "firstAssistantObservedMs": 2472,
+    "afterLastToolMs": 69994,
+    "toolsByName": {
+      "bash": 7,
+      "node": 4,
+      "edge": 3
+    },
+    "errors": 1,
+    "commands": [
+      "ls -la",
+      "find . -maxdepth 2 -type f -name \"*.ts\"",
+      "cat package.json",
+      "ls docs contracts tests",
+      "cat README.md",
+      "ls docs",
+      "ls contracts"
+    ],
+    "toolDurationsMs": [
+      {
+        "tool": "bash",
+        "ms": 9
+      },
+      {
+        "tool": "bash",
+        "ms": 8
+      },
+      {
+        "tool": "bash",
+        "ms": 0
+      },
+      {
+        "tool": "bash",
+        "ms": 0
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 0
+      },
+      {
+        "tool": "node",
+        "ms": 14
+      },
+      {
+        "tool": "node",
+        "ms": 13
+      },
+      {
+        "tool": "node",
+        "ms": 54
+      },
+      {
+        "tool": "edge",
+        "ms": 10
+      },
+      {
+        "tool": "edge",
+        "ms": 10
+      },
+      {
+        "tool": "node",
+        "ms": 13
+      },
+      {
+        "tool": "edge",
+        "ms": 13
+      }
+    ],
+    "usage": {
+      "input": 12121,
+      "output": 4244,
+      "cacheRead": 29056,
+      "cacheWrite": 0,
+      "reasoning": 1942,
+      "totalTokens": 45421
+    }
+  },
+  "executionWallMs": 1628536,
+  "executions": [
+    {
+      "node": "auth_audit",
+      "attempt": 1,
+      "status": "completed",
+      "runtimeMs": 443854,
+      "elapsedMs": 443669,
+      "firstAssistantObservedMs": 2850,
+      "afterLastToolMs": 35233,
+      "toolsByName": {
+        "bash": 15,
+        "read": 13,
+        "write": 1,
+        "edit": 2
+      },
+      "errors": 2,
+      "commands": [
+        "ls -la && echo \"---\" && git status && echo \"---\" && git log --oneline -5 2>&1 | head -20",
+        "find . -type f -not -path './node_modules/*' -not -path './.git/*' | sort && echo \"---README---\" && cat README.md && echo \"---package.json---\" && cat package.json",
+        "grep -rn \"expiresAt\\|sessions\\|authenticate\\|session\\|token\" --include=*.ts --include=*.json --include=*.md --include=*.py -l . 2>/dev/null | grep -v node_modules; echo \"=== occurrences ===\"; grep -rn \"expiresAt\\|sessions\\|authenticate\" --include=*.ts --include=*.md . 2>/dev/null | grep -v node_modules",
+        "node --version; echo \"---\"; ls node_modules 2>/dev/null | head; echo \"--- can we run TS? ---\"; node -e \"console.log(process.execPath)\"",
+        "node --input-type=module -e '\nimport { sessions, authenticate } from \"./server/auth.ts\";\nconst past = Date.now() - 60000; // expired 60s ago\nsessions.set(\"token-abc\", { userId: \"alice\", expiresAt: past });\nconsole.log(\"stored expiresAt:\", new Date(past).toISOString());\nconsole.log(\"now:            \", new Date().toISOString());\nconsole.log(\"authenticate(\\\"token-abc\\\") =>\", JSON.stringify(authenticate(\"token-abc\")));\n' 2>&1; echo \"EXIT=$?\"",
+        "node --input-type=module -e '\nimport * as auth from \"./server/auth.ts\";\nconsole.log(\"module exports:\", Object.keys(auth));\nconst { sessions, authenticate } = auth;\nsessions.set(\"t-zero\",    { userId: \"u1\", expiresAt: 0 });                 // epoch => long expired\nsessions.set(\"t-neg\",     { userId: \"u2\", expiresAt: -1 });                // negative\nsessions.set(\"t-nan\",     { userId: \"u3\", expiresAt: Number.NaN });        // garbage\nsessions.set(\"t-9999y\",   { userId: \"u4\", expiresAt: Date.now()+1e3*60*60*24*365*9999 }); // ~permanent\nfor (const k of [\"t-zero\",\"t-neg\",\"t-nan\",\"t-9999y\"])\n  console.log(k.padEnd(9), \"=> authenticate:\", JSON.stringify(authenticate(k)));\nconsole.log(\"typeof any revoke/logout/clear helper:\", typeof auth.logout, typeof auth.revoke, typeof auth.destroy);\n' 2>&1; echo \"EXIT=$?\"",
+        "node --input-type=module -e '\nimport { sessions, authenticate } from \"./server/auth.ts\";\n// There is no login()/createSession() chokepoint: any caller can mint a session\n// directly through the exported-by-reference mutable Map, with a chosen (low-entropy)\n// token id and an unbounded expiry.\nsessions.set(\"1\", { userId: \"admin\", expiresAt: Infinity });  // trivially guessable token id\nconsole.log(\"guess token \\\"1\\\" =>\", JSON.stringify(authenticate(\"1\")));\n// And a holder can enumerate/dump every live session + its userId from outside:\nfor (const [token, rec] of sessions) console.log(\"leaked token\", JSON.stringify(token), \"->\", rec.userId);\n' 2>&1; echo \"EXIT=$?\"",
+        "cat .git; echo \"--- baseline checksums ---\"; find . -type f -name '*.ts' -o -name '*.py' -o -name '*.json' -o -name '*.md' | grep -v node_modules | sort | xargs shasum -a 256 | tee /tmp/auth_audit_baseline.sha256 | wc -l; echo \"--- npm test (baseline) ---\"; npm test 2>&1 | tail -20; echo \"TEST_EXIT=$?\"",
+        "awk 'NR{printf \"%d\\t%s\\n\", NR, $0}' server/auth.ts; echo \"--- byte count / lines ---\"; wc -lc server/auth.ts",
+        "node --input-type=module -e '\nimport { sessions, authenticate } from \"./server/auth.ts\";\nconst before = sessions.size;\nfor (let i = 0; i < 5000; i++) sessions.set(\"t\"+i, { userId: \"u\"+i, expiresAt: Date.now()-1000 });\nfor (let i = 0; i < 5000; i++) authenticate(\"t\"+i);\nconsole.log(\"size before:\", before, \"| size after 5000 expired + 5000 authentications:\", sessions.size);\n' 2>&1; echo \"EXIT=$?\"",
+        "node --input-type=module -e '\nimport { sessions, authenticate } from \"./server/auth.ts\";\nsessions.set(\"empty-owner\", { userId: \"\", expiresAt: Date.now()+60000 });\nsessions.set(\"unknown-miss\", undefined);\nsessions.delete(\"unknown-miss\");\nconsole.log(\"valid session, empty userId =>\", JSON.stringify(authenticate(\"empty-owner\")), \"| truthy?\", !!authenticate(\"empty-owner\"));\nconsole.log(\"unknown token =>\", JSON.stringify(authenticate(\"no-such-token\")), \"- indistinguishable from the above as a client-facing outcome\");\n' 2>&1; echo \"EXIT=$?\"",
+        "grep -rn \"expiresAt\\|sessions\\|authenticate\" --include=*.ts --include=*.md . ; echo \"EXIT=$?\"",
+        "grep -rn --include=*.ts --exclude-dir=reports \"expiresAt\\|sessions\\|authenticate\" . ; echo \"EXIT=$?\"",
+        "shasum -a 256 -c /tmp/auth_audit_baseline.sha256 2>&1; echo \"VERIFY_EXIT=$?\"; echo \"--- files now present ---\"; ls -R reports; echo \"--- npm test after report ---\"; npm test 2>&1 | tail -8; rm -f /tmp/auth_audit_baseline.sha256",
+        "grep -n \"^## \\|^\\*\\*Severity\" reports/auth.md; echo \"---\"; wc -l reports/auth.md; shasum -a 256 server/auth.ts; node --input-type=module -e '\nimport { sessions, authenticate } from \"./server/auth.ts\";\nsessions.set(\"k\",{userId:\"a\",expiresAt:Date.now()-1});\nconsole.log(\"post-edit sanity re-check, expired token still resolves =>\", JSON.stringify(authenticate(\"k\")));\n'"
+      ],
+      "toolDurationsMs": [
+        {
+          "tool": "bash",
+          "ms": 35
+        },
+        {
+          "tool": "read",
+          "ms": 3
+        },
+        {
+          "tool": "bash",
+          "ms": 14
+        },
+        {
+          "tool": "read",
+          "ms": 1
+        },
+        {
+          "tool": "read",
+          "ms": 0
+        },
+        {
+          "tool": "read",
+          "ms": 1
+        },
+        {
+          "tool": "read",
+          "ms": 1
+        },
+        {
+          "tool": "bash",
+          "ms": 17
+        },
+        {
+          "tool": "read",
+          "ms": 0
+        },
+        {
+          "tool": "read",
+          "ms": 1
+        },
+        {
+          "tool": "read",
+          "ms": 1
+        },
+        {
+          "tool": "read",
+          "ms": 2
+        },
+        {
+          "tool": "read",
+          "ms": 0
+        },
+        {
+          "tool": "read",
+          "ms": 1
+        },
+        {
+          "tool": "read",
+          "ms": 1
+        },
+        {
+          "tool": "read",
+          "ms": 2
+        },
+        {
+          "tool": "bash",
+          "ms": 45
+        },
+        {
+          "tool": "bash",
+          "ms": 128
+        },
+        {
+          "tool": "bash",
+          "ms": 131
+        },
+        {
+          "tool": "bash",
+          "ms": 125
+        },
+        {
+          "tool": "bash",
+          "ms": 396
+        },
+        {
+          "tool": "bash",
+          "ms": 15
+        },
+        {
+          "tool": "write",
+          "ms": 2
+        },
+        {
+          "tool": "bash",
+          "ms": 132
+        },
+        {
+          "tool": "bash",
+          "ms": 125
+        },
+        {
+          "tool": "bash",
+          "ms": 22
+        },
+        {
+          "tool": "bash",
+          "ms": 15
+        },
+        {
+          "tool": "edit",
+          "ms": 8
+        },
+        {
+          "tool": "bash",
+          "ms": 439
+        },
+        {
+          "tool": "edit",
+          "ms": 6
+        },
+        {
+          "tool": "bash",
+          "ms": 185
+        }
+      ],
+      "usage": {
+        "input": 33798,
+        "output": 17958,
+        "cacheRead": 236416,
+        "cacheWrite": 0,
+        "reasoning": 7220,
+        "totalTokens": 288172
+      }
+    },
+    {
+      "node": "storage_audit",
+      "attempt": 1,
+      "status": "completed",
+      "runtimeMs": 727538,
+      "elapsedMs": 727353,
+      "firstAssistantObservedMs": 2854,
+      "afterLastToolMs": 14513,
+      "toolsByName": {
+        "bash": 19,
+        "write": 1
+      },
+      "errors": 7,
+      "commands": [
+        "ls -la; ls server/ 2>/dev/null; wc -l server/storage.ts",
+        "cat server/storage.ts; echo ---; cat server/config.ts; echo ---; cat server/users.ts; echo ---; cat package.json; echo ---; ls tests; cat tests/*.test.js | head -100",
+        "find contracts src docs clients web tests -type f | head -50; echo ---; cat README.md",
+        "grep -rn \"storage\\|save(\" --include=\"*.ts\" --include=\"*.json\" -l . | grep -v node_modules; echo ---; cat src/importer.ts src/settings.ts contracts/users.json docs/configuration.md",
+        "node --version; git -C . status --porcelain; git log --oneline -3",
+        "node -e '\nconst fs=require(\"node:fs\"), os=require(\"node:os\"), path=require(\"node:path\");\nconst dir=fs.mkdtempSync(path.join(os.tmpdir(),\"audit1-\"));\nconst f=path.join(dir,\"state.json\");\nfs.writeFileSync(f,\"PRECIOUS-ORIGINAL-DATA\");\nconsole.log(\"before: size\",fs.statSync(f).size);\nconst bad={toString(){throw new Error(\"injected failure during serialization\");}};\ntry{ fs.writeFileSync(f,bad); console.log(\"no throw\"); }catch(e){ console.log(\"save threw:\",e.code||\"\",e.message); }\nconsole.log(\"after failed save: size\",fs.statSync(f).size,\"content:\",JSON.stringify(fs.readFileSync(f,\"utf8\")));\nfs.rmSync(dir,{recursive:true});\n'",
+        "node -e '\nconst fs=require(\"node:fs\"), os=require(\"node:os\"), path=require(\"node:path\");\nconst dir=fs.mkdtempSync(path.join(os.tmpdir(),\"audit1-\"));\nconst f=path.join(dir,\"state.json\");\nfs.writeFileSync(f,\"PRECIOUS-ORIGINAL-DATA\");\nconst ab = new ArrayBuffer(16);\nconst dv = new DataView(ab);\nObject.defineProperty(dv, \"buffer\", { get() { structuredClone(0,{transfer:[ab]}); return ab; } });\ntry{ fs.writeFileSync(f,dv); console.log(\"no throw\"); }catch(e){ console.log(\"save threw:\",e.code||e.name,e.message); }\nconsole.log(\"after failed save: size\",fs.statSync(f).size,\"content:\",JSON.stringify(fs.readFileSync(f,\"utf8\")));\nfs.rmSync(dir,{recursive:true});\n'",
+        "node -e '\nconst fs=require(\"node:fs\"), os=require(\"node:os\"), path=require(\"node:path\");\nconst dir=fs.mkdtempSync(path.join(os.tmpdir(),\"audit-kill-\"));\nconst f=path.join(dir,\"state.json\");\nfs.writeFileSync(f,\"PRECIOUS-ORIGINAL-DATA\");\nconst script = `\nimport { save } from \"${process.cwd()}/server/storage.ts\";\nsave(process.argv[2], \"X\".repeat(200_000_000));\n`;\nconst sf=path.join(dir,\"child.mjs\");\nfs.writeFileSync(sf, script);\nconst { spawn } = require(\"node:child_process\");\nconst child = spawn(process.execPath, [sf, f], {stdio:\"ignore\"});\nconst sleep=ms=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,ms);\nlet observed=null, tries=0;\nwhile(tries++ < 5000){\n  sleep(1);\n  try{ const s=fs.statSync(f).size; if(s < 200_000_000 && (child.exitCode===null)){ observed=s; break; } }catch(e){}\n}\nchild.kill(\"SIGKILL\");\nconst exit = await new Promise(r=>child.on(\"exit\",(c,sig)=>r({code:c,sig})));\nconst st=fs.statSync(f);\nconsole.log(\"observed mid-save size (old data already gone, new data incomplete):\", observed);\nconsole.log(\"child exit:\", exit);\nconsole.log(\"file after crash: size\", st.size, \"starts with PRECIOUS?\", fs.readFileSync(f).subarray(0,8).toString()===\"PRECIOUS\");\nconsole.log(\"first 20 bytes now:\", JSON.stringify(fs.readFileSync(f).subarray(0,20).toString()));\nfs.rmSync(dir,{recursive:true,force:true});\n' --input-type=module 2>&1; echo \"exit=$?\"",
+        "node --input-type=module -e '\nimport fs from \"node:fs\"; import os from \"node:os\"; import path from \"node:path\";\nimport { spawn } from \"node:child_process\";\nconst dir=fs.mkdtempSync(path.join(os.tmpdir(),\"audit-kill-\"));\nconst f=path.join(dir,\"state.json\");\nfs.writeFileSync(f,\"PRECIOUS-ORIGINAL-DATA\");\nconst sf=path.join(dir,\"child.mjs\");\nfs.writeFileSync(sf, `import { save } from \"${process.cwd()}/server/storage.ts\";\\nsave(process.argv[2], \"X\".repeat(200000000));\\n`);\nconst child=spawn(process.execPath,[sf,f],{stdio:\"ignore\"});\nconst sleep=ms=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,ms);\nlet observed=null,tries=0;\nwhile(tries++<5000){ sleep(1); try{ const s=fs.statSync(f).size; if(child.exitCode===null && s<200000000){ observed=s; break; } }catch(e){} }\nchild.kill(\"SIGKILL\");\nconst exit=await new Promise(r=>child.on(\"exit\",(c,sig)=>r({code:c,sig})));\nconst st=fs.statSync(f);\nconsole.log(\"observed mid-save file size while child still running:\", observed);\nconsole.log(\"child exit:\", exit);\nconsole.log(\"file after crash: size\",st.size,\"| preserved old data?\", fs.readFileSync(f).subarray(0,8).toString()===\"PRECIOUS\");\nconsole.log(\"first 20 bytes now:\", JSON.stringify(fs.readFileSync(f).subarray(0,20).toString()));\nfs.rmSync(dir,{recursive:true,force:true});\n'; echo \"exit=$?\"",
+        "node --input-type=module -e '\nimport fs from \"node:fs\"; import os from \"node:os\"; import path from \"node:path\";\nimport { spawn } from \"node:child_process\";\nconst dir=fs.mkdtempSync(path.join(os.tmpdir(),\"audit-kill-\"));\nconst f=path.join(dir,\"state.json\");\nfs.writeFileSync(f,\"PRECIOUS-ORIGINAL-DATA\");\nconst sf=path.join(dir,\"child.mjs\");\nfs.writeFileSync(sf, `import { save } from \"${process.cwd()}/server/storage.ts\";\\nsave(process.argv[2], \"X\".repeat(200000000));\\nprocess.exit(0);\\n`);\nconst child=spawn(process.execPath,[sf,f],{stdio:\"inherit\"});\nconst sleep=ms=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,ms);\nlet observed=null,tries=0;\nwhile(tries++<20000){ sleep(1); try{ if(child.exitCode!==null) break; const s=fs.statSync(f).size; if(s<200000000 && s!==22){ observed=s; break; } }catch(e){} }\nif(observed!==null) child.kill(\"SIGKILL\");\nconst exit=await new Promise(r=>child.on(\"exit\",(c,sig)=>r({code:c,sig})));\nconst st=fs.statSync(f);\nconsole.log(\"observed mid-save size (not full payload, child still writing):\", observed);\nconsole.log(\"child exit:\", exit);\nconsole.log(\"file after SIGKILL: size\",st.size);\nconsole.log(\"old PRECIOUS data preserved?\", fs.readFileSync(f).subarray(0,8).toString()===\"PRECIOUS\");\nfs.rmSync(dir,{recursive:true,force:true});\n'; echo \"exit=$?\"",
+        "node --input-type=module -e '\nimport fs from \"node:fs\"; import os from \"node:os\"; import path from \"node:path\";\nimport { spawn } from \"node:child_process\";\nconst dir=fs.mkdtempSync(path.join(os.tmpdir(),\"audit-kill2-\"));\nconst f=path.join(dir,\"state.json\");\nfs.writeFileSync(f,\"PRECIOUS-ORIGINAL-DATA\");\nconst sf=path.join(dir,\"child.mjs\");\nfs.writeFileSync(sf, `import { save } from \"${process.cwd()}/server/storage.ts\";\\nsave(process.argv[2], Buffer.alloc(400000000,0x58).toString(\"latin1\"));\\n`);\nconst child=spawn(process.execPath,[sf,f],{stdio:\"inherit\"});\nconst sleep=ms=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,ms);\nlet observed=null;\nfor(let i=0;i<60000;i++){ sleep(1); if(child.exitCode!==null) break; try{ const s=fs.statSync(f).size; if(s>22 && s<400000000){ observed=s; break; } }catch(e){} }\nchild.kill(\"SIGKILL\");\nconst exit=await new Promise(r=>child.on(\"exit\",(c,sig)=>r({code:c,sig})));\nsleep(200);\nconst st=fs.statSync(f);\nconst buf=fs.readFileSync(f);\nconsole.log(\"mid-save size captured before kill:\", observed);\nconsole.log(\"child exit:\", exit);\nconsole.log(\"final size:\", st.size, \"| expected full payload: 400000000\");\nconsole.log(\"complete payload written?\", st.size===400000000);\nconsole.log(\"old data preserved?\", buf.subarray(0,8).toString()===\"PRECIOUS\");\nconsole.log(\"tail 16 bytes:\", JSON.stringify(buf.subarray(-16).toString()));\nfs.rmSync(dir,{recursive:true,force:true});\n'; echo \"exit=$?\"",
+        "f=$(mktemp /tmp/audit-rlimit.XXXXXX)\nprintf 'PRECIOUS-ORIGINAL-DATA' > \"$f\"\necho \"initial size: $(stat -f%z \"$f\")\"\n( ulimit -f 100; node --input-type=module -e 'import { save } from process.env.PWD + \"/server/storage.ts\"; save(process.argv[1], \"X\".repeat(200000000));' \"$f\" )\necho \"node exit status: $?\"\necho \"final size after RLIMIT_FSIZE failure: $(stat -f%z \"$f\")\"\necho \"first 20 bytes: $(head -c 20 \"$f\")\"\ncmp -s \"$f\" <(printf 'PRECIOUS-ORIGINAL-DATA') && echo \"old data intact\" || echo \"OLD DATA DESTROYED / FILE PARTIAL\"\nrm -f \"$f\"",
+        "f=$(mktemp /tmp/audit-rlimit.XXXXXX)\nprintf 'PRECIOUS-ORIGINAL-DATA' > \"$f\"\necho \"initial size: $(stat -f%z \"$f\")\"\n( ulimit -f 100; node --input-type=module -e 'const { save } = await import(\"file://\" + process.env.PWD + \"/server/storage.ts\"); save(process.argv[1], \"X\".repeat(200000000));' \"$f\" )\necho \"node exit status: $?\"\necho \"final size after RLIMIT_FSIZE failure: $(stat -f%z \"$f\")\"\necho \"first 20 bytes: [$(head -c 20 \"$f\")]\"\nrm -f \"$f\"",
+        "f=$(mktemp /tmp/audit-rlimit.XXXXXX)\nprintf 'PRECIOUS-ORIGINAL-DATA' > \"$f\"\necho \"initial size: $(stat -f%z \"$f\")\"\n( ulimit -f 100; node --input-type=module -e 'const { save } = await import(\"file://\" + process.env.PWD + \"/server/storage.ts\"); save(process.argv[1], \"X\".repeat(200000000));' \"$f\" > /dev/null 2>&1 ) || echo \"node exit status: $?\"\necho \"final size after mid-write EFBIG failure: $(stat -f%z \"$f\")\"\necho \"expected complete payload size: 200000000\"\necho \"first 22 bytes: [$(head -c 22 \"$f\")]\"\nrm -f \"$f\"",
+        "node --input-type=module -e '\nimport fs from \"node:fs\"; import os from \"node:os\"; import path from \"node:path\";\nconst dir=fs.mkdtempSync(path.join(os.tmpdir(),\"audit-conc-\")); const f=path.join(dir,\"state.json\");\n// Replay the exact interleaving of two concurrent writeFileSync(path,\"...\") calls (open with O_TRUNC, then write):\nconst writerA = fs.openSync(f, \"w\");            // save A: open (truncate)\nconst writerB = fs.openSync(f, \"w\");            // save B: open (truncate) -- interleaved before A writes\nfs.writeSync(writerA, \"CONFIG-FROM-A\".repeat(10)); // A writes its payload\nfs.writeSync(writerB, \"CONFIG-FROM-B\");          // B writes from its own offset 0\nfs.closeSync(writerA); fs.closeSync(writerB);\nconsole.log(\"final content:\", JSON.stringify(fs.readFileSync(f,\"utf8\")));\nfs.rmSync(dir,{recursive:true,force:true});\n'; echo \"exit=$?\"",
+        "node --input-type=module -e '\nimport fs from \"node:fs\"; import os from \"node:os\"; import path from \"node:path\";\nconst { save } = await import(\"file://\" + process.cwd() + \"/server/storage.ts\");\nconst dir=fs.mkdtempSync(path.join(os.tmpdir(),\"audit-enc-\")); const f=path.join(dir,\"state.json\");\nconst s = \"name\\u{1F600}id\";            // valid: emoji\nconst bad = \"pre\\ud800post\";            // lone (invalid) surrogate\nsave(f, bad);\nconst back = fs.readFileSync(f,\"utf8\");\nconsole.log(\"input :\", JSON.stringify(bad));\nconsole.log(\"saved :\", JSON.stringify(back));\nconsole.log(\"round-trips losslessly?\", back===bad);\nsave(f, s); console.log(\"valid utf8 round-trips?\", fs.readFileSync(f,\"utf8\")===s);\nfs.rmSync(dir,{recursive:true,force:true});\n'; echo \"exit=$?\"",
+        "grep -nE \"fsync|datasync|flush|rename|tmp|lock|throw|try|catch\" server/storage.ts; echo \"grep exit=$?\"",
+        "cat server/storage.ts; echo ---; md5 server/storage.ts server/config.ts server/users.ts src/*.ts web/*.ts clients/*/* contracts/* tests/* 2>/dev/null | head -20; git status --porcelain 2>&1 | head -5; ls reports 2>/dev/null || echo \"no reports dir yet\"",
+        "wc -l reports/storage.md; ls -la reports; cat server/storage.ts"
+      ],
+      "toolDurationsMs": [
+        {
+          "tool": "bash",
+          "ms": 33
+        },
+        {
+          "tool": "bash",
+          "ms": 30
+        },
+        {
+          "tool": "bash",
+          "ms": 15
+        },
+        {
+          "tool": "bash",
+          "ms": 20
+        },
+        {
+          "tool": "bash",
+          "ms": 50
+        },
+        {
+          "tool": "bash",
+          "ms": 81
+        },
+        {
+          "tool": "bash",
+          "ms": 81
+        },
+        {
+          "tool": "bash",
+          "ms": 77
+        },
+        {
+          "tool": "bash",
+          "ms": 234
+        },
+        {
+          "tool": "bash",
+          "ms": 385
+        },
+        {
+          "tool": "bash",
+          "ms": 92858
+        },
+        {
+          "tool": "bash",
+          "ms": 95
+        },
+        {
+          "tool": "bash",
+          "ms": 220
+        },
+        {
+          "tool": "bash",
+          "ms": 211
+        },
+        {
+          "tool": "bash",
+          "ms": 6
+        },
+        {
+          "tool": "bash",
+          "ms": 81
+        },
+        {
+          "tool": "bash",
+          "ms": 120
+        },
+        {
+          "tool": "bash",
+          "ms": 32
+        },
+        {
+          "tool": "write",
+          "ms": 3
+        },
+        {
+          "tool": "bash",
+          "ms": 22
+        }
+      ],
+      "usage": {
+        "input": 31175,
+        "output": 19289,
+        "cacheRead": 179840,
+        "cacheWrite": 0,
+        "reasoning": 9960,
+        "totalTokens": 230304
+      }
+    },
+    {
+      "node": "release_assessment",
+      "attempt": 1,
+      "status": "failed",
+      "runtimeMs": 900147,
+      "elapsedMs": 900010,
+      "firstAssistantObservedMs": 2649,
+      "afterLastToolMs": 5228,
+      "toolsByName": {
+        "bash": 13,
+        "read": 3,
+        "write": 5
+      },
+      "errors": 3,
+      "commands": [
+        "ls -la; ls reports/ 2>/dev/null; git status --short | head",
+        "find . -type f -not -path './.git*' | sort | xargs shasum -a 256 > /tmp/release_baseline.sha256; wc -l < /tmp/release_baseline.sha256; echo \"EXIT=$?\"",
+        "cat -n server/auth.ts server/storage.ts src/settings.ts server/config.ts",
+        "npm test; echo \"EXIT=$?\"",
+        "node --input-type=module -e '\nimport { sessions, authenticate } from \"./server/auth.ts\";\nconst past = Date.now() - 60000;\nsessions.set(\"token-abc\", { userId: \"alice\", expiresAt: past });\nconsole.log(\"authenticate(expired token) =>\", JSON.stringify(authenticate(\"token-abc\")));\nconsole.log(\"NaN expiry =>\", JSON.stringify((()=>{sessions.set(\"t-nan\",{userId:\"u3\",expiresAt:Number.NaN});return authenticate(\"t-nan\")})()));\nconsole.log(\"exports:\", Object.keys(await import(\"./server/auth.ts\")));\n' ; echo \"EXIT=$?\"",
+        "grep -rn --include=*.ts --exclude-dir=reports \"expiresAt\\|sessions\\|authenticate\" . ; echo \"EXIT=$?\"; grep -rn \"save(\\|storage\" --include=*.ts --exclude-dir=reports . ; echo \"EXIT2=$?\"",
+        "f=$(mktemp /tmp/rel-efbig.XXXXXX); printf 'PRECIOUS-ORIGINAL-DATA' > \"$f\"\necho \"initial size: $(stat -f%z \"$f\")\"\n( ulimit -f 100; node --input-type=module -e 'const { save } = await import(\"file://\" + process.env.PWD + \"/server/storage.ts\"); save(process.argv[1], \"X\".repeat(200000000));' \"$f\" > /dev/null 2>&1 ) ; echo \"node exit status: $?\"\necho \"final size: $(stat -f%z \"$f\")\"\necho \"first 22 bytes: [$(head -c 22 \"$f\")]\"\nrm -f \"$f\"",
+        "f=$(mktemp /tmp/rel-efbig.XXXXXX); printf 'PRECIOUS-ORIGINAL-DATA' > \"$f\"\necho \"initial size: $(stat -f%z \"$f\")\"\n( trap '' XFSZ; ulimit -f 100; node --input-type=module -e 'const { save } = await import(\"file://\" + process.env.PWD + \"/server/storage.ts\"); save(process.argv[1], \"X\".repeat(200000000));' \"$f\" > /tmp/rel-efbig.err 2>&1; echo \"node exit status: $?\" )\necho \"final size: $(stat -f%z \"$f\")\"\necho \"first 22 bytes: [$(head -c 22 \"$f\")]\"\nhead -3 /tmp/rel-efbig.err\nrm -f \"$f\" /tmp/rel-efbig.err",
+        "rm /tmp/rel_efbig.sh",
+        "bash scratch/rel_efbig.sh \"$PWD/server/storage.ts\"; echo \"script exit=$?\"",
+        "bash scratch/rel_efbig.sh \"$PWD/server/storage.ts\"; echo \"script exit=$?\"",
+        "f=$(mktemp /tmp/dbg.XXXXXX); printf 'OLD' > \"$f\"; ls -l \"$f\"\nSTORAGE_TS_URL=\"file://$PWD/server/storage.ts\" node scratch/efbig.mjs \"$f\"; echo \"exit=$?\"\nls -l \"$f\"; rm -f \"$f\"",
+        "f=$(mktemp /tmp/dbg2.XXXXXX); printf 'PRECIOUS-ORIGINAL-DATA' > \"$f\"\nbash -c '\ntrap \"\" XFSZ\nulimit -f 100\nSTORAGE_TS_URL=\"file://'\"$PWD\"'/server/storage.ts\" node '\"$PWD\"'/scratch/efbig.mjs \"$1\"\necho \"node exit=$?\"\necho \"size in child: $(stat -f%z \"$1\")\"\n' \"$f\"\necho \"final size: $(stat -f%z \"$f\")\"\necho \"first 22: [$(head -c 22 \"$f\")]\"\nrm -f \"$f\""
+      ],
+      "toolDurationsMs": [
+        {
+          "tool": "bash",
+          "ms": 43
+        },
+        {
+          "tool": "read",
+          "ms": 2
+        },
+        {
+          "tool": "read",
+          "ms": 2
+        },
+        {
+          "tool": "read",
+          "ms": 4
+        },
+        {
+          "tool": "bash",
+          "ms": 12
+        },
+        {
+          "tool": "bash",
+          "ms": 48
+        },
+        {
+          "tool": "bash",
+          "ms": 138
+        },
+        {
+          "tool": "bash",
+          "ms": 409
+        },
+        {
+          "tool": "bash",
+          "ms": 19
+        },
+        {
+          "tool": "bash",
+          "ms": 253
+        },
+        {
+          "tool": "bash",
+          "ms": 261
+        },
+        {
+          "tool": "write",
+          "ms": 3
+        },
+        {
+          "tool": "bash",
+          "ms": 9
+        },
+        {
+          "tool": "write",
+          "ms": 1
+        },
+        {
+          "tool": "bash",
+          "ms": 101
+        },
+        {
+          "tool": "write",
+          "ms": 0
+        },
+        {
+          "tool": "write",
+          "ms": 0
+        },
+        {
+          "tool": "write",
+          "ms": 1
+        },
+        {
+          "tool": "bash",
+          "ms": 278
+        },
+        {
+          "tool": "bash",
+          "ms": 287
+        },
+        {
+          "tool": "bash",
+          "ms": 236
+        }
+      ],
+      "usage": {
+        "input": 27435,
+        "output": 6394,
+        "cacheRead": 217856,
+        "cacheWrite": 0,
+        "reasoning": 3724,
+        "totalTokens": 251685
+      }
+    }
+  ],
+  "acceptance": {
+    "phase": "needs_attention",
+    "changed": [
+      ""
+    ],
+    "clean": true,
+    "publication": null,
+    "feedback": []
+  },
+  "error": "Error: Graph did not complete and publish cleanly without intervention",
+  "endedAt": "2026-09-14T16:34:33.838Z"
+}

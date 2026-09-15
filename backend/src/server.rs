@@ -3,11 +3,12 @@ use crate::{
     engine::{parse_route_decision, run_pi, PiModelConfig, PiRequest, PiRole},
     model::*,
     runtime::{perform, Runtime},
+    snapshot_view::{snapshot_metadata, execution_page},
 };
 use serde::Serialize;
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -28,7 +29,7 @@ pub struct Service {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bootstrap {
-    snapshot: Snapshot,
+    snapshot: serde_json::Value,
     config: Config,
     runs: Vec<String>,
     data_path: String,
@@ -103,7 +104,7 @@ mod prompt_tests {
 
     #[cfg(feature = "fixture")]
     #[test]
-    fn fast_sibling_finishes_before_slow_sibling_without_dispatching_next_wave() {
+    fn fast_sibling_releases_slot_for_downstream_before_slow_sibling() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path();
         let repository = crate::fixture::repository(root).unwrap();
@@ -132,7 +133,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let observed = loop {
             let state = service.runtime.lock().unwrap().state.clone();
-            if state.nodes["z_fast"].status == "done" || std::time::Instant::now() > deadline { break state; }
+            if state.nodes["after_fast"].status == "done" || std::time::Instant::now() > deadline { break state; }
             thread::sleep(std::time::Duration::from_millis(20));
         };
         // Always release and drain before assertions, even on a regression.
@@ -140,13 +141,95 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         while service.driving.load(Ordering::SeqCst) { thread::sleep(std::time::Duration::from_millis(20)); }
         assert_eq!(observed.nodes["z_fast"].status, "done");
         assert_eq!(observed.nodes["a_slow"].status, "running");
-        assert_eq!(observed.nodes["after_fast"].status, "waiting");
+        assert_eq!(observed.nodes["after_fast"].status, "done");
         let fast = observed.executions.iter().find(|e| e.node == "z_fast").unwrap();
         assert!(fast.completed_at.is_some());
         let runtime = service.runtime.lock().unwrap();
         let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
         assert_eq!(replayed.executions.iter().find(|e| e.node == "z_fast").unwrap().completed_at, fast.completed_at);
         assert_eq!(replayed.phase, "completed");
+    }
+
+    #[test]
+    fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let runtime = Runtime::open(temp.path()).unwrap();
+        let text = format!("{}{}\n", "a".repeat(256 * 1024 - 1), "规划输出".repeat(100_000));
+        let execution = Execution { id: "large".into(), node: "worker".into(), revision: 1, attempt: 1,
+            session_id: "fresh".into(), worktree: String::new(), before: String::new(), after: None,
+            status: "running".into(), output: text.clone(), started_at: now(), completed_at: None };
+        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false), extension: temp.path().join("unused") });
+        {
+            let mut runtime = service.runtime.lock().unwrap();
+            runtime.state.run_id = "large-run".into();
+            runtime.state.executions.push(execution);
+            runtime.state.events.push(Event { sequence: 1, timestamp: now(), kind: EventKind::Finished {
+                execution_id: "large".into(), head: "head".into(), output: text.clone() } });
+        }
+        let metadata = dispatch(&service, "snapshot", serde_json::json!({"detail":"metadata"})).unwrap();
+        assert!(metadata.to_string().len() < 2048);
+        assert_eq!(metadata["executions"][0]["outputBytes"], text.len());
+        let mut restored = String::new();
+        let mut offset = 0;
+        loop {
+            let page = get_execution_output(&serde_json::json!({"runId":"large-run", "executionId":"large", "offset":offset}), &service).unwrap();
+            let content = page["content"].as_str().unwrap();
+            assert!(content.len() <= 256 * 1024);
+            restored.push_str(content);
+            offset = page["nextOffset"].as_u64().unwrap();
+            if page["complete"] == true { break; }
+        }
+        assert_eq!(restored, text);
+        assert!(get_execution_output(&serde_json::json!({"runId":"large-run", "executionId":"large", "offset":256*1024}), &service).is_err());
+        assert_eq!(service.runtime.lock().unwrap().state.executions[0].output, text);
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn feedback_graph_drains_siblings_before_invalidating_and_never_runs_stale_consumer() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let repository = crate::fixture::repository(root).unwrap();
+        let release = root.join("release-slow");
+        let script = root.join("worker.sh");
+        fs::write(&script, format!(r#"cat >/dev/null
+case "$PWD" in
+  *slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > slow.txt ;;
+  *review-*) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<REVISE>"}}]}}}}'; exit 0 ;;
+  *consumer-*) echo invalid > stale.txt ;;
+  *) echo done > owner.txt ;;
+esac
+printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
+"#, release.display())).unwrap();
+        let mut runtime = Runtime::open(root).unwrap();
+        runtime.create(Graph { original_goal: "Feedback barrier".into(),
+            nodes: ["owner", "slow", "review", "consumer"].into_iter().map(|name| Node { name: name.into(), task: "Work".into() }).collect(),
+            edges: [("owner", "review", false), ("review", "owner", true), ("review", "consumer", false)].into_iter()
+                .map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback, relation: String::new() }).collect(),
+        }, Config { repository: repository.to_string_lossy().into(), engine: "pi".into(), pi_command: "/bin/sh".into(),
+            pi_args: vec![script.to_string_lossy().into()], model: "test".into(), max_parallel: 2, max_feedback: 1 }).unwrap();
+        runtime.approve().unwrap();
+        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false), planning: AtomicBool::new(false), extension: root.join("unused") });
+        drive(service.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let observed = loop {
+            let state = service.runtime.lock().unwrap().state.clone();
+            if state.nodes["owner"].status == "done" || std::time::Instant::now() > deadline { break state; }
+            thread::sleep(std::time::Duration::from_millis(20));
+        };
+        fs::write(&release, "release").unwrap();
+        while service.driving.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(observed.nodes["slow"].status, "running");
+        assert_eq!(observed.nodes["review"].status, "waiting");
+        let runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.state.executions.iter().filter(|e| e.node == "slow").count(), 1);
+        assert_eq!(runtime.state.executions.iter().filter(|e| e.node == "owner").count(), 2);
+        assert!(!runtime.state.executions.iter().any(|e| e.node == "consumer"));
+        assert_eq!(runtime.state.phase, "needs_attention");
     }
 
     #[test]
@@ -382,14 +465,21 @@ fn load_env_file() {
     }
 }
 
-fn bootstrap(service: &Arc<Service>) -> Result<Bootstrap, String> {
+fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String> {
     load_env_file();
+    let active_config = if service.planning.load(Ordering::SeqCst) {
+        let active = list_plannings(service, None)?.into_iter().find(|summary| summary.status.as_deref() == Some("running"));
+        let root = service.runtime.lock().map_err(|e| e.to_string())?.root.clone();
+        active.and_then(|summary| fs::read(root.join("planning").join(summary.planning_id).join("request.json")).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| serde_json::from_value::<Config>(value["config"].clone()).ok())
+    } else { None };
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(feature = "fixture")]
     let entrypoint = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../engine/entrypoint.mjs");
     let detected_repo = crate::workspace::detect(None).ok().flatten();
-    let mut config = runtime.state.config.clone().unwrap_or(Config {
+    let mut config = active_config.or_else(|| runtime.state.config.clone()).unwrap_or(Config {
         repository: detected_repo
             .as_ref()
             .map(|r| r.path.clone())
@@ -430,7 +520,8 @@ fn bootstrap(service: &Arc<Service>) -> Result<Bootstrap, String> {
         None
     };
     Ok(Bootstrap {
-        snapshot: runtime.state.clone(),
+        snapshot: if metadata { snapshot_metadata(&runtime.state)? }
+            else { serde_json::to_value(&runtime.state).map_err(|e| e.to_string())? },
         config,
         runs: runtime.store.runs()?,
         data_path: runtime.root.to_string_lossy().into(),
@@ -597,6 +688,18 @@ fn plan_goal_internal(
         let planning_id = Uuid::new_v4().to_string();
         let directory = root.join("planning").join(&planning_id);
         fs::create_dir_all(&directory).map_err(|error| (error.to_string(), None))?;
+        fs::write(directory.join("request.json"), serde_json::to_vec(&serde_json::json!({
+            "goal": goal, "config": config
+        })).map_err(|e| (e.to_string(), None))?).map_err(|e| (e.to_string(), None))?;
+        // Publish identity before launching Pi; a browser connection does not own planning.
+        let running = PlanningSummary {
+            planning_id: planning_id.clone(), status: Some("running".into()),
+            created_at: Some(now_ms), repository: Some(repo_str.clone()),
+            roles: ["partition", "planner"].into_iter().map(|role|
+                (role.to_string(), PlanningRoleMetrics::default())).collect(),
+            ..Default::default()
+        };
+        write_planning_summary(&directory, &running).map_err(|error| (error, None))?;
         let plan_outcome = (|| -> Result<Snapshot, String> {
         let route_path = directory.join("route.json");
         let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
@@ -611,6 +714,8 @@ fn plan_goal_internal(
             partitioner_extra_args.push(thinking.as_str());
         }
         let mut log = String::new();
+        let mut partition_log = fs::File::create(directory.join("partition.jsonl")).map_err(|e| e.to_string())?;
+        let mut log_error = None;
         let partition_start = std::time::Instant::now();
         let partition_result = run_pi(
             PiRequest {
@@ -630,12 +735,13 @@ fn plan_goal_internal(
                 system_prompt: Some(&partitioner_system_prompt),
             },
             |text| {
+                if let Err(error) = partition_log.write_all(text.as_bytes()) { log_error = Some(error.to_string()); }
                 log.push_str(&text);
                 on_partitioner_line(&text);
             },
         );
         let partition_wall_sec = partition_start.elapsed().as_secs_f64();
-        fs::write(directory.join("partition.jsonl"), &log).map_err(|error| error.to_string())?;
+        if let Some(error) = log_error { return Err(format!("Cannot persist planning output: {error}")); }
         let mut partition_metrics = parse_planning_role_metrics(&partitioner_config.model, &log);
         if partition_metrics.duration_seconds == 0.0 {
             partition_metrics.duration_seconds = partition_wall_sec;
@@ -680,6 +786,8 @@ fn plan_goal_internal(
                     planner_extra_args.push(thinking.as_str());
                 }
                 let mut log = String::new();
+                let mut planner_log = fs::File::create(directory.join("planner.jsonl")).map_err(|e| e.to_string())?;
+                let mut log_error = None;
                 let planner_start = std::time::Instant::now();
                 let planner_result = run_pi(
                     PiRequest {
@@ -706,13 +814,13 @@ fn plan_goal_internal(
                         system_prompt: Some(&planner_system_prompt),
                     },
                     |text| {
+                        if let Err(error) = planner_log.write_all(text.as_bytes()) { log_error = Some(error.to_string()); }
                         log.push_str(&text);
                         on_planner_line(&text);
                     },
                 );
                 let planner_wall_sec = planner_start.elapsed().as_secs_f64();
-                fs::write(directory.join("planner.jsonl"), &log)
-                    .map_err(|error| error.to_string())?;
+                if let Some(error) = log_error { return Err(format!("Cannot persist planning output: {error}")); }
                 let mut m = parse_planning_role_metrics(&planner_config.model, &log);
                 if m.duration_seconds == 0.0 {
                     m.duration_seconds = planner_wall_sec;
@@ -744,10 +852,6 @@ fn plan_goal_internal(
             created_at: Some(now_ms),
             repository: Some(repo_str.clone()),
         };
-        if let Ok(summary_json) = serde_json::to_string_pretty(&summary) {
-            let _ = fs::write(directory.join("summary.json"), &summary_json);
-            let _ = fs::write(directory.join("metrics.json"), &summary_json);
-        }
 
         #[allow(unused_mut)]
         let mut final_config = config.clone();
@@ -756,12 +860,13 @@ fn plan_goal_internal(
             final_config.model = "qwen3.8-flash".into();
         }
         let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-        runtime.create_with_planning(graph, final_config, Some(planning_id.clone()), Some(summary))?;
+        runtime.create_with_planning(graph, final_config, Some(planning_id.clone()), Some(summary.clone()))?;
         if route.plan_type == "serial" {
             runtime.approve()?;
         }
         let snapshot = runtime.state.clone();
         drop(runtime);
+        write_planning_summary(&directory, &summary)?;
         if route.plan_type == "serial" {
             drive(service.clone());
         }
@@ -802,9 +907,8 @@ fn plan_goal_internal(
                     created_at: Some(now_ms),
                     repository: Some(repo_str.clone()),
                 };
-                if let Ok(failure_json) = serde_json::to_string_pretty(&failure_summary) {
-                    let _ = fs::write(directory.join("summary.json"), &failure_json);
-                    let _ = fs::write(directory.join("metrics.json"), &failure_json);
+                if let Err(error) = write_planning_summary(&directory, &failure_summary) {
+                    eprintln!("Cannot persist planning failure: {error}");
                 }
                 Err((err, Some(failure_summary)))
             }
@@ -812,6 +916,31 @@ fn plan_goal_internal(
     })();
     cleanup.planning.store(false, Ordering::SeqCst);
     result
+}
+
+fn write_planning_summary(directory: &std::path::Path, summary: &PlanningSummary) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(summary).map_err(|e| e.to_string())?;
+    let pending = directory.join("summary.pending");
+    fs::write(&pending, &json).map_err(|e| e.to_string())?;
+    fs::rename(pending, directory.join("summary.json")).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn recover_plannings(root: &std::path::Path) -> Result<(), String> {
+    if let Ok(entries) = fs::read_dir(root.join("planning")) {
+        for entry in entries.flatten() {
+            if let Ok(content) = fs::read(entry.path().join("summary.json")) {
+                if let Ok(mut summary) = serde_json::from_slice::<PlanningSummary>(&content) {
+                    if summary.status.as_deref() == Some("running") {
+                        summary.status = Some("failed".into());
+                        summary.error = Some("Backend stopped during planning. Saved output is preserved; start a new planning attempt.".into());
+                        write_planning_summary(&entry.path(), &summary)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
@@ -825,17 +954,21 @@ fn drive(service: Arc<Service>) {
     }
     thread::spawn(move || {
         let result = (|| -> Result<(), String> {
+            let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+            let mut in_flight = 0usize;
+            let mut reviews = Vec::new();
             loop {
                 let (jobs, root, parents) = {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                    let jobs = runtime.jobs()?;
+                    let feedback_barrier = in_flight > 0 && runtime.state.graph.edges.iter().any(|edge| edge.feedback);
+                    let jobs = if feedback_barrier { Vec::new() } else { runtime.jobs()? };
                     let parents: Vec<_> = jobs
                         .iter()
                         .map(|job| runtime.parents(&job.execution.node))
                         .collect();
                     (jobs, runtime.root.clone(), parents)
                 };
-                if jobs.is_empty() {
+                if jobs.is_empty() && in_flight == 0 {
                     // PublicationStarted is durable before any user files change.
                     let publication = {
                         let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
@@ -860,14 +993,13 @@ fn drive(service: Arc<Service>) {
                     }
                     break;
                 }
-                let handles: Vec<_> = jobs
-                    .into_iter()
-                    .zip(parents)
-                    .map(|(job, parents)| {
+                in_flight += jobs.len();
+                for (job, parents) in jobs.into_iter().zip(parents) {
                         let service = service.clone();
                         let root = root.clone();
+                        let completed_tx = completed_tx.clone();
                         thread::spawn(move || {
-                            let result = perform(
+                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| perform(
                                 &job,
                                 &root,
                                 &parents,
@@ -891,25 +1023,23 @@ fn drive(service: Arc<Service>) {
                                             head,
                                         })
                                 },
-                            );
-                            // Persist completion in the worker that actually finished.
-                            // Joining in graph order must not inflate a fast sibling's
-                            // duration or leave it RUNNING behind a slow sibling.
-                            service.runtime.lock().map_err(|error| error.to_string())?
-                                .finish(&job.execution, result)
-                        })
-                    })
-                    .collect();
-                let mut reviews = Vec::new();
-                for handle in handles {
-                    if let Some(review) = handle.join().map_err(|_| "Execution worker panicked")?? {
-                        reviews.push(review);
-                    }
+                            ))).unwrap_or_else(|_| Err("Execution worker panicked".into()));
+                            let result = service.runtime.lock().map_err(|error| error.to_string())
+                                .and_then(|mut runtime| runtime.finish(&job.execution, result));
+                            let _ = completed_tx.send(result);
+                        });
                 }
-                let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                for (from, output) in reviews {
-                    if runtime.state.nodes[&from].status == "done" {
-                        runtime.review(&from, &output)?;
+                if in_flight > 0 {
+                    let completed = completed_rx.recv().map_err(|_| "Execution channel closed")?;
+                    in_flight -= 1;
+                    if let Some(review) = completed? { reviews.push(review); }
+                }
+                if in_flight == 0 {
+                    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                    for (from, output) in reviews.drain(..) {
+                        if runtime.state.nodes[&from].status == "done" {
+                            runtime.review(&from, &output)?;
+                        }
                     }
                 }
             }
@@ -953,7 +1083,7 @@ fn control(
     }
     if matches!(action.as_str(), "intervene" | "resolve" | "retry_publication") && service.driving.load(Ordering::SeqCst)
     {
-        return Err("Pause and wait for the current execution wave to settle first".into());
+        return Err("Wait for active executions to finish before intervening".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     match action.as_str() {
@@ -1071,7 +1201,16 @@ fn get_planning_output(
     }
     let root = service.runtime.lock().map_err(|e| e.to_string())?.root.join("planning");
     let root = root.canonicalize().map_err(|_| "Planning output not found")?;
-    let file_path = root.join(&planning_id).join(format!("{role}.jsonl"));
+    let directory = root.join(&planning_id).canonicalize().map_err(|_| "Planning output not found")?;
+    if !directory.starts_with(&root) { return Err("Invalid planning output path".into()); }
+    let running = fs::read(directory.join("summary.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<PlanningSummary>(&bytes).ok())
+        .is_some_and(|summary| summary.status.as_deref() == Some("running"));
+    let file_path = directory.join(format!("{role}.jsonl"));
+    if !file_path.exists() && running && offset == 0 {
+        return Ok(serde_json::json!({ "planningId": planning_id, "role": role, "content": "",
+            "nextOffset": 0, "totalBytes": 0, "complete": true, "running": true }));
+    }
     let file_path = file_path.canonicalize().map_err(|_| "Planning output not found")?;
     if !file_path.starts_with(&root) {
         return Err("Invalid planning output path".into());
@@ -1091,7 +1230,7 @@ fn get_planning_output(
     let next_offset = offset + length as u64;
     Ok(serde_json::json!({ "planningId": planning_id, "role": role,
         "content": content, "nextOffset": next_offset, "totalBytes": total_bytes,
-        "complete": next_offset >= total_bytes }))
+        "complete": next_offset >= total_bytes, "running": running }))
 }
 
 fn list_plannings(service: &Arc<Service>, repository_filter: Option<String>) -> Result<Vec<PlanningSummary>, String> {
@@ -1149,6 +1288,18 @@ fn argument<T: serde::de::DeserializeOwned>(
         .map_err(|error| format!("Invalid {key}: {error}"))
 }
 
+fn get_execution_output(body: &serde_json::Value, service: &Arc<Service>) -> Result<serde_json::Value, String> {
+    let run_id: String = argument(body, "runId")?;
+    let execution_id: String = argument(body, "executionId")?;
+    let offset: usize = body.get("offset").map(|_| argument(body, "offset")).transpose()?.unwrap_or(0);
+    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+    let historical;
+    let state = if runtime.state.run_id == run_id { &runtime.state } else {
+        historical = runtime.store.load(&run_id)?; &historical
+    };
+    execution_page(state, &execution_id, offset)
+}
+
 pub fn dispatch(
     service: &Arc<Service>,
     command: &str,
@@ -1156,9 +1307,17 @@ pub fn dispatch(
 ) -> Result<serde_json::Value, String> {
     use serde_json::to_value;
     let compact = body.get("compact").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let metadata = body.get("detail").and_then(serde_json::Value::as_str) == Some("metadata");
+    if command == "snapshot" && metadata {
+        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        return snapshot_metadata(&runtime.state);
+    }
+    if command == "history" && metadata {
+        return snapshot_metadata(&history(argument(&body, "runId")?, service)?);
+    }
     let result = match command {
         "provider_auth" => to_value(crate::provider_auth::request(body)?),
-        "bootstrap" => to_value(bootstrap(service)?),
+        "bootstrap" => to_value(bootstrap(service, metadata)?),
         "snapshot" => to_value(snapshot(service)?),
         "history" => to_value(history(argument(&body, "runId")?, service)?),
         "load_run" => to_value(load_run(argument(&body, "runId")?, service)?),
@@ -1176,6 +1335,23 @@ pub fn dispatch(
             argument(&body, "config")?,
             service,
         )?),
+        "get_execution_output" => return get_execution_output(&body, service),
+        "get_planning_snapshot" => {
+            let id: String = argument(&body, "planningId")?;
+            let repository: String = argument(&body, "repository")?;
+            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            let state = if runtime.state.planning_id.as_ref() == Some(&id) {
+                snapshot_metadata(&runtime.state)?
+            } else {
+                let run = runtime.store.runs()?.into_iter().find_map(|run| {
+                    let state = runtime.store.load(&run).ok()?;
+                    (state.planning_id.as_ref() == Some(&id)).then_some(state)
+                }).ok_or("Planning run not found")?;
+                snapshot_metadata(&run)?
+            };
+            if state["config"]["repository"].as_str() != Some(repository.as_str()) { return Err("Planning repository mismatch".into()); }
+            return Ok(state);
+        }
         "get_planning_output" => to_value(get_planning_output(
             argument(&body, "planningId")?, argument(&body, "role")?,
             body.get("offset").map(|_| argument(&body, "offset")).transpose()?.unwrap_or(0), service,
@@ -1199,6 +1375,13 @@ pub fn dispatch(
         _ => return Err("Unknown command".into()),
     };
     let mut value = result.map_err(|error| error.to_string())?;
+    if metadata && command != "bootstrap" {
+        let target = if value.get("executions").is_some() { Some(&mut value) } else { None };
+        if let Some(target) = target {
+            let state: Snapshot = serde_json::from_value(target.take()).map_err(|e| e.to_string())?;
+            *target = snapshot_metadata(&state)?;
+        }
+    }
     // UI transcripts already live on executions/mergers. Avoid sending every
     // raw Output frame a second time on each poll; the durable event store and
     // default API responses retain the complete history for replay/export.
@@ -1273,6 +1456,7 @@ pub fn run() -> Result<(), String> {
         planning: AtomicBool::new(false),
         extension,
     });
+    recover_plannings(&root)?;
     let port: u16 = std::env::var("GRAPHER_PORT")
         .unwrap_or_else(|_| "1421".into())
         .parse()

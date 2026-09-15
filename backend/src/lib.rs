@@ -1,6 +1,7 @@
 pub mod compiler;
 pub mod sandbox;
 pub mod server;
+pub mod snapshot_view;
 pub mod engine;
 pub mod graph_merge;
 pub mod provider_auth;

@@ -137,11 +137,16 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
     if !errors.is_empty() {
         return Err(errors);
     }
-    let warnings = if names.len() > 1 {
+    let mut warnings: Vec<String> = if names.len() > 1 {
         names.iter().filter(|name| !graph.edges.iter().any(|edge| &edge.from == *name || &edge.to == *name)).map(|name| format!("W301: {name} is an isolated independent terminal; confirm it contributes to the goal")).collect()
     } else {
         Vec::new()
     };
+    for node in &graph.nodes {
+        if node.task.contains("<REVISE>") && !graph.edges.iter().any(|edge| edge.feedback && edge.from == node.name) {
+            warnings.push(format!("W302: {} mentions <REVISE> but has no outgoing feedback edge. The marker alone cannot request a retry. If revision is required, connect a feedback edge to an authorized dependency ancestor; otherwise remove the retry instruction or state that it is only report text.", node.name));
+        }
+    }
     Ok(Plan {
         execution_batches: batches,
         roots,

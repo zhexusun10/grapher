@@ -30,7 +30,7 @@ Commands:
 - find [path] [-name/-iname glob] [-type f/d] [-maxdepth N]
 - rg --files [path]
 - rg/grep [-nilFrR] [-g glob] pattern [paths]
-- cat paths; head/tail [-n N] paths
+- cat paths; head/tail [-n N / -nN / -N] paths
 - curl [-fsSIL] public-HTTP(S)-URL
 
 Search options precede the pattern. Quote patterns/globs; repeat -g for includes, !glob excludes. Prefer narrow paths; -l lists matching files, -F matches literal text. No matches returns empty output. Output is capped at 64 KiB; narrow truncated searches. Use read with offset/limit for large files.

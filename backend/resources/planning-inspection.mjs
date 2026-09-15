@@ -200,8 +200,11 @@ export async function inspectCommand(root, command, signal) {
     text = walk(root, path, depth).filter(e => (!type || e.directory === (type === 'd')) && (!pattern || pattern.test(e.path.split(sep).at(-1)))).map(e => display(root, e.path)).join('\n');
   } else if (['cat', 'head', 'tail'].includes(program)) {
     const tokens = [...args]; let count = 10;
-    if (program !== 'cat' && tokens[0] === '-n') { tokens.shift(); count = number(tokens.shift(), 2000); }
-    if (!tokens.length || tokens.some(p => p.startsWith('-'))) fail(`${program} requires file paths; only head/tail -n N is supported`);
+    if (program !== 'cat') {
+      if (tokens[0] === '-n') { tokens.shift(); count = number(tokens.shift(), 2000); }
+      else if (/^-(?:n)?\d+$/.test(tokens[0] ?? '')) { count = number(tokens.shift().replace(/^-(?:n)?/, ''), 2000); }
+    }
+    if (!tokens.length || tokens.some(p => p.startsWith('-'))) fail(`${program} requires file paths; head/tail support -n N, -nN or -N (0..2000)`);
     text = tokens.map(path => {
       const contents = readText(root, path);
       if (program === 'cat') return contents;

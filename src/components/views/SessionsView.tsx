@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Code2, Terminal, FolderGit2, GitBranch, ArrowRight } from "lucide-react";
 import { Snapshot, Execution } from "../../types";
-import { VirtualizedTranscript } from "../VirtualizedTranscript";
+import { ExecutionTranscript } from "../ExecutionTranscript";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { statusText } from "../graph/TaskNode";
 
@@ -133,7 +133,7 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
                     )}
                   </div>
                   <div style={{ height: "460px", display: "flex", flexDirection: "column" }}>
-                    <VirtualizedTranscript key={execution.id} output={execution.output} />
+                    <ExecutionTranscript key={execution.id} runId={state.runId} execution={execution} />
                   </div>
                   <div className="worktree-info-footer">
                     <span>Session: <code>{execution.sessionId}</code></span>

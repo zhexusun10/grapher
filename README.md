@@ -80,12 +80,12 @@ npm start
 - 并行分支在下游执行前通过宿主 Git merge 组合；Graph 节点受路径 sandbox 保护。整图节点完成后自动合并当前有效节点提交到用户仓库，实际冲突时调用 merger。
 - 精确解析最终一行 `<ACCEPT>` / `<REVISE>`；协议错误显式失败；默认最多 3 次自动反馈重试；失败只阻塞依赖分支。
 - SQLite append-only 事件日志与 reducer；执行流、工具调用、输出、工作区 SHA、节点 revision、介入指令和历史尝试持久化。
-- 暂停停止派发**下一执行波次**，不强杀正在工作的 Pi；等待当前波次完成后可介入或重跑。所有受影响后继失效，无关分支保留。
+- 暂停停止派发新 execution，不强杀正在工作的 Pi；等待活动 execution 完成后可介入或重跑。普通 DAG 按空闲并发槽派发 ready 节点，含 feedback 的图保留波次屏障并先处理反馈再调度。所有受影响后继失效，无关分支保留。
 - 退出时终止受管理 Pi 进程组；重启后端不会自动续跑。被中断的 execution 标记 failed，需人工检查并重跑 fresh session。
 
 ## 执行、merger 与结果落地
 
-Serial（当前判定为唯一节点名为 `task`）直接在用户目录执行，结束后由 Workspace Runtime 保存快照。Graph 节点在用户项目旁的 `.grapher-worktrees/<run>/<node>-<id>` 工作；下游启动前由宿主进程合并依赖提交。此阶段有冲突仍将下游标为 **BLOCKED**：人工在冲突 worktree 解决并提交，暂停且等待波次结束后点击 **Use resolved workspace**，再以新 Execution Instance 重跑该节点。
+Serial（当前判定为唯一节点名为 `task`）直接在用户目录执行，结束后由 Workspace Runtime 保存快照。Graph 节点在用户项目旁的 `.grapher-worktrees/<run>/<node>-<id>` 工作；下游启动前由宿主进程合并依赖提交。此阶段有冲突仍将下游标为 **BLOCKED**：人工在冲突 worktree 解决并提交，暂停且等待活动 execution 结束后点击 **Use resolved workspace**，再以新 Execution Instance 重跑该节点。
 
 当 Graph 所有节点完成时，`jobs()` 先持久化 `PublicationStarted` 并进入 `publishing`，driver 随后发布当前有效节点 head。跳过已合并的祖先提交，不合并历史失败/失效尝试；Git 仓库和普通文件夹使用相同合并逻辑。普通文件夹通过明确指定外置 `--git-dir` 与用户 `--work-tree` 直接回写，正确处理新增、修改、删除，保持没有 `.git`。回写前检查本地改动，不重新快照来吞掉用户并发修改。只有实际未解决冲突才调用 merger，进入 `merging`；权限、脏目录等错误进入 `publication_failed`。
 
@@ -98,6 +98,14 @@ merger 使用锁定 Pi 内核，在用户源仓库当前 merge 状态中运行�
 已落地的前缀提交不自动回滚；仍不能与用户同时写目标目录。旧版本留下的 `Settled/completed` 事件保留原有历史解释，不凭历史记录自动重做回写。
 
 merger 的 session、JSON 输出及 `result.json` 存在 runtime 的 `mergers/<id>/`；生命周期与流式输出写入 SQLite 事件，并投影到 `Snapshot.mergers`，回写状态投影到 `Snapshot.publication`。它是独立 Execution Instance，不伪装成普通 Graph node，也不会和用户命名为 `merger` 的节点冲突。真实模型的语义修复质量需要人工检查；自动测试使用脚本执行器验证完整 HTTP、重启和重试流程，不调用计费模型。
+
+## 规划恢复与大日志浏览
+
+规划启动前持久化 planning ID、工作区和 running 状态，Partitioner/Planner 输出按事件增量写入 JSONL。刷新后前端通过当前工作区查找同一次活动规划，从字节游标继续读取；无需重新提交任务或启动模型。结束时通过 planning ID 和 repository 取得准确图结果。后端重启会把中断规划标记为失败并保留输出，需要新规划尝试。
+
+前端状态请求使用 `detail: "metadata"`：不携带 execution/merger 的完整输出，也不重复传输 `Finished.output`。当前打开的会话通过 `get_execution_output(runId, executionId, offset)` 获取最多 256KiB 的 UTF-8 安全页面；实时增量、历史尝试及项目切换均按身份和取消信号隔离。默认完整 API 和 SQLite 历史仍可导出原始数据。
+
+轨迹列表测量实际行高，支持长代码块、工具和思考卡片展开/折叠，并保留当前阅读位置。可见会话仍会累积已加载文本，历史 run 的分页仍会加载其事件状态；这不是无限日志的常量内存方案。v6 耗时归因、v7 改动和真实验证限制见 [架构优化记录](benchmark/computer-use-2026-09-14/architecture-v7.md)。
 
 ## Graph sandbox
 
@@ -161,7 +169,7 @@ node pi/node_modules/tsx/dist/cli.mjs --tsconfig pi/tsconfig.json scripts/check-
 
 ## 目前可能存在的缺陷
 
-- 仅一个活动 Graph，波次式并行调度；执行中修改节点需先暂停并等待波次结束。
+- 仅一个活动 Graph；普通 DAG 可在快分支完成后立即派发其 ready 下游，含 feedback 的图仍按波次处理以防失效正在被使用的结果。执行中修改节点需先暂停并等待活动任务结束。
 - Graph 编辑使用 JSON；没有拖线编辑、自动布局库、完整 xterm 交互终端或多项目管理。
 - 暂不自动清理 worktree、安装依赖或迁移未提交改动；历史工作区按需由用户清理。Graph 自动发布支持标准 Git 仓库和普通文件夹；发布时若用户目录有并发改动，明确失败并保留现场，处理后可重试。
 - 不支持多引擎、远程执行、自动恢复旧 session、签名/公证/安装更新器。merger 处理整图完成后的冲突，不处理下游 prepare 阶段的 BLOCKED 冲突。

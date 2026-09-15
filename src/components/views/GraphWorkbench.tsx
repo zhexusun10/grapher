@@ -14,7 +14,7 @@ import { MarkdownRenderer } from "../MarkdownRenderer";
 import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
-import { VirtualizedTranscript } from "../VirtualizedTranscript";
+import { ExecutionTranscript } from "../ExecutionTranscript";
 import { PlanningSummaryCard } from "../PlanningSummaryCard";
 import { statusText, phaseText } from "../graph/TaskNode";
 
@@ -232,7 +232,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <ExecutionTiming execution={execution} />
                   </div>
                   <div style={{ flex: 1, minHeight: 320, display: "flex", flexDirection: "column", marginTop: 8 }}>
-                    <VirtualizedTranscript key={execution.id} output={execution.output} />
+                    <ExecutionTranscript key={execution.id} runId={state.runId} execution={execution} />
                   </div>
                   <details className="workspace-details">
                     <summary><FolderGit2 size={12} />工作区与会话信息</summary>
@@ -352,9 +352,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       )}
                     </div>
 
-                    {serialExecution?.output ? (
+                    {serialExecution ? (
                       <div style={{ flex: 1, minHeight: 280, display: "flex", flexDirection: "column", marginTop: 4 }}>
-                        <VirtualizedTranscript key={serialExecution.id} output={serialExecution.output} />
+                        <ExecutionTranscript key={serialExecution.id} runId={state.runId} execution={serialExecution} />
                       </div>
                     ) : (
                       <div className="stream-card-hint" style={{ padding: "8px 0", marginTop: 6 }}>
@@ -369,6 +369,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <p>工作目录: {serialExecution.worktree}</p>
                         <p>会话实例: {serialExecution.sessionId}</p>
                         {(() => {
+                          if (serialExecution.pid) return <p>进程 PID: {serialExecution.pid}</p>;
                           const pidMatch = serialExecution.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
                                            serialExecution.output.match(/"pid":(\d+)/);
                           return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;

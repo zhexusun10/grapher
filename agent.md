@@ -938,6 +938,8 @@ Graph Runtime 是 Grapher 的核心确定性执行引擎。
 - user intervention
 - event recording
 
+Runtime 不等待无依赖的慢兄弟来启动普通 DAG 的 ready 下游：每次完成通知后在并发上限内补齐空槽。含 feedback 的图当前保留波次屏障，整波结束后先应用 feedback/invalidation，再进行下一次调度，避免旧结果的消费者在失效前启动。暂停停止新的派发；介入仍需等待活动 execution 结束。
+
 ---
 
 # 12. Node ≠ Node Agent (Execution Instance)
@@ -1002,17 +1004,26 @@ review #1 ≠ review #2
 
 # 13. Node Agent 的上下文与文件边界
 
-普通 Graph 节点的 Node Agent 使用全新会话、节点 task 和当前 worktree，不获得 Graph mutation、调度或派发工具。Pi 是唯一 Execution Instance Engine，原生 read/write/edit/bash 工具通过 macOS Seatbelt 受同一个进程级文件策略约束，Bash 子进程继承策略。
+普通 Graph 节点的 Node Agent 使用全新会话、节点 task 和当前独立工作区，不获得 Graph mutation、调度或派发工具。Pi 是唯一 Execution Instance Engine，原生 read/write/edit/bash 工具通过 macOS Seatbelt 受同一个进程级文件策略约束，Bash 子进程继承策略。
 
-策略以 canonical 源目录、`.grapher-worktrees` 根和当前节点目录生成。默认允许宿主其他路径和网络，拒绝源目录与整个 worktree 根中当前节点以外的目录。因此对其他 run、稍后创建的 worktree、`..` 和解析到受保护目录的符号链接同样生效，不是先扫描现有 sibling 再生成固定列表。
+Node Agent 的执行接口被收窄，使其世界观天然就是**单一独立 Git 仓库**：
+- 节点工作区拥有属于自己的私有 `.git` 目录，完全独立于宿主仓库与其他兄弟节点；
+- 节点不再硬性拒绝 `git diff`，节点内部可自由使用本地 Git 检查与暂存能力（如 `git status`、`git diff`、`git log`、`git add`）；
+- 不让 Agent 感知到“宿主机上有很多 worktree / 很多目录”这个事实。
 
-只允许读取 worktree 根和当前 run 的路径定位 metadata，以兼容 Node `realpath`；不允许枚举它们的目录内容。当前节点文件允许读写。共享 Git common-dir 也被拒绝，包括位于源目录之外的独立 git-dir 与 shadow repository：这些目录能泄漏其他分支对象及工作区信息。节点内部 `git status/show` 等依赖 common-dir 的命令可能失败，prepare、snapshot、merge 由宿主 Workspace Runtime 执行。
+Node Agent **不注入任何额外系统提示词，完全沿用 Pi 内置的原生编码助手系统提示词**，彻底消除多余的说教与规则污染。
+
+策略以 canonical 源目录、`.grapher-worktrees` / `.grapher-workspaces` 根和当前节点目录生成。默认允许宿主其他路径和网络：
+- 当前节点私有目录 `current/**`（包括其私有的 `current/.git`）：允许原生读写；
+- 宿主源目录 `repository/**`：严格拒绝读取与写入；
+- 外部影子仓库 `shadow_repos/**`：严格拒绝读取与写入；
+- 兄弟工作区 `workspace_root/**`（除 `current` 以外）：严格拒绝读取数据与写入；
+- 仅允许读取工作区根与当前 run 的路径定位 metadata，以兼容 Node `realpath`；不允许枚举它们的目录内容。
+- 外部 Git common-dir（若存在于 `current` 之外）同样被严密封锁，防止泄漏宿主对象库与其他工作区信息。
 
 系统没有 `sandbox-exec` 时，生产 Graph 节点必须失败，不回退到无隔离执行。Grapher/Pi 安装与 runtime 会话目录也必须在受保护源目录之外，否则会一并被拒绝访问；对 Grapher 自身运行 Graph 任务需从另一份外部安装启动。`fixture` 编译特性可注入测试替身，它的测试通过不代表 sandbox 被测过。Serial、Partitioner/Planner、merger 在源目录执行，不套用普通 Graph 节点的源目录 deny 规则；Planner 另有工具层只读限制。
 
 这不是敌对代码的宿主安全隔离：按产品要求保留外部文件、网络和环境认证访问，因此外部副本、预先存在的外部 hardlink、宿主服务/代理不在直接路径策略的保护范围内。宿主用户和 Rust Git 操作不受节点 profile 限制。
-
-Pi 系统提示词的身份与文档引导由 Grapher-owned prompt extension 清理，provider/auth upstream 代码不裁剪。Pi 的 cwd 来自实际执行目录；节点应使用当前目录的相对路径，不回到原仓库。
 
 ---
 
@@ -1036,7 +1047,7 @@ Grapher 不要求 Pi 输出 Grapher-specific artifact schema。
 
 ---
 
-# 15. Git Worktree Isolation
+# 15. 独立单 Repo 工作区与 Ref 命名空间传输契约
 
 并行 Node 不应该直接写入同一个 working directory。
 
@@ -1050,25 +1061,68 @@ backend ──┘
 
 可能产生 filesystem race condition。
 
-因此每个并行 Execution 使用独立 Git Worktree。
-
-例如：
+为了彻底消除 Git Worktree 共享 `.git` 元数据导致的锁争用，并让 Agent 拥有天然一致的单仓库世界观，Grapher 采用**物理完全隔离的独立 Git 仓库（Standalone Single-Repo）**架构。
 
 ```text
-<project-parent>/
-  project/                              # 源目录，Serial 和 merger 的 cwd
-  .grapher-worktrees/
-    <run-id>/
-      <node>-<execution-id>/             # Graph 节点 cwd
-<runtime-root>/
-  sessions/<execution-id>/               # 会话、execution-instance.sb
-  planning/<planning-id>/                # 路由、候选图、Planner 日志
-  mergers/<id>/                         # merger 会话、输出、结果状态
+                    Grapher Host Repo
+                 refs/grapher/nodes/*
+                         ▲
+                         │ host import (--no-write-fetch-head)
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+ private repo A     private repo B   private repo C
+ .git private       .git private     .git private
+ /workspace         /workspace       /workspace
+        │                │                │
+     Agent A           Agent B          Agent C
 ```
 
-Graph 的 `Execution.worktree`、Pi cwd 和 UI 展示的执行路径一致，均使用分配目录。源仓库路径不作为节点工作路径。相邻 worktree 的物理布局只解决工作区管理；第 13 节的 OS sandbox 才负责访问控制。
+### 核心架构不变量（Core Architectural Invariant）
 
-Serial 当前由“单一节点且 name 为 task”识别，直接在用户目录读写，结束后宿主保存快照。Graph 则在宿主准备和合并上游状态后进入节点 sandbox；节点退出后由宿主生成 commit。普通文件夹可使用 runtime 外置 shadow Git metadata，用户目录不添加 `.git`；整图自动回写通过宿主明确指定 shadow git-dir 和用户 work-tree，支持普通文件夹的新增、修改、删除与冲突修复。发布前检查用户目录是否变脏，不重新快照并吞掉并发改动。
+> **每个完成节点都必须在宿主拥有一个 `refs/grapher/nodes/<node_id>` ref；节点间依赖传播只通过 Grapher-owned refs，不通过裸 SHA 的 remote fetch。**
+
+由于 Git 协议不保证服务端允许客户端直接按任意 SHA 请求对象（取决于 `uploadpack.allowTipSHA1InWant` 等配置），Grapher 严格采用 advertised ref-to-ref 传输契约：
+- **SHA** = Object Identity（对象哈希标识）
+- **`refs/grapher/nodes/<id>`** = Grapher Transport / Reachability Contract（传输与可达性契约）
+
+### 传输与生命周期流程
+
+1. **节点启动与初始化（Prepare）**：
+   - 宿主确保基线 commit 拥有 advertised ref：`refs/grapher/heads/<base>` 及 `refs/grapher/base`；
+   - 节点初始化独立 Git 仓库：`git init -q`，并写入 `.git/grapher-repository` 与 `.git/grapher-node-id`；
+   - 强制使用 `file://` 传输拉取完整历史（不使用 `--depth 1`，避免 shallow boundary 破坏共同祖先判定；禁止使用 `--shared`，杜绝 alternates 共享源仓库对象）：
+     ```bash
+     git -C <child> fetch -q --no-tags --no-write-fetch-head file://<host> +refs/grapher/heads/<base>:refs/grapher/base
+     git -C <child> checkout -q -B grapher-node refs/grapher/base
+     ```
+   - 父依赖拉取与 DAG 合并：通过宿主的节点命名空间显式拉取父分支：
+     ```bash
+     git -C <child> fetch -q --no-tags --no-write-fetch-head file://<host> +refs/grapher/nodes/<parent_id>:refs/grapher/parents/<parent_id>
+     git -C <child> merge-base --is-ancestor refs/grapher/parents/<parent_id> HEAD # 若已是祖先则跳过
+     git -C <child> merge --no-edit --no-ff refs/grapher/parents/<parent_id>
+     ```
+
+2. **节点执行与收网（Snapshot）**：
+   - 节点在私有 `grapher-node` 分支上工作，可原生调用 `git status`、`git diff`；
+   - 节点执行完毕后，暂存并提交修改：
+     ```bash
+     git -C <node> add -A
+     git -C <node> commit -m "Grapher execution snapshot"
+     git -C <node> update-ref refs/heads/grapher-node HEAD
+     ```
+   - 宿主通过 ref 命名空间并行收网：
+     ```bash
+     git -C <host> fetch -q --no-tags --no-write-fetch-head file://<node> \
+       +refs/heads/grapher-node:refs/grapher/heads/<head_sha> \
+       +refs/heads/grapher-node:refs/grapher/nodes/<node_id>
+     ```
+
+3. **并行收网与 `--no-write-fetch-head`**：
+   - 普通 `git fetch` 默认会并发写入共享的 `.git/FETCH_HEAD` 文件，在多节点并行完成时会产生隐藏的文件竞争。
+   - 所有宿主与节点 fetch 均强制携带 `--no-write-fetch-head`，确保 Git 对象库按其天然的去重哈希并发安全写入，彻底消除共享 mutable 元数据文件的竞态。
+
+Serial 模式由“单一节点且 name 为 task”识别，直接在用户目录读写，结束后宿主保存快照。Graph 则在完成所有节点后统一由 `merge_graph` 回写并发布到用户目录；普通文件夹通过外置 shadow repository 提供 Git 能力，用户目录不添加 `.git`，发布前检查用户目录是否变脏，杜绝并发修改被吞。
 
 ---
 
@@ -1274,7 +1328,7 @@ flowchart TD
     Publish -->|脏目录 / 权限等错误| Pause
 ```
 
-实现位于 `backend/src/server.rs` 的 driver 和 `backend/src/graph_merge.rs`。Graph 的 `jobs()` 在节点全部完成后先发出 `PublicationStarted`，phase 进入 `publishing`；driver 在退出空工作波次前调用发布，实际文件操作前状态已经持久化。只有全部 head 落地并通过检查，`PublicationCompleted` 才令 phase 为 `completed`，节点完成不再提前代表结果回写成功。Serial 不经过发布阶段，原目录执行和快照成功后直接完成。发布读取每个节点**当前有效 head**，不遍历 Execution History 的所有旧提交；已经是 HEAD 祖先的提交跳过，避免重复发布。每次冲突解决后继续剩余 head，不能只解决第一个冲突便返回成功。
+实现位于 `backend/src/server.rs` 的 driver 和 `backend/src/graph_merge.rs`。Graph 的 `jobs()` 在节点全部完成后先发出 `PublicationStarted`，phase 进入 `publishing`；driver 在没有 ready 或 active 工作时调用发布，实际文件操作前状态已经持久化。只有全部 head 落地并通过检查，`PublicationCompleted` 才令 phase 为 `completed`，节点完成不再提前代表结果回写成功。Serial 不经过发布阶段，原目录执行和快照成功后直接完成。发布读取每个节点**当前有效 head**，不遍历 Execution History 的所有旧提交；已经是 HEAD 祖先的提交跳过，避免重复发布。每次冲突解决后继续剩余 head，不能只解决第一个冲突便返回成功。
 
 merger 是确定性 Runtime 在实际 Git 冲突时创建的专用 Execution Instance，不是图里的节点，也不是常驻 Coordinator。它使用新 session ID、固定 Pi 内核，在用户源目录的 merge 状态下工作，工具为 `read/write/bash/edit`。自定义系统提示词只包含原始 user query 和冲突修复要求：保留各节点有效修改、避免无关改动、暂存解决结果、检查无冲突。禁用项目 context files 和自动扩展发现；Pi 保留必要的 cwd、工具 schema 以及 provider/auth 能力。merger 不使用普通 Graph 节点 sandbox，因为其职责需要访问源目录。
 
@@ -1596,6 +1650,8 @@ Execution Instance Session
 ```
 
 组织。
+
+UI 获取运行状态时使用元数据投影，完整日志通过 `(runId, executionId, byteOffset)` 按需增量读取，页面上限 256KiB。原始事件/输出仍可从默认 API 和 SQLite 导出。规划同样拥有持久身份：启动前记录 running summary，角色输出逐条落盘，浏览器刷新按工作区恢复同一 planning ID 的游标；浏览器连接不拥有模型生命周期。后端中断恢复标为失败，不自动重启规划或旧 session。
 
 ---
 

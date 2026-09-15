@@ -52,24 +52,34 @@ pub fn write_graph_profile(
         current = quote(&current)?,
         run = quote(current.parent().ok_or("Invalid execution path")?)?,
     );
+    // External shadow repositories keep Git metadata outside source; explicitly deny them.
+    let shadow_dir = crate::workspace::shadow_repo_dir(&repository);
+    if shadow_dir.exists() {
+        if let Ok(canonical_shadow) = shadow_dir.canonicalize() {
+            text.push_str(&format!(
+                "(deny file-read* file-write* (subpath {}))\n",
+                quote(&canonical_shadow)?
+            ));
+        }
+    }
     // Linked worktrees, separate git-dir and shadow repositories can keep the
     // shared object database outside the source folder. It contains all branch
     // snapshots and worktree locations, so it must not bypass the path boundary.
+    // Standalone workspaces keep their .git strictly inside current, which is allowed.
     if current.join(".git").exists() {
-        let common = crate::workspace::git(
+        if let Ok(common) = crate::workspace::git(
             &current,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?;
-        let common = PathBuf::from(common)
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
-        if common.starts_with(&current) {
-            return Err("Graph worktree must use host-managed shared Git metadata".into());
+        ) {
+            if let Ok(common) = PathBuf::from(common).canonicalize() {
+                if !common.starts_with(&current) {
+                    text.push_str(&format!(
+                        "(deny file-read* file-write* (subpath {}))\n",
+                        quote(&common)?
+                    ));
+                }
+            }
         }
-        text.push_str(&format!(
-            "(deny file-read* file-write* (subpath {}))\n",
-            quote(&common)?
-        ));
     }
     fs::create_dir_all(path.parent().ok_or("Invalid sandbox profile path")?)
         .map_err(|e| e.to_string())?;

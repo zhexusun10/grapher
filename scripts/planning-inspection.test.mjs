@@ -28,6 +28,13 @@ test('read-only command surface discovers, searches and reads without following 
   assert.equal(await inspectCommand(repo, 'cat "space name.txt"'), 'space\n');
   assert.equal(await inspectCommand(repo, 'head -n 1 src/a.ts'), 'alpha');
   assert.equal(await inspectCommand(repo, 'tail -n 1 src/a.ts'), 'ALPHA');
+  for (const count of ['-1', '-n1']) {
+    assert.equal(await inspectCommand(repo, `head ${count} src/a.ts`), 'alpha');
+    assert.equal(await inspectCommand(repo, `tail ${count} src/a.ts`), 'ALPHA');
+  }
+  for (const command of ['head -2001 src/a.ts', 'tail -n2001 src/a.ts', 'head -1 src/leak.txt', 'head -1 ../rubric.json']) {
+    await assert.rejects(inspectCommand(repo, command));
+  }
   assert.equal(await inspectCommand(repo, 'grep HIDDEN_RUBRIC .'), '');
   assert.deepEqual(splitCommand('grep "alpha|beta" src'), ['grep', 'alpha|beta', 'src']);
 });

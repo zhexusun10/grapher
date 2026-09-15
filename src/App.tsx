@@ -21,6 +21,7 @@ import { LandingView } from "./components/views/LandingView";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
 import { SessionsView } from "./components/views/SessionsView";
 import { TimelineView } from "./components/views/TimelineView";
+import { PlanningSummaryCard } from "./components/PlanningSummaryCard";
 import { PublicationPanel } from "./components/PublicationPanel";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
 import { ConfirmModal, type ConfirmModalState } from "./components/modals/ConfirmModal";
@@ -68,7 +69,7 @@ function areExecutionStreamsEqual(a: Execution[] = [], b: Execution[] = []): boo
   return a.length === b.length && a.every((execution, index) => {
     const next = b[index];
     return execution.id === next.id && execution.status === next.status &&
-      execution.output.length === next.output.length;
+      (execution.outputBytes ?? execution.output.length) === (next.outputBytes ?? next.output.length);
   });
 }
 
@@ -107,6 +108,7 @@ export default function App() {
   const [activeBackendRunId, setActiveBackendRunId] = useState<string | null>(null);
   const [activeBackendPhase, setActiveBackendPhase] = useState<string | null>(null);
   const [dataPath, setDataPath] = useState("");
+  const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
   const [failedPlanning, setFailedPlanning] = useState<PlanningSummary | null>(null);
@@ -242,7 +244,7 @@ export default function App() {
         return prev;
       });
     }
-    if (data.snapshot.runId) {
+    if (data.snapshot.runId && data.snapshot.config?.repository === data.config.repository) {
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       setActiveBackendRunId(data.snapshot.runId);
@@ -820,6 +822,54 @@ export default function App() {
     load().catch((err) => setError(String(err)));
   }, [load]);
 
+  // A detached browser can discover the persisted planning identity without
+  // submitting the goal again. Every response is scoped to this repository.
+  useEffect(() => {
+    setRecoveredPlanning(null);
+    if (busy || !config.repository) return;
+    const repository = config.repository;
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    let planningId: string | undefined;
+    const poll = async () => {
+      const scope = planningRecovery.capture(repository);
+      try {
+        const summary = planningId
+          ? await runtimeService.getPlanning(planningId, abort.signal)
+          : (await runtimeService.listPlannings(repository, abort.signal)).find(item => item.status === "running");
+        if (abort.signal.aborted || !planningRecovery.current(scope)) return;
+        if (summary && summary.repository === repository) {
+          planningId = summary.planningId;
+          if (summary.status === "running") {
+            setRecoveredPlanning(summary);
+            setSelected("");
+          } else {
+            if (summary.status === "success") {
+              const snapshot = await runtimeService.getPlanningSnapshot(planningId, repository, abort.signal);
+              if (abort.signal.aborted || !planningRecovery.current(scope)) return;
+              setState(snapshot);
+              setGoal(snapshot.graph.originalGoal);
+              setRouteType(deduceRouteType(snapshot));
+              setSelected("");
+              recordRunToWorkspace(snapshot.runId, repository);
+            } else {
+              const scope = planningRecovery.begin(repository);
+              void planningRecovery.finish(scope, summary, planningId);
+            }
+            setRecoveredPlanning(null);
+            planningId = undefined;
+          }
+        }
+      } catch (error) {
+        if (!abort.signal.aborted) console.warn("Planning recovery:", error);
+      } finally {
+        if (!abort.signal.aborted) timer = setTimeout(poll, 1500);
+      }
+    };
+    void poll();
+    return () => { abort.abort(); clearTimeout(timer); };
+  }, [busy, config.repository, planningRecovery]);
+
   // Point 1: Adaptive Polling Interval with Fast Equality Diffing
   useEffect(() => {
     if (busy) return;
@@ -901,7 +951,7 @@ export default function App() {
   const publishing = state.phase === "publishing" || state.phase === "merging";
   const publicationFailed = state.phase === "publication_failed";
   const active = publishing || publicationFailed || Object.values(state.nodes).some((node) => node.status === "running");
-  const locked = busy;
+  const locked = busy || !!recoveredPlanning;
 
   const nodes = useMemo<WorkNode[]>(() => {
     const layers = state.plan?.executionBatches ?? [state.graph.nodes.map((node) => node.name)];
@@ -1113,7 +1163,7 @@ export default function App() {
         )}
 
         <AnimatePresence mode="wait" initial={false}>
-          {state.graph.nodes.length === 0 && !isPlanning && mainTab === "graph" ? (
+          {state.graph.nodes.length === 0 && !isPlanning && !recoveredPlanning && mainTab === "graph" ? (
             <LandingView
               goal={goal}
               setGoal={setGoal}
@@ -1140,8 +1190,13 @@ export default function App() {
                 eventsCount={state.events.filter(e => e.type !== "output").length}
               />
 
+              {recoveredPlanning && <section aria-label="恢复进行中的规划">
+                <p role="status">已连接正在进行的规划，活动会自动更新。</p>
+                <PlanningSummaryCard planning={recoveredPlanning} />
+              </section>}
               <PublicationPanel
                 key={state.runId}
+                runId={state.runId}
                 publication={state.publication}
                 mergers={state.mergers ?? []}
                 busy={busy}
@@ -1156,7 +1211,7 @@ export default function App() {
                   setSelected={setSelected}
                   failedPlanning={failedPlanning}
                   effectiveMessages={effectiveMessages}
-                  isPlanning={isPlanning}
+                  isPlanning={isPlanning || !!recoveredPlanning}
                   plannerStream={plannerStream}
                   onSendMessage={handleSendMessage}
                   onControl={control}

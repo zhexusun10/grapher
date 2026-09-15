@@ -1,0 +1,10 @@
+{
+  "name": "P005-1",
+  "project": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P005-1/project",
+  "data": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P005-1/data",
+  "baseline": "67efbe21b2cedc70988f98d1541304766b68b9bd",
+  "startedAt": "2026-09-14T16:03:45.759Z",
+  "status": "FAIL",
+  "error": "TypeError: fetch failed",
+  "endedAt": "2026-09-14T16:08:47.981Z"
+}

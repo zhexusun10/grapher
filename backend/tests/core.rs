@@ -87,6 +87,19 @@ fn compiler_emits_dependency_layers_and_ignores_feedback_for_topology() {
 }
 
 #[test]
+fn compiler_warns_when_revision_marker_cannot_route_a_retry() {
+    let mut candidate = graph();
+    candidate.nodes.iter_mut().find(|node| node.name == "review").unwrap().task =
+        "Check acceptance and finish with <REVISE> if corrections are needed".into();
+    assert!(!compile(&candidate, true).unwrap().warnings.iter().any(|warning| warning.starts_with("W302")));
+    candidate.edges.retain(|edge| !edge.feedback);
+    let plan = compile(&candidate, true).unwrap();
+    assert!(plan.warnings.iter().any(|warning| warning.starts_with("W302") && warning.contains("review")));
+    // This is advisory: literal report examples do not make a structurally valid graph illegal.
+    assert!(compile(&candidate, false).is_ok());
+}
+
+#[test]
 fn compiler_rejects_cycles_unknown_nodes_duplicates_empty_tasks_and_self_edges() {
     let mut cycle = graph();
     cycle.edges.last_mut().unwrap().feedback = false;
@@ -440,3 +453,46 @@ fn second_runtime_cannot_execute_the_same_event_store() {
     drop(first);
     assert!(Runtime::open(temp.path()).is_ok());
 }
+
+#[test]
+fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
+    let temp = TempDir::new().unwrap();
+    let repository = grapher::fixture::repository(temp.path()).unwrap();
+    let base = workspace::verify(&repository).unwrap();
+    let node_a = temp.path().join("node_a");
+    let node_b = temp.path().join("node_b");
+
+    // 1. Prepare Node A
+    workspace::prepare_node(&repository, &node_a, Some("nodeA"), &base, &[]).unwrap();
+    assert_eq!(
+        workspace::git(&node_a, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
+        "grapher-node"
+    );
+    fs::write(node_a.join("a.txt"), "hello from node A\n").unwrap();
+    let head_a = workspace::snapshot(&node_a).unwrap();
+
+    // 2. Verify Host has refs/grapher/nodes/nodeA pointing to head_a
+    let host_ref_a = workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).unwrap();
+    assert_eq!(host_ref_a, head_a);
+
+    // Verify .git/FETCH_HEAD does NOT exist in host repository (avoiding parallel race conditions)
+    assert!(
+        !repository.join(".git/FETCH_HEAD").exists(),
+        ".git/FETCH_HEAD was written to host repository!"
+    );
+
+    // 3. Prepare child Node B depending on parent "nodeA"
+    workspace::prepare_node(&repository, &node_b, Some("nodeB"), &base, &["nodeA".to_string()]).unwrap();
+    assert!(node_b.join("a.txt").exists(), "Child did not receive parent's files");
+    let child_parent_ref = workspace::git(&node_b, &["rev-parse", "refs/grapher/parents/nodeA"]).unwrap();
+    assert_eq!(child_parent_ref, head_a);
+
+    // 4. Node B completes and snapshots
+    fs::write(node_b.join("b.txt"), "hello from node B\n").unwrap();
+    let head_b = workspace::snapshot(&node_b).unwrap();
+
+    // 5. Verify Host has refs/grapher/nodes/nodeB pointing to head_b
+    let host_ref_b = workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).unwrap();
+    assert_eq!(host_ref_b, head_b);
+}
+

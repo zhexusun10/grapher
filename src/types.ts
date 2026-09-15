@@ -5,7 +5,7 @@ export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphE
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
 export interface Config { repository: string; model: string; maxParallel: number; maxFeedback: number }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
-export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; startedAt: number; completedAt: number | null }
+export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null }
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; from?: string; to?: string; accepted?: boolean; error?: string; execution?: Execution; instruction?: string; human?: boolean }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {

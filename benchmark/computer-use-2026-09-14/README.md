@@ -1,4 +1,21 @@
-# v6 验收资料索引
+# v6 / v7 验收资料索引
+
+本轮修复、架构与耗时分析见 [v7 架构优化记录](architecture-v7.md)。[remaining issues](remaining-issues-v6.md) 顶部已增加 v7 逐项状态，下面保留原始 v6 问题表。
+
+| v7 路径 | 用途 |
+| --- | --- |
+| `acceptance-v7.json` | 最终验收摘要：工程验证 PASS，模型语义质量/审计首次完成率仍未解决，总体 PARTIAL |
+| `v7-validation/projection.json` | 生产后端重放 v6 大事件语料，元数据大小、分页无损重建和读取耗时 |
+| `v7-validation/browser.json` | 实际 Planner 刷新恢复；原始大轨迹的长时间浏览器刷新、滚动、内存采样 |
+| `v7-validation/project-stream.json` | 真实 App 的流式状态与延迟项目切换隔离，使用 transport fixture |
+| `v7-validation/observations.json`、`quality-review.json` | 分离路由/规划/执行结果；节点 task 原文行号及语义缺陷证据 |
+| `v7-validation/P004-*`、`P005-*`、`P006-*` | Users search / 双 SDK / 审计的主采样；JSONL gzip 保留原始输出，不把截断或超时算成功 |
+| `v7-validation/feedback/` | 真实 REVISE → fresh 修复 → ACCEPT → 发布；宿主行为断言和无关分支保留 |
+| `v7-validation/audit-second-execution/` | 第三次独立规划图的第二次实际审计执行，无介入，另记源码版本与终态 |
+| `v7-catalog/` | 与旧 v6 相同 goal 和 README 契约的三次 Catalog 规划，和 P004 分开统计 |
+| `v7-recheck/` | 修正客户端为 SSE 后的单次 SDK 重查，仍在 Planner 默认上限超时 |
+
+v7 的 `PASS` 需按各文件 scope 解读：路由/编译通过不代表图语义、实际执行或整个产品通过。原始大型会话压缩归档，外部 worktree/session 路径记录在 metadata；未修改旧测试项目以制造成功。
 
 建议从这三份文档开始：
 

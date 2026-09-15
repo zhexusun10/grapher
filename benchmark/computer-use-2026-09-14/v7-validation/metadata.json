@@ -1,0 +1,16 @@
+{
+  "root": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1",
+  "model": "dashscope/qwen3.8-flash",
+  "thinking": "medium",
+  "sourceManifest": {
+    "backend/resources/prompts/planner.md": "283e6082b001dd8022e29c0dba6310b0c4f4be0d9c3a438b86185a9335f0cf09",
+    "backend/resources/prompts/partitioner.md": "0dd6ced0ee1cf36a62ae886c0ae2d9d7aa82dd3241d0441259f9cdbede30bdbb",
+    "backend/src/engine.rs": "a1c762319182e0bf83ca6cb6f2fe81238ff31144651d61eb70c9ca2f1718ee47",
+    "backend/src/runtime.rs": "2d2acc42c973b824002110da08d254b9149231fd8deffc5dc419baa98e70b0c8",
+    "backend/src/server.rs": "90c6b7a8fbb91bea48c521a67196df45091c9d6d81a832b86b14707732b37a55",
+    "engine/system-prompt.mjs": "ac11a0d7effc19689d5e8a283cb87c1c0b4920ffb83f489ce693c07c3dfa81ae"
+  },
+  "startedAt": "2026-09-14T16:03:45.464Z",
+  "nodeTimeoutSeconds": 900,
+  "plannerTimeoutSeconds": 300
+}

@@ -1,0 +1,705 @@
+{
+  "startedAt": "2026-09-14T16:12:29.120Z",
+  "errors": [],
+  "heap": [
+    {
+      "elapsedMs": 1770,
+      "usedSize": 10555436,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 3056368,
+      "backingStorageSize": 657446
+    },
+    {
+      "elapsedMs": 32847,
+      "usedSize": 10085568,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4669784,
+      "backingStorageSize": 660056
+    },
+    {
+      "elapsedMs": 64707,
+      "usedSize": 10526612,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2994912,
+      "backingStorageSize": 659749
+    },
+    {
+      "elapsedMs": 95779,
+      "usedSize": 10042588,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4670312,
+      "backingStorageSize": 661864
+    },
+    {
+      "elapsedMs": 128076,
+      "usedSize": 10527432,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2995344,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 159159,
+      "usedSize": 10035912,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4668384,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 191467,
+      "usedSize": 10527868,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2996160,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 222574,
+      "usedSize": 10038448,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4669328,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 254891,
+      "usedSize": 10526156,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2996672,
+      "backingStorageSize": 659751
+    },
+    {
+      "elapsedMs": 285971,
+      "usedSize": 10043052,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4669992,
+      "backingStorageSize": 661866
+    },
+    {
+      "elapsedMs": 318298,
+      "usedSize": 10532484,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2996336,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 349387,
+      "usedSize": 10040068,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4669504,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 381685,
+      "usedSize": 10531656,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2996272,
+      "backingStorageSize": 659751
+    },
+    {
+      "elapsedMs": 412780,
+      "usedSize": 10047312,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4669688,
+      "backingStorageSize": 661866
+    },
+    {
+      "elapsedMs": 445106,
+      "usedSize": 10530196,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2996752,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 476184,
+      "usedSize": 10047940,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4670168,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 508520,
+      "usedSize": 10533608,
+      "totalSize": 10911744,
+      "embedderHeapUsedSize": 2996688,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 539770,
+      "usedSize": 10056808,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4702776,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 572102,
+      "usedSize": 10529888,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2997136,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 603177,
+      "usedSize": 10038040,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4670328,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 635500,
+      "usedSize": 10533784,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2997216,
+      "backingStorageSize": 659751
+    },
+    {
+      "elapsedMs": 666570,
+      "usedSize": 10041344,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4670536,
+      "backingStorageSize": 661866
+    },
+    {
+      "elapsedMs": 698905,
+      "usedSize": 10536036,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2984648,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 729973,
+      "usedSize": 10044660,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4669544,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 762311,
+      "usedSize": 10532656,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2985752,
+      "backingStorageSize": 659754
+    },
+    {
+      "elapsedMs": 793408,
+      "usedSize": 10043928,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4670496,
+      "backingStorageSize": 661869
+    },
+    {
+      "elapsedMs": 825724,
+      "usedSize": 10536128,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2996768,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 856802,
+      "usedSize": 10046380,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4670112,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 889111,
+      "usedSize": 10532540,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2997968,
+      "backingStorageSize": 659751
+    },
+    {
+      "elapsedMs": 920184,
+      "usedSize": 10048380,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4671008,
+      "backingStorageSize": 661866
+    },
+    {
+      "elapsedMs": 952512,
+      "usedSize": 10533800,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2998464,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 983599,
+      "usedSize": 10041372,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4671504,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 1015902,
+      "usedSize": 10533628,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2998384,
+      "backingStorageSize": 659751
+    },
+    {
+      "elapsedMs": 1046978,
+      "usedSize": 10041276,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4671576,
+      "backingStorageSize": 661866
+    },
+    {
+      "elapsedMs": 1079310,
+      "usedSize": 10543752,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2965904,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 1110390,
+      "usedSize": 10041344,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4671840,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 1142736,
+      "usedSize": 10526396,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2988536,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 1173821,
+      "usedSize": 10038224,
+      "totalSize": 11059200,
+      "embedderHeapUsedSize": 4671744,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 1206145,
+      "usedSize": 10541592,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2999392,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 1237214,
+      "usedSize": 10048464,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4672432,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 1269010,
+      "usedSize": 10524172,
+      "totalSize": 10911744,
+      "embedderHeapUsedSize": 2999136,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 1300090,
+      "usedSize": 10035308,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4674312,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 1332430,
+      "usedSize": 10539628,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2987864,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 1363522,
+      "usedSize": 10045984,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4672736,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 1395860,
+      "usedSize": 10529492,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2987544,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 1426946,
+      "usedSize": 10038252,
+      "totalSize": 11059200,
+      "embedderHeapUsedSize": 4672464,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 1459269,
+      "usedSize": 10531544,
+      "totalSize": 11698176,
+      "embedderHeapUsedSize": 2988376,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 1490356,
+      "usedSize": 10044336,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4673344,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 1522663,
+      "usedSize": 10537452,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2999920,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 1553738,
+      "usedSize": 10043440,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4673240,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 1586061,
+      "usedSize": 10536252,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 2989144,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 1617133,
+      "usedSize": 10048868,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4674016,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 1649472,
+      "usedSize": 10529760,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 3000584,
+      "backingStorageSize": 659751
+    },
+    {
+      "elapsedMs": 1680547,
+      "usedSize": 10037600,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4673680,
+      "backingStorageSize": 661866
+    },
+    {
+      "elapsedMs": 1712859,
+      "usedSize": 10538356,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2988296,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 1743931,
+      "usedSize": 10049740,
+      "totalSize": 11059200,
+      "embedderHeapUsedSize": 4673168,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 1776256,
+      "usedSize": 10538652,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 3000784,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 1807344,
+      "usedSize": 10047328,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4673824,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 1839677,
+      "usedSize": 10532660,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 2988680,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 1870757,
+      "usedSize": 10043612,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4673552,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 1903060,
+      "usedSize": 10532616,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 3002080,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 1934142,
+      "usedSize": 10048752,
+      "totalSize": 11059200,
+      "embedderHeapUsedSize": 4675120,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 1965954,
+      "usedSize": 10534748,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 3001024,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 1997038,
+      "usedSize": 10039472,
+      "totalSize": 10797056,
+      "embedderHeapUsedSize": 4676424,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 2029362,
+      "usedSize": 10531088,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 3001856,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 2060436,
+      "usedSize": 10035564,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4674928,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 2092761,
+      "usedSize": 10533776,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 3002240,
+      "backingStorageSize": 659751
+    },
+    {
+      "elapsedMs": 2123834,
+      "usedSize": 10041592,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4675280,
+      "backingStorageSize": 661866
+    },
+    {
+      "elapsedMs": 2156144,
+      "usedSize": 10538872,
+      "totalSize": 11436032,
+      "embedderHeapUsedSize": 3003088,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 2187230,
+      "usedSize": 10047608,
+      "totalSize": 11059200,
+      "embedderHeapUsedSize": 4676280,
+      "backingStorageSize": 661867
+    },
+    {
+      "elapsedMs": 2219529,
+      "usedSize": 10532648,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 3001728,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 2250609,
+      "usedSize": 10048520,
+      "totalSize": 11059200,
+      "embedderHeapUsedSize": 4674768,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 2282931,
+      "usedSize": 10533824,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 3002592,
+      "backingStorageSize": 659753
+    },
+    {
+      "elapsedMs": 2314006,
+      "usedSize": 10041380,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4675784,
+      "backingStorageSize": 661868
+    },
+    {
+      "elapsedMs": 2346304,
+      "usedSize": 10538672,
+      "totalSize": 11173888,
+      "embedderHeapUsedSize": 3003392,
+      "backingStorageSize": 659752
+    },
+    {
+      "elapsedMs": 2377379,
+      "usedSize": 10047360,
+      "totalSize": 10534912,
+      "embedderHeapUsedSize": 4676584,
+      "backingStorageSize": 661867
+    }
+  ],
+  "reloads": [
+    329,
+    375,
+    350,
+    347,
+    359,
+    359,
+    349,
+    358,
+    357,
+    363,
+    352,
+    360,
+    351,
+    348,
+    342,
+    364,
+    349,
+    356,
+    365,
+    368,
+    352,
+    362,
+    359,
+    363,
+    346,
+    365,
+    365,
+    351,
+    360,
+    358,
+    346,
+    364,
+    359,
+    365,
+    354,
+    350,
+    361,
+    339
+  ],
+  "pages": 463,
+  "snapshotRequests": 678,
+  "liveRecovery": {
+    "samePlanningId": "点击复制规划 ID: 51ec624c-42cf-4a06-8b96-8f6ad3dc057a",
+    "submittedModelRequests": 0,
+    "restoredOnRefresh": true
+  },
+  "responseBytes": {
+    "full": 19412857,
+    "metadata": 31623
+  },
+  "virtualization": {
+    "positions": [
+      {
+        "top": 0,
+        "rendered": 9,
+        "intersects": true
+      },
+      {
+        "top": 558,
+        "rendered": 13,
+        "intersects": true
+      },
+      {
+        "top": 1116,
+        "rendered": 15,
+        "intersects": true
+      },
+      {
+        "top": 1673,
+        "rendered": 16,
+        "intersects": true
+      },
+      {
+        "top": 2231,
+        "rendered": 15,
+        "intersects": true
+      },
+      {
+        "top": 2789,
+        "rendered": 15,
+        "intersects": true
+      },
+      {
+        "top": 3347,
+        "rendered": 17,
+        "intersects": true
+      },
+      {
+        "top": 3904,
+        "rendered": 16,
+        "intersects": true
+      },
+      {
+        "top": 4462,
+        "rendered": 15,
+        "intersects": true
+      },
+      {
+        "top": 5020,
+        "rendered": 17,
+        "intersects": true
+      },
+      {
+        "top": 5578,
+        "rendered": 17,
+        "intersects": true
+      },
+      {
+        "top": 6135,
+        "rendered": 18,
+        "intersects": true
+      },
+      {
+        "top": 6693,
+        "rendered": 16,
+        "intersects": true
+      },
+      {
+        "top": 7251,
+        "rendered": 17,
+        "intersects": true
+      },
+      {
+        "top": 7809,
+        "rendered": 13,
+        "intersects": true
+      },
+      {
+        "top": 8366,
+        "rendered": 8,
+        "intersects": true
+      },
+      {
+        "top": 8924,
+        "rendered": 7,
+        "intersects": true
+      },
+      {
+        "top": 9482,
+        "rendered": 7,
+        "intersects": true
+      },
+      {
+        "top": 10040,
+        "rendered": 7,
+        "intersects": true
+      },
+      {
+        "top": 10597,
+        "rendered": 7,
+        "intersects": true
+      },
+      {
+        "top": 11155,
+        "rendered": 7,
+        "intersects": true
+      }
+    ],
+    "before": 52,
+    "after": 499
+  },
+  "elapsedMs": 2377379,
+  "snapshotBytes": 21258048,
+  "outputBytes": 112873772,
+  "status": "PASS",
+  "endedAt": "2026-09-14T16:52:34.576Z"
+}

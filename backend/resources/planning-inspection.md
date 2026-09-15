@@ -11,7 +11,7 @@ find [path] [-name/-iname glob] [-type f/d] [-maxdepth N]
 rg --files [path]
 rg/grep [-nilFrR] [-g/--glob glob] pattern [paths]
 cat paths
-head/tail [-n N] paths
+head/tail [-n N / -nN / -N] paths
 curl [-fsSIL] URL
 ```
 

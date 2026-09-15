@@ -1,0 +1,59 @@
+{
+  "originalGoal": "Add a consistent retry policy to the TypeScript and Python SDKs. Specify retryable HTTP statuses (429 and 503), Retry-After handling, exponential backoff, maximum attempts and non-idempotent request protection in a new contracts/retry-policy.md before implementation. Implement and unit-test that contract in clients/typescript/client.ts and clients/python/client.py. Review both clients together and write reproducible conformance scenarios and results in tests/sdk-conformance.md, checking both use identical policy semantics. If that review finds nonconformance, request corrections to both client implementations and repeat the conformance review. Do not put retry behavior in the server or browser app.",
+  "nodes": [
+    {
+      "name": "retry_policy_contract",
+      "task": "Author the authoritative retry contract at contracts/retry-policy.md (new file) for the Atlas SDKs, before any implementation. It must be precise enough that two independent implementations (clients/typescript/client.ts and clients/python/client.py, both currently single-class stubs) can be judged semantically identical.\n\nSpecify, normatively:\n- Retryable HTTP statuses: exactly 429 and 503. Non-retryable statuses surface immediately.\n- Retry-After handling: support both delta-seconds and HTTP-date forms, how the value is parsed and clamped, and precedence over the computed backoff delay (including the retryable-without-Retry-After case).\n- Exponential backoff: the delay formula, base delay, multiplier, cap/max delay, and whether jitter is applied (state the default explicitly so implementations agree).\n- Maximum attempts: the default attempt count (attempts, not retries), where it may be overridden per client/request, and the terminal outcome when attempts are exhausted (error type/shape both SDKs must expose).\n- Non-idempotent request protection: which methods are retry-safe by default (GET/HEAD and other idempotent methods), the default posture for non-idempotent requests such as POST, and the explicit opt-in mechanism (if any) required to retry them.\n- Scope boundary: retry policy lives only in the SDK clients. The contract must state explicitly that no retry logic belongs in the server (server/) or the browser app (web/), and that existing public client behavior is otherwise unchanged.\n\nRecord every decision as a concrete value or rule; where the surrounding repository offers no precedent (contracts/users.json defines only the GET /users schema and its 400/500 errors), make the choice yourself and document the rationale. Definition of done: the file exists in contracts/ and each of the six areas above is unambiguous and testable, including the exact wording an implementer would quote when writing a unit test for Retry-After precedence and for a non-retryable POST."
+    },
+    {
+      "name": "typescript_client_retry",
+      "task": "Implement the retry policy defined in contracts/retry-policy.md in the TypeScript SDK at clients/typescript/client.ts, and unit-test it.\n\nThe file is currently an empty `export class Client { constructor(public baseUrl: string) {} }` stub, so implement the request path needed to exercise retry (transport call, status inspection, delay, attempt accounting) plus unit tests that assert every clause of the contract: retry only on 429 and 503; Retry-After honored for delta-seconds and HTTP-date forms with the contract's precedence and clamping; the exponential backoff formula, cap and jitter default; maximum attempts with the contract's default and the exhausted-attempts error shape; non-idempotent requests not retried without the contract's opt-in.\n\nKeep tests in a new file under tests/ following the existing `node --test` convention (package.json test script is `node --test`; see tests/normalize.test.ts and tests/users-flow.test.ts for style), and inject the clock/sleep and transport so tests are deterministic and fast rather than sleeping for real. Do not add retry behavior to server/ or web/, and do not change unrelated public client behavior.\n\nDefinition of done: the contract is implemented in clients/typescript/client.ts, the new node --test suite passes when run from this worktree, and every contract clause you implemented has at least one test."
+    },
+    {
+      "name": "python_client_retry",
+      "task": "Implement the same retry policy from contracts/retry-policy.md in the Python SDK at clients/python/client.py, and unit-test it.\n\nThe file is currently a stub `class Client: def __init__(self, base_url): self.base_url = base_url`, so implement the request path needed to exercise retry (transport call, status inspection, delay, attempt accounting) plus unit tests asserting every clause of the contract: retry only on 429 and 503; Retry-After honored for delta-seconds and HTTP-date forms with the contract's precedence and clamping; the exponential backoff formula, cap and jitter default; maximum attempts with the contract's default and the exhausted-attempts error shape; non-idempotent requests not retried without the contract's opt-in.\n\nMirror the TypeScript client's public surface and naming as closely as the language allows, since a later conformance review compares the two for identical policy semantics. Put tests in a new Python test file colocated with the SDK (clients/python/) or under tests/ — the repository has no established Python runner, so pick one, keep it self-contained and dependency-light, and document the run command in the test module or a short note. Inject the sleep/transport so tests are deterministic and fast. Do not add retry behavior to server/ or web/, and do not change unrelated public client behavior.\n\nDefinition of done: the contract is implemented in clients/python/client.py and the unit tests pass in this worktree with the documented command."
+    },
+    {
+      "name": "sdk_conformance_review",
+      "task": "Perform a joint conformance review of the TypeScript and Python retry implementations against contracts/retry-policy.md, and record reproducible scenarios and results in tests/sdk-conformance.md (currently a placeholder stating no retry contract is defined).\n\nRead the policy from contracts/retry-policy.md, then compare clients/typescript/client.ts and clients/python/client.py side by side, and exercise each client's unit suites as documented in this worktree.\n\nFor each contract clause — retryable statuses (429, 503 only), Retry-After parsing (delta-seconds and HTTP-date), Retry-After precedence and clamping over computed backoff, exponential backoff base/multiplier/cap and jitter default, maximum-attempts counting (attempts vs retries) and default, exhausted-attempts terminal error shape, and non-idempotent request protection with its opt-in — write a scenario with: the concrete input (status/method/headers/attempt), the expected behavior quoted from the contract, the observed behavior in each SDK, and PASS or MISMATCH. Include the exact commands run from the repository root to reproduce each result, plus the real exit codes and pass/fail counts of both suites. Confirm the scope boundary too: no retry logic added to server/ or web/.\n\nSave the detailed evidence in tests/sdk-conformance.md and keep this task's own summary focused on the verdict table and any mismatch list.\n\nVerdict rules, on the final line only:\n- Emit `<ACCEPT>` when every clause conforms and both suites pass.\n- Emit `<REVISE>` when any clause mismatches between the two SDKs or deviates from the contract, or a suite fails. List each defect as a numbered correction request naming the offending file (clients/typescript/client.ts and/or clients/python/client.py), the contract clause, and the observed-versus-expected behavior, so both client owners can fix their own code. Do not modify the client implementations or their tests yourself; you own only tests/sdk-conformance.md."
+    }
+  ],
+  "edges": [
+    {
+      "from": "retry_policy_contract",
+      "to": "typescript_client_retry",
+      "relation": "implements",
+      "feedback": false
+    },
+    {
+      "from": "retry_policy_contract",
+      "to": "python_client_retry",
+      "relation": "implements",
+      "feedback": false
+    },
+    {
+      "from": "typescript_client_retry",
+      "to": "sdk_conformance_review",
+      "relation": "reviewed_by",
+      "feedback": false
+    },
+    {
+      "from": "python_client_retry",
+      "to": "sdk_conformance_review",
+      "relation": "reviewed_by",
+      "feedback": false
+    },
+    {
+      "from": "sdk_conformance_review",
+      "to": "typescript_client_retry",
+      "relation": "requests_corrections",
+      "feedback": true
+    },
+    {
+      "from": "sdk_conformance_review",
+      "to": "python_client_retry",
+      "relation": "requests_corrections",
+      "feedback": true
+    }
+  ]
+}

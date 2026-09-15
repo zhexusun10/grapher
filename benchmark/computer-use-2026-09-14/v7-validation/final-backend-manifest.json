@@ -1,0 +1,11 @@
+{
+  "backend/src/engine.rs": "1edfe91d59d48b1343634eec0ee9a1eb9f80ae61e36fd3ad0eabf3b5c121b436",
+  "backend/src/runtime.rs": "c1bf08729118c36f1bf9293ce62a2b3c746e609e997e1a6a999b00a11351cdc5",
+  "backend/src/server.rs": "f8b82d0e62373b9042e3053daccf7cd2e1bc14a5ef077642dbb1aea648881359",
+  "backend/src/compiler.rs": "713702a2d4dba8d0d3f2fb388e3e5b2901643aea45f1a7a191d0d9ba20905bea",
+  "backend/src/snapshot_view.rs": "349d9e8a98718356eab4e16d053b99c9034897d22c689887695c98ea30d3052a",
+  "backend/resources/prompts/planner.md": "bff63540554a799bffb70163c6d543bf403727290a6d1435574b695365ada553",
+  "backend/resources/planning-inspection.mjs": "5fb7fe1d5dd14aca2902f68fd9f64065b93d3159e4d2a91ac4ecc87919f41882",
+  "backend/resources/planner.ts": "9b310608b21c0e266012a56eba121b771e035375cc0cece23de312fe56b3689d",
+  "engine/system-prompt.mjs": "ac11a0d7effc19689d5e8a283cb87c1c0b4920ffb83f489ce693c07c3dfa81ae"
+}

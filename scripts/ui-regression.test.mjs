@@ -20,6 +20,7 @@ try {
       card: "src/components/ToolCallCard.tsx",
       planningCard: "src/components/PlanningSummaryCard.tsx",
       recovery: "src/services/planningRecovery.ts",
+      layout: "src/services/transcriptLayout.ts",
       runtime: "src/services/runtime.ts",
       extension: "engine/prompt-extension.ts",
     },
@@ -43,6 +44,24 @@ try {
   const { ToolCallCard } = await import(pathToFileURL(path.join(root, "card.js")));
   const { PlanningSummaryCard, calculateApprovalWaitingTime, calculatePausedTime, parseTimestamp } = await import(pathToFileURL(path.join(root, "planningCard.js")));
   const { createPlanningRecovery } = await import(pathToFileURL(path.join(root, "recovery.js")));
+  const { rowOffsets, visibleRows } = await import(pathToFileURL(path.join(root, "layout.js")));
+  test("Measured transcript ranges include tall rows, resized rows and the final row", () => {
+    const ids = Array.from({ length: 80 }, (_, i) => String(i));
+    const heights = new Map(ids.map(id => [id, Number(id) % 3 === 0 ? 800 : 32]));
+    let offsets = rowOffsets(ids, heights);
+    for (let top = 0; top < offsets.at(-1); top += 31) {
+      const range = visibleRows(offsets, top, 500);
+      assert.ok(offsets[range.start] <= top);
+      assert.ok(offsets[range.end] >= Math.min(top + 500, offsets.at(-1)));
+    }
+    heights.set('30', 3500);
+    offsets = rowOffsets(ids, heights);
+    const expanded = visibleRows(offsets, offsets[30] + 2500, 500, 0);
+    assert.equal(expanded.start, 30);
+    assert.equal(expanded.end, 31);
+    assert.equal(visibleRows(offsets, offsets.at(-1) + 1000, 500).end, 80);
+    assert.deepEqual(visibleRows([0], 0, 500), { start: 0, end: 0, paddingTop: 0, paddingBottom: 0 });
+  });
   const { runtimeService } = await import(pathToFileURL(path.join(root, "runtime.js")));
   const registerExtension = (await import(pathToFileURL(path.join(root, "extension.js")))).default;
 
@@ -413,14 +432,20 @@ try {
     assert.doesNotMatch(failedHtml, /审批等待/);
     assert.equal(calculateApprovalWaitingTime(mockPlanning, undefined).durationSeconds, 0);
 
-    // Check footer note clarifies SQLite authority and avoids unconditional claims
-    assert.match(approvedHtml, /运行态生命周期以 SQLite 事件为权威源/);
+    // The footer explains how users can retrieve saved activity.
+    assert.match(approvedHtml, /统计摘要与完整规划活动分别保存/);
     assert.doesNotMatch(approvedHtml, /完全对账/);
 
     // Check no thought leakage
     assert.doesNotMatch(approvedHtml, /thought/i);
     assert.doesNotMatch(approvedHtml, /reasoningContent/i);
 
+    const runningHtml = renderToStaticMarkup(createElement(PlanningSummaryCard, {
+      planning: { ...mockPlanning, status: "running", createdAt: Date.now() - 5000 },
+    }));
+    assert.match(runningHtml, /规划中/);
+    assert.match(runningHtml, /完成后统计/);
+    assert.doesNotMatch(runningHtml, /审批等待/);
     // Case 2: Approval waiting calculation
     const waitApproved = calculateApprovalWaitingTime(mockPlanning, mockStateApproved, 1726300050000);
     assert.equal(waitApproved.isWaiting, false);

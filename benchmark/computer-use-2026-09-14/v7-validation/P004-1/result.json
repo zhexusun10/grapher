@@ -1,0 +1,191 @@
+{
+  "name": "P004-1",
+  "project": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P004-1/project",
+  "data": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P004-1/data",
+  "baseline": "67efbe21b2cedc70988f98d1541304766b68b9bd",
+  "startedAt": "2026-09-14T16:03:45.594Z",
+  "status": "PASS",
+  "route": "graph",
+  "expectedRoute": "graph",
+  "planning": {
+    "createdAt": 1789401826508,
+    "modelDuration": 200.571,
+    "planningId": "45afd3aa-ac10-4110-ba92-747152d022d4",
+    "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P004-1/project",
+    "roles": {
+      "partition": {
+        "assistantMessages": 1,
+        "durationSeconds": 13.853,
+        "lastEvent": "1789401840460",
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789401826607",
+        "toolErrors": 0,
+        "tools": 0,
+        "usage": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 275,
+          "output": 375,
+          "reasoning": 371,
+          "totalTokens": 650
+        }
+      },
+      "planner": {
+        "assistantMessages": 10,
+        "durationSeconds": 186.718,
+        "lastEvent": "1789402027182",
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789401840463",
+        "toolErrors": 1,
+        "tools": 22,
+        "usage": {
+          "cacheRead": 37632,
+          "cacheWrite": 0,
+          "input": 10505,
+          "output": 4926,
+          "reasoning": 2704,
+          "totalTokens": 53063
+        }
+      }
+    },
+    "status": "success",
+    "totalPlanningDuration": 200.699436083
+  },
+  "partition": {
+    "elapsedMs": 13853,
+    "firstAssistantObservedMs": 5792,
+    "afterLastToolMs": null,
+    "toolsByName": {},
+    "errors": 0,
+    "commands": [],
+    "toolDurationsMs": [],
+    "usage": {
+      "input": 275,
+      "output": 375,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "reasoning": 371,
+      "totalTokens": 650
+    }
+  },
+  "planner": {
+    "elapsedMs": 186718,
+    "firstAssistantObservedMs": 2411,
+    "afterLastToolMs": 9538,
+    "toolsByName": {
+      "bash": 7,
+      "read": 8,
+      "node": 3,
+      "edge": 4
+    },
+    "errors": 1,
+    "commands": [
+      "ls -la",
+      "find . -maxdepth 3 -type f -name \"*.json\"",
+      "find . -maxdepth 3 -type f",
+      "head -40 server/storage.ts server/config.ts server/auth.ts web/config.ts",
+      "cat docs/configuration.md",
+      "cat server/config.ts",
+      "cat web/config.ts"
+    ],
+    "toolDurationsMs": [
+      {
+        "tool": "bash",
+        "ms": 8
+      },
+      {
+        "tool": "bash",
+        "ms": 7
+      },
+      {
+        "tool": "bash",
+        "ms": 4
+      },
+      {
+        "tool": "read",
+        "ms": 7
+      },
+      {
+        "tool": "read",
+        "ms": 6
+      },
+      {
+        "tool": "read",
+        "ms": 6
+      },
+      {
+        "tool": "read",
+        "ms": 1
+      },
+      {
+        "tool": "read",
+        "ms": 1
+      },
+      {
+        "tool": "read",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "read",
+        "ms": 0
+      },
+      {
+        "tool": "read",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "node",
+        "ms": 15
+      },
+      {
+        "tool": "node",
+        "ms": 15
+      },
+      {
+        "tool": "node",
+        "ms": 23
+      },
+      {
+        "tool": "edge",
+        "ms": 23
+      },
+      {
+        "tool": "edge",
+        "ms": 22
+      },
+      {
+        "tool": "edge",
+        "ms": 15
+      },
+      {
+        "tool": "edge",
+        "ms": 15
+      }
+    ],
+    "usage": {
+      "input": 10505,
+      "output": 4926,
+      "cacheRead": 37632,
+      "cacheWrite": 0,
+      "reasoning": 2704,
+      "totalTokens": 53063
+    }
+  },
+  "endedAt": "2026-09-14T16:07:07.218Z"
+}

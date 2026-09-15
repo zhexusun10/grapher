@@ -20,6 +20,7 @@ export function createPlanningRecovery(service: Service, publish: (summary: Plan
   };
   return {
     begin,
+    capture: (repository?: string): Scope => ({ repository, generation }),
     current,
     async restore(scope: Scope, snapshot?: Snapshot) {
       if (!current(scope) || !scope.repository) return;

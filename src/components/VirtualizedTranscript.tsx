@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState, useMemo, useCallback } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
+import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
 import { TranscriptItem } from "../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ToolCallCard } from "./ToolCallCard";
@@ -11,8 +12,19 @@ interface VirtualizedTranscriptProps {
   emptyText?: string;
 }
 
-const ESTIMATED_ITEM_HEIGHT = 72;
-const OVERSCAN = 6;
+function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = ref.current!;
+    const update = () => measure(id, element.getBoundingClientRect().height);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [id, measure]);
+  return <div ref={ref} data-transcript-id={id} style={{ display: "flow-root" }}>{children}</div>;
+}
+
 
 export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   output,
@@ -20,6 +32,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   emptyText = "工作区就绪，等待节点指令输出…",
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const expandedRows = useRef(new Map<string, boolean>());
   const isUserScrolledUpRef = useRef(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
@@ -33,6 +46,21 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   // Height cache for virtualization
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
   const [scrollTop, setScrollTop] = useState(0);
+  const [heightVersion, setHeightVersion] = useState(0);
+  const layoutRef = useRef({ ids: [] as string[], offsets: [0] });
+  const measure = useCallback((id: string, height: number) => {
+    if (height <= 0 || itemHeightsRef.current.get(id) === height) return;
+    const oldHeight = itemHeightsRef.current.get(id) ?? 72;
+    itemHeightsRef.current.set(id, height);
+    const el = containerRef.current;
+    const { ids, offsets } = layoutRef.current;
+    const index = ids.indexOf(id);
+    if (el && isUserScrolledUpRef.current && index >= 0 && index < rowAt(offsets, el.scrollTop)) {
+      el.scrollTop += height - oldHeight;
+      setScrollTop(el.scrollTop);
+    }
+    setHeightVersion(value => value + 1);
+  }, []);
   const [containerHeight, setContainerHeight] = useState(600);
 
   // Incrementally parse output as it arrives
@@ -372,11 +400,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
 
   // Handle auto-scrolling
   const items = itemsRef.current;
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isUserScrolledUpRef.current && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      setScrollTop(containerRef.current.scrollTop);
     }
-  }, [itemsVersion]);
+  }, [itemsVersion, heightVersion]);
 
   // Track container height & scroll position
   useEffect(() => {
@@ -421,59 +450,30 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const totalCount = items.length;
   const isVirtual = totalCount > 35;
 
+  const offsets = useMemo(() => rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion]);
+  layoutRef.current = { ids: items.map(item => item.id), offsets };
   const { visibleItems, paddingTop, paddingBottom } = useMemo(() => {
-    if (!isVirtual) {
-      return {
-        visibleItems: items.map((item, idx) => ({ item, index: idx })),
-        paddingTop: 0,
-        paddingBottom: 0,
-      };
-    }
-
-    const visibleCount = Math.ceil(containerHeight / ESTIMATED_ITEM_HEIGHT) + OVERSCAN * 2;
-    const startIndex = Math.min(
-      Math.max(0, totalCount - visibleCount),
-      Math.max(0, Math.floor(scrollTop / ESTIMATED_ITEM_HEIGHT) - OVERSCAN),
-    );
-    const endIndex = Math.min(totalCount, startIndex + visibleCount);
-
-    const topPad = startIndex * ESTIMATED_ITEM_HEIGHT;
-    const bottomPad = Math.max(0, (totalCount - endIndex) * ESTIMATED_ITEM_HEIGHT);
-
-    const slice = items.slice(startIndex, endIndex).map((item, idx) => ({
-      item,
-      index: startIndex + idx,
-    }));
-
-    return {
-      visibleItems: slice,
-      paddingTop: topPad,
-      paddingBottom: bottomPad,
-    };
-  }, [items, isVirtual, scrollTop, containerHeight, totalCount]);
-
-  if (!output && items.length === 0) {
-    return (
-      <div className="transcript-empty-state">
-        <Terminal size={22} />
-        <p>{emptyText}</p>
-      </div>
-    );
-  }
+    const range = isVirtual ? visibleRows(offsets, scrollTop, containerHeight)
+      : { start: 0, end: totalCount, paddingTop: 0, paddingBottom: 0 };
+    return { visibleItems: items.slice(range.start, range.end), ...range };
+  }, [items, offsets, isVirtual, scrollTop, containerHeight, totalCount]);
 
   return (
     <div className={`virtualized-transcript-container ${className}`}>
       <div
         ref={containerRef}
         className="transcript-scroll-area"
+        style={{ overflowAnchor: "none", maxHeight: "65vh", minHeight: 200 }}
         onScroll={handleScroll}
       >
-        <div style={{ paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
-          {visibleItems.map(({ item }) => {
+        {!output && items.length === 0 && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
+        <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
+          {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{(() => {
             if (item.type === "tool_call") {
               return (
                 <div key={item.id} className="transcript-row tool-row">
-                  <ToolCallCard item={item} />
+                  <ToolCallCard item={item} expanded={expandedRows.current.get(item.id)}
+                    onExpandedChange={expanded => { expandedRows.current.set(item.id, expanded); setItemsVersion(value => value + 1); }} />
                 </div>
               );
             }
@@ -481,7 +481,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
             if (item.type === "thinking") {
               return (
                 <div key={item.id} className="transcript-row thinking-row">
-                  <ThinkingCard item={item} isStreaming={item.status === "running"} />
+                  <ThinkingCard item={item} isStreaming={item.status === "running"}
+                    expanded={expandedRows.current.get(item.id)}
+                    onExpandedChange={expanded => { expandedRows.current.set(item.id, expanded); setItemsVersion(value => value + 1); }} />
                 </div>
               );
             }
@@ -504,7 +506,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
                 </div>
               </div>
             );
-          })}
+          })()}</MeasuredRow>)}
         </div>
       </div>
 

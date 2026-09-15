@@ -1,0 +1,215 @@
+{
+  "name": "P005-3",
+  "project": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P005-3/project",
+  "data": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P005-3/data",
+  "baseline": "db367ac604a5ef3497c1e7111ca791c6dd4c19f7",
+  "startedAt": "2026-09-14T16:11:30.589Z",
+  "status": "PASS",
+  "route": "graph",
+  "expectedRoute": "graph",
+  "planning": {
+    "createdAt": 1789402290903,
+    "modelDuration": 197.26899999999998,
+    "planningId": "14c7e6ea-4a17-4b5e-b754-87271e2e86fb",
+    "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P005-3/project",
+    "roles": {
+      "partition": {
+        "assistantMessages": 1,
+        "durationSeconds": 20.504,
+        "lastEvent": "1789402311465",
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789402290960",
+        "toolErrors": 0,
+        "tools": 0,
+        "usage": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 306,
+          "output": 393,
+          "reasoning": 389,
+          "totalTokens": 699
+        }
+      },
+      "planner": {
+        "assistantMessages": 14,
+        "durationSeconds": 176.765,
+        "lastEvent": "1789402488235",
+        "model": "dashscope/qwen3.8-flash",
+        "sessionStart": "1789402311469",
+        "toolErrors": 5,
+        "tools": 26,
+        "usage": {
+          "cacheRead": 51840,
+          "cacheWrite": 0,
+          "input": 11711,
+          "output": 4439,
+          "reasoning": 1606,
+          "totalTokens": 67990
+        }
+      }
+    },
+    "status": "success",
+    "totalPlanningDuration": 197.35580675
+  },
+  "partition": {
+    "elapsedMs": 20504,
+    "firstAssistantObservedMs": 2677,
+    "afterLastToolMs": null,
+    "toolsByName": {},
+    "errors": 0,
+    "commands": [],
+    "toolDurationsMs": [],
+    "usage": {
+      "input": 306,
+      "output": 393,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "reasoning": 389,
+      "totalTokens": 699
+    }
+  },
+  "planner": {
+    "elapsedMs": 176765,
+    "firstAssistantObservedMs": 2653,
+    "afterLastToolMs": 43750,
+    "toolsByName": {
+      "bash": 16,
+      "node": 4,
+      "edge": 6
+    },
+    "errors": 5,
+    "commands": [
+      "find . -maxdepth 3 -type f -name \"*.md\" -o -maxdepth 3 -type f -name \"*.json\" -o -maxdepth 3 -type d -name \"*\" -not -path \"./.git*\"",
+      "ls -la",
+      "cat README.md",
+      "ls -R clients contracts tests docs src server web",
+      "ls -lah clients clients/typescript clients/python contracts tests",
+      "cat package.json",
+      "ls -lah clients/typescript clients/python contracts tests docs src server web",
+      "ls -lah clients/typescript",
+      "ls -lah contracts",
+      "ls -lah tests",
+      "cat clients/typescript/client.ts",
+      "cat clients/python/client.py",
+      "cat tests/sdk-conformance.md",
+      "cat contracts/users.json",
+      "cat server/users.ts",
+      "ls -lah docs src web server clients/python"
+    ],
+    "toolDurationsMs": [
+      {
+        "tool": "bash",
+        "ms": 6
+      },
+      {
+        "tool": "bash",
+        "ms": 4
+      },
+      {
+        "tool": "bash",
+        "ms": 2
+      },
+      {
+        "tool": "bash",
+        "ms": 2
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 0
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 2
+      },
+      {
+        "tool": "bash",
+        "ms": 2
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 2
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "bash",
+        "ms": 1
+      },
+      {
+        "tool": "node",
+        "ms": 16
+      },
+      {
+        "tool": "node",
+        "ms": 16
+      },
+      {
+        "tool": "node",
+        "ms": 16
+      },
+      {
+        "tool": "node",
+        "ms": 9
+      },
+      {
+        "tool": "edge",
+        "ms": 32
+      },
+      {
+        "tool": "edge",
+        "ms": 31
+      },
+      {
+        "tool": "edge",
+        "ms": 30
+      },
+      {
+        "tool": "edge",
+        "ms": 30
+      },
+      {
+        "tool": "edge",
+        "ms": 13
+      },
+      {
+        "tool": "edge",
+        "ms": 12
+      }
+    ],
+    "usage": {
+      "input": 11711,
+      "output": 4439,
+      "cacheRead": 51840,
+      "cacheWrite": 0,
+      "reasoning": 1606,
+      "totalTokens": 67990
+    }
+  },
+  "endedAt": "2026-09-14T16:14:48.271Z"
+}

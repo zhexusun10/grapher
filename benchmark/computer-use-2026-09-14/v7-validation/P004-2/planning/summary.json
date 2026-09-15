@@ -1,0 +1,44 @@
+{
+  "planningId": "b2a48f74-222a-4745-94cb-131a73b88bcd",
+  "roles": {
+    "partition": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789402027556",
+      "lastEvent": "1789402051238",
+      "durationSeconds": 23.681,
+      "assistantMessages": 1,
+      "tools": 0,
+      "toolErrors": 0,
+      "usage": {
+        "input": 275,
+        "output": 336,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reasoning": 333,
+        "totalTokens": 611
+      }
+    },
+    "planner": {
+      "model": "dashscope/qwen3.8-flash",
+      "sessionStart": "1789402051241",
+      "lastEvent": "1789402234141",
+      "durationSeconds": 182.899,
+      "assistantMessages": 12,
+      "tools": 18,
+      "toolErrors": 2,
+      "usage": {
+        "input": 10776,
+        "output": 3149,
+        "cacheRead": 43520,
+        "cacheWrite": 0,
+        "reasoning": 771,
+        "totalTokens": 57445
+      }
+    }
+  },
+  "totalPlanningDuration": 206.6569675,
+  "modelDuration": 206.58,
+  "status": "success",
+  "createdAt": 1789402027505,
+  "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P004-2/project"
+}
