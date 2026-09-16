@@ -9,7 +9,7 @@ The primary benchmark is **B010, variant `planning-quality-v1`, schema v2**. The
 
 There is no Runtime construction, graph approval, `drive`, node execution, worktree preparation or implementation-success criterion. Pi is used only as the production planning engine and, in a separate process, as the semantic judge.
 
-`planning-host.rs` uses the production Pi adapter, Partitioner/Planner prompts, graph mutation extension, compiler and final compiler. This is a component evaluation of planning behavior, not a test of the HTTP `plan_goal` handler. The planner receives the same goal/system prompt and exact `node,edge` surface as production. Repository and contract investigation belongs to workers during execution. The partitioner receives route_task only.
+`planning-host.rs` uses the production Pi adapter, Partitioner/Planner prompts, graph mutation extension, compiler and final compiler. This is a component evaluation of planning behavior, not a test of the HTTP `plan_goal` handler. The planner receives the same goal/system prompt and exact `node,edge,read,bash` surface as production. Read-only inspection is limited to facts affecting graph boundaries, dependencies or authoritative constraints; implementation investigation belongs to workers. The partitioner receives route_task only.
 
 ## Corpus
 
@@ -34,9 +34,11 @@ For each **gold graph task**, the harness independently calls the Planner even i
 
 ## Planner tool boundary
 
-Planner exposes only `node` and `edge`, which atomically mutate the host-selected graph artifact through the shipping compiler. It has no shell, file read/search/listing, network or repository-write tool. This prevents planning-time implementation exploration and cross-subsystem facts from leaking into tasks merely because the model discovered similarly named files. Workers inspect their isolated worktrees during execution.
+Planner exposes `node` and `edge` for compiler-checked atomic graph mutation, repository-scoped `read`, and a custom restricted read-only `bash` inspection API. It cannot execute arbitrary shell, scripts or tests, write repository files, follow symlinks or inspect Git metadata. See `backend/resources/planning-inspection.md` for the command and network boundary.
 
-Rubrics are written only after candidate generation. `planning-boundary.mjs` checks policy `planner-graph-tools-v1`, the exact `node,edge` surface and tool start/end pairing before invoking the judge. Missing policy or any successful historical inspection tool is PLANNING_BOUNDARY failure even if Git is clean, the graph compiles and an old judge gave full marks. Replay retains originals but excludes unverified candidates from quality passes. Rejected unknown-tool attempts are not successful boundary breaches.
+The `node` tool supports batch `nodes`/`edges` arrays as well as its original single-node form. A batch applies node edits first, then edge edits, and runs the shipping compiler once on the final state. Rejected batches return diagnostics and saved topology without writing any edits. The four-tool allowlist and inspection policy are unchanged by batching; one batch produces one tool execution pair.
+
+Rubrics are written only after candidate generation. `planning-boundary.mjs` checks policy `planner-workspace-tools-v4`, the exact `node,edge,read,bash` surface, tool start/end pairing, successful bash policy evidence and successful read paths before invoking the judge. Missing policy or an unverified tool boundary fails even if Git is clean and the graph compiles. Replay retains original evidence; rejected unknown-tool attempts are not successful breaches.
 
 ## Quality assessment
 
@@ -49,7 +51,7 @@ The deterministic grader then checks:
 - Required deliverable ownership, with concrete output paths in producer tasks.
 - Prerequisite reachability, accepting transitive dependency paths.
 - Independent producers remain distinct and are not artificially serialized.
-- Required feedback appears only for user-requested revision loops, maps to the expected reviewer/owner pairs, and no additional feedback route is accepted.
+- Explicitly requested feedback maps to the expected reviewer/owner pairs. Additional bounded feedback between owned outcomes and dependency ancestors is permitted; its usefulness is assessed semantically rather than rejected solely for lacking an explicit user loop request.
 - Every node maps to an actual requested work unit; a pure extra reader, report or quality gate cannot hide behind compiler validity.
 - Case-specific inapplicable repository references are rejected. In P005, the server/browser `retryCount` configuration files are not an SDK contract and may not be carried into node tasks.
 - At least 12/14 semantic points with no zero dimension.

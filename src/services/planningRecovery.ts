@@ -1,5 +1,14 @@
 import type { PlanningSummary, Snapshot } from "../types";
 
+export function hasCurrentPlanningRun(snapshot: Snapshot, repository: string) {
+  return snapshot.config?.repository === repository && !!snapshot.runId &&
+    ["awaiting_approval", "running", "completed", "publishing", "merging"].includes(snapshot.phase);
+}
+
+export function planningRecoveryDelay(planningId: string | undefined, idleAttempts: number) {
+  return planningId ? 1500 : idleAttempts === 0 ? 15000 : 30000;
+}
+
 type Scope = { repository?: string; generation: number };
 type Service = {
   listPlannings(repository?: string): Promise<PlanningSummary[]>;

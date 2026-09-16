@@ -48,7 +48,7 @@ npm start
 2. 选择模型（可用 `provider/model` 指定 provider）。生产后端固定使用 `engine/entrypoint.mjs`；旧配置中的可执行文件和参数不再控制生产启动。
 3. 先执行 `npm run pi:setup` 安装锁定依赖及恢复固定模型目录。不能用全局安装的 Pi 替代 submodule。完整离线构建通过；详见基线文档。
 4. Partitioner 是无工具的极简单轮文本分类器，直接输出 `graph` 或 `serial`：仅当存在多个可独立推进的实质工作流时选择 Graph，否则选择 Serial；不解决或规划任务。后端采用鲁棒关键词提取判定分支，即使模型输出多余解释或未严格遵守单词要求，只要检测到对应词即转入相应分支，成功响应但文本含糊时兜底为 Serial；启动、认证或请求失败则显式报错，不创建或自动审批执行图。Serial 跳过 Planner，后端创建名为 `task` 的单节点图并自动审批、开始执行，直接修改用户目录。各角色（Partitioner / Planner / Node Agent / Merger）在统一的 `PiModelConfig` API 层解析模型与思考预算（支持 `PARTITIONER_MODEL`、`PLANNER_MODEL`、`NODE_AGENT_MODEL`、`MERGER_MODEL` 覆盖）。
-5. Graph Planner 使用 `node / edge` 生成完整可执行图，不读取仓库内容；实现调查由后续 worker 完成。每次 mutation 调用 Rust 编译器，校验失败不会写入候选图；Planner 退出后展示图，用户批准才启动节点。也可以导入手写 Graph IR。
+5. Graph Planner 使用 `node / edge / read / bash` 生成完整可执行图；只在影响边界、依赖或权威约束时检查仓库。每次 mutation 调用 Rust 编译器，校验失败不会写入候选图；`node` 支持通过 `nodes / edges` 数组一次原子提交整批修改，先应用节点再应用边，仅编译最终状态一次。Planner 退出后展示图，用户批准才启动节点。也可以导入手写 Graph IR。
 
 ### 角色环境隔离与 Node Agent 技能/插件支持
 
@@ -69,9 +69,9 @@ npm start
 
 实际提示词以 [partitioner.md](backend/resources/prompts/partitioner.md) 和 [planner.md](backend/resources/prompts/planner.md) 为准。Planner 将任务划分为独立工作成果，不提前替节点探索实现步骤；节点数不是优化目标。节点 task 必须自包含目标、用户约束、职责及验收方式。
 
-Planner 不读取仓库或公开文档，也不猜测文件内容、调用关系、运行时版本或路径名所暗示的约定；这些调查由拥有对应成果的 worker 在执行阶段完成。普通边传递上游文件系统状态，不传递对话。只有用户明确要求独立验收、纠正并重复时才添加 feedback 边。路径必须相对于当前节点 worktree，禁止嵌入 Planner 所在原仓库的绝对路径。通过编译、覆盖完整后停止规划。
+Planner 按需检查影响节点边界、依赖、并行性、可合并性或权威契约的仓库事实；实现调查留给 worker。普通边传递上游文件系统状态，不传递对话。Feedback 用于有意义且有界的审查修正，不要求用户先明确提出循环。Agent 统一看到 `/workspace`；宿主根据当前执行请求固定各角色的实际工作目录，将工具路径参数和命令中的该路径映射到各自工作区，并将模型上下文和工具结果中的实际工作区路径映射回来。映射后的访问仍由现有 sandbox 检查，不依赖全局软链接或容器。相对路径仍可使用。通过编译、覆盖完整后停止规划。
 
-**Planner 工具边界：**Planner 只暴露 `node` 和 `edge`，没有 shell、read、search、网络或写仓库能力。它只能修改宿主指定的候选 Graph IR；每次 mutation 都经编译器原子校验，拒绝时保留原图。Graph 执行节点的 OS sandbox 是下述另一层边界。
+**Planner 工具边界：**`node / edge` 经编译器原子校验修改候选图；`read` 限于仓库内普通文件；`bash` 是受限只读检查 API，禁止任意 shell、脚本、写入、符号链接、Git 元数据和仓库外读取。公开 HTTP(S) 仅允许受限 GET/HEAD。详见 [规划检查权限](backend/resources/planning-inspection.md)。Graph 执行节点的 OS sandbox 是下述另一层边界。
 
 ## 已实现
 

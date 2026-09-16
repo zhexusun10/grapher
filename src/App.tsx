@@ -11,7 +11,7 @@ import {
 } from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
-import { createPlanningRecovery } from "./services/planningRecovery";
+import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
 
 import { TaskNode, type WorkNode } from "./components/graph/TaskNode";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
@@ -822,15 +822,19 @@ export default function App() {
     load().catch((err) => setError(String(err)));
   }, [load]);
 
+  const hasCurrentPlan = hasCurrentPlanningRun(state, config.repository);
+
   // A detached browser can discover the persisted planning identity without
   // submitting the goal again. Every response is scoped to this repository.
   useEffect(() => {
     setRecoveredPlanning(null);
-    if (busy || !config.repository) return;
+    if (busy || isPlanning || hasCurrentPlan || !config.repository) return;
     const repository = config.repository;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     let planningId: string | undefined;
+    let finished = false;
+    let idleAttempts = 0;
     const poll = async () => {
       const scope = planningRecovery.capture(repository);
       try {
@@ -857,18 +861,22 @@ export default function App() {
               void planningRecovery.finish(scope, summary, planningId);
             }
             setRecoveredPlanning(null);
+            finished = true;
             planningId = undefined;
           }
         }
       } catch (error) {
         if (!abort.signal.aborted) console.warn("Planning recovery:", error);
       } finally {
-        if (!abort.signal.aborted) timer = setTimeout(poll, 1500);
+        if (!abort.signal.aborted && !finished) {
+          timer = setTimeout(poll, planningRecoveryDelay(planningId, idleAttempts));
+          if (!planningId) idleAttempts++;
+        }
       }
     };
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, [busy, config.repository, planningRecovery]);
+  }, [busy, isPlanning, hasCurrentPlan, config.repository, planningRecovery]);
 
   // Point 1: Adaptive Polling Interval with Fast Equality Diffing
   useEffect(() => {
@@ -878,8 +886,8 @@ export default function App() {
     const isTaskActive = activeBackendRunId &&
       ["running", "awaiting_approval", "publishing", "merging"].includes(activeBackendPhase ?? "");
 
-    // 1000ms when actively executing; 3500ms when idle or completed
-    const pollInterval = isTaskActive ? 1000 : 3500;
+    // Keep execution responsive without fetching full metadata every second.
+    const pollInterval = isTaskActive ? 2500 : 3500;
 
     let cancelled = false;
     const abort = new AbortController();

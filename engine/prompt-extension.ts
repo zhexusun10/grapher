@@ -4,17 +4,19 @@ import {
   createLocalBashOperations,
   type BashOperations,
 } from "../pi/packages/coding-agent/src/core/tools/bash.ts";
-import { grapherSystemPrompt } from "./system-prompt.mjs";
+import { registerWorkspacePaths } from "../backend/resources/workspace-paths.mjs";
 
 export default function (pi: ExtensionAPI) {
   // Planner owns its restricted inspection tool; Partitioner has no tools.
   // The launcher loads this adapter for every role, so execution-only tool
   // overrides and hooks must not register on either planning role.
-  if (["planner", "partition"].includes(process.env.GRAPHER_MODE || "")) return;
+  if (process.env.GRAPHER_MODE === "planner") return;
+  const paths = registerWorkspacePaths(pi, process.env.GRAPHER_WORKSPACE_ROOT || process.cwd());
+  if (process.env.GRAPHER_MODE === "partition") return;
 
   const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();
   const localOps = createLocalBashOperations();
-  const baseBashTool = createBashToolDefinition(process.cwd());
+  const baseBashTool = createBashToolDefinition(paths.root);
 
   pi.registerTool({
     ...baseBashTool,
@@ -35,14 +37,15 @@ export default function (pi: ExtensionAPI) {
         },
       };
 
-      const scopedBashTool = createBashToolDefinition(ctx?.cwd || process.cwd(), {
+      const scopedBashTool = createBashToolDefinition(paths.root, {
         operations: scopedOps,
       });
 
       let result: any;
       let execError: any;
       try {
-        result = await scopedBashTool.execute(toolCallId, params, signal, onUpdate, ctx);
+        const mappedUpdate = onUpdate ? (update: any) => onUpdate(paths.view(update)) : undefined;
+        result = await scopedBashTool.execute(toolCallId, params, signal, mappedUpdate, ctx ? { ...ctx, cwd: paths.root } : ctx);
       } catch (err) {
         execError = err;
       }
@@ -89,7 +92,7 @@ export default function (pi: ExtensionAPI) {
       details.command = recorded?.command ?? event.input?.command;
       details.truncated = recorded?.truncated ?? !!(details.truncation as any)?.truncated;
       return {
-        details,
+        details: paths.view(details),
         isError: event.isError,
       };
     }

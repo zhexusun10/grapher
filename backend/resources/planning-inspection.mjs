@@ -10,7 +10,7 @@ import { isIP } from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
 
-export const INSPECTION_POLICY = 'repository-inspection-v1';
+export const INSPECTION_POLICY = 'repository-inspection-v3';
 const MAX_OUTPUT = 64 * 1024;
 const MAX_FILE = 256 * 1024;
 const MAX_SCAN = 4 * 1024 * 1024;
@@ -18,6 +18,8 @@ const fail = (message) => { throw new Error(`Read-only inspection: ${message}`);
 
 export function repositoryPath(root, input = '.', fileOnly = false) {
   root = realpathSync(root);
+  // Resolve the public namespace before the existing traversal/symlink checks.
+  if (input === '/workspace' || input.startsWith('/workspace/')) input = root + input.slice('/workspace'.length);
   const path = resolve(root, input);
   const child = relative(root, path);
   if (child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) fail('path is outside this repository');
@@ -82,6 +84,22 @@ const number = (value, max) => {
 function glob(pattern, insensitive) {
   if (pattern.length > 256) fail('glob too long');
   return new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, insensitive ? 'i' : '');
+}
+function expandPathArguments(root, inputs) {
+  return inputs.flatMap(input => {
+    if (!/[*?]/.test(input)) return [input];
+    const workspaceAbsolute = input === '/workspace' || input.startsWith('/workspace/');
+    const pattern = workspaceAbsolute ? input.slice('/workspace/'.length) : input;
+    if (pattern.length > 256) fail('glob too long');
+    if (isAbsolute(input) && !workspaceAbsolute) repositoryPath(root, input);
+    const wildcard = pattern.search(/[*?]/);
+    const slash = pattern.slice(0, wildcard).lastIndexOf('/');
+    const base = slash < 0 ? '.' : pattern.slice(0, slash) || '.';
+    const baseInput = workspaceAbsolute ? `/workspace/${base === '.' ? '' : base}` : base;
+    const regex = new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]')}$`);
+    const matches = walk(root, baseInput).map(entry => entry.path).filter(path => regex.test(display(root, path)));
+    return matches.length ? matches : [input];
+  });
 }
 
 // Only globally routable addresses. Deny local, private, link-local, multicast,
@@ -165,26 +183,120 @@ export async function fetchPublic({ url, method, follow, failHttp }, signal, rem
   return `HTTP ${response.status}\n${method === 'HEAD' ? JSON.stringify(response.headers, null, 2) : response.body}`;
 }
 
+// Parse shell-style sequencing without handing commands to an unrestricted shell.
+// Quotes retain their meaning for splitCommand; only /dev/null redirection is supported.
+export function inspectionScript(command) {
+  if (typeof command !== 'string' || command.length > 8192 || /[\0`$]/.test(command)) fail('no expansion or command substitution');
+  const steps = [];
+  let text = '', quote = null, condition = ';', stderrNull = false, stdoutNull = false;
+  const push = () => {
+    if (!text.trim()) fail('expected a command between operators');
+    steps.push({ command: text.trim(), condition, stderrNull, stdoutNull });
+    text = ''; stderrNull = false; stdoutNull = false;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote) {
+      text += c;
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'") { quote = c; text += c; continue; }
+    const redirect = command.slice(i).match(/^(2>|1>|>)\s*\/dev\/null(?=\s|;|&&|\|\||$)/);
+    if (redirect && (!text || /\s$/.test(text) || c === '>')) {
+      if (redirect[1] === '2>') stderrNull = true; else stdoutNull = true;
+      text += ' '; i += redirect[0].length - 1; continue;
+    }
+    const op = command.slice(i, i + 2);
+    if (op === '&&' || op === '||' || c === ';' || c === '\n') {
+      // Blank lines and a trailing semicolon are ordinary shell formatting.
+      if ((c === '\n' || c === ';') && !text.trim() && condition === ';') continue;
+      push(); condition = op === '&&' || op === '||' ? op : ';';
+      if (condition !== ';') i++;
+      continue;
+    }
+    if (c === '|') { push(); condition = '|'; continue; }
+    if (/[&<>\\()]/.test(c)) fail('unsupported background process, redirection or escape; redirects may target /dev/null only');
+    text += c;
+  }
+  if (quote) fail('unclosed quote');
+  if (text.trim()) push();
+  else if (condition !== ';') fail('expected a command after conditional operator');
+  if (!steps.length) fail('empty command');
+  return steps;
+}
+
 export async function inspectCommand(root, command, signal) {
+  const steps = inspectionScript(command);
+  let successful = true, lastError, piped = '', pipeReady = false, skipPipeline = false;
+  const output = [];
+  for (let index = 0; index < steps.length; index++) {
+    const step = steps[index];
+    const feedsPipe = steps[index + 1]?.condition === '|';
+    signal?.throwIfAborted();
+    if (step.condition === '|') {
+      if (skipPipeline) {
+        if (!feedsPipe) skipPipeline = false;
+        continue;
+      }
+      if (!pipeReady) { successful = false; continue; }
+    } else if ((step.condition === '&&' && !successful) || (step.condition === '||' && successful)) {
+      pipeReady = false;
+      skipPipeline = feedsPipe;
+      continue;
+    } else {
+      skipPipeline = false;
+    }
+    try {
+      const text = await inspectSingleCommand(root, step.command, signal, step.condition === '|' ? piped : undefined);
+      if (feedsPipe) {
+        piped = step.stdoutNull ? '' : text;
+        pipeReady = true;
+      } else {
+        if (!step.stdoutNull) output.push(text);
+        pipeReady = false;
+      }
+      successful = true; lastError = undefined;
+    } catch (error) {
+      signal?.throwIfAborted();
+      // Filesystem failures behave like shell exit statuses. Policy violations
+      // remain errors and cannot be hidden behind || or stderr redirection.
+      if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
+      successful = false; lastError = error;
+      piped = ''; pipeReady = feedsPipe;
+      if (!step.stderrNull) output.push(String(error));
+    }
+  }
+  if (!successful) throw new Error(output.join('\n') || `Inspection command failed (${lastError?.code ?? 'exit 1'})`);
+  const text = output.filter(Boolean).join('\n');
+  return Buffer.byteLength(text) > MAX_OUTPUT ? Buffer.from(text).subarray(0, MAX_OUTPUT).toString('utf8').replace(/\uFFFD$/, '') + '\n[truncated; narrow the query]' : text;
+}
+
+async function inspectSingleCommand(root, command, signal, stdin) {
   signal?.throwIfAborted();
   root = realpathSync(root);
   const [program, ...args] = splitCommand(command);
+  if (stdin !== undefined && !['head', 'tail'].includes(program)) fail('pipeline consumers support only head or tail');
   let text;
-  if (program === 'curl') {
+  if (program === 'node' && args.length === 1 && ['--version', '-v'].includes(args[0])) {
+    text = process.version;
+  } else if (program === 'curl') {
     const timeout = AbortSignal.timeout(15000);
     text = await fetchPublic(parseCurl(args), signal ? AbortSignal.any([signal, timeout]) : timeout);
   } else if (program === 'pwd') {
     if (args.length) fail('pwd takes no arguments');
-    text = '.'; // Do not leak the host checkout path into generated tasks.
+    text = '/workspace';
+  } else if (program === 'echo') {
+    text = args.join(' ');
   } else if (program === 'ls') {
-    const paths = [];
-    for (const arg of args) { if (/^-[lah]+$/.test(arg)) continue; if (arg.startsWith('-')) fail('unsupported ls option'); paths.push(arg); }
-    if (paths.length > 1) fail('ls accepts one directory');
-    const path = repositoryPath(root, paths[0] ?? '.');
-    text = lstatSync(path).isDirectory() ? readdirSync(path).filter(n => n !== '.git').sort().map(n => {
+    const inputs = [];
+    for (const arg of args) { if (/^-[lah]+$/.test(arg)) continue; if (arg.startsWith('-')) fail('unsupported ls option'); inputs.push(arg); }
+    const paths = expandPathArguments(root, inputs.length ? inputs : ['.']).map(path => repositoryPath(root, path));
+    const listing = path => lstatSync(path).isDirectory() ? readdirSync(path).filter(n => n !== '.git').sort().map(n => {
       const entry = lstatSync(resolve(path, n));
       return n + (entry.isSymbolicLink() ? ' [symlink; not readable]' : entry.isDirectory() ? '/' : '');
     }).join('\n') : display(root, path);
+    text = paths.length === 1 ? listing(paths[0]) : paths.map(path => `${display(root, path)}:\n${listing(path)}`).join('\n\n');
   } else if (program === 'find' || (program === 'rg' && args[0] === '--files')) {
     const tokens = [...args];
     if (program === 'rg') tokens.shift();
@@ -216,13 +328,21 @@ export async function inspectCommand(root, command, signal) {
       if (tokens[0] === '-n') { tokens.shift(); count = number(tokens.shift(), 2000); }
       else if (/^-(?:n)?\d+$/.test(tokens[0] ?? '')) { count = number(tokens.shift().replace(/^-(?:n)?/, ''), 2000); }
     }
-    if (!tokens.length || tokens.some(p => p.startsWith('-'))) fail(`${program} requires file paths; head/tail support -n N, -nN or -N (0..2000)`);
-    text = tokens.map(path => {
-      const contents = readText(root, path);
-      if (program === 'cat') return contents;
+    if (tokens.some(p => p.startsWith('-'))) fail(`${program} file operands cannot start with '-'`);
+    const paths = expandPathArguments(root, tokens);
+    if (!paths.length && stdin === undefined) fail(`${program} requires file paths; head/tail support -n N, -nN or -N (0..2000)`);
+    let total = 0;
+    const contents = stdin !== undefined ? stdin : paths.map(path => {
+      const value = readText(root, path);
+      total += Buffer.byteLength(value);
+      if (total > MAX_SCAN) fail('file reads exceed 4 MiB; choose fewer files');
+      return value;
+    }).join('');
+    if (program === 'cat') text = contents;
+    else {
       const lines = contents.replace(/\n$/, '').split('\n');
-      return (program === 'head' ? lines.slice(0, count) : count ? lines.slice(-count) : []).join('\n');
-    }).join('\n');
+      text = (program === 'head' ? lines.slice(0, count) : count ? lines.slice(-count) : []).join('\n');
+    }
   } else if (program === 'grep' || program === 'rg') {
     const tokens = [...args]; let insensitive = false, literal = false, namesOnly = false;
     const includes = [], excludes = [];
@@ -281,7 +401,7 @@ export async function inspectCommand(root, command, signal) {
       }
     }
     text = output.join('\n');
-  } else fail('allowed commands: pwd, ls, find, rg, grep, cat, head, tail, curl (GET/HEAD). No shell, scripts, tests or writes');
+  } else fail('allowed commands: pwd, echo, ls, find, rg, grep, cat, head, tail, node --version/-v, curl (GET/HEAD). No scripts, tests or writes');
   signal?.throwIfAborted();
   return Buffer.byteLength(text) > MAX_OUTPUT ? Buffer.from(text).subarray(0, MAX_OUTPUT).toString('utf8').replace(/\uFFFD$/, '') + '\n[truncated; narrow the query]' : text;
 }

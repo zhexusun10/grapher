@@ -7,8 +7,9 @@ The architecture contract is [agent.md](../agent.md). The primary benchmark eval
 `benchmark/run.mjs` creates isolated repository fixtures and calls the planning-only Rust host in `benchmark/planning-host.rs`. The host reuses:
 
 - `backend/resources/prompts/partitioner.md` and `planner.md`, including configured product overrides.
-- `backend/resources/planner.ts`: real node/edge graph mutation tools with compiler-backed atomic rollback and workspace-portability checks. Planner has no repository inspection or execution tool.
+- `backend/resources/planner.ts`: real node/edge graph mutation tools with compiler-backed atomic rollback and workspace-portability checks. `node` accepts either a single edit or `nodes`/`edges` arrays; batches apply all node edits then all edge edits and compile the resulting graph once. Failed batches retain the saved graph and return diagnostics plus saved topology. Planner also has repository-scoped read and restricted read-only bash inspection; arbitrary execution is unavailable.
 - `backend/src/engine.rs::run_pi`: fresh Pi processes, actual configured model, JSON output and provider retry behavior.
+- `backend/resources/workspace-paths.mjs`: per-agent `/workspace` namespace for model context, tool path arguments, literal shell paths and results. This is tool-boundary mapping, not an OS filesystem mount.
 - The shipping `grapher --compile` CLI for each mutation and Rust final graph validation.
 
 The host is under Cargo feature `benchmark`. It never initializes Runtime, approves a graph, calls drive, prepares an execution worktree or performs a graph node. The goal/repository are the candidate inputs; expected route/rubric remain hidden outside the model-visible repository.

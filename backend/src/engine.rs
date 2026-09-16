@@ -372,6 +372,15 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     for (key, value) in request.environment {
         command.env(key, value);
     }
+    // The host owns the instance identity. Never inherit another agent's role
+    // or directory mapping from the parent process or role-specific overrides.
+    command.env("GRAPHER_MODE", match request.role {
+        PiRole::Partitioner => "partition",
+        PiRole::Planner => "planner",
+        PiRole::NodeAgent => "node",
+        PiRole::Merger => "merger",
+    });
+    command.env("GRAPHER_WORKSPACE_ROOT", request.cwd.canonicalize().map_err(|error| error.to_string())?);
     command.process_group(0);
     let mut child = command
         .spawn()

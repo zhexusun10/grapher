@@ -78,7 +78,13 @@ test('a compiler-valid graph cannot bind fresh workers to the original repositor
   assert.ok(graded.checks.some(c => c.id === 'workspace-portability' && !c.pass));
 });
 
-test('rejects unrequested feedback and nodes that own no requested work unit', () => {
+test('accepts bounded feedback between existing outcome owners without an explicit user loop request', () => {
+  const g = graph();
+  g.edges.push({ from: 'acceptance', to: 'api_work', feedback: true });
+  assert.equal(score(g).status, 'PASS');
+});
+
+test('rejects feedback from nodes that own no requested work unit', () => {
   const g = graph();
   g.nodes.push({ name: 'extra_review', task: 'Review all work again without producing a requested deliverable.' });
   g.edges.push(
@@ -89,7 +95,7 @@ test('rejects unrequested feedback and nodes that own no requested work unit', (
   assert.equal(score(g, r).status, 'FAIL');
   const checks = score(g, r).checks;
   assert.ok(checks.some(c => c.id === 'economy:owned-nodes' && !c.pass));
-  assert.ok(checks.some(c => c.id === 'feedback:no-unrequested-routes' && !c.pass));
+  assert.ok(checks.some(c => c.id === 'feedback:repair-owners' && !c.pass));
 });
 
 test('rejects case-specific repository references that are not authoritative', () => {

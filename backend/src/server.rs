@@ -797,7 +797,7 @@ fn plan_goal_internal(
                         task: &task,
                         session_dir: &directory.join("planner-session"),
                         extension: Some(&service.extension),
-                        tools: Some("node,edge"),
+                        tools: Some("node,edge,read,bash"),
                         session_id: None,
                         extra_args: planner_extra_args,
                         environment: vec![
@@ -1447,6 +1447,10 @@ pub fn run() -> Result<(), String> {
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let extension = root.join("grapher-planner.ts");
     fs::write(&extension, include_str!("../resources/planner.ts"))
+        .map_err(|error| error.to_string())?;
+    fs::write(root.join("workspace-paths.mjs"), include_str!("../resources/workspace-paths.mjs"))
+        .map_err(|error| error.to_string())?;
+    fs::write(root.join("planning-inspection.mjs"), include_str!("../resources/planning-inspection.mjs"))
         .map_err(|error| error.to_string())?;
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root)?),

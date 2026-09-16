@@ -91,8 +91,8 @@ export function scoreGraph(testCase, graph, compiled, review, repositoryPath) {
   }
   const owners = new Set(Object.values(review.unitOwners).flat());
   check('economy:owned-nodes', graph.nodes.every(node => owners.has(node.name)), 'Every node must produce a requested work unit; an extra reader, reviewer or report node is not free.');
-  const allowedFeedback = graph.edges.filter(edge => edge.feedback).every(edge => testCase.feedback.some(([from, to]) => review.unitOwners[from].includes(edge.from) && review.unitOwners[to].includes(edge.to)));
-  check('feedback:no-unrequested-routes', allowedFeedback, 'Feedback routes are allowed only for revision loops explicitly required by this goal and must connect the corresponding owners.');
+  const validFeedback = graph.edges.filter(edge => edge.feedback).every(edge => owners.has(edge.from) && owners.has(edge.to) && reaches(edge.to, edge.from));
+  check('feedback:repair-owners', validFeedback, 'Revision routes must connect owned outcomes and return to a dependency ancestor; whether the review is useful is assessed semantically.');
   for (const reference of testCase.forbiddenTaskReferences ?? []) {
     check(`fidelity:irrelevant-reference:${reference}`, graph.nodes.every(node => !node.task.includes(reference)), `${reference} belongs to another subsystem and is not authoritative for this goal.`);
   }

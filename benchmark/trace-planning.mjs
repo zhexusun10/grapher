@@ -11,7 +11,17 @@ const selected = (process.env.TRACE_CASES || 'P001,P005,P006').split(',');
 const plannerOnly = process.env.TRACE_PLANNER_ONLY === '1';
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); };
 const env = { ...process.env, PARTITIONER_MODEL: process.env.PARTITIONER_MODEL || 'dashscope/qwen3.8-flash', PLANNER_MODEL: process.env.PLANNER_MODEL || 'dashscope/qwen3.8-flash', PARTITIONER_THINKING: process.env.PARTITIONER_THINKING || 'medium', PLANNER_THINKING: process.env.PLANNER_THINKING || 'medium' };
-const sources = ['backend/resources/prompts/partitioner.md', 'backend/resources/prompts/planner.md', 'backend/resources/planner.ts', 'backend/src/compiler.rs', 'backend/src/engine.rs', 'benchmark/planning-host.rs'];
+const sources = [
+  'backend/resources/prompts/partitioner.md',
+  'backend/resources/prompts/planner.md',
+  'backend/resources/planner.ts',
+  'backend/resources/planning-inspection.mjs',
+  'backend/resources/workspace-paths.mjs',
+  'backend/src/compiler.rs',
+  'backend/src/engine.rs',
+  'engine/prompt-extension.ts',
+  'benchmark/planning-host.rs',
+];
 write(path.join(root, 'metadata.json'), { startedAt: new Date().toISOString(), selected, plannerOnly, partitionerModel: env.PARTITIONER_MODEL, plannerModel: env.PLANNER_MODEL, partitionerThinking: env.PARTITIONER_THINKING, plannerThinking: env.PLANNER_THINKING, nodeExecutionCount: 0, sources: Object.fromEntries(sources.map(file => { const data = fs.readFileSync(path.join(repo, file)); const target = path.join(root, 'sources', file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, data); return [file, createHash('sha256').update(data).digest('hex')]; })) });
 const results = [];
 for (const id of selected) {

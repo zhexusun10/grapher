@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const PLANNER_TOOL_POLICY = 'planner-graph-tools-v1';
+import { createWorkspacePaths } from '../backend/resources/workspace-paths.mjs';
+import { INSPECTION_POLICY, repositoryPath } from '../backend/resources/planning-inspection.mjs';
 
-// Verify the candidate used only graph mutation tools. Historical runs with
-// repository inspection remain replayable for diagnosis but are not current evidence.
-export function checkPlanningBoundary(directory) {
+export const PLANNER_TOOL_POLICY = 'planner-workspace-tools-v4';
+
+// Verify paired tool evidence and the restricted inspection boundary.
+export function checkPlanningBoundary(directory, repository) {
   const issues = [];
   let stage, events;
   try {
@@ -14,8 +16,8 @@ export function checkPlanningBoundary(directory) {
   } catch (error) {
     return { status: 'FAIL', policy: PLANNER_TOOL_POLICY, issues: [`Missing or invalid planner tool evidence: ${error}`] };
   }
-  if (stage.toolPolicy !== PLANNER_TOOL_POLICY || stage.tools !== 'node,edge') {
-    issues.push('Candidate did not attest the current graph-only Planner tool policy; historical inspection evidence is unverified');
+  if (stage.toolPolicy !== PLANNER_TOOL_POLICY || stage.tools !== 'node,edge,read,bash') {
+    issues.push('Candidate did not attest the current restricted Planner tool policy; historical inspection evidence is unverified');
   }
   const pending = new Map();
   let completed = 0;
@@ -33,7 +35,18 @@ export function checkPlanningBoundary(directory) {
     }
     completed++;
     const failed = event.isError || event.result?.isError;
-    if (!['node', 'edge'].includes(event.toolName) && !failed) {
+    if (event.toolName === 'bash' && !failed && event.result?.details?.inspectionPolicy !== INSPECTION_POLICY) {
+      issues.push('Bash executed without restricted read-only policy evidence');
+    }
+    if (event.toolName === 'read' && !failed) {
+      try {
+        if (!repository || typeof start.args?.path !== 'string') throw new Error('Missing repository or read path');
+        repositoryPath(repository, createWorkspacePaths(repository).physical(start.args.path), true);
+      } catch {
+        issues.push('Successful read escaped or could not verify the repository input boundary');
+      }
+    }
+    if (!['node', 'edge', 'read', 'bash'].includes(event.toolName) && !failed) {
       issues.push(`Unexpected successful Planner tool: ${event.toolName}`);
     }
   }

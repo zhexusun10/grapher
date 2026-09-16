@@ -266,7 +266,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             task: "task",
             session_dir: &temp.path().join("session-planner"),
             extension: None,
-            tools: Some("node,edge"),
+            tools: Some("node,edge,read,bash"),
             session_id: Some("planner-session"),
             extra_args: Vec::new(),
             environment: Vec::new(),
@@ -277,7 +277,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(planner_out.contains("--no-skills"), "Planner must have --no-skills");
     assert!(planner_out.contains("--no-extensions"), "Planner must have --no-extensions");
     assert!(planner_out.contains("--no-approve"), "Planner must have --no-approve");
-    assert!(planner_out.contains("--tools node,edge"), "Planner must restrict tools");
+    assert!(planner_out.contains("--tools node,edge,read,bash"), "Planner must restrict tools");
 
     // 3. Partitioner: MUST have --no-skills, --no-extensions, --no-approve, and --no-tools
     let mut partitioner_out = String::new();
@@ -301,6 +301,35 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(partitioner_out.contains("--no-extensions"), "Partitioner must have --no-extensions");
     assert!(partitioner_out.contains("--no-approve"), "Partitioner must have --no-approve");
     assert!(partitioner_out.contains("--no-tools"), "Partitioner must have --no-tools");
+}
+
+#[test]
+fn instance_role_and_workspace_are_owned_by_the_host() {
+    let temp = TempDir::new().unwrap();
+    let script = temp.path().join("instance.sh");
+    fs::write(&script, r#"cat >/dev/null
+printf 'ROLE=%s\nROOT=%s\n' "$GRAPHER_MODE" "$GRAPHER_WORKSPACE_ROOT"
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
+"#).unwrap();
+    let config = Config {
+        repository: String::new(), engine: "pi".into(), pi_command: "/bin/sh".into(),
+        pi_args: vec![script.to_string_lossy().into()], model: "test-model".into(),
+        max_parallel: 2, max_feedback: 3,
+    };
+    for (role, name) in [(PiRole::Partitioner, "partition"), (PiRole::Planner, "planner"), (PiRole::NodeAgent, "node"), (PiRole::Merger, "merger")] {
+        let cwd = temp.path().join(name);
+        fs::create_dir(&cwd).unwrap();
+        let mut output = String::new();
+        run_pi(PiRequest {
+            role, config: &config, cwd: &cwd, task: "task", session_dir: &cwd.join("session"),
+            extension: None, tools: None, session_id: None, extra_args: vec![],
+            environment: vec![("GRAPHER_MODE", "wrong-role".into()), ("GRAPHER_WORKSPACE_ROOT", "/wrong/root".into())],
+            system_prompt: None,
+        }, |text| output.push_str(&text)).unwrap();
+        assert!(output.contains(&format!("ROLE={name}\n")), "{output}");
+        assert!(output.contains(&format!("ROOT={}\n", cwd.canonicalize().unwrap().display())), "{output}");
+        assert!(!output.contains("wrong-role") && !output.contains("/wrong/root"));
+    }
 }
 
 #[test]

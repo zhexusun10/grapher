@@ -20,7 +20,11 @@ function fixture(t) {
 }
 test('read-only command surface discovers, searches and reads without following symlinks', async t => {
   const { repo } = fixture(t);
-  assert.equal(await inspectCommand(repo, 'pwd'), '.');
+  assert.equal(await inspectCommand(repo, 'cat /workspace/src/a.ts'), 'alpha\nbeta\nALPHA\n');
+  assert.equal(await inspectCommand(repo, 'ls /workspace/src'), 'a.ts\nleak.txt [symlink; not readable]');
+  await assert.rejects(inspectCommand(repo, 'cat /workspace/../rubric.json'), /outside/);
+  await assert.rejects(inspectCommand(repo, 'cat /workspace/.git/config'), /Git metadata/);
+  assert.equal(await inspectCommand(repo, 'pwd'), '/workspace');
   assert.match(await inspectCommand(repo, 'ls -la src'), /a.ts/);
   assert.equal(await inspectCommand(repo, 'find . -name "*.ts" -type f'), 'src/a.ts');
   assert.equal(await inspectCommand(repo, 'rg --files src'), 'src/a.ts');
@@ -38,6 +42,26 @@ test('read-only command surface discovers, searches and reads without following 
   assert.equal(await inspectCommand(repo, 'grep HIDDEN_RUBRIC .'), '');
   assert.deepEqual(splitCommand('grep "alpha|beta" src'), ['grep', 'alpha|beta', 'src']);
 });
+test('supports ordinary read-only shell sequences, null redirects and version queries', async t => {
+  const { repo } = fixture(t);
+  const actual = await inspectCommand(repo, 'ls -lah . && cat .gitignore 2>/dev/null; node --version');
+  assert.match(actual, /src\//);
+  assert.ok(actual.endsWith(process.version));
+  assert.doesNotMatch(actual, /ENOENT/);
+  assert.equal(await inspectCommand(repo, 'cat missing 2>/dev/null && cat src/a.ts; node -v'), process.version);
+  assert.equal(await inspectCommand(repo, 'cat missing 2>/dev/null || head -1 src/a.ts'), 'alpha');
+  assert.equal(await inspectCommand(repo, 'head -1 src/a.ts >/dev/null && node -v'), process.version);
+  assert.equal(await inspectCommand(repo, 'node -v\nnode --version;'), `${process.version}\n${process.version}`);
+  assert.equal(await inspectCommand(repo, 'cat /workspace/src/* | head -2'), 'alpha\nbeta');
+  assert.equal(await inspectCommand(repo, 'head -1 src/a.ts || cat missing | tail -1'), 'alpha');
+  assert.equal(await inspectCommand(repo, 'cat missing 2>/dev/null || cat src/a.ts | tail -1'), 'ALPHA');
+  assert.equal(await inspectCommand(repo, 'find /workspace -maxdepth 2 -type f && echo --- && ls /workspace/src /workspace'),
+    'space name.txt\nsrc/a.ts\n---\nsrc:\na.ts\nleak.txt [symlink; not readable]\n\n.:\noutside [symlink; not readable]\nspace name.txt\nsrc/');
+  await assert.rejects(inspectCommand(repo, 'cat src/a.ts | node -v'), /pipeline consumers/);
+  await assert.rejects(inspectCommand(repo, 'cat ../rubric.json 2>/dev/null || node -v'), /outside/);
+  await assert.rejects(inspectCommand(repo, 'node -e "1" || node -v'), /allowed commands/);
+});
+
 test('search filters, deduplicates, limits output and supports cancellation', async t => {
   const { repo } = fixture(t);
   writeFileSync(join(repo, 'src', 'a.test.ts'), 'alpha\n');
@@ -65,8 +89,8 @@ test('rejects shell execution, unsafe flags, writes, repository escape and metad
   const { repo, root } = fixture(t);
   const commands = [
     'touch changed', 'rm -rf src', 'node -e "1"', 'python3 -c "1"', 'npm test', 'bash -c ls',
-    'ls && cat ../rubric.json', 'ls; cat ../rubric.json', 'cat src/a.ts > changed', 'cat src/a.ts | head',
-    'cat $(pwd)', 'cat `pwd`', 'cat $HOME/.env', 'ls\ncat ../rubric.json',
+    'ls && cat ../rubric.json', 'ls; cat ../rubric.json', 'cat src/a.ts > changed',
+    'cat src/a.ts | bash', 'cat $(pwd)', 'cat `pwd`', 'cat $HOME/.env', 'ls\ncat ../rubric.json',
     'find . -exec touch changed', 'find . -delete', 'find -L .', 'grep -f ../rubric.json src',
     'rg --pre node alpha .', 'cat ../rubric.json', `cat ${root}/rubric.json`,
     'cat outside/rubric.json', 'cat src/leak.txt', 'find ../', 'ls .git', 'cat /etc/passwd',

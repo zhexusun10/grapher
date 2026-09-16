@@ -43,7 +43,20 @@ try {
   const { ExecutionTiming } = await import(pathToFileURL(path.join(root, "timing.js")));
   const { ToolCallCard } = await import(pathToFileURL(path.join(root, "card.js")));
   const { PlanningSummaryCard, calculateApprovalWaitingTime, calculatePausedTime, parseTimestamp } = await import(pathToFileURL(path.join(root, "planningCard.js")));
-  const { createPlanningRecovery } = await import(pathToFileURL(path.join(root, "recovery.js")));
+  const { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } = await import(pathToFileURL(path.join(root, "recovery.js")));
+  test("Planning discovery stops for current planned runs and backs off only while idle", () => {
+    for (const phase of ["awaiting_approval", "running", "completed", "publishing", "merging"]) {
+      const snapshot = { config: { repository: "/a" }, runId: "run", phase };
+      assert.equal(hasCurrentPlanningRun(snapshot, "/a"), true);
+      assert.equal(hasCurrentPlanningRun(snapshot, "/b"), false);
+      assert.equal(hasCurrentPlanningRun({ ...snapshot, runId: "" }, "/a"), false);
+    }
+    assert.equal(hasCurrentPlanningRun({ phase: "idle" }, "/a"), false);
+    assert.equal(planningRecoveryDelay(undefined, 0), 15000);
+    assert.equal(planningRecoveryDelay(undefined, 1), 30000);
+    assert.equal(planningRecoveryDelay(undefined, 100), 30000);
+    assert.equal(planningRecoveryDelay("known-running", 100), 1500);
+  });
   const { rowOffsets, visibleRows } = await import(pathToFileURL(path.join(root, "layout.js")));
   test("Measured transcript ranges include tall rows, resized rows and the final row", () => {
     const ids = Array.from({ length: 80 }, (_, i) => String(i));
