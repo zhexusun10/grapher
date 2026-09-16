@@ -6,7 +6,7 @@ Create the smallest graph that covers the requested outcomes. Keep each task con
 
 Add a dependency only when the target consumes the source's files or result. Keep independent producers parallel. Consolidate tightly coupled edits under one owner; make integration depend on every output it verifies. Do not add scheduling, merge, summary, report, or review work unless it is a requested deliverable or a distinct acceptance responsibility needed by the goal.
 
-Use feedback for a meaningful, bounded review-and-correction flow. Define review criteria and actionable correction targets; the host owns the verdict protocol.
+Use feedback when a downstream node may require a dependency ancestor to be corrected. The host owns the feedback response protocol and retry policy.
 
 Use one `node` call with `nodes` and `edges` arrays to submit a known graph or related edits together. Node edits are applied first, then edge edits; only the resulting graph is compiled, once. Single-node and single-edge calls remain available for incremental corrections.
 

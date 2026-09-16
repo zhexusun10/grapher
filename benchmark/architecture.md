@@ -38,7 +38,7 @@ Planner exposes `node` and `edge` for compiler-checked atomic graph mutation, re
 
 The `node` tool supports batch `nodes`/`edges` arrays as well as its original single-node form. A batch applies node edits first, then edge edits, and runs the shipping compiler once on the final state. Rejected batches return diagnostics and saved topology without writing any edits. The four-tool allowlist and inspection policy are unchanged by batching; one batch produces one tool execution pair.
 
-Rubrics are written only after candidate generation. `planning-boundary.mjs` checks policy `planner-workspace-tools-v4`, the exact `node,edge,read,bash` surface, tool start/end pairing, successful bash policy evidence and successful read paths before invoking the judge. Missing policy or an unverified tool boundary fails even if Git is clean and the graph compiles. Replay retains original evidence; rejected unknown-tool attempts are not successful breaches.
+Rubrics are written only after candidate generation. `planning-boundary.mjs` checks policy `planner-workspace-tools-v6`, the exact `node,edge,read,bash` surface, tool start/end pairing, successful bash policy evidence and successful read paths before invoking the judge. Missing policy or an unverified tool boundary fails even if Git is clean and the graph compiles. Replay retains original evidence; rejected unknown-tool attempts are not successful breaches.
 
 ## Quality assessment
 
@@ -51,7 +51,7 @@ The deterministic grader then checks:
 - Required deliverable ownership, with concrete output paths in producer tasks.
 - Prerequisite reachability, accepting transitive dependency paths.
 - Independent producers remain distinct and are not artificially serialized.
-- Explicitly requested feedback maps to the expected reviewer/owner pairs. Additional bounded feedback between owned outcomes and dependency ancestors is permitted; its usefulness is assessed semantically rather than rejected solely for lacking an explicit user loop request.
+- Explicitly requested feedback maps to the expected source/target owner pairs. Additional feedback between owned outcomes and dependency ancestors is permitted; its usefulness is assessed semantically rather than restricted to a dedicated reviewer role.
 - Every node maps to an actual requested work unit; a pure extra reader, report or quality gate cannot hide behind compiler validity.
 - Case-specific inapplicable repository references are rejected. In P005, the server/browser `retryCount` configuration files are not an SDK contract and may not be carried into node tasks.
 - At least 12/14 semantic points with no zero dimension.

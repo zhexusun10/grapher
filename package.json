@@ -5,14 +5,14 @@
   "type": "module",
   "scripts": {
     "pi:verify": "node scripts/pi-baseline.mjs verify",
-    "test:publication": "cargo build --manifest-path backend/Cargo.toml --features fixture --bin grapher && node scripts/test-publication-http.mjs && node --test scripts/publication-ui.test.mjs scripts/ui-regression.test.mjs",
+    "test:publication": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --features fixture --bin grapher && node scripts/test-publication-http.mjs && node --test scripts/publication-ui.test.mjs scripts/ui-regression.test.mjs",
     "test:pi": "node --check engine/system-prompt.mjs && node --test scripts/pi-baseline.test.mjs",
     "pi:setup": "node scripts/pi-baseline.mjs setup",
     "pi:build": "node scripts/pi-baseline.mjs build",
     "pi": "node engine/entrypoint.mjs",
     "dev": "node scripts/dev.mjs",
     "build": "tsc --noEmit && vite build",
-    "test": "cargo test --manifest-path backend/Cargo.toml --no-default-features --features fixture",
+    "test": "node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture",
     "check": "tsc --noEmit",
     "benchmark": "node benchmark/run.mjs",
     "benchmark:validate": "node benchmark/validate.mjs",
@@ -20,9 +20,9 @@
     "benchmark:runtime": "node benchmark/runtime.mjs",
     "test:benchmark": "node --test benchmark/planning-grade.test.mjs benchmark/planning-boundary.test.mjs scripts/planning-inspection.test.mjs scripts/workspace-paths.test.mjs",
     "frontend": "vite --host 127.0.0.1",
-    "backend": "cargo run --manifest-path backend/Cargo.toml --bin grapher",
-    "start": "cargo run --release --manifest-path backend/Cargo.toml --bin grapher",
-    "test:http": "npm run build && cargo build --manifest-path backend/Cargo.toml --features fixture --bin grapher && node scripts/test-http.mjs"
+    "backend": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher",
+    "start": "node scripts/cargo.mjs run --release --manifest-path backend/Cargo.toml --bin grapher",
+    "test:http": "npm run build && node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --features fixture --bin grapher && node scripts/test-http.mjs"
   },
   "dependencies": {
     "@xyflow/react": "12.8.5",

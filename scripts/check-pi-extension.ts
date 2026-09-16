@@ -16,6 +16,8 @@ symlinkSync(root, join(repository, "outside"));
 process.env.GRAPHER_GRAPH_PATH = join(root, "graph.json");
 process.env.GRAPHER_COMPILER_PATH = resolve("backend/target/debug/grapher");
 process.env.GRAPHER_MODE = "planner";
+// Planner behavior must not depend on the host's feedback retry setting.
+process.env.GRAPHER_MAX_FEEDBACK = "0";
 writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({ originalGoal: "Test", nodes: [], edges: [] }));
 process.chdir(repository);
 
@@ -27,6 +29,7 @@ try {
   assert.equal(loaded.extensions[1].handlers.has("tool_call"), false, "Planner graph tools must not get shell hooks");
   const extension = loaded.extensions[0];
   assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edge", "node"]);
+  assert.doesNotMatch(extension.tools.get("edge")!.definition.description, /maxFeedback|retry budget|reviewer/i);
   const context = {} as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = extension.tools.get(name)!.definition;
@@ -175,6 +178,7 @@ try {
   assert.match(JSON.stringify(listed), /sample.txt/);
   const visibleListing = await extracted.extensions[0].tools.get("bash")!.definition.execute("visible", { command: "ls /workspace && cat /workspace/sample.txt" }, undefined, undefined, context);
   assert.match(JSON.stringify(visibleListing), /planner fixture/);
+
   // Partitioner and Merger use the same namespace without the Planner extension.
   for (const mode of ["partition", "merger"]) {
     process.env.GRAPHER_MODE = mode;

@@ -60,7 +60,7 @@ pub fn main(input_path: &str) -> Result<(), String> {
     ] };
     // Persist the effective prompt/model, including overrides, for reproducible comparisons.
     fs::write(root.join("system-prompt.txt"), &system).map_err(|e| e.to_string())?;
-    write_json(&root.join("stage.json"), &json!({"stage":stage,"model":config.model,"thinking":if stage == "judge" { Some("off") } else { role_config.thinking.as_deref() },"tools":tools,"toolPolicy":if stage == "planner" { Some("planner-workspace-tools-v4") } else { None }}));
+    write_json(&root.join("stage.json"), &json!({"stage":stage,"model":config.model,"thinking":if stage == "judge" { Some("off") } else { role_config.thinking.as_deref() },"tools":tools,"toolPolicy":if stage == "planner" { Some("planner-workspace-tools-v6") } else { None }}));
     let mut log = fs::File::create(root.join("events.jsonl")).map_err(|e| e.to_string())?;
     let mut log_error = None;
     let started = Instant::now();

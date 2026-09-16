@@ -10,7 +10,7 @@ import { isIP } from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
 
-export const INSPECTION_POLICY = 'repository-inspection-v3';
+export const INSPECTION_POLICY = 'repository-inspection-v4';
 const MAX_OUTPUT = 64 * 1024;
 const MAX_FILE = 256 * 1024;
 const MAX_SCAN = 4 * 1024 * 1024;
@@ -81,6 +81,9 @@ const number = (value, max) => {
   if (!/^\d+$/.test(value ?? '') || Number(value) > max) fail(`expected integer between 0 and ${max}`);
   return Number(value);
 };
+const cap = (text, limit = MAX_OUTPUT) => Buffer.byteLength(text) > limit
+  ? Buffer.from(text).subarray(0, limit).toString('utf8').replace(/\uFFFD$/, '') + '\n[truncated; narrow the query]'
+  : text;
 function glob(pattern, insensitive) {
   if (pattern.length > 256) fail('glob too long');
   return new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, insensitive ? 'i' : '');
@@ -248,7 +251,7 @@ export async function inspectCommand(root, command, signal) {
       skipPipeline = false;
     }
     try {
-      const text = await inspectSingleCommand(root, step.command, signal, step.condition === '|' ? piped : undefined);
+      const text = await inspectSingleCommand(root, step.command, signal, step.condition === '|' ? piped : undefined, feedsPipe);
       if (feedsPipe) {
         piped = step.stdoutNull ? '' : text;
         pipeReady = true;
@@ -269,10 +272,10 @@ export async function inspectCommand(root, command, signal) {
   }
   if (!successful) throw new Error(output.join('\n') || `Inspection command failed (${lastError?.code ?? 'exit 1'})`);
   const text = output.filter(Boolean).join('\n');
-  return Buffer.byteLength(text) > MAX_OUTPUT ? Buffer.from(text).subarray(0, MAX_OUTPUT).toString('utf8').replace(/\uFFFD$/, '') + '\n[truncated; narrow the query]' : text;
+  return cap(text);
 }
 
-async function inspectSingleCommand(root, command, signal, stdin) {
+async function inspectSingleCommand(root, command, signal, stdin, pipeOutput = false) {
   signal?.throwIfAborted();
   root = realpathSync(root);
   const [program, ...args] = splitCommand(command);
@@ -362,7 +365,9 @@ async function inspectSingleCommand(root, command, signal, stdin) {
     if (tokens[0] === '--') tokens.shift();
     const pattern = tokens.shift();
     if (pattern === undefined || pattern.length > 1024) fail('search requires a pattern of at most 1024 characters');
-    const paths = tokens.length ? tokens : ['.']; let scanned = 0, outputBytes = 0; const output = [], seen = new Set();
+    const paths = tokens.length ? tokens : ['.'];
+    const outputLimit = pipeOutput ? MAX_SCAN : MAX_OUTPUT;
+    let scanned = 0, outputBytes = 0; const output = [], seen = new Set();
     search: for (const path of paths) for (const entry of walk(root, path)) {
       signal?.throwIfAborted();
       if (entry.directory || seen.has(entry.path) || lstatSync(entry.path).size > MAX_FILE) continue;
@@ -393,7 +398,7 @@ async function inspectSingleCommand(root, command, signal, stdin) {
       const lines = namesOnly ? [name] : matched.stdout.trimEnd().split('\n').map(line => `${name}:${line}`);
       for (const line of lines) {
         outputBytes += Buffer.byteLength(line) + 1;
-        if (outputBytes > MAX_OUTPUT) {
+        if (outputBytes > outputLimit) {
           output.push('[truncated; narrow the query]');
           break search;
         }
@@ -403,5 +408,5 @@ async function inspectSingleCommand(root, command, signal, stdin) {
     text = output.join('\n');
   } else fail('allowed commands: pwd, echo, ls, find, rg, grep, cat, head, tail, node --version/-v, curl (GET/HEAD). No scripts, tests or writes');
   signal?.throwIfAborted();
-  return Buffer.byteLength(text) > MAX_OUTPUT ? Buffer.from(text).subarray(0, MAX_OUTPUT).toString('utf8').replace(/\uFFFD$/, '') + '\n[truncated; narrow the query]' : text;
+  return cap(text, pipeOutput ? MAX_SCAN : MAX_OUTPUT);
 }

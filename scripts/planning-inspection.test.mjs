@@ -57,6 +57,9 @@ test('supports ordinary read-only shell sequences, null redirects and version qu
   assert.equal(await inspectCommand(repo, 'cat missing 2>/dev/null || cat src/a.ts | tail -1'), 'ALPHA');
   assert.equal(await inspectCommand(repo, 'find /workspace -maxdepth 2 -type f && echo --- && ls /workspace/src /workspace'),
     'space name.txt\nsrc/a.ts\n---\nsrc:\na.ts\nleak.txt [symlink; not readable]\n\n.:\noutside [symlink; not readable]\nspace name.txt\nsrc/');
+  writeFileSync(join(repo, 'long-tail.txt'), Array.from({ length: 12000 }, (_, index) => `line-${index}`).join('\n') + '\n');
+  assert.equal(await inspectCommand(repo, 'cat long-tail.txt | tail -1'), 'line-11999');
+  assert.equal(await inspectCommand(repo, 'rg line long-tail.txt | tail -1'), 'long-tail.txt:12000:line-11999');
   await assert.rejects(inspectCommand(repo, 'cat src/a.ts | node -v'), /pipeline consumers/);
   await assert.rejects(inspectCommand(repo, 'cat ../rubric.json 2>/dev/null || node -v'), /outside/);
   await assert.rejects(inspectCommand(repo, 'node -e "1" || node -v'), /allowed commands/);

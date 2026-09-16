@@ -17,7 +17,7 @@ pub struct Job {
     pub execution: Execution,
     pub config: Config,
     pub task: String,
-    pub reviewer: bool,
+    pub feedback_source: bool,
 }
 
 /// Test builds alone support actuator selection.
@@ -428,7 +428,7 @@ impl Runtime {
                 "{}\n{}",
                 node.task, self.state.nodes[&node.name].instruction
             );
-            let reviewer = self
+            let feedback_source = self
                 .state
                 .graph
                 .edges
@@ -441,7 +441,7 @@ impl Runtime {
                 execution,
                 config: config.clone(),
                 task,
-                reviewer,
+                feedback_source,
             });
         }
         if jobs.is_empty() && !self.active() && !matches!(self.state.phase.as_str(), "completed" | "needs_attention") {
@@ -477,13 +477,13 @@ impl Runtime {
     ) -> Result<Option<(String, String)>, String> {
         match result {
             Ok((head, output)) => {
-                let reviewer = self
+                let feedback_source = self
                     .state
                     .graph
                     .edges
                     .iter()
                     .any(|edge| edge.feedback && edge.from == execution.node);
-                if reviewer {
+                if feedback_source {
                     if let Err(error) = engine::feedback(&output) {
                         self.emit(EventKind::Failed {
                             node: execution.node.clone(),
@@ -505,7 +505,7 @@ impl Runtime {
                     head,
                     output: format!("{raw}\n── Final response ──\n{output}\n"),
                 })?;
-                Ok(if reviewer {
+                Ok(if feedback_source {
                     Some((execution.node.clone(), output))
                 } else {
                     None
@@ -528,7 +528,7 @@ impl Runtime {
         }
     }
 
-    pub fn review(&mut self, from: &str, output: &str) -> Result<(), String> {
+    pub fn apply_feedback(&mut self, from: &str, output: &str) -> Result<(), String> {
         let revise = engine::feedback(output)?;
         let edges: Vec<_> = self
             .state
@@ -576,7 +576,7 @@ impl Runtime {
                         .into_iter()
                         .collect(),
                     target: edge.to,
-                    instruction: format!("Verification feedback:\n{output}"),
+                    instruction: format!("Feedback from {from}:\n{output}"),
                     human: false,
                 })?;
             }
@@ -600,7 +600,7 @@ pub fn perform(
         &job.config,
         &job.execution,
         &job.task,
-        job.reviewer,
+        job.feedback_source,
         root,
         on_output,
     )?;

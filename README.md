@@ -69,7 +69,7 @@ npm start
 
 实际提示词以 [partitioner.md](backend/resources/prompts/partitioner.md) 和 [planner.md](backend/resources/prompts/planner.md) 为准。Planner 将任务划分为独立工作成果，不提前替节点探索实现步骤；节点数不是优化目标。节点 task 必须自包含目标、用户约束、职责及验收方式。
 
-Planner 按需检查影响节点边界、依赖、并行性、可合并性或权威契约的仓库事实；实现调查留给 worker。普通边传递上游文件系统状态，不传递对话。Feedback 用于有意义且有界的审查修正，不要求用户先明确提出循环。Agent 统一看到 `/workspace`；宿主根据当前执行请求固定各角色的实际工作目录，将工具路径参数和命令中的该路径映射到各自工作区，并将模型上下文和工具结果中的实际工作区路径映射回来。映射后的访问仍由现有 sandbox 检查，不依赖全局软链接或容器。相对路径仍可使用。通过编译、覆盖完整后停止规划。
+Planner 按需检查影响节点边界、依赖、并行性、可合并性或权威契约的仓库事实；实现调查留给 worker。普通边传递上游文件系统状态，不传递对话。Feedback 表达下游节点要求某个依赖祖先纠正结果的关系；响应协议和最大重试次数由系统管理，不属于 Planner 的规划输入。如果一个节点有多条 outgoing feedback 边，一次修订信号会触发这些目标。Agent 统一看到 `/workspace`；宿主根据当前执行请求固定各角色的实际工作目录，将工具路径参数和命令中的该路径映射到各自工作区，并将模型上下文和工具结果中的实际工作区路径映射回来。映射后的访问仍由现有 sandbox 检查，不依赖全局软链接或容器。相对路径仍可使用。通过编译、覆盖完整后停止规划。
 
 **Planner 工具边界：**`node / edge` 经编译器原子校验修改候选图；`read` 限于仓库内普通文件；`bash` 是受限只读检查 API，禁止任意 shell、脚本、写入、符号链接、Git 元数据和仓库外读取。公开 HTTP(S) 仅允许受限 GET/HEAD。详见 [规划检查权限](backend/resources/planning-inspection.md)。Graph 执行节点的 OS sandbox 是下述另一层边界。
 

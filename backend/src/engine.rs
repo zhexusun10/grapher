@@ -526,15 +526,15 @@ pub fn execute(
     config: &Config,
     execution: &Execution,
     task: &str,
-    reviewer: bool,
+    feedback_source: bool,
     root: &Path,
     on_output: impl FnMut(String),
 ) -> Result<String, String> {
     #[cfg(feature = "fixture")]
     if config.engine == crate::fixture::ENGINE {
-        return crate::fixture::execute(execution, task, reviewer, on_output);
+        return crate::fixture::execute(execution, task, feedback_source, on_output);
     }
-    let task = if reviewer {
+    let task = if feedback_source {
         format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<REVISE>\nIf REVISE, clearly describe the changes needed before the marker.")
     } else {
         task.into()

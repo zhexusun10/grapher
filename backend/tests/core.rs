@@ -54,25 +54,25 @@ fn runtime(root: &Path) -> Runtime {
     runtime
 }
 
-fn finish_wave(runtime: &mut Runtime, reviewer_output: &str) {
+fn finish_wave(runtime: &mut Runtime, feedback_output: &str) {
     let jobs = runtime.jobs().unwrap();
     assert!(!jobs.is_empty());
-    let mut reviews = Vec::new();
+    let mut feedback_results = Vec::new();
     for job in jobs {
-        let output = if job.reviewer {
-            reviewer_output
+        let output = if job.feedback_source {
+            feedback_output
         } else {
             "done"
         };
-        if let Some(review) = runtime
+        if let Some(feedback) = runtime
             .finish(&job.execution, Ok(("fake-head".into(), output.into())))
             .unwrap()
         {
-            reviews.push(review);
+            feedback_results.push(feedback);
         }
     }
-    for (from, output) in reviews {
-        runtime.review(&from, &output).unwrap();
+    for (from, output) in feedback_results {
+        runtime.apply_feedback(&from, &output).unwrap();
     }
 }
 
@@ -370,15 +370,15 @@ fn actual_worktrees_parallel_merge_and_feedback_fixture_complete() {
                 })
             })
             .collect();
-        let mut reviews = Vec::new();
+        let mut feedback_results = Vec::new();
         for handle in handles {
             let (execution, result) = handle.join().unwrap();
-            if let Some(review) = runtime.finish(&execution, result).unwrap() {
-                reviews.push(review);
+            if let Some(feedback) = runtime.finish(&execution, result).unwrap() {
+                feedback_results.push(feedback);
             }
         }
-        for (from, output) in reviews {
-            runtime.review(&from, &output).unwrap();
+        for (from, output) in feedback_results {
+            runtime.apply_feedback(&from, &output).unwrap();
         }
     }
     assert_eq!(

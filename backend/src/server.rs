@@ -956,7 +956,7 @@ fn drive(service: Arc<Service>) {
         let result = (|| -> Result<(), String> {
             let (completed_tx, completed_rx) = std::sync::mpsc::channel();
             let mut in_flight = 0usize;
-            let mut reviews = Vec::new();
+            let mut feedback_results = Vec::new();
             loop {
                 let (jobs, root, parents) = {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
@@ -1032,13 +1032,13 @@ fn drive(service: Arc<Service>) {
                 if in_flight > 0 {
                     let completed = completed_rx.recv().map_err(|_| "Execution channel closed")?;
                     in_flight -= 1;
-                    if let Some(review) = completed? { reviews.push(review); }
+                    if let Some(feedback) = completed? { feedback_results.push(feedback); }
                 }
                 if in_flight == 0 {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                    for (from, output) in reviews.drain(..) {
+                    for (from, output) in feedback_results.drain(..) {
                         if runtime.state.nodes[&from].status == "done" {
-                            runtime.review(&from, &output)?;
+                            runtime.apply_feedback(&from, &output)?;
                         }
                     }
                 }

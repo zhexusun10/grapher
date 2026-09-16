@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createWorkspacePaths } from '../backend/resources/workspace-paths.mjs';
 import { INSPECTION_POLICY, repositoryPath } from '../backend/resources/planning-inspection.mjs';
 
-export const PLANNER_TOOL_POLICY = 'planner-workspace-tools-v4';
+export const PLANNER_TOOL_POLICY = 'planner-workspace-tools-v6';
 
 // Verify paired tool evidence and the restricted inspection boundary.
 export function checkPlanningBoundary(directory, repository) {

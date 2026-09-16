@@ -35,7 +35,7 @@ test('inspection requires policy evidence and repository-scoped regular files', 
   const { events, check } = fixture(t);
   events[0].toolName = events[1].toolName = 'bash';
   assert.match(check().issues.join(' '), /without restricted/);
-  events[1].result.details = { inspectionPolicy: 'repository-inspection-v2' };
+  events[1].result.details = { inspectionPolicy: 'repository-inspection-v3' };
   assert.match(check().issues.join(' '), /without restricted/);
   events[1].result.details = { inspectionPolicy: INSPECTION_POLICY };
   assert.equal(check().status, 'PASS');

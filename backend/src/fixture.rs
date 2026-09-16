@@ -34,7 +34,7 @@ pub fn repository(root: &Path) -> Result<PathBuf, String> {
 pub fn execute(
     execution: &Execution,
     task: &str,
-    reviewer: bool,
+    feedback_source: bool,
     mut on_output: impl FnMut(String),
 ) -> Result<String, String> {
     on_output(format!(
@@ -42,9 +42,9 @@ pub fn execute(
         execution.session_id
     ));
     thread::sleep(Duration::from_millis(650));
-    let output = if reviewer && execution.attempt == 1 {
+    let output = if feedback_source && execution.attempt == 1 {
         "Fixture verification: add an empty-state message.\n<REVISE>".into()
-    } else if reviewer {
+    } else if feedback_source {
         "Fixture verification passed.\n<ACCEPT>".into()
     } else {
         fs::write(

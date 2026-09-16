@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { toolchainEnv } from "./cargo.mjs";
 
 export const root = fileURLToPath(new URL("../", import.meta.url));
 export const source = join(root, "pi");
@@ -11,7 +12,7 @@ export const lock = JSON.parse(readFileSync(join(root, "engine/pi-lock.json"), "
 // verification must still inspect Pi; leave those variables intact for its child.
 const git = (...args) => execFileSync("git", ["-C", source, ...args], {
   encoding: "utf8",
-  env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+  env: toolchainEnv(Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))),
 }).trim();
 const hash = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 
@@ -37,7 +38,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     verifyBaseline();
     const action = process.argv[2] ?? "verify";
-    const run = (...args) => execFileSync("npm", [...args, "--prefix", source], { stdio: "inherit" });
+    const run = (...args) => execFileSync("npm", [...args, "--prefix", source], { stdio: "inherit", env: toolchainEnv() });
     if (action === "setup") {
       run("ci");
       restoreModelData();
