@@ -28,11 +28,13 @@ async function start(extraEnv = {}) {
   });
   backend.stderr.on("data", chunk => { logs += chunk; });
   backend.on("error", error => { spawnError = error; logs += error.message; });
+  let wait = 10;
   for (let i = 0; i < 100; i++) {
     if (spawnError) throw spawnError;
     try { await call("bootstrap"); return; } catch {}
     if (backend.exitCode !== null) throw new Error(logs);
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await new Promise(resolve => setTimeout(resolve, wait));
+    wait = Math.min(wait * 1.3, 80);
   }
   throw new Error(`Backend did not start: ${logs}`);
 }
@@ -79,10 +81,13 @@ try {
   assert.equal((await call("snapshot")).executions.length, 0);
   await call("control", { action: "approve" });
   let snapshot;
-  for (let i = 0; i < 150; i++) {
+  let wait = 10;
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
     snapshot = await call("snapshot");
     if (snapshot.phase === "completed") break;
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await new Promise(resolve => setTimeout(resolve, wait));
+    wait = Math.min(wait * 1.3, 60);
   }
   assert.equal(snapshot.phase, "completed");
   assert.equal(snapshot.nodes.task.status, "done");

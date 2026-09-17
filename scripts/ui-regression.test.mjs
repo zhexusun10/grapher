@@ -16,6 +16,7 @@ try {
       header: "src/components/layout/Header.tsx",
       approval: "src/components/modals/ApprovalModal.tsx",
       taskNode: "src/components/graph/TaskNode.tsx",
+      workflowEdge: "src/components/graph/WorkflowEdge.tsx",
       timing: "src/components/ExecutionTiming.tsx",
       card: "src/components/ToolCallCard.tsx",
       planningCard: "src/components/PlanningSummaryCard.tsx",
@@ -40,6 +41,7 @@ try {
   const { Header } = await import(pathToFileURL(path.join(root, "header.js")));
   const { ApprovalModal } = await import(pathToFileURL(path.join(root, "approval.js")));
   const { TaskNode, phaseText } = await import(pathToFileURL(path.join(root, "taskNode.js")));
+  const { SmoothWorkflowEdge } = await import(pathToFileURL(path.join(root, "workflowEdge.js")));
   const { ExecutionTiming } = await import(pathToFileURL(path.join(root, "timing.js")));
   const { ToolCallCard } = await import(pathToFileURL(path.join(root, "card.js")));
   const { PlanningSummaryCard, calculateApprovalWaitingTime, calculatePausedTime, parseTimestamp } = await import(pathToFileURL(path.join(root, "planningCard.js")));
@@ -204,6 +206,8 @@ try {
     });
     assert.match(unattemptedHtml, /尚未执行/);
     assert.doesNotMatch(unattemptedHtml, /就绪/);
+    assert.match(unattemptedHtml, /style="top:35%"/);
+    assert.match(unattemptedHtml, /style="top:65%"/);
 
     const attemptedHtml = renderNode({
       id: "node-2",
@@ -216,6 +220,43 @@ try {
       },
     });
     assert.match(attemptedHtml, /#2 尝试/);
+  });
+
+  test("SmoothWorkflowEdge renders bezier path, interaction path, markers and labels", async () => {
+    const { Position } = await import("@xyflow/react");
+    const edgeProps = {
+      id: "edge-test-1",
+      source: "node-a",
+      target: "node-b",
+      sourceX: 100,
+      sourceY: 50,
+      targetX: 200,
+      targetY: 250,
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top,
+      style: { stroke: "#3b82f6", strokeWidth: 1.5 },
+      interactionWidth: 24,
+      markerEnd: "url(#arrow)",
+    };
+    const htmlWithoutLabel = renderToStaticMarkup(
+      createElement("svg", null, createElement(SmoothWorkflowEdge, edgeProps))
+    );
+    assert.match(htmlWithoutLabel, /react-flow__edge-path/);
+    assert.match(htmlWithoutLabel, /react-flow__edge-interaction/);
+    assert.match(htmlWithoutLabel, /d="M100,50/);
+
+    const labeledProps = {
+      ...edgeProps,
+      id: "edge-test-2",
+      label: "spec → impl: dependency",
+      labelStyle: { fontSize: 10 },
+      labelBgStyle: { fill: "#ffffff" },
+    };
+    const htmlWithLabel = renderToStaticMarkup(
+      createElement("svg", null, createElement(SmoothWorkflowEdge, labeledProps))
+    );
+    assert.match(htmlWithLabel, /spec → impl: dependency/);
+    assert.match(htmlWithLabel, /react-flow__edge-text/);
   });
 
   test("ExecutionTiming renders timestamps and duration correctly for completed execution", () => {

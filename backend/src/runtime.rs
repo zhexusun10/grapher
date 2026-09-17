@@ -487,13 +487,38 @@ impl Runtime {
             let serial =
                 self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task";
             if !serial && self.state.nodes.values().all(|node| node.status == "done") {
-                let heads = self
-                    .state
-                    .graph
-                    .nodes
+                let terminal_names: Vec<String> = if let Some(plan) = &self.state.plan {
+                    if !plan.terminals.is_empty() {
+                        plan.terminals.clone()
+                    } else {
+                        self.state.graph.nodes.iter().map(|node| node.name.clone()).collect()
+                    }
+                } else {
+                    let dependencies: Vec<_> = self
+                        .state
+                        .graph
+                        .edges
+                        .iter()
+                        .filter(|edge| !edge.feedback)
+                        .collect();
+                    let terms: Vec<_> = self
+                        .state
+                        .graph
+                        .nodes
+                        .iter()
+                        .filter(|node| !dependencies.iter().any(|edge| edge.from == node.name))
+                        .map(|node| node.name.clone())
+                        .collect();
+                    if terms.is_empty() {
+                        self.state.graph.nodes.iter().map(|node| node.name.clone()).collect()
+                    } else {
+                        terms
+                    }
+                };
+                let heads = terminal_names
                     .iter()
-                    .map(|node| {
-                        self.state.nodes[&node.name]
+                    .map(|name| {
+                        self.state.nodes[name]
                             .head
                             .clone()
                             .ok_or("Completed node has no snapshot")

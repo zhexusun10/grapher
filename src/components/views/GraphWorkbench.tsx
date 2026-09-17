@@ -533,9 +533,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 ? `向 [${selectedNode.name}] 发送微调或介入指令...`
                 : routeType === "serial"
                 ? "向当前串行任务发送微调或介入指令..."
-                : "向工作图追加全局指令或修改规划要求..."
+                : !state.approved
+                ? "向 AI 规划器追加指令或修改规划要求..."
+                : "输入新要求以重新规划，或点击节点进行针对性微调..."
             }
-            disabled={locked || active || !state.approved}
+            disabled={
+              locked ||
+              isPlanning ||
+              active ||
+              (Boolean(selectedNode) && !state.approved)
+            }
           />
         </motion.div>
       </motion.div>

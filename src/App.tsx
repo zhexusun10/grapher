@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "motion/react";
 
 import {
   defaultConfig, emptyGraph, emptySnapshot,
-  type Config, type Graph, type ProjectItem, type RepositoryInfo,
+  type Config, type Graph, type Plan, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType, type TranscriptItem, type NodeState,
   type PlanningSummary, type Execution
 } from "./types";
@@ -75,6 +75,40 @@ function areExecutionStreamsEqual(a: Execution[] = [], b: Execution[] = []): boo
 
 const nodeTypes = { work: TaskNode };
 const edgeTypes = { workflow: SmoothWorkflowEdge };
+
+function computeExecutionLayers(graph: Graph, plan?: Plan | null): string[][] {
+  if (plan?.executionBatches && plan.executionBatches.length > 0) {
+    return plan.executionBatches;
+  }
+  const nodeNames = graph.nodes.map((n) => n.name);
+  if (nodeNames.length === 0) return [];
+  const deps = graph.edges.filter(
+    (e) => !e.feedback && nodeNames.includes(e.from) && nodeNames.includes(e.to)
+  );
+  const inDegree = new Map<string, number>(nodeNames.map((n) => [n, 0]));
+  for (const edge of deps) {
+    inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
+  }
+  let ready = nodeNames.filter((n) => inDegree.get(n) === 0);
+  const visited = new Set<string>();
+  const batches: string[][] = [];
+  while (ready.length > 0) {
+    batches.push(ready);
+    const next: string[] = [];
+    for (const name of ready) {
+      visited.add(name);
+      for (const edge of deps.filter((e) => e.from === name)) {
+        const deg = (inDegree.get(edge.to) ?? 1) - 1;
+        inDegree.set(edge.to, deg);
+        if (deg === 0) next.push(edge.to);
+      }
+    }
+    ready = next;
+  }
+  const remaining = nodeNames.filter((n) => !visited.has(n));
+  if (remaining.length > 0) batches.push(remaining);
+  return batches.length > 0 ? batches : [nodeNames];
+}
 
 export default function App() {
   const [state, setState] = useState<Snapshot>(emptySnapshot);
@@ -191,15 +225,33 @@ export default function App() {
     const text = val.trim();
     if (!text) return;
     const selectedNode = state.graph.nodes.find((item) => item.name === selected);
-    const newMsg = {
-      id: `msg-${Date.now()}`,
-      role: "user" as const,
-      text: selectedNode ? `[@${selectedNode.name}] ${text}` : text,
-      timestamp: Date.now(),
-    };
-    setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
-    const targetNode = selectedNode?.name || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
-    control("intervene", { node: targetNode, instruction: text });
+
+    if (selectedNode) {
+      // 针对具体选定节点的微调与介入
+      const newMsg = {
+        id: `msg-${Date.now()}`,
+        role: "user" as const,
+        text: `[@${selectedNode.name}] ${text}`,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
+      control("intervene", { node: selectedNode.name, instruction: text });
+    } else if (routeType === "serial" && state.graph.nodes.length > 0) {
+      // 串行单任务介入
+      const newMsg = {
+        id: `msg-${Date.now()}`,
+        role: "user" as const,
+        text,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
+      control("intervene", { node: state.graph.nodes[0]?.name || "task", instruction: text });
+    } else {
+      // 未选中具体节点：处于与 AI 规划器对话面板，追加规划要求并触发重新规划
+      const baseGoal = state.graph.originalGoal || goal;
+      const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求：\n${text}` : text;
+      handlePlanGoal(combinedGoal);
+    }
   };
 
   const load = useCallback(async () => {
@@ -962,16 +1014,17 @@ export default function App() {
   const locked = busy || !!recoveredPlanning;
 
   const nodes = useMemo<WorkNode[]>(() => {
-    const layers = state.plan?.executionBatches ?? [state.graph.nodes.map((node) => node.name)];
+    const layers = computeExecutionLayers(state.graph, state.plan);
     const getNodeX = (nodeName: string) => {
       const layer = Math.max(0, layers.findIndex((batch) => batch.includes(nodeName)));
       const batch = layers[layer] || [];
-      return (batch.indexOf(nodeName) - (batch.length - 1) / 2) * 260 + 160;
+      const idx = batch.indexOf(nodeName);
+      const safeIndex = idx >= 0 ? idx : 0;
+      return (safeIndex - (Math.max(1, batch.length) - 1) / 2) * 260 + 160;
     };
 
     return state.graph.nodes.map((node) => {
       const layer = Math.max(0, layers.findIndex((batch) => batch.includes(node.name)));
-      const batch = layers[layer] || [];
       const nodeAttempts = state.executions.filter((execution) => execution.node === node.name);
 
       const hasTop = state.graph.edges.some((e) => e.to === node.name && !e.feedback);
@@ -994,7 +1047,7 @@ export default function App() {
         type: "work",
         width: 236,
         position: {
-          x: (batch.indexOf(node.name) - (batch.length - 1) / 2) * 260 + 160,
+          x: getNodeX(node.name),
           y: layer * 180 + 24,
         },
         data: {
@@ -1021,11 +1074,13 @@ export default function App() {
   }, [state.graph, state.plan, state.nodes, state.executions, selected]);
 
   const edges = useMemo<Edge[]>(() => {
-    const layers = state.plan?.executionBatches ?? [state.graph.nodes.map((node) => node.name)];
+    const layers = computeExecutionLayers(state.graph, state.plan);
     const getNodeX = (nodeName: string) => {
       const layer = Math.max(0, layers.findIndex((batch) => batch.includes(nodeName)));
       const batch = layers[layer] || [];
-      return (batch.indexOf(nodeName) - (batch.length - 1) / 2) * 260 + 160;
+      const idx = batch.indexOf(nodeName);
+      const safeIndex = idx >= 0 ? idx : 0;
+      return (safeIndex - (Math.max(1, batch.length) - 1) / 2) * 260 + 160;
     };
 
     return state.graph.edges.map((edge) => {

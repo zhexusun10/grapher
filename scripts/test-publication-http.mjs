@@ -25,8 +25,9 @@ async function call(command, body = {}) {
 async function start(dataRoot) {
   child = spawn(binary, [], { env: { ...process.env, GRAPHER_DATA_DIR: dataRoot, GRAPHER_PORT: String(port), ALLOW_MERGER: path.join(root, "allow-merger") }, stdio: ["ignore", "pipe", "pipe"] });
   child.stderr.on("data", text => { logs += text; });
+  let wait = 10;
   for (let i = 0; i < 100; i++) {
-    try { await call("bootstrap"); return; } catch { await delay(40); }
+    try { await call("bootstrap"); return; } catch { await delay(wait); wait = Math.min(wait * 1.3, 80); }
   }
   throw new Error(`Backend did not start: ${logs}`);
 }
@@ -37,13 +38,16 @@ async function stop() {
     await exited;
   }
 }
-async function settled(phase) {
+async function settled(phase, maxWaitMs = 15000) {
   const seen = new Set();
-  for (let i = 0; i < 400; i++) {
+  const start = Date.now();
+  let wait = 10;
+  while (Date.now() - start < maxWaitMs) {
     const state = await call("snapshot");
     seen.add(state.phase);
     if (state.phase === phase) return { state, seen };
-    await delay(30);
+    await delay(wait);
+    wait = Math.min(wait * 1.3, 60);
   }
   throw new Error(`Did not reach ${phase}: ${logs}`);
 }

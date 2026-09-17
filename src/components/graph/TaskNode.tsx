@@ -86,24 +86,28 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
         id="left-target"
         type="target"
         position={Position.Left}
+        style={{ top: "35%" }}
         className={`react-flow__handle ${data.hasLeftTarget ? "connected feedback" : ""}`}
       />
       <Handle
         id="left-source"
         type="source"
         position={Position.Left}
+        style={{ top: "65%" }}
         className={`react-flow__handle ${data.hasLeftSource ? "connected feedback" : ""}`}
       />
       <Handle
         id="right-target"
         type="target"
         position={Position.Right}
+        style={{ top: "35%" }}
         className={`react-flow__handle ${data.hasRightTarget ? "connected feedback" : ""}`}
       />
       <Handle
         id="right-source"
         type="source"
         position={Position.Right}
+        style={{ top: "65%" }}
         className={`react-flow__handle ${data.hasRightSource ? "connected feedback" : ""}`}
       />
     </div>
