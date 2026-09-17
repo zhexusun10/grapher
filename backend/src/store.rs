@@ -97,17 +97,23 @@ impl Store {
 
     pub fn find_repository_by_planning_id(&self, target_planning_id: &str) -> Option<String> {
         let pattern = format!("%{target_planning_id}%");
-        let mut stmt = self.connection.prepare(
-            "SELECT payload FROM events WHERE payload LIKE ?1"
-        ).ok()?;
+        let mut stmt = self
+            .connection
+            .prepare("SELECT payload FROM events WHERE payload LIKE ?1")
+            .ok()?;
         let mut rows = stmt.query([&pattern]).ok()?;
         while let Ok(Some(row)) = rows.next() {
             if let Ok(payload_str) = row.get::<_, String>(0) {
-                if let Ok(EventKind::Created { config, planning_id, planning, .. }) =
-                    serde_json::from_str::<EventKind>(&payload_str)
+                if let Ok(EventKind::Created {
+                    config,
+                    planning_id,
+                    planning,
+                    ..
+                }) = serde_json::from_str::<EventKind>(&payload_str)
                 {
                     let matches_direct = planning_id.as_deref() == Some(target_planning_id);
-                    let matches_nested = planning.as_ref().map(|p| p.planning_id.as_str()) == Some(target_planning_id);
+                    let matches_nested = planning.as_ref().map(|p| p.planning_id.as_str())
+                        == Some(target_planning_id);
                     if matches_direct || matches_nested {
                         return Some(config.repository);
                     }

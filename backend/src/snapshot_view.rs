@@ -4,7 +4,10 @@ use crate::model::{EventKind, Execution, Snapshot};
 use serde_json::{json, Value};
 
 fn execution_metadata(execution: &Execution) -> Value {
-    let pid = execution.output.lines().next()
+    let pid = execution
+        .output
+        .lines()
+        .next()
         .and_then(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|event| event["type"] == "grapher_process_started")
         .and_then(|event| event["pid"].as_u64());
@@ -22,7 +25,9 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
     for event in &state.events {
         let value = match &event.kind {
             EventKind::Output { .. } => continue,
-            EventKind::Finished { execution_id, head, .. } => json!({
+            EventKind::Finished {
+                execution_id, head, ..
+            } => json!({
                 "type": "finished", "execution_id": execution_id, "head": head,
                 "sequence": event.sequence, "timestamp": event.timestamp
             }),
@@ -40,15 +45,25 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
     }))
 }
 
-pub fn execution_page(state: &Snapshot, execution_id: &str, offset: usize) -> Result<Value, String> {
-    let execution = state.executions.iter().chain(&state.mergers)
-        .find(|e| e.id == execution_id).ok_or("Execution not found in run")?;
+pub fn execution_page(
+    state: &Snapshot,
+    execution_id: &str,
+    offset: usize,
+) -> Result<Value, String> {
+    let execution = state
+        .executions
+        .iter()
+        .chain(&state.mergers)
+        .find(|e| e.id == execution_id)
+        .ok_or("Execution not found in run")?;
     let text = &execution.output;
     if offset > text.len() || !text.is_char_boundary(offset) {
         return Err("Invalid output offset".into());
     }
     let mut end = offset.saturating_add(256 * 1024).min(text.len());
-    while !text.is_char_boundary(end) { end -= 1; }
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
     Ok(json!({ "runId": state.run_id, "executionId": execution_id,
         "content": &text[offset..end], "nextOffset": end, "totalBytes": text.len(),
         "complete": end == text.len(), "status": execution.status }))

@@ -21,7 +21,7 @@ fn source(root: &Path) -> (std::path::PathBuf, String) {
     fs::create_dir(&path).unwrap();
     workspace::git(&path, &["init"]).unwrap();
     fs::write(path.join("file"), "initial").unwrap();
-    let head = workspace::snapshot(&path).unwrap();
+    let head = workspace::snapshot_repository(&path).unwrap();
     (path, head)
 }
 

@@ -31,7 +31,10 @@ fn shadow_git_zero_pollution_for_plain_directory() {
 
     // 4. Verify that the shadow repo exists under data_dir
     let shadow_dir = workspace::shadow_repo_dir(&plain_project);
-    assert!(shadow_dir.exists(), "Shadow git repo directory should exist");
+    assert!(
+        shadow_dir.exists(),
+        "Shadow git repo directory should exist"
+    );
 
     // 5. Test verify() with uncommitted changes in plain_project
     fs::write(plain_project.join("new_file.txt"), "new content").unwrap();
@@ -47,7 +50,7 @@ fn shadow_git_zero_pollution_for_plain_directory() {
 
     // 7. Make a commit in worktree1 and snapshot
     fs::write(wt1.join("main.py"), "print('modified in worktree')\n").unwrap();
-    let after_wt1 = workspace::snapshot(&wt1).unwrap();
+    let after_wt1 = workspace::snapshot_node(&wt1, &plain_project, "worktree1").unwrap();
     assert_ne!(after_wt1, head);
 
     // 8. Prepare another worktree and merge wt1's changes
@@ -59,7 +62,16 @@ fn shadow_git_zero_pollution_for_plain_directory() {
         "print('modified in worktree')\n"
     );
 
-    // 9. Plain project STILL has zero .git pollution
+    // 9. Serial execution snapshots through the external shadow repository.
+    fs::write(plain_project.join("serial.txt"), "serial result\n").unwrap();
+    let serial_head =
+        workspace::snapshot_execution(&plain_project, &plain_project, "task").unwrap();
+    assert_eq!(
+        serial_head,
+        workspace::repository_git(&plain_project, &["rev-parse", "HEAD"]).unwrap()
+    );
+
+    // 10. Plain project STILL has zero .git pollution
     assert!(
         !plain_project.join(".git").exists(),
         "Plain project must never have .git created inside it"

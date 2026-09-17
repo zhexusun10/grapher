@@ -281,6 +281,8 @@ fn standalone_workspace_allows_git_diff_inside_sandbox_while_protecting_source()
 
     // Inside sandbox: source repository must remain DENIED!
     let leak_check = run(&profile, &current, "/bin/cat \"$1/file.txt\"", &[&source]);
-    assert!(!leak_check.status.success(), "sandbox allowed reading source repository");
+    assert!(
+        !leak_check.status.success(),
+        "sandbox allowed reading source repository"
+    );
 }
-

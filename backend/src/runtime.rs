@@ -116,10 +116,18 @@ impl Runtime {
     }
 
     fn recover_publication(&mut self) -> Result<(), String> {
-        let interrupted: Vec<String> = self.state.mergers.iter()
-            .filter(|e| e.status == "running").map(|e| e.id.clone()).collect();
+        let interrupted: Vec<String> = self
+            .state
+            .mergers
+            .iter()
+            .filter(|e| e.status == "running")
+            .map(|e| e.id.clone())
+            .collect();
         for execution_id in interrupted {
-            self.emit(EventKind::MergerFailed { execution_id, error: "Merger interrupted; inspect the merge and retry publication.".into() })?;
+            self.emit(EventKind::MergerFailed {
+                execution_id,
+                error: "Merger interrupted; inspect the merge and retry publication.".into(),
+            })?;
         }
         if matches!(self.state.phase.as_str(), "publishing" | "merging") {
             self.emit(EventKind::PublicationFailed { error: "Publication interrupted. Results and any pending merge are preserved; retry publication to verify and continue.".into() })?;
@@ -128,16 +136,27 @@ impl Runtime {
     }
 
     pub fn retry_publication(&mut self) -> Result<(), String> {
-        if self.state.phase != "publication_failed" { return Err("Only failed publication can be retried".into()); }
-        let publication = self.state.publication.clone().ok_or("No publication to retry")?;
-        self.emit(EventKind::PublicationStarted { repository: publication.repository, heads: publication.heads })
+        if self.state.phase != "publication_failed" {
+            return Err("Only failed publication can be retried".into());
+        }
+        let publication = self
+            .state
+            .publication
+            .clone()
+            .ok_or("No publication to retry")?;
+        self.emit(EventKind::PublicationStarted {
+            repository: publication.repository,
+            heads: publication.heads,
+        })
     }
 
     pub fn active(&self) -> bool {
-        matches!(self.state.phase.as_str(), "publishing" | "merging") || self.state
-            .nodes
-            .values()
-            .any(|node| node.status == "running")
+        matches!(self.state.phase.as_str(), "publishing" | "merging")
+            || self
+                .state
+                .nodes
+                .values()
+                .any(|node| node.status == "running")
     }
 
     pub fn reset_workspace(&mut self) -> Result<Snapshot, String> {
@@ -260,7 +279,10 @@ impl Runtime {
     }
 
     pub fn pause(&mut self, paused: bool) -> Result<(), String> {
-        if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+        if matches!(
+            self.state.phase.as_str(),
+            "publishing" | "merging" | "publication_failed"
+        ) {
             return Err("Publication has its own lifecycle; wait for it to finish or retry failed publication".into());
         }
         if !self.state.approved {
@@ -309,7 +331,9 @@ impl Runtime {
         {
             return Err("Resolve all conflicts and commit the merge in this worktree first".into());
         }
-        let head = workspace::git(path, &["rev-parse", "HEAD"])?;
+        let config = self.state.config.as_ref().ok_or("Missing config")?;
+        let repository = resolve_repository(&self.root, config)?;
+        let head = workspace::snapshot_node(path, &repository, node)?;
         self.emit(EventKind::Finished {
             execution_id: execution.id,
             head,
@@ -326,11 +350,17 @@ impl Runtime {
             || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed" | "completed")
             // Feedback may invalidate ancestors and their consumers. Drain the current
             // wave before applying revisions; ordinary DAGs can fill idle slots.
-            || (self.active() && self.state.graph.edges.iter().any(|edge| edge.feedback)) {
+            || (self.active() && self.state.graph.edges.iter().any(|edge| edge.feedback))
+        {
             return Ok(Vec::new());
         }
         let config = self.state.config.clone().ok_or("Missing config")?;
-        let running = self.state.nodes.values().filter(|node| node.status == "running").count();
+        let running = self
+            .state
+            .nodes
+            .values()
+            .filter(|node| node.status == "running")
+            .count();
         let available = config.max_parallel.saturating_sub(running);
         loop {
             let blocked: Vec<_> = self
@@ -402,14 +432,20 @@ impl Runtime {
                     .count()
                     + 1,
                 session_id: Uuid::new_v4().to_string(),
-                worktree: if self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task" {
-                    resolve_repository(&self.root, &config)?.to_string_lossy().into()
+                worktree: if self.state.graph.nodes.len() == 1
+                    && self.state.graph.nodes[0].name == "task"
+                {
+                    resolve_repository(&self.root, &config)?
+                        .to_string_lossy()
+                        .into()
                 } else {
                     // Graph worktrees belong beside the user's repository. Keeping
                     // them under Grapher's runtime directory makes the process
                     // discover a path that is unrelated to the project it edits.
                     let repository = resolve_repository(&self.root, &config)?;
-                    let parent = repository.parent().ok_or("Repository has no parent directory")?;
+                    let parent = repository
+                        .parent()
+                        .ok_or("Repository has no parent directory")?;
                     parent
                         .join(".grapher-worktrees")
                         .join(&self.state.run_id)
@@ -444,14 +480,30 @@ impl Runtime {
                 feedback_source,
             });
         }
-        if jobs.is_empty() && !self.active() && !matches!(self.state.phase.as_str(), "completed" | "needs_attention") {
-            let serial = self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task";
+        if jobs.is_empty()
+            && !self.active()
+            && !matches!(self.state.phase.as_str(), "completed" | "needs_attention")
+        {
+            let serial =
+                self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task";
             if !serial && self.state.nodes.values().all(|node| node.status == "done") {
-                let heads = self.state.graph.nodes.iter().map(|node|
-                    self.state.nodes[&node.name].head.clone().ok_or("Completed node has no snapshot")
-                ).collect::<Result<Vec<_>, _>>()?;
-                let repository = resolve_repository(&self.root, &config)?.canonicalize()
-                    .map_err(|e| e.to_string())?.to_string_lossy().into();
+                let heads = self
+                    .state
+                    .graph
+                    .nodes
+                    .iter()
+                    .map(|node| {
+                        self.state.nodes[&node.name]
+                            .head
+                            .clone()
+                            .ok_or("Completed node has no snapshot")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let repository = resolve_repository(&self.root, &config)?
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .into();
                 self.emit(EventKind::PublicationStarted { repository, heads })?;
             } else {
                 self.emit(EventKind::Settled)?;
@@ -594,7 +646,7 @@ pub fn perform(
 ) -> Result<(String, String), String> {
     let repository = resolve_repository(root, &job.config)?;
     let path = Path::new(&job.execution.worktree);
-    let before = workspace::prepare_node(&repository, path, Some(&job.execution.node), &job.execution.before, parents)?;
+    let before = workspace::prepare(&repository, path, &job.execution.before, parents)?;
     on_prepared(before)?;
     let output = engine::execute(
         &job.config,
@@ -604,6 +656,6 @@ pub fn perform(
         root,
         on_output,
     )?;
-    let head = workspace::snapshot(path)?;
+    let head = workspace::snapshot_execution(path, &repository, &job.execution.node)?;
     Ok((head, output))
 }

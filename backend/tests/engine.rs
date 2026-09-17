@@ -37,7 +37,9 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
             tools: Some("read,bash"),
             session_id: Some("test-session"),
             extra_args: Vec::new(),
-            environment: mode.map(|mode| vec![("GRAPHER_MODE", mode.into())]).unwrap_or_default(),
+            environment: mode
+                .map(|mode| vec![("GRAPHER_MODE", mode.into())])
+                .unwrap_or_default(),
             system_prompt: None,
         },
         |text| output.push_str(&text),
@@ -47,14 +49,54 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
 
 #[test]
 fn parse_route_decision_recognizes_exact_single_words_and_formatting() {
-    assert_eq!(parse_route_decision("graph"), Route { plan_type: "graph".into() });
-    assert_eq!(parse_route_decision("serial"), Route { plan_type: "serial".into() });
-    assert_eq!(parse_route_decision("Graph"), Route { plan_type: "graph".into() });
-    assert_eq!(parse_route_decision("SERIAL\n"), Route { plan_type: "serial".into() });
-    assert_eq!(parse_route_decision("  graph  "), Route { plan_type: "graph".into() });
-    assert_eq!(parse_route_decision("**graph**"), Route { plan_type: "graph".into() });
-    assert_eq!(parse_route_decision("`serial`"), Route { plan_type: "serial".into() });
-    assert_eq!(parse_route_decision("\"graph\"."), Route { plan_type: "graph".into() });
+    assert_eq!(
+        parse_route_decision("graph"),
+        Route {
+            plan_type: "graph".into()
+        }
+    );
+    assert_eq!(
+        parse_route_decision("serial"),
+        Route {
+            plan_type: "serial".into()
+        }
+    );
+    assert_eq!(
+        parse_route_decision("Graph"),
+        Route {
+            plan_type: "graph".into()
+        }
+    );
+    assert_eq!(
+        parse_route_decision("SERIAL\n"),
+        Route {
+            plan_type: "serial".into()
+        }
+    );
+    assert_eq!(
+        parse_route_decision("  graph  "),
+        Route {
+            plan_type: "graph".into()
+        }
+    );
+    assert_eq!(
+        parse_route_decision("**graph**"),
+        Route {
+            plan_type: "graph".into()
+        }
+    );
+    assert_eq!(
+        parse_route_decision("`serial`"),
+        Route {
+            plan_type: "serial".into()
+        }
+    );
+    assert_eq!(
+        parse_route_decision("\"graph\"."),
+        Route {
+            plan_type: "graph".into()
+        }
+    );
 }
 
 #[test]
@@ -62,11 +104,15 @@ fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
     // Model outputs conversational text instead of single word
     assert_eq!(
         parse_route_decision("I recommend graph for this parallel task."),
-        Route { plan_type: "graph".into() }
+        Route {
+            plan_type: "graph".into()
+        }
     );
     assert_eq!(
         parse_route_decision("This is a simple bug fix, please use serial."),
-        Route { plan_type: "serial".into() }
+        Route {
+            plan_type: "serial".into()
+        }
     );
     // Multiline reasoning ending with recommendation
     assert_eq!(
@@ -75,7 +121,9 @@ fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
     );
     assert_eq!(
         parse_route_decision("Analysis:\n- Single file edit\nProceed with serial."),
-        Route { plan_type: "serial".into() }
+        Route {
+            plan_type: "serial".into()
+        }
     );
 }
 
@@ -84,11 +132,15 @@ fn parse_route_decision_resolves_comparison_of_both_keywords() {
     // When both words are mentioned, later occurrence represents the conclusion
     assert_eq!(
         parse_route_decision("Serial execution was considered, but we should use a graph."),
-        Route { plan_type: "graph".into() }
+        Route {
+            plan_type: "graph".into()
+        }
     );
     assert_eq!(
         parse_route_decision("While a graph is possible, serial is safer here."),
-        Route { plan_type: "serial".into() }
+        Route {
+            plan_type: "serial".into()
+        }
     );
 }
 
@@ -96,19 +148,27 @@ fn parse_route_decision_resolves_comparison_of_both_keywords() {
 fn parse_route_decision_recognizes_explicit_decision_marker() {
     assert_eq!(
         parse_route_decision("Some reasoning here...\nDECISION: graph"),
-        Route { plan_type: "graph".into() }
+        Route {
+            plan_type: "graph".into()
+        }
     );
     assert_eq!(
         parse_route_decision("Some reasoning here...\nDECISION: serial"),
-        Route { plan_type: "serial".into() }
+        Route {
+            plan_type: "serial".into()
+        }
     );
     assert_eq!(
         parse_route_decision("Reasoning: parallel work.\n**DECISION: GRAPH**"),
-        Route { plan_type: "graph".into() }
+        Route {
+            plan_type: "graph".into()
+        }
     );
     assert_eq!(
         parse_route_decision("Reasoning: single step.\n**decision:** serial."),
-        Route { plan_type: "serial".into() }
+        Route {
+            plan_type: "serial".into()
+        }
     );
 }
 
@@ -117,17 +177,23 @@ fn parse_route_decision_safe_fallback_on_ambiguity_or_gibberish() {
     // Empty output
     assert_eq!(
         parse_route_decision(""),
-        Route { plan_type: "serial".into() }
+        Route {
+            plan_type: "serial".into()
+        }
     );
     // Hallucination / gibberish
     assert_eq!(
         parse_route_decision("I am not sure what to do here. Hello world!"),
-        Route { plan_type: "serial".into() }
+        Route {
+            plan_type: "serial".into()
+        }
     );
     // Unrelated text
     assert_eq!(
         parse_route_decision("42 is the answer to everything."),
-        Route { plan_type: "serial".into() }
+        Route {
+            plan_type: "serial".into()
+        }
     );
 }
 
@@ -250,11 +316,26 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         },
         |text| node_agent_out.push_str(&text),
     );
-    assert!(!node_agent_out.contains("--no-skills"), "Node agent must not have --no-skills");
-    assert!(!node_agent_out.contains("--no-extensions"), "Node agent must not have --no-extensions");
-    assert!(!node_agent_out.contains("--no-approve"), "Node agent must not have --no-approve");
-    assert!(node_agent_out.contains("--approve"), "Node agent must have --approve for workspace trust");
-    assert!(!node_agent_out.contains("--tools"), "Node agent must not restrict tools via --tools");
+    assert!(
+        !node_agent_out.contains("--no-skills"),
+        "Node agent must not have --no-skills"
+    );
+    assert!(
+        !node_agent_out.contains("--no-extensions"),
+        "Node agent must not have --no-extensions"
+    );
+    assert!(
+        !node_agent_out.contains("--no-approve"),
+        "Node agent must not have --no-approve"
+    );
+    assert!(
+        node_agent_out.contains("--approve"),
+        "Node agent must have --approve for workspace trust"
+    );
+    assert!(
+        !node_agent_out.contains("--tools"),
+        "Node agent must not restrict tools via --tools"
+    );
 
     // 2. Planner: MUST have --no-skills, --no-extensions, --no-approve, and restricted tools
     let mut planner_out = String::new();
@@ -274,10 +355,22 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         },
         |text| planner_out.push_str(&text),
     );
-    assert!(planner_out.contains("--no-skills"), "Planner must have --no-skills");
-    assert!(planner_out.contains("--no-extensions"), "Planner must have --no-extensions");
-    assert!(planner_out.contains("--no-approve"), "Planner must have --no-approve");
-    assert!(planner_out.contains("--tools node,edge,read,bash"), "Planner must restrict tools");
+    assert!(
+        planner_out.contains("--no-skills"),
+        "Planner must have --no-skills"
+    );
+    assert!(
+        planner_out.contains("--no-extensions"),
+        "Planner must have --no-extensions"
+    );
+    assert!(
+        planner_out.contains("--no-approve"),
+        "Planner must have --no-approve"
+    );
+    assert!(
+        planner_out.contains("--tools node,edge,read,bash"),
+        "Planner must restrict tools"
+    );
 
     // 3. Partitioner: MUST have --no-skills, --no-extensions, --no-approve, and --no-tools
     let mut partitioner_out = String::new();
@@ -297,10 +390,22 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         },
         |text| partitioner_out.push_str(&text),
     );
-    assert!(partitioner_out.contains("--no-skills"), "Partitioner must have --no-skills");
-    assert!(partitioner_out.contains("--no-extensions"), "Partitioner must have --no-extensions");
-    assert!(partitioner_out.contains("--no-approve"), "Partitioner must have --no-approve");
-    assert!(partitioner_out.contains("--no-tools"), "Partitioner must have --no-tools");
+    assert!(
+        partitioner_out.contains("--no-skills"),
+        "Partitioner must have --no-skills"
+    );
+    assert!(
+        partitioner_out.contains("--no-extensions"),
+        "Partitioner must have --no-extensions"
+    );
+    assert!(
+        partitioner_out.contains("--no-approve"),
+        "Partitioner must have --no-approve"
+    );
+    assert!(
+        partitioner_out.contains("--no-tools"),
+        "Partitioner must have --no-tools"
+    );
 }
 
 #[test]
@@ -312,22 +417,48 @@ printf 'ROLE=%s\nROOT=%s\n' "$GRAPHER_MODE" "$GRAPHER_WORKSPACE_ROOT"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
 "#).unwrap();
     let config = Config {
-        repository: String::new(), engine: "pi".into(), pi_command: "/bin/sh".into(),
-        pi_args: vec![script.to_string_lossy().into()], model: "test-model".into(),
-        max_parallel: 2, max_feedback: 3,
+        repository: String::new(),
+        engine: "pi".into(),
+        pi_command: "/bin/sh".into(),
+        pi_args: vec![script.to_string_lossy().into()],
+        model: "test-model".into(),
+        max_parallel: 2,
+        max_feedback: 3,
     };
-    for (role, name) in [(PiRole::Partitioner, "partition"), (PiRole::Planner, "planner"), (PiRole::NodeAgent, "node"), (PiRole::Merger, "merger")] {
+    for (role, name) in [
+        (PiRole::Partitioner, "partition"),
+        (PiRole::Planner, "planner"),
+        (PiRole::NodeAgent, "node"),
+        (PiRole::Merger, "merger"),
+    ] {
         let cwd = temp.path().join(name);
         fs::create_dir(&cwd).unwrap();
         let mut output = String::new();
-        run_pi(PiRequest {
-            role, config: &config, cwd: &cwd, task: "task", session_dir: &cwd.join("session"),
-            extension: None, tools: None, session_id: None, extra_args: vec![],
-            environment: vec![("GRAPHER_MODE", "wrong-role".into()), ("GRAPHER_WORKSPACE_ROOT", "/wrong/root".into())],
-            system_prompt: None,
-        }, |text| output.push_str(&text)).unwrap();
+        run_pi(
+            PiRequest {
+                role,
+                config: &config,
+                cwd: &cwd,
+                task: "task",
+                session_dir: &cwd.join("session"),
+                extension: None,
+                tools: None,
+                session_id: None,
+                extra_args: vec![],
+                environment: vec![
+                    ("GRAPHER_MODE", "wrong-role".into()),
+                    ("GRAPHER_WORKSPACE_ROOT", "/wrong/root".into()),
+                ],
+                system_prompt: None,
+            },
+            |text| output.push_str(&text),
+        )
+        .unwrap();
         assert!(output.contains(&format!("ROLE={name}\n")), "{output}");
-        assert!(output.contains(&format!("ROOT={}\n", cwd.canonicalize().unwrap().display())), "{output}");
+        assert!(
+            output.contains(&format!("ROOT={}\n", cwd.canonicalize().unwrap().display())),
+            "{output}"
+        );
         assert!(!output.contains("wrong-role") && !output.contains("/wrong/root"));
     }
 }
@@ -374,9 +505,19 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert_eq!(resolved.thinking, None);
     let saved_thinking = std::env::var("PARTITIONER_THINKING").ok();
     std::env::remove_var("PARTITIONER_THINKING");
-    assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &base_config).thinking.as_deref(), Some("off"));
+    assert_eq!(
+        PiModelConfig::resolve(PiRole::Partitioner, &base_config)
+            .thinking
+            .as_deref(),
+        Some("off")
+    );
     std::env::set_var("PARTITIONER_THINKING", "medium");
-    assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &base_config).thinking.as_deref(), Some("medium"));
+    assert_eq!(
+        PiModelConfig::resolve(PiRole::Partitioner, &base_config)
+            .thinking
+            .as_deref(),
+        Some("medium")
+    );
     match saved_thinking {
         Some(value) => std::env::set_var("PARTITIONER_THINKING", value),
         None => std::env::remove_var("PARTITIONER_THINKING"),
@@ -408,11 +549,26 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         |text| output.push_str(&text),
     );
 
-    assert!(output.contains("PI_MODEL_ENV: UNSET"), "Child process must not inherit PI_MODEL");
-    assert!(output.contains("PI_THINKING_ENV: UNSET"), "Child process must not inherit PI_THINKING");
-    assert!(output.contains("PI_SESSION_ID_ENV: UNSET"), "Child process must not inherit PI_SESSION_ID");
-    assert!(output.contains("PI_SESSION_FILE_ENV: UNSET"), "Child process must not inherit PI_SESSION_FILE");
-    assert!(output.contains("CLI_MODEL: internal-grapher-model"), "Child must receive internal grapher model via --model");
+    assert!(
+        output.contains("PI_MODEL_ENV: UNSET"),
+        "Child process must not inherit PI_MODEL"
+    );
+    assert!(
+        output.contains("PI_THINKING_ENV: UNSET"),
+        "Child process must not inherit PI_THINKING"
+    );
+    assert!(
+        output.contains("PI_SESSION_ID_ENV: UNSET"),
+        "Child process must not inherit PI_SESSION_ID"
+    );
+    assert!(
+        output.contains("PI_SESSION_FILE_ENV: UNSET"),
+        "Child process must not inherit PI_SESSION_FILE"
+    );
+    assert!(
+        output.contains("CLI_MODEL: internal-grapher-model"),
+        "Child must receive internal grapher model via --model"
+    );
 
     // Clean up test env
     std::env::remove_var("PI_MODEL");
@@ -420,4 +576,3 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     std::env::remove_var("PI_SESSION_ID");
     std::env::remove_var("PI_SESSION_FILE");
 }
-

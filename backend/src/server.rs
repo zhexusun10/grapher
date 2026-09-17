@@ -3,7 +3,7 @@ use crate::{
     engine::{parse_route_decision, run_pi, PiModelConfig, PiRequest, PiRole},
     model::*,
     runtime::{perform, Runtime},
-    snapshot_view::{snapshot_metadata, execution_page},
+    snapshot_view::{execution_page, snapshot_metadata},
 };
 use serde::Serialize;
 use std::{
@@ -78,23 +78,42 @@ mod prompt_tests {
         let root = temp.path().join("runtime");
         let service = Arc::new(Service {
             runtime: Mutex::new(Runtime::open(&root).unwrap()),
-            driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
             extension: temp.path().join("unused.ts"),
         });
         let before = service.runtime.lock().unwrap().state.run_id.clone();
-        let result = plan_goal_internal("Build two modules".into(), Config {
-            repository: repo.to_string_lossy().into(), engine: "pi".into(),
-            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: String::new(), max_parallel: 2, max_feedback: 3,
-        }, &service, |_| {}, |_| panic!("Failure must not emit a route"), |_| {});
+        let result = plan_goal_internal(
+            "Build two modules".into(),
+            Config {
+                repository: repo.to_string_lossy().into(),
+                engine: "pi".into(),
+                pi_command: "/bin/sh".into(),
+                pi_args: vec![script.to_string_lossy().into()],
+                model: String::new(),
+                max_parallel: 2,
+                max_feedback: 3,
+            },
+            &service,
+            |_| {},
+            |_| panic!("Failure must not emit a route"),
+            |_| {},
+        );
         assert!(result.unwrap_err().0.contains("Partitioner failed"));
         let runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.state.run_id, before);
         assert!(runtime.state.executions.is_empty());
         assert!(!runtime.state.approved);
         assert!(!service.planning.load(Ordering::SeqCst));
-        let directory = fs::read_dir(root.join("planning")).unwrap().next().unwrap().unwrap().path();
-        assert!(fs::read_to_string(directory.join("partition.jsonl")).unwrap().contains("provider unavailable"));
+        let directory = fs::read_dir(root.join("planning"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(fs::read_to_string(directory.join("partition.jsonl"))
+            .unwrap()
+            .contains("provider unavailable"));
         assert!(!directory.join("route.json").exists());
         let summary_content = fs::read_to_string(directory.join("summary.json")).unwrap();
         let failure_summary: PlanningSummary = serde_json::from_str(&summary_content).unwrap();
@@ -118,35 +137,76 @@ esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
 "#, release.display())).unwrap();
         let mut runtime = Runtime::open(root).unwrap();
-        runtime.create(Graph {
-            original_goal: "Check real completion order".into(),
-            nodes: ["a_slow", "z_fast", "after_fast"].into_iter()
-                .map(|name| Node { name: name.into(), task: "Write your result".into() }).collect(),
-            edges: vec![Edge { from: "z_fast".into(), to: "after_fast".into(), feedback: false, relation: String::new() }],
-        }, Config { repository: repository.to_string_lossy().into(), engine: "pi".into(),
-            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: "test".into(), max_parallel: 2, max_feedback: 2 }).unwrap();
+        runtime
+            .create(
+                Graph {
+                    original_goal: "Check real completion order".into(),
+                    nodes: ["a_slow", "z_fast", "after_fast"]
+                        .into_iter()
+                        .map(|name| Node {
+                            name: name.into(),
+                            task: "Write your result".into(),
+                        })
+                        .collect(),
+                    edges: vec![Edge {
+                        from: "z_fast".into(),
+                        to: "after_fast".into(),
+                        feedback: false,
+                        relation: String::new(),
+                    }],
+                },
+                Config {
+                    repository: repository.to_string_lossy().into(),
+                    engine: "pi".into(),
+                    pi_command: "/bin/sh".into(),
+                    pi_args: vec![script.to_string_lossy().into()],
+                    model: "test".into(),
+                    max_parallel: 2,
+                    max_feedback: 2,
+                },
+            )
+            .unwrap();
         runtime.approve().unwrap();
-        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
-            planning: AtomicBool::new(false), extension: root.join("unused.ts") });
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
+            extension: root.join("unused.ts"),
+        });
         drive(service.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let observed = loop {
             let state = service.runtime.lock().unwrap().state.clone();
-            if state.nodes["after_fast"].status == "done" || std::time::Instant::now() > deadline { break state; }
+            if state.nodes["after_fast"].status == "done" || std::time::Instant::now() > deadline {
+                break state;
+            }
             thread::sleep(std::time::Duration::from_millis(20));
         };
         // Always release and drain before assertions, even on a regression.
         fs::write(&release, "release").unwrap();
-        while service.driving.load(Ordering::SeqCst) { thread::sleep(std::time::Duration::from_millis(20)); }
+        while service.driving.load(Ordering::SeqCst) {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert_eq!(observed.nodes["z_fast"].status, "done");
         assert_eq!(observed.nodes["a_slow"].status, "running");
         assert_eq!(observed.nodes["after_fast"].status, "done");
-        let fast = observed.executions.iter().find(|e| e.node == "z_fast").unwrap();
+        let fast = observed
+            .executions
+            .iter()
+            .find(|e| e.node == "z_fast")
+            .unwrap();
         assert!(fast.completed_at.is_some());
         let runtime = service.runtime.lock().unwrap();
         let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
-        assert_eq!(replayed.executions.iter().find(|e| e.node == "z_fast").unwrap().completed_at, fast.completed_at);
+        assert_eq!(
+            replayed
+                .executions
+                .iter()
+                .find(|e| e.node == "z_fast")
+                .unwrap()
+                .completed_at,
+            fast.completed_at
+        );
         assert_eq!(replayed.phase, "completed");
     }
 
@@ -154,35 +214,79 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() {
         let temp = tempfile::TempDir::new().unwrap();
         let runtime = Runtime::open(temp.path()).unwrap();
-        let text = format!("{}{}\n", "a".repeat(256 * 1024 - 1), "规划输出".repeat(100_000));
-        let execution = Execution { id: "large".into(), node: "worker".into(), revision: 1, attempt: 1,
-            session_id: "fresh".into(), worktree: String::new(), before: String::new(), after: None,
-            status: "running".into(), output: text.clone(), started_at: now(), completed_at: None };
-        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
-            planning: AtomicBool::new(false), extension: temp.path().join("unused") });
+        let text = format!(
+            "{}{}\n",
+            "a".repeat(256 * 1024 - 1),
+            "规划输出".repeat(100_000)
+        );
+        let execution = Execution {
+            id: "large".into(),
+            node: "worker".into(),
+            revision: 1,
+            attempt: 1,
+            session_id: "fresh".into(),
+            worktree: String::new(),
+            before: String::new(),
+            after: None,
+            status: "running".into(),
+            output: text.clone(),
+            started_at: now(),
+            completed_at: None,
+        };
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused"),
+        });
         {
             let mut runtime = service.runtime.lock().unwrap();
             runtime.state.run_id = "large-run".into();
             runtime.state.executions.push(execution);
-            runtime.state.events.push(Event { sequence: 1, timestamp: now(), kind: EventKind::Finished {
-                execution_id: "large".into(), head: "head".into(), output: text.clone() } });
+            runtime.state.events.push(Event {
+                sequence: 1,
+                timestamp: now(),
+                kind: EventKind::Finished {
+                    execution_id: "large".into(),
+                    head: "head".into(),
+                    output: text.clone(),
+                },
+            });
         }
-        let metadata = dispatch(&service, "snapshot", serde_json::json!({"detail":"metadata"})).unwrap();
+        let metadata = dispatch(
+            &service,
+            "snapshot",
+            serde_json::json!({"detail":"metadata"}),
+        )
+        .unwrap();
         assert!(metadata.to_string().len() < 2048);
         assert_eq!(metadata["executions"][0]["outputBytes"], text.len());
         let mut restored = String::new();
         let mut offset = 0;
         loop {
-            let page = get_execution_output(&serde_json::json!({"runId":"large-run", "executionId":"large", "offset":offset}), &service).unwrap();
+            let page = get_execution_output(
+                &serde_json::json!({"runId":"large-run", "executionId":"large", "offset":offset}),
+                &service,
+            )
+            .unwrap();
             let content = page["content"].as_str().unwrap();
             assert!(content.len() <= 256 * 1024);
             restored.push_str(content);
             offset = page["nextOffset"].as_u64().unwrap();
-            if page["complete"] == true { break; }
+            if page["complete"] == true {
+                break;
+            }
         }
         assert_eq!(restored, text);
-        assert!(get_execution_output(&serde_json::json!({"runId":"large-run", "executionId":"large", "offset":256*1024}), &service).is_err());
-        assert_eq!(service.runtime.lock().unwrap().state.executions[0].output, text);
+        assert!(get_execution_output(
+            &serde_json::json!({"runId":"large-run", "executionId":"large", "offset":256*1024}),
+            &service
+        )
+        .is_err());
+        assert_eq!(
+            service.runtime.lock().unwrap().state.executions[0].output,
+            text
+        );
     }
 
     #[cfg(feature = "fixture")]
@@ -203,19 +307,56 @@ esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
 "#, release.display())).unwrap();
         let mut runtime = Runtime::open(root).unwrap();
-        runtime.create(Graph { original_goal: "Feedback barrier".into(),
-            nodes: ["owner", "slow", "review", "consumer"].into_iter().map(|name| Node { name: name.into(), task: "Work".into() }).collect(),
-            edges: [("owner", "review", false), ("review", "owner", true), ("review", "consumer", false)].into_iter()
-                .map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback, relation: String::new() }).collect(),
-        }, Config { repository: repository.to_string_lossy().into(), engine: "pi".into(), pi_command: "/bin/sh".into(),
-            pi_args: vec![script.to_string_lossy().into()], model: "test".into(), max_parallel: 2, max_feedback: 1 }).unwrap();
+        runtime
+            .create(
+                Graph {
+                    original_goal: "Feedback barrier".into(),
+                    nodes: ["owner", "slow", "review", "consumer"]
+                        .into_iter()
+                        .map(|name| Node {
+                            name: name.into(),
+                            task: "Work".into(),
+                        })
+                        .collect(),
+                    edges: [
+                        ("owner", "review", false),
+                        ("review", "owner", true),
+                        ("review", "consumer", false),
+                    ]
+                    .into_iter()
+                    .map(|(from, to, feedback)| Edge {
+                        from: from.into(),
+                        to: to.into(),
+                        feedback,
+                        relation: String::new(),
+                    })
+                    .collect(),
+                },
+                Config {
+                    repository: repository.to_string_lossy().into(),
+                    engine: "pi".into(),
+                    pi_command: "/bin/sh".into(),
+                    pi_args: vec![script.to_string_lossy().into()],
+                    model: "test".into(),
+                    max_parallel: 2,
+                    max_feedback: 1,
+                },
+            )
+            .unwrap();
         runtime.approve().unwrap();
-        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false), planning: AtomicBool::new(false), extension: root.join("unused") });
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
+            extension: root.join("unused"),
+        });
         drive(service.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let observed = loop {
             let state = service.runtime.lock().unwrap().state.clone();
-            if state.nodes["owner"].status == "done" || std::time::Instant::now() > deadline { break state; }
+            if state.nodes["owner"].status == "done" || std::time::Instant::now() > deadline {
+                break state;
+            }
             thread::sleep(std::time::Duration::from_millis(20));
         };
         fs::write(&release, "release").unwrap();
@@ -226,9 +367,29 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         assert_eq!(observed.nodes["slow"].status, "running");
         assert_eq!(observed.nodes["review"].status, "waiting");
         let runtime = service.runtime.lock().unwrap();
-        assert_eq!(runtime.state.executions.iter().filter(|e| e.node == "slow").count(), 1);
-        assert_eq!(runtime.state.executions.iter().filter(|e| e.node == "owner").count(), 2);
-        assert!(!runtime.state.executions.iter().any(|e| e.node == "consumer"));
+        assert_eq!(
+            runtime
+                .state
+                .executions
+                .iter()
+                .filter(|e| e.node == "slow")
+                .count(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .state
+                .executions
+                .iter()
+                .filter(|e| e.node == "owner")
+                .count(),
+            2
+        );
+        assert!(!runtime
+            .state
+            .executions
+            .iter()
+            .any(|e| e.node == "consumer"));
         assert_eq!(runtime.state.phase, "needs_attention");
     }
 
@@ -363,7 +524,11 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         };
         let unattr_dir = temp.path().join("planning").join("unattributed-plan");
         fs::create_dir_all(&unattr_dir).unwrap();
-        fs::write(unattr_dir.join("summary.json"), serde_json::to_string_pretty(&unattr_summary).unwrap()).unwrap();
+        fs::write(
+            unattr_dir.join("summary.json"),
+            serde_json::to_string_pretty(&unattr_summary).unwrap(),
+        )
+        .unwrap();
 
         let service = Arc::new(Service {
             runtime: Mutex::new(runtime),
@@ -374,7 +539,11 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
 
         // 1. Filter by repo-b: must return NOTHING (fail closed against repo-a and unattributed)
         let res_b = list_plannings(&service, Some("/workspace/repo-b".into())).unwrap();
-        assert_eq!(res_b.len(), 0, "Repo B must not receive Repo A or unattributed plannings");
+        assert_eq!(
+            res_b.len(),
+            0,
+            "Repo B must not receive Repo A or unattributed plannings"
+        );
 
         // 2. Filter by repo-a: must backfill legacy-plan-a and return it, and exclude unattributed
         let res_a = list_plannings(&service, Some("/workspace/repo-a".into())).unwrap();
@@ -400,23 +569,47 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         let temp = tempfile::TempDir::new().unwrap();
         let mut runtime = Runtime::open(temp.path()).unwrap();
         let config = Config {
-            repository: String::new(), engine: "fixture".into(),
-            pi_command: String::new(), pi_args: Vec::new(), model: String::new(),
-            max_parallel: 2, max_feedback: 1,
+            repository: String::new(),
+            engine: "fixture".into(),
+            pi_command: String::new(),
+            pi_args: Vec::new(),
+            model: String::new(),
+            max_parallel: 2,
+            max_feedback: 1,
         };
-        runtime.create(Graph {
-            original_goal: "Publish both independent outcomes".into(),
-            nodes: vec![Node { name: "first".into(), task: "First".into() },
-                Node { name: "last".into(), task: "Last".into() }], edges: Vec::new(),
-        }, config).unwrap();
+        runtime
+            .create(
+                Graph {
+                    original_goal: "Publish both independent outcomes".into(),
+                    nodes: vec![
+                        Node {
+                            name: "first".into(),
+                            task: "First".into(),
+                        },
+                        Node {
+                            name: "last".into(),
+                            task: "Last".into(),
+                        },
+                    ],
+                    edges: Vec::new(),
+                },
+                config,
+            )
+            .unwrap();
         runtime.approve().unwrap();
-        let service = Arc::new(Service { runtime: Mutex::new(runtime),
-            driving: AtomicBool::new(false), planning: AtomicBool::new(false),
-            extension: temp.path().join("unused-extension.ts") });
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused-extension.ts"),
+        });
         drive(service.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while service.driving.load(Ordering::SeqCst) {
-            assert!(std::time::Instant::now() < deadline, "Driver did not settle");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Driver did not settle"
+            );
             thread::sleep(std::time::Duration::from_millis(20));
         }
         let runtime = service.runtime.lock().unwrap();
@@ -424,7 +617,9 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         let source = temp.path().join("fixture-repository");
         assert!(source.join("first.md").exists());
         assert!(source.join("last.md").exists());
-        assert!(crate::workspace::git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+        assert!(crate::workspace::git(&source, &["status", "--porcelain"])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -434,7 +629,10 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             assert!(!system.contains("{{query}}"));
             assert!(!system.contains("Goal:"));
             assert_eq!(query, "{{query}}");
-            assert_eq!(render_prompt(query, &[("query", "Build a graph")]), "Build a graph");
+            assert_eq!(
+                render_prompt(query, &[("query", "Build a graph")]),
+                "Build a graph"
+            );
         }
     }
 }
@@ -468,32 +666,50 @@ fn load_env_file() {
 fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String> {
     load_env_file();
     let active_config = if service.planning.load(Ordering::SeqCst) {
-        let active = list_plannings(service, None)?.into_iter().find(|summary| summary.status.as_deref() == Some("running"));
-        let root = service.runtime.lock().map_err(|e| e.to_string())?.root.clone();
-        active.and_then(|summary| fs::read(root.join("planning").join(summary.planning_id).join("request.json")).ok())
+        let active = list_plannings(service, None)?
+            .into_iter()
+            .find(|summary| summary.status.as_deref() == Some("running"));
+        let root = service
+            .runtime
+            .lock()
+            .map_err(|e| e.to_string())?
+            .root
+            .clone();
+        active
+            .and_then(|summary| {
+                fs::read(
+                    root.join("planning")
+                        .join(summary.planning_id)
+                        .join("request.json"),
+                )
+                .ok()
+            })
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|value| serde_json::from_value::<Config>(value["config"].clone()).ok())
-    } else { None };
+    } else {
+        None
+    };
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(feature = "fixture")]
-    let entrypoint = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../engine/entrypoint.mjs");
+    let entrypoint = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs");
     let detected_repo = crate::workspace::detect(None).ok().flatten();
-    let mut config = active_config.or_else(|| runtime.state.config.clone()).unwrap_or(Config {
-        repository: detected_repo
-            .as_ref()
-            .map(|r| r.path.clone())
-            .unwrap_or_default(),
-        model: "qwen3.8-flash".into(),
-        max_parallel: 2,
-        max_feedback: 3,
-        #[cfg(feature = "fixture")]
-        engine: "pi".into(),
-        #[cfg(feature = "fixture")]
-        pi_command: "node".into(),
-        #[cfg(feature = "fixture")]
-        pi_args: vec![entrypoint.to_string_lossy().into()],
-    });
+    let mut config = active_config
+        .or_else(|| runtime.state.config.clone())
+        .unwrap_or(Config {
+            repository: detected_repo
+                .as_ref()
+                .map(|r| r.path.clone())
+                .unwrap_or_default(),
+            model: "qwen3.8-flash".into(),
+            max_parallel: 2,
+            max_feedback: 3,
+            #[cfg(feature = "fixture")]
+            engine: "pi".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: "node".into(),
+            #[cfg(feature = "fixture")]
+            pi_args: vec![entrypoint.to_string_lossy().into()],
+        });
     if config.model.trim().is_empty() {
         config.model = "qwen3.8-flash".into();
     }
@@ -520,8 +736,11 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
         None
     };
     Ok(Bootstrap {
-        snapshot: if metadata { snapshot_metadata(&runtime.state)? }
-            else { serde_json::to_value(&runtime.state).map_err(|e| e.to_string())? },
+        snapshot: if metadata {
+            snapshot_metadata(&runtime.state)?
+        } else {
+            serde_json::to_value(&runtime.state).map_err(|e| e.to_string())?
+        },
         config,
         runs: runtime.store.runs()?,
         data_path: runtime.root.to_string_lossy().into(),
@@ -559,7 +778,11 @@ fn compile_graph(graph: Graph) -> Result<Plan, Vec<compiler::Diagnostic>> {
     compiler::compile(&graph, true)
 }
 
-fn save_graph(graph: Graph, mut config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
+fn save_graph(
+    graph: Graph,
+    mut config: Config,
+    service: &Arc<Service>,
+) -> Result<Snapshot, String> {
     if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
         return Err("Wait for the current operation to finish".into());
     }
@@ -571,10 +794,7 @@ fn save_graph(graph: Graph, mut config: Config, service: &Arc<Service>) -> Resul
     Ok(runtime.state.clone())
 }
 
-pub fn parse_planning_role_metrics(
-    model: &str,
-    log: &str,
-) -> PlanningRoleMetrics {
+pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetrics {
     let mut session_start = None;
     let mut last_event = None;
     let mut duration_seconds = 0.0;
@@ -604,7 +824,11 @@ pub fn parse_planning_role_metrics(
                     last_event = Some(ts_str);
                 }
             }
-            match value.get("type").and_then(|v| v.as_str()).unwrap_or_default() {
+            match value
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+            {
                 "grapher_process_exited" => {
                     if let Some(elapsed) = value.get("elapsedMs").and_then(|v| v.as_f64()) {
                         duration_seconds = elapsed / 1000.0;
@@ -615,12 +839,22 @@ pub fn parse_planning_role_metrics(
                         if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
                             assistant_messages += 1;
                             if let Some(u) = msg.get("usage") {
-                                usage.input += u.get("input").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.output += u.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.cache_read += u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.cache_write += u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.reasoning += u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.total_tokens += u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.input +=
+                                    u.get("input").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.output +=
+                                    u.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.cache_read +=
+                                    u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
+                                usage.cache_write +=
+                                    u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
+                                usage.reasoning +=
+                                    u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
+                                usage.total_tokens +=
+                                    u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
                             }
                         }
                     }
@@ -629,7 +863,11 @@ pub fn parse_planning_role_metrics(
                     tools += 1;
                 }
                 "tool_execution_end" => {
-                    if value.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if value
+                        .get("isError")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
                         tool_errors += 1;
                     }
                 }
@@ -663,7 +901,10 @@ fn plan_goal_internal(
     }
     #[cfg(feature = "fixture")]
     if config.engine != "pi" {
-        return Err(("Automatic planning requires the Execution Instance Engine".into(), None));
+        return Err((
+            "Automatic planning requires the Execution Instance Engine".into(),
+            None,
+        ));
     }
     if service.driving.load(Ordering::SeqCst) || service.planning.swap(true, Ordering::SeqCst) {
         return Err(("Another operation is running".into(), None));
@@ -688,199 +929,230 @@ fn plan_goal_internal(
         let planning_id = Uuid::new_v4().to_string();
         let directory = root.join("planning").join(&planning_id);
         fs::create_dir_all(&directory).map_err(|error| (error.to_string(), None))?;
-        fs::write(directory.join("request.json"), serde_json::to_vec(&serde_json::json!({
-            "goal": goal, "config": config
-        })).map_err(|e| (e.to_string(), None))?).map_err(|e| (e.to_string(), None))?;
+        fs::write(
+            directory.join("request.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "goal": goal, "config": config
+            }))
+            .map_err(|e| (e.to_string(), None))?,
+        )
+        .map_err(|e| (e.to_string(), None))?;
         // Publish identity before launching Pi; a browser connection does not own planning.
         let running = PlanningSummary {
-            planning_id: planning_id.clone(), status: Some("running".into()),
-            created_at: Some(now_ms), repository: Some(repo_str.clone()),
-            roles: ["partition", "planner"].into_iter().map(|role|
-                (role.to_string(), PlanningRoleMetrics::default())).collect(),
+            planning_id: planning_id.clone(),
+            status: Some("running".into()),
+            created_at: Some(now_ms),
+            repository: Some(repo_str.clone()),
+            roles: ["partition", "planner"]
+                .into_iter()
+                .map(|role| (role.to_string(), PlanningRoleMetrics::default()))
+                .collect(),
             ..Default::default()
         };
         write_planning_summary(&directory, &running).map_err(|error| (error, None))?;
         let plan_outcome = (|| -> Result<Snapshot, String> {
-        let route_path = directory.join("route.json");
-        let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
-        let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
-            .unwrap_or_else(|_| default_partitioner_system.to_string());
-        let task = format!("User query:\n\n{goal}");
-        let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
-        let partitioner_config = partitioner_model_cfg.effective_config(&config);
-        let mut partitioner_extra_args = vec!["--no-tools", "--no-context-files"];
-        if let Some(thinking) = &partitioner_model_cfg.thinking {
-            partitioner_extra_args.push("--thinking");
-            partitioner_extra_args.push(thinking.as_str());
-        }
-        let mut log = String::new();
-        let mut partition_log = fs::File::create(directory.join("partition.jsonl")).map_err(|e| e.to_string())?;
-        let mut log_error = None;
-        let partition_start = std::time::Instant::now();
-        let partition_result = run_pi(
-            PiRequest {
-                role: PiRole::Partitioner,
-                config: &partitioner_config,
-                cwd: &repository,
-                task: &task,
-                session_dir: &directory.join("partition-session"),
-                extension: None,
-                tools: Some(""),
-                session_id: None,
-                extra_args: partitioner_extra_args,
-                environment: vec![
-                    ("GRAPHER_MODE", "partition".into()),
-                    ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
-                ],
-                system_prompt: Some(&partitioner_system_prompt),
-            },
-            |text| {
-                if let Err(error) = partition_log.write_all(text.as_bytes()) { log_error = Some(error.to_string()); }
-                log.push_str(&text);
-                on_partitioner_line(&text);
-            },
-        );
-        let partition_wall_sec = partition_start.elapsed().as_secs_f64();
-        if let Some(error) = log_error { return Err(format!("Cannot persist planning output: {error}")); }
-        let mut partition_metrics = parse_planning_role_metrics(&partitioner_config.model, &log);
-        if partition_metrics.duration_seconds == 0.0 {
-            partition_metrics.duration_seconds = partition_wall_sec;
-        }
-        // A failed engine call is not a routing decision. In particular, do not
-        // turn authentication/provider failures into an auto-approved serial run.
-        let output = partition_result.map_err(|error| format!("Partitioner failed: {error}"))?;
-        let route = parse_route_decision(&output);
-        fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
-            .map_err(|error| error.to_string())?;
-        on_route(&route);
-        let mut planner_metrics = None;
-        let graph = match route.plan_type.as_str() {
-            "serial" => Graph {
-                original_goal: goal.clone(),
-                nodes: vec![Node {
-                    name: "task".into(),
-                    task: goal.clone(),
-                }],
-                edges: Vec::new(),
-            },
-            "graph" => {
-                let graph_path = directory.join("graph.json");
-                fs::write(
-                    &graph_path,
-                    serde_json::to_string(&Graph {
-                        original_goal: goal.clone(),
-                        ..Graph::default()
-                    })
-                    .unwrap(),
-                )
-                .map_err(|error| error.to_string())?;
-                let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
-                let planner_config = planner_model_cfg.effective_config(&config);
-                let (default_planner_system, _) = split_prompt_template(PLANNER_PROMPT);
-                let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
-                    .unwrap_or_else(|_| default_planner_system.to_string());
-                let task = format!("User query:\n\n{goal}");
-                let mut planner_extra_args = Vec::new();
-                if let Some(thinking) = &planner_model_cfg.thinking {
-                    planner_extra_args.push("--thinking");
-                    planner_extra_args.push(thinking.as_str());
-                }
-                let mut log = String::new();
-                let mut planner_log = fs::File::create(directory.join("planner.jsonl")).map_err(|e| e.to_string())?;
-                let mut log_error = None;
-                let planner_start = std::time::Instant::now();
-                let planner_result = run_pi(
-                    PiRequest {
-                        role: PiRole::Planner,
-                        config: &planner_config,
-                        cwd: &repository,
-                        task: &task,
-                        session_dir: &directory.join("planner-session"),
-                        extension: Some(&service.extension),
-                        tools: Some("node,edge,read,bash"),
-                        session_id: None,
-                        extra_args: planner_extra_args,
-                        environment: vec![
-                            ("GRAPHER_MODE", "planner".into()),
-                            ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
-                            (
-                                "GRAPHER_COMPILER_PATH",
-                                std::env::current_exe()
-                                    .map_err(|error| error.to_string())?
-                                    .to_string_lossy()
-                                    .into(),
-                            ),
-                        ],
-                        system_prompt: Some(&planner_system_prompt),
-                    },
-                    |text| {
-                        if let Err(error) = planner_log.write_all(text.as_bytes()) { log_error = Some(error.to_string()); }
-                        log.push_str(&text);
-                        on_planner_line(&text);
-                    },
-                );
-                let planner_wall_sec = planner_start.elapsed().as_secs_f64();
-                if let Some(error) = log_error { return Err(format!("Cannot persist planning output: {error}")); }
-                let mut m = parse_planning_role_metrics(&planner_config.model, &log);
-                if m.duration_seconds == 0.0 {
-                    m.duration_seconds = planner_wall_sec;
-                }
-                planner_metrics = Some(m);
-                planner_result?;
-                serde_json::from_str(
-                    &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?
+            let route_path = directory.join("route.json");
+            let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
+            let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
+                .unwrap_or_else(|_| default_partitioner_system.to_string());
+            let task = format!("User query:\n\n{goal}");
+            let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+            let partitioner_config = partitioner_model_cfg.effective_config(&config);
+            let mut partitioner_extra_args = vec!["--no-tools", "--no-context-files"];
+            if let Some(thinking) = &partitioner_model_cfg.thinking {
+                partitioner_extra_args.push("--thinking");
+                partitioner_extra_args.push(thinking.as_str());
             }
-            _ => return Err("Partitioner returned an invalid route".into()),
-        };
-        let total_planning_duration = planning_start.elapsed().as_secs_f64();
-        let model_duration = partition_metrics.duration_seconds
-            + planner_metrics.as_ref().map(|p| p.duration_seconds).unwrap_or(0.0);
-        let mut roles = std::collections::BTreeMap::new();
-        roles.insert("partition".to_string(), partition_metrics);
-        if let Some(m) = planner_metrics {
-            roles.insert("planner".to_string(), m);
-        }
-        let summary = PlanningSummary {
-            planning_id: planning_id.clone(),
-            roles,
-            total_planning_duration,
-            model_duration,
-            status: Some("success".to_string()),
-            error: None,
-            created_at: Some(now_ms),
-            repository: Some(repo_str.clone()),
-        };
+            let mut log = String::new();
+            let mut partition_log =
+                fs::File::create(directory.join("partition.jsonl")).map_err(|e| e.to_string())?;
+            let mut log_error = None;
+            let partition_start = std::time::Instant::now();
+            let partition_result = run_pi(
+                PiRequest {
+                    role: PiRole::Partitioner,
+                    config: &partitioner_config,
+                    cwd: &repository,
+                    task: &task,
+                    session_dir: &directory.join("partition-session"),
+                    extension: None,
+                    tools: Some(""),
+                    session_id: None,
+                    extra_args: partitioner_extra_args,
+                    environment: vec![
+                        ("GRAPHER_MODE", "partition".into()),
+                        ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
+                    ],
+                    system_prompt: Some(&partitioner_system_prompt),
+                },
+                |text| {
+                    if let Err(error) = partition_log.write_all(text.as_bytes()) {
+                        log_error = Some(error.to_string());
+                    }
+                    log.push_str(&text);
+                    on_partitioner_line(&text);
+                },
+            );
+            let partition_wall_sec = partition_start.elapsed().as_secs_f64();
+            if let Some(error) = log_error {
+                return Err(format!("Cannot persist planning output: {error}"));
+            }
+            let mut partition_metrics =
+                parse_planning_role_metrics(&partitioner_config.model, &log);
+            if partition_metrics.duration_seconds == 0.0 {
+                partition_metrics.duration_seconds = partition_wall_sec;
+            }
+            // A failed engine call is not a routing decision. In particular, do not
+            // turn authentication/provider failures into an auto-approved serial run.
+            let output =
+                partition_result.map_err(|error| format!("Partitioner failed: {error}"))?;
+            let route = parse_route_decision(&output);
+            fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
+                .map_err(|error| error.to_string())?;
+            on_route(&route);
+            let mut planner_metrics = None;
+            let graph = match route.plan_type.as_str() {
+                "serial" => Graph {
+                    original_goal: goal.clone(),
+                    nodes: vec![Node {
+                        name: "task".into(),
+                        task: goal.clone(),
+                    }],
+                    edges: Vec::new(),
+                },
+                "graph" => {
+                    let graph_path = directory.join("graph.json");
+                    fs::write(
+                        &graph_path,
+                        serde_json::to_string(&Graph {
+                            original_goal: goal.clone(),
+                            ..Graph::default()
+                        })
+                        .unwrap(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
+                    let planner_config = planner_model_cfg.effective_config(&config);
+                    let (default_planner_system, _) = split_prompt_template(PLANNER_PROMPT);
+                    let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
+                        .unwrap_or_else(|_| default_planner_system.to_string());
+                    let task = format!("User query:\n\n{goal}");
+                    let mut planner_extra_args = Vec::new();
+                    if let Some(thinking) = &planner_model_cfg.thinking {
+                        planner_extra_args.push("--thinking");
+                        planner_extra_args.push(thinking.as_str());
+                    }
+                    let mut log = String::new();
+                    let mut planner_log = fs::File::create(directory.join("planner.jsonl"))
+                        .map_err(|e| e.to_string())?;
+                    let mut log_error = None;
+                    let planner_start = std::time::Instant::now();
+                    let planner_result = run_pi(
+                        PiRequest {
+                            role: PiRole::Planner,
+                            config: &planner_config,
+                            cwd: &repository,
+                            task: &task,
+                            session_dir: &directory.join("planner-session"),
+                            extension: Some(&service.extension),
+                            tools: Some("node,edge,read,bash"),
+                            session_id: None,
+                            extra_args: planner_extra_args,
+                            environment: vec![
+                                ("GRAPHER_MODE", "planner".into()),
+                                ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
+                                (
+                                    "GRAPHER_COMPILER_PATH",
+                                    std::env::current_exe()
+                                        .map_err(|error| error.to_string())?
+                                        .to_string_lossy()
+                                        .into(),
+                                ),
+                            ],
+                            system_prompt: Some(&planner_system_prompt),
+                        },
+                        |text| {
+                            if let Err(error) = planner_log.write_all(text.as_bytes()) {
+                                log_error = Some(error.to_string());
+                            }
+                            log.push_str(&text);
+                            on_planner_line(&text);
+                        },
+                    );
+                    let planner_wall_sec = planner_start.elapsed().as_secs_f64();
+                    if let Some(error) = log_error {
+                        return Err(format!("Cannot persist planning output: {error}"));
+                    }
+                    let mut m = parse_planning_role_metrics(&planner_config.model, &log);
+                    if m.duration_seconds == 0.0 {
+                        m.duration_seconds = planner_wall_sec;
+                    }
+                    planner_metrics = Some(m);
+                    planner_result?;
+                    serde_json::from_str(
+                        &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
+                _ => return Err("Partitioner returned an invalid route".into()),
+            };
+            let total_planning_duration = planning_start.elapsed().as_secs_f64();
+            let model_duration = partition_metrics.duration_seconds
+                + planner_metrics
+                    .as_ref()
+                    .map(|p| p.duration_seconds)
+                    .unwrap_or(0.0);
+            let mut roles = std::collections::BTreeMap::new();
+            roles.insert("partition".to_string(), partition_metrics);
+            if let Some(m) = planner_metrics {
+                roles.insert("planner".to_string(), m);
+            }
+            let summary = PlanningSummary {
+                planning_id: planning_id.clone(),
+                roles,
+                total_planning_duration,
+                model_duration,
+                status: Some("success".to_string()),
+                error: None,
+                created_at: Some(now_ms),
+                repository: Some(repo_str.clone()),
+            };
 
-        #[allow(unused_mut)]
-        let mut final_config = config.clone();
-        #[cfg(not(feature = "fixture"))]
-        if final_config.model.trim().is_empty() {
-            final_config.model = "qwen3.8-flash".into();
-        }
-        let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-        runtime.create_with_planning(graph, final_config, Some(planning_id.clone()), Some(summary.clone()))?;
-        if route.plan_type == "serial" {
-            runtime.approve()?;
-        }
-        let snapshot = runtime.state.clone();
-        drop(runtime);
-        write_planning_summary(&directory, &summary)?;
-        if route.plan_type == "serial" {
-            drive(service.clone());
-        }
-        Ok(snapshot)
+            #[allow(unused_mut)]
+            let mut final_config = config.clone();
+            #[cfg(not(feature = "fixture"))]
+            if final_config.model.trim().is_empty() {
+                final_config.model = "qwen3.8-flash".into();
+            }
+            let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+            runtime.create_with_planning(
+                graph,
+                final_config,
+                Some(planning_id.clone()),
+                Some(summary.clone()),
+            )?;
+            if route.plan_type == "serial" {
+                runtime.approve()?;
+            }
+            let snapshot = runtime.state.clone();
+            drop(runtime);
+            write_planning_summary(&directory, &summary)?;
+            if route.plan_type == "serial" {
+                drive(service.clone());
+            }
+            Ok(snapshot)
         })();
         match plan_outcome {
             Ok(snapshot) => Ok(snapshot),
             Err(err) => {
-                let mut roles: std::collections::BTreeMap<String, PlanningRoleMetrics> = Default::default();
+                let mut roles: std::collections::BTreeMap<String, PlanningRoleMetrics> =
+                    Default::default();
                 let mut model_duration = 0.0;
                 let partition_file = directory.join("partition.jsonl");
                 if partition_file.exists() {
                     if let Ok(content) = fs::read_to_string(&partition_file) {
-                        let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+                        let partitioner_model_cfg =
+                            PiModelConfig::resolve(PiRole::Partitioner, &config);
                         let partitioner_config = partitioner_model_cfg.effective_config(&config);
                         let m = parse_planning_role_metrics(&partitioner_config.model, &content);
                         model_duration += m.duration_seconds;
@@ -918,7 +1190,10 @@ fn plan_goal_internal(
     result
 }
 
-fn write_planning_summary(directory: &std::path::Path, summary: &PlanningSummary) -> Result<(), String> {
+fn write_planning_summary(
+    directory: &std::path::Path,
+    summary: &PlanningSummary,
+) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(summary).map_err(|e| e.to_string())?;
     let pending = directory.join("summary.pending");
     fs::write(&pending, &json).map_err(|e| e.to_string())?;
@@ -944,8 +1219,7 @@ fn recover_plannings(root: &std::path::Path) -> Result<(), String> {
 }
 
 fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
-    plan_goal_internal(goal, config, service, |_| {}, |_| {}, |_| {})
-        .map_err(|(error, _)| error)
+    plan_goal_internal(goal, config, service, |_| {}, |_| {}, |_| {}).map_err(|(error, _)| error)
 }
 
 fn drive(service: Arc<Service>) {
@@ -960,8 +1234,13 @@ fn drive(service: Arc<Service>) {
             loop {
                 let (jobs, root, parents) = {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                    let feedback_barrier = in_flight > 0 && runtime.state.graph.edges.iter().any(|edge| edge.feedback);
-                    let jobs = if feedback_barrier { Vec::new() } else { runtime.jobs()? };
+                    let feedback_barrier =
+                        in_flight > 0 && runtime.state.graph.edges.iter().any(|edge| edge.feedback);
+                    let jobs = if feedback_barrier {
+                        Vec::new()
+                    } else {
+                        runtime.jobs()?
+                    };
                     let parents: Vec<_> = jobs
                         .iter()
                         .map(|job| runtime.parents(&job.execution.node))
@@ -973,18 +1252,49 @@ fn drive(service: Arc<Service>) {
                     let publication = {
                         let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                         if runtime.state.phase == "publishing" {
-                            Some((runtime.state.config.clone().ok_or("Missing config")?,
+                            Some((
+                                runtime.state.config.clone().ok_or("Missing config")?,
                                 runtime.state.graph.original_goal.clone(),
-                                runtime.state.publication.clone().ok_or("Missing publication state")?))
-                        } else { None }
+                                runtime
+                                    .state
+                                    .publication
+                                    .clone()
+                                    .ok_or("Missing publication state")?,
+                            ))
+                        } else {
+                            None
+                        }
                     };
                     if let Some((config, query, publication)) = publication {
                         let repository = PathBuf::from(&publication.repository);
-                        let result = crate::graph_merge::merge_graph(&repository, &publication.heads, || {
-                            let attempt = service.runtime.lock().map_err(|e| e.to_string())?.state.mergers.len() + 1;
-                            crate::graph_merge::resolve_with_merger(&repository, &query, &config, &root, attempt,
-                                |event| service.runtime.lock().map_err(|e| e.to_string())?.emit(event))
-                        });
+                        let result = crate::graph_merge::merge_graph(
+                            &repository,
+                            &publication.heads,
+                            || {
+                                let attempt = service
+                                    .runtime
+                                    .lock()
+                                    .map_err(|e| e.to_string())?
+                                    .state
+                                    .mergers
+                                    .len()
+                                    + 1;
+                                crate::graph_merge::resolve_with_merger(
+                                    &repository,
+                                    &query,
+                                    &config,
+                                    &root,
+                                    attempt,
+                                    |event| {
+                                        service
+                                            .runtime
+                                            .lock()
+                                            .map_err(|e| e.to_string())?
+                                            .emit(event)
+                                    },
+                                )
+                            },
+                        );
                         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                         match result {
                             Ok(head) => runtime.emit(EventKind::PublicationCompleted { head })?,
@@ -995,11 +1305,12 @@ fn drive(service: Arc<Service>) {
                 }
                 in_flight += jobs.len();
                 for (job, parents) in jobs.into_iter().zip(parents) {
-                        let service = service.clone();
-                        let root = root.clone();
-                        let completed_tx = completed_tx.clone();
-                        thread::spawn(move || {
-                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| perform(
+                    let service = service.clone();
+                    let root = root.clone();
+                    let completed_tx = completed_tx.clone();
+                    thread::spawn(move || {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            perform(
                                 &job,
                                 &root,
                                 &parents,
@@ -1023,16 +1334,25 @@ fn drive(service: Arc<Service>) {
                                             head,
                                         })
                                 },
-                            ))).unwrap_or_else(|_| Err("Execution worker panicked".into()));
-                            let result = service.runtime.lock().map_err(|error| error.to_string())
-                                .and_then(|mut runtime| runtime.finish(&job.execution, result));
-                            let _ = completed_tx.send(result);
-                        });
+                            )
+                        }))
+                        .unwrap_or_else(|_| Err("Execution worker panicked".into()));
+                        let result = service
+                            .runtime
+                            .lock()
+                            .map_err(|error| error.to_string())
+                            .and_then(|mut runtime| runtime.finish(&job.execution, result));
+                        let _ = completed_tx.send(result);
+                    });
                 }
                 if in_flight > 0 {
-                    let completed = completed_rx.recv().map_err(|_| "Execution channel closed")?;
+                    let completed = completed_rx
+                        .recv()
+                        .map_err(|_| "Execution channel closed")?;
                     in_flight -= 1;
-                    if let Some(feedback) = completed? { feedback_results.push(feedback); }
+                    if let Some(feedback) = completed? {
+                        feedback_results.push(feedback);
+                    }
                 }
                 if in_flight == 0 {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
@@ -1081,7 +1401,10 @@ fn control(
     if service.planning.load(Ordering::SeqCst) {
         return Err("Wait for planning to finish".into());
     }
-    if matches!(action.as_str(), "intervene" | "resolve" | "retry_publication") && service.driving.load(Ordering::SeqCst)
+    if matches!(
+        action.as_str(),
+        "intervene" | "resolve" | "retry_publication"
+    ) && service.driving.load(Ordering::SeqCst)
     {
         return Err("Wait for active executions to finish before intervening".into());
     }
@@ -1149,7 +1472,8 @@ fn is_valid_planning_id(id: &str) -> bool {
     if id.is_empty() || id.len() > 128 {
         return false;
     }
-    id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    id.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         && !id.starts_with('.')
         && id != ".."
 }
@@ -1164,15 +1488,21 @@ fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningS
     if let Ok(canonical_summary) = summary_path.canonicalize() {
         if let Ok(canonical_planning_dir) = planning_dir.canonicalize() {
             if !canonical_summary.starts_with(&canonical_planning_dir) {
-                return Err(format!("Invalid planning ID: path traversal detected: {planning_id}"));
+                return Err(format!(
+                    "Invalid planning ID: path traversal detected: {planning_id}"
+                ));
             }
         }
     }
     if summary_path.exists() {
         let content = fs::read_to_string(&summary_path).map_err(|error| error.to_string())?;
-        let mut summary = serde_json::from_str::<PlanningSummary>(&content).map_err(|error| error.to_string())?;
+        let mut summary =
+            serde_json::from_str::<PlanningSummary>(&content).map_err(|error| error.to_string())?;
         if summary.repository.is_none() {
-            if let Some(repo) = runtime.store.find_repository_by_planning_id(&summary.planning_id) {
+            if let Some(repo) = runtime
+                .store
+                .find_repository_by_planning_id(&summary.planning_id)
+            {
                 summary.repository = Some(repo);
                 if let Ok(migrated_json) = serde_json::to_string_pretty(&summary) {
                     let _ = fs::write(&summary_path, migrated_json);
@@ -1199,28 +1529,50 @@ fn get_planning_output(
     if !matches!(role.as_str(), "partition" | "planner") {
         return Err("Invalid planning role".into());
     }
-    let root = service.runtime.lock().map_err(|e| e.to_string())?.root.join("planning");
-    let root = root.canonicalize().map_err(|_| "Planning output not found")?;
-    let directory = root.join(&planning_id).canonicalize().map_err(|_| "Planning output not found")?;
-    if !directory.starts_with(&root) { return Err("Invalid planning output path".into()); }
-    let running = fs::read(directory.join("summary.json")).ok()
+    let root = service
+        .runtime
+        .lock()
+        .map_err(|e| e.to_string())?
+        .root
+        .join("planning");
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Planning output not found")?;
+    let directory = root
+        .join(&planning_id)
+        .canonicalize()
+        .map_err(|_| "Planning output not found")?;
+    if !directory.starts_with(&root) {
+        return Err("Invalid planning output path".into());
+    }
+    let running = fs::read(directory.join("summary.json"))
+        .ok()
         .and_then(|bytes| serde_json::from_slice::<PlanningSummary>(&bytes).ok())
         .is_some_and(|summary| summary.status.as_deref() == Some("running"));
     let file_path = directory.join(format!("{role}.jsonl"));
     if !file_path.exists() && running && offset == 0 {
-        return Ok(serde_json::json!({ "planningId": planning_id, "role": role, "content": "",
-            "nextOffset": 0, "totalBytes": 0, "complete": true, "running": true }));
+        return Ok(
+            serde_json::json!({ "planningId": planning_id, "role": role, "content": "",
+            "nextOffset": 0, "totalBytes": 0, "complete": true, "running": true }),
+        );
     }
-    let file_path = file_path.canonicalize().map_err(|_| "Planning output not found")?;
+    let file_path = file_path
+        .canonicalize()
+        .map_err(|_| "Planning output not found")?;
     if !file_path.starts_with(&root) {
         return Err("Invalid planning output path".into());
     }
     let mut file = fs::File::open(file_path).map_err(|e| e.to_string())?;
     let total_bytes = file.metadata().map_err(|e| e.to_string())?.len();
-    if offset > total_bytes { return Err("Invalid planning output offset".into()); }
-    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    if offset > total_bytes {
+        return Err("Invalid planning output offset".into());
+    }
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
-    file.take(256 * 1024).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    file.take(256 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     let length = match std::str::from_utf8(&bytes) {
         Ok(_) => bytes.len(),
         Err(error) if error.error_len().is_none() => error.valid_up_to(),
@@ -1233,7 +1585,10 @@ fn get_planning_output(
         "complete": next_offset >= total_bytes, "running": running }))
 }
 
-fn list_plannings(service: &Arc<Service>, repository_filter: Option<String>) -> Result<Vec<PlanningSummary>, String> {
+fn list_plannings(
+    service: &Arc<Service>,
+    repository_filter: Option<String>,
+) -> Result<Vec<PlanningSummary>, String> {
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     let planning_dir = runtime.root.join("planning");
     if !planning_dir.exists() {
@@ -1248,7 +1603,10 @@ fn list_plannings(service: &Arc<Service>, repository_filter: Option<String>) -> 
                     if let Ok(mut summary) = serde_json::from_str::<PlanningSummary>(&content) {
                         // If repository is missing, attempt to backfill from associated run in event store
                         if summary.repository.is_none() {
-                            if let Some(repo) = runtime.store.find_repository_by_planning_id(&summary.planning_id) {
+                            if let Some(repo) = runtime
+                                .store
+                                .find_repository_by_planning_id(&summary.planning_id)
+                            {
                                 summary.repository = Some(repo);
                                 if let Ok(migrated_json) = serde_json::to_string_pretty(&summary) {
                                     let _ = fs::write(&summary_path, migrated_json);
@@ -1288,14 +1646,24 @@ fn argument<T: serde::de::DeserializeOwned>(
         .map_err(|error| format!("Invalid {key}: {error}"))
 }
 
-fn get_execution_output(body: &serde_json::Value, service: &Arc<Service>) -> Result<serde_json::Value, String> {
+fn get_execution_output(
+    body: &serde_json::Value,
+    service: &Arc<Service>,
+) -> Result<serde_json::Value, String> {
     let run_id: String = argument(body, "runId")?;
     let execution_id: String = argument(body, "executionId")?;
-    let offset: usize = body.get("offset").map(|_| argument(body, "offset")).transpose()?.unwrap_or(0);
+    let offset: usize = body
+        .get("offset")
+        .map(|_| argument(body, "offset"))
+        .transpose()?
+        .unwrap_or(0);
     let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
     let historical;
-    let state = if runtime.state.run_id == run_id { &runtime.state } else {
-        historical = runtime.store.load(&run_id)?; &historical
+    let state = if runtime.state.run_id == run_id {
+        &runtime.state
+    } else {
+        historical = runtime.store.load(&run_id)?;
+        &historical
     };
     execution_page(state, &execution_id, offset)
 }
@@ -1306,7 +1674,10 @@ pub fn dispatch(
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use serde_json::to_value;
-    let compact = body.get("compact").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let compact = body
+        .get("compact")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let metadata = body.get("detail").and_then(serde_json::Value::as_str) == Some("metadata");
     if command == "snapshot" && metadata {
         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
@@ -1343,24 +1714,33 @@ pub fn dispatch(
             let state = if runtime.state.planning_id.as_ref() == Some(&id) {
                 snapshot_metadata(&runtime.state)?
             } else {
-                let run = runtime.store.runs()?.into_iter().find_map(|run| {
-                    let state = runtime.store.load(&run).ok()?;
-                    (state.planning_id.as_ref() == Some(&id)).then_some(state)
-                }).ok_or("Planning run not found")?;
+                let run = runtime
+                    .store
+                    .runs()?
+                    .into_iter()
+                    .find_map(|run| {
+                        let state = runtime.store.load(&run).ok()?;
+                        (state.planning_id.as_ref() == Some(&id)).then_some(state)
+                    })
+                    .ok_or("Planning run not found")?;
                 snapshot_metadata(&run)?
             };
-            if state["config"]["repository"].as_str() != Some(repository.as_str()) { return Err("Planning repository mismatch".into()); }
+            if state["config"]["repository"].as_str() != Some(repository.as_str()) {
+                return Err("Planning repository mismatch".into());
+            }
             return Ok(state);
         }
         "get_planning_output" => to_value(get_planning_output(
-            argument(&body, "planningId")?, argument(&body, "role")?,
-            body.get("offset").map(|_| argument(&body, "offset")).transpose()?.unwrap_or(0), service,
+            argument(&body, "planningId")?,
+            argument(&body, "role")?,
+            body.get("offset")
+                .map(|_| argument(&body, "offset"))
+                .transpose()?
+                .unwrap_or(0),
+            service,
         )?),
         "get_planning" => to_value(get_planning(argument(&body, "planningId")?, service)?),
-        "list_plannings" => to_value(list_plannings(
-            service,
-            argument(&body, "repository").ok(),
-        )?),
+        "list_plannings" => to_value(list_plannings(service, argument(&body, "repository").ok())?),
         "control" => to_value(control(
             argument(&body, "action")?,
             argument(&body, "node")?,
@@ -1376,9 +1756,14 @@ pub fn dispatch(
     };
     let mut value = result.map_err(|error| error.to_string())?;
     if metadata && command != "bootstrap" {
-        let target = if value.get("executions").is_some() { Some(&mut value) } else { None };
+        let target = if value.get("executions").is_some() {
+            Some(&mut value)
+        } else {
+            None
+        };
         if let Some(target) = target {
-            let state: Snapshot = serde_json::from_value(target.take()).map_err(|e| e.to_string())?;
+            let state: Snapshot =
+                serde_json::from_value(target.take()).map_err(|e| e.to_string())?;
             *target = snapshot_metadata(&state)?;
         }
     }
@@ -1388,11 +1773,27 @@ pub fn dispatch(
     if compact {
         let snapshot = if command == "bootstrap" {
             value.get_mut("snapshot")
-        } else if matches!(command, "snapshot" | "history" | "load_run" | "save_graph" | "plan_goal" | "control" | "reset_workspace") {
+        } else if matches!(
+            command,
+            "snapshot"
+                | "history"
+                | "load_run"
+                | "save_graph"
+                | "plan_goal"
+                | "control"
+                | "reset_workspace"
+        ) {
             Some(&mut value)
-        } else { None };
-        if let Some(events) = snapshot.and_then(|snapshot| snapshot.get_mut("events")).and_then(serde_json::Value::as_array_mut) {
-            events.retain(|event| event.get("type").and_then(serde_json::Value::as_str) != Some("output"));
+        } else {
+            None
+        };
+        if let Some(events) = snapshot
+            .and_then(|snapshot| snapshot.get_mut("events"))
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            events.retain(|event| {
+                event.get("type").and_then(serde_json::Value::as_str) != Some("output")
+            });
         }
     }
     Ok(value)
@@ -1448,10 +1849,16 @@ pub fn run() -> Result<(), String> {
     let extension = root.join("grapher-planner.ts");
     fs::write(&extension, include_str!("../resources/planner.ts"))
         .map_err(|error| error.to_string())?;
-    fs::write(root.join("workspace-paths.mjs"), include_str!("../resources/workspace-paths.mjs"))
-        .map_err(|error| error.to_string())?;
-    fs::write(root.join("planning-inspection.mjs"), include_str!("../resources/planning-inspection.mjs"))
-        .map_err(|error| error.to_string())?;
+    fs::write(
+        root.join("workspace-paths.mjs"),
+        include_str!("../resources/workspace-paths.mjs"),
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        root.join("planning-inspection.mjs"),
+        include_str!("../resources/planning-inspection.mjs"),
+    )
+    .map_err(|error| error.to_string())?;
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root)?),
         driving: AtomicBool::new(false),
@@ -1474,8 +1881,12 @@ pub fn run() -> Result<(), String> {
         if signals.forever().next().is_some() {
             if let Ok(mut runtime) = shutdown_service.runtime.lock() {
                 if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
-                    let _ = runtime.emit(EventKind::PublicationFailed { error: "Backend stopped during publication; inspect and retry publication.".into() });
-                } else if runtime.state.approved && (runtime.active() || runtime.state.phase == "running")
+                    let _ = runtime.emit(EventKind::PublicationFailed {
+                        error: "Backend stopped during publication; inspect and retry publication."
+                            .into(),
+                    });
+                } else if runtime.state.approved
+                    && (runtime.active() || runtime.state.phase == "running")
                 {
                     let _ = runtime.emit(EventKind::Paused { paused: true });
                 }
@@ -1538,7 +1949,9 @@ pub fn run() -> Result<(), String> {
                         &mut input,
                     )
                     .map_err(|e| e.to_string())
-                    .and_then(|_| serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string()));
+                    .and_then(|_| {
+                        serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string())
+                    });
 
                     let (goal, config): (String, Config) = match body_res.and_then(|body| {
                         let goal: String = argument(&body, "goal")?;
@@ -1548,9 +1961,13 @@ pub fn run() -> Result<(), String> {
                         Ok(pair) => pair,
                         Err(err) => {
                             let _ = request.respond(
-                                Response::from_string(serde_json::json!({"error": err}).to_string())
-                                    .with_status_code(400)
-                                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
+                                Response::from_string(
+                                    serde_json::json!({"error": err}).to_string(),
+                                )
+                                .with_status_code(400)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                ),
                             );
                             return;
                         }
@@ -1568,27 +1985,53 @@ pub fn run() -> Result<(), String> {
                             config,
                             &service_clone,
                             |line| {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-                                    send_sse_event(&tx_part, "partitioner", &serde_json::json!({ "raw": line, "event": parsed }));
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
+                                {
+                                    send_sse_event(
+                                        &tx_part,
+                                        "partitioner",
+                                        &serde_json::json!({ "raw": line, "event": parsed }),
+                                    );
                                 } else {
-                                    send_sse_event(&tx_part, "partitioner", &serde_json::json!({ "raw": line }));
+                                    send_sse_event(
+                                        &tx_part,
+                                        "partitioner",
+                                        &serde_json::json!({ "raw": line }),
+                                    );
                                 }
                             },
                             |route| {
-                                send_sse_event(&tx_route, "route_decision", &serde_json::json!({ "planType": route.plan_type }));
+                                send_sse_event(
+                                    &tx_route,
+                                    "route_decision",
+                                    &serde_json::json!({ "planType": route.plan_type }),
+                                );
                             },
                             |line| {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-                                    send_sse_event(&tx_plan, "planner", &serde_json::json!({ "raw": line, "event": parsed }));
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
+                                {
+                                    send_sse_event(
+                                        &tx_plan,
+                                        "planner",
+                                        &serde_json::json!({ "raw": line, "event": parsed }),
+                                    );
                                 } else {
-                                    send_sse_event(&tx_plan, "planner", &serde_json::json!({ "raw": line }));
+                                    send_sse_event(
+                                        &tx_plan,
+                                        "planner",
+                                        &serde_json::json!({ "raw": line }),
+                                    );
                                 }
                             },
                         );
 
                         match result {
                             Ok(snapshot) => {
-                                send_sse_event(&tx, "complete", &serde_json::json!({ "snapshot": snapshot }));
+                                send_sse_event(
+                                    &tx,
+                                    "complete",
+                                    &serde_json::json!({ "snapshot": snapshot }),
+                                );
                             }
                             Err((err, summary)) => {
                                 let mut err_payload = serde_json::json!({ "error": err });
@@ -1609,7 +2052,9 @@ pub fn run() -> Result<(), String> {
                     };
                     let response = Response::empty(200)
                         .with_data(stream, None)
-                        .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
+                        .with_header(
+                            Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
+                        )
                         .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
                         .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
                         .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());

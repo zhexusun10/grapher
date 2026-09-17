@@ -5,7 +5,14 @@ use tempfile::TempDir;
 fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> String {
     workspace::prepare(source, path, base, &[]).unwrap();
     fs::write(path.join(file), content).unwrap();
-    workspace::snapshot(path).unwrap()
+    workspace::snapshot_node(
+        path,
+        source,
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("node"),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -22,7 +29,7 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
     workspace::prepare(&source, &a_dir, &base, &[]).unwrap();
     fs::remove_file(a_dir.join("delete.txt")).unwrap();
     fs::write(a_dir.join("new.txt"), "new").unwrap();
-    let a = workspace::snapshot(&a_dir).unwrap();
+    let a = workspace::snapshot_node(&a_dir, &source, "a").unwrap();
     let b = branch(
         &source,
         &base,

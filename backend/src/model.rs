@@ -110,12 +110,19 @@ pub struct Config {
 }
 
 #[cfg(feature = "fixture")]
-fn test_engine() -> String { "pi".into() }
+fn test_engine() -> String {
+    "pi".into()
+}
 #[cfg(feature = "fixture")]
-fn test_command() -> String { "node".into() }
+fn test_command() -> String {
+    "node".into()
+}
 #[cfg(feature = "fixture")]
 fn test_args() -> Vec<String> {
-    vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs").to_string_lossy().into()]
+    vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../engine/entrypoint.mjs")
+        .to_string_lossy()
+        .into()]
 }
 
 /// One actual Execution Instance; its serialized event schema remains stable.
@@ -212,12 +219,27 @@ pub enum EventKind {
         to: String,
         accepted: bool,
     },
-    PublicationStarted { repository: String, heads: Vec<String> },
-    PublicationCompleted { head: String },
-    PublicationFailed { error: String },
-    MergerStarted { execution: Execution },
-    MergerFinished { execution_id: String, head: String },
-    MergerFailed { execution_id: String, error: String },
+    PublicationStarted {
+        repository: String,
+        heads: Vec<String>,
+    },
+    PublicationCompleted {
+        head: String,
+    },
+    PublicationFailed {
+        error: String,
+    },
+    MergerStarted {
+        execution: Execution,
+    },
+    MergerFinished {
+        execution_id: String,
+        head: String,
+    },
+    MergerFailed {
+        execution_id: String,
+        error: String,
+    },
     Settled,
 }
 
@@ -410,8 +432,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::PublicationStarted { repository, heads } => {
             state.publication = Some(Publication {
-                repository: repository.clone(), heads: heads.clone(), status: "publishing".into(),
-                head: None, error: None, started_at: event.timestamp, completed_at: None,
+                repository: repository.clone(),
+                heads: heads.clone(),
+                status: "publishing".into(),
+                head: None,
+                error: None,
+                started_at: event.timestamp,
+                completed_at: None,
             });
             state.paused = false;
             state.phase = "publishing".into();
@@ -437,7 +464,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::MergerStarted { execution } => {
             state.mergers.push(execution.clone());
             state.phase = "merging".into();
-            if let Some(publication) = &mut state.publication { publication.status = "merging".into(); }
+            if let Some(publication) = &mut state.publication {
+                publication.status = "merging".into();
+            }
         }
         EventKind::MergerFinished { execution_id, head } => {
             if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
@@ -446,12 +475,19 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 execution.completed_at = Some(event.timestamp);
             }
             state.phase = "publishing".into();
-            if let Some(publication) = &mut state.publication { publication.status = "publishing".into(); }
+            if let Some(publication) = &mut state.publication {
+                publication.status = "publishing".into();
+            }
         }
-        EventKind::MergerFailed { execution_id, error } => {
+        EventKind::MergerFailed {
+            execution_id,
+            error,
+        } => {
             if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
                 execution.status = "failed".into();
-                execution.output.push_str(&format!("\nMerger failed: {error}\n"));
+                execution
+                    .output
+                    .push_str(&format!("\nMerger failed: {error}\n"));
                 execution.completed_at = Some(event.timestamp);
             }
         }

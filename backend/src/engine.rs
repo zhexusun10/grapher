@@ -145,20 +145,28 @@ pub fn parse_route_decision(text: &str) -> Route {
     // 1. Direct single-word match (ignoring whitespace and surrounding punctuation)
     let clean_single = lower.trim_matches(|c: char| !c.is_alphanumeric());
     if clean_single == "graph" {
-        return Route { plan_type: "graph".into() };
+        return Route {
+            plan_type: "graph".into(),
+        };
     }
     if clean_single == "serial" {
-        return Route { plan_type: "serial".into() };
+        return Route {
+            plan_type: "serial".into(),
+        };
     }
 
     // 2. Check each line in reverse order (bottom-up priority)
     for line in lower.lines().rev() {
         let line_clean = line.trim().trim_matches(|c: char| !c.is_alphanumeric());
         if line_clean == "graph" {
-            return Route { plan_type: "graph".into() };
+            return Route {
+                plan_type: "graph".into(),
+            };
         }
         if line_clean == "serial" {
-            return Route { plan_type: "serial".into() };
+            return Route {
+                plan_type: "serial".into(),
+            };
         }
 
         let tokens: Vec<&str> = line
@@ -168,10 +176,14 @@ pub fn parse_route_decision(text: &str) -> Route {
         let line_g = tokens.contains(&"graph");
         let line_s = tokens.contains(&"serial");
         if line_g && !line_s {
-            return Route { plan_type: "graph".into() };
+            return Route {
+                plan_type: "graph".into(),
+            };
         }
         if line_s && !line_g {
-            return Route { plan_type: "serial".into() };
+            return Route {
+                plan_type: "serial".into(),
+            };
         }
     }
 
@@ -186,10 +198,14 @@ pub fn parse_route_decision(text: &str) -> Route {
             let after_g = after_tokens.contains(&"graph");
             let after_s = after_tokens.contains(&"serial");
             if after_g && !after_s {
-                return Route { plan_type: "graph".into() };
+                return Route {
+                    plan_type: "graph".into(),
+                };
             }
             if after_s && !after_g {
-                return Route { plan_type: "serial".into() };
+                return Route {
+                    plan_type: "serial".into(),
+                };
             }
         }
     }
@@ -203,46 +219,78 @@ pub fn parse_route_decision(text: &str) -> Route {
     let total_s = all_tokens.contains(&"serial");
 
     if total_g && !total_s {
-        return Route { plan_type: "graph".into() };
+        return Route {
+            plan_type: "graph".into(),
+        };
     }
     if total_s && !total_g {
-        return Route { plan_type: "serial".into() };
+        return Route {
+            plan_type: "serial".into(),
+        };
     }
 
     // 5. If both words are mentioned in prose, the later occurrence represents the conclusion
     if total_g && total_s {
-        let last_g = lower.match_indices("graph").filter_map(|(idx, _)| {
-            let before = lower[..idx].chars().next_back();
-            let after = lower[idx + 5..].chars().next();
-            let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
-            let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
-            if before_ok && after_ok { Some(idx) } else { None }
-        }).last();
+        let last_g = lower
+            .match_indices("graph")
+            .filter_map(|(idx, _)| {
+                let before = lower[..idx].chars().next_back();
+                let after = lower[idx + 5..].chars().next();
+                let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
+                let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
+                if before_ok && after_ok {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .last();
 
-        let last_s = lower.match_indices("serial").filter_map(|(idx, _)| {
-            let before = lower[..idx].chars().next_back();
-            let after = lower[idx + 6..].chars().next();
-            let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
-            let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
-            if before_ok && after_ok { Some(idx) } else { None }
-        }).last();
+        let last_s = lower
+            .match_indices("serial")
+            .filter_map(|(idx, _)| {
+                let before = lower[..idx].chars().next_back();
+                let after = lower[idx + 6..].chars().next();
+                let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
+                let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
+                if before_ok && after_ok {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .last();
 
         match (last_g, last_s) {
             (Some(g), Some(s)) => {
                 if g > s {
-                    return Route { plan_type: "graph".into() };
+                    return Route {
+                        plan_type: "graph".into(),
+                    };
                 } else {
-                    return Route { plan_type: "serial".into() };
+                    return Route {
+                        plan_type: "serial".into(),
+                    };
                 }
             }
-            (Some(_), None) => return Route { plan_type: "graph".into() },
-            (None, Some(_)) => return Route { plan_type: "serial".into() },
+            (Some(_), None) => {
+                return Route {
+                    plan_type: "graph".into(),
+                }
+            }
+            (None, Some(_)) => {
+                return Route {
+                    plan_type: "serial".into(),
+                }
+            }
             (None, None) => {}
         }
     }
 
     // 6. Safe fallback for hallucination or completely unrelated output
-    Route { plan_type: "serial".into() }
+    Route {
+        plan_type: "serial".into(),
+    }
 }
 
 pub struct PiRequest<'request> {
@@ -276,8 +324,13 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     // legacy command fields cannot select a different engine implementation.
     #[cfg(not(feature = "fixture"))]
     let mut command = {
-        let repository = Path::new(&config.repository).canonicalize().map_err(|_| "Invalid repository path")?;
-        let current = request.cwd.canonicalize().map_err(|_| "Invalid execution path")?;
+        let repository = Path::new(&config.repository)
+            .canonicalize()
+            .map_err(|_| "Invalid repository path")?;
+        let current = request
+            .cwd
+            .canonicalize()
+            .map_err(|_| "Invalid execution path")?;
         if current != repository {
             let profile = request.session_dir.join("execution-instance.sb");
             let worktree_root = current.parent().and_then(Path::parent)
@@ -285,11 +338,17 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
                 .ok_or("Graph execution must use .grapher-workspaces/<run>/<instance>; rerun legacy workspaces")?;
             crate::sandbox::write_graph_profile(&profile, &repository, worktree_root, &current)?;
             let mut command = Command::new("/usr/bin/sandbox-exec");
-            command.args(["-f", profile.to_str().ok_or("Invalid sandbox profile path")?, "node"]);
-            command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs")); command
+            command.args([
+                "-f",
+                profile.to_str().ok_or("Invalid sandbox profile path")?,
+                "node",
+            ]);
+            command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs"));
+            command
         } else {
             let mut command = Command::new("node");
-            command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs")); command
+            command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs"));
+            command
         }
     };
     // Process substitution is exclusively a test capability.
@@ -374,13 +433,22 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     }
     // The host owns the instance identity. Never inherit another agent's role
     // or directory mapping from the parent process or role-specific overrides.
-    command.env("GRAPHER_MODE", match request.role {
-        PiRole::Partitioner => "partition",
-        PiRole::Planner => "planner",
-        PiRole::NodeAgent => "node",
-        PiRole::Merger => "merger",
-    });
-    command.env("GRAPHER_WORKSPACE_ROOT", request.cwd.canonicalize().map_err(|error| error.to_string())?);
+    command.env(
+        "GRAPHER_MODE",
+        match request.role {
+            PiRole::Partitioner => "partition",
+            PiRole::Planner => "planner",
+            PiRole::NodeAgent => "node",
+            PiRole::Merger => "merger",
+        },
+    );
+    command.env(
+        "GRAPHER_WORKSPACE_ROOT",
+        request
+            .cwd
+            .canonicalize()
+            .map_err(|error| error.to_string())?,
+    );
     command.process_group(0);
     let mut child = command
         .spawn()
@@ -391,7 +459,10 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         .map_err(|error| error.to_string())?
         .insert(child.id());
     let _guard = ProcessGuard(child.id());
-    on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "timestamp":crate::model::now()})));
+    on_output(format!(
+        "{}\n",
+        serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "timestamp":crate::model::now()})
+    ));
     if let Err(error) = child
         .stdin
         .take()
@@ -435,8 +506,14 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         if started.elapsed() > budget {
             let _ = child.kill();
             let _ = child.wait();
-            on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "success":false, "timedOut":true, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})));
-            return Err(format!("{phase} timed out after {} seconds; inspect the saved session before retrying", budget.as_secs()));
+            on_output(format!(
+                "{}\n",
+                serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "success":false, "timedOut":true, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
+            ));
+            return Err(format!(
+                "{phase} timed out after {} seconds; inspect the saved session before retrying",
+                budget.as_secs()
+            ));
         }
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok((is_error, line)) => {
@@ -486,7 +563,9 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
                         object.insert("grapherReceivedAt".into(), crate::model::now().into());
                     }
                     Some(serde_json::to_string(&event).map_err(|error| error.to_string())?)
-                } else { None };
+                } else {
+                    None
+                };
                 on_output(format!("{}\n", received_line.as_deref().unwrap_or(&line)));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -506,7 +585,10 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         }
     }
     let status = child.wait().map_err(|error| error.to_string())?;
-    on_output(format!("{}\n", serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success(), "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})));
+    on_output(format!(
+        "{}\n",
+        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success(), "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
+    ));
     if !status.success() {
         return Err(format!("Pi exited with {status}: {stderr_tail}"));
     }
@@ -539,16 +621,19 @@ pub fn execute(
     } else {
         task.into()
     };
-    let execution_date = Command::new("/bin/date").args(["-u", "+%Y-%m-%d"]).output()
-        .ok().filter(|output| output.status.success())
+    let execution_date = Command::new("/bin/date")
+        .args(["-u", "+%Y-%m-%d"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|date| date.trim().to_string());
     let task = if let Some(date) = execution_date {
         format!("{task}\n\nHost execution date (UTC): {date}. If your deliverable requires a date, use this observed date rather than guessing.")
-    } else { task };
-    let session_dir = root
-        .join("sessions")
-        .join(&execution.id);
+    } else {
+        task
+    };
+    let session_dir = root.join("sessions").join(&execution.id);
     let model_config = PiModelConfig::resolve(PiRole::NodeAgent, config);
     let effective_config = model_config.effective_config(config);
     let mut extra_args = Vec::new();

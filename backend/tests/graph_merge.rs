@@ -1,6 +1,6 @@
 use grapher::{
     graph_merge::merge_graph,
-    workspace::{git, prepare, snapshot},
+    workspace::{git, prepare, snapshot_node, snapshot_repository},
 };
 use std::{
     fs,
@@ -13,13 +13,20 @@ fn repository(base: &Path) -> (PathBuf, String) {
     fs::create_dir(&path).unwrap();
     git(&path, &["init"]).unwrap();
     fs::write(path.join("shared"), "base\n").unwrap();
-    (path.clone(), snapshot(&path).unwrap())
+    (path.clone(), snapshot_repository(&path).unwrap())
 }
 
 fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> String {
     prepare(source, path, base, &[]).unwrap();
     fs::write(path.join(file), content).unwrap();
-    snapshot(path).unwrap()
+    snapshot_node(
+        path,
+        source,
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("node"),
+    )
+    .unwrap()
 }
 
 #[test]

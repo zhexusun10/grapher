@@ -1,50 +1,70 @@
 # Execution Instance Engine: Pi baseline
 
-一次实际执行称为 **Execution Instance**；创建和驱动它的内核称为 **Execution Instance Engine**。Pi 是唯一生产实现。`fixture` 只是 Rust 编译期测试能力，不能用于出货。
+Pi 是 Grapher 唯一的生产 Execution Instance Engine。一次模型执行称为 **Execution Instance**；Graph 节点执行实例称为 **Node Agent**，最终发布冲突使用专用 **merger** 实例。
 
-## Ownership / capability boundary
+## 所有权边界
 
-- `/pi`：完整、未修改的 upstream 源码 submodule。包括 execution core、provider/API infrastructure、authentication、login、credential storage/refresh、模型配置、CLI、SDK 和扩展机制。此轮没有删除或迁移任何旧 Pi 代码。
-- `backend/src/engine.rs`：Grapher 持有进程组、取消、超时、事件输出及 Execution Instance 生命周期；生产启动路径固定为 `engine/entrypoint.mjs`，不再信任历史配置中的任意可执行文件。测试构建保留进程替身注入。
-- `engine/entrypoint.mjs`：校验源码基线并调用本地锁定依赖中的 tsx 与 upstream CLI；透传 stdin/stdout/stderr，不引入全局 Pi fallback。JSON instrumentation 仍使用 upstream 事件流，Grapher 在既有 execution/session 日志中消费它。
-- `engine/model-data/`：upstream 官方 hydration 脚本生成的构建输入快照，不是另行维护的 provider 实现。新 upstream 不将这些 JSON 纳入 Git，因此仅锁 commit 不足以复现模型目录；这里补充逐文件 SHA-256。
-- Provider/Auth Adapter 与前端交互尚待实现。必须委托 upstream `ModelRuntime` 的 provider discovery、auth interaction、login/logout 和 credential management，不能复制 provider 列表、OAuth 流程或凭据刷新逻辑。浏览器不可接收保存的 token/key；只可显示非敏感状态并提交用户输入。现阶段可通过 `npm run pi` 使用完整 upstream CLI 登录能力。
+- `pi/`：未修改的 upstream Pi submodule，拥有 execution core、provider/API、认证、CLI、SDK、skills 和 extensions。
+- `engine/entrypoint.mjs`：校验锁定基线，并通过仓库内 tsx 启动 upstream CLI；不回退到全局 Pi。
+- `engine/pi-lock.json`：锁定 upstream commit、package lock 和模型目录校验和。
+- `engine/model-data/`：由 upstream hydration 流程产生的模型目录构建输入，不是 Grapher 自行维护的 provider 实现。
+- `engine/provider-host.ts`：在独立进程中调用 upstream `ModelRuntime`。
+- `backend/src/engine.rs`：拥有进程组、角色配置、超时、取消、JSON 事件消费和 Execution Instance 生命周期。
+- `backend/src/provider_auth.rs`：Provider/Auth Adapter 的本地 IPC 桥接。
 
-## Reproduce
+Grapher 拥有图编译、调度、工作区、sandbox、发布和事件记录；Pi 拥有模型调用及 provider/auth 能力。Rust 后端和浏览器不读取或保存 Pi 的 token/key。
+
+当前锁定版本见 [pi-lock.json](pi-lock.json)。更新版本必须显式审阅并同步 gitlink、lock manifest 和模型数据校验和，运行时不会浮动更新。
+
+## 安装与验证
 
 ```sh
 git submodule update --init --recursive
-npm run pi:setup     # 校验 commit/lock/checksum、npm ci、恢复固定模型目录
+npm run pi:setup
 npm run pi:verify
 npm run pi -- --version
-npm run pi           # upstream 交互 CLI，包括 /login 和 /logout
-npm run pi:build     # upstream 完整 build:offline；不会重新抓取浮动模型目录
+npm run pi
+npm run pi:build
 ```
 
-需要 Node >=22.19、Git、npm；依赖安装需要网络及平台相关原生依赖。开发入口使用 upstream 源码与锁定的 tsx，不要求完整 dist 构建通过。这里承诺源码/依赖/模型目录输入可追踪，不承诺跨 OS/Node 的产物字节一致。
+要求 Node.js 22.19+、Git 和 npm。`pi:setup` 校验 commit/lock/checksum，安装 upstream 依赖并恢复固定模型目录；`pi:build` 执行 upstream offline build。
 
-锁定详情见 `pi-lock.json`。当前 upstream/fork commit 均为 `ceea48f5d5d12fd7915dfefba2835ccd55f23bb9`，Pi 0.85.1；本地 fork 分支 `grapher/engine` 没有独立 patch。submodule URL 指向可公开获取此 commit 的 upstream；没有推送或创建远程 fork 仓库。
+开发入口直接使用锁定源码和仓库内 tsx，不要求系统安装 Pi。认证可在 Grapher 设置界面完成，也可通过 `npm run pi` 使用 upstream `/login`、`/logout`。
 
-### Upstream build status
+## 角色策略
 
-完整 `build:offline` 通过。此前锁定的 `71dca871bc80b6bc97be37f0ca3189399d651fff` 漏掉 `FinishReason.TOO_MANY_TOOL_CALLS` 的映射，导致 `packages/ai/src/api/google-shared.ts` 的 exhaustive switch 无法编译。当前 upstream commit 将该 provider 终止原因显式映射为 Pi 的 `error`，同时保留未来枚举变化的编译期穷举检查。
+| 角色 | Pi 加载策略 |
+| --- | --- |
+| Partitioner | 无工具、无 context files、无 skills/extensions，默认 thinking off |
+| Planner | 只开放 `node,edge,read,bash`，加载 Grapher 显式 planning extension，不加载项目 context/自动扩展 |
+| Node Agent | 开放 Pi 原生工具，允许受信工作区的 skills/extensions |
+| Merger | 固定冲突修复 prompt 和工具，不加载项目 context/自动扩展 |
 
-Grapher 验证：`npm run test:pi`、`npm run check`、`cargo check --no-default-features`、`cargo test --no-default-features --features fixture` 通过（Cargo 命令使用 `--manifest-path backend/Cargo.toml`）。无 fixture 的完整 `cargo test` 目前被已有 `tests/core.rs` 两处未门控的 `grapher::fixture` 引用阻塞；未改动这些既有测试逻辑。
+生产入口始终为 `engine/entrypoint.mjs`。历史配置中的 command/args 只在 `fixture` 测试构建可注入，不能选择另一生产引擎。
 
-## Sync upstream (explicit review, never floating update)
+后端会清除继承的 `PI_MODEL`、`PI_THINKING`、`PI_PROVIDER`、`PI_REASONING_LEVEL`、`PI_SESSION_ID` 和 `PI_SESSION_FILE`，再按角色显式传入模型、thinking、session 和 `GRAPHER_MODE`。
 
-1. `npm run pi:verify`，确保子仓库无改动。保留父仓库现有修改；不要 reset/stash 他人工作。
-2. 新 clone 中 remote 通常名为 `origin`；本次本地仓库名为 `upstream`。若缺少 upstream：`git -C pi remote add upstream https://github.com/earendil-works/pi.git`。
-3. `git -C pi fetch upstream`，审阅并记录目标完整 SHA。创建/切换 fork 分支，显式 `git -C pi merge --ff-only <SHA>`。未来有必要 patch 时使用审阅过的 merge，不将旧备份自动应用。
-4. 更新 `pi-lock.json` 的 upstream/fork SHA、package version 和依赖锁 SHA-256。用新 upstream 的 `npm ci` 和 `npm run hydrate:model-data` 获取新模型目录，整体更新 `engine/model-data/` 及每个校验和，不手工修 provider 数据。
-5. 执行 setup、verify、完整 build、CLI smoke、Grapher 后端/HTTP/前端测试以及后续 Provider/Auth Adapter 合约测试。构建失败不得标记为可发布。
-6. 同一次 Grapher 提交记录 gitlink、manifest、模型目录和适配层变更。不要在启动时执行 `git pull` 或 `submodule update --remote`。
-7. 如未来需要独立 fork commit，先将其推送到可访问的 fork remote，再更新 `.gitmodules` URL 并验证全新 clone。当前不依赖任何未推送 commit。
+## Provider/Auth Adapter
 
-## Original backup
+Adapter 支持 upstream provider catalog、login、poll、交互响应、cancel 和 logout。长期凭据及刷新逻辑留在 upstream `ModelRuntime`；浏览器只接收非敏感状态并提交当前认证交互所需输入。
 
-完整旧目录（含 `.git`、原 index、工作区、未跟踪文件和 node_modules）位于：
+修改 provider/auth 边界时，应同时验证：
 
-`/Users/jerry/Desktop/grapher-pi-backup-20260913-164654/pi`
+```sh
+npm run test:pi
+npm run check
+cargo check --manifest-path backend/Cargo.toml --no-default-features
+npm run test:http
+```
 
-相邻保存 `index`、`index.patch`、`worktree.patch`、`status.txt`。原 index 与副本逐字节相同，备份前后 porcelain 状态 SHA-256 均为 `366c5a726b3c31ffa6208f4da0fc4ac94e8dff605b0d9fb563936b0eee8e02ac`。这是本机备份，不纳入版本库、不含自动迁移步骤。不要用它覆盖已注册的 submodule；需要旧环境时直接在备份目录检查或复制到独立位置。
+## 同步 upstream
+
+1. 运行 `npm run pi:verify`，确认当前 submodule 与锁文件一致；保留父仓库已有修改。
+2. 在 `pi/` 中 fetch 目标 upstream，记录并审阅完整 commit SHA。
+3. 仅使用显式目标 SHA 更新 submodule；不要使用启动时 `git pull` 或 `submodule update --remote`。
+4. 使用新 upstream 的 lockfile 安装依赖并运行模型数据 hydration。
+5. 更新 `engine/pi-lock.json`、`engine/model-data/` 和父仓库 gitlink。
+6. 运行 setup、verify、offline build、CLI smoke、后端测试、HTTP/UI 测试和 sandbox 测试。
+7. 若使用 fork commit，必须先推送到可公开获取的 remote，再更新 `.gitmodules` 并用全新 clone 验证。
+
+基线更新、适配层修改和校验数据应在同一变更中提交。任何构建或合约测试失败都不能标记为可发布。

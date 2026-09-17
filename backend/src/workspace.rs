@@ -64,7 +64,9 @@ pub fn is_standard_git(path: &Path) -> bool {
 }
 
 pub fn shadow_repo_dir(target: &Path) -> PathBuf {
-    let canonical = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+    let canonical = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
     let mut hasher = DefaultHasher::new();
     canonical.to_string_lossy().hash(&mut hasher);
     let hash = hasher.finish();
@@ -74,7 +76,13 @@ pub fn shadow_repo_dir(target: &Path) -> PathBuf {
         .unwrap_or_else(|| "project".into());
     let safe_name: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     data_root()
         .join("shadow_repos")
@@ -82,7 +90,9 @@ pub fn shadow_repo_dir(target: &Path) -> PathBuf {
 }
 
 pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
-    let canonical_target = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+    let canonical_target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
     let shadow_dir = shadow_repo_dir(&canonical_target);
     if !shadow_dir.exists() {
         fs::create_dir_all(&shadow_dir).map_err(|e| e.to_string())?;
@@ -91,11 +101,24 @@ pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
 
         git(
             &canonical_target,
-            &["--git-dir", git_dir_str, "--work-tree", work_tree_str, "init"],
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "init",
+            ],
         )?;
         let _ = git(
             &canonical_target,
-            &["--git-dir", git_dir_str, "--work-tree", work_tree_str, "add", "-A"],
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "add",
+                "-A",
+            ],
         );
         let _ = git(
             &canonical_target,
@@ -127,10 +150,7 @@ pub fn pick_folder() -> Result<Option<PathBuf>, String> {
                 return ""
             end try
         "#;
-        let mut output = Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output();
+        let mut output = Command::new("osascript").arg("-e").arg(script).output();
 
         if output.is_err() || !output.as_ref().unwrap().status.success() {
             let fallback_script = r#"
@@ -226,10 +246,8 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
             .unwrap_or_else(|| path_str.clone());
         let branch = git(&top_level, &["rev-parse", "--abbrev-ref", "HEAD"])
             .unwrap_or_else(|_| "HEAD".into());
-        let head = git(&top_level, &["rev-parse", "--short", "HEAD"])
-            .unwrap_or_default();
-        let status = git(&top_level, &["status", "--porcelain"])
-            .unwrap_or_default();
+        let head = git(&top_level, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+        let status = git(&top_level, &["status", "--porcelain"]).unwrap_or_default();
         let clean = status.trim().is_empty();
 
         Ok(Some(RepositoryInfo {
@@ -296,7 +314,12 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         } else if !stdout.is_empty() {
             stdout
         } else {
-            format!("git failed with exit code {:?} in {:?}: git {:?}", output.status.code(), cwd, args)
+            format!(
+                "git failed with exit code {:?} in {:?}: git {:?}",
+                output.status.code(),
+                cwd,
+                args
+            )
         };
         return Err(msg);
     }
@@ -307,11 +330,21 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 /// repository. Publication must never create/rebaseline a shadow repository.
 pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String> {
     let repository = repository.canonicalize().map_err(|e| e.to_string())?;
-    if is_standard_git(&repository) { return git(&repository, args); }
+    if is_standard_git(&repository) {
+        return git(&repository, args);
+    }
     let shadow = shadow_repo_dir(&repository);
-    if !shadow.is_dir() { return Err("Shadow repository is missing; retained node results have not been published".into()); }
-    let mut command = vec!["--git-dir", shadow.to_str().ok_or("Invalid shadow path")?,
-        "--work-tree", repository.to_str().ok_or("Invalid repository path")?];
+    if !shadow.is_dir() {
+        return Err(
+            "Shadow repository is missing; retained node results have not been published".into(),
+        );
+    }
+    let mut command = vec![
+        "--git-dir",
+        shadow.to_str().ok_or("Invalid shadow path")?,
+        "--work-tree",
+        repository.to_str().ok_or("Invalid repository path")?,
+    ];
     command.extend_from_slice(args);
     git(&repository, &command)
 }
@@ -330,16 +363,28 @@ pub fn verify(repository: &Path) -> Result<String, String> {
         git(repository, &["rev-parse", "--verify", "HEAD"])
     } else {
         if !repository.is_dir() {
-            return Err(format!("Directory does not exist: {}", repository.display()));
+            return Err(format!(
+                "Directory does not exist: {}",
+                repository.display()
+            ));
         }
-        let canonical = repository.canonicalize().unwrap_or_else(|_| repository.to_path_buf());
+        let canonical = repository
+            .canonicalize()
+            .unwrap_or_else(|_| repository.to_path_buf());
         let shadow = ensure_shadow_repo(&canonical)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
 
         let _ = git(
             &canonical,
-            &["--git-dir", git_dir_str, "--work-tree", work_tree_str, "add", "-A"],
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "add",
+                "-A",
+            ],
         );
         let status = git(
             &canonical,
@@ -366,7 +411,10 @@ pub fn verify(repository: &Path) -> Result<String, String> {
                 ],
             );
         }
-        git(&canonical, &["--git-dir", git_dir_str, "rev-parse", "--verify", "HEAD"])
+        git(
+            &canonical,
+            &["--git-dir", git_dir_str, "rev-parse", "--verify", "HEAD"],
+        )
     }
 }
 
@@ -376,17 +424,9 @@ pub fn prepare(
     base: &str,
     parents: &[String],
 ) -> Result<String, String> {
-    prepare_node(repository, path, None, base, parents)
-}
-
-pub fn prepare_node(
-    repository: &Path,
-    path: &Path,
-    node_id: Option<&str>,
-    base: &str,
-    parents: &[String],
-) -> Result<String, String> {
-    let canonical_repo = repository.canonicalize().unwrap_or_else(|_| repository.to_path_buf());
+    let canonical_repo = repository
+        .canonicalize()
+        .unwrap_or_else(|_| repository.to_path_buf());
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if canonical_path == canonical_repo {
         if is_standard_git(repository) {
@@ -394,7 +434,10 @@ pub fn prepare_node(
         } else {
             let shadow = ensure_shadow_repo(&canonical_repo)?;
             let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
-            return git(&canonical_repo, &["--git-dir", git_dir_str, "rev-parse", "HEAD"]);
+            return git(
+                &canonical_repo,
+                &["--git-dir", git_dir_str, "rev-parse", "HEAD"],
+            );
         }
     }
 
@@ -403,15 +446,40 @@ pub fn prepare_node(
     // Determine the source Git location (either standard repository or shadow repo)
     let source_git_path = if is_standard_git(&canonical_repo) {
         // Ensure base commit has advertised refs in refs/grapher/heads/ and refs/grapher/base
-        git(&canonical_repo, &["update-ref", &format!("refs/grapher/heads/{base}"), base])?;
+        git(
+            &canonical_repo,
+            &["update-ref", &format!("refs/grapher/heads/{base}"), base],
+        )?;
         git(&canonical_repo, &["update-ref", "refs/grapher/base", base])?;
         canonical_repo.clone()
     } else {
         let shadow = ensure_shadow_repo(&canonical_repo)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical_repo.to_str().ok_or("Invalid target path")?;
-        git(&canonical_repo, &["--git-dir", git_dir_str, "--work-tree", work_tree_str, "update-ref", &format!("refs/grapher/heads/{base}"), base])?;
-        git(&canonical_repo, &["--git-dir", git_dir_str, "--work-tree", work_tree_str, "update-ref", "refs/grapher/base", base])?;
+        git(
+            &canonical_repo,
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "update-ref",
+                &format!("refs/grapher/heads/{base}"),
+                base,
+            ],
+        )?;
+        git(
+            &canonical_repo,
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "update-ref",
+                "refs/grapher/base",
+                base,
+            ],
+        )?;
         shadow
     };
     let source_url = format!("file://{}", source_git_path.display());
@@ -419,94 +487,150 @@ pub fn prepare_node(
     // Initialize standalone Git repository in node's workspace
     git(path, &["init", "-q"])?;
 
-    // Record the authoritative source repository path inside .git for snapshot fetch
-    let dot_git = path.join(".git");
-    fs::write(dot_git.join("grapher-repository"), canonical_repo.to_string_lossy().as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    // Record node_id if known, or derive from directory name
-    let effective_node_id = node_id
-        .map(String::from)
-        .or_else(|| path.file_name().and_then(|n| n.to_str()).map(String::from))
-        .unwrap_or_else(|| "node".to_string());
-    fs::write(dot_git.join("grapher-node-id"), effective_node_id.as_bytes())
-        .map_err(|e| e.to_string())?;
+    // The host keeps repository and node identity in Runtime state. Do not write
+    // either physical path into the agent-visible checkout.
 
     // Fetch the base commit from the advertised ref and check it out on branch grapher-node (full history, no --depth 1)
-    git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", &source_url, &format!("+refs/grapher/heads/{base}:refs/grapher/base")])?;
-    git(path, &["checkout", "-q", "-B", "grapher-node", "refs/grapher/base"])?;
+    git(
+        path,
+        &[
+            "fetch",
+            "-q",
+            "--no-tags",
+            "--no-write-fetch-head",
+            &source_url,
+            &format!("+refs/grapher/heads/{base}:refs/grapher/base"),
+        ],
+    )?;
+    git(
+        path,
+        &["checkout", "-q", "-B", "grapher-node", "refs/grapher/base"],
+    )?;
 
     // Fetch and merge each parent dependency from their advertised refs
     for parent in parents {
         let node_refspec = format!("+refs/grapher/nodes/{parent}:refs/grapher/parents/{parent}");
         let head_refspec = format!("+refs/grapher/heads/{parent}:refs/grapher/parents/{parent}");
-        if git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", &source_url, &node_refspec]).is_err() {
-            git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", &source_url, &head_refspec])?;
+        if git(
+            path,
+            &[
+                "fetch",
+                "-q",
+                "--no-tags",
+                "--no-write-fetch-head",
+                &source_url,
+                &node_refspec,
+            ],
+        )
+        .is_err()
+        {
+            git(
+                path,
+                &[
+                    "fetch",
+                    "-q",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    &source_url,
+                    &head_refspec,
+                ],
+            )?;
         }
-        if git(path, &["merge-base", "--is-ancestor", &format!("refs/grapher/parents/{parent}"), "HEAD"]).is_ok() {
+        if git(
+            path,
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &format!("refs/grapher/parents/{parent}"),
+                "HEAD",
+            ],
+        )
+        .is_ok()
+        {
             continue;
         }
-        if let Err(error) = git(path, &["merge", "--no-edit", "--no-ff", &format!("refs/grapher/parents/{parent}")]) {
+        if let Err(error) = git(
+            path,
+            &[
+                "merge",
+                "--no-edit",
+                "--no-ff",
+                &format!("refs/grapher/parents/{parent}"),
+            ],
+        ) {
             return Err(format!("Workspace composition blocked at {}. Resolve and commit the merge in this worktree, then use 'Use resolved workspace'.\n{error}", path.display()));
         }
     }
     git(path, &["rev-parse", "HEAD"])
 }
 
-pub fn snapshot(path: &Path) -> Result<String, String> {
-    let dot_git = path.join(".git");
-    let repo_meta = dot_git.join("grapher-repository");
-    if repo_meta.exists() {
-        // Node's standalone workspace: commit changes and export to source repository
-        if !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
-            return Err("Unresolved merge conflicts remain".into());
-        }
-        git(path, &["add", "-A"])?;
-        if !git(path, &["status", "--porcelain"])?.is_empty() {
-            git(path, &["commit", "-m", "Grapher execution snapshot"])?;
-        }
-        let head = git(path, &["rev-parse", "HEAD"])?;
-        let _ = git(path, &["update-ref", "refs/heads/grapher-node", &head]);
+/// Snapshot an isolated node and import its commit into the host repository.
+/// Repository identity stays in the host Runtime rather than the agent checkout.
+pub fn snapshot_node(path: &Path, repository: &Path, node_id: &str) -> Result<String, String> {
+    let canonical_repo = repository
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let canonical_path = path.canonicalize().map_err(|error| error.to_string())?;
+    if canonical_path == canonical_repo
+        || canonical_path.starts_with(&canonical_repo)
+        || canonical_repo.starts_with(&canonical_path)
+    {
+        return Err("Node snapshot requires a non-overlapping isolated workspace".into());
+    }
+    if node_id.is_empty()
+        || node_id.len() > 64
+        || !node_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+    {
+        return Err("Invalid node identity for snapshot ref".into());
+    }
+    if !git(&canonical_path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
+        return Err("Unresolved merge conflicts remain".into());
+    }
+    git(&canonical_path, &["add", "-A"])?;
+    if !git(&canonical_path, &["status", "--porcelain"])?.is_empty() {
+        git(
+            &canonical_path,
+            &["commit", "-m", "Grapher execution snapshot"],
+        )?;
+    }
+    let head = git(&canonical_path, &["rev-parse", "HEAD"])?;
+    git(
+        &canonical_path,
+        &["update-ref", "refs/heads/grapher-node", &head],
+    )?;
 
-        // Pull the commit object into source repository under refs/grapher/nodes/<node_id> and refs/grapher/heads/<head>
-        // using --no-write-fetch-head to avoid parallel fetch race conditions on .git/FETCH_HEAD
-        let repo_str = fs::read_to_string(&repo_meta).map_err(|e| e.to_string())?;
-        let repository = PathBuf::from(repo_str.trim());
-        let canonical_repo = repository.canonicalize().unwrap_or_else(|_| repository.clone());
-        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let path_url = format!("file://{}", canonical_path.display());
+    let path_url = format!("file://{}", canonical_path.display());
+    let head_refspec = format!("+refs/heads/grapher-node:refs/grapher/heads/{head}");
+    let node_refspec = format!("+refs/heads/grapher-node:refs/grapher/nodes/{node_id}");
+    let fetch_args = [
+        "fetch",
+        "-q",
+        "--no-tags",
+        "--no-write-fetch-head",
+        &path_url,
+        &head_refspec,
+        &node_refspec,
+    ];
 
-        let node_id = fs::read_to_string(dot_git.join("grapher-node-id"))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+    if is_standard_git(&canonical_repo) {
+        git(&canonical_repo, &fetch_args)?;
+    } else {
+        let shadow = ensure_shadow_repo(&canonical_repo)?;
+        let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
+        let work_tree_str = canonical_repo.to_str().ok_or("Invalid repository path")?;
+        let mut shadow_args = vec!["--git-dir", git_dir_str, "--work-tree", work_tree_str];
+        shadow_args.extend(fetch_args);
+        git(&canonical_repo, &shadow_args)?;
+    }
+    Ok(head)
+}
 
-        let mut fetch_args = vec![
-            "fetch", "-q", "--no-tags", "--no-write-fetch-head", &path_url,
-        ];
-        let head_refspec = format!("+refs/heads/grapher-node:refs/grapher/heads/{head}");
-        fetch_args.push(&head_refspec);
-        let node_refspec = if !node_id.is_empty() {
-            Some(format!("+refs/heads/grapher-node:refs/grapher/nodes/{node_id}"))
-        } else {
-            None
-        };
-        if let Some(ref nr) = node_refspec {
-            fetch_args.push(nr);
-        }
-
-        if is_standard_git(&canonical_repo) {
-            git(&canonical_repo, &fetch_args)?;
-        } else {
-            let shadow = ensure_shadow_repo(&canonical_repo)?;
-            let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
-            let work_tree_str = canonical_repo.to_str().ok_or("Invalid target path")?;
-            let mut shadow_args = vec!["--git-dir", git_dir_str, "--work-tree", work_tree_str];
-            shadow_args.extend(fetch_args);
-            git(&canonical_repo, &shadow_args)?;
-        }
-        Ok(head)
-    } else if is_standard_git(path) {
-
+/// Snapshot the user-owned Serial workspace. Graph workspaces must use
+/// `snapshot_node` so their commits are imported into Grapher-owned host refs.
+pub fn snapshot_repository(path: &Path) -> Result<String, String> {
+    if is_standard_git(path) {
         if !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
             return Err("Unresolved merge conflicts remain".into());
         }
@@ -516,16 +640,60 @@ pub fn snapshot(path: &Path) -> Result<String, String> {
         }
         git(path, &["rev-parse", "HEAD"])
     } else {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical = path.canonicalize().map_err(|error| error.to_string())?;
         let shadow = ensure_shadow_repo(&canonical)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
-        let _ = git(&canonical, &["--git-dir", git_dir_str, "--work-tree", work_tree_str, "add", "-A"]);
-        let status = git(&canonical, &["--git-dir", git_dir_str, "--work-tree", work_tree_str, "status", "--porcelain"])?;
+        git(
+            &canonical,
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "add",
+                "-A",
+            ],
+        )?;
+        let status = git(
+            &canonical,
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "status",
+                "--porcelain",
+            ],
+        )?;
         if !status.trim().is_empty() {
-            let _ = git(&canonical, &["--git-dir", git_dir_str, "--work-tree", work_tree_str, "commit", "-m", "Grapher execution snapshot"]);
+            git(
+                &canonical,
+                &[
+                    "--git-dir",
+                    git_dir_str,
+                    "--work-tree",
+                    work_tree_str,
+                    "commit",
+                    "-m",
+                    "Grapher execution snapshot",
+                ],
+            )?;
         }
         git(&canonical, &["--git-dir", git_dir_str, "rev-parse", "HEAD"])
     }
 }
 
+/// Choose the Serial source/shadow or Graph isolated-node snapshot contract
+/// from canonical workspace identity.
+pub fn snapshot_execution(path: &Path, repository: &Path, node_id: &str) -> Result<String, String> {
+    let canonical_repo = repository
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let canonical_path = path.canonicalize().map_err(|error| error.to_string())?;
+    if canonical_path == canonical_repo {
+        snapshot_repository(&canonical_path)
+    } else {
+        snapshot_node(&canonical_path, &canonical_repo, node_id)
+    }
+}

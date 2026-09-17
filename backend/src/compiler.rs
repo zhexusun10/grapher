@@ -150,7 +150,12 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
         Vec::new()
     };
     for node in &graph.nodes {
-        if node.task.contains("<REVISE>") && !graph.edges.iter().any(|edge| edge.feedback && edge.from == node.name) {
+        if node.task.contains("<REVISE>")
+            && !graph
+                .edges
+                .iter()
+                .any(|edge| edge.feedback && edge.from == node.name)
+        {
             warnings.push(format!("W302: {} mentions <REVISE> but has no outgoing feedback edge. The marker alone cannot request a retry. If revision is required, connect a feedback edge to an authorized dependency ancestor; otherwise remove the retry instruction or state that it is only report text.", node.name));
         }
     }

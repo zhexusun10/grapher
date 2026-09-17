@@ -89,12 +89,23 @@ fn compiler_emits_dependency_layers_and_ignores_feedback_for_topology() {
 #[test]
 fn compiler_warns_when_revision_marker_cannot_route_a_retry() {
     let mut candidate = graph();
-    candidate.nodes.iter_mut().find(|node| node.name == "review").unwrap().task =
-        "Check acceptance and finish with <REVISE> if corrections are needed".into();
-    assert!(!compile(&candidate, true).unwrap().warnings.iter().any(|warning| warning.starts_with("W302")));
+    candidate
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "review")
+        .unwrap()
+        .task = "Check acceptance and finish with <REVISE> if corrections are needed".into();
+    assert!(!compile(&candidate, true)
+        .unwrap()
+        .warnings
+        .iter()
+        .any(|warning| warning.starts_with("W302")));
     candidate.edges.retain(|edge| !edge.feedback);
     let plan = compile(&candidate, true).unwrap();
-    assert!(plan.warnings.iter().any(|warning| warning.starts_with("W302") && warning.contains("review")));
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.starts_with("W302") && warning.contains("review")));
     // This is advisory: literal report examples do not make a structurally valid graph illegal.
     assert!(compile(&candidate, false).is_ok());
 }
@@ -414,8 +425,8 @@ fn conflicting_worktrees_block_without_modifying_source_repository() {
     workspace::prepare(&repository, &second, &base, &[]).unwrap();
     fs::write(first.join("README.md"), "first\n").unwrap();
     fs::write(second.join("README.md"), "second\n").unwrap();
-    let first_head = workspace::snapshot(&first).unwrap();
-    let second_head = workspace::snapshot(&second).unwrap();
+    let first_head = workspace::snapshot_node(&first, &repository, "first").unwrap();
+    let second_head = workspace::snapshot_node(&second, &repository, "second").unwrap();
     let merged = temp.path().join("merged");
     let error =
         workspace::prepare(&repository, &merged, &base, &[first_head, second_head]).unwrap_err();
@@ -463,16 +474,20 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     let node_b = temp.path().join("node_b");
 
     // 1. Prepare Node A
-    workspace::prepare_node(&repository, &node_a, Some("nodeA"), &base, &[]).unwrap();
+    workspace::prepare(&repository, &node_a, &base, &[]).unwrap();
+    assert!(!node_a.join(".git/grapher-repository").exists());
+    assert!(!node_a.join(".git/grapher-node-id").exists());
     assert_eq!(
         workspace::git(&node_a, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
         "grapher-node"
     );
     fs::write(node_a.join("a.txt"), "hello from node A\n").unwrap();
-    let head_a = workspace::snapshot(&node_a).unwrap();
+    assert!(workspace::snapshot_node(&node_a, &repository, "../invalid").is_err());
+    let head_a = workspace::snapshot_node(&node_a, &repository, "nodeA").unwrap();
 
     // 2. Verify Host has refs/grapher/nodes/nodeA pointing to head_a
-    let host_ref_a = workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).unwrap();
+    let host_ref_a =
+        workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).unwrap();
     assert_eq!(host_ref_a, head_a);
 
     // Verify .git/FETCH_HEAD does NOT exist in host repository (avoiding parallel race conditions)
@@ -482,17 +497,107 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     );
 
     // 3. Prepare child Node B depending on parent "nodeA"
-    workspace::prepare_node(&repository, &node_b, Some("nodeB"), &base, &["nodeA".to_string()]).unwrap();
-    assert!(node_b.join("a.txt").exists(), "Child did not receive parent's files");
-    let child_parent_ref = workspace::git(&node_b, &["rev-parse", "refs/grapher/parents/nodeA"]).unwrap();
+    workspace::prepare(&repository, &node_b, &base, &["nodeA".to_string()]).unwrap();
+    assert!(
+        node_b.join("a.txt").exists(),
+        "Child did not receive parent's files"
+    );
+    let child_parent_ref =
+        workspace::git(&node_b, &["rev-parse", "refs/grapher/parents/nodeA"]).unwrap();
     assert_eq!(child_parent_ref, head_a);
 
     // 4. Node B completes and snapshots
     fs::write(node_b.join("b.txt"), "hello from node B\n").unwrap();
-    let head_b = workspace::snapshot(&node_b).unwrap();
+    let head_b = workspace::snapshot_node(&node_b, &repository, "nodeB").unwrap();
 
     // 5. Verify Host has refs/grapher/nodes/nodeB pointing to head_b
-    let host_ref_b = workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).unwrap();
+    let host_ref_b =
+        workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).unwrap();
     assert_eq!(host_ref_b, head_b);
 }
 
+#[test]
+fn serial_snapshot_does_not_create_or_move_graph_refs() {
+    let temp = TempDir::new().unwrap();
+    let repository = grapher::fixture::repository(temp.path()).unwrap();
+    fs::write(repository.join("serial.txt"), "serial result\n").unwrap();
+
+    let head = workspace::snapshot_execution(&repository, &repository, "task").unwrap();
+    assert_eq!(
+        head,
+        workspace::git(&repository, &["rev-parse", "HEAD"]).unwrap()
+    );
+    assert!(workspace::git(
+        &repository,
+        &["rev-parse", "--verify", "refs/heads/grapher-node"]
+    )
+    .is_err());
+    assert!(workspace::git(
+        &repository,
+        &["rev-parse", "--verify", "refs/grapher/nodes/task"]
+    )
+    .is_err());
+    assert!(workspace::snapshot_node(&repository, &repository, "task").is_err());
+}
+
+#[test]
+fn human_resolved_workspace_is_imported_before_fresh_execution() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("runtime");
+    let mut runtime = Runtime::open(&root).unwrap();
+    runtime
+        .create(
+            Graph {
+                original_goal: "Resolve a composed workspace".into(),
+                nodes: vec![Node {
+                    name: "worker".into(),
+                    task: "Complete the work".into(),
+                }],
+                edges: Vec::new(),
+            },
+            config(),
+        )
+        .unwrap();
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    let repository = grapher::fixture::repository(&root).unwrap();
+    let workspace_path = Path::new(&job.execution.worktree);
+    workspace::prepare(&repository, workspace_path, &job.execution.before, &[]).unwrap();
+    fs::write(workspace_path.join("resolved.txt"), "human resolution\n").unwrap();
+    workspace::git(workspace_path, &["add", "resolved.txt"]).unwrap();
+    workspace::git(workspace_path, &["commit", "-m", "Resolve composition"]).unwrap();
+    let resolved_head = workspace::git(workspace_path, &["rev-parse", "HEAD"]).unwrap();
+    assert!(workspace::git(&repository, &["cat-file", "-e", &resolved_head]).is_err());
+
+    runtime
+        .emit(EventKind::Blocked {
+            node: "worker".into(),
+            error: "Workspace composition blocked".into(),
+        })
+        .unwrap();
+    runtime.pause(true).unwrap();
+    runtime.resolved("worker").unwrap();
+    assert_eq!(
+        runtime.state.nodes["worker"].head.as_deref(),
+        Some(resolved_head.as_str())
+    );
+    assert_eq!(
+        workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/worker"]).unwrap(),
+        resolved_head
+    );
+
+    runtime.pause(false).unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    assert_eq!(retry.execution.before, resolved_head);
+    workspace::prepare(
+        &repository,
+        Path::new(&retry.execution.worktree),
+        &retry.execution.before,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(Path::new(&retry.execution.worktree).join("resolved.txt")).unwrap(),
+        "human resolution\n"
+    );
+}
