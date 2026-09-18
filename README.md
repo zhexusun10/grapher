@@ -157,7 +157,7 @@ npm run benchmark:runtime         # 执行机制回归
 npm run test:benchmark            # grader 回归，不调用模型
 ```
 
-规划 benchmark 不创建 Runtime、不批准图、不执行节点。评测契约见 [benchmark/architecture.md](benchmark/architecture.md)，被测系统边界见 [benchmark/system-under-test.md](benchmark/system-under-test.md)。
+规划 benchmark 不创建 Runtime、不批准图、不执行节点。默认证据写入 Grapher 仓库旁的 `grapher-benchmark-results/`，可通过 `GRAPHER_BENCHMARK_RESULTS_DIR` 覆盖，避免 fixture 和模型会话落入安装源码树。评测契约见 [benchmark/architecture.md](benchmark/architecture.md)，被测系统边界见 [benchmark/system-under-test.md](benchmark/system-under-test.md)。
 
 ## 已知约束
 

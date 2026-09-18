@@ -82,6 +82,25 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
             );
         }
     }
+    let mut feedback_targets: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for edge in graph.edges.iter().filter(|edge| edge.feedback) {
+        feedback_targets
+            .entry(&edge.from)
+            .or_default()
+            .insert(&edge.to);
+    }
+    for (source, targets) in feedback_targets
+        .into_iter()
+        .filter(|(_, targets)| targets.len() > 1)
+    {
+        add(
+            "E208",
+            format!(
+                "Feedback source {source} has multiple targets: {}. A feedback verdict does not identify a target, so each source may revise exactly one dependency ancestor. Keep one feedback edge from this source. For converged branches, route review feedback to one integration owner, or use separate review nodes so each reviewer targets one owner.",
+                targets.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
     if !errors.is_empty() {
         return Err(errors);
     }

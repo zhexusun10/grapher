@@ -1,6 +1,0 @@
-{
-  "output": "/Users/jerry/Desktop/grapher/benchmark-results/partition-off-trace/P003/partition",
-  "repository": "/Users/jerry/Desktop/grapher/benchmark-results/partition-off-trace/P003/repository",
-  "goal": "Rename Settings.retryCount to maxRetries in src/settings.ts and update its direct references in server/config.ts, web/config.ts and docs/configuration.md. The default stays 3 and behavior must remain identical. Check that no stale retryCount references remain. Do not redesign the configuration system.",
-  "stage": "partition"
-}

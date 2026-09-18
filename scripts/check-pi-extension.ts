@@ -29,6 +29,12 @@ try {
   assert.equal(loaded.extensions[1].handlers.has("tool_call"), false, "Planner graph tools must not get shell hooks");
   const extension = loaded.extensions[0];
   assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edge", "node"]);
+  const bashDescription = extension.tools.get("bash")!.definition.description;
+  assert.match(bashDescription, /similar name or setting is not authority/);
+  assert.match(bashDescription, /checkout starts at \/workspace/);
+  assert.match(bashDescription, /cd \[repository-directory\]/);
+  assert.match(bashDescription, /wc \[-clw\]/);
+  assert.match(bashDescription, /find \[path\].*-not -path glob/);
   assert.doesNotMatch(extension.tools.get("edge")!.definition.description, /maxFeedback|retry budget|reviewer/i);
   const context = {} as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
@@ -126,6 +132,10 @@ try {
     [{ nodes: [{ name: "new", task: "New task" }], edges: [{ from: "verification", to: "contract" }] }, "E101"],
     [{ nodes: [{ name: "new", task: "New task" }], edges: [{ from: "new", to: "missing" }] }, "E204"],
     [{ edges: [{ from: "parser", to: "search", feedback: true }] }, "E207"],
+    [{ edges: [
+      { from: "verification", to: "parser", feedback: true },
+      { from: "verification", to: "search", feedback: true },
+    ] }, "E208"],
     [{ nodes: [{ name: "new" }] }, "E203"],
     [{ nodes: [], edges: [] }, "mutation-input"],
     [{ name: "contract", nodes: batchNodes }, "mutation-input"],

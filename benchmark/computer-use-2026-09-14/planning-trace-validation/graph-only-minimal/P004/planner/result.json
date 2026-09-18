@@ -1,6 +1,0 @@
-{
-  "durationMs": 49779,
-  "error": null,
-  "response": "Plan is in place — three nodes, no warnings:\n\n- **server-users** (batch 1): `server/users.ts` with `q` filtering, cursor pagination, contract-specified 400 (invalid cursor) / 500 errors + server unit tests.\n- **web-users** (batch 1, parallel): `web/users.ts` with debounced search, cursor pagination, loading/empty/error states, stale-response suppression + browser unit tests including an out-of-order response pair.\n- **users-flow-acceptance** (batch 2, depends on both): `tests/users-flow.test.ts` running the browser layer against the real endpoint — filtering, multi-page cursor walk, invalid-cursor 400, 500 path, and out-of-order/stale resolution — plus confirmation that `contracts/users.json` and the package manifest are byte-unchanged.\n\nBoth producers treat `contracts/users.json` as the sole authoritative shape and are barred from editing it or the manifest; the acceptance node owns integration verification as the single terminal.",
-  "status": "PASS"
-}

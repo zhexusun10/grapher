@@ -1,7 +1,0 @@
-{
-  "model": "dashscope/qwen3.8-flash",
-  "stage": "planner",
-  "thinking": "medium",
-  "toolPolicy": "planner-graph-tools-v1",
-  "tools": "node,edge"
-}

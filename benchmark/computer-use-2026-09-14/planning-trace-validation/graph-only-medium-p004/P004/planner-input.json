@@ -1,6 +1,0 @@
-{
-  "output": "/Users/jerry/Desktop/grapher/benchmark/computer-use-2026-09-14/planning-trace-validation/graph-only-medium-p004/P004/planner",
-  "repository": "/Users/jerry/Desktop/grapher/benchmark/computer-use-2026-09-14/planning-trace-validation/graph-only-medium-p004/P004/repository",
-  "goal": "Deliver users search using the existing immutable contracts/users.json contract. Implement server/users.ts with q filtering, cursor pagination and the specified 400/500 errors, and server unit tests. Implement web/users.ts with debounced search, pagination, loading/empty/error states and protection against stale responses, with browser unit tests. Add integrated acceptance coverage in tests/users-flow.test.ts exercising the browser against the endpoint, including invalid cursors and out-of-order responses. Keep the published contract and package manifest unchanged.",
-  "stage": "planner"
-}

@@ -1,6 +1,0 @@
-{
-  "durationMs": 36504,
-  "error": null,
-  "response": "The graph is complete with no warnings:\n\n**Structure:**\n- **Batch 1 (parallel):** `audit-auth` and `audit-storage` run concurrently — each independently examines one source file and writes its report.\n- **Batch 2 (dependent):** `release-decision` waits for both reports, synthesizes them into `reports/release.md` with prioritized blockers, tradeoff analysis, and a release go/no-go recommendation.\n\nAll three nodes are constrained to read-only inspection of application source and must not implement fixes.",
-  "status": "PASS"
-}

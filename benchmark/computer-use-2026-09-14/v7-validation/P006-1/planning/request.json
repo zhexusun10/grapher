@@ -1,9 +1,0 @@
-{
-  "config": {
-    "maxFeedback": 2,
-    "maxParallel": 2,
-    "model": "dashscope/qwen3.8-flash",
-    "repository": "/private/var/folders/6w/9gtqd_9j3rz41r1rzgxcd9h00000gn/T/grapher-v7-real-7Hl7C1/P006-1/project"
-  },
-  "goal": "Assess whether this service is ready for release without changing application source. Audit server/auth.ts for authentication/session expiry vulnerabilities and write reports/auth.md with evidence, reproduction cases, severity and recommended fixes. Separately audit server/storage.ts for crash consistency and data-loss risks and write reports/storage.md with failure scenarios, severity and recommended fixes. Produce reports/release.md using both reports to prioritize blockers, explain tradeoffs and recommend a release decision. Do not implement the fixes in this assessment."
-}

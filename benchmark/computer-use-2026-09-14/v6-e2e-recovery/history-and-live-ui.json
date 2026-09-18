@@ -1,8 +1,0 @@
-{
-  "defaultAttempt": "1baf7ff2-c5ab-4047-ae00-efa942df790c",
-  "currentTiming": "21:32:26 → 21:35:34 · 耗时 3分8秒",
-  "historicalTiming": "21:16:27 → 21:31:28 · 耗时 15分0秒",
-  "liveBefore": "21:35:34 · 已运行 3分42秒",
-  "liveAfter": "21:35:34 · 已运行 3分44秒",
-  "status": "PASS"
-}

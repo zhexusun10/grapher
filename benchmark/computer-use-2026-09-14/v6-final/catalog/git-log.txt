@@ -1,2 +1,0 @@
-* 5f9323a Grapher execution snapshot
-* 175ae25 Acceptance baseline

@@ -98,7 +98,7 @@ interface Graph {
 }
 ```
 
-`name` 是图内语义标识；边由 `(from, to)` 唯一标识。`feedback` 必须显式提供。
+`name` 是图内语义标识；边由 `(from, to)` 唯一标识。`feedback` 必须显式提供。同一 source 最多只能有一条 outgoing feedback edge，因为反馈 verdict 不携带 target。
 
 边分为两类：
 
@@ -113,6 +113,7 @@ Compiler 校验：
 
 - 节点名称格式、唯一性、数量上限和非空 task。
 - 边端点存在、无自环、`(from, to)` 不重复。
+- 每个 source 最多一条 outgoing feedback edge。
 - 普通依赖图无环。
 - feedback target 是 source 的普通依赖祖先。
 
@@ -148,12 +149,23 @@ waiting/dirty -> blocked
 
 ### Feedback
 
-拥有 outgoing feedback edge 的节点会自动收到响应协议：最终一行必须是 `<ACCEPT>` 或 `<REVISE>`。
+拥有 outgoing feedback edge 的节点会自动收到响应协议：最终一行必须是 `<ACCEPT>` 或 `<REVISE>`。每个 source 最多一条 outgoing feedback edge；Compiler 拒绝一个 source 指向多个 target，因为 verdict 本身不选择 target。
 
 - `<ACCEPT>`：不触发反馈。
-- `<REVISE>`：触发该 source 的全部 outgoing feedback edges，使 target 及其普通依赖后继失效并重新执行。
+- `<REVISE>`：触发该 source 的唯一 outgoing feedback edge，使 target 及其普通依赖后继失效并重新执行。
 - 协议错误：当前 execution 失败。
 - 超过 `maxFeedback`：来源分支失败，无关分支继续。
+
+当两个并行实现都可能需要独立修订时，使用以下任一可表达结构：
+
+```text
+frontend ----\
+              integration -> review
+backend -----/                 |
+               ^--------------+ feedback
+```
+
+这里 `integration` 是合并后结果的修订 owner，`review` 只有一条 feedback edge 指回它。或者为两个实现分别设置 reviewer，每个 reviewer 只反馈给自己的实现 owner，再让后续 integration 消费两条已验收分支。不要创建同一个 `review` 同时 feedback 到 `frontend` 和 `backend` 的图；当前协议无法表达“只修其中一个”。
 
 路由由 Graph 决定，评价由节点完成，状态迁移由 Runtime 完成。
 
@@ -217,7 +229,7 @@ Runtime 先持久化 `PublicationStarted`，再把当前有效节点 heads 合�
 | 角色 | 工具/扩展 | 工作目录与权限 |
 | --- | --- | --- |
 | Partitioner | 无工具、无 skills/extensions | 用户仓库，只做分类 |
-| Planner | `node/edge/read/bash`，仅显式 Grapher extension | 用户仓库，工具层只读 |
+| Planner | `node/edge/read/bash`，仅显式 Grapher extension | 用户仓库，原生 bash，通过工具层正则拦截显式写操作 |
 | Node Agent | Pi 原生工具，可加载 skills/extensions | Serial 在用户目录；Graph 在独立节点仓库 |
 | Merger | `read/write/edit/bash`，无自动扩展发现 | 用户目录，仅处理最终发布冲突 |
 
@@ -310,7 +322,7 @@ React UI 负责：
 1. Planner plans; Compiler validates; Runtime executes; Pi works.
 2. Planner 不派发 agent，也不参与运行期协调。
 3. 每次节点尝试都是 fresh Execution Instance。
-4. 普通依赖图必须是 DAG；循环只能通过显式 feedback edge 表达。
+4. 普通依赖图必须是 DAG；循环只能通过显式 feedback edge 表达，且每个 feedback source 只能指向一个 target。
 5. Graph 节点通过 Git 文件系统状态协作，不传递对话历史。
 6. Runtime 和 SQLite event log 是状态权威，UI 只是投影。
 7. Graph 结果只有成功发布到用户目录后才算 completed。

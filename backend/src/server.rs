@@ -1854,11 +1854,6 @@ pub fn run() -> Result<(), String> {
         include_str!("../resources/workspace-paths.mjs"),
     )
     .map_err(|error| error.to_string())?;
-    fs::write(
-        root.join("planning-inspection.mjs"),
-        include_str!("../resources/planning-inspection.mjs"),
-    )
-    .map_err(|error| error.to_string())?;
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root)?),
         driving: AtomicBool::new(false),

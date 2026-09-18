@@ -1,7 +1,0 @@
-{
-  "inspectionPolicy": "repository-inspection-v1",
-  "model": "dashscope/qwen3.8-flash",
-  "stage": "planner",
-  "thinking": "medium",
-  "tools": "node,edge,read,bash"
-}
