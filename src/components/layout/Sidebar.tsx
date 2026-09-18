@@ -123,7 +123,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       </div>
 
       <div className="nav-section runs-label">
-        <span>Run History</span>
+        <span>Conversation</span>
         <div className="section-actions">
           <button
             className="icon-tiny-btn"

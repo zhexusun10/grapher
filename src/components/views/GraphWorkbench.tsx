@@ -323,6 +323,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 <span>最新</span>
               </button>
             )}
+            <motion.div
+              className="pane-bottom-chat"
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <PromptBox
+                compact
+                onSubmit={(val) => onSendMessage(val)}
+                placeholder=""
+                disabled={
+                  locked ||
+                  isPlanning ||
+                  active ||
+                  (Boolean(selectedNode) && !state.approved)
+                }
+              />
+            </motion.div>
           </div>
         ) : (
           <div className="initial-query-view">
@@ -546,35 +564,26 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 <span>最新</span>
               </button>
             )}
+            <motion.div
+              className="pane-bottom-chat"
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <PromptBox
+                compact
+                onSubmit={(val) => onSendMessage(val)}
+                placeholder=""
+                disabled={
+                  locked ||
+                  isPlanning ||
+                  active ||
+                  (Boolean(selectedNode) && !state.approved)
+                }
+              />
+            </motion.div>
           </div>
         )}
-
-        <motion.div
-          className="pane-bottom-chat"
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
-        >
-          <PromptBox
-            compact
-            onSubmit={(val) => onSendMessage(val)}
-            placeholder={
-              selectedNode
-                ? `向 [${selectedNode.name}] 发送微调或介入指令...`
-                : routeType === "serial"
-                ? "向当前串行任务发送微调或介入指令..."
-                : !state.approved
-                ? "向 AI 规划器追加指令或修改规划要求..."
-                : "输入新要求以重新规划，或点击节点进行针对性微调..."
-            }
-            disabled={
-              locked ||
-              isPlanning ||
-              active ||
-              (Boolean(selectedNode) && !state.approved)
-            }
-          />
-        </motion.div>
       </motion.div>
 
       {/* 左右可调节分割器 与 右侧执行拓扑图面板 */}
