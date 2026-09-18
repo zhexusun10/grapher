@@ -1,8 +1,8 @@
-import React, { useRef, useState, useEffect, useCallback } from "react";
+import React, { useRef, useState, useEffect, useLayoutEffect, useCallback } from "react";
 import { Background, Controls, ReactFlow } from "@xyflow/react";
 import {
   Code2, ArrowLeft, Terminal, FolderGit2, GitBranch, RotateCcw,
-  Workflow, Check, Play, Pause, ShieldCheck, Compass
+  Workflow, Check, Play, Pause, ShieldCheck, Compass, ArrowDown
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -82,6 +82,57 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const currentWidthRef = useRef<number>(390);
   const [attemptId, setAttemptId] = useState("");
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const isUserScrolledUpRef = useRef(false);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+
+  const handleChatScroll = useCallback(() => {
+    if (!chatScrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    const isUp = distanceFromBottom > 80;
+    isUserScrolledUpRef.current = isUp;
+    setShowScrollBottom(isUp);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTo({
+        top: chatScrollRef.current.scrollHeight,
+        behavior: "smooth",
+      });
+      isUserScrolledUpRef.current = false;
+    }
+  }, []);
+
+  // Ensure scroll button visibility is evaluated immediately on render and on size changes
+  useLayoutEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+
+    handleChatScroll(); // initial check
+
+    const observer = new ResizeObserver(() => {
+      // Auto-scroll to bottom when content grows, unless user scrolled up
+      if (!isUserScrolledUpRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+      handleChatScroll();
+    });
+
+    observer.observe(el);
+    if (el.firstElementChild) {
+      observer.observe(el.firstElementChild);
+    }
+
+    return () => observer.disconnect();
+  }, [handleChatScroll]);
+
+  // Auto-scroll to bottom when new messages or streaming content arrives
+  useLayoutEffect(() => {
+    if (!isUserScrolledUpRef.current && chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [effectiveMessages, plannerStream.plannerText, plannerStream.plannerThinking, isPlanning]);
 
   // Initialize width from localStorage directly into CSS variable
   useEffect(() => {
@@ -140,12 +191,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, []);
 
-  // Scroll chat messages
-  useEffect(() => {
-    if (chatScrollRef.current) {
-      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-    }
-  }, [effectiveMessages.length, isPlanning]);
+
 
   const selectedNode = state.graph.nodes.find((item) => item.name === selected);
   const selectedState = selectedNode ? state.nodes[selectedNode.name] : undefined;
@@ -194,7 +240,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               )}
             </div>
 
-            <div className="initial-query-scroll" ref={chatScrollRef}>
+            <div className="initial-query-scroll" ref={chatScrollRef} onScroll={handleChatScroll}>
               <div className="chat-messages-stream">
                 <div style={{ padding: "0 4px" }}>
                   <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }}>
@@ -266,10 +312,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
               </div>
             </div>
+            {showScrollBottom && (
+              <button
+                type="button"
+                className="scroll-to-bottom-btn"
+                onClick={scrollToBottom}
+                title="回到底部最新输出"
+              >
+                <ArrowDown size={14} />
+                <span>最新</span>
+              </button>
+            )}
           </div>
         ) : (
           <div className="initial-query-view">
-            <div className="initial-query-scroll" ref={chatScrollRef}>
+            <div className="initial-query-scroll" ref={chatScrollRef} onScroll={handleChatScroll}>
               <div className="chat-messages-stream">
                 {effectiveMessages.map((msg) => (
                   <motion.div
@@ -280,7 +337,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
                   >
                     <div className={`chat-bubble-${msg.role}`}>
-                      <MarkdownRenderer content={msg.text} />
+                      {msg.role === "user" ? msg.text.trim() : <MarkdownRenderer content={msg.text} />}
                     </div>
                   </motion.div>
                 ))}
@@ -478,6 +535,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </motion.div>
               )}
             </div>
+            {showScrollBottom && (
+              <button
+                type="button"
+                className="scroll-to-bottom-btn"
+                onClick={scrollToBottom}
+                title="回到底部最新输出"
+              >
+                <ArrowDown size={14} />
+                <span>最新</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -562,79 +630,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <h3>AI 架构师正在生成有向执行图...</h3>
                       <p>正在分析代码拓扑、计算独立 Git worktree 并行执行批次与复审边。</p>
                     </div>
-                  ) : (
-                    <div className="graph-empty-state">
-                      <div className="empty-icon-orbit">
-                        <FolderGit2 size={32} />
-                      </div>
-                      {repoInfo || config.repository ? (
-                        <>
-                          <h3>本地 Git 工作区已就绪</h3>
-                          <p>
-                            已自动识别并连接本地代码仓库。在下方输入框输入工作目标，Grapher 将通过 AI Planner 编译并行有向工作图并在独立 Git worktree 中执行。
-                          </p>
-                          <div className="workspace-status-card">
-                            <div className="ws-card-header">
-                              <span className="ws-repo-name">
-                                <FolderGit2 size={15} />
-                                <strong>{repoInfo?.name || (config.repository ? config.repository.split("/").pop() : "")}</strong>
-                              </span>
-                              {repoInfo && (
-                                <span className={`ws-clean-badge ${repoInfo.clean ? "clean" : "dirty"}`}>
-                                  {repoInfo.clean ? "✓ 工作树干净 (Ready)" : "⚠ 有未提交改动 (Dirty)"}
-                                </span>
-                              )}
-                            </div>
-                            <div className="ws-card-meta">
-                              {repoInfo?.branch && (
-                                <span className="ws-meta-tag">
-                                  <GitBranch size={12} /> 分支: <code>{repoInfo.branch}</code>
-                                </span>
-                              )}
-                              {repoInfo?.head && (
-                                <span className="ws-meta-tag">
-                                  <Code2 size={12} /> HEAD: <code>{repoInfo.head}</code>
-                                </span>
-                              )}
-                            </div>
-                            <div className="ws-card-path" title={repoInfo?.path || config.repository}>
-                              <code>{repoInfo?.path || config.repository}</code>
-                            </div>
-                          </div>
-                          <div className="empty-actions">
-                            <button type="button" className="secondary" onClick={onPickRepository}>
-                              <FolderGit2 size={14} />选择 / 切换本地目录
-                            </button>
-                            <button type="button" className="secondary" onClick={onDetectRepository}>
-                              <RotateCcw size={14} />重新检测
-                            </button>
-                            <button
-                              type="button"
-                              className="secondary"
-                              onClick={onOpenEditor}
-                            >
-                              <Code2 size={14} />编写 Graph IR
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <h3>未选择本地工作区</h3>
-                          <p>
-                            Grapher 支持选择本地 Git 仓库或任意普通项目文件夹（自动提供本地隔离沙箱，零侵入不污染原项目）。请通过下方按钮选择本地文件夹。
-                          </p>
-                          <div className="empty-actions">
-                            <button type="button" className="primary" onClick={onPickRepository}>
-                              <FolderGit2 size={15} />选择本地项目文件夹
-                            </button>
-                            <button type="button" className="secondary" onClick={onDetectRepository}>
-                              <RotateCcw size={14} />自动检测当前目录
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )
+                  ) : null
                 ) : (
                   <>
                     <ReactFlow

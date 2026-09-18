@@ -1,5 +1,5 @@
 import React from "react";
-import { Settings2, FolderGit2, RotateCcw, Terminal, Plus, Check, X } from "lucide-react";
+import { Settings2, FolderGit2, RotateCcw, Terminal, Plus, Check, X, Copy } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
 import { ProviderSettings } from "../ProviderSettings";
 
@@ -51,7 +51,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <Settings2 size={18} />
             </div>
             <div>
-              <h2 id="modal-title">项目与引擎运行配置</h2>
+              <h2 id="modal-title">Setting</h2>
               <small>管理工作区、模型、Provider 认证及 Execution Instance 并发参数</small>
             </div>
           </div>
@@ -129,50 +129,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <ProviderSettings model={config.model} onModel={model => setConfig(prev => ({ ...prev, model }))} />
             </div>
 
-            {/* Section 3: 调度 */}
-            <div className="settings-card">
-              <div className="settings-card-title"><h4>Execution Instance 调度</h4></div>
-              <div className="form-grid">
-                <label className="form-field">
-                  <span>并发执行节点上限</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={8}
-                    value={config.maxParallel}
-                    onChange={(e) => setConfig({ ...config, maxParallel: Number(e.target.value) })}
-                  />
-                </label>
-
-                <label className="form-field">
-                  <span>反馈重试上限</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={10}
-                    value={config.maxFeedback}
-                    onChange={(e) => setConfig({ ...config, maxFeedback: Number(e.target.value) })}
-                  />
-                </label>
-              </div>
-            </div>
-
             {/* Section 4: 数据管理 */}
             <div className="settings-card">
               <div className="settings-card-title">
                 <RotateCcw size={16} />
                 <h4>存储与重置</h4>
               </div>
-              <p className="section-desc">
-                Grapher 将运行时快照与事件保存在本地 SQLite 数据库中。路径：<code>{dataPath || "本地系统应用目录"}</code>
-              </p>
-              <div className="danger-actions-row">
-                <button type="button" className="secondary" onClick={onResetWorkspace}>
-                  <Plus size={14} /> 重置当前工作区图
-                </button>
-                <button type="button" className="secondary danger-btn" onClick={onClearHistory}>
-                  <RotateCcw size={14} /> 清空所有历史运行快照
-                </button>
+              <div className="section-desc">
+                <p>Grapher 将运行时快照与事件保存在本地 SQLite 数据库中。路径：</p>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
+                  <code>{dataPath || "本地系统应用目录"}</code>
+                  <button 
+                    type="button"
+                    className="icon-tiny-btn"
+                    onClick={() => navigator.clipboard.writeText(dataPath || "本地系统应用目录")}
+                    title="复制路径"
+                  >
+                    <Copy size={13} />
+                  </button>
+                </div>
               </div>
             </div>
           </div>

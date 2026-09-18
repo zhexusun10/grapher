@@ -29,21 +29,31 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
       transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
     >
       <div className="landing-center-content">
-        <motion.p
-          className="landing-title"
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
-          How Can I Help You
-        </motion.p>
+        <div className="landing-title-container">
+          <motion.p
+            className="landing-title"
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            Build Anything.
+          </motion.p>
+          <motion.p
+            className="landing-subtitle"
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: 0.1 }}
+          >
+            The Most Powerful Multi-Agent System Ever
+          </motion.p>
+        </div>
         <div style={{ width: "100%", position: "relative" }}>
           <PromptBox
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
             onSubmit={(val) => onPlanGoal(val)}
             isBusy={isBusy}
-            placeholder="描述你想完成的工作或项目目标..."
+            placeholder=""
           />
         </div>
       </div>

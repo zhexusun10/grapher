@@ -1214,7 +1214,6 @@ export default function App() {
           }
         })}
         onDeleteRun={handleDeleteRunConfirm}
-        onClearHistory={handleClearHistory}
         onResetWorkspace={handleResetWorkspace}
         onOpenSettings={() => setModal("settings")}
         isSettingsOpen={modal === "settings"}
@@ -1257,6 +1256,7 @@ export default function App() {
         <AnimatePresence mode="wait" initial={false}>
           {state.graph.nodes.length === 0 && !isPlanning && !recoveredPlanning && mainTab === "graph" ? (
             <LandingView
+              key="landing-view"
               goal={goal}
               setGoal={setGoal}
               onPlanGoal={handlePlanGoal}
@@ -1269,7 +1269,7 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0, transition: { duration: 0.18 } }}
-              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
             >
               {recoveredPlanning && <section aria-label="恢复进行中的规划">
                 <p role="status">已连接正在进行的规划，活动会自动更新。</p>

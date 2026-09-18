@@ -16,6 +16,8 @@ import {
   LogOut,
   X,
   Search,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import {
   providerAuth,
@@ -65,6 +67,7 @@ export function ProviderSettings({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [showProviders, setShowProviders] = useState(false);
 
   const mounted = useRef(false);
   const activeId = useRef<string | undefined>(undefined);
@@ -289,7 +292,12 @@ export function ProviderSettings({
               type="text"
               placeholder="搜索 Provider..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                if (e.target.value.trim() !== "") {
+                  setShowProviders(true);
+                }
+              }}
             />
           </div>
           <button
@@ -498,11 +506,15 @@ export function ProviderSettings({
       )}
 
       {/* Provider List Grid */}
-      <div className="providers-grid-title">
-        <span>支持的 Provider 列表</span>
-        <small>点击任意 Provider 可一键发起 <code>/login</code> 或管理凭据</small>
+      <div className="providers-grid-title" onClick={() => setShowProviders(!showProviders)} style={{ cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <span>支持的 Provider 列表</span>
+          <small>点击任意 Provider 可一键发起 <code>/login</code> 或管理凭据</small>
+        </div>
+        {showProviders ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
       </div>
 
+      {showProviders && (
       <div className="providers-card-grid">
         {filteredProviders.map((p) => {
           const isSelected = activeProvider?.id === p.id;
@@ -585,6 +597,7 @@ export function ProviderSettings({
           );
         })}
       </div>
+      )}
 
       {busy && (
         <div className="provider-status-loading">

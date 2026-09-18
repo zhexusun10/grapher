@@ -14,7 +14,6 @@ interface SidebarProps {
   activeBackendPhase: string | null;
   onLoadRun: (runId: string) => void;
   onDeleteRun: (runId: string) => void;
-  onClearHistory: () => void;
   onResetWorkspace: () => void;
   onOpenSettings: () => void;
   isSettingsOpen: boolean;
@@ -33,7 +32,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   activeBackendPhase,
   onLoadRun,
   onDeleteRun,
-  onClearHistory,
   onResetWorkspace,
   onOpenSettings,
   isSettingsOpen,
@@ -127,15 +125,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       <div className="nav-section runs-label">
         <span>Run History</span>
         <div className="section-actions">
-          {runs.length > 0 && (
-            <button
-              className="icon-tiny-btn danger-hover"
-              title="清空历史运行快照"
-              onClick={onClearHistory}
-            >
-              <RotateCcw size={11} />
-            </button>
-          )}
           <button
             className="icon-tiny-btn"
             title="新建空白工作区"
@@ -188,10 +177,10 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           type="button"
           className={`sidebar-bottom-btn ${isSettingsOpen ? "active" : ""}`}
           onClick={onOpenSettings}
-          title="项目与引擎运行配置"
+          title="Setting"
         >
           <Settings2 size={15} />
-          <span>运行配置</span>
+          <span>Setting</span>
         </button>
       </div>
 

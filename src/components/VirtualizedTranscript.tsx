@@ -85,9 +85,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     const unparsed = output.slice(lastProcessedPosRef.current);
     if (!unparsed) return;
 
-    // Find the last newline to ensure we only process complete lines
+    // Process all complete lines, plus keep any trailing incomplete line in lastProcessedPos
     const lastNewlineIdx = unparsed.lastIndexOf("\n");
-    if (lastNewlineIdx === -1) return; // Wait for complete line
+    if (lastNewlineIdx === -1) return; // Wait for at least one complete line
 
     const chunkToProcess = unparsed.slice(0, lastNewlineIdx + 1);
     lastProcessedPosRef.current += chunkToProcess.length;
@@ -479,7 +479,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
         className="transcript-scroll-area"
         style={{ overflowAnchor: "none", minHeight: 200 }}
       >
-        {!output && items.length === 0 && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
+        {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
         <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
           {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{(() => {
             if (item.type === "tool_call") {

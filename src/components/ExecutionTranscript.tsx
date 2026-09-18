@@ -9,6 +9,7 @@ export function ExecutionTranscript({ runId, execution }: { runId: string; execu
   const [record, setRecord] = useState({ id: "", text: "" });
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const [isFetchingFirstPage, setIsFetchingFirstPage] = useState(false);
   const paged = execution.outputBytes !== undefined;
   useEffect(() => {
     if (!paged) return;
@@ -18,10 +19,12 @@ export function ExecutionTranscript({ runId, execution }: { runId: string; execu
     let text = "";
     setRecord({ id: execution.id, text });
     setError("");
+    setIsFetchingFirstPage(true);
     const poll = async () => {
       try {
         const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, abort.signal);
         if (abort.signal.aborted) return;
+        setIsFetchingFirstPage(false);
         if (page.runId !== runId || page.executionId !== execution.id || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
           throw new Error("执行记录与请求不匹配");
         }
@@ -33,7 +36,7 @@ export function ExecutionTranscript({ runId, execution }: { runId: string; execu
           const complete = page.complete && page.status !== "running";
           setRecord({ id: execution.id, text: complete && text && !text.endsWith("\n") ? `${text}\n` : text });
         }
-        if (!page.complete || page.status === "running") timer = setTimeout(poll, page.complete ? 1000 : 0);
+        if (!page.complete || page.status === "running") timer = setTimeout(poll, page.complete ? 150 : 0);
       } catch (error) {
         if (!abort.signal.aborted) setError(String(error));
       }
@@ -41,9 +44,24 @@ export function ExecutionTranscript({ runId, execution }: { runId: string; execu
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
   }, [runId, execution.id, paged, retry]);
+
+  let emptyText = "工作区就绪，等待节点指令输出…";
+  if (paged) {
+    if (isFetchingFirstPage) {
+      emptyText = "";
+    } else if (execution.status !== "running" && record.text === "") {
+      emptyText = "该节点没有产生日志输出";
+    }
+  } else {
+    if (execution.status !== "running" && !execution.output) {
+      emptyText = "该节点没有产生日志输出";
+    }
+  }
+
   return <>
     {error && <p role="alert">{error} <button onClick={() => setRetry(value => value + 1)}>重试</button></p>}
     <VirtualizedTranscript key={`${runId}:${execution.id}:${retry}`}
+      emptyText={emptyText}
       output={paged ? (record.id === execution.id ? record.text : "") : execution.output} />
   </>;
 }

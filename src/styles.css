@@ -95,11 +95,11 @@ h3 {
 
 /* 侧边栏 (悬浮圆角卡片模式) */
 .sidebar {
-  width: 256px;
+  width: 230px;
   flex-shrink: 0;
   margin: 12px 0 12px 12px;
   box-sizing: border-box;
-  border-radius: 10px;
+  border-radius: 18px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
@@ -1264,19 +1264,40 @@ a,
   gap: 32px;
 }
 
+.landing-title-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  width: 100%;
+  margin: auto 0;
+}
+
 .landing-title {
   font-size: clamp(28px, 3.8vw, 38px);
   font-weight: 550;
   letter-spacing: -0.025em;
   color: var(--text-primary);
   text-align: right;
-  width: 100%;
-  margin: auto 0;
   -webkit-user-select: none;
   -moz-user-select: none;
   -ms-user-select: none;
   user-select: none;
   -webkit-user-drag: none;
+  cursor: default;
+  pointer-events: none;
+}
+
+.landing-subtitle {
+  font-size: clamp(14px, 2vw, 18px);
+  font-weight: 500;
+  color: var(--text-primary);
+  text-align: right;
+  letter-spacing: -0.015em;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
   cursor: default;
   pointer-events: none;
 }
@@ -1873,14 +1894,16 @@ a,
   color: var(--brand-default);
 }
 
-/* 节点详情面板与未选中初始 Query 展示 */
 .initial-query-view {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  position: relative;
 }
+
+
 
 .initial-query-scroll {
   flex: 1;
@@ -2436,7 +2459,7 @@ a,
 
 /* 工作台面板与可调节分割器 */
 .workbench {
-  --workbench-left-width: 390px;
+  --workbench-left-width: 370px;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -2444,7 +2467,7 @@ a,
   margin: 12px 0;
   border: 1px solid var(--border-default);
   background: var(--bg-canvas);
-  border-radius: 10px;
+  border-radius: 18px;
   overflow: hidden;
   box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
   position: relative;
@@ -2467,6 +2490,8 @@ a,
   display: flex;
   flex-direction: column;
   background: var(--bg-surface);
+  border-top-left-radius: 18px;
+  border-bottom-left-radius: 18px;
 }
 
 .workbench-resizer {
@@ -4484,7 +4509,7 @@ a,
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   border-radius: 8px;
-  padding: 18px 20px;
+  padding: 10px 20px;
 }
 
 .settings-card-title {
@@ -4534,6 +4559,7 @@ a,
 
 .repo-path-input:focus {
   border-color: var(--brand-default);
+  outline: none;
 }
 
 .form-grid {
@@ -4562,10 +4588,12 @@ a,
 .form-field input,
 .form-field select,
 .form-field textarea {
+  width: 100%;
+  height: 28px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: 6px;
-  padding: 7px 10px;
+  padding: 0 10px;
   font-size: 12px;
   color: var(--text-primary);
   font-family: inherit;
@@ -4573,6 +4601,9 @@ a,
 }
 
 .form-field textarea {
+  height: auto;
+  min-height: 80px;
+  padding: 7px 10px;
   font-family: var(--font-mono, monospace);
   font-size: 11px;
   line-height: 1.5;
@@ -4582,6 +4613,7 @@ a,
 .form-field select:focus,
 .form-field textarea:focus {
   border-color: var(--brand-default);
+  outline: none;
 }
 
 .danger-actions-row {
@@ -4687,24 +4719,29 @@ a,
   max-width: 100% !important;
   border-right: none !important;
   background: var(--bg-surface);
+  border-radius: 18px;
   transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .conversation-pane.full-width .initial-query-scroll {
-  max-width: 860px;
-  margin: 0 auto;
   width: 100%;
   padding: 24px 20px;
 }
 
-.conversation-pane.full-width .pane-bottom-chat {
+.conversation-pane.full-width .chat-messages-stream {
   max-width: 860px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.conversation-pane.full-width .pane-bottom-chat {
+  max-width: 680px;
   margin: 0 auto;
   width: 100%;
 }
 
 .conversation-pane.split {
-  width: var(--workbench-left-width, 390px);
+  width: var(--workbench-left-width, 370px);
   transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
