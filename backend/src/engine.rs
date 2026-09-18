@@ -451,10 +451,13 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     );
     command.env(
         "GRAPHER_ORIGINAL_ROOT",
-        context
-            .original_repository
-            .canonicalize()
-            .map_err(|error| error.to_string())?,
+        Path::new(if config.repository.trim().is_empty() {
+            request.cwd.as_os_str()
+        } else {
+            config.repository.as_ref()
+        })
+        .canonicalize()
+        .map_err(|error| error.to_string())?,
     );
     command.process_group(0);
     let mut child = command

@@ -5,6 +5,8 @@ edition = "2021"
 
 [features]
 default = []
+benchmark = ["fixture"]
+fixture = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -14,3 +16,43 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 libc = "0.2"
 tiny_http = "0.12"
 signal-hook = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[example]]
+name = "benchmark"
+path = "../../grapher-tests/backend-examples/benchmark.rs"
+required-features = ["benchmark"]
+
+[[test]]
+name = "core"
+path = "../../grapher-tests/backend-tests/core.rs"
+required-features = ["fixture"]
+
+[[test]]
+name = "engine"
+path = "../../grapher-tests/backend-tests/engine.rs"
+required-features = ["fixture"]
+
+[[test]]
+name = "graph_merge"
+path = "../../grapher-tests/backend-tests/graph_merge.rs"
+
+[[test]]
+name = "publication"
+path = "../../grapher-tests/backend-tests/publication.rs"
+required-features = ["fixture"]
+
+[[test]]
+name = "publication_state"
+path = "../../grapher-tests/backend-tests/publication_state.rs"
+required-features = ["fixture"]
+
+[[test]]
+name = "sandbox"
+path = "../../grapher-tests/backend-tests/sandbox.rs"
+
+[[test]]
+name = "shadow"
+path = "../../grapher-tests/backend-tests/shadow.rs"

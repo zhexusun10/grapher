@@ -1233,7 +1233,7 @@ a,
   flex: 1;
   min-height: 0;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
   padding: 32px 24px;
   width: 100%;
@@ -1248,7 +1248,7 @@ a,
   max-width: 680px;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
   gap: 32px;
 }
 
@@ -1257,8 +1257,9 @@ a,
   font-weight: 550;
   letter-spacing: -0.025em;
   color: var(--text-primary);
-  text-align: center;
-  margin: 0;
+  text-align: right;
+  width: 100%;
+  margin: auto 0;
   -webkit-user-select: none;
   -moz-user-select: none;
   -ms-user-select: none;
@@ -1306,9 +1307,7 @@ a,
   outline: none !important;
 }
 
-.prompt-box-container:hover {
-  border-color: var(--text-primary) !important;
-}
+
 
 .prompt-box-container.landing:focus,
 .prompt-box-container.landing:focus-within,

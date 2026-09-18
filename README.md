@@ -89,7 +89,8 @@ backend/resources/ Partitioner/Planner prompts 与只读检查契约
 engine/            锁定 Pi 入口、Provider/Auth host、模型数据
 src/               React UI 与 HTTP client
 scripts/           开发、Pi 基线和 HTTP/UI 回归脚本
-benchmark/         规划质量和 Runtime benchmark
+../grapher-tests/benchmark/  外置规划质量和 Runtime benchmark
+../grapher-tests/backend-tests/ 外置 Rust 集成测试
 pi/                upstream Pi submodule
 ```
 
@@ -133,16 +134,15 @@ cargo fmt --manifest-path backend/Cargo.toml -- --check
 ```sh
 npm run test:pi
 npm run test:http
-npm run test:publication
-cargo check --manifest-path backend/Cargo.toml --no-default-features
+node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-features
 cargo build --release --manifest-path backend/Cargo.toml
 ```
 
 真实 macOS sandbox 和 Git 发布测试：
 
 ```sh
-cargo test --manifest-path backend/Cargo.toml --no-default-features --test sandbox -- --nocapture
-cargo test --manifest-path backend/Cargo.toml --no-default-features --test graph_merge
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --test sandbox -- --nocapture
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --test graph_merge
 ```
 
 `fixture` 测试使用确定性执行器，不调用真实模型，也不能证明生产 sandbox 有效。真实模型认证和语义质量需要在用户自己的 provider 环境中验证。
@@ -157,7 +157,7 @@ npm run benchmark:runtime         # 执行机制回归
 npm run test:benchmark            # grader 回归，不调用模型
 ```
 
-规划 benchmark 不创建 Runtime、不批准图、不执行节点。默认证据写入 Grapher 仓库旁的 `grapher-benchmark-results/`，可通过 `GRAPHER_BENCHMARK_RESULTS_DIR` 覆盖，避免 fixture 和模型会话落入安装源码树。评测契约见 [benchmark/architecture.md](benchmark/architecture.md)，被测系统边界见 [benchmark/system-under-test.md](benchmark/system-under-test.md)。
+规划 benchmark 不创建 Runtime、不批准图、不执行节点。Harness 与测试源码位于 Grapher 仓库外的 sibling `../grapher-tests/`；Cargo manifest 和 npm scripts 只引用这些外置文件。默认证据写入 Grapher 仓库旁的 `grapher-benchmark-results/`，可通过 `GRAPHER_BENCHMARK_RESULTS_DIR` 覆盖。评测契约见 [外置 benchmark 架构](../grapher-tests/benchmark/architecture.md)，被测系统边界见 [system-under-test.md](../grapher-tests/benchmark/system-under-test.md)。
 
 ## 已知约束
 
@@ -176,4 +176,4 @@ npm run test:benchmark            # grader 回归，不调用模型
 - [Planner 只读检查权限](backend/resources/planning-inspection.md)
 - [Planner prompt](backend/resources/prompts/planner.md)
 - [Partitioner prompt](backend/resources/prompts/partitioner.md)
-- [Benchmark 契约](benchmark/architecture.md)
+- [Benchmark 契约](../grapher-tests/benchmark/architecture.md)

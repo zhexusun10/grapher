@@ -56,7 +56,7 @@ Grapher 不运行一个持续在线的 LLM Coordinator。Planner 完成后，调
 | `backend/src/server.rs` | 本地 HTTP API、规划流程和 runtime driver |
 | `engine/` | 锁定 Pi 入口、模型数据与适配层 |
 | `src/` | React UI、运行时服务和图/会话视图 |
-| `benchmark/` | 规划质量与 Runtime 回归，不属于产品运行路径 |
+| `../grapher-tests/benchmark/` | 外置规划质量与 Runtime 回归，不属于产品运行路径 |
 | `pi/` | 未修改的 upstream Pi submodule |
 
 ## 3. 规划与 Graph IR
@@ -77,9 +77,9 @@ Planner 只有四个工具：
 - `node`：创建、更新或删除节点。
 - `edge`：创建、更新或删除边。
 - `read`：读取仓库内普通文件。
-- `bash`：受限的只读检查 API，不执行任意 shell。
+- `bash`：Pi 原生 shell 检查工具；工具层拒绝显式写操作，但它不是完整的只读 shell sandbox。
 
-Planner 不能启动 Node Agent、修改代码、管理工作区或参与运行期调度。只读检查的完整权限契约见 [planning-inspection.md](backend/resources/planning-inspection.md)。
+Planner 没有文件 edit/write 工具，也不能启动 Node Agent、管理工作区或参与运行期调度。当前原生 bash 的写保护只拦截显式写命令，不足以作为不可绕过的代码修改隔离；完整权限契约见 [planning-inspection.md](backend/resources/planning-inspection.md)。
 
 节点 task 必须自包含目标、约束、职责边界和验收方式。普通依赖边只表达文件状态或执行顺序依赖；逻辑可并行但会大量修改同一文件的工作不应强行并行。
 
@@ -318,6 +318,7 @@ React UI 负责：
 - 用户不能在 Graph 发布期间并发修改目标目录；脏目录会使发布失败。
 - prepare 阶段冲突由人工处理；merger 只处理最终发布冲突。
 - Runtime 不自动恢复被中断的 Execution Instance。
+- Planner 原生 bash 的写保护是启发式显式写拦截，不是完整只读 sandbox；规划后必须检查仓库未被修改。
 
 ## 11. 架构不变量
 

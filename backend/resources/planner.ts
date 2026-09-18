@@ -105,7 +105,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node",
-    description: `Create or replace a node's task by stable name. A node is a work outcome executed later in a fresh session; it receives this task and upstream filesystem changes, not the planner conversation. Include the context, constraints and completion evidence the worker needs. Workspace paths use /workspace for every agent; the host maps them to each agent's own checkout.
+    description: `Create or replace a node's task by stable name. A node is a work outcome executed later in a fresh session; it receives this task and upstream filesystem changes, not the planner conversation. Include the context, constraints and completion evidence the worker needs.
 
 Updating a name replaces its entire task and preserves edges. Deleting a node also removes its incident edges. To rename, create the new node, reconnect its edges and delete the old one. Independent terminals are allowed.
 

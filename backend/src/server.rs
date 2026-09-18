@@ -2123,5 +2123,8 @@ pub fn run() -> Result<(), String> {
 
 #[cfg(feature = "benchmark")]
 pub mod benchmark {
-    include!("../../benchmark/server.rs");
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../grapher-tests/benchmark/server.rs"
+    ));
 }
