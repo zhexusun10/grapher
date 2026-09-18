@@ -12,6 +12,7 @@ interface SidebarProps {
   currentRunId: string;
   activeBackendRunId: string | null;
   activeBackendPhase: string | null;
+  runIndicators: Record<string, { unread: boolean; phase: string }>;
   onLoadRun: (runId: string) => void;
   onDeleteRun: (runId: string) => void;
   onResetWorkspace: () => void;
@@ -30,6 +31,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   currentRunId,
   activeBackendRunId,
   activeBackendPhase,
+  runIndicators,
   onLoadRun,
   onDeleteRun,
   onResetWorkspace,
@@ -97,14 +99,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                 <div className="proj-details">
                   <div className="proj-name-row">
                     <strong>{proj.name}</strong>
-                    {proj.isShadow ? (
+                    {proj.isShadow && (
                       <span className="proj-branch-pill shadow" title="本地零侵入影子仓库：不污染原项目目录">
                         影子仓库
-                      </span>
-                    ) : (
-                      <span className="proj-branch-pill">
-                        <GitBranch size={9} />
-                        {proj.branch}
                       </span>
                     )}
                   </div>
@@ -139,6 +136,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         {runs.length > 0 ? (
           runs.map((id, index) => {
             const isThisRunActive = activeBackendRunId === id && ["running", "awaiting_approval", "publishing", "merging"].includes(activeBackendPhase ?? "");
+            const indicator = runIndicators[id];
+            const isUnread = Boolean(indicator?.unread && currentRunId !== id);
+            const needsUnreadApproval = isUnread && indicator.phase === "awaiting_approval";
             let displayLabel = `Graph ${id.slice(0, 8)}`;
             const labelText = runLabels[id];
             if (labelText) {
@@ -157,7 +157,12 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                 }}
                 title={labelText ? `${labelText}\n\n快照: ${id}\n(右键可复制 ID 或删除)` : `快照: ${id}\n(右键可复制 ID 或删除)`}
               >
-                <span className={`run-dot ${isThisRunActive ? "pulse-dot" : ""}`} />
+                {isUnread && (
+                  <span
+                    className={`run-dot ${needsUnreadApproval ? "approval-pulse" : ""}`}
+                    title={needsUnreadApproval ? "有待审批的未读更新" : "有未读更新"}
+                  />
+                )}
                 <span className="run-title-text">
                   {displayLabel}
                 </span>

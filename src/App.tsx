@@ -17,6 +17,7 @@ import { TaskNode, type WorkNode } from "./components/graph/TaskNode";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
 import { Sidebar } from "./components/layout/Sidebar";
 import { LandingView } from "./components/views/LandingView";
+import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
 import { PlanningSummaryCard } from "./components/PlanningSummaryCard";
 import { PublicationPanel } from "./components/PublicationPanel";
@@ -68,6 +69,24 @@ function areExecutionStreamsEqual(a: Execution[] = [], b: Execution[] = []): boo
     return execution.id === next.id && execution.status === next.status &&
       (execution.outputBytes ?? execution.output.length) === (next.outputBytes ?? next.output.length);
   });
+}
+
+function executionActivityVersion(executions: Execution[] = []): string {
+  return executions.map((execution) =>
+    `${execution.id}:${execution.status}:${execution.outputBytes ?? execution.output.length}`
+  ).join(",");
+}
+
+function snapshotActivityVersion(snapshot: Snapshot): string {
+  const lastSequence = snapshot.events.at(-1)?.sequence ?? 0;
+  return [
+    snapshot.phase,
+    snapshot.approved ? "approved" : "unapproved",
+    lastSequence,
+    executionActivityVersion(snapshot.executions),
+    executionActivityVersion(snapshot.mergers),
+    snapshot.publication?.status ?? "",
+  ].join("|");
 }
 
 const nodeTypes = { work: TaskNode };
@@ -169,6 +188,49 @@ export default function App() {
   }, [runs, runLabels, runtimeService]);
   const [activeBackendRunId, setActiveBackendRunId] = useState<string | null>(null);
   const [activeBackendPhase, setActiveBackendPhase] = useState<string | null>(null);
+  const [runIndicators, setRunIndicators] = useState<Record<string, { unread: boolean; phase: string }>>({});
+  const runActivityVersionsRef = useRef(new Map<string, string>());
+  const viewedRunIdRef = useRef(state.runId);
+  viewedRunIdRef.current = state.runId;
+
+  const markSnapshotRead = useCallback((snapshot: Snapshot) => {
+    if (!snapshot.runId) return;
+    runActivityVersionsRef.current.set(snapshot.runId, snapshotActivityVersion(snapshot));
+    setRunIndicators((prev) => {
+      const current = prev[snapshot.runId];
+      if (current && !current.unread && current.phase === snapshot.phase) return prev;
+      return { ...prev, [snapshot.runId]: { unread: false, phase: snapshot.phase } };
+    });
+  }, []);
+
+  const clearRunUnread = useCallback((runId: string) => {
+    setRunIndicators((prev) => {
+      const current = prev[runId];
+      if (!current?.unread) return prev;
+      return { ...prev, [runId]: { ...current, unread: false } };
+    });
+  }, []);
+
+  const observeRunSnapshot = useCallback((snapshot: Snapshot) => {
+    if (!snapshot.runId) return;
+    const nextVersion = snapshotActivityVersion(snapshot);
+    const previousVersion = runActivityVersionsRef.current.get(snapshot.runId);
+    runActivityVersionsRef.current.set(snapshot.runId, nextVersion);
+    const isViewed = viewedRunIdRef.current === snapshot.runId;
+
+    setRunIndicators((prev) => {
+      const current = prev[snapshot.runId];
+      const hasNewContent = previousVersion !== undefined && previousVersion !== nextVersion;
+      const unread = isViewed ? false : Boolean(current?.unread || hasNewContent);
+      if (current?.unread === unread && current.phase === snapshot.phase) return prev;
+      return { ...prev, [snapshot.runId]: { unread, phase: snapshot.phase } };
+    });
+  }, []);
+
+  useEffect(() => {
+    markSnapshotRead(state);
+  }, [state, markSnapshotRead]);
+
   const [dataPath, setDataPath] = useState("");
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
@@ -327,15 +389,12 @@ export default function App() {
     if (data.snapshot.runId && data.snapshot.config?.repository === data.config.repository) {
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
+      markSnapshotRead(data.snapshot);
       setActiveBackendRunId(data.snapshot.runId);
       setActiveBackendPhase(data.snapshot.phase);
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
-      if (deduced === "graph" && data.snapshot.graph.nodes.length > 0) {
-        setSelected((curr) => (curr && data.snapshot.graph.nodes.some(n => n.name === curr) ? curr : ""));
-      } else {
-        setSelected("");
-      }
+      setSelected("");
     }
 
     const targetRepo = data.config.repository || data.repositoryInfo?.path;
@@ -417,11 +476,7 @@ export default function App() {
         setRouteType(deduced);
         setGoal(snapshot.graph.originalGoal || "");
         setMessages([]);
-        if (deduced === "graph" && snapshot.graph.nodes.length > 0) {
-          setSelected(snapshot.graph.nodes[0].name);
-        } else {
-          setSelected("");
-        }
+        setSelected("");
         loadedSnapshot = snapshot;
       } catch {
         try {
@@ -605,11 +660,7 @@ export default function App() {
     setGoal(graph.originalGoal);
     setModal(null);
     recordRunToWorkspace(snapshot.runId);
-    if (deduced === "graph" && graph.nodes.length > 0) {
-      setSelected(graph.nodes[0].name);
-    } else {
-      setSelected("");
-    }
+    setSelected("");
   });
 
   const handlePlanGoal = (inputGoal?: string) => run(async () => {
@@ -983,6 +1034,7 @@ export default function App() {
           }
           setActiveBackendRunId(newSnap.runId);
           setActiveBackendPhase(newSnap.phase);
+          observeRunSnapshot(newSnap);
 
           setState((prev) => {
             if (prev.runId !== newSnap.runId) {
@@ -1017,7 +1069,7 @@ export default function App() {
       clearTimeout(timer);
       abort.abort();
     };
-  }, [busy, activeBackendRunId, activeBackendPhase]);
+  }, [busy, activeBackendRunId, activeBackendPhase, observeRunSnapshot]);
 
   useEffect(() => {
     if (routeType === "serial" && state.phase === "awaiting_approval" && !busy) {
@@ -1157,9 +1209,19 @@ export default function App() {
     });
   }, [state.graph.edges, state.graph.nodes, state.plan, state.nodes]);
 
+  const isLandingView = state.graph.nodes.length === 0 &&
+    !isPlanning &&
+    !recoveredPlanning &&
+    mainTab === "graph";
+
   return (
-    <div className="app-shell">
-      {/* 全局悬浮报错横幅 */}
+    <div className={`app-background-root ${isLandingView ? "landing-active" : ""}`}>
+      <FloatingPathsBackground
+        className="aspect-16/9 flex items-center justify-center"
+        position={-1}
+      >
+        <div className={`app-shell ${isLandingView ? "landing-active" : ""}`}>
+          {/* 全局悬浮报错横幅 */}
       <AnimatePresence>
         {error && (
           <motion.div
@@ -1199,19 +1261,18 @@ export default function App() {
         currentRunId={state.runId}
         activeBackendRunId={activeBackendRunId}
         activeBackendPhase={activeBackendPhase}
+        runIndicators={runIndicators}
         onLoadRun={(id) => run(async () => {
+          clearRunUnread(id);
           setPlannerStream(initialPlannerStream);
           const snapshot = await runtimeService.loadRun(id);
           const deduced = deduceRouteType(snapshot);
           setState(snapshot);
+          markSnapshotRead(snapshot);
           setRouteType(deduced);
           setGoal(snapshot.graph.originalGoal || "");
           setMessages([]);
-          if (deduced === "graph" && snapshot.graph.nodes.length > 0) {
-            setSelected(snapshot.graph.nodes[0].name);
-          } else {
-            setSelected("");
-          }
+          setSelected("");
         })}
         onDeleteRun={handleDeleteRunConfirm}
         onResetWorkspace={handleResetWorkspace}
@@ -1234,18 +1295,16 @@ export default function App() {
                 type="button"
                 className="background-run-action-btn"
                 onClick={() => run(async () => {
+                  clearRunUnread(activeBackendRunId);
                   setPlannerStream(initialPlannerStream);
                   const snapshot = await runtimeService.loadRun(activeBackendRunId);
                   const deduced = deduceRouteType(snapshot);
                   setState(snapshot);
+                  markSnapshotRead(snapshot);
                   setRouteType(deduced);
                   setGoal(snapshot.graph.originalGoal || "");
                   setMessages([]);
-                  if (deduced === "graph" && snapshot.graph.nodes.length > 0) {
-                    setSelected(snapshot.graph.nodes[0].name);
-                  } else {
-                    setSelected("");
-                  }
+                  setSelected("");
                 })}
               >
                 返回运行中的任务
@@ -1254,7 +1313,7 @@ export default function App() {
         )}
 
         <AnimatePresence mode="wait" initial={false}>
-          {state.graph.nodes.length === 0 && !isPlanning && !recoveredPlanning && mainTab === "graph" ? (
+          {isLandingView ? (
             <LandingView
               key="landing-view"
               goal={goal}
@@ -1359,10 +1418,12 @@ export default function App() {
         onApprove={() => control("approve")}
       />
 
-      <ConfirmModal
-        config={confirmModal}
-        onClose={() => setConfirmModal(null)}
-      />
+          <ConfirmModal
+            config={confirmModal}
+            onClose={() => setConfirmModal(null)}
+          />
+        </div>
+      </FloatingPathsBackground>
     </div>
   );
 }

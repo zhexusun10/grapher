@@ -5,7 +5,15 @@ import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
 // Only mounted conversations fetch output. Switching attempts cancels the old
 // cursor and releases its transcript; snapshots carry metadata alone.
-export function ExecutionTranscript({ runId, execution }: { runId: string; execution: Execution }) {
+export function ExecutionTranscript({
+  runId,
+  execution,
+  onUserResize,
+}: {
+  runId: string;
+  execution: Execution;
+  onUserResize?: () => void;
+}) {
   const [record, setRecord] = useState({ id: "", text: "" });
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -62,6 +70,7 @@ export function ExecutionTranscript({ runId, execution }: { runId: string; execu
     {error && <p role="alert">{error} <button onClick={() => setRetry(value => value + 1)}>重试</button></p>}
     <VirtualizedTranscript key={`${runId}:${execution.id}:${retry}`}
       emptyText={emptyText}
+      onUserResize={onUserResize}
       output={paged ? (record.id === execution.id ? record.text : "") : execution.output} />
   </>;
 }

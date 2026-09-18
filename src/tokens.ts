@@ -9,7 +9,7 @@ export const tokens = {
   bgDefault: "#FFFFFF",
 
   /* 容器与表面 */
-  bgSurface: "#F8FAFC",
+  bgSurface: "#F7F7F8",
   bgSurfaceHover: "#F1F5F9",
   bgSurfaceActive: "#E2E8F0",
 

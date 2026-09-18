@@ -87,10 +87,91 @@ h3 {
 
 .app-shell {
   display: flex;
+  width: 100%;
   height: 100vh;
   min-height: 400px;
   overflow: hidden;
+  position: relative;
+  isolation: isolate;
   background: var(--bg-canvas);
+}
+
+.app-background-root {
+  width: 100%;
+  height: 100vh;
+  min-height: 400px;
+  overflow: hidden;
+  background: #FFFFFF;
+}
+
+.app-background-root>.w-full {
+  width: 100%;
+  height: 100%;
+}
+
+.app-background-root>.relative {
+  position: relative;
+}
+
+.app-background-root>.aspect-16\/9 {
+  aspect-ratio: auto;
+}
+
+.app-background-root>.flex {
+  display: flex;
+}
+
+.app-background-root>.items-center {
+  align-items: center;
+}
+
+.app-background-root>.justify-center {
+  justify-content: center;
+}
+
+.app-background-root .absolute {
+  position: absolute;
+}
+
+.app-background-root .inset-0 {
+  inset: 0;
+}
+
+.app-background-root .pointer-events-none {
+  pointer-events: none;
+}
+
+.app-background-root .w-full,
+.app-background-root .h-full {
+  width: 100%;
+  height: 100%;
+}
+
+.app-background-root .text-slate-950 {
+  color: #0F172A;
+}
+
+.app-background-root:not(.landing-active)>.relative>.absolute {
+  display: none;
+}
+
+.app-background-root.landing-active>.relative>.absolute {
+  -webkit-mask-image: radial-gradient(ellipse at center,
+      #000000 0%,
+      #000000 78%,
+      transparent 100%);
+  mask-image: radial-gradient(ellipse at center,
+      #000000 0%,
+      #000000 78%,
+      transparent 100%);
+}
+
+.app-shell.landing-active {
+  background: transparent;
+}
+
+.app-shell.landing-active .main {
+  background: transparent;
 }
 
 /* 侧边栏 (悬浮圆角卡片模式) */
@@ -716,7 +797,7 @@ a,
   transition: all 0.2s ease;
 }
 
-.run-dot.pulse-dot {
+.run-dot.approval-pulse {
   background: var(--brand-default, #06b6d4);
   box-shadow: 0 0 8px var(--brand-default, #06b6d4);
   animation: pulse-glow 1.5s infinite ease-in-out;
@@ -1275,10 +1356,20 @@ a,
   gap: 4px;
   width: 100%;
   margin: auto 0;
+  transform: translateX(clamp(0px, 4.5vw, 80px));
+  transition: transform 0.2s ease;
+}
+
+@media (max-width: 960px) {
+  .landing-title-container {
+    transform: translateX(0);
+  }
 }
 
 .landing-title {
-  font-size: clamp(28px, 3.8vw, 38px);
+  font-size: clamp(32px, 4.4vw, 44px);
+  line-height: 1.15;
+  font-style: normal;
   font-weight: 550;
   letter-spacing: -0.025em;
   color: var(--text-primary);
@@ -1294,6 +1385,7 @@ a,
 
 .landing-subtitle {
   font-size: clamp(14px, 2vw, 18px);
+  font-style: normal;
   font-weight: 500;
   color: var(--text-primary);
   text-align: right;
@@ -1993,7 +2085,7 @@ a,
   justify-content: flex-start;
 }
 
-.route-decision-pill.serial + .serial-execution-panel {
+.route-decision-pill.serial+.serial-execution-panel {
   margin-top: -12px;
 }
 
@@ -4737,7 +4829,6 @@ a,
   border-right: none !important;
   background: var(--bg-surface);
   border-radius: 18px;
-  transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .conversation-pane.full-width .initial-query-scroll {
@@ -4764,7 +4855,17 @@ a,
 
 .conversation-pane.split {
   width: var(--workbench-left-width, 370px);
-  transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Historical conversations and graph views must render at their final geometry. */
+.workbench .serial-execution-panel,
+.workbench .pane-bottom-chat,
+.workbench .chat-message-row,
+.workbench .route-decision-pill,
+.workbench .plan-summary-card,
+.workbench .initial-query-scroll>div:not(.chat-messages-stream) {
+  opacity: 1 !important;
+  transform: none !important;
 }
 
 /* Route Decision Pill */

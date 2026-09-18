@@ -10,6 +10,7 @@ interface VirtualizedTranscriptProps {
   output: string;
   className?: string;
   emptyText?: string;
+  onUserResize?: () => void;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -25,15 +26,26 @@ function MeasuredRow({ id, measure, children }: { id: string; measure: (id: stri
   return <div ref={ref} data-transcript-id={id} style={{ display: "flow-root" }}>{children}</div>;
 }
 
+function getScrollParent(node: HTMLElement | null): HTMLElement | null {
+  if (!node) return null;
+  if (node.scrollHeight > node.clientHeight && window.getComputedStyle(node).overflowY !== "visible") {
+    return node;
+  }
+  return getScrollParent(node.parentElement);
+}
+
 
 export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   output,
   className = "",
   emptyText = "工作区就绪，等待节点指令输出…",
+  onUserResize,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const expandedRows = useRef(new Map<string, boolean>());
   const isUserScrolledUpRef = useRef(false);
+  const suppressAutoFollowRef = useRef(false);
+  const resumeAutoFollowFrameRef = useRef<number | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   // Incremental parse state
@@ -47,6 +59,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
   const [scrollTop, setScrollTop] = useState(0);
   const [heightVersion, setHeightVersion] = useState(0);
+  const [, setExpansionVersion] = useState(0);
   const layoutRef = useRef({ ids: [] as string[], offsets: [0] });
   const measure = useCallback((id: string, height: number) => {
     if (height <= 0 || itemHeightsRef.current.get(id) === height) return;
@@ -398,18 +411,48 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     setItemsVersion((v) => v + 1);
   }, [output]);
 
-  const getScrollParent = (node: HTMLElement | null): HTMLElement | null => {
-    if (!node) return null;
-    if (node.scrollHeight > node.clientHeight && window.getComputedStyle(node).overflowY !== 'visible') {
-      return node;
-    }
-    return getScrollParent(node.parentElement);
-  };
-
   const items = itemsRef.current;
 
+  const syncScrollState = useCallback(() => {
+    const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
+    if (!scrollParent) return;
+
+    const currentScrollTop = scrollParent.scrollTop;
+    const distanceFromBottom = scrollParent.scrollHeight - currentScrollTop - scrollParent.clientHeight;
+    const isUserAwayFromBottom = distanceFromBottom > 64;
+    const shouldShowScrollBottom = distanceFromBottom > scrollParent.clientHeight / 2;
+    setScrollTop(currentScrollTop);
+    isUserScrolledUpRef.current = isUserAwayFromBottom;
+    setShowScrollBottom(shouldShowScrollBottom);
+  }, []);
+
+  const handleExpandedChange = useCallback((id: string, expanded: boolean) => {
+    expandedRows.current.set(id, expanded);
+    suppressAutoFollowRef.current = true;
+    isUserScrolledUpRef.current = true;
+    setExpansionVersion(value => value + 1);
+    onUserResize?.();
+
+    if (resumeAutoFollowFrameRef.current !== null) {
+      cancelAnimationFrame(resumeAutoFollowFrameRef.current);
+    }
+    resumeAutoFollowFrameRef.current = requestAnimationFrame(() => {
+      resumeAutoFollowFrameRef.current = requestAnimationFrame(() => {
+        resumeAutoFollowFrameRef.current = null;
+        suppressAutoFollowRef.current = false;
+        syncScrollState();
+      });
+    });
+  }, [onUserResize, syncScrollState]);
+
+  useEffect(() => () => {
+    if (resumeAutoFollowFrameRef.current !== null) {
+      cancelAnimationFrame(resumeAutoFollowFrameRef.current);
+    }
+  }, []);
+
   useLayoutEffect(() => {
-    if (!isUserScrolledUpRef.current && containerRef.current) {
+    if (!suppressAutoFollowRef.current && !isUserScrolledUpRef.current && containerRef.current) {
       const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
       scrollParent.scrollTop = scrollParent.scrollHeight;
       setScrollTop(scrollParent.scrollTop);
@@ -431,22 +474,14 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     const resizeObserver = new ResizeObserver(updateDimensions);
     resizeObserver.observe(scrollParent);
     
-    const onScroll = () => {
-      const currentScrollTop = scrollParent.scrollTop;
-      setScrollTop(currentScrollTop);
-
-      const distanceFromBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
-      const isUp = distanceFromBottom > 64;
-      isUserScrolledUpRef.current = isUp;
-      setShowScrollBottom(isUp);
-    };
+    const onScroll = () => syncScrollState();
     scrollParent.addEventListener('scroll', onScroll);
 
     return () => {
       resizeObserver.disconnect();
       scrollParent.removeEventListener('scroll', onScroll);
     };
-  }, []);
+  }, [syncScrollState]);
 
   const scrollToBottom = () => {
     const scrollParent = getScrollParent(containerRef.current);
@@ -486,7 +521,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
               return (
                 <div key={item.id} className="transcript-row tool-row">
                   <ToolCallCard item={item} expanded={expandedRows.current.get(item.id)}
-                    onExpandedChange={expanded => { expandedRows.current.set(item.id, expanded); setItemsVersion(value => value + 1); }} />
+                    onExpandedChange={expanded => handleExpandedChange(item.id, expanded)} />
                 </div>
               );
             }
@@ -496,7 +531,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
                 <div key={item.id} className="transcript-row thinking-row">
                   <ThinkingCard item={item} isStreaming={item.status === "running"}
                     expanded={expandedRows.current.get(item.id)}
-                    onExpandedChange={expanded => { expandedRows.current.set(item.id, expanded); setItemsVersion(value => value + 1); }} />
+                    onExpandedChange={expanded => handleExpandedChange(item.id, expanded)} />
                 </div>
               );
             }
