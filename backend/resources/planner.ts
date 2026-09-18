@@ -84,6 +84,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       mutationApplied: false,
       structuralCheck: "failed",
       diagnostics,
+      attemptedTopology: { nodes: graph.nodes.map(node => node.name), edges: graph.edges },
       savedTopology: { nodes: saved.nodes.map(node => node.name), edges: saved.edges },
     }), true);
     const inputErrors = change(graph);
@@ -105,28 +106,28 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node",
-    description: `Create or replace a node's task by stable name. A node is a work outcome executed later in a fresh session; it receives this task and upstream filesystem changes, not the planner conversation. Include the context, constraints and completion evidence the worker needs.
+    description: `Create, replace, or delete a graph node by stable name. The task text is passed to a later fresh session together with completed dependency filesystem state; the planner conversation is not passed.
 
-Updating a name replaces its entire task and preserves edges. Deleting a node also removes its incident edges. To rename, create the new node, reconnect its edges and delete the old one. Independent terminals are allowed.
+Updating a name replaces its entire task and preserves edges. Deleting a node also removes its incident edges. To rename, create the new node, reconnect its edges, and delete the old one.
 
-For a complete graph or related edits, use nodes and edges arrays in ONE call, without top-level name/task/delete. At least one edit is required. Node edits run in array order first, then edge edits in array order; later edits of the same name or ordered pair replace earlier ones. Omitted arrays are empty. Only the resulting graph is compiled, once; intermediate states need not compile. Edges may reference nodes created in this batch; feedback is checked against the final dependency paths. Any failure rejects the whole batch. Existing nodes/edges not edited are retained. Edge fields have the same semantics as the edge tool: omitted feedback is false, omitted relation is empty, delete removes the ordered pair.`,
+Single-node mode uses name/task/delete. Batch mode uses nodes/edges arrays and cannot be mixed with single-node fields. A batch requires at least one edit, applies node edits before edge edits, and compiles the resulting graph once. Later edits of the same node name or ordered edge pair replace earlier edits. Omitted arrays are empty. Existing nodes and edges not edited are retained. Any failure rejects the entire mutation. Edge fields have the same semantics as the edge tool: omitted feedback is false, omitted relation is empty, and delete removes the ordered pair.`,
     parameters: Type.Object({
       name: Type.Optional(Type.String({ description: "Single-node mode: stable identifier, 1–64 ASCII letters, digits, _ or -. Omit in batch mode." })),
-      task: Type.Optional(Type.String({ description: "Concise standalone outcome, constraints, owned files or artifacts, authoritative inputs, and observable completion evidence. Required and nonempty unless deleting." })),
+      task: Type.Optional(Type.String({ description: "Task text passed verbatim to the node execution. Required and nonempty unless deleting." })),
       delete: Type.Optional(Type.Boolean({ description: "Remove this node and all its incident edges; task is ignored." })),
       nodes: Type.Optional(Type.Array(Type.Object({
         name: Type.String(),
         task: Type.Optional(Type.String()),
         delete: Type.Optional(Type.Boolean()),
-      }), { description: "Batch node edits, applied before all edge edits." })),
+      }, { additionalProperties: false }), { description: "Batch node edits, applied before all edge edits." })),
       edges: Type.Optional(Type.Array(Type.Object({
         from: Type.String(),
         to: Type.String(),
         relation: Type.Optional(Type.String()),
         feedback: Type.Optional(Type.Boolean()),
         delete: Type.Optional(Type.Boolean()),
-      }), { description: "Batch edge edits, applied after all node edits." })),
-    }),
+      }, { additionalProperties: false }), { description: "Batch edge edits, applied after all node edits." })),
+    }, { additionalProperties: false }),
     async execute(_id, parameters) {
       return mutate((graph) => {
         const batch = parameters.nodes !== undefined || parameters.edges !== undefined;
@@ -150,18 +151,18 @@ For a complete graph or related edits, use nodes and edges arrays in ONE call, w
   }));
   pi.registerTool(defineTool({
     name: "edge", label: "Graph edge",
-    description: `Create or replace a directed edge between existing nodes. There is one edge per ordered pair; updating it replaces its relation and feedback flag. Delete removes only that ordered pair.
+    description: `Create, replace, or delete a directed edge between existing nodes. There is one edge per ordered pair.
 
-feedback omitted or false is a dependency: the target waits for successful source completion and receives its filesystem state. A failed source blocks its dependents. A dependency expresses required state or ordering, not just a topical relationship.
+feedback omitted or false creates a dependency: the target waits for the source to complete successfully and receives its filesystem state. A failed source blocks the target.
 
-feedback=true is a feedback route from a downstream node to one dependency ancestor. Feedback supplies no ordering or filesystem input.`,
+feedback=true creates a feedback route from the source to one dependency ancestor. It supplies no execution ordering or filesystem input.`,
     parameters: Type.Object({
       from: Type.String({ description: "Existing source node name." }),
       to: Type.String({ description: "Existing target node name, different from source." }),
       relation: Type.Optional(Type.String({ description: "Human-readable reason for the relationship; runtime behavior is determined by feedback." })),
       feedback: Type.Optional(Type.Boolean({ description: "Omit or false for a dependency carrying filesystem state. True creates a feedback route from this source to one dependency ancestor." })),
       delete: Type.Optional(Type.Boolean({ description: "Remove the ordered pair regardless of its current feedback flag." })),
-    }),
+    }, { additionalProperties: false }),
     async execute(_id, parameters) {
       return mutate(graph => applyEdge(graph, parameters));
     },

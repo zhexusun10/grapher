@@ -55,6 +55,12 @@ npm start
 
 普通文件夹通过 `.grapher/shadow_repos/` 中的外置 Git metadata 工作，项目目录不会增加 `.git`。
 
+### 独立节点
+
+Graph 的普通依赖图不要求整体连通，可以包含多个互不相连的 DAG component。没有 incoming 或 outgoing dependency edge 的节点是合法的独立节点；它同时出现在 `roots` 和 `terminals` 中，依赖并发槽直接执行。Runtime 最终发布各 terminal 的有效 head；依赖祖先已包含在下游 terminal 的 Git 历史中，而独立节点自身就是 terminal，因此它的文件结果不会因为没有边而被忽略。
+
+Edge 只表示真实的文件状态或执行顺序依赖。不要仅为了让图连通而给独立节点添加虚假 dependency edge。若多个独立节点修改相同文件，它们的结果仍可能在后续组合或最终发布时产生 Git 冲突。
+
 ## 配置
 
 界面配置：

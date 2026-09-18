@@ -41,17 +41,28 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
     }
     let mut names = BTreeSet::new();
     for node in &graph.nodes {
-        if node.name.is_empty()
-            || node.name.len() > 64
-            || !node.name.chars().all(|character| {
-                character.is_ascii_alphanumeric() || character == '_' || character == '-'
-            })
-        {
+        if node.name.is_empty() || node.name.len() > 128 {
+            let reason = if node.name.is_empty() {
+                "name is empty".to_string()
+            } else {
+                format!("name is too long ({} characters, max 128)", node.name.len())
+            };
+            add(
+                "E201",
+                format!("Invalid node name {:?}: {}.", node.name, reason),
+            );
+        }
+        // Check for filesystem-unsafe characters across platforms
+        let unsafe_chars: Vec<char> = node.name.chars()
+            .filter(|c| matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\0'))
+            .collect();
+        if !unsafe_chars.is_empty() {
             add(
                 "E201",
                 format!(
-                    "Invalid semantic node name: {:?}. Use 1–64 ASCII letters, digits, _ or -",
-                    node.name
+                    "Invalid node name {:?}: contains filesystem-unsafe characters: {}. These characters cannot be used: / \\ < > : \" | ? * (null byte)",
+                    node.name,
+                    unsafe_chars.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ")
                 ),
             );
         }
@@ -59,7 +70,13 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
             add("E202", format!("Duplicate node: {}", node.name));
         }
         if node.task.trim().is_empty() {
-            add("E203", format!("Empty task: {}", node.name));
+            add(
+                "E203",
+                format!(
+                    "Node '{}' has an empty task. Each node must have a non-empty task description that will be passed to the executor.",
+                    node.name
+                ),
+            );
         }
     }
     let mut pairs = BTreeSet::new();
@@ -67,9 +84,18 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
         if !names.contains(&edge.from) || !names.contains(&edge.to) {
             add(
                 "E204",
-                format!("Unknown endpoint in {} → {}. Missing: {}. Existing nodes: {}. Create missing nodes with node before adding this edge, or correct the endpoint names.", edge.from, edge.to,
-                    [&edge.from, &edge.to].into_iter().filter(|name| !names.contains(*name)).cloned().collect::<Vec<_>>().join(", "),
-                    names.iter().cloned().collect::<Vec<_>>().join(", ")),
+                format!(
+                    "Unknown endpoint in {} → {}. Missing: {}. Existing nodes: {}.",
+                    edge.from,
+                    edge.to,
+                    [&edge.from, &edge.to]
+                        .into_iter()
+                        .filter(|name| !names.contains(*name))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    names.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
             );
         }
         if edge.from == edge.to {
@@ -96,7 +122,7 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
         add(
             "E208",
             format!(
-                "Feedback source {source} has multiple targets: {}. A feedback verdict does not identify a target, so each source may revise exactly one dependency ancestor. Keep one feedback edge from this source. For converged branches, route review feedback to one integration owner, or use separate review nodes so each reviewer targets one owner.",
+                "Feedback source {source} has multiple targets: {}. A feedback verdict does not identify a target, so each source may have at most one feedback target.",
                 targets.into_iter().collect::<Vec<_>>().join(", ")
             ),
         );
@@ -141,7 +167,7 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
         return Err(vec![Diagnostic {
             code: "E101".into(),
             message: format!(
-                "Dependency cycle detected. Nodes in or blocked by the cycle: {}. Dependency edges within this unresolved set: {}. Remove or redirect a dependency to break the cycle. Use feedback=true only when the relationship is a revision route to a dependency ancestor.",
+                "Dependency cycle detected. Nodes in or blocked by the cycle: {}. Dependency edges within this unresolved set: {}.",
                 names
                     .difference(&visited)
                     .cloned()
@@ -157,17 +183,13 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
     }
     for edge in graph.edges.iter().filter(|edge| edge.feedback) {
         if !downstream(graph, &edge.to).contains(&edge.from) {
-            errors.push(Diagnostic { code: "E207".into(), message: format!("Feedback {} → {} requires a dependency path from {} to {}. Nodes currently reachable from {} through dependencies: {}. Create the needed dependency path first, or choose an existing ancestor as the revision target. Feedback does not provide execution ordering.", edge.from, edge.to, edge.to, edge.from, edge.to, downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", ")) });
+            errors.push(Diagnostic { code: "E207".into(), message: format!("Feedback {} → {} requires a dependency path from {} to {}. Nodes currently reachable from {} through dependencies: {}. Feedback does not provide execution ordering.", edge.from, edge.to, edge.to, edge.from, edge.to, downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", ")) });
         }
     }
     if !errors.is_empty() {
         return Err(errors);
     }
-    let mut warnings: Vec<String> = if names.len() > 1 {
-        names.iter().filter(|name| !graph.edges.iter().any(|edge| &edge.from == *name || &edge.to == *name)).map(|name| format!("W301: {name} is an isolated independent terminal; confirm it contributes to the goal")).collect()
-    } else {
-        Vec::new()
-    };
+    let mut warnings = Vec::new();
     for node in &graph.nodes {
         if node.task.contains("<REVISE>")
             && !graph
@@ -175,7 +197,7 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
                 .iter()
                 .any(|edge| edge.feedback && edge.from == node.name)
         {
-            warnings.push(format!("W302: {} mentions <REVISE> but has no outgoing feedback edge. The marker alone cannot request a retry. If revision is required, connect a feedback edge to an authorized dependency ancestor; otherwise remove the retry instruction or state that it is only report text.", node.name));
+            warnings.push(format!("W302: {} mentions <REVISE> but has no outgoing feedback edge; the marker cannot trigger revision.", node.name));
         }
     }
     Ok(Plan {

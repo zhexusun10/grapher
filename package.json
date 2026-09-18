@@ -17,7 +17,7 @@
     "benchmark:validate": "node ../grapher-tests/benchmark/validate.mjs",
     "benchmark:planner": "node ../grapher-tests/benchmark/run.mjs --planner-only",
     "benchmark:runtime": "node ../grapher-tests/benchmark/runtime.mjs",
-    "test:benchmark": "node --test ../grapher-tests/benchmark/planning-grade.test.mjs ../grapher-tests/benchmark/planning-boundary.test.mjs ../grapher-tests/benchmark/replay-selection.test.mjs ../grapher-tests/benchmark/results-paths.test.mjs ../grapher-tests/scripts/workspace-paths.test.mjs",
+    "test:benchmark": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher && node --test ../grapher-tests/benchmark/planning-grade.test.mjs ../grapher-tests/benchmark/planning-boundary.test.mjs ../grapher-tests/benchmark/replay-selection.test.mjs ../grapher-tests/benchmark/results-paths.test.mjs ../grapher-tests/scripts/workspace-paths.test.mjs && node --import ./pi/node_modules/tsx/dist/loader.mjs --test ../grapher-tests/scripts/planner-extension.test.mjs",
     "test:http": "npm run build && node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --features fixture --bin grapher && node ../grapher-tests/scripts/test-http.mjs",
     "frontend": "vite --host 127.0.0.1",
     "backend": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher",
