@@ -51,7 +51,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       return { isError: true };
     }
   });
-  const paths = registerWorkspacePaths(pi, process.env.GRAPHER_WORKSPACE_ROOT || process.cwd(), { shellCommands: false });
+  const paths = registerWorkspacePaths(pi, process.env.GRAPHER_WORKSPACE_ROOT || process.cwd(), { shellCommands: true });
   const repository = paths.root;
   const nativeBash = createBashToolDefinition(repository);
   pi.registerTool(defineTool({

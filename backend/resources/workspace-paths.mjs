@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { posix, resolve } from 'node:path';
 
-export const WORKSPACE_PATH = '/workspace';
+// Workspace path is now dynamically constructed based on the original repository root
 
 // A per-agent namespace. Never create a shared /workspace symlink: concurrent
 // agents must map the same visible path to different checkouts.
@@ -30,8 +30,10 @@ function shellWords(text) {
 }
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 
-export function createWorkspacePaths(directory) {
+export function createWorkspacePaths(directory, originalRoot = process.env.GRAPHER_ORIGINAL_ROOT || process.env.GRAPHER_WORKSPACE_ROOT || directory) {
   const root = realpathSync(directory);
+  const base = realpathSync(originalRoot);
+  const WORKSPACE_PATH = `${posix.dirname(base)}/workspace/${posix.basename(base)}`;
   const aliases = [...new Set([resolve(directory), root])].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s/"'`<>:;,&|()\[\]{}]/.test(c);
   function replace(text, source, replacement) {
@@ -122,11 +124,11 @@ export function createWorkspacePaths(directory) {
     }
     return value;
   }
-  return { root, visible, physical, command, view };
+  return { root, visible, physical, command, view, WORKSPACE_PATH };
 }
 
-export function registerWorkspacePaths(pi, directory, { shellCommands = true } = {}) {
-  const paths = createWorkspacePaths(directory);
+export function registerWorkspacePaths(pi, directory, { shellCommands = true, originalRoot } = {}) {
+  const paths = createWorkspacePaths(directory, originalRoot);
   pi.on('before_agent_start', async event => ({ systemPrompt: paths.visible(event.systemPrompt) }));
   // Covers user prompts, resumed conversation and tool results before model input.
   pi.on('context', async event => ({ messages: paths.view(event.messages) }));

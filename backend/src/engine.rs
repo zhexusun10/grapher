@@ -449,6 +449,13 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
             .canonicalize()
             .map_err(|error| error.to_string())?,
     );
+    command.env(
+        "GRAPHER_ORIGINAL_ROOT",
+        context
+            .original_repository
+            .canonicalize()
+            .map_err(|error| error.to_string())?,
+    );
     command.process_group(0);
     let mut child = command
         .spawn()
