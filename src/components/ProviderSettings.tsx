@@ -45,13 +45,6 @@ function AuthLink({ url, label }: { url?: string; label?: string }) {
   );
 }
 
-const PRESET_MODELS = [
-  { id: "qwen3.8-flash", label: "qwen3.8-flash", desc: "快速高性价比 (默认)" },
-  { id: "anthropic/claude-3-7-sonnet", label: "Claude 3.7 Sonnet", desc: "高精度推理 (推荐)" },
-  { id: "openai/gpt-4o", label: "GPT-4o", desc: "全能旗舰" },
-  { id: "deepseek/deepseek-chat", label: "DeepSeek V3", desc: "超高性价比" },
-];
-
 export function ProviderSettings({
   model,
   onModel,
@@ -227,6 +220,23 @@ export function ProviderSettings({
       <div className="model-quick-config">
         <div className="form-grid">
           <label className="form-field">
+            <span>模型所属 Provider 过滤</span>
+            <select
+              value={providerFilter}
+              disabled={busy || pending}
+              onChange={(e) => setProviderFilter(e.target.value)}
+              className="provider-filter-select"
+            >
+              <option value="">全部 Provider</option>
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.id}) {p.configured ? "✓ 已认证" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="form-field">
             <span>当前默认执行模型</span>
             <input
               list="provider-models"
@@ -249,42 +259,8 @@ export function ProviderSettings({
                 ))}
             </datalist>
           </label>
-
-          <label className="form-field">
-            <span>模型所属 Provider 过滤</span>
-            <select
-              value={providerFilter}
-              disabled={busy || pending}
-              onChange={(e) => setProviderFilter(e.target.value)}
-              className="provider-filter-select"
-            >
-              <option value="">全部 Provider</option>
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.id}) {p.configured ? "✓ 已认证" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
 
-        {/* Quick Model Presets */}
-        <div className="model-presets-row">
-          <span className="preset-label">
-            <Sparkles size={13} /> 快捷预设:
-          </span>
-          {PRESET_MODELS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`preset-pill ${model === item.id ? "active" : ""}`}
-              onClick={() => onModel(item.id)}
-              title={item.desc}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
       </div>
 
       {/* Pi Auth Center Header */}

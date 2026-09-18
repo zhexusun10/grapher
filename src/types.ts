@@ -85,7 +85,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", maxParallel: 2, maxFeedback: 3 };
+export const defaultConfig: Config = { repository: "", model: "", maxParallel: 4, maxFeedback: 3 };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},

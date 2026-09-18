@@ -16,11 +16,8 @@ import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } 
 import { TaskNode, type WorkNode } from "./components/graph/TaskNode";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
 import { Sidebar } from "./components/layout/Sidebar";
-import { Header } from "./components/layout/Header";
 import { LandingView } from "./components/views/LandingView";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
-import { SessionsView } from "./components/views/SessionsView";
-import { TimelineView } from "./components/views/TimelineView";
 import { PlanningSummaryCard } from "./components/PlanningSummaryCard";
 import { PublicationPanel } from "./components/PublicationPanel";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
@@ -136,9 +133,40 @@ export default function App() {
       return {};
     }
   });
+  const [runLabels, setRunLabels] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem("grapher_run_labels");
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
 
   const currentRepoPath = useMemo(() => config.repository || repoInfo?.path || "default", [config.repository, repoInfo]);
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
+  
+  useEffect(() => {
+    const missing = runs.filter(id => !(id in runLabels));
+    if (missing.length > 0) {
+      missing.forEach(id => {
+        runtimeService.history(id).then(snapshot => {
+          setRunLabels(prev => {
+            if (prev[id] !== undefined) return prev; // already fetched
+            const updated = { ...prev, [id]: snapshot.graph.originalGoal || "" };
+            localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+            return updated;
+          });
+        }).catch(() => {
+          setRunLabels(prev => {
+            if (prev[id] !== undefined) return prev; // already fetched
+            const updated = { ...prev, [id]: "" };
+            localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+            return updated;
+          });
+        });
+      });
+    }
+  }, [runs, runLabels, runtimeService]);
   const [activeBackendRunId, setActiveBackendRunId] = useState<string | null>(null);
   const [activeBackendPhase, setActiveBackendPhase] = useState<string | null>(null);
   const [dataPath, setDataPath] = useState("");
@@ -1167,6 +1195,7 @@ export default function App() {
         onOpenProject={handleOpenProject}
         onRemoveProject={handleRemoveWorkspaceConfirm}
         runs={runs}
+        runLabels={runLabels}
         currentRunId={state.runId}
         activeBackendRunId={activeBackendRunId}
         activeBackendPhase={activeBackendPhase}
@@ -1193,13 +1222,13 @@ export default function App() {
 
       <main className="main">
         {activeBackendRunId &&
-          ["running", "awaiting_approval", "publishing", "merging"].includes(activeBackendPhase ?? "") &&
+          ["running", "publishing", "merging"].includes(activeBackendPhase ?? "") &&
           state.runId !== activeBackendRunId && (
             <div className="background-run-banner">
               <div className="background-run-info">
                 <span className="pulse-indicator" />
                 <span>
-                  后台有任务正在{activeBackendPhase === "awaiting_approval" ? "等待审批" : "执行中"}: <strong>Graph {activeBackendRunId.slice(0, 8)}</strong>
+                  后台有任务正在执行中: <strong>Graph {activeBackendRunId.slice(0, 8)}</strong>
                 </span>
               </div>
               <button
@@ -1242,17 +1271,6 @@ export default function App() {
               exit={{ opacity: 0, transition: { duration: 0.18 } }}
               transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             >
-              <Header
-                activeProject={activeProject}
-                repoInfo={repoInfo}
-                config={config}
-                phase={state.phase}
-                mainTab={mainTab}
-                setMainTab={setMainTab}
-                nodesCount={state.graph.nodes.length}
-                eventsCount={state.events.filter(e => e.type !== "output").length}
-              />
-
               {recoveredPlanning && <section aria-label="恢复进行中的规划">
                 <p role="status">已连接正在进行的规划，活动会自动更新。</p>
                 <PlanningSummaryCard planning={recoveredPlanning} />
@@ -1266,52 +1284,35 @@ export default function App() {
                 onRetry={() => control("retry_publication")}
               />
 
-              {mainTab === "graph" && (
-                <GraphWorkbench
-                  state={state}
-                  routeType={routeType}
-                  selected={selected}
-                  setSelected={setSelected}
-                  failedPlanning={failedPlanning}
-                  effectiveMessages={effectiveMessages}
-                  isPlanning={isPlanning || !!recoveredPlanning}
-                  plannerStream={plannerStream}
-                  onSendMessage={handleSendMessage}
-                  onControl={control}
-                  onSave={save}
-                  onOpenEditor={() => setModal("editor")}
-                  onOpenApproval={() => setModal("approval")}
-                  onPickRepository={handleOpenProject}
-                  onDetectRepository={() => handleDetectRepository()}
-                  repoInfo={repoInfo}
-                  config={config}
-                  goal={goal}
-                  active={active}
-                  locked={locked}
-                  publishing={publishing}
-                  publicationFailed={publicationFailed}
-                  nodes={nodes}
-                  edges={edges}
-                  nodeTypes={nodeTypes}
-                  edgeTypes={edgeTypes}
-                  tokens={tokens}
-                />
-              )}
-
-              {mainTab === "sessions" && (
-                <SessionsView
-                  state={state}
-                  selected={selected}
-                  setSelected={setSelected}
-                  active={active}
-                  locked={locked}
-                  onIntervene={(instruction, nodeName) => control("intervene", { node: nodeName, instruction })}
-                />
-              )}
-
-              {mainTab === "timeline" && (
-                <TimelineView events={state.events} />
-              )}
+              <GraphWorkbench
+                state={state}
+                routeType={routeType}
+                selected={selected}
+                setSelected={setSelected}
+                failedPlanning={failedPlanning}
+                effectiveMessages={effectiveMessages}
+                isPlanning={isPlanning || !!recoveredPlanning}
+                plannerStream={plannerStream}
+                onSendMessage={handleSendMessage}
+                onControl={control}
+                onSave={save}
+                onOpenEditor={() => setModal("editor")}
+                onOpenApproval={() => setModal("approval")}
+                onPickRepository={handleOpenProject}
+                onDetectRepository={() => handleDetectRepository()}
+                repoInfo={repoInfo}
+                config={config}
+                goal={goal}
+                active={active}
+                locked={locked}
+                publishing={publishing}
+                publicationFailed={publicationFailed}
+                nodes={nodes}
+                edges={edges}
+                nodeTypes={nodeTypes}
+                edgeTypes={edgeTypes}
+                tokens={tokens}
+              />
             </motion.div>
           )}
         </AnimatePresence>

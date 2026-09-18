@@ -175,11 +175,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
       >
         {selectedNode && routeType === "graph" ? (
-          <>
+          <div className="initial-query-view">
             <div className="conversation-heading">
-              <div className="detail-icon">
-                <Code2 size={18} />
-              </div>
               <div className="heading-title-col">
                 <h2>{selectedNode.name}</h2>
               </div>
@@ -190,89 +187,86 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 <button
                   type="button"
                   className="back-to-query-btn"
-                  title="取消选中节点，返回查看全局初始任务目标"
                   onClick={() => setSelected("")}
                 >
-                  <ArrowLeft size={12} />
-                  <span>初始目标</span>
+                  <ArrowLeft size={16} />
                 </button>
               )}
             </div>
 
-            <div className="conversation-scroll">
-              <div className="task-card">
-                <div className="task-card-header">
-                  <Terminal size={13} />
-                  <span>TASK SPECIFICATION</span>
-                </div>
-                <p>{selectedNode.task}</p>
-              </div>
-
-              {attempts.length > 0 && (
-                <label className="attempt-picker">
-                  <span>执行记录</span>
-                  <select
-                    value={execution?.id ?? ""}
-                    onChange={(event) => setAttemptId(event.target.value)}
-                  >
-                    {attempts.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        #{item.attempt} · {item.status}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-
-              {execution ? (
-                <>
-                  <div className="session-label">
-                    <strong>Pi Session</strong>
-                    <span>{execution.status}</span>
-                    <ExecutionTiming execution={execution} />
+            <div className="initial-query-scroll" ref={chatScrollRef}>
+              <div className="chat-messages-stream">
+                <div style={{ padding: "0 4px" }}>
+                  <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }}>
+                    Task
                   </div>
-                  <div style={{ flex: 1, minHeight: 320, display: "flex", flexDirection: "column", marginTop: 8 }}>
-                    <ExecutionTranscript key={execution.id} runId={state.runId} execution={execution} />
-                  </div>
-                  <details className="workspace-details">
-                    <summary><FolderGit2 size={12} />工作区与会话信息</summary>
-                    <p>Worktree: {execution.worktree}</p>
-                    <p>Session ID: {execution.sessionId}</p>
-                    <p>Commit Before: {execution.before}</p>
-                    <p>Commit After: {execution.after ?? "pending"}</p>
-                    <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
-                  </details>
-                </>
-              ) : (
-                <div className="conversation-empty">
-                  <div className="empty-orbit">
-                    <Terminal size={22} />
-                  </div>
-                  <h3>全新独立上下文</h3>
-                  <p>
-                    审批通过后，该节点将在用户仓库旁的隔离 Git worktree 中启动全新的 Execution Instance。<br />
-                    执行进度、代码修改与工具调用流将在此呈现。
+                  <p style={{ fontSize: "12px", lineHeight: 1.6, color: "var(--text-primary)", margin: 0, whiteSpace: "pre-wrap" }}>
+                    {selectedNode.task}
                   </p>
                 </div>
-              )}
 
-              {selectedState?.error && (
-                <div className="node-error">
-                  {selectedState.error}
-                  {selectedState.status === "blocked" && (
-                    <button
-                      type="button"
-                      className="secondary"
-                      disabled={locked || active}
-                      onClick={() => onControl("resolve")}
+                {attempts.length > 0 && (
+                  <label className="attempt-picker">
+                    <span>执行记录</span>
+                    <select
+                      value={execution?.id ?? ""}
+                      onChange={(event) => setAttemptId(event.target.value)}
                     >
-                      Use resolved workspace
-                    </button>
-                  )}
-                </div>
-              )}
+                      {attempts.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          #{item.attempt} · {item.status}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                {execution && (
+                  <motion.div
+                    className="serial-execution-panel"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3 }}
+                  >
+                    <div className="session-label">
+                      <strong>Pi Session</strong>
+                      <span className={`status-badge ${execution.status}`}>
+                        {statusText[execution.status as Status] ?? execution.status}
+                      </span>
+                      <ExecutionTiming execution={execution} />
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                      <ExecutionTranscript key={execution.id} runId={state.runId} execution={execution} />
+                    </div>
+                    <details className="workspace-details" style={{ marginTop: 12 }}>
+                      <summary><FolderGit2 size={12} />工作区与会话信息</summary>
+                      <p>Worktree: {execution.worktree}</p>
+                      <p>Session ID: {execution.sessionId}</p>
+                      <p>Commit Before: {execution.before}</p>
+                      <p>Commit After: {execution.after ?? "pending"}</p>
+                      <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
+                    </details>
+                  </motion.div>
+                )}
+
+                {selectedState?.error && (
+                  <div className="node-error" style={{ marginTop: 12 }}>
+                    {selectedState.error}
+                    {selectedState.status === "blocked" && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={locked || active}
+                        onClick={() => onControl("resolve")}
+                      >
+                        Use resolved workspace
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
-          </>
+          </div>
         ) : (
           <div className="initial-query-view">
             <div className="initial-query-scroll" ref={chatScrollRef}>
@@ -291,32 +285,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   </motion.div>
                 ))}
 
-                {/* Partitioner 实时推理流 */}
-                {(plannerStream.partitionerThinking || plannerStream.partitionerText || (isPlanning && plannerStream.stage === "partitioning")) && (
-                  <motion.div
-                    className="planning-stream-card partitioner"
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                  >
-                    <div className="stream-card-header">
-                      <Compass size={14} className={isPlanning && plannerStream.stage === "partitioning" ? "spin" : ""} />
-                      <span>{isPlanning && plannerStream.stage === "partitioning" ? "AI 架构师正在评估任务执行路径 (Serial / Graph)..." : "Partitioner 路由记录"}</span>
-                    </div>
-                    {plannerStream.partitionerThinking && (
-                      <ThinkingCard
-                        content={plannerStream.partitionerThinking}
-                        isStreaming={isPlanning && plannerStream.partitionerThinkingActive}
-                        title="AI 架构师思维链"
-                        defaultExpanded={true}
-                      />
-                    )}
-                    {plannerStream.partitionerText && (
-                      <div className="stream-card-body">
-                        <MarkdownRenderer content={plannerStream.partitionerText} isStreaming={true} />
-                      </div>
-                    )}
-                  </motion.div>
-                )}
+
 
                 {/* 任务路线决策结果 */}
                 {routeType !== "undecided" && (
@@ -353,7 +322,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     </div>
 
                     {serialExecution ? (
-                      <div style={{ flex: 1, minHeight: 280, display: "flex", flexDirection: "column", marginTop: 4 }}>
+                      <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
                         <ExecutionTranscript key={serialExecution.id} runId={state.runId} execution={serialExecution} />
                       </div>
                     ) : (
@@ -389,45 +358,39 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
 
                 {/* Planner 工具调用流 */}
-                {plannerStream.tools.length > 0 && (
-                  <div className="planner-tools-stream">
-                    {plannerStream.tools.map((tool: any) => (
-                      <ToolCallCard key={tool.id} item={tool} />
-                    ))}
-                  </div>
-                )}
+                {plannerStream.tools.map((tool: any) => (
+                  <ToolCallCard key={tool.id} item={tool} />
+                ))}
 
                 {/* Planner 实时思考与推理 */}
                 {(plannerStream.plannerThinking || plannerStream.plannerText || (isPlanning && plannerStream.stage === "planning")) && (
-                  <motion.div
-                    className="planning-stream-card planner"
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                  >
-                    <div className="stream-card-header">
-                      <Workflow size={14} className={isPlanning && plannerStream.stage === "planning" ? "spin" : ""} />
-                      <span>{isPlanning && plannerStream.stage === "planning" ? "AI Planner 正在探测仓库架构并构建有向执行图..." : "Planner 规划记录"}</span>
-                    </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                     {plannerStream.plannerThinking && (
                       <ThinkingCard
                         content={plannerStream.plannerThinking}
                         isStreaming={isPlanning && plannerStream.plannerThinkingActive}
-                        title="AI 规划器思维链"
+                        title="思考过程"
                         defaultExpanded={true}
                       />
                     )}
-                    {plannerStream.plannerText ? (
-                      <div className="stream-card-body">
-                        <MarkdownRenderer content={plannerStream.plannerText} isStreaming={true} />
-                      </div>
-                    ) : (
-                      !plannerStream.plannerThinking && (
-                        <div className="stream-card-hint">
-                          正在计算独立 Git worktree 执行批次与验收复审依赖...
+                    {plannerStream.plannerText && (
+                      <motion.div
+                        className="chat-message-row assistant"
+                        initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                      >
+                        <div className="chat-bubble-assistant">
+                          <MarkdownRenderer content={plannerStream.plannerText} isStreaming={isPlanning} />
                         </div>
-                      )
+                      </motion.div>
                     )}
-                  </motion.div>
+                    {isPlanning && plannerStream.stage === "planning" && !plannerStream.plannerThinking && !plannerStream.plannerText && (
+                      <div className="stream-card-hint" style={{ padding: "8px 0" }}>
+                        <Workflow size={14} className="spin" style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
+                        正在计算独立 Git worktree 执行批次与验收复审依赖...
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
 
@@ -469,8 +432,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   transition={{ duration: 0.38, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
                 >
                   <div className="plan-summary-header">
-                    <Workflow size={14} />
-                    <strong>执行拓扑概览</strong>
+                    <span>执行拓扑概览</span>
                     <span className={`phase-tag ${state.phase}`}>{phaseText[state.phase] ?? "草稿"}</span>
                   </div>
 
@@ -732,16 +694,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         : state.phase === "needs_attention" ? "执行已停止，请检查失败或阻塞节点"
                         : state.phase === "paused" ? "已暂停后续派发"
                         : state.phase === "completed" ? "运行已完成"
-                        : state.approved ? phaseText[state.phase] ?? state.phase : "需用户审核并批准计划"}
+                        : state.approved ? phaseText[state.phase] ?? state.phase : ""}
                     </span>
                     <div>
                       {state.phase === "awaiting_approval" ? (
                         <>
                           <button type="button" className="text-button" disabled={locked} onClick={() => onControl("reject")}>
-                            拒绝
+                            Reject
                           </button>
                           <button type="button" className="primary" disabled={locked} onClick={onOpenApproval}>
-                            <Play size={13} fill="currentColor" />Approve & Start
+                            <Play size={13} fill="currentColor" />Approve
                           </button>
                         </>
                       ) : state.approved ? (

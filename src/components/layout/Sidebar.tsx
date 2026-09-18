@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { FolderGit2, GitBranch, Plus, RotateCcw, Settings2, Trash2, Copy } from "lucide-react";
+import { Folder, GitBranch, Plus, RotateCcw, Settings2, Trash2, Copy } from "lucide-react";
 import { ProjectItem } from "../../types";
 
 interface SidebarProps {
@@ -18,6 +18,7 @@ interface SidebarProps {
   onResetWorkspace: () => void;
   onOpenSettings: () => void;
   isSettingsOpen: boolean;
+  runLabels?: Record<string, string>;
 }
 
 export const Sidebar: React.FC<SidebarProps> = React.memo(({
@@ -36,6 +37,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onResetWorkspace,
   onOpenSettings,
   isSettingsOpen,
+  runLabels = {},
 }) => {
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);
   const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string } | null>(null);
@@ -62,7 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       </div>
 
       <div className="nav-section projects-label">
-        <span>Work Space</span>
+        <span>Workspace</span>
         <div className="section-actions">
           <button
             className="icon-tiny-btn"
@@ -92,7 +94,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                 title={`${proj.name}\n${proj.path}\n分支: ${proj.branch}\n(右键管理工作区)`}
               >
                 <span className="proj-icon">
-                  <FolderGit2 size={15} />
+                  <Folder size={15} />
                 </span>
                 <div className="proj-details">
                   <div className="proj-name-row">
@@ -115,7 +117,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           })
         ) : (
           <div className="empty-projects-hint" onClick={onOpenProject}>
-            <FolderGit2 size={24} />
+            <Folder size={24} />
             <span>暂无工作区</span>
             <small>点击打开本地项目文件夹</small>
           </div>
@@ -148,6 +150,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         {runs.length > 0 ? (
           runs.map((id, index) => {
             const isThisRunActive = activeBackendRunId === id && ["running", "awaiting_approval", "publishing", "merging"].includes(activeBackendPhase ?? "");
+            let displayLabel = `Graph ${id.slice(0, 8)}`;
+            const labelText = runLabels[id];
+            if (labelText) {
+              displayLabel = labelText;
+            }
             return (
               <button
                 className={`run-item ${currentRunId === id ? "chosen" : ""} ${isThisRunActive ? "active-running" : ""}`}
@@ -159,16 +166,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   setProjectContextMenu(null);
                   setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
                 }}
-                title={`快照: ${id}\n(右键可复制 ID 或删除)`}
+                title={labelText ? `${labelText}\n\n快照: ${id}\n(右键可复制 ID 或删除)` : `快照: ${id}\n(右键可复制 ID 或删除)`}
               >
                 <span className={`run-dot ${isThisRunActive ? "pulse-dot" : ""}`} />
-                <span>
-                  Graph {id.slice(0, 8)}
-                  <small>
-                    {isThisRunActive
-                      ? (activeBackendPhase === "awaiting_approval" ? "等待审批" : "运行中...")
-                      : index === 0 ? "最近编译" : "历史快照"}
-                  </small>
+                <span className="run-title-text">
+                  {displayLabel}
                 </span>
               </button>
             );

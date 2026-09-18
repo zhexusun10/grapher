@@ -132,7 +132,7 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
                       </span>
                     )}
                   </div>
-                  <div style={{ height: "460px", display: "flex", flexDirection: "column" }}>
+                  <div style={{ display: "flex", flexDirection: "column" }}>
                     <ExecutionTranscript key={execution.id} runId={state.runId} execution={execution} />
                   </div>
                   <div className="worktree-info-footer">

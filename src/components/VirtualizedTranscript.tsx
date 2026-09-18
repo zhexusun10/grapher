@@ -398,12 +398,21 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     setItemsVersion((v) => v + 1);
   }, [output]);
 
-  // Handle auto-scrolling
+  const getScrollParent = (node: HTMLElement | null): HTMLElement | null => {
+    if (!node) return null;
+    if (node.scrollHeight > node.clientHeight && window.getComputedStyle(node).overflowY !== 'visible') {
+      return node;
+    }
+    return getScrollParent(node.parentElement);
+  };
+
   const items = itemsRef.current;
+
   useLayoutEffect(() => {
     if (!isUserScrolledUpRef.current && containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
-      setScrollTop(containerRef.current.scrollTop);
+      const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
+      scrollParent.scrollTop = scrollParent.scrollHeight;
+      setScrollTop(scrollParent.scrollTop);
     }
   }, [itemsVersion, heightVersion]);
 
@@ -411,34 +420,39 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    
+    const scrollParent = getScrollParent(el) || el;
 
     const updateDimensions = () => {
-      setContainerHeight(el.clientHeight || 600);
+      setContainerHeight(scrollParent.clientHeight || 600);
     };
     updateDimensions();
 
     const resizeObserver = new ResizeObserver(updateDimensions);
-    resizeObserver.observe(el);
-    return () => resizeObserver.disconnect();
-  }, []);
+    resizeObserver.observe(scrollParent);
+    
+    const onScroll = () => {
+      const currentScrollTop = scrollParent.scrollTop;
+      setScrollTop(currentScrollTop);
 
-  const handleScroll = useCallback(() => {
-    const el = containerRef.current;
-    if (!el) return;
+      const distanceFromBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
+      const isUp = distanceFromBottom > 64;
+      isUserScrolledUpRef.current = isUp;
+      setShowScrollBottom(isUp);
+    };
+    scrollParent.addEventListener('scroll', onScroll);
 
-    const currentScrollTop = el.scrollTop;
-    setScrollTop(currentScrollTop);
-
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const isUp = distanceFromBottom > 64;
-    isUserScrolledUpRef.current = isUp;
-    setShowScrollBottom(isUp);
+    return () => {
+      resizeObserver.disconnect();
+      scrollParent.removeEventListener('scroll', onScroll);
+    };
   }, []);
 
   const scrollToBottom = () => {
-    if (containerRef.current) {
-      containerRef.current.scrollTo({
-        top: containerRef.current.scrollHeight,
+    const scrollParent = getScrollParent(containerRef.current);
+    if (scrollParent) {
+      scrollParent.scrollTo({
+        top: scrollParent.scrollHeight,
         behavior: "smooth",
       });
       isUserScrolledUpRef.current = false;
@@ -463,8 +477,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       <div
         ref={containerRef}
         className="transcript-scroll-area"
-        style={{ overflowAnchor: "none", maxHeight: "65vh", minHeight: 200 }}
-        onScroll={handleScroll}
+        style={{ overflowAnchor: "none", minHeight: 200 }}
       >
         {!output && items.length === 0 && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
         <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>

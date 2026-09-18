@@ -133,7 +133,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
   };
 
   const rolesList = useMemo(() => {
-    return Object.entries(planning.roles || {});
+    return Object.entries(planning.roles || {}).filter(([key]) => key !== "partition");
   }, [planning.roles]);
 
   const totalToolCalls = useMemo(() => {
@@ -176,13 +176,12 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
     <div className="planning-summary-card" data-testid="planning-summary-card">
       <div className="planning-summary-header">
         <div className="planning-summary-title-area">
-          <Cpu size={15} className="planning-icon" />
           <span className="planning-summary-title">规划阶段摘要</span>
-          <span className="planning-model-badge" title="规划使用模型">
-            {primaryModel}
-          </span>
         </div>
         <div className="planning-summary-actions">
+          <span style={{ fontSize: 11, color: "var(--text-secondary)", marginRight: 8 }}>
+            {primaryModel}
+          </span>
           <button
             type="button"
             className="planning-id-chip"
@@ -352,15 +351,9 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
             </div>
           </div>
 
-          <div className="planning-footer-note">
-            <FileText size={11} />
-            <span>
-              统计摘要与完整规划活动分别保存；下方可查看规划时的文字、思维链及工具调用。
-            </span>
-          </div>
         </div>
       )}
-      <PlanningActivity key={planning.planningId} planning={planning} />
+
     </div>
   );
 };

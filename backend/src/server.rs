@@ -91,7 +91,7 @@ mod prompt_tests {
                 pi_command: "/bin/sh".into(),
                 pi_args: vec![script.to_string_lossy().into()],
                 model: String::new(),
-                max_parallel: 2,
+                max_parallel: 4,
                 max_feedback: 3,
             },
             &service,
@@ -161,7 +161,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     pi_command: "/bin/sh".into(),
                     pi_args: vec![script.to_string_lossy().into()],
                     model: "test".into(),
-                    max_parallel: 2,
+                    max_parallel: 4,
                     max_feedback: 2,
                 },
             )
@@ -338,7 +338,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     pi_command: "/bin/sh".into(),
                     pi_args: vec![script.to_string_lossy().into()],
                     model: "test".into(),
-                    max_parallel: 2,
+                    max_parallel: 4,
                     max_feedback: 1,
                 },
             )
@@ -424,7 +424,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             #[cfg(feature = "fixture")]
             pi_args: Vec::new(),
             model: "test-model".into(),
-            max_parallel: 2,
+            max_parallel: 4,
             max_feedback: 1,
         };
         let mut roles = std::collections::BTreeMap::new();
@@ -476,7 +476,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             #[cfg(feature = "fixture")]
             pi_args: Vec::new(),
             model: String::new(),
-            max_parallel: 2,
+            max_parallel: 4,
             max_feedback: 1,
         };
         let summary = PlanningSummary {
@@ -574,7 +574,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             pi_command: String::new(),
             pi_args: Vec::new(),
             model: String::new(),
-            max_parallel: 2,
+            max_parallel: 4,
             max_feedback: 1,
         };
         runtime
@@ -701,7 +701,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
                 .map(|r| r.path.clone())
                 .unwrap_or_default(),
             model: "qwen3.8-flash".into(),
-            max_parallel: 2,
+            max_parallel: 4,
             max_feedback: 3,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),

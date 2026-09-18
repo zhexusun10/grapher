@@ -357,9 +357,7 @@ pub fn verify(repository: &Path) -> Result<String, String> {
         {
             return Err("Choose the Git repository root".into());
         }
-        if !git(repository, &["status", "--porcelain"])?.is_empty() {
-            return Err("Repository must be clean, including untracked files. Commit or move your changes first; Grapher will not touch them.".into());
-        }
+
         git(repository, &["rev-parse", "--verify", "HEAD"])
     } else {
         if !repository.is_dir() {
