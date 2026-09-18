@@ -242,6 +242,8 @@ Graph Node Agent 在生产环境通过 macOS `/usr/bin/sandbox-exec` 启动：
 
 这是项目路径隔离，不是恶意代码容器或网络沙箱。缺少 `sandbox-exec` 时生产 Graph 节点必须失败；Serial、Planner 和 merger 不使用该 Graph profile。
 
+为保证 Planner 能在分配任务时提供统一的文件路径，底层环境通过 `workspace-paths.mjs` 适配层在 Agent 侧实现了一个虚拟的 `/workspace` 命名空间。无论底层的真实隔离检出（checkout）路径位于何处，Agent （包括 Partitioner、Planner、Node Agent 和 Merger）看到的项目根目录始终为 `/workspace`。此映射存在于工具和上下文层面（自动替换请求中的路径并改写 Bash 命令等），不依赖系统级的挂载（mount）或全局软链接（symlink）。
+
 Node Agent 可加载工作区 skills/extensions，因此 Graph 模式需要这些文件已经提交到仓库；未跟踪文件不会进入独立节点仓库。
 
 ## 7. Pi、模型与认证
