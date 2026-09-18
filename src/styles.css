@@ -1993,6 +1993,10 @@ a,
   justify-content: flex-start;
 }
 
+.route-decision-pill.serial + .serial-execution-panel {
+  margin-top: -12px;
+}
+
 /* 执行拓扑概览卡片 */
 .plan-summary-card {
   background: var(--bg-canvas);

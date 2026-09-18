@@ -372,7 +372,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <Compass size={13} />
                     <span>
                       {routeType === "serial"
-                        ? "任务路线决策：单节点串行执行（无需图分解）"
+                        ? "任务路线决策：单节点执行"
                         : "任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）"}
                     </span>
                   </motion.div>
@@ -386,16 +386,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.3 }}
                   >
-                    <div className="session-label">
-                      <strong>Pi 串行执行实例</strong>
-                      <span className={`status-badge ${serialNodeState?.status ?? "waiting"}`}>
-                        {statusText[serialNodeState?.status as Status] ?? serialNodeState?.status ?? "WAITING"}
-                      </span>
-                      {serialExecution?.startedAt && (
-                        <ExecutionTiming execution={serialExecution} />
-                      )}
-                    </div>
-
                     {serialExecution ? (
                       <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
                         <ExecutionTranscript key={serialExecution.id} runId={state.runId} execution={serialExecution} />
