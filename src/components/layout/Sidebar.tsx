@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Folder, GitBranch, Plus, RotateCcw, Settings2, Trash2, Copy } from "lucide-react";
+import { Folder, Plus, RotateCcw, Settings2, Trash2, Copy } from "lucide-react";
 import { ProjectItem } from "../../types";
 
 interface SidebarProps {
@@ -99,11 +99,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                 <div className="proj-details">
                   <div className="proj-name-row">
                     <strong>{proj.name}</strong>
-                    {proj.isShadow && (
-                      <span className="proj-branch-pill shadow" title="本地零侵入影子仓库：不污染原项目目录">
-                        影子仓库
-                      </span>
-                    )}
                   </div>
                   <small className="proj-path-text">{proj.path}</small>
                 </div>
@@ -171,8 +166,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           })
         ) : (
           <div className="run-placeholder">
-            <GitBranch size={13} />
-            <span>当前项目暂无运行历史</span>
+            <span>No conversations for this project</span>
           </div>
         )}
       </div>

@@ -1,11 +1,11 @@
 import React from "react";
 import { motion } from "motion/react";
-import { PromptBox } from "../ui/chatgpt-prompt-input";
+import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 
 interface LandingViewProps {
   goal: string;
   setGoal: (val: string) => void;
-  onPlanGoal: (val: string) => void;
+  onPlanGoal: (val: string, options?: PromptBoxSubmitOptions) => void;
   isBusy: boolean;
 }
 
@@ -59,7 +59,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
           <PromptBox
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
-            onSubmit={(val) => onPlanGoal(val)}
+            onSubmit={(val, options) => onPlanGoal(val, options)}
             isBusy={isBusy}
             placeholder=""
           />

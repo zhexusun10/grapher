@@ -318,7 +318,10 @@ export default function App() {
     setFollowUpQueue((prev) => prev.filter((item) => item.id !== id));
   };
 
-  const handleSendMessage = (val: string, options?: { mode?: "followUp" | "steer" }) => {
+  const handleSendMessage = (
+    val: string,
+    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[] }
+  ) => {
     const text = val.trim();
     if (!text) return;
     const selectedNode = state.graph.nodes.find((item) => item.name === selected);
@@ -328,12 +331,14 @@ export default function App() {
           ? (state.graph.nodes[0]?.name || "task")
           : undefined);
 
+    const displayMsg = options?.displayText || text;
+
     if (active) {
       const displayLabel = targetNodeName && targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
       const newMsg = {
         id: `msg-${Date.now()}`,
         role: "user" as const,
-        text: `${displayLabel}${text}`,
+        text: `${displayLabel}${displayMsg}`,
         timestamp: Date.now(),
       };
       setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
@@ -353,7 +358,7 @@ export default function App() {
         } else {
           const baseGoal = state.graph.originalGoal || goal;
           const combinedGoal = baseGoal ? `${baseGoal}\n\n补充执行要求：\n${text}` : text;
-          handlePlanGoal(combinedGoal);
+          handlePlanGoal(combinedGoal, options);
         }
       });
       return;
@@ -364,7 +369,7 @@ export default function App() {
       const newMsg = {
         id: `msg-${Date.now()}`,
         role: "user" as const,
-        text: `[@${selectedNode.name}] ${text}`,
+        text: `[@${selectedNode.name}] ${displayMsg}`,
         timestamp: Date.now(),
       };
       setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
@@ -374,7 +379,7 @@ export default function App() {
       const newMsg = {
         id: `msg-${Date.now()}`,
         role: "user" as const,
-        text,
+        text: displayMsg,
         timestamp: Date.now(),
       };
       setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
@@ -383,7 +388,7 @@ export default function App() {
       // 未选中具体节点：处于与 AI 规划器对话面板，追加规划要求并触发重新规划
       const baseGoal = state.graph.originalGoal || goal;
       const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求：\n${text}` : text;
-      handlePlanGoal(combinedGoal);
+      handlePlanGoal(combinedGoal, options);
     }
   };
 
@@ -391,11 +396,79 @@ export default function App() {
     const scope = planningRecovery.begin();
     const data = await runtimeService.bootstrap();
     if (!planningRecovery.current(scope)) return;
-    setConfig(data.config);
-    if (data.repositoryInfo) {
-      const info = data.repositoryInfo;
-      setRepoInfo(info);
-      setProjects((prev) => {
+
+    let storedProjects: ProjectItem[] | null = null;
+    try {
+      const saved = localStorage.getItem("grapher_projects");
+      if (saved !== null) {
+        storedProjects = JSON.parse(saved);
+      }
+    } catch {}
+
+    let storedWorkspaceRuns: Record<string, string[]> | null = null;
+    try {
+      const saved = localStorage.getItem("grapher_workspace_runs");
+      if (saved !== null) {
+        storedWorkspaceRuns = JSON.parse(saved);
+      }
+    } catch {}
+
+    let activeRepo = "";
+    let activeInfo: RepositoryInfo | null = null;
+
+    if (storedProjects !== null) {
+      if (data.repositoryInfo) {
+        const info = data.repositoryInfo;
+        const exists = storedProjects.some((p) => p.path === info.path);
+        if (exists) {
+          const updatedProjects = storedProjects.map((p) =>
+            p.path === info.path
+              ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
+              : p
+          );
+          setProjects(updatedProjects);
+          try {
+            localStorage.setItem("grapher_projects", JSON.stringify(updatedProjects));
+          } catch {}
+          activeRepo = info.path;
+          activeInfo = info;
+        } else if (storedProjects.length > 0) {
+          const sorted = [...storedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+          setProjects(storedProjects);
+          activeRepo = sorted[0].path;
+          activeInfo = {
+            name: sorted[0].name,
+            path: sorted[0].path,
+            branch: sorted[0].branch,
+            head: sorted[0].branch || "",
+            clean: sorted[0].clean,
+            isShadow: sorted[0].isShadow,
+          };
+        } else {
+          setProjects([]);
+          activeRepo = "";
+          activeInfo = null;
+        }
+      } else if (storedProjects.length > 0) {
+        const sorted = [...storedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+        setProjects(storedProjects);
+        activeRepo = sorted[0].path;
+        activeInfo = {
+          name: sorted[0].name,
+          path: sorted[0].path,
+          branch: sorted[0].branch,
+          head: sorted[0].branch || "",
+          clean: sorted[0].clean,
+          isShadow: sorted[0].isShadow,
+        };
+      } else {
+        setProjects([]);
+        activeRepo = "";
+        activeInfo = null;
+      }
+    } else {
+      if (data.repositoryInfo) {
+        const info = data.repositoryInfo;
         const item: ProjectItem = {
           id: info.path,
           name: info.name,
@@ -405,31 +478,40 @@ export default function App() {
           isShadow: info.isShadow,
           lastOpened: Date.now(),
         };
-        const exists = prev.some((p) => p.path === info.path);
-        const nextList = exists
-          ? prev.map((p) => (p.path === info.path ? item : p))
-          : [item, ...prev];
+        setProjects([item]);
         try {
-          localStorage.setItem("grapher_projects", JSON.stringify(nextList));
+          localStorage.setItem("grapher_projects", JSON.stringify([item]));
         } catch {}
-        return nextList;
-      });
+        activeRepo = info.path;
+        activeInfo = info;
+      } else {
+        setProjects([]);
+      }
     }
+
+    setRepoInfo(activeInfo);
+    setConfig((prev) => ({ ...data.config, repository: activeRepo || (activeInfo ? activeInfo.path : "") }));
     setDataPath(data.dataPath);
-    if (data.runs && data.runs.length > 0) {
-      const initialKey = data.config?.repository || data.repositoryInfo?.path || "default";
-      setWorkspaceRuns((prev) => {
-        if (!prev[initialKey] || prev[initialKey].length === 0) {
-          const updated = { ...prev, [initialKey]: data.runs };
-          try {
-            localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
-          } catch {}
-          return updated;
-        }
-        return prev;
-      });
+
+    if (storedWorkspaceRuns === null) {
+      if (data.runs && data.runs.length > 0 && activeRepo) {
+        const initial = { [activeRepo]: data.runs };
+        setWorkspaceRuns(initial);
+        try {
+          localStorage.setItem("grapher_workspace_runs", JSON.stringify(initial));
+        } catch {}
+      }
+    } else {
+      setWorkspaceRuns(storedWorkspaceRuns);
     }
-    if (data.snapshot.runId && data.snapshot.config?.repository === data.config.repository) {
+
+    const currentRuns = (storedWorkspaceRuns ? (storedWorkspaceRuns[activeRepo] || []) : null) ?? (data.runs || []);
+    if (
+      activeRepo &&
+      data.snapshot.runId &&
+      (data.snapshot.config?.repository === activeRepo || (!data.snapshot.config?.repository && activeRepo === (data.repositoryInfo?.path || ""))) &&
+      currentRuns.includes(data.snapshot.runId)
+    ) {
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       markSnapshotRead(data.snapshot);
@@ -438,10 +520,32 @@ export default function App() {
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
       setSelected("");
+    } else if (activeRepo && currentRuns.length > 0) {
+      try {
+        const snap = await runtimeService.loadRun(currentRuns[0]);
+        const deduced = deduceRouteType(snap);
+        setState(snap);
+        setRouteType(deduced);
+        setGoal(snap.graph.originalGoal || "");
+        setSelected("");
+      } catch {
+        setState(emptySnapshot);
+        setRouteType("undecided");
+        setGoal("");
+        setSelected("");
+      }
+    } else {
+      setState(emptySnapshot);
+      setRouteType("undecided");
+      setGoal("");
+      setSelected("");
+      setMessages([]);
     }
 
-    const targetRepo = data.config.repository || data.repositoryInfo?.path;
-    void planningRecovery.restore(planningRecovery.begin(targetRepo), data.snapshot);
+    const targetRepo = activeRepo || data.config.repository || data.repositoryInfo?.path;
+    if (targetRepo) {
+      void planningRecovery.restore(planningRecovery.begin(targetRepo), data.snapshot);
+    }
   }, [planningRecovery]);
 
   const handleOpenProject = () => run(async () => {
@@ -562,13 +666,12 @@ export default function App() {
       danger: true,
       onConfirm: () => {
         const pathToRemove = project.path;
-        setProjects((prev) => {
-          const next = prev.filter((p) => p.path !== pathToRemove);
-          try {
-            localStorage.setItem("grapher_projects", JSON.stringify(next));
-          } catch {}
-          return next;
-        });
+        const remainingProjects = projects.filter((p) => p.path !== pathToRemove);
+        setProjects(remainingProjects);
+        try {
+          localStorage.setItem("grapher_projects", JSON.stringify(remainingProjects));
+        } catch {}
+
         setWorkspaceRuns((prev) => {
           const copy = { ...prev };
           delete copy[pathToRemove];
@@ -577,8 +680,20 @@ export default function App() {
           } catch {}
           return copy;
         });
-        if (config.repository === pathToRemove) {
-          handleResetWorkspace();
+
+        if (config.repository === pathToRemove || repoInfo?.path === pathToRemove) {
+          if (remainingProjects.length > 0) {
+            handleSelectProject(remainingProjects[0]);
+          } else {
+            setConfig((prev) => ({ ...prev, repository: "" }));
+            setRepoInfo(null);
+            setState(emptySnapshot);
+            setGoal("");
+            setSelected("");
+            setMessages([]);
+            setRouteType("undecided");
+            void runtimeService.resetWorkspace().catch(() => {});
+          }
         }
       },
     });
@@ -587,23 +702,49 @@ export default function App() {
   const handleDeleteRun = (runIdToDelete: string) => run(async () => {
     await runtimeService.deleteRun(runIdToDelete);
     setWorkspaceRuns((prev) => {
-      const existing = prev[currentRepoPath] || [];
-      const nextList = existing.filter((id) => id !== runIdToDelete);
-      const updated = { ...prev, [currentRepoPath]: nextList };
+      const copy: Record<string, string[]> = {};
+      for (const [repo, idList] of Object.entries(prev)) {
+        copy[repo] = idList.filter((id) => id !== runIdToDelete);
+      }
       try {
-        localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
+        localStorage.setItem("grapher_workspace_runs", JSON.stringify(copy));
       } catch {}
-      return updated;
+      return copy;
+    });
+    setRunLabels((prev) => {
+      const copy = { ...prev };
+      delete copy[runIdToDelete];
+      try {
+        localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
+      } catch {}
+      return copy;
     });
     if (state.runId === runIdToDelete) {
-      try {
-        const snapshot = await runtimeService.resetWorkspace();
-        setState(snapshot);
-      } catch {
-        setState(emptySnapshot);
+      const remainingRuns = (workspaceRuns[currentRepoPath] || []).filter((id) => id !== runIdToDelete);
+      if (remainingRuns.length > 0) {
+        try {
+          const snapshot = await runtimeService.loadRun(remainingRuns[0]);
+          setState(snapshot);
+          setRouteType(deduceRouteType(snapshot));
+          setGoal(snapshot.graph.originalGoal || "");
+          setSelected("");
+        } catch {
+          setState(emptySnapshot);
+          setGoal("");
+          setSelected("");
+        }
+      } else {
+        try {
+          const snapshot = await runtimeService.resetWorkspace();
+          setState(snapshot);
+        } catch {
+          setState(emptySnapshot);
+        }
+        setGoal("");
+        setSelected("");
+        setMessages([]);
+        setRouteType("undecided");
       }
-      setGoal("");
-      setSelected("");
     }
   });
 
@@ -626,30 +767,47 @@ export default function App() {
       confirmText: "清空全部",
       danger: true,
       onConfirm: () => run(async () => {
-        const data = await runtimeService.bootstrap();
-        const snapshots = await Promise.all(data.runs.map((id) => runtimeService.history(id)));
+        const currentRuns = workspaceRuns[currentRepoPath] || [];
+        const data = await runtimeService.bootstrap().catch(() => ({ runs: [] as string[] }));
+        const candidateIds = Array.from(new Set([...currentRuns, ...(data.runs || [])]));
+        const snapshots = await Promise.all(
+          candidateIds.map((id) => runtimeService.history(id).catch(() => null))
+        );
         const scopedIds = snapshots
-          .filter((snapshot) => snapshot.config && (snapshot.config.repository || "default") === currentRepoPath)
-          .map((snapshot) => snapshot.runId);
-        for (const runId of scopedIds) {
-          await runtimeService.deleteRun(runId);
-          setWorkspaceRuns((prev) => {
-            const updated = {
-              ...prev,
-              [currentRepoPath]: (prev[currentRepoPath] || []).filter((id) => id !== runId),
-            };
-            try {
-              localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
-            } catch {}
-            return updated;
-          });
-          if (state.runId === runId) {
-            setState(emptySnapshot);
-            setMessages([]);
-            setGoal("");
-            setSelected("");
-          }
+          .filter((snap): snap is Snapshot => !!snap && (snap.config?.repository || "default") === currentRepoPath)
+          .map((snap) => snap.runId);
+        const allIdsToDelete = Array.from(new Set([...currentRuns, ...scopedIds]));
+
+        for (const runId of allIdsToDelete) {
+          await runtimeService.deleteRun(runId).catch(() => {});
         }
+
+        setWorkspaceRuns((prev) => {
+          const updated = {
+            ...prev,
+            [currentRepoPath]: [],
+          };
+          try {
+            localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+
+        setRunLabels((prev) => {
+          const copy = { ...prev };
+          allIdsToDelete.forEach((id) => delete copy[id]);
+          try {
+            localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
+          } catch {}
+          return copy;
+        });
+
+        setState(emptySnapshot);
+        setMessages([]);
+        setGoal("");
+        setSelected("");
+        setRouteType("undecided");
+        void runtimeService.resetWorkspace().catch(() => {});
       }),
     });
   };
@@ -706,7 +864,10 @@ export default function App() {
     setSelected("");
   });
 
-  const handlePlanGoal = (inputGoal?: string) => run(async () => {
+  const handlePlanGoal = (
+    inputGoal?: string,
+    options?: { displayText?: string; rawText?: string; files?: File[] }
+  ) => run(async () => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return;
     setGoal(targetGoal);
@@ -728,7 +889,7 @@ export default function App() {
       {
         id: `msg-${Date.now()}`,
         role: "user",
-        text: targetGoal,
+        text: options?.displayText || targetGoal,
         timestamp: Date.now(),
       },
     ]);

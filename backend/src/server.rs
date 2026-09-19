@@ -1946,7 +1946,7 @@ pub fn run() -> Result<(), String> {
                 if command == "plan_goal_stream" {
                     let mut input = String::new();
                     let body_res = std::io::Read::read_to_string(
-                        &mut request.as_reader().take(2 * 1024 * 1024 + 1),
+                        &mut request.as_reader().take(10 * 1024 * 1024 + 1),
                         &mut input,
                     )
                     .map_err(|e| e.to_string())
@@ -2065,12 +2065,12 @@ pub fn run() -> Result<(), String> {
 
                 let mut input = String::new();
                 let result = std::io::Read::read_to_string(
-                    &mut request.as_reader().take(2 * 1024 * 1024 + 1),
+                    &mut request.as_reader().take(10 * 1024 * 1024 + 1),
                     &mut input,
                 )
                 .map_err(|e| e.to_string())
                 .and_then(|_| {
-                    if input.len() > 2 * 1024 * 1024 {
+                    if input.len() > 10 * 1024 * 1024 {
                         return Err("Request too large".into());
                     }
                     let body = serde_json::from_str(&input).map_err(|e| e.to_string())?;
