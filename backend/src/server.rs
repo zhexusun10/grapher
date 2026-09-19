@@ -1425,6 +1425,12 @@ fn control(
             instruction.as_deref().unwrap_or_default(),
         )?,
         "resolve" => runtime.resolved(node.as_deref().unwrap_or_default())?,
+        "stop" | "cancel" => {
+            crate::engine::terminate_all();
+            if runtime.state.approved {
+                let _ = runtime.pause(true);
+            }
+        }
         _ => return Err("Unknown action".into()),
     }
     let snapshot = runtime.state.clone();

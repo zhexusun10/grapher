@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect, useLayoutEffect, useCallback } from
 import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
 import {
   Code2, ArrowLeft, Terminal, FolderGit2, GitBranch, RotateCcw,
-  Workflow, Check, Play, Pause, Compass, ArrowDown
+  Workflow, Check, Play, Pause, Compass, ArrowDown, Clock, Loader2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -26,7 +26,9 @@ interface GraphWorkbenchProps {
   effectiveMessages: Array<{ id: string; role: "user" | "assistant"; text: string; timestamp?: number }>;
   isPlanning: boolean;
   plannerStream: any;
-  onSendMessage: (val: string) => void;
+  onSendMessage: (val: string, options?: { mode?: "followUp" | "steer" }) => void;
+  followUpQueue?: Array<{ id: string; text: string; node?: string; timestamp: number }>;
+  onCancelFollowUp?: (id: string) => void;
   onControl: (action: string, extra?: Record<string, unknown>) => void;
   onSave: (graph: Graph) => void;
   onOpenEditor: () => void;
@@ -58,6 +60,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   isPlanning,
   plannerStream,
   onSendMessage,
+  followUpQueue,
+  onCancelFollowUp,
   onControl,
   onSave,
   onOpenEditor,
@@ -89,6 +93,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const resetChatScrollFrameRef = useRef<number | null>(null);
   const activeConversationViewRef = useRef(conversationViewKey);
   const entryTopLockedRef = useRef(true);
+  const isScrollingToBottomRef = useRef(false);
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -121,16 +126,29 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (entryTopLockedRef.current) {
       const { scrollHeight, clientHeight } = chatScrollRef.current;
       chatScrollRef.current.scrollTop = 0;
-      setShowScrollBottom(scrollHeight - clientHeight > clientHeight / 2);
+      setShowScrollBottom(scrollHeight - clientHeight > 80);
       return;
     }
     if (suppressAutoScrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
-    const isUserAwayFromBottom = distanceFromBottom > 80;
-    const shouldShowScrollBottom = distanceFromBottom > clientHeight / 2;
-    isUserScrolledUpRef.current = isUserAwayFromBottom;
-    setShowScrollBottom(shouldShowScrollBottom);
+
+    if (isScrollingToBottomRef.current) {
+      if (distanceFromBottom <= 30) {
+        isScrollingToBottomRef.current = false;
+      }
+      isUserScrolledUpRef.current = false;
+      setShowScrollBottom(false);
+      return;
+    }
+
+    if (distanceFromBottom > 80) {
+      isUserScrolledUpRef.current = true;
+      setShowScrollBottom(true);
+    } else if (distanceFromBottom <= 30) {
+      isUserScrolledUpRef.current = false;
+      setShowScrollBottom(false);
+    }
   }, []);
 
   const releaseEntryTopLock = useCallback(() => {
@@ -141,13 +159,61 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const scrollToBottom = useCallback(() => {
     entryTopLockedRef.current = false;
+    isUserScrolledUpRef.current = false;
+    isScrollingToBottomRef.current = true;
+    setShowScrollBottom(false);
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTo({
         top: chatScrollRef.current.scrollHeight,
         behavior: "smooth",
       });
-      isUserScrolledUpRef.current = false;
     }
+  }, []);
+
+  // Listen to wheel and touch gestures on chat scroll container to immediately lock auto-scroll upon upward scrolling
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+
+    const onWheel = (e: WheelEvent) => {
+      entryTopLockedRef.current = false;
+      if (e.deltaY < -1) {
+        isScrollingToBottomRef.current = false;
+        isUserScrolledUpRef.current = true;
+      } else if (e.deltaY > 1) {
+        const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (dist <= 30) {
+          isScrollingToBottomRef.current = false;
+          isUserScrolledUpRef.current = false;
+          setShowScrollBottom(false);
+        }
+      }
+    };
+
+    let startTouchY = 0;
+    const onTouchStart = (e: TouchEvent) => {
+      entryTopLockedRef.current = false;
+      if (e.touches[0]) startTouchY = e.touches[0].clientY;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches[0]) {
+        const delta = e.touches[0].clientY - startTouchY;
+        if (delta > 2) {
+          isScrollingToBottomRef.current = false;
+          isUserScrolledUpRef.current = true;
+        }
+      }
+    };
+
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
   }, []);
 
   const handleExpandableContentChange = useCallback(() => {
@@ -188,13 +254,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const observer = new ResizeObserver(() => {
       if (entryTopLockedRef.current) {
         el.scrollTop = 0;
-        setShowScrollBottom(el.scrollHeight - el.clientHeight > el.clientHeight / 2);
+        setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
         return;
       }
       if (suppressAutoScrollRef.current) return;
 
-      // Auto-scroll to bottom when content grows, unless user scrolled up
-      if (!isUserScrolledUpRef.current) {
+      // Auto-scroll to bottom when content grows, unless user scrolled up or smooth-scrolling to bottom
+      if (!isUserScrolledUpRef.current && !isScrollingToBottomRef.current) {
         el.scrollTop = el.scrollHeight;
       }
       handleChatScroll();
@@ -298,8 +364,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     entryTopLockedRef.current = true;
     suppressAutoScrollRef.current = false;
     isUserScrolledUpRef.current = true;
+    isScrollingToBottomRef.current = false;
     el.scrollTop = 0;
-    setShowScrollBottom(el.scrollHeight - el.clientHeight > el.clientHeight / 2);
+    setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
 
     if (resetChatScrollFrameRef.current !== null) {
       cancelAnimationFrame(resetChatScrollFrameRef.current);
@@ -308,7 +375,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       resetChatScrollFrameRef.current = null;
       el.scrollTop = 0;
       isUserScrolledUpRef.current = true;
-      setShowScrollBottom(el.scrollHeight - el.clientHeight > el.clientHeight / 2);
+      setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
     });
   }, [conversationViewKey]);
 
@@ -445,14 +512,31 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
             >
+              {followUpQueue && followUpQueue.length > 0 && (
+                <div className="followup-queue-banner">
+                  <div className="queue-info">
+                    <Clock size={12} />
+                    <span>排队中 ({followUpQueue.length}): {followUpQueue[0].text.slice(0, 30)}...</span>
+                  </div>
+                  {onCancelFollowUp && (
+                    <button
+                      type="button"
+                      className="queue-cancel-btn"
+                      onClick={() => onCancelFollowUp(followUpQueue[0].id)}
+                    >
+                      取消
+                    </button>
+                  )}
+                </div>
+              )}
               <PromptBox
                 compact
-                onSubmit={(val) => onSendMessage(val)}
+                onSubmit={(val, options) => onSendMessage(val, options)}
                 placeholder=""
+                isExecuting={active}
                 disabled={
                   locked ||
                   isPlanning ||
-                  active ||
                   (Boolean(selectedNode) && !state.approved)
                 }
               />
@@ -478,19 +562,29 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
 
 
-                {/* 任务路线决策结果 */}
-                {routeType !== "undecided" && (
+                {/* 任务路线决策结果或评估中加载状态 */}
+                {((isPlanning && routeType === "undecided") || routeType !== "undecided") && (
                   <motion.div
                     className={`route-decision-pill ${routeType}`}
-                    initial={{ opacity: 0, scale: 0.95 }}
+                    initial={{ opacity: 0, scale: 0.96 }}
                     animate={{ opacity: 1, scale: 1 }}
+                    transition={{ duration: 0.25, ease: "easeOut" }}
                   >
-                    <Compass size={13} />
-                    <span>
-                      {routeType === "serial"
-                        ? "任务路线决策：单节点执行"
-                        : "任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）"}
-                    </span>
+                    {routeType === "undecided" ? (
+                      <>
+                        <Loader2 size={13} className="spin" />
+                        <span>正在评估任务路线决策...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Compass size={13} />
+                        <span>
+                          {routeType === "serial"
+                            ? "任务路线决策：单节点执行"
+                            : "任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）"}
+                        </span>
+                      </>
+                    )}
                   </motion.div>
                 )}
 
@@ -600,8 +694,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </motion.div>
               )}
 
-              {/* 当前 Run 的规划阶段摘要（仅在当前 Run 自身拥有有效规划时展示） */}
-              {state.planning && (!failedPlanning || state.planning.planningId !== failedPlanning.planningId) && (
+              {/* 当前 Run 的规划阶段摘要（仅在多节点图模式下且当前 Run 自身拥有有效规划时展示） */}
+              {routeType === "graph" && state.planning && (!failedPlanning || state.planning.planningId !== failedPlanning.planningId) && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -686,14 +780,31 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
             >
+              {followUpQueue && followUpQueue.length > 0 && (
+                <div className="followup-queue-banner">
+                  <div className="queue-info">
+                    <Clock size={12} />
+                    <span>排队中 ({followUpQueue.length}): {followUpQueue[0].text.slice(0, 30)}...</span>
+                  </div>
+                  {onCancelFollowUp && (
+                    <button
+                      type="button"
+                      className="queue-cancel-btn"
+                      onClick={() => onCancelFollowUp(followUpQueue[0].id)}
+                    >
+                      取消
+                    </button>
+                  )}
+                </div>
+              )}
               <PromptBox
                 compact
-                onSubmit={(val) => onSendMessage(val)}
+                onSubmit={(val, options) => onSendMessage(val, options)}
                 placeholder=""
+                isExecuting={active}
                 disabled={
                   locked ||
                   isPlanning ||
-                  active ||
                   (Boolean(selectedNode) && !state.approved)
                 }
               />

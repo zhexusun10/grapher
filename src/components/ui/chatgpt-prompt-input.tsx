@@ -6,11 +6,15 @@ export interface PromptBoxProps
   extends Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, "onSubmit"> {
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLTextAreaElement> | any) => void;
-  onSubmit?: (message: string, options?: { files?: File[]; selectedTool?: string | null }) => void;
+  onSubmit?: (
+    message: string,
+    options?: { files?: File[]; selectedTool?: string | null; mode?: "followUp" | "steer" }
+  ) => void;
   placeholder?: string;
   disabled?: boolean;
   isBusy?: boolean;
   compact?: boolean;
+  isExecuting?: boolean;
   layoutId?: string;
   className?: string;
 }
@@ -21,10 +25,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       value,
       onChange,
       onSubmit,
-      placeholder = "描述你想完成的工作或输入指令...",
+      placeholder = "",
       disabled = false,
       isBusy = false,
       compact = false,
+      isExecuting = false,
       layoutId,
       className = "",
       ...restProps
@@ -90,6 +95,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       if (onSubmit) {
         onSubmit(trimmed, {
           files: selectedFile ? [selectedFile] : [],
+          mode: isExecuting ? "steer" : undefined,
         });
       }
 
@@ -108,6 +114,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     };
 
     const canSubmit = (hasText || !!selectedImage) && !disabled && !isBusy;
+
+
 
     return (
       <motion.div
@@ -200,7 +208,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               }}
               disabled={!canSubmit}
               className={`prompt-box-send-btn ${canSubmit ? "active" : ""}`}
-              title="发送并编译工作图 (Enter)"
+              title="发送消息 (Enter)"
               aria-label="发送消息"
             >
               {isBusy ? (

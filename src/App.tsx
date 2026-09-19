@@ -311,10 +311,53 @@ export default function App() {
     setModal(null);
   });
 
-  const handleSendMessage = (val: string) => {
+  // 待办跟进队列（用于运行中输入的 Follow-up 指令）
+  const [followUpQueue, setFollowUpQueue] = useState<Array<{ id: string; text: string; node?: string; timestamp: number }>>([]);
+
+  const handleCancelFollowUp = (id: string) => {
+    setFollowUpQueue((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  const handleSendMessage = (val: string, options?: { mode?: "followUp" | "steer" }) => {
     const text = val.trim();
     if (!text) return;
     const selectedNode = state.graph.nodes.find((item) => item.name === selected);
+    const targetNodeName = selectedNode
+      ? selectedNode.name
+      : (routeType === "serial" && state.graph.nodes.length > 0
+          ? (state.graph.nodes[0]?.name || "task")
+          : undefined);
+
+    if (active) {
+      const displayLabel = targetNodeName && targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
+      const newMsg = {
+        id: `msg-${Date.now()}`,
+        role: "user" as const,
+        text: `${displayLabel}${text}`,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
+      run(async () => {
+        try {
+          await runtimeService.control("stop");
+        } catch {
+          // ignore
+        }
+        await new Promise((r) => setTimeout(r, 120));
+        if (targetNodeName) {
+          const snap = await runtimeService.control("intervene", {
+            node: targetNodeName,
+            instruction: text,
+          });
+          setState(snap);
+        } else {
+          const baseGoal = state.graph.originalGoal || goal;
+          const combinedGoal = baseGoal ? `${baseGoal}\n\n补充执行要求：\n${text}` : text;
+          handlePlanGoal(combinedGoal);
+        }
+      });
+      return;
+    }
 
     if (selectedNode) {
       // 针对具体选定节点的微调与介入
@@ -1093,6 +1136,24 @@ export default function App() {
   const active = publishing || publicationFailed || Object.values(state.nodes).some((node) => node.status === "running");
   const locked = busy || !!recoveredPlanning;
 
+  // 自动出队并派发排队跟进的 Follow-up 指令
+  const prevActiveRef = useRef(active);
+  useEffect(() => {
+    if (prevActiveRef.current && !active && followUpQueue.length > 0) {
+      const nextItem = followUpQueue[0];
+      setFollowUpQueue((prev) => prev.slice(1));
+      const targetNodeName = nextItem.node || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
+      if (targetNodeName) {
+        control("intervene", { node: targetNodeName, instruction: nextItem.text });
+      } else {
+        const baseGoal = state.graph.originalGoal || goal;
+        const combinedGoal = baseGoal ? `${baseGoal}\n\n补充执行要求：\n${nextItem.text}` : nextItem.text;
+        handlePlanGoal(combinedGoal);
+      }
+    }
+    prevActiveRef.current = active;
+  }, [active, followUpQueue, routeType, state.graph.nodes, state.graph.originalGoal, goal]);
+
   const nodes = useMemo<WorkNode[]>(() => {
     const layers = computeExecutionLayers(state.graph, state.plan);
     const getNodeX = (nodeName: string) => {
@@ -1353,6 +1414,8 @@ export default function App() {
                 isPlanning={isPlanning || !!recoveredPlanning}
                 plannerStream={plannerStream}
                 onSendMessage={handleSendMessage}
+                followUpQueue={followUpQueue}
+                onCancelFollowUp={handleCancelFollowUp}
                 onControl={control}
                 onSave={save}
                 onOpenEditor={() => setModal("editor")}

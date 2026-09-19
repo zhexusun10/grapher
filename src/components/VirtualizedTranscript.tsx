@@ -4,7 +4,7 @@ import { TranscriptItem } from "../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
-import { ArrowDown, Terminal } from "lucide-react";
+import { Terminal } from "lucide-react";
 
 interface VirtualizedTranscriptProps {
   output: string;
@@ -46,7 +46,6 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const isUserScrolledUpRef = useRef(false);
   const suppressAutoFollowRef = useRef(false);
   const resumeAutoFollowFrameRef = useRef<number | null>(null);
-  const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   // Incremental parse state
   const lastProcessedPosRef = useRef<number>(0);
@@ -413,17 +412,21 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
 
   const items = itemsRef.current;
 
+  const touchStartYRef = useRef(0);
+
   const syncScrollState = useCallback(() => {
     const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
     if (!scrollParent) return;
 
     const currentScrollTop = scrollParent.scrollTop;
     const distanceFromBottom = scrollParent.scrollHeight - currentScrollTop - scrollParent.clientHeight;
-    const isUserAwayFromBottom = distanceFromBottom > 64;
-    const shouldShowScrollBottom = distanceFromBottom > scrollParent.clientHeight / 2;
+    const isUserAwayFromBottom = distanceFromBottom > 24;
     setScrollTop(currentScrollTop);
-    isUserScrolledUpRef.current = isUserAwayFromBottom;
-    setShowScrollBottom(shouldShowScrollBottom);
+    if (!isUserAwayFromBottom) {
+      isUserScrolledUpRef.current = false;
+    } else {
+      isUserScrolledUpRef.current = true;
+    }
   }, []);
 
   const handleExpandedChange = useCallback((id: string, expanded: boolean) => {
@@ -452,9 +455,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   }, []);
 
   useLayoutEffect(() => {
-    if (!suppressAutoFollowRef.current && !isUserScrolledUpRef.current && containerRef.current) {
+    if (containerRef.current) {
       const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
-      scrollParent.scrollTop = scrollParent.scrollHeight;
       setScrollTop(scrollParent.scrollTop);
     }
   }, [itemsVersion, heightVersion]);
@@ -475,25 +477,38 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     resizeObserver.observe(scrollParent);
     
     const onScroll = () => syncScrollState();
-    scrollParent.addEventListener('scroll', onScroll);
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < -1) {
+        isUserScrolledUpRef.current = true;
+      } else if (e.deltaY > 1) {
+        const dist = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
+        if (dist <= 24) {
+          isUserScrolledUpRef.current = false;
+        }
+      }
+    };
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches[0]) touchStartYRef.current = e.touches[0].clientY;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches[0] && e.touches[0].clientY - touchStartYRef.current > 2) {
+        isUserScrolledUpRef.current = true;
+      }
+    };
+
+    scrollParent.addEventListener('wheel', onWheel, { passive: true });
+    scrollParent.addEventListener('touchstart', onTouchStart, { passive: true });
+    scrollParent.addEventListener('touchmove', onTouchMove, { passive: true });
+    scrollParent.addEventListener('scroll', onScroll, { passive: true });
 
     return () => {
       resizeObserver.disconnect();
+      scrollParent.removeEventListener('wheel', onWheel);
+      scrollParent.removeEventListener('touchstart', onTouchStart);
+      scrollParent.removeEventListener('touchmove', onTouchMove);
       scrollParent.removeEventListener('scroll', onScroll);
     };
   }, [syncScrollState]);
-
-  const scrollToBottom = () => {
-    const scrollParent = getScrollParent(containerRef.current);
-    if (scrollParent) {
-      scrollParent.scrollTo({
-        top: scrollParent.scrollHeight,
-        behavior: "smooth",
-      });
-      isUserScrolledUpRef.current = false;
-      setShowScrollBottom(false);
-    }
-  };
 
   // Virtualization calculations
   const totalCount = items.length;
@@ -557,17 +572,6 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
           })()}</MeasuredRow>)}
         </div>
       </div>
-
-      {showScrollBottom && (
-        <button
-          className="scroll-to-bottom-btn"
-          onClick={scrollToBottom}
-          title="回到底部最新输出"
-        >
-          <ArrowDown size={14} />
-          <span>最新</span>
-        </button>
-      )}
     </div>
   );
 };
