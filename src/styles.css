@@ -1386,7 +1386,7 @@ a,
   max-width: 100%;
   gap: 4px;
   margin: auto 0;
-  transform: translateX(clamp(0px, 5.5vw, 90px));
+  transform: translateX(clamp(0px, 7.5vw, 120px));
   transition: transform 0.2s ease;
 }
 

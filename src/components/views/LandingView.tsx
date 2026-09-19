@@ -52,7 +52,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3, delay: 0.2 }}
           >
-            The Most Powerful Multi-Agent System Ever
+            The Most Powerful Multi Agent System Ever
           </motion.p>
         </div>
         <div style={{ width: "100%", position: "relative" }}>
