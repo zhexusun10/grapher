@@ -30,7 +30,7 @@ test('literal shell mapping preserves quoting, external paths and opaque content
     ]) assert.equal(execFileSync('bash', ['-c', paths.command(command)], { cwd: workspace, encoding: 'utf8' }), 'NODE');
     assert.equal(paths.command(`cat ${source}-other/marker`), `cat ${source}-other/marker`);
     assert.equal(paths.command('cat /etc/hosts'), 'cat /etc/hosts');
-    assert.equal(paths.visible(`${workspace}/marker`), `${source}/marker`);
+    assert.equal(paths.visible(`${workspace}/marker`), './marker');
     assert.equal(paths.visible(`${workspace}-other/marker`), `${workspace}-other/marker`);
     for (const encode of [
       value => value,
@@ -42,9 +42,9 @@ test('literal shell mapping preserves quoting, external paths and opaque content
       value => encodeURI(value),
       value => encodeURIComponent(value),
     ]) {
-      assert.equal(paths.visible(`${encode(workspace)}/marker`), `${encode(source)}/marker`);
+      assert.equal(paths.visible(`${encode(workspace)}/marker`), `${encode(workspace).startsWith('file:') || encode(workspace).includes('%') ? encode(source) : '.'}/marker`);
     }
-    assert.deepEqual(paths.view({ [workspace + '/marker']: workspace }), { [source + '/marker']: source });
+    assert.deepEqual(paths.view({ [workspace + '/marker']: workspace }), { ['./marker']: '.' });
     const fancySource = join(root, 'source with spaces');
     mkdirSync(fancySource);
     const alias = join(root, 'alias');
@@ -62,6 +62,6 @@ test('literal shell mapping preserves quoting, external paths and opaque content
     }
     const opaque = [{type:'image', data:workspace}, {type:'thinking', thinking:workspace, signature:workspace}];
     assert.deepEqual(paths.view(opaque), opaque);
-    assert.deepEqual(paths.view({id:workspace, textSignature:workspace, text:`Read ${workspace}/marker`}), {id:workspace, textSignature:workspace, text:`Read ${source}/marker`});
+    assert.deepEqual(paths.view({id:workspace, textSignature:workspace, text:`Read ${workspace}/marker`}), {id:workspace, textSignature:workspace, text:'Read ./marker'});
   } finally { rmSync(root, {recursive:true, force:true}); }
 });

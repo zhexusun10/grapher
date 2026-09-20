@@ -177,7 +177,7 @@ try {
     const roleExtension = await loadExtensions([adapterPath], repository);
     assert.deepEqual(roleExtension.errors, []);
     const hooks = roleExtension.extensions[0].handlers;
-    assert.equal(hooks.has("before_agent_start"), false, "No prompt path rewriting");
+    assert.equal(hooks.has("before_agent_start"), mode !== "partition", "Working roles receive the relative-path convention");
     assert.equal(hooks.has("context"), false, "No content rewriting");
     if (mode === "partition") assert.equal(roleExtension.extensions[0].tools.size, 0);
     else assert.ok(roleExtension.extensions[0].tools.has("bash"));

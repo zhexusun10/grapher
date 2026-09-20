@@ -4,7 +4,7 @@
 
 ## 当前实现
 
-所有 agent 为宿主原生 Pi instance。正式 `engine/workspace-tools.ts` 在工具执行前映射 read/write/edit/ls/find/grep 的项目路径；bash 通过 `engine/workspace-paths.mjs` 转换可识别的完整项目路径字面量，在节点真实 cwd 运行。模型侧路径规范为统一源项目路径；已有脚本和程序内部动态路径不透明映射。项目外绝对脚本、统一项目路径的常见 bash 操作已通过实际原生 launcher 验证。
+所有 agent 为宿主原生 Pi instance。正式 `engine/workspace-tools.ts` 在工具执行前映射 read/write/edit/ls/find/grep 的项目路径；bash 通过 `engine/workspace-paths.mjs` 转换可识别的完整项目路径字面量，在节点真实 cwd 运行。模型侧普通节点路径呈现为项目根相对路径，项目外路径保持绝对形式，结构化 URI 保持有效的源项目绝对地址；已有脚本和程序内部动态路径不透明映射。项目外绝对脚本、统一项目路径的常见 bash 操作已通过实际原生 launcher 验证。
 
 macOS Seatbelt 防止节点直接读写源项目、兄弟工作区和其他 session；共享 Pi 运行副本放在源项目外，避免自托管时阻断引擎。访问控制不等于透明重定向。脚本内部硬编码源项目路径仍可能被拒绝，这是当前明确接受的范围，不再因此阻塞整个 Graph。
 

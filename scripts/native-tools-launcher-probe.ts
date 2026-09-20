@@ -2,7 +2,7 @@
 // in tests. No provider/model call. Tool implementations and adapter are the
 // actual staged production modules, not a replacement execution backend.
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -34,6 +34,14 @@ export default async function () {
     await call('edit', { path: visible, edits: [{ oldText: `first-${label}`, newText: `final-${label}` }] });
     assert.equal(text(await call('read', { path: visible })), `final-${label}`);
     assert.equal(text(await call('read', { path: 'mapped.txt' })), `final-${label}`);
+    mkdirSync(join(cwd, 'sub'));
+    await call('bash', { command: 'cd sub && printf relative > local.txt && cat ../mapped.txt' });
+    assert.equal(readFileSync(join(cwd, 'sub/local.txt'), 'utf8'), 'relative');
+    assert.equal(text(await call('read', { path: 'sub/local.txt' })), 'relative');
+    assert.equal(text(await call('read', { path: join(source, 'sub/local.txt') })), 'relative');
+    const externalMaterial = join(process.env.GRAPHER_TEST_EXTERNAL!, '..', 'material.txt');
+    // Resolve the external sibling using its host absolute path, not ../ from cwd.
+    assert.equal(text(await call('read', { path: externalMaterial })), 'external material');
     await call('write', { path: join(source, 'literal.txt'), content: `keep ${source} unchanged` });
     assert.equal(readFileSync(join(cwd, 'literal.txt'), 'utf8'), `keep ${source} unchanged`);
     assert.match(text(await call('ls', { path: source })), /mapped.txt/);
@@ -69,9 +77,11 @@ export default async function () {
     await call('bash', { command: `${quote(process.execPath)} -e ${quote(nested)}` });
     assert.equal(readFileSync(join(cwd, 'nested-ran'), 'utf8'), 'ok');
     const system = await hooks.get('before_agent_start')![0]({ systemPrompt: 'base' });
-    assert.equal(system.systemPrompt, 'base', 'No instructions are appended or modified');
+    assert.ok(system.systemPrompt.startsWith('base\n\n'));
+    assert.match(system.systemPrompt, /project-root-relative/);
+    assert.match(system.systemPrompt, /external files/);
     const systemWithCwd = await hooks.get('before_agent_start')![0]({ systemPrompt: `Original instructions.\nCurrent working directory: ${cwd}` });
-    assert.equal(systemWithCwd.systemPrompt, `Original instructions.\nCurrent working directory: ${source}`);
+    assert.ok(systemWithCwd.systemPrompt.startsWith('Original instructions.\nCurrent working directory: .\n\n'));
     const updates: any[] = [];
     const bash = tools.get('bash');
     for (const command of [
@@ -84,7 +94,7 @@ export default async function () {
       assert.equal(input.command, command);
     }
     const pwd = await bash.execute('pwd', { command: 'pwd -P' }, undefined, (v: any) => updates.push(v));
-    assert.equal(text(pwd).trim(), source);
+    assert.equal(text(pwd).trim(), '.');
     for (const command of [
       `cat < ${quote(visible)}`,
       `env PROJECT=${quote(source)} sh -c 'cat "$PROJECT/mapped.txt"'`,
@@ -93,7 +103,7 @@ export default async function () {
     const encodedOutput = `console.log(JSON.stringify({path:process.cwd(),uri:require('node:url').pathToFileURL(process.cwd()).href,encoded:encodeURIComponent(process.cwd())}))`;
     const encoded = text(await bash.execute('encoded', { command: `${quote(process.execPath)} -e ${quote(encodedOutput)}` }));
     const parsed = JSON.parse(encoded);
-    assert.equal(parsed.path, source);
+    assert.equal(parsed.path, '.');
     assert.equal(parsed.uri, pathToFileURL(source).href);
     assert.equal(parsed.encoded, encodeURIComponent(source));
     const errorResult = await bash.execute('mapped-error', { command: 'cat missing-in-workspace' }).catch((error: Error) => error.message);

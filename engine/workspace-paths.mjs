@@ -65,7 +65,9 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     value => encodeURI(value),
     value => encodeURIComponent(value),
   ];
-  const replacements = [...new Map(aliases.flatMap(alias => spellings.map(encode => [encode(alias), encode(base)]))).entries()]
+  // Plain filesystem paths are presented relative to the project root. Keep
+  // structured URI encodings valid; do not turn file URLs into file://./... .
+  const replacements = [...new Map(aliases.flatMap(alias => spellings.map((encode, index) => [encode(alias), index >= 5 ? encode(base) : '.'])).reverse()).entries()]
     .sort(([a], [b]) => b.length - a.length);
   const visible = text => replacements.reduce((value, [alias, project]) => replace(value, alias, project), text);
   const physical = value => {

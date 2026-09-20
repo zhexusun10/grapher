@@ -8,24 +8,27 @@ import {
 } from "../pi/packages/coding-agent/src/core/tools/bash.ts";
 
 export default function (pi: ExtensionAPI) {
-  // Planner owns its native bash tool; Partitioner has no tools.
-  // The launcher loads this adapter for every role, so execution-only tool
-  // overrides and hooks must not register on either planning role.
-  if (process.env.GRAPHER_MODE === "planner") return;
-  if (process.env.GRAPHER_MODE === "partition") return;
   const cwd = process.cwd();
   const project = process.env.GRAPHER_ORIGINAL_ROOT;
   const paths = process.env.GRAPHER_EXECUTION_KIND === 'graph' && project
     ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;
   const view = (value: any): any => paths ? paths.view(value) : value;
+  // A shared convention, not a change to filesystem resolution. Each shell
+  // still observes cd; ../ is never redirected to the source project's parent.
+  if (process.env.GRAPHER_MODE !== 'partition') {
+    pi.on('before_agent_start', async event => ({
+      systemPrompt: `${paths ? paths.visible(event.systemPrompt) : event.systemPrompt}\n\nUse project-root-relative paths for project files, node handoffs and generated configuration. Use original host absolute paths for external files and scripts. In bash, relative paths follow the shell's current directory after cd. Do not use ../ to mean the source project's parent; use an explicit host absolute path for external siblings. Existing absolute project references are compatibility inputs, not the preferred form for new work.`,
+    }));
+  }
+  // Planner owns its native bash tool; Partitioner has no tools.
+  // The launcher loads this adapter for every role, so execution-only tool
+  // overrides and hooks must not register on either planning role.
+  if (process.env.GRAPHER_MODE === "planner") return;
+  if (process.env.GRAPHER_MODE === "partition") return;
   if (process.env.GRAPHER_EXECUTION_KIND === 'graph') {
     if (!project) throw new Error('Graph execution is missing its host-owned project binding');
     registerWorkspaceTools(pi, cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view);
-    pi.on('before_agent_start', async event => ({
-      // Pi embeds the physical cwd in its generated prompt. Normalize only
-      // path spelling; do not append instructions or change role behavior.
-      systemPrompt: paths!.visible(event.systemPrompt),
-    }));
+
     // Normalize model-facing paths only; never change stored files, tool input
     // contents, provider signatures, or image bytes.
     pi.on('context', async event => ({ messages: view(event.messages) }));
