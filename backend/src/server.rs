@@ -94,6 +94,7 @@ mod prompt_tests {
                 max_parallel: 4,
                 max_feedback: 3,
             },
+            None,
             &service,
             |_| {},
             |_| panic!("Failure must not emit a route"),
@@ -885,6 +886,7 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
 fn plan_goal_internal(
     goal: String,
     config: Config,
+    mode: Option<&str>,
     service: &Arc<Service>,
     mut on_partitioner_line: impl FnMut(&str),
     mut on_route: impl FnMut(&Route),
@@ -926,7 +928,7 @@ fn plan_goal_internal(
         fs::write(
             directory.join("request.json"),
             serde_json::to_vec(&serde_json::json!({
-                "goal": goal, "config": config
+                "goal": goal, "config": config, "mode": mode
             }))
             .map_err(|e| (e.to_string(), None))?,
         )
@@ -946,64 +948,87 @@ fn plan_goal_internal(
         write_planning_summary(&directory, &running).map_err(|error| (error, None))?;
         let plan_outcome = (|| -> Result<Snapshot, String> {
             let route_path = directory.join("route.json");
-            let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
-            let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
-                .unwrap_or_else(|_| default_partitioner_system.to_string());
-            let task = format!("User query:\n\n{goal}");
-            let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
-            let partitioner_config = partitioner_model_cfg.effective_config(&config);
-            let mut partitioner_extra_args = vec!["--no-tools", "--no-context-files"];
-            if let Some(thinking) = &partitioner_model_cfg.thinking {
-                partitioner_extra_args.push("--thinking");
-                partitioner_extra_args.push(thinking.as_str());
-            }
-            let mut log = String::new();
-            let mut partition_log =
-                fs::File::create(directory.join("partition.jsonl")).map_err(|e| e.to_string())?;
-            let mut log_error = None;
-            let partition_start = std::time::Instant::now();
-            let partition_result = run_pi(
-                PiRequest {
-                    role: PiRole::Partitioner,
-                    config: &partitioner_config,
-                    cwd: &repository,
-                    task: &task,
-                    session_dir: &directory.join("partition-session"),
-                    extension: None,
-                    tools: Some(""),
-                    session_id: None,
-                    extra_args: partitioner_extra_args,
-                    environment: vec![
-                        ("GRAPHER_MODE", "partition".into()),
-                        ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
-                    ],
-                    system_prompt: Some(&partitioner_system_prompt),
-                },
-                |text| {
-                    if let Err(error) = partition_log.write_all(text.as_bytes()) {
-                        log_error = Some(error.to_string());
+            let (route, partition_metrics) = match mode {
+                Some("serial") => {
+                    let route = Route {
+                        plan_type: "serial".into(),
+                    };
+                    fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
+                        .map_err(|error| error.to_string())?;
+                    on_route(&route);
+                    (route, PlanningRoleMetrics::default())
+                }
+                Some("graph") => {
+                    let route = Route {
+                        plan_type: "graph".into(),
+                    };
+                    fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
+                        .map_err(|error| error.to_string())?;
+                    on_route(&route);
+                    (route, PlanningRoleMetrics::default())
+                }
+                _ => {
+                    let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
+                    let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
+                        .unwrap_or_else(|_| default_partitioner_system.to_string());
+                    let task = format!("User query:\n\n{goal}");
+                    let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+                    let partitioner_config = partitioner_model_cfg.effective_config(&config);
+                    let mut partitioner_extra_args = vec!["--no-tools", "--no-context-files"];
+                    if let Some(thinking) = &partitioner_model_cfg.thinking {
+                        partitioner_extra_args.push("--thinking");
+                        partitioner_extra_args.push(thinking.as_str());
                     }
-                    log.push_str(&text);
-                    on_partitioner_line(&text);
-                },
-            );
-            let partition_wall_sec = partition_start.elapsed().as_secs_f64();
-            if let Some(error) = log_error {
-                return Err(format!("Cannot persist planning output: {error}"));
-            }
-            let mut partition_metrics =
-                parse_planning_role_metrics(&partitioner_config.model, &log);
-            if partition_metrics.duration_seconds == 0.0 {
-                partition_metrics.duration_seconds = partition_wall_sec;
-            }
-            // A failed engine call is not a routing decision. In particular, do not
-            // turn authentication/provider failures into an auto-approved serial run.
-            let output =
-                partition_result.map_err(|error| format!("Partitioner failed: {error}"))?;
-            let route = parse_route_decision(&output);
-            fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
-                .map_err(|error| error.to_string())?;
-            on_route(&route);
+                    let mut log = String::new();
+                    let mut partition_log =
+                        fs::File::create(directory.join("partition.jsonl")).map_err(|e| e.to_string())?;
+                    let mut log_error = None;
+                    let partition_start = std::time::Instant::now();
+                    let partition_result = run_pi(
+                        PiRequest {
+                            role: PiRole::Partitioner,
+                            config: &partitioner_config,
+                            cwd: &repository,
+                            task: &task,
+                            session_dir: &directory.join("partition-session"),
+                            extension: None,
+                            tools: Some(""),
+                            session_id: None,
+                            extra_args: partitioner_extra_args,
+                            environment: vec![
+                                ("GRAPHER_MODE", "partition".into()),
+                                ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
+                            ],
+                            system_prompt: Some(&partitioner_system_prompt),
+                        },
+                        |text| {
+                            if let Err(error) = partition_log.write_all(text.as_bytes()) {
+                                log_error = Some(error.to_string());
+                            }
+                            log.push_str(&text);
+                            on_partitioner_line(&text);
+                        },
+                    );
+                    let partition_wall_sec = partition_start.elapsed().as_secs_f64();
+                    if let Some(error) = log_error {
+                        return Err(format!("Cannot persist planning output: {error}"));
+                    }
+                    let mut partition_metrics =
+                        parse_planning_role_metrics(&partitioner_config.model, &log);
+                    if partition_metrics.duration_seconds == 0.0 {
+                        partition_metrics.duration_seconds = partition_wall_sec;
+                    }
+                    // A failed engine call is not a routing decision. In particular, do not
+                    // turn authentication/provider failures into an auto-approved serial run.
+                    let output =
+                        partition_result.map_err(|error| format!("Partitioner failed: {error}"))?;
+                    let route = parse_route_decision(&output);
+                    fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
+                        .map_err(|error| error.to_string())?;
+                    on_route(&route);
+                    (route, partition_metrics)
+                }
+            };
             let mut planner_metrics = None;
             let graph = match route.plan_type.as_str() {
                 "serial" => Graph {
@@ -1208,8 +1233,8 @@ fn recover_plannings(root: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn plan_goal(goal: String, config: Config, service: &Arc<Service>) -> Result<Snapshot, String> {
-    plan_goal_internal(goal, config, service, |_| {}, |_| {}, |_| {}).map_err(|(error, _)| error)
+fn plan_goal(goal: String, config: Config, mode: Option<String>, service: &Arc<Service>) -> Result<Snapshot, String> {
+    plan_goal_internal(goal, config, mode.as_deref(), service, |_| {}, |_| {}, |_| {}).map_err(|(error, _)| error)
 }
 
 fn drive(service: Arc<Service>) {
@@ -1388,6 +1413,14 @@ fn control(
     instruction: Option<String>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
+    if matches!(action.as_str(), "stop" | "cancel") {
+        crate::engine::terminate_all();
+        let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        if runtime.state.approved {
+            let _ = runtime.pause(true);
+        }
+        return Ok(runtime.state.clone());
+    }
     if service.planning.load(Ordering::SeqCst) {
         return Err("Wait for planning to finish".into());
     }
@@ -1415,12 +1448,6 @@ fn control(
             instruction.as_deref().unwrap_or_default(),
         )?,
         "resolve" => runtime.resolved(node.as_deref().unwrap_or_default())?,
-        "stop" | "cancel" => {
-            crate::engine::terminate_all();
-            if runtime.state.approved {
-                let _ = runtime.pause(true);
-            }
-        }
         _ => return Err("Unknown action".into()),
     }
     let snapshot = runtime.state.clone();
@@ -1700,6 +1727,7 @@ pub fn dispatch(
         "plan_goal" => to_value(plan_goal(
             argument(&body, "goal")?,
             argument(&body, "config")?,
+            argument(&body, "mode").ok(),
             service,
         )?),
         "get_execution_output" => return get_execution_output(&body, service),
@@ -1946,12 +1974,13 @@ pub fn run() -> Result<(), String> {
                         serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string())
                     });
 
-                    let (goal, config): (String, Config) = match body_res.and_then(|body| {
+                    let (goal, config, plan_mode): (String, Config, Option<String>) = match body_res.and_then(|body| {
                         let goal: String = argument(&body, "goal")?;
                         let config: Config = argument(&body, "config")?;
-                        Ok((goal, config))
+                        let mode: Option<String> = argument(&body, "mode").ok();
+                        Ok((goal, config, mode))
                     }) {
-                        Ok(pair) => pair,
+                        Ok(tuple) => tuple,
                         Err(err) => {
                             let _ = request.respond(
                                 Response::from_string(
@@ -1976,6 +2005,7 @@ pub fn run() -> Result<(), String> {
                         let result = plan_goal_internal(
                             goal,
                             config,
+                            plan_mode.as_deref(),
                             &service_clone,
                             |line| {
                                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)

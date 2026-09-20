@@ -2,12 +2,14 @@ import React, { useRef, useState, useEffect, useLayoutEffect, useCallback } from
 import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
 import {
   Code2, ArrowLeft, Terminal, FolderGit2, GitBranch, RotateCcw,
-  Workflow, Check, Play, Pause, Compass, ArrowDown, Clock, Loader2
+  Workflow, Check, Play, Pause, Compass, ArrowDown, Clock, Loader2,
+  Pencil, ChevronLeft, ChevronRight
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Snapshot, PlanRouteType, RepositoryInfo, Config,
-  Graph, Execution, Status, PlanningSummary, emptyGraph, TranscriptItem
+  Graph, Execution, Status, PlanningSummary, emptyGraph, TranscriptItem,
+  ChatMessage, PlanMode
 } from "../../types";
 import { PromptBox } from "../ui/chatgpt-prompt-input";
 import { MarkdownRenderer } from "../MarkdownRenderer";
@@ -24,7 +26,16 @@ interface GraphWorkbenchProps {
   routeType: PlanRouteType;
   selected: string;
   setSelected: (name: string) => void;
-  effectiveMessages: Array<{ id: string; role: "user" | "assistant"; text: string; timestamp?: number }>;
+  effectiveMessages: Array<ChatMessage>;
+  branchInfo?: Record<string, { index: number; count: number; prevId?: string; nextId?: string }>;
+  onSwitchBranch?: (targetId: string) => void;
+  onEditMessage?: (msg: ChatMessage) => void;
+  editingMessage?: ChatMessage | null;
+  editPrefillText?: string;
+  onEditPrefillTextChange?: (text: string) => void;
+  onCancelEditMessage?: () => void;
+  isWorking?: boolean;
+  onInterrupt?: () => void;
   isPlanning: boolean;
   plannerStream: any;
   onSendMessage: (val: string, options?: { mode?: "followUp" | "steer" }) => void;
@@ -66,6 +77,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   setSelected,
   failedPlanning,
   effectiveMessages,
+  branchInfo,
+  onSwitchBranch,
+  onEditMessage,
+  editingMessage,
+  editPrefillText,
+  onEditPrefillTextChange,
+  onCancelEditMessage,
+  isWorking,
+  onInterrupt,
   isPlanning,
   plannerStream,
   onSendMessage,
@@ -364,6 +384,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     ? state.executions.filter((item) => item.node === serialNode.name).pop()
     : undefined;
 
+  const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
+  const isPlannerDisabled = !isSerialExecution && Boolean(state.approved);
+
+  useEffect(() => {
+    if (isPlannerDisabled && editingMessage) {
+      onCancelEditMessage?.();
+    }
+  }, [isPlannerDisabled, editingMessage, onCancelEditMessage]);
+
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
   const graphKey = `${state.runId || state.graph.originalGoal}:${state.graph.nodes.map((node) => node.name).join("|")}`;
   const graphViewportReady = readyGraphKey === graphKey;
@@ -592,15 +621,36 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   )}
                 </div>
               )}
+              {editingMessage && (
+                <div className="prompt-box-editing-banner">
+                  <div className="editing-banner-content">
+                    <span className="editing-banner-dot" />
+                    <span>正在修改历史消息（将创建新分支，已有执行记录完整保留）</span>
+                  </div>
+                  {onCancelEditMessage && (
+                    <button type="button" onClick={onCancelEditMessage} className="editing-cancel-btn">
+                      取消
+                    </button>
+                  )}
+                </div>
+              )}
               <PromptBox
                 compact
                 onSubmit={(val, options) => onSendMessage(val, options)}
-                placeholder=""
+                placeholder={
+                  !state.approved
+                    ? "图规划审批启动后，可在此向选定节点发送介入指令…"
+                    : `向 @${selectedNode.name} 发送介入指令…`
+                }
                 isExecuting={active}
+                isWorking={isWorking}
+                onInterrupt={onInterrupt}
+                value={editPrefillText || undefined}
+                onChange={(e) => onEditPrefillTextChange?.(e.target.value)}
+                onCancel={onCancelEditMessage}
                 disabled={
                   locked ||
-                  isPlanning ||
-                  (Boolean(selectedNode) && !state.approved)
+                  !state.approved
                 }
               />
             </motion.div>
@@ -617,9 +667,53 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
                   >
-                    <div className={`chat-bubble-${msg.role}`}>
-                      {msg.role === "user" ? msg.text.trim() : <MarkdownRenderer content={msg.text} />}
-                    </div>
+                    {msg.role === "user" ? (
+                      <div className="chat-user-message-card-wrapper">
+                        {!isPlannerDisabled && onEditMessage && (
+                          <button
+                            type="button"
+                            className="chat-message-edit-btn"
+                            onClick={() => onEditMessage(msg)}
+                            title="修改消息内容并重新发送"
+                            aria-label="修改消息内容并重新发送"
+                          >
+                            <Pencil size={13} />
+                          </button>
+                        )}
+                        {branchInfo?.[msg.id] && branchInfo[msg.id].count > 1 && (
+                          <div className="chat-branch-pager">
+                            <button
+                              type="button"
+                              disabled={branchInfo[msg.id].index <= 0}
+                              onClick={() => onSwitchBranch?.(branchInfo[msg.id].prevId!)}
+                              className="chat-branch-pager-btn"
+                              title="切换到上一分支"
+                            >
+                              <ChevronLeft size={11} />
+                            </button>
+                            <span className="chat-branch-pager-text">
+                              {branchInfo[msg.id].index + 1}/{branchInfo[msg.id].count}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={branchInfo[msg.id].index >= branchInfo[msg.id].count - 1}
+                              onClick={() => onSwitchBranch?.(branchInfo[msg.id].nextId!)}
+                              className="chat-branch-pager-btn"
+                              title="切换到下一分支"
+                            >
+                              <ChevronRight size={11} />
+                            </button>
+                          </div>
+                        )}
+                        <div className="chat-bubble-user">
+                          {msg.text.trim()}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className={`chat-bubble-${msg.role}`}>
+                        <MarkdownRenderer content={msg.text} />
+                      </div>
+                    )}
                   </motion.div>
                 ))}
 
@@ -898,15 +992,38 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   )}
                 </div>
               )}
+              {editingMessage && !isPlannerDisabled && (
+                <div className="prompt-box-editing-banner">
+                  <div className="editing-banner-content">
+                    <span className="editing-banner-dot" />
+                    <span>正在修改历史消息（将创建新分支，已有执行记录完整保留）</span>
+                  </div>
+                  {onCancelEditMessage && (
+                    <button type="button" onClick={onCancelEditMessage} className="editing-cancel-btn">
+                      取消
+                    </button>
+                  )}
+                </div>
+              )}
               <PromptBox
                 compact
                 onSubmit={(val, options) => onSendMessage(val, options)}
-                placeholder=""
+                placeholder={
+                  isPlannerDisabled
+                    ? "拓扑图已批准执行，无法再向规划器发送消息"
+                    : isSerialExecution
+                    ? "向当前任务发送介入指令…"
+                    : ""
+                }
                 isExecuting={active}
+                isWorking={isWorking}
+                onInterrupt={onInterrupt}
+                value={editPrefillText || undefined}
+                onChange={(e) => onEditPrefillTextChange?.(e.target.value)}
+                onCancel={onCancelEditMessage}
                 disabled={
                   locked ||
-                  isPlanning ||
-                  (Boolean(selectedNode) && !state.approved)
+                  isPlannerDisabled
                 }
               />
             </motion.div>

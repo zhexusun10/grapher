@@ -110,6 +110,17 @@ export const example: Graph = {
 };
 
 export type PlanRouteType = "undecided" | "serial" | "graph";
+export type PlanMode = "auto" | "serial" | "graph";
+
+export interface ChatMessage {
+  id: string;
+  parentId?: string | null;
+  role: "user" | "assistant";
+  text: string;
+  timestamp?: number;
+  runId?: string;
+  node?: string;
+}
 
 export interface PlanStreamEvent {
   type: "partitioner" | "route_decision" | "planner" | "complete" | "error";

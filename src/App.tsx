@@ -7,7 +7,7 @@ import {
   defaultConfig, emptyGraph, emptySnapshot,
   type Config, type Graph, type Plan, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType, type TranscriptItem, type NodeState,
-  type PlanningSummary, type Execution
+  type PlanningSummary, type Execution, type PlanMode, type ChatMessage
 } from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
@@ -256,9 +256,134 @@ export default function App() {
     });
   };
 
-  // 对话流消息记录
-  const [messages, setMessages] = useState<Array<{ id: string; role: "user" | "assistant"; text: string; timestamp?: number }>>([]);
+  // 对话流消息树结构（移植自 pi 的 /tree 架构，no summary 版本）
+  const [sessionEntries, setSessionEntries] = useState<ChatMessage[]>([]);
+  const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
+  const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
+  const [editPrefillText, setEditPrefillText] = useState<string>("");
+  const planningAbortControllerRef = useRef<AbortController | null>(null);
+
+  // 规划路由模式选择：auto (默认，Partitioner评估) / serial (单Agent跳过Partitioner) / graph (Planner跳过Partitioner)
+  const [planMode, setPlanMode] = useState<PlanMode>(() => {
+    try {
+      const saved = localStorage.getItem("grapher_plan_mode");
+      if (saved === "serial" || saved === "graph" || saved === "auto") return saved;
+    } catch {}
+    return "auto";
+  });
+
+  const handlePlanModeChange = useCallback((mode: PlanMode) => {
+    setPlanMode(mode);
+    try {
+      localStorage.setItem("grapher_plan_mode", mode);
+    } catch {}
+  }, []);
+
+  const resetSessionMessages = useCallback(() => {
+    setSessionEntries([]);
+    setActiveLeafId(null);
+    setEditingMessage(null);
+    setEditPrefillText("");
+  }, []);
+
+  // 沿 parentId 回溯构造当前分支链（从根节点至当前叶子节点）
+  const getBranch = useCallback((leafId: string | null, entries: ChatMessage[]): ChatMessage[] => {
+    if (!leafId || entries.length === 0) return [];
+    const byId = new Map<string, ChatMessage>();
+    for (const entry of entries) {
+      byId.set(entry.id, entry);
+    }
+    const path: ChatMessage[] = [];
+    let current = byId.get(leafId);
+    const visited = new Set<string>();
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      path.push(current);
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+    path.reverse();
+    return path;
+  }, []);
+
+  const branchMessages = useMemo(() => {
+    return getBranch(activeLeafId, sessionEntries);
+  }, [activeLeafId, sessionEntries, getBranch]);
+
+  const effectiveMessages = useMemo<ChatMessage[]>(() => {
+    if (branchMessages.length > 0) return branchMessages;
+    const initialGoal = state.graph.originalGoal || goal;
+    if (initialGoal) {
+      return [
+        {
+          id: "msg-initial-goal",
+          parentId: null,
+          role: "user",
+          text: initialGoal,
+        },
+      ];
+    }
+    return [];
+  }, [branchMessages, state.graph.originalGoal, goal]);
+
+  // 计算分支信息（同一 parentId 下存在多个 sibling 分支时的页码与切换目标）
+  const branchInfo = useMemo(() => {
+    const map: Record<string, { index: number; count: number; prevId?: string; nextId?: string }> = {};
+    if (sessionEntries.length === 0) return map;
+
+    const siblingsByParent = new Map<string | null, ChatMessage[]>();
+    for (const entry of sessionEntries) {
+      const p = entry.parentId ?? null;
+      const list = siblingsByParent.get(p) || [];
+      list.push(entry);
+      siblingsByParent.set(p, list);
+    }
+
+    for (const siblings of siblingsByParent.values()) {
+      if (siblings.length > 1) {
+        siblings.forEach((s, idx) => {
+          map[s.id] = {
+            index: idx,
+            count: siblings.length,
+            prevId: idx > 0 ? siblings[idx - 1].id : undefined,
+            nextId: idx < siblings.length - 1 ? siblings[idx + 1].id : undefined,
+          };
+        });
+      }
+    }
+    return map;
+  }, [sessionEntries]);
+
+  // 切换到同级兄弟分支（沿着该节点深入到最新叶子节点）
+  const handleSwitchBranch = useCallback((targetId: string) => {
+    let currentId = targetId;
+    while (true) {
+      const children = sessionEntries.filter((e) => (e.parentId ?? null) === currentId);
+      if (children.length === 0) break;
+      currentId = children[children.length - 1].id;
+    }
+    setActiveLeafId(currentId);
+    setEditingMessage(null);
+    setEditPrefillText("");
+  }, [sessionEntries]);
+
   const [routeType, setRouteType] = useState<PlanRouteType>(() => deduceRouteType(emptySnapshot));
+
+  // 开始编辑消息
+  const handleStartEditMessage = useCallback((msg: ChatMessage) => {
+    const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
+    if (!selected && !isSerialExecution && state.approved) {
+      return;
+    }
+    setEditingMessage(msg);
+    // 剥离可能存在的 [@node] 格式前缀以便用户编辑纯指令
+    const cleanText = msg.text.replace(/^\[@[^\]]+\]\s*/, "");
+    setEditPrefillText(cleanText);
+  }, [routeType, selected, state.approved, state.graph.nodes.length]);
+
+  const handleCancelEditMessage = useCallback(() => {
+    setEditingMessage(null);
+    setEditPrefillText("");
+  }, []);
 
   const initialPlannerStream = {
     stage: "idle" as "idle" | "partitioning" | "planning" | "done" | "error",
@@ -273,21 +398,6 @@ export default function App() {
   };
 
   const [plannerStream, setPlannerStream] = useState(initialPlannerStream);
-
-  const effectiveMessages = useMemo(() => {
-    if (messages.length > 0) return messages;
-    const initialGoal = state.graph.originalGoal || goal;
-    if (initialGoal) {
-      return [
-        {
-          id: "msg-initial-goal",
-          role: "user" as const,
-          text: initialGoal,
-        },
-      ];
-    }
-    return [];
-  }, [messages, state.graph.originalGoal, goal]);
 
   const run = async (work: () => Promise<void>) => {
     setBusy(true);
@@ -340,17 +450,34 @@ export default function App() {
           ? (state.graph.nodes[0]?.name || "task")
           : undefined);
 
+    // 用户 approve graph 之后禁止再向 planner 发送消息
+    if (!targetNodeName && state.approved) {
+      return;
+    }
+
     const displayMsg = options?.displayText || text;
+    const parentId = editingMessage
+      ? (editingMessage.parentId ?? null)
+      : (activeLeafId ?? (effectiveMessages.length > 0 ? effectiveMessages[effectiveMessages.length - 1].id : null));
+
+    const recordMessage = (textToRecord: string) => {
+      const newMsg: ChatMessage = {
+        id: `msg-${Date.now()}`,
+        parentId,
+        role: "user",
+        text: textToRecord,
+        timestamp: Date.now(),
+      };
+      setSessionEntries((prev) => [...prev, newMsg]);
+      setActiveLeafId(newMsg.id);
+      setEditingMessage(null);
+      setEditPrefillText("");
+      return newMsg;
+    };
 
     if (active) {
       const displayLabel = targetNodeName && targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
-      const newMsg = {
-        id: `msg-${Date.now()}`,
-        role: "user" as const,
-        text: `${displayLabel}${displayMsg}`,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
+      recordMessage(`${displayLabel}${displayMsg}`);
       run(async () => {
         await requireRepository(state.config?.repository || config.repository);
         try {
@@ -376,23 +503,11 @@ export default function App() {
 
     if (selectedNode) {
       // 针对具体选定节点的微调与介入
-      const newMsg = {
-        id: `msg-${Date.now()}`,
-        role: "user" as const,
-        text: `[@${selectedNode.name}] ${displayMsg}`,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
+      recordMessage(`[@${selectedNode.name}] ${displayMsg}`);
       control("intervene", { node: selectedNode.name, instruction: text });
     } else if (routeType === "serial" && state.graph.nodes.length > 0) {
       // 串行单任务介入
-      const newMsg = {
-        id: `msg-${Date.now()}`,
-        role: "user" as const,
-        text: displayMsg,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
+      recordMessage(displayMsg);
       control("intervene", { node: state.graph.nodes[0]?.name || "task", instruction: text });
     } else {
       // 未选中具体节点：处于与 AI 规划器对话面板，追加规划要求并触发重新规划
@@ -549,7 +664,7 @@ export default function App() {
       setRouteType("undecided");
       setGoal("");
       setSelected("");
-      setMessages([]);
+      resetSessionMessages();
     }
 
     const targetRepo = activeRepo || data.config.repository || data.repositoryInfo?.path;
@@ -633,7 +748,7 @@ export default function App() {
         setState(snapshot);
         setRouteType(deduced);
         setGoal(snapshot.graph.originalGoal || "");
-        setMessages([]);
+        resetSessionMessages();
         setSelected("");
         loadedSnapshot = snapshot;
       } catch {
@@ -648,7 +763,7 @@ export default function App() {
         setRouteType("undecided");
         setPlannerStream(initialPlannerStream);
         setGoal("");
-        setMessages([]);
+        resetSessionMessages();
       }
     } else {
       try {
@@ -662,7 +777,7 @@ export default function App() {
       setRouteType("undecided");
       setPlannerStream(initialPlannerStream);
       setGoal("");
-      setMessages([]);
+      resetSessionMessages();
     }
     setError("");
     void planningRecovery.restore(scope, loadedSnapshot);
@@ -701,7 +816,7 @@ export default function App() {
             setState(emptySnapshot);
             setGoal("");
             setSelected("");
-            setMessages([]);
+            resetSessionMessages();
             setRouteType("undecided");
             void runtimeService.resetWorkspace().catch(() => {});
           }
@@ -753,7 +868,7 @@ export default function App() {
         }
         setGoal("");
         setSelected("");
-        setMessages([]);
+        resetSessionMessages();
         setRouteType("undecided");
       }
     }
@@ -814,7 +929,7 @@ export default function App() {
         });
 
         setState(emptySnapshot);
-        setMessages([]);
+        resetSessionMessages();
         setGoal("");
         setSelected("");
         setRouteType("undecided");
@@ -824,7 +939,7 @@ export default function App() {
   };
 
   const handleResetWorkspace = () => run(async () => {
-    setMessages([]);
+    resetSessionMessages();
     try {
       const snapshot = await runtimeService.resetWorkspace();
       setState(snapshot);
@@ -937,14 +1052,19 @@ export default function App() {
       tools: [],
     });
     setSelected("");
-    setMessages([
-      {
-        id: `msg-${Date.now()}`,
-        role: "user",
-        text: options?.displayText || targetGoal,
-        timestamp: Date.now(),
-      },
-    ]);
+    const parentId = editingMessage ? (editingMessage.parentId ?? null) : null;
+    const newMsg: ChatMessage = {
+      id: `msg-${Date.now()}`,
+      parentId,
+      role: "user",
+      text: options?.displayText || targetGoal,
+      timestamp: Date.now(),
+    };
+    setSessionEntries((prev) => [...prev, newMsg]);
+    setActiveLeafId(newMsg.id);
+    setEditingMessage(null);
+    setEditPrefillText("");
+
     setState((prev) => ({
       ...prev,
       graph: {
@@ -965,7 +1085,13 @@ export default function App() {
       let partInTag = false;
       let planInTag = false;
 
-      const snapshot = await runtimeService.planGoalStream(targetGoal, config, (event) => {
+      const abortController = new AbortController();
+      planningAbortControllerRef.current = abortController;
+
+      const snapshot = await runtimeService.planGoalStream(
+        targetGoal,
+        config,
+        (event) => {
         if (!planningRecovery.current(scope)) return;
         if (event.type === "partitioner") {
           const pEvent = event.event;
@@ -1346,7 +1472,10 @@ export default function App() {
             void planningRecovery.finish(scope);
           }
         }
-      });
+      },
+      planMode,
+      abortController.signal
+    );
       if (!planningRecovery.current(scope)) return;
       setState(snapshot);
       setRouteType(deduceRouteType(snapshot));
@@ -1369,6 +1498,7 @@ export default function App() {
         stage: "error",
       }));
     } finally {
+      planningAbortControllerRef.current = null;
       setIsPlanning(false);
     }
   });
@@ -1516,6 +1646,27 @@ export default function App() {
   const publicationFailed = state.phase === "publication_failed";
   const active = publishing || publicationFailed || Object.values(state.nodes).some((node) => node.status === "running");
   const locked = busy || !!recoveredPlanning || repositoryBlocked;
+  const isAgentWorking = active || isPlanning;
+
+  const handleInterrupt = useCallback(async () => {
+    if (planningAbortControllerRef.current) {
+      planningAbortControllerRef.current.abort();
+      planningAbortControllerRef.current = null;
+    }
+    try {
+      await runtimeService.control("stop");
+    } catch (e) {
+      console.warn("Stop command failed:", e);
+    }
+    if (isPlanning) {
+      setIsPlanning(false);
+      setPlannerStream((prev) => ({
+        ...prev,
+        items: closeRunningThinkingItem(prev.items),
+        stage: "error",
+      }));
+    }
+  }, [isPlanning]);
 
   // 自动出队并派发排队跟进的 Follow-up 指令
   const prevActiveRef = useRef(active);
@@ -1527,6 +1678,7 @@ export default function App() {
       if (targetNodeName) {
         control("intervene", { node: targetNodeName, instruction: nextItem.text });
       } else {
+        if (state.approved) return;
         const baseGoal = state.graph.originalGoal || goal;
         const combinedGoal = baseGoal ? `${baseGoal}\n\n补充执行要求：\n${nextItem.text}` : nextItem.text;
         handlePlanGoal(combinedGoal);
@@ -1663,35 +1815,6 @@ export default function App() {
         position={-1}
       >
         <div className={`app-shell ${isLandingView ? "landing-active" : ""}`}>
-          {/* 全局悬浮报错横幅 */}
-      <AnimatePresence>
-        {error && (
-          <motion.div
-            className="floating-error-banner"
-            role="alert"
-            initial={{ opacity: 0, y: -20, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -16, scale: 0.96 }}
-            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-          >
-            <div className="floating-error-icon">
-              <AlertTriangle size={15} />
-            </div>
-            <div className="floating-error-content">
-              <span className="floating-error-text">{error}</span>
-            </div>
-            <button
-              type="button"
-              className="floating-error-close"
-              aria-label="关闭错误提示"
-              onClick={() => setError("")}
-            >
-              <X size={14} />
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       <Sidebar
         projects={projects}
         activeRepo={config.repository}
@@ -1713,7 +1836,7 @@ export default function App() {
           markSnapshotRead(snapshot);
           setRouteType(deduced);
           setGoal(snapshot.graph.originalGoal || "");
-          setMessages([]);
+          resetSessionMessages();
           setSelected("");
         })}
         onDeleteRun={handleDeleteRunConfirm}
@@ -1723,6 +1846,37 @@ export default function App() {
       />
 
       <main className="main">
+        {/* 全局悬浮报错横幅 (居中于工作区主体，排除侧边栏) */}
+        <div className="floating-error-banner-container">
+          <AnimatePresence>
+            {error && (
+              <motion.div
+                key="floating-error-banner"
+                className="floating-error-banner"
+                role="alert"
+                initial={{ opacity: 0, y: -20, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -16, scale: 0.96 }}
+                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <div className="floating-error-icon">
+                  <AlertTriangle size={15} />
+                </div>
+                <div className="floating-error-content">
+                  <span className="floating-error-text">{error}</span>
+                </div>
+                <button
+                  type="button"
+                  className="floating-error-close"
+                  aria-label="关闭错误提示"
+                  onClick={() => setError("")}
+                >
+                  <X size={14} />
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
         {repositoryBlocked && (
           <div className="background-run-banner" role="alert">
             <span>{repositoryStatus?.error || "正在确认项目绑定…"} <code>{config.repository}</code></span>
@@ -1752,7 +1906,7 @@ export default function App() {
                   markSnapshotRead(snapshot);
                   setRouteType(deduced);
                   setGoal(snapshot.graph.originalGoal || "");
-                  setMessages([]);
+                  resetSessionMessages();
                   setSelected("");
                 })}
               >
@@ -1769,6 +1923,10 @@ export default function App() {
               setGoal={setGoal}
               onPlanGoal={handlePlanGoal}
               isBusy={busy || isPlanning || repositoryBlocked}
+              planMode={planMode}
+              onPlanModeChange={handlePlanModeChange}
+              isWorking={isAgentWorking}
+              onInterrupt={handleInterrupt}
             />
           ) : (
             <motion.div
@@ -1799,6 +1957,15 @@ export default function App() {
                 setSelected={setSelected}
                 failedPlanning={failedPlanning}
                 effectiveMessages={effectiveMessages}
+                branchInfo={branchInfo}
+                onSwitchBranch={handleSwitchBranch}
+                onEditMessage={handleStartEditMessage}
+                editingMessage={editingMessage}
+                editPrefillText={editPrefillText}
+                onEditPrefillTextChange={setEditPrefillText}
+                onCancelEditMessage={handleCancelEditMessage}
+                isWorking={isAgentWorking}
+                onInterrupt={handleInterrupt}
                 isPlanning={isPlanning || !!recoveredPlanning}
                 plannerStream={plannerStream}
                 onSendMessage={handleSendMessage}

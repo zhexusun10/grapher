@@ -1,10 +1,11 @@
-import React, { useState, useRef, useLayoutEffect } from "react";
+import React, { useState, useRef, useLayoutEffect, useEffect, useId } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   ArrowUp,
   Paperclip,
   X,
   LoaderCircle,
+  Square,
   FileCode,
   FileText,
   File,
@@ -28,6 +29,11 @@ export interface PromptBoxProps
   isBusy?: boolean;
   compact?: boolean;
   isExecuting?: boolean;
+  isWorking?: boolean;
+  onInterrupt?: () => void;
+  planMode?: "auto" | "serial" | "graph";
+  onPlanModeChange?: (mode: "auto" | "serial" | "graph") => void;
+  onCancel?: () => void;
   layoutId?: string;
   className?: string;
 }
@@ -119,6 +125,12 @@ function getLanguageForExt(fileName: string): string {
   }
 }
 
+const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string; title: string }> = [
+  { id: "auto", label: "Auto", title: "智能路由：由 Partitioner 评估任务并自动选择单 Agent 或拓扑图架构" },
+  { id: "serial", label: "Serial", title: "单 Agent：跳过 Partitioner，直接启动单 Agent 独立沙箱执行" },
+  { id: "graph", label: "Graph", title: "拓扑图：跳过 Partitioner，直接启动 Planner 规划生成协作拓扑图" },
+];
+
 export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
   (
     {
@@ -130,6 +142,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       isBusy = false,
       compact = false,
       isExecuting = false,
+      isWorking = false,
+      onInterrupt,
+      planMode,
+      onPlanModeChange,
+      onCancel,
       layoutId,
       className = "",
       ...restProps
@@ -143,8 +160,21 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [isPreparing, setIsPreparing] = useState(false);
+    const pillLayoutId = useId();
 
-    const currentText = value !== undefined ? value : internalValue;
+    // 同步外部 value 变化（如编辑消息回填或清除）
+    useEffect(() => {
+      if (value !== undefined) {
+        setInternalValue(value);
+        if (value) {
+          setTimeout(() => {
+            internalTextareaRef.current?.focus();
+          }, 40);
+        }
+      }
+    }, [value]);
+
+    const currentText = value !== undefined && onChange ? value : internalValue;
     const hasText = currentText.trim().length > 0;
 
     // Auto-adjust textarea height
@@ -160,10 +190,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     }, [currentText, compact]);
 
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      setInternalValue(e.target.value);
       if (onChange) {
         onChange(e);
-      } else {
-        setInternalValue(e.target.value);
       }
     };
 
@@ -257,9 +286,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         });
       }
 
-      if (value === undefined) {
-        setInternalValue("");
-      }
+      setInternalValue("");
       setSelectedImage(null);
       setSelectedFile(null);
     };
@@ -268,6 +295,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         handleSubmitAction();
+      } else if (e.key === "Escape") {
+        onCancel?.();
       }
     };
 
@@ -277,8 +306,12 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       <motion.div
         layoutId={layoutId || undefined}
         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-        className={`prompt-box-container ${compact ? "compact" : "landing"} ${className}`}
-        onClick={() => internalTextareaRef.current?.focus()}
+        className={`prompt-box-container ${compact ? "compact" : "landing"} ${disabled ? "disabled" : ""} ${className}`}
+        onClick={() => {
+          if (!disabled && !isBusy) {
+            internalTextareaRef.current?.focus();
+          }
+        }}
       >
         {/* Hidden File Input: allows text, code (ipynb, py, etc.), images, any single file */}
         <input
@@ -385,19 +418,62 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             </button>
           </div>
 
-          {/* Right Action Button: Send Button */}
+          {/* Right Action Button: Mode Selector + Send/Interrupt Button */}
           <div className="prompt-box-right-actions">
+            {planMode !== undefined && onPlanModeChange && (
+              <div className="prompt-box-mode-selector" role="group" aria-label="执行规划模式">
+                {MODE_OPTIONS.map((item) => {
+                  const isSelected = planMode === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`prompt-box-mode-btn ${isSelected ? "active" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onPlanModeChange(item.id);
+                      }}
+                      title={item.title}
+                    >
+                      {isSelected && (
+                        <motion.div
+                          layoutId={`mode-pill-indicator-${pillLayoutId}`}
+                          className="prompt-box-mode-pill-indicator"
+                          transition={{
+                            type: "spring",
+                            stiffness: 520,
+                            damping: 36,
+                          }}
+                        />
+                      )}
+                      <span className="prompt-box-mode-text">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                handleSubmitAction();
+                if (isWorking) {
+                  onInterrupt?.();
+                } else {
+                  handleSubmitAction();
+                }
               }}
-              disabled={!canSubmit}
-              className={`prompt-box-send-btn ${canSubmit ? "active" : ""}`}
-              aria-label="发送消息"
+              disabled={!isWorking && !canSubmit}
+              className={`prompt-box-send-btn ${isWorking ? "working active" : canSubmit ? "active" : ""}`}
+              title={isWorking ? "点击打断执行" : "发送消息"}
+              aria-label={isWorking ? "点击打断执行" : "发送消息"}
             >
-              {isBusy || isPreparing ? (
+              {isWorking ? (
+                <span className="prompt-box-stop-spinner-wrapper">
+                  <LoaderCircle size={compact ? 15 : 18} className="prompt-box-spin" />
+                  <Square size={compact ? 7 : 8} className="prompt-box-stop-icon" />
+                </span>
+              ) : isBusy || isPreparing ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
               ) : (
                 <motion.span

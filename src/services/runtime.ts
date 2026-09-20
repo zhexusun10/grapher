@@ -20,7 +20,19 @@ async function request<T>(command: string, body: Record<string, unknown> = {}, s
 }
 
 export const runtimeService = {
-  bootstrap: () => request<Bootstrap>("bootstrap"),
+  bootstrap: async () => {
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        return await request<Bootstrap>("bootstrap");
+      } catch (err) {
+        retries--;
+        if (retries === 0) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      }
+    }
+    return request<Bootstrap>("bootstrap");
+  },
   repositoryStatus: (repository: string, signal?: AbortSignal) =>
     request<{ repository: string; valid: boolean; error: string | null }>("repository_status", { repository }, signal),
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
@@ -40,16 +52,19 @@ export const runtimeService = {
   },
   compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config) => request<Snapshot>("save_graph", { graph, config }),
-  planGoal: (goal: string, config: Config) => request<Snapshot>("plan_goal", { goal, config }),
+  planGoal: (goal: string, config: Config, mode?: string) => request<Snapshot>("plan_goal", { goal, config, mode }),
   async planGoalStream(
     goal: string,
     config: Config,
-    onEvent: (event: import("../types").PlanStreamEvent) => void
+    onEvent: (event: import("../types").PlanStreamEvent) => void,
+    mode?: import("../types").PlanMode,
+    signal?: AbortSignal
   ): Promise<Snapshot> {
     const response = await fetch("/api/plan_goal_stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, config }),
+      body: JSON.stringify({ goal, config, mode }),
+      signal,
     });
 
     if (!response.ok) {
