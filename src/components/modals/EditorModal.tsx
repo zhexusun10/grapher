@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { motion } from "motion/react";
 import { Check, X } from "lucide-react";
 import { Graph, emptyGraph } from "../../types";
 
@@ -29,20 +30,36 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
     }
   }, [isOpen, initialGraph]);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose, busy]);
+
   if (!isOpen) return null;
 
   return (
-    <div
+    <motion.div
       className="modal-backdrop"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <section
+      <motion.section
         className="modal wide"
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
+        initial={{ opacity: 0, scale: 0.95, y: 14 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 10 }}
+        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
       >
         <header>
           <h2 id="modal-title">Graph IR · 编辑与编译</h2>
@@ -58,7 +75,8 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
           className="json-editor"
           aria-label="Graph JSON"
           value={editorText}
-          onChange={(event) => setEditorText(event.target.value)}
+          onChange={(e) => setEditorText(e.target.value)}
+          rows={16}
           spellCheck={false}
         />
         <footer>
@@ -85,8 +103,8 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
             <Check size={14} />校验并应用
           </button>
         </footer>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 });
 

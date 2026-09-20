@@ -28,38 +28,37 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
     <motion.div
       key="landing-screen"
       className="landing-screen"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
       exit={{
         opacity: 0,
-        y: -8,
         transition: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
       }}
-      transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+      transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
     >
       <div className="landing-center-content">
         <div className="landing-title-container">
           <motion.p
             className="landing-title"
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.25 }}
           >
             Build Anything
           </motion.p>
           <motion.p
             className="landing-title"
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3, delay: 0.1 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.25, delay: 0.05 }}
           >
             With Grapher.
           </motion.p>
           <motion.p
             className="landing-subtitle"
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3, delay: 0.2 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.25, delay: 0.1 }}
           >
             The Most Powerful Multi Agent System Ever
           </motion.p>

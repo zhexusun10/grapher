@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useEffect } from "react";
+import { motion } from "motion/react";
 import { AlertTriangle, Trash2 } from "lucide-react";
 
 export interface ConfirmModalState {
@@ -16,12 +17,31 @@ interface ConfirmModalProps {
 }
 
 export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, onClose }) => {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   if (!config) return null;
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
+    <motion.div
+      className="modal-backdrop"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.18, ease: "easeOut" }}
+      onClick={onClose}
+    >
+      <motion.div
         className="confirm-dialog"
+        initial={{ opacity: 0, scale: 0.94, y: 10 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 8 }}
+        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="confirm-header">
@@ -56,8 +76,8 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
             {config.confirmText}
           </button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 });
 

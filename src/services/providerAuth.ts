@@ -1,5 +1,13 @@
 export interface ProviderMethod { id: "api_key" | "oauth"; name: string }
-export interface ProviderInfo { id: string; name: string; methods: ProviderMethod[]; configured: boolean; authType: string | null }
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  methods: ProviderMethod[];
+  configured: boolean;
+  authType: string | null;
+  authSource?: "stored" | "env" | null;
+  authEnvVar?: string | null;
+}
 export interface ModelInfo { provider: string; id: string; name: string; api: string; contextWindow: number; available: boolean }
 export interface ProviderCatalog { providers: ProviderInfo[]; models: ModelInfo[]; warning: string | null }
 export interface AuthPrompt { id: string; type: "text" | "secret" | "select" | "manual_code"; message: string; placeholder?: string; options?: { id: string; label: string; description?: string }[] }

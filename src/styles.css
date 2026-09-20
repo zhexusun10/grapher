@@ -2001,7 +2001,7 @@ a,
   background: transparent;
   border: none;
   font-size: 11.5px;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-family: inherit;
   font-weight: 500;
   color: #000000; /* 未选中时字为黑色而不是灰色 */
   padding: 0 10px;
@@ -4215,8 +4215,8 @@ a,
   position: fixed;
   inset: 0;
   background: var(--bg-overlay);
-  backdrop-filter: blur(3px);
-  z-index: 20;
+  backdrop-filter: blur(4px);
+  z-index: 1000;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6239,9 +6239,93 @@ a,
   padding: 14px 16px;
 }
 
+.model-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.model-input-wrapper input {
+  width: 100%;
+  padding-right: 28px !important;
+}
+
+.model-input-clear-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.model-input-clear-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .model-text-input {
   font-family: var(--font-mono, monospace);
   font-size: 12px;
+}
+
+.model-quick-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-default);
+  flex-wrap: wrap;
+}
+
+.quick-chips-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+}
+
+.quick-chips-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.model-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.model-chip:hover {
+  border-color: var(--brand-default);
+  background: rgba(6, 182, 212, 0.08);
+}
+
+.model-chip.active {
+  border-color: var(--brand-default);
+  background: rgba(6, 182, 212, 0.18);
+  color: var(--brand-default);
+  font-weight: 600;
 }
 
 .provider-filter-select {
@@ -6546,6 +6630,313 @@ a,
 .card-action-btn.logout-btn:hover {
   background: rgba(239, 68, 68, 0.1);
   border-color: #ef4444;
+}
+
+.danger-outline-btn {
+  background: transparent;
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.danger-outline-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: #ef4444;
+}
+
+/* Configured Credentials Panel */
+.configured-credentials-card {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.06) 0%, rgba(6, 182, 212, 0.04) 100%);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.configured-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.configured-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.configured-key-icon {
+  color: #4ade80;
+}
+
+.configured-status-tag {
+  font-size: 11px;
+  color: #4ade80;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+}
+
+.configured-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.configured-row {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.configured-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.configured-name-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.configured-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.configured-id {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+}
+
+.configured-type-badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.configured-type-badge.stored-badge {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.configured-type-badge.env-badge {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+/* Custom In-App Deletion Confirmation Modal */
+.confirm-delete-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-delete-modal {
+  width: 100%;
+  max-width: 440px;
+  background: #18181b;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6), 0 0 24px rgba(239, 68, 68, 0.12);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.confirm-delete-header {
+  padding: 16px 18px 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.confirm-delete-icon-wrap {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.confirm-delete-titles {
+  flex: 1;
+}
+
+.confirm-delete-titles h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.confirm-delete-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.confirm-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-close-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.confirm-delete-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.confirm-delete-target-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.target-provider-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.target-provider-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.target-provider-id {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+}
+
+.target-provider-source {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.source-tag {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.source-tag.env {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+.source-tag.local {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.confirm-delete-warning {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.confirm-delete-footer {
+  padding: 12px 18px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.confirm-cancel-btn {
+  padding: 6px 14px;
+  font-size: 12.5px;
+}
+
+.confirm-action-btn {
+  background: #dc2626;
+  color: #fff;
+  border: none;
+  padding: 6px 16px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.confirm-action-btn:hover {
+  background: #b91c1c;
+  box-shadow: 0 0 12px rgba(220, 38, 38, 0.4);
+}
+
+.configured-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .env-only-hint {

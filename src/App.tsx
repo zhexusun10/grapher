@@ -26,9 +26,8 @@ import { PublicationPanel } from "./components/PublicationPanel";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
 import { ConfirmModal, type ConfirmModalState } from "./components/modals/ConfirmModal";
 
-// Point 4: Code splitting and dynamic imports for non-critical modals
-const SettingsModal = React.lazy(() => import("./components/modals/SettingsModal"));
-const EditorModal = React.lazy(() => import("./components/modals/EditorModal"));
+import { SettingsModal } from "./components/modals/SettingsModal";
+import { EditorModal } from "./components/modals/EditorModal";
 
 // Point 1: Fast O(N) shallow diff functions to avoid 700ms JSON.stringify serialization
 function areNodesEqual(a: Record<string, NodeState>, b: Record<string, NodeState>): boolean {
@@ -123,14 +122,6 @@ function computeExecutionLayers(graph: Graph, plan?: Plan | null): string[][] {
 
 export default function App() {
   const [state, setState] = useState<Snapshot>(emptySnapshot);
-  const [config, setConfig] = useState<Config>(defaultConfig);
-  const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
-  const repositoryStatus = useRepositoryStatus(config.repository);
-  const repositoryBlocked = !!config.repository && repositoryStatus?.valid !== true;
-  const requireRepository = async (repository: string) => {
-    const status = await runtimeService.repositoryStatus(repository);
-    if (!status.valid) throw new Error(status.error || "项目绑定已失效，请重新选择目录。");
-  };
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     try {
       const saved = localStorage.getItem("grapher_projects");
@@ -139,6 +130,36 @@ export default function App() {
       return [];
     }
   });
+  const [config, setConfig] = useState<Config>(() => {
+    let initialConfig: Config = { ...defaultConfig };
+    try {
+      const savedConfig = localStorage.getItem("grapher_config");
+      if (savedConfig) {
+        const parsed = JSON.parse(savedConfig);
+        initialConfig = { ...initialConfig, ...parsed };
+      }
+    } catch {}
+    try {
+      const saved = localStorage.getItem("grapher_projects");
+      if (saved) {
+        const list: ProjectItem[] = JSON.parse(saved);
+        if (list.length > 0) {
+          const sorted = [...list].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+          if (!initialConfig.repository && sorted[0]?.path) {
+            initialConfig.repository = sorted[0].path;
+          }
+        }
+      }
+    } catch {}
+    return initialConfig;
+  });
+  const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
+  const repositoryStatus = useRepositoryStatus(config.repository);
+  const repositoryBlocked = !!config.repository && repositoryStatus?.valid === false;
+  const requireRepository = async (repository: string) => {
+    const status = await runtimeService.repositoryStatus(repository);
+    if (!status.valid) throw new Error(status.error || "项目绑定已失效，请重新选择目录。");
+  };
   const [mainTab, setMainTab] = useState<"graph" | "sessions" | "timeline">("graph");
   const [goal, setGoal] = useState("");
   const [selected, setSelected] = useState<string>("");
@@ -615,7 +636,16 @@ export default function App() {
     }
 
     setRepoInfo(activeInfo);
-    setConfig((prev) => ({ ...data.config, repository: activeRepo || (activeInfo ? activeInfo.path : "") }));
+    let savedModel = "";
+    try {
+      const raw = localStorage.getItem("grapher_config");
+      if (raw) savedModel = JSON.parse(raw).model || "";
+    } catch {}
+    setConfig((prev) => ({
+      ...data.config,
+      model: data.config.model || savedModel || prev.model,
+      repository: activeRepo || (activeInfo ? activeInfo.path : ""),
+    }));
     setDataPath(data.dataPath);
 
     if (storedWorkspaceRuns === null) {
@@ -965,16 +995,27 @@ export default function App() {
   });
 
   const handleSaveConfig = () => run(async () => {
-    const info = await runtimeService.detectRepository(config.repository.trim());
-    if (!info) throw new Error("目标路径不存在或无法作为工作区加载。");
-    setRepoInfo(info);
-    setConfig((prev) => ({ ...prev, repository: info.path }));
-    setProjects((prev) => {
-      const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
-      const next = [item, ...prev.filter((project) => project.path !== info.path)];
-      try { localStorage.setItem("grapher_projects", JSON.stringify(next)); } catch {}
-      return next;
-    });
+    let repoPath = config.repository.trim();
+    let info: RepositoryInfo | null = null;
+    if (repoPath) {
+      info = await runtimeService.detectRepository(repoPath);
+      if (!info) throw new Error("目标路径不存在或无法作为工作区加载。");
+      setRepoInfo(info);
+      repoPath = info.path;
+    }
+    const nextConfig = { ...config, repository: repoPath };
+    setConfig(nextConfig);
+    try {
+      localStorage.setItem("grapher_config", JSON.stringify(nextConfig));
+    } catch {}
+    if (info) {
+      setProjects((prev) => {
+        const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
+        const next = [item, ...prev.filter((project) => project.path !== info.path)];
+        try { localStorage.setItem("grapher_projects", JSON.stringify(next)); } catch {}
+        return next;
+      });
+    }
     setModal(null);
     setError("");
   });
@@ -1879,7 +1920,7 @@ export default function App() {
         </div>
         {repositoryBlocked && (
           <div className="background-run-banner" role="alert">
-            <span>{repositoryStatus?.error || "正在确认项目绑定…"} <code>{config.repository}</code></span>
+            <span>{repositoryStatus?.error || "项目绑定已失效，请重新选择目录。"} <code>{config.repository}</code></span>
             <button type="button" onClick={handleOpenProject} disabled={busy}>重新选择目录</button>
             {active && <button type="button" onClick={() => control("cancel")} disabled={busy}>停止执行</button>}
           </div>
@@ -1995,10 +2036,11 @@ export default function App() {
         </AnimatePresence>
       </main>
 
-      {/* Point 4: Lazy Loaded Modals with Suspense */}
-      <Suspense fallback={null}>
+      {/* Modals with Opening and Closing Animations */}
+      <AnimatePresence>
         {modal === "settings" && (
           <SettingsModal
+            key="settings-modal"
             isOpen={true}
             onClose={() => setModal(null)}
             config={config}
@@ -2015,6 +2057,7 @@ export default function App() {
 
         {modal === "editor" && (
           <EditorModal
+            key="editor-modal"
             isOpen={true}
             onClose={() => setModal(null)}
             initialGraph={state.graph.nodes.length ? state.graph : emptyGraph}
@@ -2024,22 +2067,28 @@ export default function App() {
             onError={setError}
           />
         )}
-      </Suspense>
 
-      <ApprovalModal
-        isOpen={modal === "approval"}
-        onClose={() => setModal(null)}
-        state={state}
-        config={config}
-        busy={busy || repositoryBlocked}
-        onAdjustPlan={() => setModal("editor")}
-        onApprove={() => control("approve")}
-      />
+        {modal === "approval" && (
+          <ApprovalModal
+            key="approval-modal"
+            isOpen={true}
+            onClose={() => setModal(null)}
+            state={state}
+            config={config}
+            busy={busy || repositoryBlocked}
+            onAdjustPlan={() => setModal("editor")}
+            onApprove={() => control("approve")}
+          />
+        )}
 
+        {confirmModal && (
           <ConfirmModal
+            key="confirm-modal"
             config={confirmModal}
             onClose={() => setConfirmModal(null)}
           />
+        )}
+      </AnimatePresence>
         </div>
       </FloatingPathsBackground>
     </div>

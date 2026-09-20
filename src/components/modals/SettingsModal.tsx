@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useEffect } from "react";
+import { motion } from "motion/react";
 import { Settings2, FolderGit2, RotateCcw, Terminal, Plus, Check, X, Copy } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
 import { ProviderSettings } from "../ProviderSettings";
@@ -30,20 +31,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   onClearHistory,
   onSaveConfig,
 }) => {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   if (!isOpen) return null;
 
   return (
-    <div
+    <motion.div
       className="modal-backdrop"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <section
+      <motion.section
         className="modal settings-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
+        initial={{ opacity: 0, scale: 0.95, y: 14 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 10 }}
+        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
       >
         <header className="settings-modal-header">
           <div className="settings-header-title-wrap">
@@ -161,8 +178,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             </button>
           </footer>
         </div>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 });
 

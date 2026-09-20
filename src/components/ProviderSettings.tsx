@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
 import {
   Key,
   Globe,
@@ -14,6 +15,7 @@ import {
   ShieldCheck,
   LogIn,
   LogOut,
+  Trash2,
   X,
   Search,
   ChevronDown,
@@ -66,6 +68,8 @@ export function ProviderSettings({
   const [copiedCode, setCopiedCode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [actionSuccess, setActionSuccess] = useState("");
+  const [confirmDeleteProvider, setConfirmDeleteProvider] = useState<ProviderInfo | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [showProviders, setShowProviders] = useState(false);
 
@@ -174,16 +178,54 @@ export function ProviderSettings({
     }
   }
 
+  useEffect(() => {
+    if (!confirmDeleteProvider) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfirmDeleteProvider(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [confirmDeleteProvider]);
+
   async function logout(p: ProviderInfo) {
     setBusy(true);
     setError("");
+    setActionSuccess("");
     try {
       await providerAuth.logout(p.id);
+      if (model.startsWith(`${p.id}/`)) {
+        onModel("");
+      }
+      if (providerFilter === p.id) {
+        setProviderFilter("");
+      }
+      setCatalog((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          providers: prev.providers.map((prov) =>
+            prov.id === p.id
+              ? { ...prov, configured: false, authSource: null, authEnvVar: null }
+              : prov
+          ),
+          models: prev.models.map((m) =>
+            m.provider === p.id ? { ...m, available: false } : m
+          ),
+        };
+      });
       await load();
       if (activeProvider?.id === p.id) {
         setLogin(undefined);
         setActiveProvider(null);
       }
+      setActionSuccess(
+        p.authSource === "env"
+          ? `已在 Grapher 中屏蔽 ${p.name} (${p.id}) 的环境变量凭据。`
+          : `已成功删除 ${p.name} (${p.id}) 的 API Key 凭据。`
+      );
+      setTimeout(() => {
+        if (mounted.current) setActionSuccess("");
+      }, 4500);
     } catch (err) {
       if (mounted.current) setError(String(err));
     } finally {
@@ -215,7 +257,11 @@ export function ProviderSettings({
       p.id.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const configuredCount = providers.filter((p) => p.configured).length;
+  const configuredProviders = providers.filter((p) => p.configured);
+  const configuredCount = configuredProviders.length;
+  const availableModels = catalog?.models.filter(
+    (m) => m.available && (!providerFilter || m.provider === providerFilter)
+  ) ?? [];
 
   return (
     <div className="provider-settings-container">
@@ -241,13 +287,25 @@ export function ProviderSettings({
 
           <label className="form-field">
             <span>当前默认执行模型</span>
-            <input
-              list="provider-models"
-              value={model}
-              onChange={(e) => onModel(e.target.value)}
-              placeholder="例如: qwen3.8-flash 或 anthropic/claude-3-7-sonnet"
-              className="model-text-input"
-            />
+            <div className="model-input-wrapper">
+              <input
+                list="provider-models"
+                value={model}
+                onChange={(e) => onModel(e.target.value)}
+                placeholder="例如: openai/gpt-4o 或 anthropic/claude-3-7-sonnet"
+                className="model-text-input"
+              />
+              {model && (
+                <button
+                  type="button"
+                  className="model-input-clear-btn"
+                  onClick={() => onModel("")}
+                  title="清空已选模型"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
             <datalist id="provider-models">
               {catalog?.models
                 .filter((m) => !providerFilter || m.provider === providerFilter)
@@ -264,6 +322,30 @@ export function ProviderSettings({
           </label>
         </div>
 
+        {availableModels.length > 0 && (
+          <div className="model-quick-chips">
+            <span className="quick-chips-label">
+              <Sparkles size={12} /> 快捷选用已可用模型:
+            </span>
+            <div className="quick-chips-list">
+              {availableModels.slice(0, 8).map((m) => {
+                const fullId = `${m.provider}/${m.id}`;
+                const isSelected = model === fullId;
+                return (
+                  <button
+                    key={fullId}
+                    type="button"
+                    className={`model-chip ${isSelected ? "active" : ""}`}
+                    onClick={() => onModel(fullId)}
+                    title={`点击选用: ${fullId}`}
+                  >
+                    {m.name || m.id}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Pi Auth Center Header */}
@@ -280,7 +362,7 @@ export function ProviderSettings({
               </span>
             </div>
             <p className="section-desc pi-auth-desc">
-              凭证由本地 Pi 内核统一加密管理（保存在 <code>~/.pi/agent/auth.json</code>），Partitioner、Planner、Node Agent、Merger 天然共享，无需重复绑定。
+              凭证由本地 Pi 内核统一安全管理（保存在 <code>~/.grapher/pi-agent/auth.json</code>），Partitioner、Planner、Node Agent、Merger 天然共享，无需重复绑定。
             </p>
           </div>
         </div>
@@ -320,6 +402,73 @@ export function ProviderSettings({
           </button>
         </div>
       </div>
+
+      {actionSuccess && (
+        <div className="login-status-alert success" style={{ marginBottom: "12px" }}>
+          <CheckCircle2 size={15} />
+          <span>{actionSuccess}</span>
+        </div>
+      )}
+
+      {/* Active Configured Credentials Section */}
+      {configuredProviders.length > 0 && (
+        <div className="configured-credentials-card">
+          <div className="configured-card-header">
+            <div className="configured-title-group">
+              <Key size={15} className="configured-key-icon" />
+              <strong>已绑定的 API Key 凭据 ({configuredProviders.length})</strong>
+            </div>
+            <span className="configured-status-tag">
+              <CheckCircle2 size={11} /> 运行环境就绪
+            </span>
+          </div>
+
+          <div className="configured-list">
+            {configuredProviders.map((p) => (
+              <div key={p.id} className="configured-row">
+                <div className="configured-info">
+                  <div className="configured-name-wrap">
+                    <span className="configured-name">{p.name}</span>
+                    <code className="configured-id">{p.id}</code>
+                  </div>
+                  <span className={`configured-type-badge ${p.authSource === "env" ? "env-badge" : "stored-badge"}`}>
+                    {p.authSource === "env"
+                      ? `环境变量 (${p.authEnvVar || "ENV"})`
+                      : "API Key 已保存"}
+                  </span>
+                </div>
+
+                <div className="configured-actions">
+                  <button
+                    type="button"
+                    className="card-action-btn reauth-btn"
+                    disabled={busy || pending}
+                    onClick={() => {
+                      const defaultMethod =
+                        p.methods.find((m) => m.id === "oauth")?.id ??
+                        p.methods[0]?.id ??
+                        "api_key";
+                      void startLogin(p, defaultMethod as "api_key" | "oauth");
+                    }}
+                    title="重新输入以更新密钥"
+                  >
+                    <Key size={12} /> 修改 Key
+                  </button>
+                  <button
+                    type="button"
+                    className="card-action-btn logout-btn"
+                    disabled={busy || pending}
+                    onClick={() => setConfirmDeleteProvider(p)}
+                    title="彻底删除 / 屏蔽此 API 凭据"
+                  >
+                    <Trash2 size={12} /> 删除 API Key
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Active Login Flow Modal/Drawer */}
       {(login || activeProvider) && (
@@ -475,6 +624,17 @@ export function ProviderSettings({
                 >
                   <Check size={14} /> 保存并绑定到 Pi
                 </button>
+                {activeProvider?.configured && (
+                  <button
+                    type="button"
+                    className="danger-outline-btn"
+                    disabled={busy}
+                    onClick={() => setConfirmDeleteProvider(activeProvider)}
+                    title="从本地删除该凭据"
+                  >
+                    <Trash2 size={13} /> 删除当前凭据
+                  </button>
+                )}
                 <button
                   type="button"
                   className="secondary"
@@ -558,16 +718,16 @@ export function ProviderSettings({
                       }}
                       title="重新输入密钥或刷新授权"
                     >
-                      <RefreshCw size={12} /> 重新登录
+                      <Key size={12} /> 修改 Key
                     </button>
                     <button
                       type="button"
                       className="card-action-btn logout-btn"
                       disabled={busy || pending}
-                      onClick={() => void logout(p)}
-                      title="移除本地已保存的凭据"
+                      onClick={() => setConfirmDeleteProvider(p)}
+                      title="移除本地已保存的 API Key 凭据"
                     >
-                      <LogOut size={12} /> 退出
+                      <Trash2 size={12} /> 删除 Key
                     </button>
                   </div>
                 ) : (
@@ -619,6 +779,108 @@ export function ProviderSettings({
           <span>{error}</span>
         </div>
       )}
+
+      {/* Custom In-App Deletion Confirmation Modal */}
+      <AnimatePresence>
+        {confirmDeleteProvider && (
+          <motion.div
+            key="confirm-delete-backdrop"
+            className="confirm-delete-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+            onClick={() => setConfirmDeleteProvider(null)}
+          >
+            <motion.div
+              key="confirm-delete-modal"
+              className="confirm-delete-modal"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="confirm-delete-title"
+              initial={{ opacity: 0, scale: 0.94, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 8 }}
+              transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="confirm-delete-header">
+                <div className="confirm-delete-icon-wrap">
+                  <Trash2 size={18} />
+                </div>
+                <div className="confirm-delete-titles">
+                  <h4 id="confirm-delete-title">确认移除该 API 凭据？</h4>
+                  <p className="confirm-delete-subtitle">
+                    {confirmDeleteProvider.authSource === "env"
+                      ? "检测到该凭据来自系统环境变量，确认后将在 Grapher 中屏蔽"
+                      : "确认后将从 Grapher 本地密钥库中彻底清除"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="confirm-close-btn"
+                  onClick={() => setConfirmDeleteProvider(null)}
+                  title="取消并关闭"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+
+              <div className="confirm-delete-body">
+                <div className="confirm-delete-target-card">
+                  <div className="target-provider-header">
+                    <strong className="target-provider-name">
+                      {confirmDeleteProvider.name}
+                    </strong>
+                    <code className="target-provider-id">
+                      {confirmDeleteProvider.id}
+                    </code>
+                  </div>
+                  <div className="target-provider-source">
+                    凭据来源:{" "}
+                    {confirmDeleteProvider.authSource === "env" ? (
+                      <span className="source-tag env">
+                        系统环境变量 ({confirmDeleteProvider.authEnvVar || "ENV"})
+                      </span>
+                    ) : (
+                      <span className="source-tag local">本地 auth.json</span>
+                    )}
+                  </div>
+                </div>
+
+                <p className="confirm-delete-warning">
+                  {confirmDeleteProvider.authSource === "env"
+                    ? "屏蔽后，Grapher 不再向此 Provider 发送请求，相关模型将从可用列表中隐藏。您随时可在下方 Provider 列表中点击“登录”输入新密钥重新激活。"
+                    : "清除后，该 Provider 下的所有模型将无法调用。您可以在下方列表中随时重新输入 API Key 绑定。"}
+                </p>
+              </div>
+
+              <div className="confirm-delete-footer">
+                <button
+                  type="button"
+                  className="secondary confirm-cancel-btn"
+                  disabled={busy}
+                  onClick={() => setConfirmDeleteProvider(null)}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="danger-btn confirm-action-btn"
+                  disabled={busy}
+                  onClick={async () => {
+                    const target = confirmDeleteProvider;
+                    setConfirmDeleteProvider(null);
+                    await logout(target);
+                  }}
+                >
+                  <Trash2 size={13} /> 确认删除
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

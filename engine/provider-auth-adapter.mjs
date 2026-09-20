@@ -1,4 +1,52 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+const KNOWN_PROVIDER_ENV_VARS = {
+  anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"],
+  openai: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  google: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"],
+  deepseek: ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"],
+  groq: ["GROQ_API_KEY"],
+  mistral: ["MISTRAL_API_KEY"],
+  together: ["TOGETHER_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
+  "github-copilot": ["COPILOT_GITHUB_TOKEN"],
+  cohere: ["COHERE_API_KEY", "CO_API_KEY"],
+  perplexity: ["PERPLEXITY_API_KEY"],
+  xai: ["XAI_API_KEY"],
+};
+
+function getDisabledProvidersPath() {
+  const dir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".grapher", "pi-agent");
+  return join(dir, "disabled-providers.json");
+}
+
+function loadDisabledProviders() {
+  try {
+    const raw = readFileSync(getDisabledProvidersPath(), "utf8");
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? new Set(arr) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDisabledProviders(set) {
+  try {
+    writeFileSync(getDisabledProvidersPath(), JSON.stringify([...set], null, 2), "utf8");
+  } catch {}
+}
+
+function purgeEnvVarsForProvider(providerId) {
+  const vars = KNOWN_PROVIDER_ENV_VARS[providerId];
+  if (vars) {
+    for (const v of vars) {
+      delete process.env[v];
+    }
+  }
+}
 
 // Versioned transport DTOs only. Provider implementation, credential storage and
 // refresh are owned by the injected upstream ModelRuntime, never by Grapher.
@@ -11,20 +59,46 @@ export class ProviderAuthAdapter {
   }
 
   async catalog(refresh = false) {
+    const disabled = loadDisabledProviders();
+    for (const p of disabled) {
+      purgeEnvVarsForProvider(p);
+    }
     const runtime = await this.createRuntime({ allowModelNetwork: refresh, signal: AbortSignal.timeout(25000) });
-    const available = new Set(runtime.getAvailableSnapshot().map(m => `${m.provider}/${m.id}`));
+    const available = new Set(
+      runtime.getAvailableSnapshot()
+        .filter(m => !disabled.has(m.provider))
+        .map(m => `${m.provider}/${m.id}`)
+    );
     const providers = await Promise.all(runtime.getProviders().map(async provider => {
       const methods = [];
       if (provider.auth.apiKey?.login) methods.push({ id: "api_key", name: provider.auth.apiKey.name });
       if (provider.auth.oauth?.login) methods.push({ id: "oauth", name: provider.auth.oauth.loginLabel ?? provider.auth.oauth.name });
       let auth;
-      try { auth = await runtime.checkAuth(provider.id, { signal: AbortSignal.timeout(5000) }); } catch { /* Unavailable is not a transport error. */ }
-      return { id: provider.id, name: provider.name, methods, configured: !!auth, authType: auth?.type ?? null };
+      if (!disabled.has(provider.id)) {
+        try { auth = await runtime.checkAuth(provider.id, { signal: AbortSignal.timeout(5000) }); } catch { /* Unavailable is not a transport error. */ }
+      }
+      const isConfigured = !!auth;
+      const isStored = auth?.source === "stored credential";
+      return {
+        id: provider.id,
+        name: provider.name,
+        methods,
+        configured: isConfigured,
+        authType: auth?.type ?? null,
+        authSource: isConfigured ? (isStored ? "stored" : "env") : null,
+        authEnvVar: isConfigured && !isStored ? auth?.source : null,
+      };
     }));
     return {
       providers,
-      models: runtime.getModels().map(m => ({ provider: m.provider, id: m.id, name: m.name, api: m.api,
-        contextWindow: m.contextWindow, available: available.has(`${m.provider}/${m.id}`) })),
+      models: runtime.getModels().map(m => ({
+        provider: m.provider,
+        id: m.id,
+        name: m.name,
+        api: m.api,
+        contextWindow: m.contextWindow,
+        available: available.has(`${m.provider}/${m.id}`)
+      })),
       warning: runtime.getError() ? "Some provider/model configuration could not be loaded; inspect local configuration." : null,
     };
   }
@@ -44,6 +118,11 @@ export class ProviderAuthAdapter {
     if (typeof provider !== "string" || !["api_key", "oauth"].includes(method)) throw new Error("Invalid authentication method.");
     if ([...this.jobs.values()].some(j => j.provider === provider && j.status === "pending")) throw new Error("Login already in progress for this provider.");
     if ([...this.jobs.values()].filter(j => j.status === "pending").length >= 4) throw new Error("Too many pending logins.");
+    const disabled = loadDisabledProviders();
+    if (disabled.has(provider)) {
+      disabled.delete(provider);
+      saveDisabledProviders(disabled);
+    }
     const job = { id: randomUUID(), provider, status: "pending", events: [], controller: new AbortController() };
     this.jobs.set(job.id, job);
     job.timer = setTimeout(() => job.controller.abort(), this.timeoutMs);
@@ -132,7 +211,11 @@ export class ProviderAuthAdapter {
     const runtime = await this.createRuntime({ refreshOnCreate: false, signal: AbortSignal.timeout(25000) });
     if (!runtime.getProviders().some(p => p.id === provider)) throw new Error("Unknown provider.");
     await runtime.logout(provider, { signal: AbortSignal.timeout(25000) });
-    return { loggedOut: true }; // Ambient env/profile auth can remain configured.
+    const disabled = loadDisabledProviders();
+    disabled.add(provider);
+    saveDisabledProviders(disabled);
+    purgeEnvVarsForProvider(provider);
+    return { loggedOut: true };
   }
 
   async dispatch(request) {

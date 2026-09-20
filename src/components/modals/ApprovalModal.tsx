@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useEffect } from "react";
+import { motion } from "motion/react";
 import { ShieldCheck, Play, X } from "lucide-react";
 import { Snapshot, Config } from "../../types";
 
@@ -21,20 +22,36 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
   onAdjustPlan,
   onApprove,
 }) => {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose, busy]);
+
   if (!isOpen) return null;
 
   return (
-    <div
+    <motion.div
       className="modal-backdrop"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <section
+      <motion.section
         className="modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
+        initial={{ opacity: 0, scale: 0.95, y: 14 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 10 }}
+        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
       >
         <header>
           <h2 id="modal-title">审批执行图计划</h2>
@@ -80,8 +97,8 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
             <Play size={14} />确认审批并启动
           </button>
         </footer>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 });
 
