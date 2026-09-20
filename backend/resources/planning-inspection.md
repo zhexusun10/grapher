@@ -2,6 +2,8 @@
 
 Planner exposes exactly `node`, `edge`, `read`, and `bash`, plus compiler feedback from graph mutations.
 
+`node` accepts a nonempty `nodes` array; `edge` accepts a nonempty `edges` array. One edit is an array of length one. Each tool applies its own edits in order and compiles once. A failed batch leaves the saved graph unchanged.
+
 `read` uses Pi's native implementation and description, including offset/limit behavior. `bash` uses Pi's native backend without write-command filtering or implicit errexit/pipefail. Planner has no automatic skills/extensions or project context files.
 
 Planner runs as a host-native process at the selected source project's real absolute path. PATH, HOME, TMPDIR, external files and host-native executables remain available according to host permissions. Tools, commands, file contents and output are not rewritten. The host provides real, execution-specific graph/session paths and its own native graph compiler.

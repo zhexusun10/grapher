@@ -64,65 +64,38 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node",
-    description: `Create, replace, or delete a graph node by stable name. The task text is passed to a later fresh session together with completed dependency filesystem state; the planner conversation is not passed.
-
-Updating a name replaces its entire task and preserves edges. Deleting a node also removes its incident edges. To rename, create the new node, reconnect its edges, and delete the old one.
-
-Single-node mode uses name/task/delete. Batch mode uses nodes/edges arrays and cannot be mixed with single-node fields. A batch requires at least one edit, applies node edits before edge edits, and compiles the resulting graph once. Later edits of the same node name or ordered edge pair replace earlier edits. Omitted arrays are empty. Existing nodes and edges not edited are retained. Any failure rejects the entire mutation. Edge fields have the same semantics as the edge tool: omitted feedback is false, omitted relation is empty, and delete removes the ordered pair.`,
+    description: `Create, replace, or delete graph nodes. Supply one or more edits in nodes. Each task is passed to a later fresh session with completed dependency filesystem state; the planner conversation is not passed. Updating a name replaces its task and preserves edges. Deleting a node removes its incident edges. Edits are applied in order, then compiled once. A failure leaves the saved graph unchanged.`,
     parameters: Type.Object({
-      name: Type.Optional(Type.String({ description: "Single-node mode: stable identifier, 1–64 ASCII letters, digits, _ or -. Omit in batch mode." })),
-      task: Type.Optional(Type.String({ description: "Task text passed verbatim to the node execution. Required and nonempty unless deleting." })),
-      delete: Type.Optional(Type.Boolean({ description: "Remove this node and all its incident edges; task is ignored." })),
-      nodes: Type.Optional(Type.Array(Type.Object({
-        name: Type.String(),
-        task: Type.Optional(Type.String()),
-        delete: Type.Optional(Type.Boolean()),
-      }, { additionalProperties: false }), { description: "Batch node edits, applied before all edge edits." })),
-      edges: Type.Optional(Type.Array(Type.Object({
-        from: Type.String(),
-        to: Type.String(),
-        relation: Type.Optional(Type.String()),
-        feedback: Type.Optional(Type.Boolean()),
-        delete: Type.Optional(Type.Boolean()),
-      }, { additionalProperties: false }), { description: "Batch edge edits, applied after all node edits." })),
+      nodes: Type.Array(Type.Object({
+        name: Type.String({ description: "Stable node identifier." }),
+        task: Type.Optional(Type.String({ description: "Task for a fresh execution; required unless deleting." })),
+        delete: Type.Optional(Type.Boolean({ description: "Delete this node and its incident edges." })),
+      }, { additionalProperties: false }), { minItems: 1 }),
     }, { additionalProperties: false }),
     async execute(_id, parameters) {
       return mutate((graph) => {
-        const batch = parameters.nodes !== undefined || parameters.edges !== undefined;
-        if (batch) {
-          if (parameters.name !== undefined || parameters.task !== undefined || parameters.delete !== undefined) {
-            return [{ code: "mutation-input", message: "Use either single-node name/task/delete or batch nodes/edges, not both. The saved graph was not changed." }];
-          }
-          if (!(parameters.nodes?.length || parameters.edges?.length)) {
-            return [{ code: "mutation-input", message: "A batch requires at least one node or edge edit. The saved graph was not changed." }];
-          }
-          for (const edit of parameters.nodes ?? []) applyNode(graph, edit);
-          for (const edit of parameters.edges ?? []) applyEdge(graph, edit);
-        } else {
-          if (parameters.name === undefined) {
-            return [{ code: "mutation-input", message: "Provide a node name or a batch of nodes/edges. The saved graph was not changed." }];
-          }
-          applyNode(graph, { ...parameters, name: parameters.name });
-        }
+        if (!parameters.nodes.length) return [{ code: "mutation-input", message: "Provide at least one node edit. The saved graph was not changed." }];
+        for (const edit of parameters.nodes) applyNode(graph, edit);
       });
     },
   }));
   pi.registerTool(defineTool({
     name: "edge", label: "Graph edge",
-    description: `Create, replace, or delete a directed edge between existing nodes. There is one edge per ordered pair.
-
-feedback omitted or false creates a dependency: the target waits for the source to complete successfully and receives its filesystem state. A failed source blocks the target.
-
-feedback=true creates a feedback route from the source to one dependency ancestor. It supplies no execution ordering or filesystem input.`,
+    description: `Create, replace, or delete directed edges between existing nodes. Supply one or more edits in edges. There is one edge per ordered pair. Edits are applied in order, then compiled once; a failure leaves the saved graph unchanged. Omitted or false feedback creates a dependency: the target waits for the source to complete successfully and receives its filesystem state. True feedback creates a route to a dependency ancestor without execution ordering or filesystem input.`,
     parameters: Type.Object({
-      from: Type.String({ description: "Existing source node name." }),
-      to: Type.String({ description: "Existing target node name, different from source." }),
-      relation: Type.Optional(Type.String({ description: "Human-readable reason for the relationship; runtime behavior is determined by feedback." })),
-      feedback: Type.Optional(Type.Boolean({ description: "Omit or false for a dependency carrying filesystem state. True creates a feedback route from this source to one dependency ancestor." })),
-      delete: Type.Optional(Type.Boolean({ description: "Remove the ordered pair regardless of its current feedback flag." })),
+      edges: Type.Array(Type.Object({
+        from: Type.String({ description: "Existing source node name." }),
+        to: Type.String({ description: "Existing target node name, different from source." }),
+        relation: Type.Optional(Type.String({ description: "Human-readable relationship; feedback determines runtime behavior." })),
+        feedback: Type.Optional(Type.Boolean({ description: "True for feedback; otherwise a dependency." })),
+        delete: Type.Optional(Type.Boolean({ description: "Remove the ordered pair." })),
+      }, { additionalProperties: false }), { minItems: 1 }),
     }, { additionalProperties: false }),
     async execute(_id, parameters) {
-      return mutate(graph => applyEdge(graph, parameters));
+      return mutate(graph => {
+        if (!parameters.edges.length) return [{ code: "mutation-input", message: "Provide at least one edge edit. The saved graph was not changed." }];
+        for (const edit of parameters.edges) applyEdge(graph, edit);
+      });
     },
   }));
 }
