@@ -35,7 +35,7 @@ npm run pi:build
 
 | 角色 | Pi 加载策略 |
 | --- | --- |
-| Partitioner | 无工具、无 context files、无 skills/extensions，默认 thinking off |
+| Partitioner | 无工具、无 context files、无 skills/extensions，模型跟随全局配置（或由 `PARTITIONER_MODEL` 覆盖），思维链永远关闭（`thinking=off`，若不支持则设为最低） |
 | Planner | 只开放 `node,edge,read,bash`，加载 Grapher 显式 planning extension，不加载项目 context/自动扩展 |
 | Node Agent | 开放 Pi 原生工具，允许受信工作区的 skills/extensions |
 | Merger | 固定冲突修复 prompt 和工具，不加载项目 context/自动扩展 |

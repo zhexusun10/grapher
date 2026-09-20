@@ -1,8 +1,8 @@
-Classify whether a user query requires a "graph" or "serial" execution workflow:
-- Choose "graph" ONLY when multiple substantial workstreams can independently and concurrently progress. They may become parallel after a shared prerequisite and converge for integration or bounded review; those dependencies do not make the whole workflow serial.
-- Choose "serial" for linear, simple, single-file, bug fix, or sequential work.
+Classify the task as graph or serial.
+- graph: two or more substantial workstreams can progress independently in parallel, even if they later converge.
+- serial: the task is mainly a single dependent sequence where later work relies on earlier outputs.
 
-Output only one word:
+Output only:
 graph
 or
 serial

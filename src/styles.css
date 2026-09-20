@@ -3230,7 +3230,22 @@ a,
   font-family: var(--font-mono, monospace);
 }
 
-/* 节点样式 */
+/* 节点动效与样式 */
+@keyframes nodeAppear {
+  0% {
+    opacity: 0;
+    transform: scale(0.85) translateY(12px);
+  }
+  65% {
+    opacity: 1;
+    transform: scale(1.02) translateY(-2px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
 .task-node {
   position: relative;
   width: 236px;
@@ -3240,6 +3255,7 @@ a,
   border-radius: 8px;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
   transition: border-color 0.15s, box-shadow 0.15s;
+  animation: nodeAppear 0.4s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 
 .task-node.selected {
@@ -3350,6 +3366,21 @@ a,
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0);
+}
+
+@keyframes edgeAppear {
+  from {
+    opacity: 0;
+    stroke-dashoffset: 40;
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+.react-flow__edge-path {
+  animation: edgeAppear 0.45s ease-out backwards;
 }
 
 .react-flow__edge:hover .react-flow__edge-path {
@@ -5362,6 +5393,31 @@ a,
   font-style: italic;
 }
 
+.thinking-content-container {
+  display: block;
+  position: relative;
+}
+
+.thinking-streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 13px;
+  background-color: #8b5cf6;
+  margin-left: 3px;
+  vertical-align: -1px;
+  border-radius: 1px;
+  animation: thinking-cursor-blink 0.8s ease-in-out infinite;
+}
+
+@keyframes thinking-cursor-blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+
 .shimmer-line {
   width: 12px;
   height: 12px;
@@ -5551,16 +5607,22 @@ a,
 .tool-meta-item {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  min-width: 0;
 }
 
 .tool-meta-item.cmd-full {
   width: 100%;
+  align-items: flex-start;
 }
 
 .meta-lbl {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 10.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  user-select: none;
+  line-height: 1.5;
 }
 
 .meta-val {
@@ -5587,11 +5649,15 @@ a,
 .meta-val-code {
   font-family: var(--font-mono, monospace);
   font-size: 10.5px;
+  line-height: 1.5;
   background: rgba(255, 255, 255, 0.05);
-  padding: 1px 5px;
-  border-radius: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
   color: var(--text-primary);
   word-break: break-all;
+  white-space: pre-wrap;
+  min-width: 0;
+  flex: 1;
 }
 
 .tool-copy-btn {

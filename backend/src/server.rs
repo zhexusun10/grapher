@@ -700,7 +700,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
                 .as_ref()
                 .map(|r| r.path.clone())
                 .unwrap_or_default(),
-            model: "qwen3.8-flash".into(),
+            model: String::new(),
             max_parallel: 4,
             max_feedback: 3,
             #[cfg(feature = "fixture")]
@@ -710,9 +710,6 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
             #[cfg(feature = "fixture")]
             pi_args: vec![entrypoint.to_string_lossy().into()],
         });
-    if config.model.trim().is_empty() {
-        config.model = "qwen3.8-flash".into();
-    }
     if config.repository.is_empty() {
         if let Some(ref repo) = detected_repo {
             config.repository = repo.path.clone();
@@ -780,14 +777,11 @@ fn compile_graph(graph: Graph) -> Result<Plan, Vec<compiler::Diagnostic>> {
 
 fn save_graph(
     graph: Graph,
-    mut config: Config,
+    config: Config,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
         return Err("Wait for the current operation to finish".into());
-    }
-    if config.model.trim().is_empty() {
-        config.model = "qwen3.8-flash".into();
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     runtime.create(graph, config)?;
@@ -1118,12 +1112,7 @@ fn plan_goal_internal(
                 repository: Some(repo_str.clone()),
             };
 
-            #[allow(unused_mut)]
-            let mut final_config = config.clone();
-            #[cfg(not(feature = "fixture"))]
-            if final_config.model.trim().is_empty() {
-                final_config.model = "qwen3.8-flash".into();
-            }
+            let final_config = config.clone();
             let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
             runtime.create_with_planning(
                 graph,

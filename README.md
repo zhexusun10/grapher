@@ -85,7 +85,7 @@ Edge 只表示真实的文件状态或执行顺序依赖。不要仅为了让图
 | `PARTITIONER_SYSTEM_PROMPT` | 开发用 Partitioner prompt 覆盖 |
 | `PLANNER_SYSTEM_PROMPT` | 开发用 Planner prompt 覆盖 |
 
-Partitioner 默认 `thinking=off`。各角色配置互相隔离，不继承外层 Pi 会话的模型或 session 环境变量。
+Partitioner 模型跟随全局配置（或由 `PARTITIONER_MODEL` 覆盖）；思维链永远关闭（`thinking=off`，若底层模型不支持完全关闭则自动设为该模型允许的最低档位）。各角色配置互相隔离，不继承外层 Pi 会话的模型或 session 环境变量。
 
 ## 项目结构
 

@@ -261,6 +261,7 @@ export default function App() {
 
   const initialPlannerStream = {
     stage: "idle" as "idle" | "partitioning" | "planning" | "done" | "error",
+    items: [] as TranscriptItem[],
     partitionerThinking: "",
     partitionerThinkingActive: false,
     partitionerText: "",
@@ -864,6 +865,45 @@ export default function App() {
     setSelected("");
   });
 
+  const appendItemDelta = (
+    prevItems: TranscriptItem[],
+    type: "thinking" | "text",
+    delta: string,
+    isRunning: boolean = true
+  ): TranscriptItem[] => {
+    if (!delta) return prevItems;
+    const nextItems = prevItems.map((item) => ({ ...item }));
+    const last = nextItems[nextItems.length - 1];
+    if (last && last.type === type && (type === "thinking" ? last.status === "running" : true)) {
+      last.content = (last.content || "") + delta;
+      if (type === "thinking") {
+        last.status = isRunning ? "running" : "success";
+      }
+    } else {
+      if (last && last.type === "thinking" && last.status === "running") {
+        last.status = "success";
+      }
+      nextItems.push({
+        id: `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        type,
+        role: "assistant",
+        content: delta,
+        status: isRunning ? "running" : "success",
+        timestamp: Date.now(),
+      });
+    }
+    return nextItems;
+  };
+
+  const closeRunningThinkingItem = (prevItems: TranscriptItem[]): TranscriptItem[] => {
+    const nextItems = prevItems.map((item) => ({ ...item }));
+    const last = nextItems[nextItems.length - 1];
+    if (last && last.type === "thinking" && last.status === "running") {
+      last.status = "success";
+    }
+    return nextItems;
+  };
+
   const handlePlanGoal = (
     inputGoal?: string,
     options?: { displayText?: string; rawText?: string; files?: File[] }
@@ -876,6 +916,7 @@ export default function App() {
     setRouteType("undecided");
     setPlannerStream({
       stage: "partitioning",
+      items: [],
       partitionerThinking: "",
       partitionerThinkingActive: false,
       partitionerText: "",
@@ -897,8 +938,11 @@ export default function App() {
       ...prev,
       graph: {
         ...prev.graph,
+        nodes: [],
+        edges: [],
         originalGoal: targetGoal,
       },
+      nodes: {},
     }));
     const scope = planningRecovery.begin(config.repository);
     try {
@@ -1004,16 +1048,42 @@ export default function App() {
           if (pEvent?.type === "message_update") {
             const aEvent = pEvent.assistantMessageEvent;
             if (aEvent?.type === "thinking_start") {
-              setPlannerStream((prev) => ({ ...prev, plannerThinkingActive: true }));
+              setPlannerStream((prev) => {
+                let items = prev.items;
+                const last = items[items.length - 1];
+                if (!last || last.type !== "thinking" || last.status !== "running") {
+                  items = [
+                    ...items,
+                    {
+                      id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      type: "thinking",
+                      role: "assistant",
+                      content: "",
+                      status: "running",
+                      timestamp: Date.now(),
+                    },
+                  ];
+                }
+                return {
+                  ...prev,
+                  items,
+                  plannerThinkingActive: true,
+                };
+              });
             } else if (aEvent?.type === "thinking_delta") {
               const delta = aEvent.delta || "";
               setPlannerStream((prev) => ({
                 ...prev,
+                items: appendItemDelta(prev.items, "thinking", delta, true),
                 plannerThinking: prev.plannerThinking + delta,
                 plannerThinkingActive: true,
               }));
             } else if (aEvent?.type === "thinking_end") {
-              setPlannerStream((prev) => ({ ...prev, plannerThinkingActive: false }));
+              setPlannerStream((prev) => ({
+                ...prev,
+                items: closeRunningThinkingItem(prev.items),
+                plannerThinkingActive: false,
+              }));
             } else if (aEvent?.type === "text_delta") {
               const delta = aEvent.delta || "";
               if (planInTag || delta.includes("<think>") || delta.includes("<thought>")) {
@@ -1049,15 +1119,29 @@ export default function App() {
                     }
                   }
                 }
-                setPlannerStream((prev) => ({
-                  ...prev,
-                  plannerThinking: prev.plannerThinking + thinkChunk,
-                  plannerThinkingActive: planInTag,
-                  plannerText: prev.plannerText + textChunk,
-                }));
+                setPlannerStream((prev) => {
+                  let items = prev.items;
+                  if (thinkChunk) {
+                    items = appendItemDelta(items, "thinking", thinkChunk, planInTag);
+                  }
+                  if (!planInTag && items.some((i) => i.type === "thinking" && i.status === "running")) {
+                    items = closeRunningThinkingItem(items);
+                  }
+                  if (textChunk) {
+                    items = appendItemDelta(items, "text", textChunk, true);
+                  }
+                  return {
+                    ...prev,
+                    items,
+                    plannerThinking: prev.plannerThinking + thinkChunk,
+                    plannerThinkingActive: planInTag,
+                    plannerText: prev.plannerText + textChunk,
+                  };
+                });
               } else {
                 setPlannerStream((prev) => ({
                   ...prev,
+                  items: appendItemDelta(closeRunningThinkingItem(prev.items), "text", delta, true),
                   plannerThinkingActive: false,
                   plannerText: prev.plannerText + delta,
                 }));
@@ -1065,16 +1149,32 @@ export default function App() {
             }
           } else if (pEvent?.type === "message_end") {
             setPlannerStream((prev) => {
+              let items = closeRunningThinkingItem(prev.items);
               let thinking = prev.plannerThinking;
-              if (!thinking && Array.isArray(pEvent.message?.content)) {
+              if (Array.isArray(pEvent.message?.content)) {
                 for (const c of pEvent.message.content) {
                   if (c.type === "thinking" && c.thinking) {
-                    thinking = c.thinking;
+                    if (!thinking) thinking = c.thinking;
+                    const hasThinking = items.some((i) => i.type === "thinking" && i.content === c.thinking);
+                    if (!hasThinking) {
+                      items = [
+                        ...items,
+                        {
+                          id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                          type: "thinking",
+                          role: "assistant",
+                          content: c.thinking,
+                          status: "success",
+                          timestamp: Date.now(),
+                        },
+                      ];
+                    }
                   }
                 }
               }
               return {
                 ...prev,
+                items,
                 plannerThinking: thinking,
                 plannerThinkingActive: false,
               };
@@ -1091,9 +1191,83 @@ export default function App() {
             };
             setPlannerStream((prev) => ({
               ...prev,
+              items: [...closeRunningThinkingItem(prev.items), toolItem],
               plannerThinkingActive: false,
               tools: [...prev.tools, toolItem],
             }));
+
+            // 实时增量将 node 和 edge 工具调用的图结构同步至 graph
+            if (pEvent.toolName === "node") {
+              const args = pEvent.args || {};
+              setState((prev) => {
+                let nextNodes = [...prev.graph.nodes];
+                let nextEdges = [...prev.graph.edges];
+                if (Array.isArray(args.nodes) || Array.isArray(args.edges)) {
+                  if (Array.isArray(args.nodes)) {
+                    for (const n of args.nodes) {
+                      if (!n || !n.name) continue;
+                      nextNodes = nextNodes.filter((item) => item.name !== n.name);
+                      if (n.delete) {
+                        nextEdges = nextEdges.filter((e) => e.from !== n.name && e.to !== n.name);
+                      } else {
+                        nextNodes.push({ name: n.name, task: n.task || "" });
+                      }
+                    }
+                  }
+                  if (Array.isArray(args.edges)) {
+                    for (const e of args.edges) {
+                      if (!e || !e.from || !e.to) continue;
+                      nextEdges = nextEdges.filter((item) => item.from !== e.from || item.to !== e.to);
+                      if (!e.delete) {
+                        nextEdges.push({
+                          from: e.from,
+                          to: e.to,
+                          relation: e.relation || "",
+                          feedback: Boolean(e.feedback),
+                        });
+                      }
+                    }
+                  }
+                } else if (args.name) {
+                  nextNodes = nextNodes.filter((item) => item.name !== args.name);
+                  if (args.delete) {
+                    nextEdges = nextEdges.filter((e) => e.from !== args.name && e.to !== args.name);
+                  } else {
+                    nextNodes.push({ name: args.name, task: args.task || "" });
+                  }
+                }
+                return {
+                  ...prev,
+                  graph: {
+                    ...prev.graph,
+                    nodes: nextNodes,
+                    edges: nextEdges,
+                  },
+                };
+              });
+            } else if (pEvent.toolName === "edge") {
+              const args = pEvent.args || {};
+              if (args.from && args.to) {
+                setState((prev) => {
+                  let nextEdges = prev.graph.edges.filter((item) => item.from !== args.from || item.to !== args.to);
+                  if (!args.delete) {
+                    nextEdges.push({
+                      from: args.from,
+                      to: args.to,
+                      relation: args.relation || "",
+                      feedback: Boolean(args.feedback),
+                    });
+                  }
+                  return {
+                    ...prev,
+                    graph: {
+                      ...prev.graph,
+                      edges: nextEdges,
+                    },
+                  };
+                });
+              }
+            }
           } else if (pEvent?.type === "tool_execution_end") {
             const resText = (pEvent.result?.content ?? [])
               .filter((i: any) => i.type === "text")
@@ -1108,21 +1282,48 @@ export default function App() {
               resText.includes("[Showing lines") ||
               resText.includes("Full output:")
             );
-            setPlannerStream((prev) => ({
-              ...prev,
-              tools: prev.tools.map((t) =>
-                t.toolCallId === pEvent.toolCallId
-                  ? {
-                      ...t,
-                      result: resText,
-                      exitCode,
-                      truncated,
-                      isError: isErr,
-                      status: isErr ? "error" : "success",
-                    }
-                  : t
-              ),
-            }));
+            setPlannerStream((prev) => {
+              const updateTool = (t: TranscriptItem) => ({
+                ...t,
+                result: resText,
+                exitCode,
+                truncated,
+                isError: isErr,
+                status: isErr ? ("error" as const) : ("success" as const),
+              });
+
+              let matchedItem = false;
+              const nextItems = prev.items.map((item) => {
+                if (
+                  item.type === "tool_call" &&
+                  ((pEvent.toolCallId && item.toolCallId === pEvent.toolCallId) ||
+                    (!pEvent.toolCallId && item.toolName === pEvent.toolName && item.status === "running"))
+                ) {
+                  matchedItem = true;
+                  return updateTool(item);
+                }
+                return item;
+              });
+              if (!matchedItem) {
+                for (let i = nextItems.length - 1; i >= 0; i--) {
+                  if (nextItems[i].type === "tool_call" && nextItems[i].status === "running") {
+                    nextItems[i] = updateTool(nextItems[i]);
+                    break;
+                  }
+                }
+              }
+
+              return {
+                ...prev,
+                items: nextItems,
+                tools: prev.tools.map((t) =>
+                  t.toolCallId === pEvent.toolCallId ||
+                  (!pEvent.toolCallId && t.toolName === pEvent.toolName && t.status === "running")
+                    ? updateTool(t)
+                    : t
+                ),
+              };
+            });
           }
         } else if (event.type === "error") {
           void planningRecovery.finish(scope, event.summary, event.planningId);
@@ -1142,12 +1343,20 @@ export default function App() {
       recordRunToWorkspace(snapshot.runId);
       void planningRecovery.finish(scope);
       setSelected("");
-      setPlannerStream((prev) => ({ ...prev, stage: "done" }));
+      setPlannerStream((prev) => ({
+        ...prev,
+        items: closeRunningThinkingItem(prev.items),
+        stage: "done",
+      }));
     } catch (err: any) {
       if (!planningRecovery.current(scope)) return;
       setError(String(err?.message || err));
       void planningRecovery.finish(scope, err?.summary, err?.planningId);
-      setPlannerStream((prev) => ({ ...prev, stage: "error" }));
+      setPlannerStream((prev) => ({
+        ...prev,
+        items: closeRunningThinkingItem(prev.items),
+        stage: "error",
+      }));
     } finally {
       setIsPlanning(false);
     }

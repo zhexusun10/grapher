@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Brain, ChevronDown, ChevronRight, Copy, Check, Sparkles } from "lucide-react";
 import { TranscriptItem } from "../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { useSmoothStreamText } from "../hooks/useSmoothStreamText";
 
 export interface ThinkingCardProps {
   item?: TranscriptItem;
@@ -27,6 +28,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
   }) => {
     const rawContent = (item ? item.content : directContent) || "";
     const isStreaming = item ? item.status === "running" : Boolean(directStreaming);
+    const smoothContent = useSmoothStreamText(rawContent, isStreaming);
 
     // If user explicitly collapses/expands, respect their choice; otherwise auto-expand while streaming
     const [userToggled, setUserToggled] = useState<boolean | null>(null);
@@ -41,7 +43,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       if (isStreaming && isExpanded && !userScrolledUpRef.current && bodyRef.current) {
         bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
       }
-    }, [rawContent, isStreaming, isExpanded]);
+    }, [smoothContent, isStreaming, isExpanded]);
 
     const handleScroll = () => {
       const el = bodyRef.current;
@@ -52,8 +54,9 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
 
     const handleCopy = (e: React.MouseEvent) => {
       e.stopPropagation();
-      if (!rawContent) return;
-      navigator.clipboard.writeText(rawContent).then(() => {
+      const textToCopy = rawContent || smoothContent;
+      if (!textToCopy) return;
+      navigator.clipboard.writeText(textToCopy).then(() => {
         setIsCopied(true);
         setTimeout(() => setIsCopied(false), 1800);
       });
@@ -65,7 +68,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     };
 
     // Calculate approximate token/char stats
-    const charCount = rawContent.length;
+    const charCount = (isStreaming && smoothContent ? smoothContent : rawContent).length;
 
     return (
       <div className={`thinking-card ${isStreaming ? "streaming" : "settled"} ${isExpanded ? "expanded" : "collapsed"} ${className}`}>
@@ -123,8 +126,11 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             className="thinking-card-body"
             onScroll={handleScroll}
           >
-            {rawContent ? (
-              <MarkdownRenderer content={rawContent} isStreaming={isStreaming} className="thinking-markdown" />
+            {smoothContent ? (
+              <div className="thinking-content-container">
+                <MarkdownRenderer content={smoothContent} isStreaming={isStreaming} className="thinking-markdown" />
+                {isStreaming && <span className="thinking-streaming-cursor" />}
+              </div>
             ) : (
               <div className="thinking-shimmer">
                 <span className="shimmer-line" />
@@ -138,4 +144,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
   }
 );
 
+ThinkingCard.displayName = "ThinkingCard";
+
 export default ThinkingCard;
+

@@ -7,7 +7,7 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import {
   Snapshot, PlanRouteType, RepositoryInfo, Config,
-  Graph, Execution, Status, PlanningSummary, emptyGraph
+  Graph, Execution, Status, PlanningSummary, emptyGraph, TranscriptItem
 } from "../../types";
 import { PromptBox } from "../ui/chatgpt-prompt-input";
 import { MarkdownRenderer } from "../MarkdownRenderer";
@@ -17,6 +17,7 @@ import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTranscript } from "../ExecutionTranscript";
 import { PlanningSummaryCard } from "../PlanningSummaryCard";
 import { statusText, phaseText } from "../graph/TaskNode";
+import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 
 interface GraphWorkbenchProps {
   state: Snapshot;
@@ -50,6 +51,14 @@ interface GraphWorkbenchProps {
   failedPlanning?: PlanningSummary | null;
 }
 
+const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean }> = React.memo(
+  ({ content, isStreaming }) => {
+    const smoothText = useSmoothStreamText(content, isStreaming);
+    return <MarkdownRenderer content={smoothText} isStreaming={isStreaming} />;
+  }
+);
+StreamingAssistantBubble.displayName = "StreamingAssistantBubble";
+
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   state,
   routeType,
@@ -82,6 +91,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   tokens,
 }) => {
   const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}`;
+  const isNodeInspection = Boolean(selected);
+  const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   const workbenchRef = useRef<HTMLDivElement>(null);
   const [isResizing, setIsResizing] = useState(false);
   const currentWidthRef = useRef<number>(390);
@@ -92,7 +103,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const resumeAutoScrollFrameRef = useRef<number | null>(null);
   const resetChatScrollFrameRef = useRef<number | null>(null);
   const activeConversationViewRef = useRef(conversationViewKey);
-  const entryTopLockedRef = useRef(true);
+  const entryTopLockedRef = useRef(isNodeInspection);
   const isScrollingToBottomRef = useRef(false);
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
@@ -101,8 +112,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   if (activeConversationViewRef.current !== conversationViewKey) {
     activeConversationViewRef.current = conversationViewKey;
-    entryTopLockedRef.current = true;
-    isUserScrolledUpRef.current = true;
+    entryTopLockedRef.current = isNodeInspection;
+    isUserScrolledUpRef.current = isNodeInspection;
     suppressAutoScrollRef.current = false;
   }
 
@@ -279,7 +290,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!entryTopLockedRef.current && !isUserScrolledUpRef.current && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [effectiveMessages, plannerStream.plannerText, plannerStream.plannerThinking, isPlanning]);
+  }, [effectiveMessages, smoothPlannerText, plannerStream.items, plannerStream.plannerThinking, isPlanning]);
 
   // Initialize width from localStorage directly into CSS variable
   useEffect(() => {
@@ -357,27 +368,78 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const graphKey = `${state.runId || state.graph.originalGoal}:${state.graph.nodes.map((node) => node.name).join("|")}`;
   const graphViewportReady = readyGraphKey === graphKey;
 
+  const hasGraphToolCalled =
+    (plannerStream.items || []).some((t: any) => t.toolName === "node" || t.toolName === "edge") ||
+    (plannerStream.tools || []).some((t: any) => t.toolName === "node" || t.toolName === "edge");
+  const hasGraphContent = state.graph.nodes.length > 0 || hasGraphToolCalled;
+  const showGraphPane = routeType === "graph" && (hasGraphContent || (!isPlanning && state.graph.nodes.length > 0));
+
+  const prevNodesCountRef = useRef(nodes.length);
+  useEffect(() => {
+    if (nodes.length > 0 && nodes.length !== prevNodesCountRef.current) {
+      prevNodesCountRef.current = nodes.length;
+      if (graphFlowRef.current) {
+        void graphFlowRef.current.fitView({ padding: 0.18, duration: 400, minZoom: 0.3, maxZoom: 1.5 });
+      }
+    }
+  }, [nodes.length]);
+
+  const prevMsgCountRef = useRef(effectiveMessages.length);
+  useEffect(() => {
+    if (effectiveMessages.length > prevMsgCountRef.current) {
+      prevMsgCountRef.current = effectiveMessages.length;
+      entryTopLockedRef.current = false;
+      isUserScrolledUpRef.current = false;
+      if (chatScrollRef.current) {
+        chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+      }
+    } else {
+      prevMsgCountRef.current = effectiveMessages.length;
+    }
+  }, [effectiveMessages.length]);
+
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
 
-    entryTopLockedRef.current = true;
-    suppressAutoScrollRef.current = false;
-    isUserScrolledUpRef.current = true;
-    isScrollingToBottomRef.current = false;
-    el.scrollTop = 0;
-    setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
-
-    if (resetChatScrollFrameRef.current !== null) {
-      cancelAnimationFrame(resetChatScrollFrameRef.current);
-    }
-    resetChatScrollFrameRef.current = requestAnimationFrame(() => {
-      resetChatScrollFrameRef.current = null;
-      el.scrollTop = 0;
+    if (selected) {
+      entryTopLockedRef.current = true;
+      suppressAutoScrollRef.current = false;
       isUserScrolledUpRef.current = true;
+      isScrollingToBottomRef.current = false;
+      el.scrollTop = 0;
       setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
-    });
-  }, [conversationViewKey]);
+
+      if (resetChatScrollFrameRef.current !== null) {
+        cancelAnimationFrame(resetChatScrollFrameRef.current);
+      }
+      resetChatScrollFrameRef.current = requestAnimationFrame(() => {
+        resetChatScrollFrameRef.current = null;
+        el.scrollTop = 0;
+        isUserScrolledUpRef.current = true;
+        setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
+      });
+    } else {
+      entryTopLockedRef.current = false;
+      suppressAutoScrollRef.current = false;
+      isUserScrolledUpRef.current = false;
+      isScrollingToBottomRef.current = false;
+      el.scrollTop = el.scrollHeight;
+      setShowScrollBottom(false);
+
+      if (resetChatScrollFrameRef.current !== null) {
+        cancelAnimationFrame(resetChatScrollFrameRef.current);
+      }
+      resetChatScrollFrameRef.current = requestAnimationFrame(() => {
+        resetChatScrollFrameRef.current = null;
+        if (chatScrollRef.current) {
+          chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+        }
+        isUserScrolledUpRef.current = false;
+        setShowScrollBottom(false);
+      });
+    }
+  }, [conversationViewKey, selected]);
 
   useEffect(() => {
     if (routeType !== "graph") setReadyGraphKey("");
@@ -385,14 +447,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   return (
     <section
-      className={`workbench ${isResizing ? "resizing" : ""} ${routeType === "graph" ? "graph-mode" : "dialogue-only-mode"}`}
+      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"}`}
       ref={workbenchRef}
     >
       {/* 左侧/居中对话与日志面板 */}
       <motion.div
-        initial={false}
-        className={`conversation-pane ${routeType === "graph" ? "split" : "full-width"}`}
-        style={routeType === "graph" ? undefined : { width: "100%", maxWidth: "100%" }}
+        layout
+        className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
+        style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
+        transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
         onWheelCapture={releaseEntryTopLock}
         onPointerDownCapture={releaseEntryTopLock}
         onTouchStartCapture={releaseEntryTopLock}
@@ -637,45 +700,83 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   </motion.div>
                 )}
 
-                {/* Planner 工具调用流 */}
-                {plannerStream.tools.map((tool: any) => (
-                  <ToolCallCard
-                    key={tool.id}
-                    item={tool}
-                    onExpandedChange={handleExpandableContentChange}
-                  />
-                ))}
-
-                {/* Planner 实时思考与推理 */}
-                {(plannerStream.plannerThinking || plannerStream.plannerText || (isPlanning && plannerStream.stage === "planning")) && (
+                {/* Planner 顺序流式记录：严格按实际发生时序呈现工具调用、思维链与输出文字 */}
+                {plannerStream.items && plannerStream.items.length > 0 ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-                    {plannerStream.plannerThinking && (
-                      <ThinkingCard
-                        content={plannerStream.plannerThinking}
-                        isStreaming={isPlanning && plannerStream.plannerThinkingActive}
-                        title="思考过程"
-                        defaultExpanded={true}
-                        onExpandedChange={handleExpandableContentChange}
-                      />
-                    )}
-                    {plannerStream.plannerText && (
-                      <motion.div
-                        className="chat-message-row assistant"
-                        initial={{ opacity: 0, y: 8, scale: 0.98 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                      >
-                        <div className="chat-bubble-assistant">
-                          <MarkdownRenderer content={plannerStream.plannerText} isStreaming={isPlanning} />
-                        </div>
-                      </motion.div>
-                    )}
-                    {isPlanning && plannerStream.stage === "planning" && !plannerStream.plannerThinking && !plannerStream.plannerText && (
-                      <div className="stream-card-hint" style={{ padding: "8px 0" }}>
-                        <Workflow size={14} className="spin" style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
-                        正在计算独立 Git worktree 执行批次与验收复审依赖...
-                      </div>
-                    )}
+                    {plannerStream.items.map((item: TranscriptItem, idx: number) => {
+                      const isLast = idx === plannerStream.items.length - 1;
+                      if (item.type === "tool_call") {
+                        return (
+                          <ToolCallCard
+                            key={item.id}
+                            item={item}
+                            onExpandedChange={handleExpandableContentChange}
+                          />
+                        );
+                      }
+                      if (item.type === "thinking") {
+                        return (
+                          <ThinkingCard
+                            key={item.id}
+                            item={item}
+                            isStreaming={isPlanning && item.status === "running"}
+                            title="思考过程"
+                            defaultExpanded={true}
+                            onExpandedChange={handleExpandableContentChange}
+                          />
+                        );
+                      }
+                      if (item.type === "text") {
+                        return (
+                          <motion.div
+                            key={item.id}
+                            className="chat-message-row assistant"
+                            initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                          >
+                            <div className="chat-bubble-assistant">
+                              <StreamingAssistantBubble
+                                content={item.content || ""}
+                                isStreaming={isPlanning && isLast && item.status === "running"}
+                              />
+                            </div>
+                          </motion.div>
+                        );
+                      }
+                      return null;
+                    })}
                   </div>
+                ) : (
+                  (plannerStream.plannerThinking || plannerStream.plannerText || (isPlanning && plannerStream.stage === "planning")) && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                      {plannerStream.plannerThinking && (
+                        <ThinkingCard
+                          content={plannerStream.plannerThinking}
+                          isStreaming={isPlanning && plannerStream.plannerThinkingActive}
+                          title="思考过程"
+                          defaultExpanded={true}
+                          onExpandedChange={handleExpandableContentChange}
+                        />
+                      )}
+                      {smoothPlannerText && (
+                        <motion.div
+                          className="chat-message-row assistant"
+                          initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                        >
+                          <div className="chat-bubble-assistant">
+                            <MarkdownRenderer content={smoothPlannerText} isStreaming={isPlanning} />
+                          </div>
+                        </motion.div>
+                      )}
+                      {isPlanning && plannerStream.stage === "planning" && !plannerStream.plannerThinking && !plannerStream.plannerText && (
+                        <div className="stream-card-hint" style={{ padding: "8px 0" }}>
+                          <Workflow size={14} className="spin" style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
+                          正在计算独立 Git worktree 执行批次与验收复审依赖...
+                        </div>
+                      )}
+                    </div>
+                  )
                 )}
               </div>
 
@@ -815,7 +916,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
       {/* 左右可调节分割器 与 右侧执行拓扑图面板 */}
       <AnimatePresence>
-        {routeType === "graph" && (
+        {showGraphPane && (
           <>
             <motion.div
               key="workbench-resizer"
@@ -823,7 +924,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
+              transition={{ duration: 0.25 }}
               onMouseDown={handleStartResize}
               onDoubleClick={handleResetResizer}
               title="按住左右拖动调节宽度，双击恢复默认"
@@ -834,7 +935,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             <motion.div
               key="graph-pane"
               className="graph-pane"
-              initial={false}
+              initial={{ opacity: 0, x: 40 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 40 }}
+              transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
             >
               <div className="graph-toolbar">
                 <div className="toolbar-left">
@@ -854,20 +958,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               </div>
 
               <div className="graph-canvas">
-                {state.graph.nodes.length === 0 ? (
-                  isPlanning ? (
-                    <div className="graph-empty-state planning">
-                      <div className="empty-icon-orbit">
-                        <Workflow size={32} className="spin" />
-                      </div>
-                      <h3>AI 架构师正在生成有向执行图...</h3>
-                      <p>正在分析代码拓扑、计算独立 Git worktree 并行执行批次与复审边。</p>
-                    </div>
-                  ) : null
-                ) : (
+                {state.graph.nodes.length > 0 && (
                   <>
                     <ReactFlow
-                      key={graphKey}
+                      key={state.runId || "active-plan"}
                       onInit={(instance) => centerGraph(instance, graphKey)}
                       style={{
                         opacity: graphViewportReady ? 1 : 0,

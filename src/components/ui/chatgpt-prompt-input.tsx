@@ -395,7 +395,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               }}
               disabled={!canSubmit}
               className={`prompt-box-send-btn ${canSubmit ? "active" : ""}`}
-              title="发送消息 (Enter)"
               aria-label="发送消息"
             >
               {isBusy || isPreparing ? (

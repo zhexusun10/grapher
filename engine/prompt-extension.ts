@@ -7,7 +7,7 @@ import {
 import { registerWorkspacePaths } from "../backend/resources/workspace-paths.mjs";
 
 export default function (pi: ExtensionAPI) {
-  // Planner owns its restricted inspection tool; Partitioner has no tools.
+  // Planner owns its native bash tool; Partitioner has no tools.
   // The launcher loads this adapter for every role, so execution-only tool
   // overrides and hooks must not register on either planning role.
   if (process.env.GRAPHER_MODE === "planner") return;

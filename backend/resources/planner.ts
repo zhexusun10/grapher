@@ -1,27 +1,8 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync, writeFileSync, lstatSync, realpathSync } from "node:fs";
-import { resolve, relative, isAbsolute, sep } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
 import { registerWorkspacePaths } from "./workspace-paths.mjs";
 import { spawnSync } from "node:child_process";
-
-export function repositoryPath(root: string, input = '.', fileOnly = false) {
-  root = realpathSync(root);
-  if (input === '/workspace' || input.startsWith('/workspace/')) input = root + input.slice('/workspace'.length);
-  const path = resolve(root, input);
-  const child = relative(root, path);
-  if (child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) throw new Error('path is outside this repository');
-  let current = root;
-  for (const part of child.split(sep).filter(Boolean)) {
-    if (part === '.git') throw new Error('Git metadata is not an inspection input');
-    current = resolve(current, part);
-    if (lstatSync(current).isSymbolicLink()) throw new Error('symlinks are not inspection inputs');
-  }
-  const stat = lstatSync(path);
-  if (!stat.isFile() && !stat.isDirectory()) throw new Error('only regular files and directories are readable');
-  if (fileOnly && !stat.isFile()) throw new Error('expected a regular file');
-  return path;
-}
 
 type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; edges: { from: string; to: string; relation: string; feedback: boolean }[] };
 
@@ -54,29 +35,8 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   const paths = registerWorkspacePaths(pi, process.env.GRAPHER_WORKSPACE_ROOT || process.cwd(), { shellCommands: true });
   const repository = paths.root;
   const nativeBash = createBashToolDefinition(repository);
-  pi.registerTool(defineTool({
-    ...nativeBash,
-    label: "Read-only inspection",
-    description: "Execute a read-only bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
-    async execute(id, parameters, signal, onUpdate, ctx) {
-      const command = parameters.command;
-      const writePattern = /(^|\s|;|&|\|)(>|>>|touch|mkdir|rm|rmdir|mv|cp|tee)(\s|$)/;
-      if (writePattern.test(command)) {
-        return {
-          content: [{ type: "text", text: "Write command rejected. Write operations are forbidden in Planner. Please use 'node' to define a task instead of writing directly." }],
-          details: { grapherRejected: true, inspectionRejected: true },
-          isError: true
-        };
-      }
-      return nativeBash.execute(id, parameters, signal, onUpdate, ctx);
-    }
-  }));
-  pi.on("tool_call", async event => {
-    if (event.toolName === "read") {
-      try { repositoryPath(repository, String(event.input.path ?? ""), true); }
-      catch { return { block: true, reason: "Planner may read only regular repository files, without symlinks or Git metadata." }; }
-    }
-  });
+  // Use native bash without write-command filtering.
+  pi.registerTool(defineTool(nativeBash));
   function mutate(change: (graph: Graph) => Diagnostic[] | void) {
     const saved: Graph = JSON.parse(readFileSync(graphPath, "utf8"));
     const graph: Graph = structuredClone(saved);

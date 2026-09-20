@@ -55,29 +55,10 @@ export function createWorkspacePaths(directory, originalRoot = process.env.GRAPH
     if (typeof value !== 'string') return value;
     // Path arguments are paths, not prose: punctuation is part of the filename.
     if (value !== WORKSPACE_PATH && !value.startsWith(WORKSPACE_PATH + '/')) return value;
-    const normalized = posix.normalize(value);
-    if (normalized !== WORKSPACE_PATH && !normalized.startsWith(WORKSPACE_PATH + '/')) {
-      throw new Error(`Workspace path escapes ${WORKSPACE_PATH}`);
-    }
-    return root + normalized.slice(WORKSPACE_PATH.length);
+    // Translate only the prefix; let the filesystem resolve .. and symlinks.
+    return root + value.slice(WORKSPACE_PATH.length);
   };
-  function rejectLiteralEscapes(text) {
-    for (const word of shellWords(text)) {
-      let cursor = 0;
-      while ((cursor = word.value.indexOf(WORKSPACE_PATH, cursor)) >= 0) {
-        const before = word.value[cursor - 1], after = word.value[cursor + WORKSPACE_PATH.length];
-        if ((!before || boundary(before) || before === '=') && boundary(after)) {
-          const normalized = posix.normalize(word.value.slice(cursor));
-          if (normalized !== WORKSPACE_PATH && !normalized.startsWith(WORKSPACE_PATH + '/')) {
-            throw new Error(`Workspace path escapes ${WORKSPACE_PATH}`);
-          }
-        }
-        cursor += WORKSPACE_PATH.length;
-      }
-    }
-  }
   function command(text) {
-    rejectLiteralEscapes(text);
     // A quoted sh -c argument is parsed again by the child shell. Translate at
     // that level first, then quote the entire script for the outer shell.
     const words = shellWords(text);

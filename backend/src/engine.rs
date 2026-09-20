@@ -55,23 +55,6 @@ impl PiRole {
         }
     }
 
-    pub fn timeout_seconds(&self) -> u64 {
-        match self {
-            PiRole::Partitioner => 60,
-            PiRole::Planner => 300,
-            PiRole::NodeAgent => 900,
-            PiRole::Merger => 900,
-        }
-    }
-
-    pub fn timeout_env_var(&self) -> &'static str {
-        match self {
-            PiRole::Partitioner => "PARTITIONER_TIMEOUT_SECONDS",
-            PiRole::Planner => "PLANNER_TIMEOUT_SECONDS",
-            PiRole::NodeAgent => "NODE_AGENT_TIMEOUT_SECONDS",
-            PiRole::Merger => "MERGER_TIMEOUT_SECONDS",
-        }
-    }
 
     pub fn model_env_var(&self) -> &'static str {
         match self {
@@ -112,19 +95,22 @@ impl PiModelConfig {
         let model = std::env::var(role.model_env_var())
             .ok()
             .filter(|m| !m.trim().is_empty())
-            .or_else(|| {
-                if !base_config.model.trim().is_empty() {
-                    Some(base_config.model.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "qwen3.8-flash".to_string());
+            .unwrap_or_else(|| base_config.model.clone());
 
-        let thinking = std::env::var(role.thinking_env_var())
-            .ok()
-            .filter(|t| !t.trim().is_empty())
-            .or_else(|| (role == PiRole::Partitioner).then(|| "off".into()));
+        let thinking = match role {
+            PiRole::Partitioner => {
+                let explicit = std::env::var(role.thinking_env_var())
+                    .ok()
+                    .filter(|t| !t.trim().is_empty());
+                match explicit.as_deref() {
+                    Some("minimal") | Some("low") => explicit,
+                    _ => Some("off".to_string()),
+                }
+            }
+            _ => std::env::var(role.thinking_env_var())
+                .ok()
+                .filter(|t| !t.trim().is_empty()),
+        };
 
         Self { model, thinking }
     }
@@ -307,17 +293,8 @@ pub struct PiRequest<'request> {
     pub system_prompt: Option<&'request str>,
 }
 
-fn execution_budget(role: PiRole) -> (&'static str, Duration) {
-    let seconds = std::env::var(role.timeout_env_var())
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or_else(|| role.timeout_seconds());
-    (role.name(), Duration::from_secs(seconds))
-}
-
 pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Result<String, String> {
-    let (phase, budget) = execution_budget(request.role);
+    let phase = request.role.name();
     let config = request.config;
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
@@ -386,19 +363,19 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
             "--no-context-files",
         ]);
     }
-    let model = if !config.model.trim().is_empty() {
-        Some(config.model.as_str())
-    } else {
-        Some("qwen3.8-flash")
-    };
-    if let Some(model) = model {
-        command.args(["--model", model]);
+    if !config.model.trim().is_empty() {
+        command.args(["--model", config.model.as_str()]);
     }
     if let Some(session_id) = request.session_id {
         command.args(["--session-id", session_id]);
     }
     if !request.extra_args.is_empty() {
         command.args(&request.extra_args);
+    }
+    if request.role == PiRole::Partitioner
+        && !request.extra_args.iter().any(|arg| *arg == "--thinking")
+    {
+        command.args(["--thinking", "off"]);
     }
     if let Some(system_prompt) = request.system_prompt {
         let prompt_path = if Path::new(system_prompt).is_file() {
@@ -513,18 +490,6 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     let mut stderr_tail = String::new();
     let mut exited_at = None;
     loop {
-        if started.elapsed() > budget {
-            let _ = child.kill();
-            let _ = child.wait();
-            on_output(format!(
-                "{}\n",
-                serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "success":false, "timedOut":true, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
-            ));
-            return Err(format!(
-                "{phase} timed out after {} seconds; inspect the saved session before retrying",
-                budget.as_secs()
-            ));
-        }
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok((is_error, line)) => {
                 if is_error {
@@ -674,5 +639,128 @@ pub fn feedback(output: &str) -> Result<bool, String> {
         Some("<ACCEPT>") => Ok(false),
         Some("<REVISE>") => Ok(true),
         _ => Err("Feedback protocol error: final line must be exactly <ACCEPT> or <REVISE>".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn partitioner_model_follows_base_config_model_with_thinking_off() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PARTITIONER_MODEL");
+        std::env::remove_var("PARTITIONER_THINKING");
+
+        let custom_config = Config {
+            repository: "/tmp/fake".into(),
+            model: "anthropic/claude-3-7-sonnet".into(),
+            max_parallel: 4,
+            max_feedback: 3,
+            #[cfg(feature = "fixture")]
+            engine: "pi".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: "node".into(),
+            #[cfg(feature = "fixture")]
+            pi_args: vec![],
+        };
+
+        // Partitioner follows base_config.model, but its thinking is strictly off
+        let partitioner_cfg = PiModelConfig::resolve(PiRole::Partitioner, &custom_config);
+        assert_eq!(partitioner_cfg.model, "anthropic/claude-3-7-sonnet");
+        assert_eq!(partitioner_cfg.thinking, Some("off".to_string()));
+
+        // Planner and NodeAgent should also inherit custom base_config.model
+        let planner_cfg = PiModelConfig::resolve(PiRole::Planner, &custom_config);
+        assert_eq!(planner_cfg.model, "anthropic/claude-3-7-sonnet");
+
+        let node_cfg = PiModelConfig::resolve(PiRole::NodeAgent, &custom_config);
+        assert_eq!(node_cfg.model, "anthropic/claude-3-7-sonnet");
+    }
+
+    #[test]
+    fn partitioner_thinking_is_strictly_off_or_lowest() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PARTITIONER_THINKING");
+
+        let config = Config {
+            repository: "/tmp/fake".into(),
+            model: String::new(),
+            max_parallel: 4,
+            max_feedback: 3,
+            #[cfg(feature = "fixture")]
+            engine: "pi".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: "node".into(),
+            #[cfg(feature = "fixture")]
+            pi_args: vec![],
+        };
+
+        // When base_config.model is empty, model remains empty (no qwen3.8-flash fallback)
+        let cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+        assert_eq!(cfg.model, "");
+        assert_eq!(cfg.thinking, Some("off".to_string()));
+    }
+
+    #[test]
+    fn partitioner_thinking_ignores_high_levels() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let config = Config {
+            repository: "/tmp/fake".into(),
+            model: "some-model".into(),
+            max_parallel: 4,
+            max_feedback: 3,
+            #[cfg(feature = "fixture")]
+            engine: "pi".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: "node".into(),
+            #[cfg(feature = "fixture")]
+            pi_args: vec![],
+        };
+
+        std::env::set_var("PARTITIONER_THINKING", "high");
+        let cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+        assert_eq!(cfg.thinking, Some("off".to_string()));
+
+        std::env::set_var("PARTITIONER_THINKING", "minimal");
+        let cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+        assert_eq!(cfg.thinking, Some("minimal".to_string()));
+
+        std::env::set_var("PARTITIONER_THINKING", "low");
+        let cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+        assert_eq!(cfg.thinking, Some("low".to_string()));
+
+        std::env::remove_var("PARTITIONER_THINKING");
+    }
+
+    #[test]
+    fn partitioner_model_env_override_works_independently() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let config = Config {
+            repository: "/tmp/fake".into(),
+            model: "claude-3-7-sonnet".into(),
+            max_parallel: 4,
+            max_feedback: 3,
+            #[cfg(feature = "fixture")]
+            engine: "pi".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: "node".into(),
+            #[cfg(feature = "fixture")]
+            pi_args: vec![],
+        };
+
+        std::env::set_var("PARTITIONER_MODEL", "custom-partitioner-model");
+        let partitioner_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+        assert_eq!(partitioner_cfg.model, "custom-partitioner-model");
+
+        let planner_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
+        assert_eq!(planner_cfg.model, "claude-3-7-sonnet");
+
+        std::env::remove_var("PARTITIONER_MODEL");
     }
 }

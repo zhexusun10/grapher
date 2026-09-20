@@ -76,10 +76,10 @@ Planner 只有四个工具：
 
 - `node`：创建、更新或删除节点。
 - `edge`：创建、更新或删除边。
-- `read`：读取仓库内普通文件。
-- `bash`：Pi 原生 shell 检查工具；工具层拒绝显式写操作，但它不是完整的只读 shell sandbox。
+- `read`：Pi 原生读取工具，不额外限制仓库范围、符号链接或 Git metadata。
+- `bash`：Pi 原生 shell 工具，不再拦截写操作。
 
-Planner 没有文件 edit/write 工具，也不能启动 Node Agent、管理工作区或参与运行期调度。当前原生 bash 的写保护只拦截显式写命令，不足以作为不可绕过的代码修改隔离；完整权限契约见 [planning-inspection.md](backend/resources/planning-inspection.md)。
+Planner 没有文件 edit/write 工具，也不参与运行期调度。bash 直接操作源目录，文件变化立即生效，不自动备份或回撤；Reject 只拒绝计划，不恢复文件。完整边界见 [planning-inspection.md](backend/resources/planning-inspection.md)。
 
 节点 task 必须自包含目标、约束、职责边界和验收方式。普通依赖边只表达文件状态或执行顺序依赖；逻辑可并行但会大量修改同一文件的工作不应强行并行。
 
@@ -229,7 +229,7 @@ Runtime 先持久化 `PublicationStarted`，再把当前有效节点 heads 合�
 | 角色 | 工具/扩展 | 工作目录与权限 |
 | --- | --- | --- |
 | Partitioner | 无工具、无 skills/extensions | 用户仓库，只做分类 |
-| Planner | `node/edge/read/bash`，仅显式 Grapher extension | 用户仓库，原生 bash，通过工具层正则拦截显式写操作 |
+| Planner | `node/edge/read/bash`，仅显式 Grapher extension | 用户仓库，原生 bash 不拦截写操作；Reject 不回撤文件 |
 | Node Agent | Pi 原生工具，可加载 skills/extensions | Serial 在用户目录；Graph 在独立节点仓库 |
 | Merger | `read/write/edit/bash`，无自动扩展发现 | 用户目录，仅处理最终发布冲突 |
 
@@ -318,7 +318,7 @@ React UI 负责：
 - 用户不能在 Graph 发布期间并发修改目标目录；脏目录会使发布失败。
 - prepare 阶段冲突由人工处理；merger 只处理最终发布冲突。
 - Runtime 不自动恢复被中断的 Execution Instance。
-- Planner 原生 bash 的写保护是启发式显式写拦截，不是完整只读 sandbox；规划后必须检查仓库未被修改。
+- Planner 工具不是 sandbox；所有写入直接生效，Reject 不恢复文件或其他副作用。
 
 ## 11. 架构不变量
 
