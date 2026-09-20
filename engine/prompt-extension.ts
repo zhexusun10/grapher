@@ -1,31 +1,47 @@
+import { createWorkspacePaths } from './workspace-paths.mjs';
+import { registerWorkspaceTools } from './workspace-tools.ts';
 import type { ExtensionAPI } from "../pi/packages/coding-agent/src/index.ts";
 import {
   createBashToolDefinition,
   createLocalBashOperations,
   type BashOperations,
 } from "../pi/packages/coding-agent/src/core/tools/bash.ts";
-import { registerWorkspacePaths } from "../backend/resources/workspace-paths.mjs";
 
 export default function (pi: ExtensionAPI) {
   // Planner owns its native bash tool; Partitioner has no tools.
   // The launcher loads this adapter for every role, so execution-only tool
   // overrides and hooks must not register on either planning role.
   if (process.env.GRAPHER_MODE === "planner") return;
-  const paths = registerWorkspacePaths(pi, process.env.GRAPHER_WORKSPACE_ROOT || process.cwd());
   if (process.env.GRAPHER_MODE === "partition") return;
+  const cwd = process.cwd();
+  const project = process.env.GRAPHER_ORIGINAL_ROOT;
+  const paths = process.env.GRAPHER_EXECUTION_KIND === 'graph' && project
+    ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;
+  const view = (value: any): any => paths ? paths.view(value) : value;
+  if (process.env.GRAPHER_EXECUTION_KIND === 'graph') {
+    if (!project) throw new Error('Graph execution is missing its host-owned project binding');
+    registerWorkspaceTools(pi, cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view);
+    pi.on('before_agent_start', async event => ({
+      // Pi embeds the physical cwd in its generated prompt. Normalize only
+      // path spelling; do not append instructions or change role behavior.
+      systemPrompt: paths!.visible(event.systemPrompt),
+    }));
+    // Normalize model-facing paths only; never change stored files, tool input
+    // contents, provider signatures, or image bytes.
+    pi.on('context', async event => ({ messages: view(event.messages) }));
+    pi.on('tool_result', async event => ({ content: view(event.content), details: view(event.details) }));
+  }
 
   const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();
   const localOps = createLocalBashOperations();
-  const baseBashTool = createBashToolDefinition(paths.root);
+  const baseBashTool = createBashToolDefinition(cwd);
 
   pi.registerTool({
     ...baseBashTool,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      // Preserve native bash semantics. Callers can request errexit/pipefail
+      // explicitly; injecting them changes otherwise valid shell programs.
       const rawCmd = params.command;
-      const cmd = (rawCmd.startsWith("set -E -e -o pipefail") || rawCmd.startsWith("set -e -E -o pipefail"))
-        ? rawCmd
-        : `set -E -e -o pipefail\n${rawCmd}`;
-      params.command = cmd;
 
       // Call-local isolated exit code variable specific to this invocation closure
       let callExitCode: number | null = null;
@@ -37,15 +53,16 @@ export default function (pi: ExtensionAPI) {
         },
       };
 
-      const scopedBashTool = createBashToolDefinition(paths.root, {
+      const scopedBashTool = createBashToolDefinition(cwd, {
         operations: scopedOps,
       });
 
       let result: any;
       let execError: any;
       try {
-        const mappedUpdate = onUpdate ? (update: any) => onUpdate(paths.view(update)) : undefined;
-        result = await scopedBashTool.execute(toolCallId, params, signal, mappedUpdate, ctx ? { ...ctx, cwd: paths.root } : ctx);
+        const mapped = { ...params, command: paths ? paths.command(rawCmd) : rawCmd };
+        result = view(await scopedBashTool.execute(toolCallId, mapped, signal,
+          onUpdate ? update => onUpdate(view(update)) : undefined, ctx));
       } catch (err) {
         execError = err;
       }
@@ -55,28 +72,20 @@ export default function (pi: ExtensionAPI) {
       toolCallExitCodes.set(toolCallId, { exitCode, command: rawCmd, truncated: isTruncated });
 
       if (execError) {
+        if (execError instanceof Error && paths) execError.message = paths.visible(execError.message);
         throw execError;
       }
 
       return {
         ...result,
-        details: {
+        details: view({
           ...result?.details,
           exitCode,
           command: rawCmd,
           truncated: isTruncated,
-        },
+        }),
       };
     },
-  });
-
-  pi.on("tool_call", async event => {
-    if (event.toolName === "bash" && typeof event.input?.command === "string") {
-      const raw = event.input.command;
-      if (!raw.startsWith("set -E -e -o pipefail") && !raw.startsWith("set -e -E -o pipefail")) {
-        event.input.command = `set -E -e -o pipefail\n${raw}`;
-      }
-    }
   });
 
   pi.on("tool_result", async event => {
@@ -92,7 +101,7 @@ export default function (pi: ExtensionAPI) {
       details.command = recorded?.command ?? event.input?.command;
       details.truncated = recorded?.truncated ?? !!(details.truncation as any)?.truncated;
       return {
-        details: paths.view(details),
+        details: view(details),
         isError: event.isError,
       };
     }

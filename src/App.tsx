@@ -11,6 +11,8 @@ import {
 } from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
+import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
+import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
 
 import { TaskNode, type WorkNode } from "./components/graph/TaskNode";
@@ -27,13 +29,6 @@ import { ConfirmModal, type ConfirmModalState } from "./components/modals/Confir
 // Point 4: Code splitting and dynamic imports for non-critical modals
 const SettingsModal = React.lazy(() => import("./components/modals/SettingsModal"));
 const EditorModal = React.lazy(() => import("./components/modals/EditorModal"));
-
-function deduceRouteType(snap: Snapshot): PlanRouteType {
-  if (snap.graph.nodes.length > 1) return "graph";
-  if (snap.graph.nodes.length === 1 && snap.graph.nodes[0].name === "task") return "serial";
-  if (snap.graph.nodes.length === 1) return "graph";
-  return "undecided";
-}
 
 // Point 1: Fast O(N) shallow diff functions to avoid 700ms JSON.stringify serialization
 function areNodesEqual(a: Record<string, NodeState>, b: Record<string, NodeState>): boolean {
@@ -130,6 +125,12 @@ export default function App() {
   const [state, setState] = useState<Snapshot>(emptySnapshot);
   const [config, setConfig] = useState<Config>(defaultConfig);
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
+  const repositoryStatus = useRepositoryStatus(config.repository);
+  const repositoryBlocked = !!config.repository && repositoryStatus?.valid !== true;
+  const requireRepository = async (repository: string) => {
+    const status = await runtimeService.repositoryStatus(repository);
+    if (!status.valid) throw new Error(status.error || "项目绑定已失效，请重新选择目录。");
+  };
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     try {
       const saved = localStorage.getItem("grapher_projects");
@@ -301,6 +302,9 @@ export default function App() {
   };
 
   const control = (action: string, extra: Record<string, unknown> = {}) => run(async () => {
+    if (["approve", "resume", "intervene", "resolve", "retry_publication"].includes(action)) {
+      await requireRepository(state.config?.repository || config.repository);
+    }
     const defaultNode = selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
     const targetNode = extra.node !== undefined ? extra.node : defaultNode;
     const payload: Record<string, unknown> = { ...extra };
@@ -325,6 +329,10 @@ export default function App() {
   ) => {
     const text = val.trim();
     if (!text) return;
+    if (repositoryBlocked) {
+      setError(repositoryStatus?.error || "正在确认项目绑定，请稍后重试。");
+      return;
+    }
     const selectedNode = state.graph.nodes.find((item) => item.name === selected);
     const targetNodeName = selectedNode
       ? selectedNode.name
@@ -344,6 +352,7 @@ export default function App() {
       };
       setMessages((prev) => (prev.length > 0 ? [...prev, newMsg] : [...effectiveMessages, newMsg]));
       run(async () => {
+        await requireRepository(state.config?.repository || config.repository);
         try {
           await runtimeService.control("stop");
         } catch {
@@ -612,6 +621,7 @@ export default function App() {
         return next;
       });
     } else {
+      setRepoInfo(null);
       setConfig((prev) => ({ ...prev, repository: proj.path }));
     }
     const projRuns = workspaceRuns[proj.path] || [];
@@ -910,6 +920,7 @@ export default function App() {
   ) => run(async () => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return;
+    if (config.repository) await requireRepository(config.repository);
     setGoal(targetGoal);
     setError("");
     setIsPlanning(true);
@@ -1485,10 +1496,10 @@ export default function App() {
   }, [busy, activeBackendRunId, activeBackendPhase, observeRunSnapshot]);
 
   useEffect(() => {
-    if (routeType === "serial" && state.phase === "awaiting_approval" && !busy) {
+    if (routeType === "serial" && state.phase === "awaiting_approval" && !busy && !repositoryBlocked) {
       control("approve");
     }
-  }, [routeType, state.phase, busy]);
+  }, [routeType, state.phase, busy, repositoryBlocked]);
 
   const activeProject = useMemo(() => {
     return projects.find((p) => p.path === config.repository) || (repoInfo?.path === config.repository ? {
@@ -1504,7 +1515,7 @@ export default function App() {
   const publishing = state.phase === "publishing" || state.phase === "merging";
   const publicationFailed = state.phase === "publication_failed";
   const active = publishing || publicationFailed || Object.values(state.nodes).some((node) => node.status === "running");
-  const locked = busy || !!recoveredPlanning;
+  const locked = busy || !!recoveredPlanning || repositoryBlocked;
 
   // 自动出队并派发排队跟进的 Follow-up 指令
   const prevActiveRef = useRef(active);
@@ -1712,6 +1723,13 @@ export default function App() {
       />
 
       <main className="main">
+        {repositoryBlocked && (
+          <div className="background-run-banner" role="alert">
+            <span>{repositoryStatus?.error || "正在确认项目绑定…"} <code>{config.repository}</code></span>
+            <button type="button" onClick={handleOpenProject} disabled={busy}>重新选择目录</button>
+            {active && <button type="button" onClick={() => control("cancel")} disabled={busy}>停止执行</button>}
+          </div>
+        )}
         {activeBackendRunId &&
           ["running", "publishing", "merging"].includes(activeBackendPhase ?? "") &&
           state.runId !== activeBackendRunId && (
@@ -1750,7 +1768,7 @@ export default function App() {
               goal={goal}
               setGoal={setGoal}
               onPlanGoal={handlePlanGoal}
-              isBusy={busy || isPlanning}
+              isBusy={busy || isPlanning || repositoryBlocked}
             />
           ) : (
             <motion.div
@@ -1770,7 +1788,7 @@ export default function App() {
                 runId={state.runId}
                 publication={state.publication}
                 mergers={state.mergers ?? []}
-                busy={busy}
+                busy={busy || repositoryBlocked}
                 onRetry={() => control("retry_publication")}
               />
 
@@ -1846,7 +1864,7 @@ export default function App() {
         onClose={() => setModal(null)}
         state={state}
         config={config}
-        busy={busy}
+        busy={busy || repositoryBlocked}
         onAdjustPlan={() => setModal("editor")}
         onApprove={() => control("approve")}
       />

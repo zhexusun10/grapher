@@ -2,8 +2,10 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { root, source, verifyBaseline } from "../scripts/pi-baseline.mjs";
+import { configureAgentDir } from "./agent-dir.mjs";
 
 try {
+  configureAgentDir();
   verifyBaseline();
   const child = spawn(process.execPath, [
     join(source, "node_modules/tsx/dist/cli.mjs"),

@@ -21,6 +21,8 @@ async function request<T>(command: string, body: Record<string, unknown> = {}, s
 
 export const runtimeService = {
   bootstrap: () => request<Bootstrap>("bootstrap"),
+  repositoryStatus: (repository: string, signal?: AbortSignal) =>
+    request<{ repository: string; valid: boolean; error: string | null }>("repository_status", { repository }, signal),
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
   history: (runId: string) => request<Snapshot>("history", { runId }),
   loadRun: async (runId: string) => {

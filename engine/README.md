@@ -9,7 +9,8 @@ Pi 是 Grapher 唯一的生产 Execution Instance Engine。一次模型执行称
 - `engine/pi-lock.json`：锁定 upstream commit、package lock 和模型目录校验和。
 - `engine/model-data/`：由 upstream hydration 流程产生的模型目录构建输入，不是 Grapher 自行维护的 provider 实现。
 - `engine/provider-host.ts`：在独立进程中调用 upstream `ModelRuntime`。
-- `backend/src/engine.rs`：拥有进程组、角色配置、超时、取消、JSON 事件消费和 Execution Instance 生命周期。
+- `backend/src/engine.rs`：拥有进程组、角色配置、取消、JSON 事件消费和 Execution Instance 生命周期。
+- `backend/src/native.rs`：宿主启动策略、Graph 映射能力门槛、专用认证目录和旧 lease 检查。
 - `backend/src/provider_auth.rs`：Provider/Auth Adapter 的本地 IPC 桥接。
 
 Grapher 拥有图编译、调度、工作区、sandbox、发布和事件记录；Pi 拥有模型调用及 provider/auth 能力。Rust 后端和浏览器不读取或保存 Pi 的 token/key。
@@ -40,13 +41,17 @@ npm run pi:build
 | Node Agent | 开放 Pi 原生工具，允许受信工作区的 skills/extensions |
 | Merger | 固定冲突修复 prompt 和工具，不加载项目 context/自动扩展 |
 
-生产入口始终为 `engine/entrypoint.mjs`。历史配置中的 command/args 只在 `fixture` 测试构建可注入，不能选择另一生产引擎。
+生产入口为安装目录内的 `engine/entrypoint.mjs`，通过宿主 Node 启动锁定 Pi。Planner/Partitioner/Serial/Merger 在源项目真实绝对路径执行，复用宿主 PATH、HOME、TMPDIR、原生程序与外部文件。会话与 Planner 编译器均使用真实宿主路径。源目录角色保持原生工具行为；Graph 路径适配及呈现规则见下文。历史配置中的 command/args 只在 `fixture` 测试构建可注入。
+
+**Graph 路径统一**：文件工具映射源项目路径；bash 转换可识别的完整项目路径字面量，模型侧提示、上下文、工具结果与流式输出将当前节点物理路径规范为源项目路径。宿主原生执行、外部脚本及 Seatbelt 保护保留。脚本文件内部硬编码路径和程序动态拼接路径仍不透明映射；这不是内核目录重映射。完整边界见 [native-execution.md](native-execution.md)。
+
+Graph 首次执行将经过 baseline 校验的 Pi 及已安装依赖复制到源项目外，一份副本供本 backend 的节点共享，解决自托管与目录保护冲突。节点只能读取这份引擎。无需密码或特权组件；没有 Docker/VM/chroot 后备路径。完整逻辑与验证见 [native-execution.md](native-execution.md)。
 
 后端会清除继承的 `PI_MODEL`、`PI_THINKING`、`PI_PROVIDER`、`PI_REASONING_LEVEL`、`PI_SESSION_ID` 和 `PI_SESSION_FILE`，再按角色显式传入模型、thinking、session 和 `GRAPHER_MODE`。
 
 ## Provider/Auth Adapter
 
-Adapter 支持 upstream provider catalog、login、poll、交互响应、cancel 和 logout。长期凭据及刷新逻辑留在 upstream `ModelRuntime`；浏览器只接收非敏感状态并提交当前认证交互所需输入。
+Adapter 支持 upstream provider catalog、login、poll、交互响应、cancel 和 logout。长期凭据及刷新逻辑留在 upstream `ModelRuntime`；浏览器只接收非敏感状态并提交当前认证交互所需输入。宿主 Adapter、`npm run pi` 和原生执行共享专用 `~/.grapher/pi-agent`（或 `PI_CODING_AGENT_DIR`）。不读取或自动复制旧 `~/.pi/agent` 凭据。
 
 修改 provider/auth 边界时，应同时验证：
 
@@ -64,7 +69,7 @@ npm run test:http
 3. 仅使用显式目标 SHA 更新 submodule；不要使用启动时 `git pull` 或 `submodule update --remote`。
 4. 使用新 upstream 的 lockfile 安装依赖并运行模型数据 hydration。
 5. 更新 `engine/pi-lock.json`、`engine/model-data/` 和父仓库 gitlink。
-6. 运行 setup、verify、offline build、CLI smoke、后端测试、HTTP/UI 测试和 sandbox 测试。
+6. 运行 setup、verify、offline build、CLI smoke、后端测试、HTTP/UI 测试和 `npm run test:native`；后者包含两个实际 Pi CLI 经生产 launcher 执行工具及绝对脚本的检查。
 7. 若使用 fork commit，必须先推送到可公开获取的 remote，再更新 `.gitmodules` 并用全新 clone 验证。
 
 基线更新、适配层修改和校验数据应在同一变更中提交。任何构建或合约测试失败都不能标记为可发布。

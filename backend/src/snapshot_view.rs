@@ -35,14 +35,18 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         };
         events.push(value);
     }
-    Ok(json!({
+    let mut metadata = json!({
         "runId": state.run_id, "planningId": state.planning_id, "planning": state.planning,
         "graph": state.graph, "config": state.config, "plan": state.plan, "nodes": state.nodes,
         "executions": state.executions.iter().map(execution_metadata).collect::<Vec<_>>(),
         "mergers": state.mergers.iter().map(execution_metadata).collect::<Vec<_>>(),
         "publication": state.publication, "events": events, "approved": state.approved,
         "paused": state.paused, "phase": state.phase, "base": state.base, "feedbackCounts": state.feedback_counts
-    }))
+    });
+    if let Some(plan_type) = &state.plan_type {
+        metadata["planType"] = json!(plan_type);
+    }
+    Ok(metadata)
 }
 
 pub fn execution_page(

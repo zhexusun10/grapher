@@ -1,4 +1,5 @@
 pub mod compiler;
+pub mod native;
 pub mod engine;
 #[cfg(feature = "fixture")]
 pub mod fixture;

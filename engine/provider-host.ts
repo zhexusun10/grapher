@@ -3,7 +3,9 @@ import { createInterface } from "node:readline";
 import { ModelRuntime } from "../pi/packages/coding-agent/src/index.ts";
 import { ProviderAuthAdapter } from "./provider-auth-adapter.mjs";
 import { verifyBaseline } from "../scripts/pi-baseline.mjs";
+import { configureAgentDir } from "./agent-dir.mjs";
 
+configureAgentDir();
 verifyBaseline();
 const adapter = new ProviderAuthAdapter((options: Parameters<typeof ModelRuntime.create>[0]) => ModelRuntime.create(options));
 const input = createInterface({ input: process.stdin, terminal: false });

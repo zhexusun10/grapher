@@ -1,7 +1,9 @@
 import { realpathSync } from 'node:fs';
-import { posix, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
-// Workspace path is now dynamically constructed based on the original repository root
+import { pathToFileURL } from 'node:url';
+
+// Explicit tool adaptation, not an operating-system mount namespace.
 
 // A per-agent namespace. Never create a shared /workspace symlink: concurrent
 // agents must map the same visible path to different checkouts.
@@ -30,11 +32,14 @@ function shellWords(text) {
 }
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 
-export function createWorkspacePaths(directory, originalRoot = process.env.GRAPHER_ORIGINAL_ROOT || process.env.GRAPHER_WORKSPACE_ROOT || directory) {
+export function createWorkspacePaths(directory, originalRoot = directory, sourceAlias = originalRoot) {
   const root = realpathSync(directory);
-  const base = realpathSync(originalRoot);
-  const WORKSPACE_PATH = `${posix.dirname(base)}/workspace/${posix.basename(base)}`;
+  // Rust canonicalizes the binding before entering Seatbelt; the source itself
+  // is intentionally inaccessible here. Do not stat it from the node.
+  const base = resolve(originalRoot);
+  const WORKSPACE_PATH = base;
   const aliases = [...new Set([resolve(directory), root])].sort((a, b) => b.length - a.length);
+  const projects = [...new Set([base, resolve(sourceAlias)])].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s/"'`<>:;,&|()\[\]{}]/.test(c);
   function replace(text, source, replacement) {
     if (typeof text !== 'string') return text;
@@ -45,12 +50,24 @@ export function createWorkspacePaths(directory, originalRoot = process.env.GRAPH
       output += text.slice(cursor, at);
       const after = at + source.length;
       const end = boundary(text[after]) || (text[after] === '.' && (text[after + 1] === undefined || /\s/.test(text[after + 1])));
-      const valid = (at === 0 || boundary(text[at - 1]) || text[at - 1] === '=') && end;
+      const valid = (at === 0 || boundary(text[at - 1]) || text[at - 1] === '=' || text[at - 1] === '\\') && (end || text.slice(after, after + 3).toLowerCase() === '%2f' || text.slice(after, after + 2) === '\\/');
       output += valid ? replacement : source;
       cursor = at + source.length;
     }
   }
-  const visible = text => aliases.reduce((value, alias) => replace(value, alias, WORKSPACE_PATH), text);
+  const spellings = [
+    value => value,
+    value => JSON.stringify(value).slice(1, -1),
+    value => value.replaceAll('/', '\\/'),
+    value => value.replace(/[^a-zA-Z0-9_./-]/g, character => `\\${character}`),
+    value => value.replaceAll("'", "'\\''"),
+    value => pathToFileURL(value).href,
+    value => encodeURI(value),
+    value => encodeURIComponent(value),
+  ];
+  const replacements = [...new Map(aliases.flatMap(alias => spellings.map(encode => [encode(alias), encode(base)]))).entries()]
+    .sort(([a], [b]) => b.length - a.length);
+  const visible = text => replacements.reduce((value, [alias, project]) => replace(value, alias, project), text);
   const physical = value => {
     if (typeof value !== 'string') return value;
     // Path arguments are paths, not prose: punctuation is part of the filename.
@@ -58,7 +75,7 @@ export function createWorkspacePaths(directory, originalRoot = process.env.GRAPH
     // Translate only the prefix; let the filesystem resolve .. and symlinks.
     return root + value.slice(WORKSPACE_PATH.length);
   };
-  function command(text) {
+  function mapCommand(text, WORKSPACE_PATH) {
     // A quoted sh -c argument is parsed again by the child shell. Translate at
     // that level first, then quote the entire script for the outer shell.
     const words = shellWords(text);
@@ -69,7 +86,7 @@ export function createWorkspacePaths(directory, originalRoot = process.env.GRAPH
         if (!words[j].value.includes('c')) continue;
         const script = words[j + 1];
         if (script?.literal && script.value.includes(WORKSPACE_PATH)) {
-          replacements.push({ ...script, replacement: shellQuote(command(script.value)) });
+          replacements.push({ ...script, replacement: shellQuote(mapCommand(script.value, WORKSPACE_PATH)) });
           i = j + 1;
         }
         break;
@@ -80,9 +97,18 @@ export function createWorkspacePaths(directory, originalRoot = process.env.GRAPH
     // expansion characters. Only translate literal workspace paths, not names
     // such as /workspace-other.
     let result = '', quote = null;
+    const parentheses = [];
     for (let i = 0; i < text.length; i++) {
       const c = text[i];
       if (c === '\\' && quote !== "'") { result += text.slice(i, i + 2); i++; continue; }
+      // $(...) has its own shell quoting context even inside double quotes.
+      if (quote !== "'" && c === '$' && text[i + 1] === '(') {
+        parentheses.push(quote); quote = null; result += '$('; i++; continue;
+      }
+      if (!quote && c === '(') { parentheses.push(null); result += c; continue; }
+      if (!quote && c === ')' && parentheses.length) {
+        quote = parentheses.pop(); result += c; continue;
+      }
       if (text.startsWith(WORKSPACE_PATH, i) && (i === 0 || boundary(text[i - 1]) || text[i - 1] === '=') && boundary(text[i + WORKSPACE_PATH.length])) {
         result += quote === "'" ? root.replaceAll("'", "'\\''") : quote === '"' ? root.replace(/[\\$`"]/g, '\\$&') : "'" + root.replaceAll("'", "'\\''") + "'";
         i += WORKSPACE_PATH.length - 1;
@@ -93,38 +119,35 @@ export function createWorkspacePaths(directory, originalRoot = process.env.GRAPH
     }
     return result;
   }
+  function command(text) {
+    // Preserve literal shell arguments with escaped spaces/quotes in the source
+    // prefix. Only re-quote complete literal path/assignment tokens; never eval.
+    const edits = [];
+    for (const word of shellWords(text)) {
+      if (!word.literal || text.slice(word.start, word.end).includes('\n')) continue;
+      const assignment = word.value.match(/^([A-Za-z_][A-Za-z_0-9]*=|--[A-Za-z_][A-Za-z_0-9-]*=)(.*)$/s);
+      const prefix = assignment?.[1] ?? '';
+      const value = assignment?.[2] ?? word.value;
+      const project = projects.find(project => value === project || value.startsWith(project + '/'));
+      if (!project) continue;
+      // Unquoted globs must retain glob semantics; the scanner below handles them.
+      if (/[*?\[\]{}]/.test(value)) continue;
+      edits.push({ ...word, replacement: prefix + shellQuote(root + value.slice(project.length)) });
+    }
+    for (const edit of edits.reverse()) text = text.slice(0, edit.start) + edit.replacement + text.slice(edit.end);
+    return projects.reduce((value, project) => mapCommand(value, project), text);
+  }
   function view(value) {
     if (typeof value === 'string') return visible(value);
     if (Array.isArray(value)) return value.map(view);
     if (value && typeof value === 'object') {
       // Opaque provider signatures and image bytes must survive context mapping.
       if (value.type === 'image' || value.type === 'thinking' || value.type === 'redactedThinking') return value;
-      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [visible(key),
         ['signature', 'textSignature', 'thinkingSignature', 'id', 'toolCallId'].includes(key) ? item : view(item),
       ]));
     }
     return value;
   }
   return { root, visible, physical, command, view, WORKSPACE_PATH };
-}
-
-export function registerWorkspacePaths(pi, directory, { shellCommands = true, originalRoot } = {}) {
-  const paths = createWorkspacePaths(directory, originalRoot);
-  pi.on('before_agent_start', async event => ({ systemPrompt: paths.visible(event.systemPrompt) }));
-  // Covers user prompts, resumed conversation and tool results before model input.
-  pi.on('context', async event => ({ messages: paths.view(event.messages) }));
-  pi.on('tool_call', async event => {
-    try {
-      const input = event.input;
-      if (shellCommands && event.toolName === 'bash' && typeof input.command === 'string') input.command = paths.command(input.command);
-      for (const field of ['path', 'cwd', 'directory']) {
-        if (typeof input[field] === 'string') input[field] = paths.physical(input[field]);
-      }
-      if (Array.isArray(input.paths)) input.paths = input.paths.map(path => paths.physical(path));
-    } catch (error) {
-      return { block: true, reason: error instanceof Error ? error.message : String(error) };
-    }
-  });
-  pi.on('tool_result', async event => ({ content: paths.view(event.content), details: paths.view(event.details) }));
-  return paths;
 }

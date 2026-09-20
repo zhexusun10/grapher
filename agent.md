@@ -51,7 +51,7 @@ Grapher 不运行一个持续在线的 LLM Coordinator。Planner 完成后，调
 | `backend/src/graph_merge.rs` | 最终发布与冲突 merger |
 | `backend/src/engine.rs` | Pi 进程、角色配置、超时和反馈协议 |
 | `backend/src/provider_auth.rs` | Provider/Auth Adapter 的本地进程桥接 |
-| `backend/src/sandbox.rs` | Graph 节点的 macOS Seatbelt 路径策略 |
+| `backend/src/native.rs` | 宿主原生入口、映射能力门槛与认证目录 |
 | `backend/src/store.rs` | SQLite append-only 事件存储 |
 | `backend/src/server.rs` | 本地 HTTP API、规划流程和 runtime driver |
 | `engine/` | 锁定 Pi 入口、模型数据与适配层 |
@@ -181,7 +181,7 @@ backend -----/                 |
 
 ### Serial
 
-唯一节点名为 `task` 的 Serial run 直接在用户目录执行。执行完成后 Workspace Runtime 保存快照，不进入整图发布阶段。
+Partitioner 明确选择 Serial 后，唯一 `task` 节点直接在用户目录执行。运行模式单独持久化；Planner 生成的单个 `task` 节点仍按 Graph 隔离。旧事件没有模式字段时保留旧版按图形状判断的行为。Serial 完成后保存快照，不进入整图发布阶段。
 
 ### Graph
 
@@ -195,7 +195,7 @@ Graph 节点位于：
 
 工作区流程：
 
-1. 宿主把基线放入 `refs/grapher/base` 和 `refs/grapher/heads/<sha>`。
+1. Planner 完成并批准后，宿主将源目录当前非忽略文件变更提交为基线，再放入 `refs/grapher/base` 和 `refs/grapher/heads/<sha>`；节点工作区随后才分配。
 2. 节点仓库通过 `file://` fetch 基线和父节点 refs。
 3. 多个父依赖在节点执行前由宿主合并。
 4. 节点完成后提交工作区修改。
@@ -233,18 +233,18 @@ Runtime 先持久化 `PublicationStarted`，再把当前有效节点 heads 合�
 | Node Agent | Pi 原生工具，可加载 skills/extensions | Serial 在用户目录；Graph 在独立节点仓库 |
 | Merger | `read/write/edit/bash`，无自动扩展发现 | 用户目录，仅处理最终发布冲突 |
 
-Graph Node Agent 在生产环境通过 macOS `/usr/bin/sandbox-exec` 启动：
+生产入口已改为宿主 Node 启动固定 Pi，Docker/容器实现已删除：
 
-- 当前节点仓库可读写。
-- 用户源目录、其他节点目录和外置 shadow Git metadata 禁止读写。
-- 工作区父目录只开放路径定位所需 metadata，不允许枚举内容。
-- 其他宿主路径、网络和环境认证按宿主权限开放。
+- Planner、Partitioner、Serial 和 Merger 在源项目真实绝对路径执行；宿主 PATH、HOME、TMPDIR、外部文件与原生工具直接可用。
+- Graph 文件工具映射源项目路径，bash 转换可识别的完整项目路径字面量；模型侧输出规范为统一源项目路径。脚本文件内部硬编码路径和程序动态拼接路径不透明映射，直接越界访问由 Seatbelt 拒绝。
+- Planner 写入立即生效，Reject 不回撤。批准后快照再分配工作区的代码与回归保留。
+- 文件写入内容和已有脚本不改写；Graph 的命令字面量与模型侧路径呈现由适配器处理（不是通用内核映射）。Planner 编译器使用宿主 Rust binary；会话使用真实独立目录，认证使用专用 Pi 配置目录。Graph 引擎在源外准备一份共享只读运行副本，保护源目录时不阻断自身。
+- 当前取消仅清理进程组，不能声称覆盖已脱离的后代或外部服务；完整后台写入屏障与崩溃恢复仍未验证。
+- 检测到旧执行器 lease 时拒绝后端启动，不调用旧执行器或删除记录；必须先确认旧执行已经停止。
 
-这是项目路径隔离，不是恶意代码容器或网络沙箱。缺少 `sandbox-exec` 时生产 Graph 节点必须失败；Serial、Planner 和 merger 不使用该 Graph profile。
+完整逻辑、验证与边界见 [native-execution.md](engine/native-execution.md)。
 
-为保证 Planner 能在分配任务时提供统一的文件路径，底层环境通过 `workspace-paths.mjs` 适配层在 Agent 侧实现了一个与原宿主路径平行的动态虚拟命名空间。无论底层的真实物理隔离检出（checkout）路径位于何处，Agent （包括 Partitioner、Planner、Node Agent 和 Merger）看到的项目根目录始终会被统一映射为 `<宿主项目父目录>/workspace/<项目名>`（例如原始项目在 `/Users/jerry/Desktop/grapher`，映射后统一为 `/Users/jerry/Desktop/workspace/grapher`）。此映射存在于工具和上下文层面（自动替换请求中的路径并改写 Bash 命令等），不依赖系统级的挂载（mount）或全局软链接（symlink）。由于这个虚拟路径的父级前缀与宿主环境一致，Agent 也能借此在需要时利用原生的 bash 命令通过绝对路径（如 `/Users/jerry/Desktop`）合法探索并调用未被屏蔽的外部文件。
-
-Node Agent 可加载工作区 skills/extensions，因此 Graph 模式需要这些文件已经提交到仓库；未跟踪文件不会进入独立节点仓库。
+Node Agent 可加载工作区 skills/extensions。批准时会将新增非忽略文件纳入基线；Git 忽略的未跟踪依赖文件不会进入快照。共享 HOME/临时目录中的文件保留，但不受 Git 快照和节点版本隔离管理。
 
 ## 7. Pi、模型与认证
 
@@ -261,7 +261,7 @@ MERGER_MODEL      / MERGER_THINKING      / MERGER_TIMEOUT_SECONDS
 
 Partitioner 默认 `thinking=off`。后端启动 Pi 前会移除继承的 `PI_MODEL`、`PI_THINKING`、`PI_PROVIDER`、`PI_REASONING_LEVEL`、`PI_SESSION_ID` 和 `PI_SESSION_FILE`，再显式设置本次角色配置。
 
-Provider/Auth Adapter 委托 upstream `ModelRuntime` 完成 provider catalog、登录、轮询、交互响应、登出和凭据管理。Rust 与浏览器不读取或保存 Pi 的 token/key。
+Provider/Auth Adapter 委托 upstream `ModelRuntime` 完成 provider catalog、登录、轮询、交互响应、登出和凭据管理。Rust 与浏览器不读取或保存 Pi 的 token/key。宿主 Adapter、交互 `npm run pi` 和原生执行共享专用 `~/.grapher/pi-agent`（可由 `PI_CODING_AGENT_DIR` 覆盖），旧凭据不自动迁移。
 
 ## 8. 持久化与恢复
 
@@ -312,8 +312,8 @@ React UI 负责：
 
 - 同一数据目录只允许一个 Grapher Runtime 持有文件锁。
 - 当前产品面向本机单活动 Graph，不支持远程节点或多引擎。
-- Graph 节点的生产路径隔离依赖 macOS Seatbelt。
-- 对 Grapher 自身执行 Graph 任务时，宿主安装和 `GRAPHER_DATA_DIR` 必须位于目标仓库之外，否则路径策略会拒绝执行引擎或会话文件。
+- 当前验证 macOS 原生 Graph 入口和文件工具映射；不提供任意子进程透明路径重定向。
+- 源/兄弟/session 的普通直接及符号链接写入拒绝已验证；间接服务、硬链接、跨进程描述符等不构成已证明的恶意租户隔离。
 - 不自动清理历史节点工作区，也不自动安装目标项目依赖。
 - 用户不能在 Graph 发布期间并发修改目标目录；脏目录会使发布失败。
 - prepare 阶段冲突由人工处理；merger 只处理最终发布冲突。

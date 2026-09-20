@@ -38,6 +38,7 @@ pub fn merge_graph(
     heads: &[String],
     mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
+    workspace::validate_binding(repository)?;
     if let Some(head) = pending(repository) {
         if !heads.contains(&head) {
             return Err(

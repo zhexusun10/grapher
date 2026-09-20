@@ -6,15 +6,17 @@ Grapher 是本地 Agent Runtime：它把用户目标路由为单节点任务或�
 
 系统边界与运行时语义见 [agent.md](agent.md)。
 
+Docker/容器执行实现已移除，当前执行入口为宿主原生 Pi。Graph 文件工具映射统一源项目路径，bash 转换完整项目路径字面量，模型侧提示与工具输出使用统一项目路径。Seatbelt 保护源目录、兄弟工作区和其他 session；脚本文件内部硬编码路径及程序动态拼接路径仍不透明映射。完整逻辑、取舍与验证见 [原生执行实现说明](engine/native-execution.md)。
+
 ## 环境要求
 
-- macOS：生产 Graph 节点依赖 `/usr/bin/sandbox-exec`；缺少它时 Graph 执行会拒绝启动。
+- macOS 与系统自带 sandbox-exec：目前验证此平台的原生执行与路径保护；Linux/Windows 后端尚未验证。
 - Node.js 22.19+
 - Rust stable
 - Git、npm
 - 可用的 Pi provider 认证和网络环境
 
-Pi 以锁定 commit 的 submodule 提供，不使用全局 Pi 替代。基线和同步流程见 [engine/README.md](engine/README.md)。
+Pi 以锁定 commit 的 submodule 提供，不使用全局 Pi 替代。基线和同步流程见 [engine/README.md](engine/README.md)。原生入口不会退回其他执行器，访问策略或运行副本准备失败时明确报错。
 
 ## 安装与启动
 
@@ -55,6 +57,8 @@ npm start
 
 普通文件夹通过 `.grapher/shadow_repos/` 中的外置 Git metadata 工作，项目目录不会增加 `.git`。
 
+Planner 已落地的文件不会因 Reject 回滚。批准（包括 Serial 自动批准）会暂存并提交源目录当前变更，包含用户此前未提交的修改，并改变暂存状态。原绑定目录不存在或不可访问时，界面显示失效，后端拒绝执行；重新选择目录建立新绑定即可，不搜索、迁移或重写旧绝对路径。切换查看其他项目不会修改后台 run 的绑定。
+
 ### 独立节点
 
 Graph 的普通依赖图不要求整体连通，可以包含多个互不相连的 DAG component。没有 incoming 或 outgoing dependency edge 的节点是合法的独立节点；它同时出现在 `roots` 和 `terminals` 中，依赖并发槽直接执行。Runtime 最终发布各 terminal 的有效 head；依赖祖先已包含在下游 terminal 的 Git 历史中，而独立节点自身就是 terminal，因此它的文件结果不会因为没有边而被忽略。
@@ -76,6 +80,7 @@ Edge 只表示真实的文件状态或执行顺序依赖。不要仅为了让图
 | --- | --- |
 | `GRAPHER_PORT` | 后端端口，默认 `1421` |
 | `GRAPHER_DATA_DIR` | SQLite、会话、规划和 shadow repository 数据目录 |
+| `PI_CODING_AGENT_DIR` | 共享 Pi 配置/认证目录，默认 `~/.grapher/pi-agent` |
 | `PARTITIONER_MODEL` | 覆盖 Partitioner 模型 |
 | `PLANNER_MODEL` | 覆盖 Planner 模型 |
 | `NODE_AGENT_MODEL` | 覆盖执行节点模型 |
@@ -91,7 +96,7 @@ Partitioner 模型跟随全局配置（或由 `PARTITIONER_MODEL` 覆盖）；�
 
 ```text
 backend/src/       Rust Compiler、Runtime、Workspace、HTTP API、SQLite
-backend/resources/ Partitioner/Planner prompts 与只读检查契约
+backend/resources/ Partitioner/Planner prompts 与工具权限契约
 engine/            锁定 Pi 入口、Provider/Auth host、模型数据
 src/               React UI 与 HTTP client
 scripts/           开发、Pi 基线和 HTTP/UI 回归脚本
@@ -144,14 +149,17 @@ node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-fea
 cargo build --release --manifest-path backend/Cargo.toml
 ```
 
-真实 macOS sandbox 和 Git 发布测试：
+原生入口、工具、映射实验和 Git 发布测试：
 
 ```sh
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --test sandbox -- --nocapture
+npm run test:native
+npm run test:extensions
+npm run test:bindings
+npm run probe:native-mapping
 node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --test graph_merge
 ```
 
-`fixture` 测试使用确定性执行器，不调用真实模型，也不能证明生产 sandbox 有效。真实模型认证和语义质量需要在用户自己的 provider 环境中验证。
+`fixture` 测试使用确定性执行器，不调用真实模型，也不能证明透明路径映射有效。`probe:native-mapping` 退出码 0 表示预期反例复现，报告仍明确 `contractSatisfied: false`。真实模型认证和语义质量需要在用户自己的 provider 环境中验证。
 
 ## Benchmark
 
@@ -168,8 +176,11 @@ npm run test:benchmark            # grader 回归，不调用模型
 ## 已知约束
 
 - 当前只支持一个活动 Graph 和本地执行，不支持远程节点或多执行引擎。
-- Graph 节点路径隔离依赖 macOS Seatbelt；它不是容器或网络隔离。
-- 对 Grapher 自身运行 Graph 任务时，需要从目标仓库外的另一份安装启动，并将 `GRAPHER_DATA_DIR` 放在目标仓库外。
+- Pi 文件工具及 bash 完整路径字面量映射项目路径；脚本文件内部写死的源项目路径或程序动态拼接路径可能被拒绝，不会自动重定向。
+- 当前源目录角色使用宿主环境，HOME/全局工具的修改会影响用户。进程组取消不能保证清理已脱离的后代，完整后台进程和崩溃恢复尚未验证。
+- 批准执行时会提交源目录当前的非忽略文件变更，作为 planner 完成后的节点基线；被 Git 忽略的未跟踪文件不随快照传播。共享 HOME/临时文件不具备节点快照的版本隔离。
+- 若数据目录存在旧执行器的未清理 lease，后端拒绝启动；需要先用旧版本停止对应执行并确认没有后台写入。新版本不会调用旧执行器或删除这些记录。
+- 认证目录改为 `~/.grapher/pi-agent`；旧 `~/.pi/agent` 凭据不自动迁移，可重新登录或显式设置 `PI_CODING_AGENT_DIR`。
 - 暂停不会强杀活动 execution；等待其结束后才能介入。
 - 后端重启不会恢复旧模型会话，中断任务会标记失败并暂停。
 - 用户目录在发布期间不能并发修改；检测到脏状态会保留结果并进入发布失败。
@@ -179,7 +190,8 @@ npm run test:benchmark            # grader 回归，不调用模型
 
 - [系统架构与不变量](agent.md)
 - [Pi 基线、适配边界与升级流程](engine/README.md)
-- [Planner 只读检查权限](backend/resources/planning-inspection.md)
+- [原生执行与路径映射完整说明](engine/native-execution.md)
+- [Planner 工具权限](backend/resources/planning-inspection.md)
 - [Planner prompt](backend/resources/prompts/planner.md)
 - [Partitioner prompt](backend/resources/prompts/partitioner.md)
 - [Benchmark 契约](../grapher-tests/benchmark/architecture.md)

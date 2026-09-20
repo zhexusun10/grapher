@@ -1,0 +1,251 @@
+{
+  "contractSatisfied": false,
+  "productionLauncherTested": false,
+  "environment": {
+    "system": "macOS-27.0-arm64-arm-64bit",
+    "node": "/opt/homebrew/bin/node",
+    "python": "3.11.2",
+    "docker": null,
+    "macOS": {
+      "code": 0,
+      "stdout": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428",
+      "stderr": ""
+    },
+    "sip": {
+      "code": 0,
+      "stdout": "System Integrity Protection status: enabled.",
+      "stderr": ""
+    },
+    "clang": {
+      "code": 0,
+      "stdout": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+      "stderr": ""
+    },
+    "filesystems": [
+      "NetFSPlugins"
+    ]
+  },
+  "cases": [
+    {
+      "name": "cwd_relative_reads_workspace",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "A",
+      "stderr": ""
+    },
+    {
+      "name": "cwd_absolute_still_reads_source",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "hook_libc_open_redirects",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "A",
+      "stderr": ""
+    },
+    {
+      "name": "hook_custom_exec_inherits",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "A",
+      "stderr": ""
+    },
+    {
+      "name": "hook_direct_arm64_syscall_bypasses",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "hook_protected_cat_bypasses",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "hook_nested_system_shell_bypasses",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "hook_external_symlink_available",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "EXTERNAL",
+      "stderr": ""
+    },
+    {
+      "name": "hook_source_symlink_bypasses",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "hook_parallel_worker_0",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "A-WRITE",
+      "stderr": ""
+    },
+    {
+      "name": "hook_parallel_worker_1",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "B-WRITE",
+      "stderr": ""
+    },
+    {
+      "name": "seatbelt_relative_workspace_allowed",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "A-WRITE",
+      "stderr": ""
+    },
+    {
+      "name": "seatbelt_absolute_source_denied_not_redirected",
+      "expectedObserved": true,
+      "code": 4,
+      "stdout": "",
+      "stderr": "read open: Operation not permitted"
+    },
+    {
+      "name": "seatbelt_source_symlink_denied",
+      "expectedObserved": true,
+      "code": 4,
+      "stdout": "",
+      "stderr": "read open: Operation not permitted"
+    },
+    {
+      "name": "seatbelt_external_link_allowed",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "EXTERNAL",
+      "stderr": ""
+    },
+    {
+      "name": "seatbelt_protected_child_denied_not_redirected",
+      "expectedObserved": true,
+      "code": 1,
+      "stdout": "",
+      "stderr": "cat: <fixture>/source/value: Operation not permitted"
+    },
+    {
+      "name": "hook_plus_seatbelt_libc_redirects",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "A-WRITE",
+      "stderr": ""
+    },
+    {
+      "name": "hook_plus_seatbelt_raw_denied_not_redirected",
+      "expectedObserved": true,
+      "code": 4,
+      "stdout": "",
+      "stderr": "read open: Operation not permitted"
+    },
+    {
+      "name": "hook_plus_seatbelt_protected_child_denied_not_redirected",
+      "expectedObserved": true,
+      "code": 1,
+      "stdout": "",
+      "stderr": "cat: <fixture>/source/value: Operation not permitted"
+    },
+    {
+      "name": "hook_raw-write_escapes",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "name": "hook_raw-write_source_changed",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "RAW-WROTE-SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "seatbelt_raw-write_denied_not_redirected",
+      "expectedObserved": true,
+      "code": 4,
+      "stdout": "",
+      "stderr": "raw write open: Operation not permitted"
+    },
+    {
+      "name": "seatbelt_raw-write_source_unchanged",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "hook_nested-write_escapes",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "name": "hook_nested-write_source_changed",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "CHILD-WROTE-SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "seatbelt_nested-write_denied_not_redirected",
+      "expectedObserved": true,
+      "code": 1,
+      "stdout": "",
+      "stderr": "sh: <fixture>/source/nested-write: Operation not permitted"
+    },
+    {
+      "name": "seatbelt_nested-write_source_unchanged",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "python_constructed_absolute_reads_source",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "node_nested_absolute_reads_source",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "SOURCE",
+      "stderr": ""
+    },
+    {
+      "name": "global_alias_reader_0_same_target",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "A-WRITE",
+      "stderr": ""
+    },
+    {
+      "name": "global_alias_reader_1_same_target",
+      "expectedObserved": true,
+      "code": 0,
+      "stdout": "A-WRITE",
+      "stderr": ""
+    }
+  ],
+  "mainSourceSentinelUnchanged": true,
+  "writeEscapeDemonstratedOnDisposableMarkers": true,
+  "privateWritesVerified": true,
+  "expectedCounterexamplesReproduced": true
+}

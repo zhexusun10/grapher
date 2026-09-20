@@ -55,7 +55,6 @@ impl PiRole {
         }
     }
 
-
     pub fn model_env_var(&self) -> &'static str {
         match self {
             PiRole::Partitioner => "PARTITIONER_MODEL",
@@ -296,38 +295,16 @@ pub struct PiRequest<'request> {
 pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Result<String, String> {
     let phase = request.role.name();
     let config = request.config;
+    #[cfg(not(feature = "fixture"))]
+    crate::workspace::validate_binding(Path::new(&config.repository))?;
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
     // legacy command fields cannot select a different engine implementation.
     #[cfg(not(feature = "fixture"))]
-    let mut command = {
-        let repository = Path::new(&config.repository)
-            .canonicalize()
-            .map_err(|_| "Invalid repository path")?;
-        let current = request
-            .cwd
-            .canonicalize()
-            .map_err(|_| "Invalid execution path")?;
-        if current != repository {
-            let profile = request.session_dir.join("execution-instance.sb");
-            let worktree_root = current.parent().and_then(Path::parent)
-                .filter(|path| path.file_name().is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces"))
-                .ok_or("Graph execution must use .grapher-workspaces/<run>/<instance>; rerun legacy workspaces")?;
-            crate::sandbox::write_graph_profile(&profile, &repository, worktree_root, &current)?;
-            let mut command = Command::new("/usr/bin/sandbox-exec");
-            command.args([
-                "-f",
-                profile.to_str().ok_or("Invalid sandbox profile path")?,
-                "node",
-            ]);
-            command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs"));
-            command
-        } else {
-            let mut command = Command::new("node");
-            command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs"));
-            command
-        }
-    };
+    let mut command = crate::native::execution_command(
+        request.role, Path::new(&config.repository), request.cwd,
+        &crate::workspace::data_root(), request.session_dir,
+    )?;
     // Process substitution is exclusively a test capability.
     #[cfg(feature = "fixture")]
     let mut command = {
@@ -356,12 +333,19 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         }
         None => {}
     }
-    if let Some(extension) = request.extension {
-        command.args([
-            "--extension",
-            extension.to_str().ok_or("Invalid extension path")?,
-            "--no-context-files",
-        ]);
+    if let Some(_extension) = request.extension {
+        #[cfg(feature = "fixture")]
+        let extension = _extension.to_str().ok_or("Invalid extension path")?;
+        #[cfg(not(feature = "fixture"))]
+        let extension_path = {
+            if request.role != PiRole::Planner {
+                return Err("Only the Grapher-owned Planner extension may be injected".into());
+            }
+            crate::native::installation_root().join("backend/resources/planner.ts")
+        };
+        #[cfg(not(feature = "fixture"))]
+        let extension = extension_path.to_str().ok_or("Invalid Planner extension path")?;
+        command.args(["--extension", extension, "--no-context-files"]);
     }
     if !config.model.trim().is_empty() {
         command.args(["--model", config.model.as_str()]);
@@ -390,9 +374,10 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
             prompt_path.to_str().ok_or("Invalid system prompt path")?,
         ]);
     }
+    let session_dir = request.session_dir;
     command
         .arg("--session-dir")
-        .arg(request.session_dir)
+        .arg(session_dir)
         .current_dir(request.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -405,7 +390,7 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     command.env_remove("PI_REASONING_LEVEL");
     command.env_remove("PI_SESSION_ID");
     command.env_remove("PI_SESSION_FILE");
-    for (key, value) in request.environment {
+    for (key, value) in &request.environment {
         command.env(key, value);
     }
     // The host owns the instance identity. Never inherit another agent's role
@@ -419,6 +404,13 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
             PiRole::Merger => "merger",
         },
     );
+    #[cfg(not(feature = "fixture"))]
+    {
+        let graph = request.cwd.canonicalize().map_err(|e| e.to_string())?
+            != Path::new(&config.repository).canonicalize().map_err(|e| e.to_string())?;
+        command.env("GRAPHER_EXECUTION_KIND", if graph { "graph" } else { "source" });
+        command.env("GRAPHER_SOURCE_ALIAS", &config.repository);
+    }
     command.env(
         "GRAPHER_WORKSPACE_ROOT",
         request
@@ -436,6 +428,10 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         .canonicalize()
         .map_err(|error| error.to_string())?,
     );
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     command.process_group(0);
     let mut child = command
         .spawn()
@@ -450,11 +446,12 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         "{}\n",
         serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "timestamp":crate::model::now()})
     ));
+    let task = request.task;
     if let Err(error) = child
         .stdin
         .take()
         .ok_or("Pi stdin unavailable")?
-        .write_all(request.task.as_bytes())
+        .write_all(task.as_bytes())
     {
         let _ = child.kill();
         let _ = child.wait();
@@ -560,6 +557,8 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         }
     }
     let status = child.wait().map_err(|error| error.to_string())?;
+    // ProcessGuard clears the process group. Detached descendants are not
+    // guaranteed to be covered; tasks must finish background work before returning.
     on_output(format!(
         "{}\n",
         serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success(), "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})

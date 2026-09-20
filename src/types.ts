@@ -41,6 +41,7 @@ export interface PlanningSummary {
 
 export interface Snapshot {
   runId: string;
+  planType?: "serial" | "graph";
   planningId?: string;
   planning?: PlanningSummary | null;
   graph: Graph;

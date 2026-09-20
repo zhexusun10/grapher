@@ -37,6 +37,7 @@ impl Bridge {
             .arg(root.join("pi/tsconfig.json"))
             .arg(root.join("engine/provider-host.ts"))
             .current_dir(&root)
+            .env("PI_CODING_AGENT_DIR", crate::native::agent_dir()?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

@@ -36,7 +36,9 @@ pub(crate) fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf
         return crate::fixture::repository(root);
     }
     let _ = root;
-    Ok(PathBuf::from(&config.repository))
+    let repository = PathBuf::from(&config.repository);
+    workspace::validate_binding(&repository)?;
+    Ok(repository)
 }
 
 pub struct Runtime {
@@ -144,6 +146,7 @@ impl Runtime {
             .publication
             .clone()
             .ok_or("No publication to retry")?;
+        workspace::validate_binding(Path::new(&publication.repository))?;
         self.emit(EventKind::PublicationStarted {
             repository: publication.repository,
             heads: publication.heads,
@@ -268,13 +271,39 @@ impl Runtime {
         })
     }
 
+    pub fn set_route(&mut self, plan_type: &str) -> Result<(), String> {
+        if self.state.phase != "awaiting_approval"
+            || !matches!(plan_type, "serial" | "graph")
+            || (plan_type == "serial"
+                && !(self.state.graph.nodes.len() == 1
+                    && self.state.graph.nodes[0].name == "task"))
+        {
+            return Err("Invalid execution route or routing phase".into());
+        }
+        self.emit(EventKind::Routed { plan_type: plan_type.into() })
+    }
+
+    fn is_serial(&self) -> bool {
+        match self.state.plan_type.as_deref() {
+            Some(mode) => mode == "serial",
+            None => self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task",
+        }
+    }
+
     pub fn approve(&mut self) -> Result<(), String> {
         if self.state.phase != "awaiting_approval" {
             return Err("Only a compiled, unapproved graph can be approved".into());
         }
         let config = self.state.config.as_ref().ok_or("No graph")?;
         let repository = resolve_repository(&self.root, config)?;
-        let base = workspace::verify(&repository)?;
+        #[cfg(not(feature = "fixture"))]
+        if !self.is_serial() {
+            crate::native::require_graph_execution()?;
+        }
+        workspace::verify(&repository)?;
+        // Planning writes directly to source. Freeze the actual files only now,
+        // after planning and approval, before any node workspace is allocated.
+        let base = workspace::snapshot_repository(&repository)?;
         self.emit(EventKind::Approved { base })
     }
 
@@ -287,6 +316,9 @@ impl Runtime {
         }
         if !self.state.approved {
             return Err("Approve the graph first".into());
+        }
+        if !paused {
+            resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
         }
         self.emit(EventKind::Paused { paused })
     }
@@ -303,6 +335,7 @@ impl Runtime {
         if !self.state.nodes.contains_key(node) || instruction.trim().is_empty() {
             return Err("Select a node and enter an instruction".into());
         }
+        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
         self.emit(EventKind::Invalidated {
             nodes: downstream(&self.state.graph, node).into_iter().collect(),
             target: node.into(),
@@ -312,6 +345,7 @@ impl Runtime {
     }
 
     pub fn resolved(&mut self, node: &str) -> Result<(), String> {
+        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
         if self.active()
             || self.state.nodes.get(node).map(|node| node.status.as_str()) != Some("blocked")
         {
@@ -355,6 +389,13 @@ impl Runtime {
             return Ok(Vec::new());
         }
         let config = self.state.config.clone().ok_or("Missing config")?;
+        // Check before emitting Started or allocating workspaces, including jobs
+        // resumed without a UI request. perform() checks again before filesystem work.
+        resolve_repository(&self.root, &config)?;
+        #[cfg(not(feature = "fixture"))]
+        if !self.is_serial() {
+            crate::native::require_graph_execution()?;
+        }
         let running = self
             .state
             .nodes
@@ -432,9 +473,7 @@ impl Runtime {
                     .count()
                     + 1,
                 session_id: Uuid::new_v4().to_string(),
-                worktree: if self.state.graph.nodes.len() == 1
-                    && self.state.graph.nodes[0].name == "task"
-                {
+                worktree: if self.is_serial() {
                     resolve_repository(&self.root, &config)?
                         .to_string_lossy()
                         .into()
@@ -484,9 +523,7 @@ impl Runtime {
             && !self.active()
             && !matches!(self.state.phase.as_str(), "completed" | "needs_attention")
         {
-            let serial =
-                self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task";
-            if !serial && self.state.nodes.values().all(|node| node.status == "done") {
+            if !self.is_serial() && self.state.nodes.values().all(|node| node.status == "done") {
                 let terminal_names: Vec<String> = if let Some(plan) = &self.state.plan {
                     if !plan.terminals.is_empty() {
                         plan.terminals.clone()
@@ -662,6 +699,10 @@ impl Runtime {
     }
 }
 
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;
+
 pub fn perform(
     job: &Job,
     root: &Path,
@@ -671,6 +712,10 @@ pub fn perform(
 ) -> Result<(String, String), String> {
     let repository = resolve_repository(root, &job.config)?;
     let path = Path::new(&job.execution.worktree);
+    #[cfg(not(feature = "fixture"))]
+    if path != repository {
+        crate::native::require_graph_execution()?;
+    }
     let before = workspace::prepare(&repository, path, &job.execution.before, parents)?;
     on_prepared(before)?;
     let output = engine::execute(

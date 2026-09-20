@@ -26,6 +26,36 @@ pub fn write_graph_profile(
     worktree_root: &Path,
     current: &Path,
 ) -> Result<PathBuf, String> {
+    write_profile(path, repository, worktree_root, current, None)
+}
+
+/// Production adds session/data and engine boundaries. The current session is
+/// the only writable exception when runtime data lives inside the source tree.
+pub fn write_execution_profile(
+    path: &Path,
+    repository: &Path,
+    worktree_root: &Path,
+    current: &Path,
+    data: &Path,
+    session: &Path,
+    engine: &Path,
+) -> Result<PathBuf, String> {
+    write_profile(
+        path,
+        repository,
+        worktree_root,
+        current,
+        Some((data, session, engine)),
+    )
+}
+
+fn write_profile(
+    path: &Path,
+    repository: &Path,
+    worktree_root: &Path,
+    current: &Path,
+    execution: Option<(&Path, &Path, &Path)>,
+) -> Result<PathBuf, String> {
     if !supported() {
         return Err("Graph sandbox requires /usr/bin/sandbox-exec on macOS".into());
     }
@@ -39,19 +69,51 @@ pub fn write_graph_profile(
     {
         return Err("Invalid or overlapping Graph sandbox paths".into());
     }
+    let extra = execution
+        .map(|(data, session, engine)| -> Result<_, String> {
+            Ok((
+                data.canonicalize().map_err(|e| e.to_string())?,
+                session.canonicalize().map_err(|e| e.to_string())?,
+                engine.canonicalize().map_err(|e| e.to_string())?,
+            ))
+        })
+        .transpose()?;
+    if let Some((data, session, engine)) = &extra {
+        if !session.starts_with(data)
+            || session == data
+            || current.starts_with(session)
+            || repository.starts_with(session)
+            || engine.starts_with(&repository)
+        {
+            return Err("Invalid execution session or native engine location".into());
+        }
+    }
+    let source_rule = if let Some((_, session, _)) = &extra {
+        format!(
+            "(require-all (subpath {}) (require-not (subpath {})))",
+            quote(&repository)?,
+            quote(session)?
+        )
+    } else {
+        format!("(subpath {})", quote(&repository)?)
+    };
     let mut text = format!(
         "(version 1)\n(allow default)\n\
-         (deny file-read* file-write* (subpath {repository}))\n\
+         (deny file-read* file-write* {source_rule})\n\
          (deny file-read-data file-write*\n\
            (require-all (subpath {root}) (require-not (subpath {current}))))\n\
          (deny file-read-metadata\n\
            (require-all (subpath {root}) (require-not (subpath {current}))\n\
              (require-not (literal {root})) (require-not (literal {run}))))\n",
-        repository = quote(&repository)?,
         root = quote(&worktree_root)?,
         current = quote(&current)?,
         run = quote(current.parent().ok_or("Invalid execution path")?)?,
     );
+    if let Some((data, session, engine)) = &extra {
+        text.push_str(&format!(
+            "(deny file-read* file-write* (require-all (subpath {}) (require-not (subpath {}))))\n(deny file-write* (subpath {}))\n",
+            quote(data)?, quote(session)?, quote(engine)?));
+    }
     // External shadow repositories keep Git metadata outside source; explicitly deny them.
     let shadow_dir = crate::workspace::shadow_repo_dir(&repository);
     if shadow_dir.exists() {
@@ -60,6 +122,21 @@ pub fn write_graph_profile(
                 "(deny file-read* file-write* (subpath {}))\n",
                 quote(&canonical_shadow)?
             ));
+        }
+    }
+    // Source linked worktrees can keep all node snapshots in a shared Git
+    // directory outside the source path. Protect that database as well.
+    if let Ok(common) = crate::workspace::repository_git(
+        &repository,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
+        if let Ok(common) = PathBuf::from(common).canonicalize() {
+            if !common.starts_with(&repository) && !common.starts_with(&current) {
+                text.push_str(&format!(
+                    "(deny file-read* file-write* (subpath {}))\n",
+                    quote(&common)?
+                ));
+            }
         }
     }
     // Linked worktrees, separate git-dir and shadow repositories can keep the

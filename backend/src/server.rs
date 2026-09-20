@@ -1120,6 +1120,7 @@ fn plan_goal_internal(
                 Some(planning_id.clone()),
                 Some(summary.clone()),
             )?;
+            runtime.set_route(&route.plan_type)?;
             if route.plan_type == "serial" {
                 runtime.approve()?;
             }
@@ -1742,6 +1743,11 @@ pub fn dispatch(
             argument(&body, "instruction")?,
             service,
         )?),
+        "repository_status" => {
+            let repository: String = argument(&body, "repository")?;
+            let error = crate::workspace::validate_binding(std::path::Path::new(&repository)).err();
+            Ok(serde_json::json!({ "repository": repository, "valid": error.is_none(), "error": error }))
+        }
         "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),
         "pick_repository" => to_value(crate::workspace::pick_repository()?),
         "reset_workspace" => to_value(reset_workspace(service)?),
@@ -1844,17 +1850,14 @@ pub fn run() -> Result<(), String> {
     let extension = root.join("grapher-planner.ts");
     fs::write(&extension, include_str!("../resources/planner.ts"))
         .map_err(|error| error.to_string())?;
-    fs::write(
-        root.join("workspace-paths.mjs"),
-        include_str!("../resources/workspace-paths.mjs"),
-    )
-    .map_err(|error| error.to_string())?;
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root)?),
         driving: AtomicBool::new(false),
         planning: AtomicBool::new(false),
         extension,
     });
+    #[cfg(not(feature = "fixture"))]
+    crate::native::check_retired_leases(&root)?;
     recover_plannings(&root)?;
     let port: u16 = std::env::var("GRAPHER_PORT")
         .unwrap_or_else(|_| "1421".into())

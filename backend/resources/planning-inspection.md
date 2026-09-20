@@ -1,18 +1,13 @@
-# Planner inspection and workspace paths
+# Planner tools and workspace paths
 
-Planner exposes exactly `node`, `edge`, `read`, and `bash` in addition to the graph compiler feedback returned by node/edge mutations.
+Planner exposes exactly `node`, `edge`, `read`, and `bash`, plus compiler feedback from graph mutations.
 
-`read` uses Pi's native implementation and description, including offset/limit behavior. Grapher adds no repository-scope, symlink, or Git metadata restriction.
+`read` uses Pi's native implementation and description, including offset/limit behavior. `bash` uses Pi's native backend without write-command filtering or implicit errexit/pipefail. Planner has no automatic skills/extensions or project context files.
 
-`bash` uses Pi's native shell backend without write-command filtering. Planner runs with no approval, no skills, and no automatically discovered extensions.
+Planner runs as a host-native process at the selected source project's real absolute path. PATH, HOME, TMPDIR, external files and host-native executables remain available according to host permissions. Tools, commands, file contents and output are not rewritten. The host provides real, execution-specific graph/session paths and its own native graph compiler.
 
-Planner runs directly in the source repository. File changes take effect immediately and are not automatically backed up or reverted. Reject only rejects the plan; it does not undo file changes or other side effects. Approve likewise leaves existing changes in place.
+Planner writes affect source files immediately. Reject only rejects the plan and does not undo writes. The retained approval contract snapshots current source files before allocating node workspaces, including new nonignored files and uncommitted changes. This stages and commits user changes as well as Planner changes. A planner-generated single `task` graph stays Graph, using persisted routing.
 
-Access outside the repository is not blocked by the workspace adapter. Virtual paths are translated by replacing their root prefix, leaving `..` and symlinks to the filesystem; this mapping is not an access-control boundary. This permits inspection of explicitly available host references, but graph tasks must remain self-contained and portable. External files are not automatically present in later isolated node workspaces.
+Graph uses native Pi instances in private Git workspaces. File tools map source-project paths to the current workspace. Bash translates complete literal project paths, including common variable assignments and literal nested shell commands. Model-facing results normalize the current physical workspace prefix to the source-project prefix. Existing script files and programmatically assembled paths are not transparently remapped; direct source/sibling/session access remains denied by Seatbelt. See `engine/native-execution.md` for the supported contract and limitations. Baseline, parent snapshots and fresh sessions are retained.
 
-Every role receives two host-owned roots:
-
-- `GRAPHER_WORKSPACE_ROOT`: the physical checkout used by the current execution instance.
-- `GRAPHER_ORIGINAL_ROOT`: the canonical source repository selected in the run configuration.
-
-`workspace-paths.mjs` exposes the current checkout at `<original-parent>/workspace/<original-name>`. The same visible path maps to each node's private checkout, while Planner and Serial map it to the source repository. Context text, tool path arguments, shell commands, and tool results are translated per process; no mount or global symlink is created. Repository-relative paths remain preferred in graph tasks.
+See [the full native execution logic](../../engine/native-execution.md) for tested behavior and limits.

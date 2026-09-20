@@ -14,7 +14,7 @@ writeFileSync(join(repository, "sample.txt"), "planner fixture\n");
 writeFileSync(join(root, "rubric.json"), "hidden criteria");
 symlinkSync(root, join(repository, "outside"));
 process.env.GRAPHER_GRAPH_PATH = join(root, "graph.json");
-process.env.GRAPHER_COMPILER_PATH = resolve("backend/target/debug/grapher");
+process.env.GRAPHER_COMPILER_PATH ||= resolve("backend/target/debug/grapher");
 process.env.GRAPHER_MODE = "planner";
 // Planner behavior must not depend on the host's feedback retry setting.
 process.env.GRAPHER_MAX_FEEDBACK = "0";
@@ -30,13 +30,10 @@ try {
   const extension = loaded.extensions[0];
   assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edge", "node"]);
   const bashDescription = extension.tools.get("bash")!.definition.description;
-  assert.match(bashDescription, /similar name or setting is not authority/);
-  assert.match(bashDescription, /checkout starts at \/workspace/);
-  assert.match(bashDescription, /cd \[repository-directory\]/);
-  assert.match(bashDescription, /wc \[-clw\]/);
-  assert.match(bashDescription, /find \[path\].*-not -path glob/);
+  assert.match(bashDescription, /Execute a bash command/);
+  assert.equal(extension.handlers.has("tool_call"), false, "Planner has no path or read guards");
   assert.doesNotMatch(extension.tools.get("edge")!.definition.description, /maxFeedback|retry budget|reviewer/i);
-  const context = {} as ExtensionContext;
+  const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = extension.tools.get(name)!.definition;
     const args = validateToolArguments(tool, { type: "toolCall", id: "test", name, arguments: parameters });
@@ -85,26 +82,15 @@ try {
   for (const task of [`Work at ${repository}.`, `Read ${repository}/sample.txt`]) {
     await call("node", { name: "build", task });
     const savedTask = JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).nodes.find((n: { name: string }) => n.name === "build").task;
-    assert.equal(savedTask, task.replaceAll(repository, "/workspace"));
+    assert.equal(savedTask, task, "Task content is not rewritten");
   }
   await call("node", { name: "build", task: "In your assigned worktree, update sample.txt and verify it." });
-  const handlers = extension.handlers.get("tool_call")!.slice(-1);
-  assert.equal(await handlers[0]({ toolName: "read", input: { path: "sample.txt" } }), undefined);
-  for (const path of ["../rubric.json", "outside/rubric.json", root, "missing", ".", ".git/config"]) {
-    assert.equal((await handlers[0]({ toolName: "read", input: { path } }) as { block: boolean }).block, true);
-  }
   assert.match(JSON.stringify(await call("bash", { command: "cat sample.txt" })), /planner fixture/);
-  for (const command of ["cat ../rubric.json", "cat outside/rubric.json", "touch changed", "curl file:///etc/passwd", "ls; rm -rf ."]) {
-    const response = await call("bash", { command });
-    assert.equal((response as { isError: boolean }).isError, true, command);
-    assert.deepEqual(await toolResultHook({ toolName: "bash", details: response.details, isError: false }), { isError: true });
+  for (const command of ["cat ../rubric.json", "cat outside/rubric.json", "printf changed > changed"]) {
+    await call("bash", { command });
   }
-  for (const file of ["backend/src/server.rs", "benchmark/planning-host.rs"]) {
-    const text = readFileSync(join(source, file), "utf8");
-    assert.ok(text.includes('"node,edge,read,bash"'), `${file}: tool surface`);
-    assert.ok(!text.includes('"node,edge,inspect"'));
-  }
-  assert.match(readFileSync(join(source, "backend/src/server.rs"), "utf8"), /include_str!\("\.\.\/resources\/planning-inspection\.mjs"\)/);
+  assert.equal(readFileSync(join(repository, "changed"), "utf8"), "changed");
+  assert.equal(extension.handlers.has("context"), false, "Planner must preserve file contents and tool results");
   await call("node", { name: "build", delete: true });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
   // A real five-node graph is committed with one compiler invocation.
@@ -176,18 +162,14 @@ try {
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeUnavailable);
   process.env.GRAPHER_COMPILER_PATH = compilerPath;
 
-  // Production extracts the extension and its inspection module together.
+  // The Planner extension is self-contained; no path adapter is needed.
   process.env.GRAPHER_MODE = "planner";
   writeFileSync(join(root, "grapher-planner.ts"), readFileSync(join(source, "backend/resources/planner.ts")));
-  writeFileSync(join(root, "workspace-paths.mjs"), readFileSync(join(source, "backend/resources/workspace-paths.mjs")));
-  writeFileSync(join(root, "planning-inspection.mjs"), readFileSync(join(source, "backend/resources/planning-inspection.mjs")));
   const extracted = await loadExtensions([join(root, "grapher-planner.ts"), adapterPath], repository);
   assert.deepEqual(extracted.errors, []);
   assert.deepEqual([...extracted.extensions[0].tools.keys()].sort(), ["bash", "edge", "node"]);
   const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
   assert.match(JSON.stringify(listed), /sample.txt/);
-  const visibleListing = await extracted.extensions[0].tools.get("bash")!.definition.execute("visible", { command: "ls /workspace && cat /workspace/sample.txt" }, undefined, undefined, context);
-  assert.match(JSON.stringify(visibleListing), /planner fixture/);
 
   // Partitioner and Merger use the same namespace without the Planner extension.
   for (const mode of ["partition", "merger"]) {
@@ -195,8 +177,8 @@ try {
     const roleExtension = await loadExtensions([adapterPath], repository);
     assert.deepEqual(roleExtension.errors, []);
     const hooks = roleExtension.extensions[0].handlers;
-    const prompt = await hooks.get("before_agent_start")![0]({ systemPrompt: `Current working directory: ${repository}` });
-    assert.equal(prompt.systemPrompt, "Current working directory: /workspace");
+    assert.equal(hooks.has("before_agent_start"), false, "No prompt path rewriting");
+    assert.equal(hooks.has("context"), false, "No content rewriting");
     if (mode === "partition") assert.equal(roleExtension.extensions[0].tools.size, 0);
     else assert.ok(roleExtension.extensions[0].tools.has("bash"));
   }
@@ -209,11 +191,15 @@ try {
   const { createWriteToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/write.ts");
   const { createEditToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/edit.ts");
   const { createLsToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/ls.ts");
+  const { createFindToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/find.ts");
+  const { createGrepToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/grep.ts");
   const builtins = new Map([
     ["read", createReadToolDefinition(repository)],
     ["write", createWriteToolDefinition(repository)],
     ["edit", createEditToolDefinition(repository)],
     ["ls", createLsToolDefinition(repository)],
+    ["find", createFindToolDefinition(repository)],
+    ["grep", createGrepToolDefinition(repository)],
   ]);
   async function workerCall(name: string, input: Record<string, unknown>, onUpdate?: (update: any) => void) {
     for (const hook of workerExtension.handlers.get("tool_call") ?? []) await hook({ toolName: name, input });
@@ -225,19 +211,61 @@ try {
     }
     return response;
   }
-  await workerCall("write", { path: "/workspace/mapped.txt", content: "before\n" });
-  await workerCall("edit", { path: "/workspace/mapped.txt", edits: [{ oldText: "before", newText: "after" }] });
-  assert.match(JSON.stringify(await workerCall("read", { path: "/workspace/mapped.txt" })), /after/);
+  await workerCall("write", { path: "mapped.txt", content: "before\n" });
+  await workerCall("edit", { path: "mapped.txt", edits: [{ oldText: "before", newText: "after" }] });
+  assert.match(JSON.stringify(await workerCall("read", { path: "mapped.txt" })), /after/);
   const updates: any[] = [];
-  const shellResult = await workerCall("bash", { command: "pwd; cat /workspace/mapped.txt" }, update => updates.push(update));
+  const shellResult = await workerCall("bash", { command: "pwd; cat mapped.txt" }, update => updates.push(update));
   assert.match(JSON.stringify(shellResult), /after/);
-  assert.match(JSON.stringify(shellResult), /\/workspace/);
-  assert.ok(!JSON.stringify(shellResult).includes(repository));
-  assert.ok(updates.some(update => JSON.stringify(update).includes("/workspace")));
-  assert.ok(updates.every(update => !JSON.stringify(update).includes(repository)));
-  assert.match(JSON.stringify(await workerCall("ls", { path: "/workspace" })), /mapped.txt/);
+  assert.ok(JSON.stringify(shellResult).includes(repository), "Native output is not rewritten");
+  assert.ok(updates.some(update => JSON.stringify(update).includes(repository)));
+  assert.match(JSON.stringify(await workerCall("ls", { path: "." })), /mapped.txt/);
   assert.equal(readFileSync(join(repository, "mapped.txt"), "utf8"), "after\n");
-  console.log("Pi extension smoke passed: restricted tools, read guards, extracted resources, atomic batches, worker path mapping and rollback.");
+  assert.match(JSON.stringify(await workerCall("find", { pattern: "*.txt", path: repository })), /mapped.txt/);
+  assert.match(JSON.stringify(await workerCall("grep", { pattern: "after", path: repository })), /mapped.txt/);
+  const externalFile = join(root, "external space ' quote.txt");
+  await workerCall("write", { path: externalFile, content: "external before\n" });
+  await workerCall("edit", { path: externalFile, edits: [{ oldText: "before", newText: "after" }] });
+  assert.match(JSON.stringify(await workerCall("read", { path: externalFile })), /external after/);
+  assert.match(JSON.stringify(await workerCall("read", { path: "outside/external space ' quote.txt" })), /external after/);
+
+  // Ordinary shell programs must have native semantics, for Node and Merger.
+  for (const mode of ["node", "merger"]) {
+    process.env.GRAPHER_MODE = mode;
+    const loaded = await loadExtensions([adapterPath], repository);
+    assert.deepEqual(loaded.errors, []);
+    const adapter = loaded.extensions[0];
+    assert.equal(adapter.handlers.has("tool_call"), false, "No implicit shell command rewriting");
+    const bash = adapter.tools.get("bash")!.definition;
+    for (const command of [
+      "false; printf continued",
+      "false | cat; printf continued",
+      "grep 'not-present' mapped.txt; printf continued",
+    ]) {
+      const input = { command };
+      const result = await bash.execute(`${mode}-${command}`, input, undefined, undefined, context);
+      assert.match(JSON.stringify(result), /continued/);
+      assert.equal(input.command, command, "Caller parameters remain unchanged");
+      assert.equal(result.details?.exitCode, 0);
+    }
+    await assert.rejects(() => bash.execute(`${mode}-failure`, { command: "exit 17" }, undefined, undefined, context), /code 17/);
+    await assert.rejects(() => bash.execute(`${mode}-strict`, { command: "set -e; false; printf unreachable" }, undefined, undefined, context), /code 1/);
+    await assert.rejects(() => bash.execute(`${mode}-timeout`, { command: "sleep 5", timeout: 0.1 }, undefined, undefined, context), /timed out/);
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(() => bash.execute(`${mode}-abort`, { command: "sleep 5" }, controller.signal, undefined, context), /abort/i);
+    const results = await Promise.all(["first", "second"].map(value => bash.execute(`${mode}-${value}`, { command: `printf ${value}` }, undefined, undefined, context)));
+    for (const [index, value] of ["first", "second"].entries()) {
+      assert.match(JSON.stringify(results[index].content), new RegExp(value));
+      assert.equal(results[index].details?.command, `printf ${value}`);
+    }
+  }
+  // This proves native macOS execution in this tool-adapter smoke only.
+  if (process.platform === "darwin") {
+    const native = await workerCall("bash", { command: "/usr/bin/uname -s; /usr/bin/sw_vers -productVersion; /usr/bin/xcrun --find clang" });
+    assert.match(JSON.stringify(native.content), /Darwin/);
+  }
+  console.log(`Pi extension smoke passed on ${process.platform}: read/write/edit/ls/find/grep/bash, external paths and symlinks, shell semantics, failures/cancellation, Planner graph tools. This is not a production launcher or transparent mapping test.`);
 } finally {
   process.chdir(source);
   rmSync(root, { recursive: true, force: true });

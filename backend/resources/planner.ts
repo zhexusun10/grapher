@@ -1,7 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync } from "node:fs";
-import { registerWorkspacePaths } from "./workspace-paths.mjs";
 import { spawnSync } from "node:child_process";
 
 type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; edges: { from: string; to: string; relation: string; feedback: boolean }[] };
@@ -32,8 +31,9 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       return { isError: true };
     }
   });
-  const paths = registerWorkspacePaths(pi, process.env.GRAPHER_WORKSPACE_ROOT || process.cwd(), { shellCommands: true });
-  const repository = paths.root;
+  // Planner runs natively at the source project path. Commands and file
+  // contents are passed unchanged; this role needs no private mapping.
+  const repository = process.cwd();
   const nativeBash = createBashToolDefinition(repository);
   // Use native bash without write-command filtering.
   pi.registerTool(defineTool(nativeBash));
@@ -49,8 +49,6 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     }), true);
     const inputErrors = change(graph);
     if (inputErrors?.length) return rejected(inputErrors);
-    for (const node of graph.nodes) node.task = paths.visible(node.task);
-    for (const edge of graph.edges) edge.relation = paths.visible(edge.relation);
     const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false }), encoding: "utf8", timeout: 10000 });
     if (checked.error || checked.status !== 0) return rejected([{ code: "compiler-unavailable", message: checked.error?.message || checked.stderr || `Compiler exited with status ${checked.status}` }]);
     let output;

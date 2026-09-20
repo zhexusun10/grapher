@@ -349,7 +349,23 @@ pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String
     git(&repository, &command)
 }
 
+/// Read-only validation of the original binding. Never search, rebind, create a
+/// shadow repository, or resolve a missing path relative to the backend cwd.
+pub fn validate_binding(repository: &Path) -> Result<(), String> {
+    if !repository.is_absolute() || !repository.is_dir() {
+        return Err(format!(
+            "项目绑定已失效：{}。原目录不存在、不可访问或不是绝对目录；请重新选择目录建立新绑定。",
+            repository.display()
+        ));
+    }
+    fs::read_dir(repository).map_err(|error| {
+        format!("项目绑定不可访问：{}：{error}。请重新选择目录建立新绑定。", repository.display())
+    })?;
+    Ok(())
+}
+
 pub fn verify(repository: &Path) -> Result<String, String> {
+    validate_binding(repository)?;
     if is_standard_git(repository) {
         let root = git(repository, &["rev-parse", "--show-toplevel"])?;
         if fs::canonicalize(repository).map_err(|error| error.to_string())?

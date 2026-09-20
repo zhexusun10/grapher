@@ -176,6 +176,11 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         planning: Option<PlanningSummary>,
     },
+    /// Persist routing separately from graph shape. Older event stores did not
+    /// record it and retain their legacy shape-based interpretation.
+    Routed {
+        plan_type: String,
+    },
     Approved {
         base: String,
     },
@@ -270,6 +275,8 @@ pub struct Publication {
 pub struct Snapshot {
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning: Option<PlanningSummary>,
@@ -316,6 +323,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .map(|node| (node.name.clone(), NodeState::default()))
                 .collect();
             state.phase = "awaiting_approval".into();
+        }
+        EventKind::Routed { plan_type } => {
+            state.plan_type = Some(plan_type.clone());
         }
         EventKind::Approved { base } => {
             state.approved = true;
