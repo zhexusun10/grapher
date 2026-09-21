@@ -52,9 +52,13 @@ function AuthLink({ url, label }: { url?: string; label?: string }) {
 export function ProviderSettings({
   model,
   onModel,
+  effectiveRoleModels,
+  envOverrides = {},
 }: {
   model: string;
   onModel: (model: string) => void;
+  effectiveRoleModels?: Record<string, string>;
+  envOverrides?: Record<string, string>;
 }) {
   const [catalog, setCatalog] = useState<ProviderCatalog>();
   const [providerFilter, setProviderFilter] = useState(
@@ -267,6 +271,33 @@ export function ProviderSettings({
     <div className="provider-settings-container">
       {/* Top Model Setting & Presets */}
       <div className="model-quick-config">
+        {Object.keys(envOverrides).length > 0 && (
+          <div style={{
+            background: "rgba(234, 179, 8, 0.1)",
+            border: "1px solid rgba(234, 179, 8, 0.3)",
+            borderRadius: "6px",
+            padding: "8px 12px",
+            marginBottom: "12px",
+            fontSize: "12px",
+            color: "#eab308",
+            display: "flex",
+            flexDirection: "column",
+            gap: "4px"
+          }}>
+            <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: "6px" }}>
+              <span>⚠️ 检测到后端环境变量强制覆盖角色模型：</span>
+            </div>
+            {Object.entries(envOverrides).map(([role, mod]) => (
+              <div key={role} style={{ marginLeft: "14px", color: "var(--text-primary, #ddd)" }}>
+                • <code>{role}</code>: <strong>{mod}</strong>
+              </div>
+            ))}
+            <div style={{ color: "var(--text-muted, #888)", fontSize: "11px", marginTop: "2px" }}>
+              受环境变量覆盖的角色将优先使用环境变量指定的模型。如需完全通过界面配置，请从 .env 或系统环境变量中移除对应项。
+            </div>
+          </div>
+        )}
+
         <div className="form-grid">
           <label className="form-field">
             <span>模型所属 Provider 过滤</span>
@@ -306,6 +337,33 @@ export function ProviderSettings({
                 </button>
               )}
             </div>
+            {model && !model.includes("/") && (
+              <div style={{ color: "#f87171", fontSize: "11px", marginTop: "4px" }}>
+                ⚠ 模型缺少 Provider 前缀，请使用 <code>provider/model</code> 格式（例如: <code>openai/gpt-4o</code>）
+              </div>
+            )}
+            {catalog?.models && catalog.models.length > 0 && (
+              <select
+                value={catalog.models.some((m) => `${m.provider}/${m.id}` === model) ? model : ""}
+                onChange={(e) => {
+                  if (e.target.value) onModel(e.target.value);
+                }}
+                className="provider-filter-select"
+                style={{ marginTop: "6px", fontSize: "12px" }}
+              >
+                <option value="">-- 从模型列表快速选择 --</option>
+                {catalog.models
+                  .filter((m) => !providerFilter || m.provider === providerFilter)
+                  .map((m) => {
+                    const fullId = `${m.provider}/${m.id}`;
+                    return (
+                      <option key={fullId} value={fullId}>
+                        {fullId} ({m.name}){m.available ? " · [可用]" : ""}
+                      </option>
+                    );
+                  })}
+              </select>
+            )}
             <datalist id="provider-models">
               {catalog?.models
                 .filter((m) => !providerFilter || m.provider === providerFilter)
@@ -321,6 +379,22 @@ export function ProviderSettings({
             </datalist>
           </label>
         </div>
+
+        {effectiveRoleModels && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "11px", color: "var(--text-muted, #888)", marginTop: "8px" }}>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontWeight: 600 }}>当前后端实际生效:</span>
+              <span>规划 (Planner): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.planner || "未设置"}</code></span>
+              <span>任务切分 (Partitioner): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.partitioner || "未设置"}</code></span>
+              <span>节点执行 (Node): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.nodeAgent || "未设置"}</code></span>
+            </div>
+            {model && effectiveRoleModels.planner !== model && !envOverrides.planner && (
+              <div style={{ color: "#38bdf8", fontSize: "11px" }}>
+                ℹ️ 已选 <code>{model}</code>（点击下方“保存所有配置”后同步至后端生效）
+              </div>
+            )}
+          </div>
+        )}
 
         {availableModels.length > 0 && (
           <div className="model-quick-chips">

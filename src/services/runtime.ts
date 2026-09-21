@@ -52,6 +52,7 @@ export const runtimeService = {
   },
   compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config) => request<Snapshot>("save_graph", { graph, config }),
+  saveConfig: (config: Config) => request<Bootstrap>("save_config", { config }),
   planGoal: (goal: string, config: Config, mode?: string) => request<Snapshot>("plan_goal", { goal, config, mode }),
   async planGoalStream(
     goal: string,

@@ -205,8 +205,8 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
 
       {/* 规划失败提示 */}
       {(planning.error || planning.status === "failed") && (
-        <div className="planning-error-notice" style={{ marginBottom: 10, padding: "8px 12px", background: "rgba(239, 68, 68, 0.1)", borderRadius: 6, color: "#ef4444", fontSize: 11, display: "flex", alignItems: "flex-start", gap: 6, border: "1px solid rgba(239, 68, 68, 0.2)" }}>
-          <AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+        <div className="planning-error-notice" style={{ marginBottom: 10, padding: "8px 12px", background: "#ffffff", borderRadius: 6, color: "#b91c1c", fontSize: 11, display: "flex", alignItems: "flex-start", gap: 6, border: "1px solid #fca5a5", boxShadow: "0 1px 4px rgba(239, 68, 68, 0.08)" }}>
+          <AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1, color: "#ef4444" }} />
           <span>规划未通过：{planning.error || "规划阶段异常中断"}</span>
         </div>
       )}

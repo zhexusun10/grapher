@@ -11,6 +11,7 @@ import {
 } from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
+import { providerAuth } from "./services/providerAuth";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
@@ -154,6 +155,8 @@ export default function App() {
     return initialConfig;
   });
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
+  const [effectiveRoleModels, setEffectiveRoleModels] = useState<Record<string, string>>({});
+  const [envOverrides, setEnvOverrides] = useState<Record<string, string>>({});
   const repositoryStatus = useRepositoryStatus(config.repository);
   const repositoryBlocked = !!config.repository && repositoryStatus?.valid === false;
   const requireRepository = async (repository: string) => {
@@ -542,6 +545,8 @@ export default function App() {
     const scope = planningRecovery.begin();
     const data = await runtimeService.bootstrap();
     if (!planningRecovery.current(scope)) return;
+    if (data.effectiveRoleModels) setEffectiveRoleModels(data.effectiveRoleModels);
+    if (data.envOverrides) setEnvOverrides(data.envOverrides);
 
     let storedProjects: ProjectItem[] | null = null;
     try {
@@ -641,12 +646,42 @@ export default function App() {
       const raw = localStorage.getItem("grapher_config");
       if (raw) savedModel = JSON.parse(raw).model || "";
     } catch {}
-    setConfig((prev) => ({
+
+    // Choose model with priority:
+    // 1) savedModel with a provider prefix ("provider/model")
+    // 2) backend data.config.model with a provider prefix
+    // 3) non-empty savedModel
+    // 4) backend data.config.model
+    let chosenModel = "";
+    if (savedModel && savedModel.includes("/")) {
+      chosenModel = savedModel;
+    } else if (data.config?.model && data.config.model.includes("/")) {
+      chosenModel = data.config.model;
+    } else if (savedModel) {
+      chosenModel = savedModel;
+    } else if (data.config?.model) {
+      chosenModel = data.config.model;
+    } else {
+      chosenModel = "";
+    }
+
+    const nextConfigObj: Config = {
       ...data.config,
-      model: data.config.model || savedModel || prev.model,
+      model: chosenModel,
       repository: activeRepo || (activeInfo ? activeInfo.path : ""),
-    }));
+    };
+    setConfig(nextConfigObj);
     setDataPath(data.dataPath);
+
+    if (chosenModel && chosenModel !== data.config?.model) {
+      try {
+        const synced = await runtimeService.saveConfig(nextConfigObj);
+        if (synced.effectiveRoleModels) setEffectiveRoleModels(synced.effectiveRoleModels);
+        if (synced.envOverrides) setEnvOverrides(synced.envOverrides);
+      } catch (err) {
+        console.warn("Failed to sync initial model to backend:", err);
+      }
+    }
 
     if (storedWorkspaceRuns === null) {
       if (data.runs && data.runs.length > 0 && activeRepo) {
@@ -1016,6 +1051,17 @@ export default function App() {
         return next;
       });
     }
+    try {
+      const boot = await runtimeService.saveConfig(nextConfig);
+      if (boot.effectiveRoleModels) {
+        setEffectiveRoleModels(boot.effectiveRoleModels);
+      }
+      if (boot.envOverrides) {
+        setEnvOverrides(boot.envOverrides);
+      }
+    } catch (e) {
+      console.warn("Failed to persist config to backend:", e);
+    }
     setModal(null);
     setError("");
   });
@@ -1122,6 +1168,30 @@ export default function App() {
         setModal("settings");
         setError("请先在左侧工作区选择绑定的本地 Git 仓库。");
         return;
+      }
+      const model = config.model?.trim();
+      if (!model) {
+        setModal("settings");
+        setError("请先在设置中配置执行模型。");
+        return;
+      }
+      if (!model.includes("/")) {
+        setModal("settings");
+        setError(`模型标识 "${model}" 缺少 Provider 前缀（例如: openai/gpt-4o 或 opencode-go/qwen3.8-flash）。无前缀模型会导致引擎无法定位提供商。`);
+        return;
+      }
+
+      const providerId = model.split("/")[0];
+      try {
+        const cat = await providerAuth.catalog();
+        const prov = cat.providers.find((p) => p.id === providerId);
+        if (prov && !prov.configured) {
+          setModal("settings");
+          setError(`所选模型服务商 "${prov.name || providerId}" 尚未完成认证，请在设置中配置 API Key 或登录凭据后再提交。`);
+          return;
+        }
+      } catch {
+        // If provider catalog call fails or times out, proceed to backend preflight
       }
       let partInTag = false;
       let planInTag = false;
@@ -2047,6 +2117,8 @@ export default function App() {
             setConfig={setConfig}
             repoInfo={repoInfo}
             dataPath={dataPath}
+            effectiveRoleModels={effectiveRoleModels}
+            envOverrides={envOverrides}
             onOpenProject={handleOpenProject}
             onDetectRepository={handleDetectRepository}
             onResetWorkspace={handleResetWorkspace}

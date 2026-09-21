@@ -2,7 +2,7 @@
 
 Planner exposes exactly `node`, `edge`, `read`, and `bash`, plus compiler feedback from graph mutations.
 
-`node` accepts a nonempty `nodes` array; `edge` accepts a nonempty `edges` array. One edit is an array of length one. Each tool applies its own edits in order and compiles once. A failed batch leaves the saved graph unchanged.
+`node` accepts a nonempty `nodes` array or single-node fields (`name`, `task`, `delete`); `edge` accepts a nonempty `edges` array or single-edge fields (`from`, `to`, `relation`, `feedback`, `delete`). Single-item edits can be passed directly or as a length-one array. Each tool applies its edits in order and compiles once. A failed mutation leaves the saved graph unchanged.
 
 `read` uses Pi's native implementation and description, including offset/limit behavior. `bash` uses Pi's native backend without write-command filtering or implicit errexit/pipefail. Planner has no automatic skills/extensions or project context files.
 

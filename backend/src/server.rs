@@ -34,6 +34,8 @@ pub struct Bootstrap {
     runs: Vec<String>,
     data_path: String,
     repository_info: Option<crate::workspace::RepositoryInfo>,
+    pub effective_role_models: std::collections::HashMap<String, String>,
+    pub env_overrides: std::collections::HashMap<String, String>,
 }
 
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
@@ -636,6 +638,100 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             );
         }
     }
+
+    #[test]
+    fn origin_check_allows_custom_ports_and_blocks_malicious_origins() {
+        assert!(is_trusted_origin_or_host("http://localhost:5173", 1421));
+        assert!(is_trusted_origin_or_host("http://localhost:1420", 1421));
+        assert!(is_trusted_origin_or_host("http://127.0.0.1:3000", 1421));
+        assert!(is_trusted_origin_or_host("http://[::1]:5173", 1421));
+        assert!(is_trusted_origin_or_host("tauri://localhost", 1421));
+        assert!(is_trusted_origin_or_host("127.0.0.1:1421", 1421));
+        assert!(is_trusted_origin_or_host("localhost:1421", 1421));
+
+        // Malicious or remote origins must be blocked
+        assert!(!is_trusted_origin_or_host("http://evil.com", 1421));
+        assert!(!is_trusted_origin_or_host("http://evil.com:5173", 1421));
+        assert!(!is_trusted_origin_or_host("http://localhost.evil.com", 1421));
+        assert!(!is_trusted_origin_or_host("http://127.0.0.1.attacker.com", 1421));
+        assert!(!is_trusted_origin_or_host("http://attacker.com:5173", 1421));
+    }
+
+    #[test]
+    fn planning_preflight_checks_model_format() {
+        let mut config = Config {
+            repository: "/tmp/fake".into(),
+            model: "".into(),
+            max_parallel: 4,
+            max_feedback: 3,
+            #[cfg(feature = "fixture")]
+            engine: "pi".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: "node".into(),
+            #[cfg(feature = "fixture")]
+            pi_args: vec![],
+        };
+
+        // 1. Empty model fails preflight
+        let err = validate_planning_preflight(&config, None).unwrap_err();
+        assert!(err.contains("is not configured"));
+
+        // 2. Model without provider prefix fails preflight
+        config.model = "qwen3.8-flash".into();
+        let err = validate_planning_preflight(&config, None).unwrap_err();
+        assert!(err.contains("is missing a provider prefix"));
+
+        // 3. Model with valid provider prefix passes preflight format check
+        config.model = "openai/gpt-4o".into();
+        assert!(validate_planning_preflight(&config, None).is_ok());
+    }
+
+    #[test]
+    fn save_config_updates_bootstrap_and_persists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let runtime = crate::runtime::Runtime::open(temp_dir.path()).unwrap();
+        let service = Arc::new(Service {
+            runtime: std::sync::Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
+            extension: temp_dir.path().to_path_buf(),
+        });
+
+        // 1. Initial bootstrap has empty model
+        let initial = bootstrap(&service, false).unwrap();
+        assert_eq!(initial.config.model, "");
+        assert_eq!(initial.effective_role_models.get("planner").unwrap(), "");
+
+        // 2. Save new config with valid model
+        let new_config = Config {
+            repository: temp_dir.path().to_string_lossy().into(),
+            model: "openai/gpt-4o".into(),
+            max_parallel: 2,
+            max_feedback: 3,
+            #[cfg(feature = "fixture")]
+            engine: "pi".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: "node".into(),
+            #[cfg(feature = "fixture")]
+            pi_args: vec![],
+        };
+        let updated = save_config(new_config.clone(), &service).unwrap();
+        assert_eq!(updated.config.model, "openai/gpt-4o");
+        assert_eq!(updated.effective_role_models.get("planner").unwrap(), "openai/gpt-4o");
+        assert_eq!(updated.effective_role_models.get("partitioner").unwrap(), "openai/gpt-4o");
+        assert_eq!(updated.effective_role_models.get("nodeAgent").unwrap(), "openai/gpt-4o");
+
+        // 3. Verify config.json file was written
+        let config_file = temp_dir.path().join("config.json");
+        assert!(config_file.exists());
+        let saved_disk: Config = serde_json::from_str(&fs::read_to_string(&config_file).unwrap()).unwrap();
+        assert_eq!(saved_disk.model, "openai/gpt-4o");
+
+        // 4. Verify new bootstrap reloads the persisted config
+        let reloaded = bootstrap(&service, false).unwrap();
+        assert_eq!(reloaded.config.model, "openai/gpt-4o");
+        assert_eq!(reloaded.effective_role_models.get("planner").unwrap(), "openai/gpt-4o");
+    }
 }
 
 fn load_env_file() {
@@ -694,8 +790,23 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
     #[cfg(feature = "fixture")]
     let entrypoint = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs");
     let detected_repo = crate::workspace::detect(None).ok().flatten();
+    let saved_config_on_disk = {
+        let path = runtime.root.join("config.json");
+        if let Ok(bytes) = fs::read(&path) {
+            serde_json::from_slice::<Config>(&bytes).ok()
+        } else {
+            None
+        }
+    };
     let mut config = active_config
-        .or_else(|| runtime.state.config.clone())
+        .or(saved_config_on_disk)
+        .or_else(|| {
+            let mut cfg = runtime.state.config.clone()?;
+            if !cfg.model.is_empty() && !cfg.model.contains('/') {
+                cfg.model = String::new();
+            }
+            Some(cfg)
+        })
         .unwrap_or(Config {
             repository: detected_repo
                 .as_ref()
@@ -733,6 +844,32 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
     } else {
         None
     };
+    let mut effective_role_models = std::collections::HashMap::new();
+    let mut env_overrides = std::collections::HashMap::new();
+
+    let planner_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
+    let partitioner_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
+    let node_cfg = PiModelConfig::resolve(PiRole::NodeAgent, &config);
+    let merger_cfg = PiModelConfig::resolve(PiRole::Merger, &config);
+
+    effective_role_models.insert("planner".into(), planner_cfg.model);
+    effective_role_models.insert("partitioner".into(), partitioner_cfg.model);
+    effective_role_models.insert("nodeAgent".into(), node_cfg.model);
+    effective_role_models.insert("merger".into(), merger_cfg.model);
+
+    for (role_name, env_var) in [
+        ("planner", "PLANNER_MODEL"),
+        ("partitioner", "PARTITIONER_MODEL"),
+        ("nodeAgent", "NODE_AGENT_MODEL"),
+        ("merger", "MERGER_MODEL"),
+    ] {
+        if let Ok(val) = std::env::var(env_var) {
+            if !val.trim().is_empty() {
+                env_overrides.insert(role_name.into(), val);
+            }
+        }
+    }
+
     Ok(Bootstrap {
         snapshot: if metadata {
             snapshot_metadata(&runtime.state)?
@@ -743,6 +880,8 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
         runs: runtime.store.runs()?,
         data_path: runtime.root.to_string_lossy().into(),
         repository_info,
+        effective_role_models,
+        env_overrides,
     })
 }
 
@@ -787,6 +926,17 @@ fn save_graph(
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     runtime.create(graph, config)?;
     Ok(runtime.state.clone())
+}
+
+fn save_config(config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
+    let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+    let config_path = runtime.root.join("config.json");
+    if let Ok(bytes) = serde_json::to_vec_pretty(&config) {
+        let _ = fs::write(&config_path, bytes);
+    }
+    runtime.state.config = Some(config.clone());
+    drop(runtime);
+    bootstrap(service, false)
 }
 
 pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetrics {
@@ -883,6 +1033,71 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
     }
 }
 
+pub fn validate_planning_preflight(config: &Config, mode: Option<&str>) -> Result<(), String> {
+    let need_partitioner = mode.is_none();
+    let need_planner = mode != Some("serial");
+
+    if need_partitioner {
+        let partitioner_cfg = PiModelConfig::resolve(PiRole::Partitioner, config);
+        validate_role_model_preflight(PiRole::Partitioner, &partitioner_cfg.model)?;
+    }
+    if need_planner {
+        let planner_cfg = PiModelConfig::resolve(PiRole::Planner, config);
+        validate_role_model_preflight(PiRole::Planner, &planner_cfg.model)?;
+    }
+    Ok(())
+}
+
+fn validate_role_model_preflight(role: PiRole, model: &str) -> Result<(), String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "Pre-flight check failed: {} model is not configured. Please select or specify a model in settings.",
+            role.name()
+        ));
+    }
+    if !trimmed.contains('/') {
+        return Err(format!(
+            "Pre-flight check failed: {} model '{}' is missing a provider prefix (e.g. 'openai/{}' or 'opencode-go/{}'). Please specify the fully qualified provider/model identifier in settings.",
+            role.name(),
+            trimmed,
+            trimmed,
+            trimmed
+        ));
+    }
+    let provider_id = trimmed.split('/').next().unwrap_or("");
+    if provider_id.is_empty() {
+        return Err(format!(
+            "Pre-flight check failed: Invalid model identifier '{}'.",
+            trimmed
+        ));
+    }
+
+    #[cfg(not(feature = "fixture"))]
+    {
+        if let Ok(resp) = crate::provider_auth::request(serde_json::json!({
+            "version": 1,
+            "operation": "catalog",
+            "refresh": false
+        })) {
+            if let Some(providers) = resp.get("result").and_then(|r| r.get("providers")).and_then(|p| p.as_array()) {
+                if let Some(prov) = providers.iter().find(|p| p.get("id").and_then(|i| i.as_str()) == Some(provider_id)) {
+                    let is_configured = prov.get("configured").and_then(|c| c.as_bool()).unwrap_or(false);
+                    if !is_configured {
+                        return Err(format!(
+                            "Pre-flight check failed: Provider '{}' for model '{}' is not authenticated. Please configure API credentials or log in before starting planning.",
+                            provider_id,
+                            trimmed
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn plan_goal_internal(
     goal: String,
     config: Config,
@@ -922,6 +1137,7 @@ fn plan_goal_internal(
         let repository = PathBuf::from(&config.repository);
         let repo_str = repository.to_string_lossy().to_string();
         crate::workspace::verify(&repository).map_err(|error| (error, None))?;
+        validate_planning_preflight(&config, mode).map_err(|error| (error, None))?;
         let planning_id = Uuid::new_v4().to_string();
         let directory = root.join("planning").join(&planning_id);
         fs::create_dir_all(&directory).map_err(|error| (error.to_string(), None))?;
@@ -1724,6 +1940,7 @@ pub fn dispatch(
             argument(&body, "config")?,
             service,
         )?),
+        "save_config" => to_value(save_config(argument(&body, "config")?, service)?),
         "plan_goal" => to_value(plan_goal(
             argument(&body, "goal")?,
             argument(&body, "config")?,
@@ -1868,6 +2085,81 @@ fn send_sse_event(tx: &std::sync::mpsc::Sender<Vec<u8>>, event: &str, data: &ser
     let _ = tx.send(payload.into_bytes());
 }
 
+pub fn is_trusted_origin_or_host(value: &str, backend_port: u16) -> bool {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return false;
+    }
+
+    // Check optional GRAPHER_ALLOWED_ORIGINS environment variable
+    if let Ok(allowed) = std::env::var("GRAPHER_ALLOWED_ORIGINS") {
+        for origin in allowed.split(',') {
+            let o = origin.trim();
+            if !o.is_empty() && (o == raw || raw.starts_with(o)) {
+                return true;
+            }
+        }
+    }
+
+    // Strip scheme if present
+    let without_scheme = if let Some(stripped) = raw.strip_prefix("http://") {
+        stripped
+    } else if let Some(stripped) = raw.strip_prefix("https://") {
+        stripped
+    } else if let Some(stripped) = raw.strip_prefix("tauri://") {
+        stripped
+    } else {
+        raw
+    };
+
+    // Strip path or query if present (e.g. "localhost:5173/path")
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("");
+    if authority.is_empty() {
+        return false;
+    }
+
+    // Special check for tauri://localhost
+    if raw.starts_with("tauri://") && authority == "localhost" {
+        return true;
+    }
+
+    // Extract host (handle IPv6 [::1]:port vs host:port)
+    let host = if authority.starts_with('[') {
+        if let Some(end_bracket) = authority.find(']') {
+            &authority[1..end_bracket]
+        } else {
+            authority
+        }
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+
+    // Any loopback address on any port is trusted
+    if host == "localhost"
+        || host == "127.0.0.1"
+        || host == "0.0.0.0"
+        || host == "::1"
+        || host == "[::1]"
+    {
+        return true;
+    }
+
+    // Direct match against backend port
+    let backend_host_1 = format!("127.0.0.1:{backend_port}");
+    let backend_host_2 = format!("localhost:{backend_port}");
+    if authority == backend_host_1 || authority == backend_host_2 {
+        return true;
+    }
+
+    false
+}
+
 pub fn run() -> Result<(), String> {
     use tiny_http::{Header, Response, Server};
     load_env_file();
@@ -1926,28 +2218,29 @@ pub fn run() -> Result<(), String> {
         let service = service.clone();
         let web_root = web_root.clone();
         thread::spawn(move || {
-            let trusted_hosts = [
-                format!("127.0.0.1:{port}"),
-                format!("localhost:{port}"),
-                "127.0.0.1:1420".into(),
-                "localhost:1420".into(),
-            ];
+            let req_origin = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Origin"))
+                .map(|h| h.value.as_str().to_string());
             let trusted = request
                 .headers()
                 .iter()
                 .filter(|h| h.field.equiv("Host") || h.field.equiv("Origin"))
-                .all(|h| {
-                    let value = h.value.as_str();
-                    let host = if h.field.equiv("Origin") {
-                        value.strip_prefix("http://").unwrap_or("")
-                    } else {
-                        value
-                    };
-                    trusted_hosts.iter().any(|allowed| allowed == host)
-                });
+                .all(|h| is_trusted_origin_or_host(h.value.as_str(), port));
             if !trusted {
                 let _ = request
                     .respond(Response::from_string("Untrusted origin").with_status_code(403));
+                return;
+            }
+            if request.method() == &tiny_http::Method::Options {
+                let origin = req_origin.unwrap_or_else(|| "*".to_string());
+                let response = Response::empty(204)
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], origin.as_bytes()).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, OPTIONS"[..]).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type, Authorization"[..]).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Max-Age"[..], &b"86400"[..]).unwrap());
+                let _ = request.respond(response);
                 return;
             }
             let url = request.url().split('?').next().unwrap_or("/").to_string();
@@ -1982,18 +2275,39 @@ pub fn run() -> Result<(), String> {
                     }) {
                         Ok(tuple) => tuple,
                         Err(err) => {
-                            let _ = request.respond(
-                                Response::from_string(
-                                    serde_json::json!({"error": err}).to_string(),
-                                )
-                                .with_status_code(400)
-                                .with_header(
-                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
-                                ),
+                            let mut resp = Response::from_string(
+                                serde_json::json!({"error": err}).to_string(),
+                            )
+                            .with_status_code(400)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
                             );
+                            if let Some(ref origin) = req_origin {
+                                if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
+                                    resp = resp.with_header(hdr);
+                                }
+                            }
+                            let _ = request.respond(resp);
                             return;
                         }
                     };
+
+                    if let Err(err) = validate_planning_preflight(&config, plan_mode.as_deref()) {
+                        let mut resp = Response::from_string(
+                            serde_json::json!({"error": err}).to_string(),
+                        )
+                        .with_status_code(400)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        );
+                        if let Some(ref origin) = req_origin {
+                            if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
+                                resp = resp.with_header(hdr);
+                            }
+                        }
+                        let _ = request.respond(resp);
+                        return;
+                    }
 
                     let (tx, rx) = std::sync::mpsc::channel();
                     let service_clone = service.clone();
@@ -2073,7 +2387,7 @@ pub fn run() -> Result<(), String> {
                         current: Vec::new(),
                         pos: 0,
                     };
-                    let response = Response::empty(200)
+                    let mut response = Response::empty(200)
                         .with_data(stream, None)
                         .with_header(
                             Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
@@ -2081,6 +2395,11 @@ pub fn run() -> Result<(), String> {
                         .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
                         .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
                         .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
+                    if let Some(ref origin) = req_origin {
+                        if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
+                            response = response.with_header(hdr);
+                        }
+                    }
                     let _ = request.respond(response);
                     return;
                 }
@@ -2102,14 +2421,18 @@ pub fn run() -> Result<(), String> {
                     Ok(value) => (200, serde_json::json!({"result": value})),
                     Err(error) => (400, serde_json::json!({"error": error})),
                 };
-                let _ = request.respond(
-                    Response::from_string(body.to_string())
+                let mut response = Response::from_string(body.to_string())
                         .with_status_code(status)
                         .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
                         .with_header(
                             Header::from_bytes("Content-Type", "application/json").unwrap(),
-                        ),
-                );
+                        );
+                if let Some(ref origin) = req_origin {
+                    if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
+                        response = response.with_header(hdr);
+                    }
+                }
+                let _ = request.respond(response);
             } else {
                 let relative = url.trim_start_matches('/');
                 if relative.split('/').any(|part| part == "..") {

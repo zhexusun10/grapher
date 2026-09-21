@@ -469,10 +469,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               aria-label={isWorking ? "点击打断执行" : "发送消息"}
             >
               {isWorking ? (
-                <span className="prompt-box-stop-spinner-wrapper">
-                  <LoaderCircle size={compact ? 15 : 18} className="prompt-box-spin" />
-                  <Square size={compact ? 7 : 8} className="prompt-box-stop-icon" />
-                </span>
+                <Square size={compact ? 8 : 10} className="prompt-box-stop-icon" />
               ) : isBusy || isPreparing ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
               ) : (

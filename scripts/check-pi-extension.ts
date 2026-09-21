@@ -129,6 +129,10 @@ try {
     ] }, "E208"],
     ["node", { nodes: [{ name: "new", task: "New task" }, { name: "invalid" }] }, "E203"],
     ["node", { nodes: [{ name: "new" }] }, "E203"],
+    ["node", { name: "contract", nodes: batchNodes }, "mutation-input"],
+    ["node", { task: "orphan" }, "mutation-input"],
+    ["edge", { from: "contract", edges: batchEdges }, "mutation-input"],
+    ["edge", { from: "contract" }, "mutation-input"],
   ] as const) {
     const response = await call(toolName, edits);
     const rejectedBatch = JSON.parse(response.content[0].text);
@@ -140,16 +144,18 @@ try {
   }
   for (const [toolName, invalid] of [
     ["node", { nodes: [] }],
-    ["node", { name: "contract", task: "Wrong shape" }],
     ["node", { nodes: batchNodes, edges: batchEdges }],
     ["edge", { edges: [] }],
-    ["edge", { from: "contract", to: "parser" }],
     ["edge", { edges: batchEdges, nodes: batchNodes }],
   ] as const) {
     const tool = extension.tools.get(toolName)!.definition;
     assert.throws(() => validateToolArguments(tool, { type: "toolCall", id: "invalid", name: toolName, arguments: invalid }));
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
   }
+  // Single-entity fallback without array wrapper works seamlessly:
+  const directSingle = JSON.parse((await call("node", { name: "direct", task: "Direct task" })).content[0].text);
+  assert.equal(directSingle.mutationApplied, true);
+  await call("node", { name: "direct", delete: true });
   // Reversing an edge creates a temporary cycle; only the final batch must compile.
   const rewired = JSON.parse((await call("edge", { edges: [
     { from: "parser", to: "contract" },

@@ -156,14 +156,8 @@ h3 {
 }
 
 .app-background-root.landing-active>.relative>.absolute {
-  -webkit-mask-image: radial-gradient(ellipse at center,
-      #000000 0%,
-      #000000 78%,
-      transparent 100%);
-  mask-image: radial-gradient(ellipse at center,
-      #000000 0%,
-      #000000 78%,
-      transparent 100%);
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 .app-shell.landing-active {
@@ -463,12 +457,10 @@ a,
 .confirm-dialog {
   width: 380px;
   max-width: 90vw;
-  background: rgba(255, 255, 255, 0.98);
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  background: #ffffff;
   border: 1px solid var(--border-default);
   border-radius: 12px;
-  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(0, 0, 0, 0.04);
   padding: 20px 22px 18px;
   display: flex;
   flex-direction: column;
@@ -1929,7 +1921,7 @@ a,
   opacity: 0.3;
 }
 
-/* 发送按钮工作/转圈打断状态 */
+/* 发送按钮工作/打断状态 */
 .prompt-box-send-btn.working {
   opacity: 1 !important;
   background: var(--brand-default);
@@ -1943,20 +1935,11 @@ a,
   transform: scale(1.06);
 }
 
-.prompt-box-stop-spinner-wrapper {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 100%;
-}
-
 .prompt-box-stop-icon {
-  position: absolute;
   fill: currentColor;
   stroke: currentColor;
-  border-radius: 1px;
+  border-radius: 1.5px;
+  transition: transform 0.15s ease;
 }
 
 .prompt-box-send-btn.working:hover .prompt-box-stop-icon {
@@ -2119,11 +2102,12 @@ a,
   justify-content: space-between;
   padding: 5px 10px;
   margin-bottom: 6px;
-  background: rgba(59, 130, 246, 0.1);
+  background: #ffffff;
   border: 1px solid rgba(59, 130, 246, 0.25);
+  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.08);
   border-radius: 8px;
   font-size: 11px;
-  color: #93c5fd;
+  color: #2563eb;
 }
 
 .followup-queue-banner .queue-info {
@@ -2138,18 +2122,19 @@ a,
 .followup-queue-banner .queue-cancel-btn {
   background: transparent;
   border: none;
-  color: #93c5fd;
+  color: #64748b;
   cursor: pointer;
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 10px;
-  opacity: 0.8;
-  transition: opacity 0.15s ease;
+  opacity: 0.85;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
 .followup-queue-banner .queue-cancel-btn:hover {
   opacity: 1;
-  background: rgba(59, 130, 246, 0.2);
+  color: #1e40af;
+  background: rgba(59, 130, 246, 0.12);
 }
 
 .prompt-box-spin {
@@ -3880,7 +3865,7 @@ a,
   z-index: 99999;
 }
 
-/* 全局悬浮报错横幅 (Floating Error Banner) - 浮动展示，不占用页面流，不挤压其他部件 */
+/* 全局悬浮报错横幅 (Floating Error Banner) - 浮动展示，不占用页面流，白底告警风格 */
 .floating-error-banner,
 .error-banner {
   position: relative;
@@ -3889,14 +3874,12 @@ a,
   gap: 12px;
   max-width: min(680px, calc(100% - 32px));
   min-width: min(320px, calc(100% - 32px));
-  padding: 10px 14px;
-  background: rgba(26, 17, 18, 0.94);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  padding: 10px 16px;
+  background: #ffffff;
   border: 1px solid rgba(239, 68, 68, 0.35);
   border-radius: 10px;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 10px rgba(239, 68, 68, 0.15);
-  color: #fca5a5;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12), 0 4px 12px rgba(239, 68, 68, 0.08);
+  color: #991b1b;
   font-size: 12px;
   line-height: 1.45;
   pointer-events: auto;
@@ -3911,7 +3894,8 @@ a,
   width: 26px;
   height: 26px;
   border-radius: 6px;
-  background: rgba(239, 68, 68, 0.16);
+  background: var(--status-danger-subtle, #fef2f2);
+  border: 1px solid var(--status-danger-border, #fecaca);
   color: #ef4444;
   flex-shrink: 0;
 }
@@ -3926,8 +3910,8 @@ a,
 }
 
 .floating-error-text {
-  color: #fee2e2;
-  font-weight: 450;
+  color: #991b1b;
+  font-weight: 500;
   letter-spacing: -0.01em;
 }
 
@@ -3942,7 +3926,7 @@ a,
   border-radius: 6px;
   background: transparent;
   border: none;
-  color: rgba(254, 202, 202, 0.65);
+  color: #94a3b8;
   cursor: pointer;
   flex-shrink: 0;
   transition: all 0.15s ease;
@@ -3950,8 +3934,8 @@ a,
 
 .floating-error-close:hover,
 .error-banner button:hover {
-  background: rgba(239, 68, 68, 0.22);
-  color: #ffffff;
+  background: var(--status-danger-subtle, #fef2f2);
+  color: #ef4444;
 }
 
 .floating-error-close:active,
@@ -5552,9 +5536,6 @@ a,
   }
 }
 
-.sparkle-spin {
-  animation: spin 4s linear infinite;
-}
 
 .thinking-title {
   font-size: 12px;
@@ -6754,7 +6735,7 @@ a,
 .confirm-delete-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.72);
+  background: var(--bg-overlay, rgba(15, 23, 42, 0.45));
   backdrop-filter: blur(4px);
   z-index: 10000;
   display: flex;
@@ -6765,10 +6746,10 @@ a,
 .confirm-delete-modal {
   width: 100%;
   max-width: 440px;
-  background: #18181b;
-  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: #ffffff;
+  border: 1px solid var(--border-default, #e2e8f0);
   border-radius: 12px;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6), 0 0 24px rgba(239, 68, 68, 0.12);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.16), 0 4px 16px rgba(0, 0, 0, 0.04);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -6779,15 +6760,16 @@ a,
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--border-subtle, #f1f5f9);
 }
 
 .confirm-delete-icon-wrap {
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
+  background: var(--status-danger-subtle, #fef2f2);
+  color: var(--status-danger, #ef4444);
+  border: 1px solid var(--status-danger-border, #fecaca);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6802,30 +6784,31 @@ a,
   margin: 0;
   font-size: 15px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-primary, #0f172a);
 }
 
 .confirm-delete-subtitle {
   margin: 4px 0 0;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--text-secondary, #64748b);
 }
 
 .confirm-close-btn {
   background: transparent;
   border: none;
-  color: var(--text-secondary);
+  color: var(--text-secondary, #64748b);
   cursor: pointer;
   padding: 4px;
   border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: all 0.15s ease;
 }
 
 .confirm-close-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-primary);
+  background: var(--bg-surface-hover, #f1f5f9);
+  color: var(--text-primary, #0f172a);
 }
 
 .confirm-delete-body {
@@ -6836,8 +6819,8 @@ a,
 }
 
 .confirm-delete-target-card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--bg-surface, #f7f7f8);
+  border: 1px solid var(--border-default, #e2e8f0);
   border-radius: 8px;
   padding: 10px 14px;
   display: flex;
@@ -6854,18 +6837,18 @@ a,
 .target-provider-name {
   font-size: 14px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-primary, #0f172a);
 }
 
 .target-provider-id {
   font-size: 11px;
-  color: var(--text-secondary);
+  color: var(--text-secondary, #64748b);
   font-family: var(--font-mono, monospace);
 }
 
 .target-provider-source {
   font-size: 11.5px;
-  color: var(--text-secondary);
+  color: var(--text-secondary, #64748b);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -6879,14 +6862,14 @@ a,
 }
 
 .source-tag.env {
-  background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
   border: 1px solid rgba(59, 130, 246, 0.25);
 }
 
 .source-tag.local {
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
+  background: rgba(34, 197, 94, 0.1);
+  color: #16a34a;
   border: 1px solid rgba(34, 197, 94, 0.25);
 }
 
@@ -6894,7 +6877,7 @@ a,
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-secondary);
+  color: var(--text-secondary, #64748b);
 }
 
 .confirm-delete-footer {
@@ -6903,8 +6886,8 @@ a,
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.15);
+  border-top: 1px solid var(--border-subtle, #f1f5f9);
+  background: var(--bg-surface, #f7f7f8);
 }
 
 .confirm-cancel-btn {
@@ -6929,7 +6912,7 @@ a,
 
 .confirm-action-btn:hover {
   background: #b91c1c;
-  box-shadow: 0 0 12px rgba(220, 38, 38, 0.4);
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.25);
 }
 
 .configured-actions {
@@ -7186,8 +7169,8 @@ a,
 }
 
 .login-status-alert {
-  padding: 10px 12px;
-  border-radius: 6px;
+  padding: 10px 14px;
+  border-radius: 8px;
   font-size: 12px;
   display: flex;
   align-items: center;
@@ -7195,21 +7178,24 @@ a,
 }
 
 .login-status-alert.success {
-  background: rgba(34, 197, 94, 0.12);
-  border: 1px solid rgba(34, 197, 94, 0.3);
-  color: #4ade80;
+  background: #ffffff;
+  border: 1px solid #bbf7d0;
+  color: #15803d;
+  box-shadow: 0 1px 4px rgba(34, 197, 94, 0.08);
 }
 
 .login-status-alert.error {
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #f87171;
+  background: #ffffff;
+  border: 1px solid #fca5a5;
+  color: #b91c1c;
+  box-shadow: 0 1px 4px rgba(239, 68, 68, 0.08);
 }
 
 .login-status-alert.warning {
-  background: rgba(234, 179, 8, 0.12);
-  border: 1px solid rgba(234, 179, 8, 0.3);
-  color: #facc15;
+  background: #ffffff;
+  border: 1px solid #fde68a;
+  color: #b45309;
+  box-shadow: 0 1px 4px rgba(245, 158, 11, 0.08);
 }
 
 .provider-status-loading {

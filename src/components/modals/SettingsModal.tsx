@@ -11,6 +11,8 @@ interface SettingsModalProps {
   setConfig: React.Dispatch<React.SetStateAction<Config>>;
   repoInfo: RepositoryInfo | null;
   dataPath: string;
+  effectiveRoleModels?: Record<string, string>;
+  envOverrides?: Record<string, string>;
   onOpenProject: () => void;
   onDetectRepository: (path?: string) => void;
   onResetWorkspace: () => void;
@@ -25,6 +27,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   setConfig,
   repoInfo,
   dataPath,
+  effectiveRoleModels,
+  envOverrides,
   onOpenProject,
   onDetectRepository,
   onResetWorkspace,
@@ -143,7 +147,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 <Terminal size={16} />
                 <h4>模型与 Pi Provider 认证 (/login)</h4>
               </div>
-              <ProviderSettings model={config.model} onModel={model => setConfig(prev => ({ ...prev, model }))} />
+              <ProviderSettings
+                model={config.model}
+                onModel={model => setConfig(prev => ({ ...prev, model }))}
+                effectiveRoleModels={effectiveRoleModels}
+                envOverrides={envOverrides}
+              />
             </div>
 
             {/* Section 4: 数据管理 */}

@@ -87,7 +87,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
         >
           <div className="thinking-header-left">
             <div className={`thinking-icon-box ${isStreaming ? "pulse" : ""}`}>
-              {isStreaming ? <Sparkles size={14} className="sparkle-spin" /> : <Brain size={14} />}
+              {isStreaming ? <Sparkles size={14} /> : <Brain size={14} />}
             </div>
             <span className="thinking-title">{title}</span>
             {isStreaming ? (

@@ -83,6 +83,8 @@ export interface Bootstrap {
   runs: string[];
   dataPath: string;
   repositoryInfo?: RepositoryInfo | null;
+  effectiveRoleModels?: Record<string, string>;
+  envOverrides?: Record<string, string>;
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
