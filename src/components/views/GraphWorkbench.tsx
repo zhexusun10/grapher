@@ -723,7 +723,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         </div>
                       </div>
                     ) : (
-                      <div className={`chat-bubble-${msg.role}`}>
+                      <div className={`chat-bubble-${msg.role} chat-message-${msg.role}`}>
                         <MarkdownRenderer content={msg.text} />
                       </div>
                     )}
@@ -841,7 +841,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             initial={{ opacity: 0, y: 8, scale: 0.98 }}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                           >
-                            <div className="chat-bubble-assistant">
+                            <div className="chat-bubble-assistant chat-message-assistant">
                               <StreamingAssistantBubble
                                 content={item.content || ""}
                                 isStreaming={isPlanning && isLast && item.status === "running"}
@@ -871,7 +871,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           initial={{ opacity: 0, y: 8, scale: 0.98 }}
                           animate={{ opacity: 1, y: 0, scale: 1 }}
                         >
-                          <div className="chat-bubble-assistant">
+                          <div className="chat-bubble-assistant chat-message-assistant">
                             <MarkdownRenderer content={smoothPlannerText} isStreaming={isPlanning} />
                           </div>
                         </motion.div>

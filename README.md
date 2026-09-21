@@ -171,7 +171,9 @@ npm run benchmark:runtime         # 执行机制回归
 npm run test:benchmark            # grader 回归，不调用模型
 ```
 
-规划 benchmark 不创建 Runtime、不批准图、不执行节点。Harness 与测试源码位于 Grapher 仓库外的 sibling `../grapher-tests/`；Cargo manifest 和 npm scripts 只引用这些外置文件。默认证据写入 Grapher 仓库旁的 `grapher-benchmark-results/`，可通过 `GRAPHER_BENCHMARK_RESULTS_DIR` 覆盖。评测契约见 [外置 benchmark 架构](../grapher-tests/benchmark/architecture.md)，被测系统边界见 [system-under-test.md](../grapher-tests/benchmark/system-under-test.md)。
+规划 benchmark 默认使用锁定的 `engine/entrypoint.mjs`，与应用共用专用 Pi 认证目录和工具环境；模型跟随已保存的 Grapher 配置或显式角色覆盖，不再隐式选择其他模型。`BENCHMARK_PI_MODEL=provider/model` 可指定候选模型。未配置模型时明确失败。
+
+规划 benchmark 只记录路由、编译、工具边界、活动轨迹、时间、token 和生成图证据。图的任务划分、依赖是否有用、并行性和整体质量由人工核验；系统不调用模型 judge，也不输出图质量分数。它不创建 Runtime、不批准图、不执行节点，保留完整 graph、compiler、events 和 trajectory 文件供人工核验。Harness 与测试源码位于 Grapher 仓库外的 sibling `../grapher-tests/`；Cargo manifest 和 npm scripts 只引用这些外置文件。默认证据写入 Grapher 仓库旁的 `grapher-benchmark-results/`，可通过 `GRAPHER_BENCHMARK_RESULTS_DIR` 覆盖。评测契约见 [外置 benchmark 架构](../grapher-tests/benchmark/architecture.md)，被测系统边界见 [system-under-test.md](../grapher-tests/benchmark/system-under-test.md)。
 
 ## 已知约束
 

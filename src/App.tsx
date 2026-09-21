@@ -995,17 +995,24 @@ export default function App() {
         const scopedIds = snapshots
           .filter((snap): snap is Snapshot => !!snap && (snap.config?.repository || "default") === currentRepoPath)
           .map((snap) => snap.runId);
-        const allIdsToDelete = Array.from(new Set([...currentRuns, ...scopedIds]));
-
-        for (const runId of allIdsToDelete) {
-          await runtimeService.deleteRun(runId).catch(() => {});
+        // Sidebar indexes can be stale or misfiled. Only persisted repository
+        // ownership authorizes deletion, and failed deletions remain visible.
+        const deletedIds = new Set<string>();
+        const failures: string[] = [];
+        for (const runId of scopedIds) {
+          try {
+            await runtimeService.deleteRun(runId);
+            deletedIds.add(runId);
+          } catch (error) {
+            failures.push(`${runId}: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
 
         setWorkspaceRuns((prev) => {
-          const updated = {
-            ...prev,
-            [currentRepoPath]: [],
-          };
+          const updated = Object.fromEntries(
+            Object.entries(prev).map(([repository, ids]) =>
+              [repository, ids.filter(id => !deletedIds.has(id))])
+          );
           try {
             localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
           } catch {}
@@ -1014,13 +1021,15 @@ export default function App() {
 
         setRunLabels((prev) => {
           const copy = { ...prev };
-          allIdsToDelete.forEach((id) => delete copy[id]);
+          deletedIds.forEach((id) => delete copy[id]);
           try {
             localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
           } catch {}
           return copy;
         });
 
+        if (failures.length) throw new Error(`部分运行历史未能删除：\n${failures.join("\n")}`);
+        if (!deletedIds.has(state.runId)) return;
         setState(emptySnapshot);
         resetSessionMessages();
         setGoal("");

@@ -2495,24 +2495,54 @@ a,
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
 
-.chat-bubble-assistant {
-  max-width: 88%;
-  padding: 9px 13px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: 12px 12px 12px 2px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.5;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.chat-bubble-assistant,
+.chat-message-assistant {
+  width: 100%;
+  max-width: 100%;
+  padding: 2px 0 6px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text-primary);
+  font-size: 14.5px;
+  line-height: 1.68;
+  display: block;
+  word-break: break-word;
 }
 
-.chat-bubble-assistant.planning {
+.chat-bubble-assistant.planning,
+.chat-message-assistant.planning {
   color: var(--brand-default);
-  background: var(--brand-subtle);
-  border-color: var(--brand-border);
+  background: transparent;
+  border: none;
+}
+
+.chat-bubble-assistant .markdown-content,
+.chat-message-assistant .markdown-content {
+  font-size: 14.5px;
+  line-height: 1.68;
+  color: var(--text-primary);
+}
+
+.chat-bubble-assistant .markdown-content p,
+.chat-message-assistant .markdown-content p {
+  margin: 0 0 10px;
+}
+
+.chat-bubble-assistant .markdown-content p:last-child,
+.chat-message-assistant .markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.chat-bubble-assistant .markdown-content code:not(pre code),
+.chat-message-assistant .markdown-content code:not(pre code) {
+  font-size: 13px;
+}
+
+.chat-bubble-assistant .markdown-content pre code,
+.chat-message-assistant .markdown-content pre code {
+  font-size: 13px;
 }
 
 /* 单节点串行执行内容（无多余卡片包裹，直接在页面里靠左展示） */
@@ -6237,12 +6267,21 @@ a,
   background: transparent;
   border: none;
   border-radius: 0;
-  padding: 2px 0;
+  padding: 4px 0;
   width: 100%;
   text-align: left;
   color: var(--text-primary);
+  font-size: 14.5px;
+  line-height: 1.68;
+}
+
+.transcript-message-bubble .markdown-content {
+  font-size: 14.5px;
+  line-height: 1.68;
+}
+
+.transcript-message-bubble .markdown-content code:not(pre code) {
   font-size: 13px;
-  line-height: 1.6;
 }
 
 .scroll-to-bottom-btn {
