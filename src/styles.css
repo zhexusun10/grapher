@@ -2374,6 +2374,35 @@ a,
 }
 
 /* 对话流与 Chatbot 消息样式（无生硬卡片，靠右展示） */
+.working-indicator {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 4px 2px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.working-indicator-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-primary, #7c8cff);
+  animation: workingPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes workingPulse {
+  0%, 100% { opacity: .35; transform: scale(.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+/* 长日志即使不在虚拟窗口中也不要为屏幕外卡片反复布局。 */
+.transcript-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 72px;
+}
+
 .chat-messages-stream {
   display: flex;
   flex-direction: column;

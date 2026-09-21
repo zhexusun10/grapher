@@ -111,20 +111,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   edgeTypes,
   tokens,
 }) => {
-  const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}`;
-  const isNodeInspection = Boolean(selected);
+  const [attemptId, setAttemptId] = useState("");
+  const selectedNode = state.graph.nodes.find((item) => item.name === selected);
+  const selectedState = selectedNode ? state.nodes[selectedNode.name] : undefined;
+  const attempts = selectedNode
+    ? state.executions.filter((item) => item.node === selectedNode.name)
+    : [];
+  const execution: Execution | undefined = attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
+
+  const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}:${execution?.id || ""}`;
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   const workbenchRef = useRef<HTMLDivElement>(null);
   const [isResizing, setIsResizing] = useState(false);
   const currentWidthRef = useRef<number>(390);
-  const [attemptId, setAttemptId] = useState("");
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const isUserScrolledUpRef = useRef(false);
   const suppressAutoScrollRef = useRef(false);
   const resumeAutoScrollFrameRef = useRef<number | null>(null);
   const resetChatScrollFrameRef = useRef<number | null>(null);
   const activeConversationViewRef = useRef(conversationViewKey);
-  const entryTopLockedRef = useRef(isNodeInspection);
   const isScrollingToBottomRef = useRef(false);
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
@@ -133,8 +138,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   if (activeConversationViewRef.current !== conversationViewKey) {
     activeConversationViewRef.current = conversationViewKey;
-    entryTopLockedRef.current = isNodeInspection;
-    isUserScrolledUpRef.current = isNodeInspection;
+    isUserScrolledUpRef.current = false;
     suppressAutoScrollRef.current = false;
   }
 
@@ -155,12 +159,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const handleChatScroll = useCallback(() => {
     if (!chatScrollRef.current) return;
-    if (entryTopLockedRef.current) {
-      const { scrollHeight, clientHeight } = chatScrollRef.current;
-      chatScrollRef.current.scrollTop = 0;
-      setShowScrollBottom(scrollHeight - clientHeight > 80);
-      return;
-    }
     if (suppressAutoScrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
@@ -183,14 +181,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, []);
 
-  const releaseEntryTopLock = useCallback(() => {
-    if (!entryTopLockedRef.current) return;
-    entryTopLockedRef.current = false;
-    handleChatScroll();
-  }, [handleChatScroll]);
-
   const scrollToBottom = useCallback(() => {
-    entryTopLockedRef.current = false;
     isUserScrolledUpRef.current = false;
     isScrollingToBottomRef.current = true;
     setShowScrollBottom(false);
@@ -208,7 +199,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      entryTopLockedRef.current = false;
       if (e.deltaY < -1) {
         isScrollingToBottomRef.current = false;
         isUserScrolledUpRef.current = true;
@@ -224,7 +214,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     let startTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
-      entryTopLockedRef.current = false;
       if (e.touches[0]) startTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
@@ -284,11 +273,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     handleChatScroll(); // initial check
 
     const observer = new ResizeObserver(() => {
-      if (entryTopLockedRef.current) {
-        el.scrollTop = 0;
-        setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
-        return;
-      }
       if (suppressAutoScrollRef.current) return;
 
       // Auto-scroll to bottom when content grows, unless user scrolled up or smooth-scrolling to bottom
@@ -308,10 +292,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   // Auto-scroll to bottom when new messages or streaming content arrives
   useLayoutEffect(() => {
-    if (!entryTopLockedRef.current && !isUserScrolledUpRef.current && chatScrollRef.current) {
+    if (!isUserScrolledUpRef.current && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [effectiveMessages, smoothPlannerText, plannerStream.items, plannerStream.plannerThinking, isPlanning]);
+  }, [
+    effectiveMessages,
+    smoothPlannerText,
+    plannerStream.items,
+    plannerStream.plannerThinking,
+    isPlanning,
+    execution?.id,
+    execution?.status,
+    execution?.outputBytes,
+    execution?.output,
+  ]);
 
   // Initialize width from localStorage directly into CSS variable
   useEffect(() => {
@@ -372,12 +366,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
 
 
-  const selectedNode = state.graph.nodes.find((item) => item.name === selected);
-  const selectedState = selectedNode ? state.nodes[selectedNode.name] : undefined;
-  const attempts = selectedNode
-    ? state.executions.filter((item) => item.node === selectedNode.name)
-    : [];
-  const execution: Execution | undefined = attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
+
 
   const serialNode = routeType === "serial" && state.graph.nodes.length > 0 ? state.graph.nodes[0] : undefined;
   const serialNodeState = serialNode ? state.nodes[serialNode.name] : undefined;
@@ -430,7 +419,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   useEffect(() => {
     if (effectiveMessages.length > prevMsgCountRef.current) {
       prevMsgCountRef.current = effectiveMessages.length;
-      entryTopLockedRef.current = false;
       isUserScrolledUpRef.current = false;
       if (chatScrollRef.current) {
         chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
@@ -444,44 +432,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const el = chatScrollRef.current;
     if (!el) return;
 
-    if (selected) {
-      entryTopLockedRef.current = true;
-      suppressAutoScrollRef.current = false;
-      isUserScrolledUpRef.current = true;
-      isScrollingToBottomRef.current = false;
-      el.scrollTop = 0;
-      setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
+    suppressAutoScrollRef.current = false;
+    isUserScrolledUpRef.current = false;
+    isScrollingToBottomRef.current = false;
+    el.scrollTop = el.scrollHeight;
+    setShowScrollBottom(false);
 
-      if (resetChatScrollFrameRef.current !== null) {
-        cancelAnimationFrame(resetChatScrollFrameRef.current);
-      }
-      resetChatScrollFrameRef.current = requestAnimationFrame(() => {
-        resetChatScrollFrameRef.current = null;
-        el.scrollTop = 0;
-        isUserScrolledUpRef.current = true;
-        setShowScrollBottom(el.scrollHeight - el.clientHeight > 80);
-      });
-    } else {
-      entryTopLockedRef.current = false;
-      suppressAutoScrollRef.current = false;
-      isUserScrolledUpRef.current = false;
-      isScrollingToBottomRef.current = false;
-      el.scrollTop = el.scrollHeight;
-      setShowScrollBottom(false);
-
-      if (resetChatScrollFrameRef.current !== null) {
-        cancelAnimationFrame(resetChatScrollFrameRef.current);
-      }
-      resetChatScrollFrameRef.current = requestAnimationFrame(() => {
-        resetChatScrollFrameRef.current = null;
-        if (chatScrollRef.current) {
-          chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-        }
-        isUserScrolledUpRef.current = false;
-        setShowScrollBottom(false);
-      });
+    if (resetChatScrollFrameRef.current !== null) {
+      cancelAnimationFrame(resetChatScrollFrameRef.current);
     }
-  }, [conversationViewKey, selected]);
+    resetChatScrollFrameRef.current = requestAnimationFrame(() => {
+      resetChatScrollFrameRef.current = null;
+      if (chatScrollRef.current) {
+        chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+      }
+      isUserScrolledUpRef.current = false;
+      setShowScrollBottom(false);
+    });
+  }, [conversationViewKey]);
 
   useEffect(() => {
     if (routeType !== "graph") setReadyGraphKey("");
@@ -498,10 +466,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
         style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
         transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-        onWheelCapture={releaseEntryTopLock}
-        onPointerDownCapture={releaseEntryTopLock}
-        onTouchStartCapture={releaseEntryTopLock}
-        onKeyDownCapture={releaseEntryTopLock}
       >
         {selectedNode && routeType === "graph" ? (
           <div className="initial-query-view">
@@ -596,6 +560,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         Use resolved workspace
                       </button>
                     )}
+                  </div>
+                )}
+
+                {isWorking && (
+                  <div className="working-indicator" role="status" aria-live="polite">
+                    <span className="working-indicator-dot" />
+                    Working…
                   </div>
                 )}
               </div>
@@ -884,6 +855,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       )}
                     </div>
                   )
+                )}
+                {isWorking && (
+                  <div className="working-indicator" role="status" aria-live="polite">
+                    <span className="working-indicator-dot" />
+                    Working…
+                  </div>
                 )}
               </div>
 

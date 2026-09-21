@@ -41,7 +41,7 @@ try {
   const child = spawn(process.execPath, [
     join(source, "node_modules/tsx/dist/cli.mjs"),
     "--tsconfig", join(source, "tsconfig.json"),
-    join(source, "packages/coding-agent/src/cli.ts"),
+    join(root, "engine/execution-cli.ts"),
     ...process.argv.slice(2),
     "--extension", join(root, "engine/prompt-extension.ts"),
   ], { stdio: "inherit", env: childEnv });

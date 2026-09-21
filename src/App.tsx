@@ -2027,14 +2027,14 @@ export default function App() {
         runIndicators={runIndicators}
         onLoadRun={(id) => run(async () => {
           clearRunUnread(id);
-          setPlannerStream(initialPlannerStream);
+          if (id !== state.runId) setPlannerStream(initialPlannerStream);
           const snapshot = await runtimeService.loadRun(id);
           const deduced = deduceRouteType(snapshot);
           setState(snapshot);
           markSnapshotRead(snapshot);
           setRouteType(deduced);
           setGoal(snapshot.graph.originalGoal || "");
-          resetSessionMessages();
+          if (id !== state.runId) resetSessionMessages();
           setSelected("");
         })}
         onDeleteRun={handleDeleteRunConfirm}
@@ -2097,14 +2097,14 @@ export default function App() {
                 className="background-run-action-btn"
                 onClick={() => run(async () => {
                   clearRunUnread(activeBackendRunId);
-                  setPlannerStream(initialPlannerStream);
+                  if (activeBackendRunId !== state.runId) setPlannerStream(initialPlannerStream);
                   const snapshot = await runtimeService.loadRun(activeBackendRunId);
                   const deduced = deduceRouteType(snapshot);
                   setState(snapshot);
                   markSnapshotRead(snapshot);
                   setRouteType(deduced);
                   setGoal(snapshot.graph.originalGoal || "");
-                  resetSessionMessages();
+                  if (activeBackendRunId !== state.runId) resetSessionMessages();
                   setSelected("");
                 })}
               >

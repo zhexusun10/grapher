@@ -27,8 +27,10 @@ function MeasuredRow({ id, measure, children }: { id: string; measure: (id: stri
 }
 
 function getScrollParent(node: HTMLElement | null): HTMLElement | null {
-  if (!node) return null;
-  if (node.scrollHeight > node.clientHeight && window.getComputedStyle(node).overflowY !== "visible") {
+  if (!node || node === document.body || node === document.documentElement) return null;
+  const style = window.getComputedStyle(node);
+  const overflowY = style.overflowY;
+  if (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") {
     return node;
   }
   return getScrollParent(node.parentElement);
@@ -64,12 +66,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     if (height <= 0 || itemHeightsRef.current.get(id) === height) return;
     const oldHeight = itemHeightsRef.current.get(id) ?? 72;
     itemHeightsRef.current.set(id, height);
-    const el = containerRef.current;
+    const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
     const { ids, offsets } = layoutRef.current;
     const index = ids.indexOf(id);
-    if (el && isUserScrolledUpRef.current && index >= 0 && index < rowAt(offsets, el.scrollTop)) {
-      el.scrollTop += height - oldHeight;
-      setScrollTop(el.scrollTop);
+    if (scrollParent && isUserScrolledUpRef.current && index >= 0 && index < rowAt(offsets, scrollParent.scrollTop)) {
+      scrollParent.scrollTop += height - oldHeight;
+      setScrollTop(scrollParent.scrollTop);
     }
     setHeightVersion(value => value + 1);
   }, []);
@@ -457,7 +459,21 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   useLayoutEffect(() => {
     if (containerRef.current) {
       const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
-      setScrollTop(scrollParent.scrollTop);
+      if (scrollParent) {
+        if (!isUserScrolledUpRef.current && !suppressAutoFollowRef.current) {
+          scrollParent.scrollTop = scrollParent.scrollHeight;
+          requestAnimationFrame(() => {
+            if (!isUserScrolledUpRef.current && !suppressAutoFollowRef.current && containerRef.current) {
+              const sp = getScrollParent(containerRef.current) || containerRef.current;
+              if (sp) {
+                sp.scrollTop = sp.scrollHeight;
+                setScrollTop(sp.scrollTop);
+              }
+            }
+          });
+        }
+        setScrollTop(scrollParent.scrollTop);
+      }
     }
   }, [itemsVersion, heightVersion]);
 

@@ -7,6 +7,6 @@
 .publication-error { color: #a02e17; white-space: pre-wrap; }
 .publication-mergers summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
 .publication-mergers select { max-width: 100%; padding: 6px; }
-.publication-transcript { height: 280px; display: flex; flex-direction: column; background: white; border-radius: 8px; }
+.publication-transcript { height: 280px; display: flex; flex-direction: column; background: white; border-radius: 8px; overflow-y: auto; }
 .phase-tag.publishing, .phase-tag.merging { color: #254a83; background: #e7effd; }
 .phase-tag.publication_failed { color: #a02e17; background: #fff0e8; }

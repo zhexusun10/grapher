@@ -299,6 +299,9 @@ pub struct PiRequest<'request> {
 }
 
 pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<String, String> {
+    if request.role == PiRole::NodeAgent {
+        return run_pi_with_timeout(request, on_output, None);
+    }
     let variable = request
         .role
         .model_env_var()
@@ -312,13 +315,13 @@ pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<S
         Err(std::env::VarError::NotPresent) => 900,
         Err(error) => return Err(format!("Invalid {variable}: {error}")),
     };
-    run_pi_with_timeout(request, on_output, Duration::from_secs(seconds))
+    run_pi_with_timeout(request, on_output, Some(Duration::from_secs(seconds)))
 }
 
 fn run_pi_with_timeout(
     request: PiRequest<'_>,
     mut on_output: impl FnMut(String),
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<String, String> {
     let phase = request.role.name();
     let config = request.config;
@@ -524,7 +527,7 @@ fn run_pi_with_timeout(
     let mut timed_out = false;
     loop {
         // Check even while output is arriving: a noisy child can also hang.
-        if started.elapsed() >= timeout {
+        if timeout.is_some_and(|limit| started.elapsed() >= limit) {
             timed_out = true;
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
@@ -625,7 +628,7 @@ fn run_pi_with_timeout(
     if timed_out {
         return Err(format!(
             "{phase} timed out after {} seconds",
-            timeout.as_secs_f64()
+            timeout.expect("timed out with a deadline").as_secs_f64()
         ));
     }
     if !status.success() {
@@ -752,7 +755,7 @@ mod tests {
                     system_prompt: None,
                 },
                 |line| output.push_str(&line),
-                Duration::from_millis(150),
+                Some(Duration::from_millis(150)),
             );
             assert!(result.unwrap_err().contains("Planner timed out"));
             assert!(start.elapsed() < Duration::from_secs(5));
@@ -761,6 +764,43 @@ mod tests {
             assert_eq!(exited["timedOut"], true);
             assert_eq!(exited["success"], false);
         }
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn node_agent_ignores_legacy_deadline() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let variable = PiRole::NodeAgent.model_env_var().replace("_MODEL", "_TIMEOUT_SECONDS");
+        let original = std::env::var_os(&variable);
+        std::env::set_var(&variable, "1");
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            engine: "pi".into(),
+            pi_command: "/bin/sh".into(),
+            pi_args: vec!["-c".into(), "sleep 1.2; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+        };
+        let result = run_pi(PiRequest {
+            role: PiRole::NodeAgent,
+            config: &config,
+            cwd: temp.path(),
+            task: "test",
+            session_dir: &temp.path().join("session"),
+            extension: None,
+            tools: None,
+            session_id: None,
+            extra_args: vec![],
+            environment: vec![],
+            system_prompt: None,
+        }, |_| {});
+        match original {
+            Some(value) => std::env::set_var(&variable, value),
+            None => std::env::remove_var(&variable),
+        }
+        assert_eq!(result.unwrap(), "done");
     }
 
     #[test]
