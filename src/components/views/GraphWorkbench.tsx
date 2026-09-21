@@ -432,6 +432,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const el = chatScrollRef.current;
     if (!el) return;
 
+    // 进入对话视图（Node Agent 或 Planner）时直接聚焦到底部最新内容，避免从顶部生硬滑动到底部
     suppressAutoScrollRef.current = false;
     isUserScrolledUpRef.current = false;
     isScrollingToBottomRef.current = false;
@@ -462,10 +463,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     >
       {/* 左侧/居中对话与日志面板 */}
       <motion.div
-        layout
         className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
         style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
-        transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
       >
         {selectedNode && routeType === "graph" ? (
           <div className="initial-query-view">
@@ -517,7 +516,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 {execution && (
                   <motion.div
                     className="serial-execution-panel"
-                    initial={{ opacity: 0, y: 10 }}
+                    initial={false}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.3 }}
                   >
@@ -647,7 +646,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <motion.div
                     key={msg.id}
                     className={`chat-message-row ${msg.role}`}
-                    initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                    initial={false}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
                   >
@@ -661,7 +660,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             title="修改消息内容并重新发送"
                             aria-label="修改消息内容并重新发送"
                           >
-                            <Pencil size={13} />
+                            <Pencil size={14} />
                           </button>
                         )}
                         {branchInfo?.[msg.id] && branchInfo[msg.id].count > 1 && (
@@ -673,7 +672,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               className="chat-branch-pager-btn"
                               title="切换到上一分支"
                             >
-                              <ChevronLeft size={11} />
+                              <ChevronLeft size={12} />
                             </button>
                             <span className="chat-branch-pager-text">
                               {branchInfo[msg.id].index + 1}/{branchInfo[msg.id].count}
@@ -685,7 +684,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               className="chat-branch-pager-btn"
                               title="切换到下一分支"
                             >
-                              <ChevronRight size={11} />
+                              <ChevronRight size={12} />
                             </button>
                           </div>
                         )}
@@ -733,7 +732,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 {routeType === "serial" && state.graph.nodes.length > 0 && (
                   <motion.div
                     className="serial-execution-panel"
-                    initial={{ opacity: 0, y: 10 }}
+                    initial={false}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.3 }}
                   >
@@ -809,7 +808,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           <motion.div
                             key={item.id}
                             className="chat-message-row assistant"
-                            initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                            initial={false}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                           >
                             <div className="chat-bubble-assistant chat-message-assistant">
@@ -839,7 +838,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       {smoothPlannerText && (
                         <motion.div
                           className="chat-message-row assistant"
-                          initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                          initial={false}
                           animate={{ opacity: 1, y: 0, scale: 1 }}
                         >
                           <div className="chat-bubble-assistant chat-message-assistant">

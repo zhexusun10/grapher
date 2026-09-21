@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Folder, Plus, RotateCcw, Settings2, Trash2, Copy } from "lucide-react";
+import { Folder, Plus, RotateCcw, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { ProjectItem } from "../../types";
 
 interface SidebarProps {
@@ -39,6 +39,25 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   isSettingsOpen,
   runLabels = {},
 }) => {
+  const [isCollapsed, setIsCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("grapher_sidebar_collapsed_v1") === "true";
+    } catch {
+      return false;
+    }
+  });
+  const toggleCollapsed = () => {
+    const next = !isCollapsed;
+    setIsCollapsed(next);
+    setProjectContextMenu(null);
+    setRunContextMenu(null);
+    try {
+      localStorage.setItem("grapher_sidebar_collapsed_v1", String(next));
+    } catch {
+      // Keep the toggle usable when browser storage is unavailable.
+    }
+  };
+
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);
   const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string } | null>(null);
 
@@ -56,22 +75,34 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   }, []);
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${isCollapsed ? " is-collapsed" : ""}`} aria-label="侧边栏">
       <div className="sidebar-brand-row">
         <a className="brand" href="#" onClick={(event) => event.preventDefault()}>
           <strong>Grapher</strong>
         </a>
+        <button
+          type="button"
+          className="sidebar-toggle-btn"
+          onClick={toggleCollapsed}
+          aria-label={isCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          aria-expanded={!isCollapsed}
+          title={isCollapsed ? "展开侧边栏" : "收起侧边栏"}
+        >
+          {isCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        </button>
       </div>
 
       <div className="nav-section projects-label">
         <span>Workspace</span>
         <div className="section-actions">
           <button
-            className="icon-tiny-btn"
+            type="button"
+            className="sidebar-add-btn icon-tiny-btn"
             title="添加或打开本地 Git 仓库"
+            aria-label="添加或打开本地 Git 仓库"
             onClick={onOpenProject}
           >
-            <Plus size={14} />
+            <Plus size={18} />
           </button>
         </div>
       </div>
@@ -94,7 +125,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                 title={`${proj.name}\n${proj.path}\n分支: ${proj.branch}\n(右键管理工作区)`}
               >
                 <span className="proj-icon">
-                  <Folder size={15} />
+                  <Folder size={16} />
                 </span>
                 <div className="proj-details">
                   <div className="proj-name-row">
@@ -118,11 +149,13 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         <span>Conversation</span>
         <div className="section-actions">
           <button
-            className="icon-tiny-btn"
+            type="button"
+            className="sidebar-add-btn icon-tiny-btn"
             title="新建空白工作区"
+            aria-label="新建空白工作区"
             onClick={onResetWorkspace}
           >
-            <Plus size={14} />
+            <Plus size={18} />
           </button>
         </div>
       </div>
@@ -177,8 +210,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           className={`sidebar-bottom-btn ${isSettingsOpen ? "active" : ""}`}
           onClick={onOpenSettings}
           title="Setting"
+          aria-label="设置"
         >
-          <Settings2 size={15} />
+          <Settings2 size={16} />
           <span>Setting</span>
         </button>
       </div>
@@ -199,7 +233,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               setProjectContextMenu(null);
             }}
           >
-            <Copy size={13} />
+            <Copy size={14} />
             <span>复制仓库路径</span>
           </button>
           <div className="context-menu-divider" />
@@ -211,7 +245,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               onRemoveProject(project);
             }}
           >
-            <Trash2 size={13} />
+            <Trash2 size={14} />
             <span>从工作区移除</span>
           </button>
         </div>
@@ -233,7 +267,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               setRunContextMenu(null);
             }}
           >
-            <Copy size={13} />
+            <Copy size={14} />
             <span>复制快照 ID</span>
           </button>
           <div className="context-menu-divider" />
@@ -245,7 +279,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               onDeleteRun(runId);
             }}
           >
-            <Trash2 size={13} />
+            <Trash2 size={14} />
             <span>删除此条历史</span>
           </button>
         </div>

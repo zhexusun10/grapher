@@ -3,6 +3,10 @@ import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
+// In-memory cache for execution transcripts so switching between node agents or reopening them
+// immediately displays known logs on frame 0 instead of flashing empty.
+const executionTranscriptCache = new Map<string, { text: string; offset: number; complete: boolean; status?: string }>();
+
 // Only mounted conversations fetch output. Switching attempts cancels the old
 // cursor and releases its transcript; snapshots carry metadata alone.
 export function ExecutionTranscript({
@@ -14,20 +18,39 @@ export function ExecutionTranscript({
   execution: Execution;
   onUserResize?: () => void;
 }) {
-  const [record, setRecord] = useState({ id: "", text: "" });
+  const cacheKey = `${runId}:${execution.id}`;
+  const cached = executionTranscriptCache.get(cacheKey);
+  const paged = execution.outputBytes !== undefined;
+  const [record, setRecord] = useState(() => ({
+    id: execution.id,
+    text: cached ? cached.text : (!paged ? execution.output ?? "" : ""),
+  }));
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
-  const [isFetchingFirstPage, setIsFetchingFirstPage] = useState(false);
-  const paged = execution.outputBytes !== undefined;
+  const [isFetchingFirstPage, setIsFetchingFirstPage] = useState(!cached && paged && !execution.output);
+
   useEffect(() => {
     if (!paged) return;
+    const cachedEntry = executionTranscriptCache.get(cacheKey);
+    if (cachedEntry?.complete && execution.status !== "running") {
+      setRecord({ id: execution.id, text: cachedEntry.text });
+      setIsFetchingFirstPage(false);
+      return;
+    }
+
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
-    let offset = 0;
-    let text = "";
-    setRecord({ id: execution.id, text });
+    let offset = cachedEntry ? cachedEntry.offset : 0;
+    let text = cachedEntry ? cachedEntry.text : "";
+    if (cachedEntry) {
+      setRecord({ id: execution.id, text: cachedEntry.text });
+      setIsFetchingFirstPage(false);
+    } else {
+      setRecord({ id: execution.id, text: "" });
+      setIsFetchingFirstPage(true);
+    }
     setError("");
-    setIsFetchingFirstPage(true);
+
     const poll = async () => {
       try {
         const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, abort.signal);
@@ -38,11 +61,11 @@ export function ExecutionTranscript({
         }
         text += page.content;
         offset = page.nextOffset;
+        const complete = page.complete && page.status !== "running";
+        const finalText = complete && text && !text.endsWith("\n") ? `${text}\n` : text;
+        executionTranscriptCache.set(cacheKey, { text: finalText, offset, complete, status: page.status });
         if (page.content || page.status !== "running") {
-          // Historical Finished events can lack a final newline. Flush the last
-          // display line only at terminal EOF, never at an intermediate byte page.
-          const complete = page.complete && page.status !== "running";
-          setRecord({ id: execution.id, text: complete && text && !text.endsWith("\n") ? `${text}\n` : text });
+          setRecord({ id: execution.id, text: finalText });
         }
         if (!page.complete || page.status === "running") timer = setTimeout(poll, page.complete ? 150 : 0);
       } catch (error) {
@@ -51,7 +74,7 @@ export function ExecutionTranscript({
     };
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, [runId, execution.id, paged, retry]);
+  }, [runId, execution.id, paged, retry, cacheKey, execution.status]);
 
   let emptyText = "工作区就绪，等待节点指令输出…";
   if (paged) {

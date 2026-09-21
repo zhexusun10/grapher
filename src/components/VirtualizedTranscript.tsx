@@ -77,8 +77,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   }, []);
   const [containerHeight, setContainerHeight] = useState(600);
 
-  // Incrementally parse output as it arrives
-  useEffect(() => {
+  // Incrementally parse output as it arrives synchronously before paint
+  useLayoutEffect(() => {
     if (!output) {
       lastProcessedPosRef.current = 0;
       itemsRef.current = [];
@@ -460,6 +460,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     if (containerRef.current) {
       const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
       if (scrollParent) {
+        if (scrollParent.clientHeight && scrollParent.clientHeight !== containerHeight) {
+          setContainerHeight(scrollParent.clientHeight);
+        }
         if (!isUserScrolledUpRef.current && !suppressAutoFollowRef.current) {
           scrollParent.scrollTop = scrollParent.scrollHeight;
           requestAnimationFrame(() => {
@@ -475,7 +478,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
         setScrollTop(scrollParent.scrollTop);
       }
     }
-  }, [itemsVersion, heightVersion]);
+  }, [itemsVersion, heightVersion, containerHeight]);
 
   // Track container height & scroll position
   useEffect(() => {
@@ -532,11 +535,15 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
 
   const offsets = useMemo(() => rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion]);
   layoutRef.current = { ids: items.map(item => item.id), offsets };
+  const totalOffsetsHeight = offsets[offsets.length - 1] ?? 0;
+  const targetScrollTop = isUserScrolledUpRef.current
+    ? scrollTop
+    : Math.max(0, totalOffsetsHeight - containerHeight);
   const { visibleItems, paddingTop, paddingBottom } = useMemo(() => {
-    const range = isVirtual ? visibleRows(offsets, scrollTop, containerHeight)
+    const range = isVirtual ? visibleRows(offsets, targetScrollTop, containerHeight, 12)
       : { start: 0, end: totalCount, paddingTop: 0, paddingBottom: 0 };
     return { visibleItems: items.slice(range.start, range.end), ...range };
-  }, [items, offsets, isVirtual, scrollTop, containerHeight, totalCount]);
+  }, [items, offsets, isVirtual, targetScrollTop, containerHeight, totalCount]);
 
   return (
     <div className={`virtualized-transcript-container ${className}`}>

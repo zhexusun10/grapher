@@ -62,7 +62,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       );
     }, [isError, exitCode, item.result]);
 
-    const [localExpanded, setIsExpanded] = useState(defaultExpanded || isError || hasSubcommandWarning);
+    const [localExpanded, setIsExpanded] = useState(defaultExpanded);
     const isExpanded = expanded ?? localExpanded;
     const toggleExpanded = () => {
       setIsExpanded(!isExpanded);
@@ -146,7 +146,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     return (
       <motion.div
-        initial={{ opacity: 0, y: 10, scale: 0.98 }}
+        initial={false}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
         className={`tool-call-card ${meta.type} ${status} ${
