@@ -7,7 +7,22 @@ type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; ed
 
 type NodeEdit = { name: string; task?: string; delete?: boolean };
 type EdgeEdit = { from: string; to: string; relation?: string; feedback?: boolean; delete?: boolean };
-type Diagnostic = { code: string; message: string };
+type Diagnostic = { code: string; message: string; path?: string };
+
+function duplicateTargets(field: "nodes" | "edges", targets: string[]): Diagnostic[] {
+  const firstIndex = new Map<string, number>();
+  const diagnostics: Diagnostic[] = [];
+  targets.forEach((target, index) => {
+    const first = firstIndex.get(target);
+    if (first === undefined) firstIndex.set(target, index);
+    else diagnostics.push({
+      code: "duplicate-target",
+      path: `${field}[${index}]`,
+      message: `${field}[${index}] repeats target ${target} from ${field}[${first}]. Supply one edit per target. The saved graph was not changed.`,
+    });
+  });
+  return diagnostics;
+}
 
 function applyNode(graph: Graph, edit: NodeEdit) {
   graph.nodes = graph.nodes.filter(node => node.name !== edit.name);
@@ -64,72 +79,42 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node",
-    description: `Create, replace, or delete graph nodes. Supply one or more edits in 'nodes' (batch mode), or single-node fields 'name'/'task'/'delete'. Each task is passed to a later fresh session with completed dependency filesystem state; the planner conversation is not passed. Updating a name replaces its task and preserves edges. Deleting a node removes its incident edges. Edits are applied in order, then compiled once. A failure leaves the saved graph unchanged.`,
+    // Pi normalizes nullable optional edit fields before local validation.
+    constrainedSampling: { type: "json_schema", strict: "prefer" },
+    description: `Create, replace, or delete graph nodes. Supply a nonempty 'nodes' array; use one element for a single edit. Each node name may appear only once per call. Each task is passed to a later fresh session with completed dependency filesystem state; the planner conversation is not passed. Updating a name replaces its task and preserves edges. Deleting a node removes its incident edges. Edits are applied in order, then compiled once. A failure leaves the saved graph unchanged.`,
     parameters: Type.Object({
-      name: Type.Optional(Type.String({ description: "Single-node mode: stable identifier, 1–64 ASCII letters, digits, _ or -." })),
-      task: Type.Optional(Type.String({ description: "Task text passed verbatim to the node execution. Required and nonempty unless deleting." })),
-      delete: Type.Optional(Type.Boolean({ description: "Remove this node and all its incident edges; task is ignored." })),
-      nodes: Type.Optional(Type.Array(Type.Object({
-        name: Type.String({ description: "Stable node identifier." }),
+      nodes: Type.Array(Type.Object({
+        name: Type.String({ description: "Stable node identifier, 1–64 ASCII letters, digits, _ or -." }),
         task: Type.Optional(Type.String({ description: "Task for a fresh execution; required unless deleting." })),
         delete: Type.Optional(Type.Boolean({ description: "Delete this node and its incident edges." })),
-      }, { additionalProperties: false }), { minItems: 1, description: "Batch node edits, applied in order." })),
+      }, { additionalProperties: false }), { minItems: 1, description: "Batch node edits, applied in order." }),
     }, { additionalProperties: false }),
     async execute(_id, parameters) {
-      return mutate((graph) => {
-        let edits: NodeEdit[] = [];
-        if (parameters.nodes !== undefined) {
-          if (parameters.name !== undefined || parameters.task !== undefined || parameters.delete !== undefined) {
-            return [{ code: "mutation-input", message: "Use either single-node name/task/delete or batch nodes, not both. The saved graph was not changed." }];
-          }
-          if (!parameters.nodes.length) {
-            return [{ code: "mutation-input", message: "A batch requires at least one node edit. The saved graph was not changed." }];
-          }
-          edits = parameters.nodes;
-        } else if (parameters.name !== undefined) {
-          edits = [{ name: parameters.name, task: parameters.task, delete: parameters.delete }];
-        }
-        if (!edits.length) return [{ code: "mutation-input", message: "Provide a node name or a non-empty nodes array. The saved graph was not changed." }];
-        for (const edit of edits) applyNode(graph, edit);
+      return mutate(graph => {
+        const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.name));
+        if (duplicates.length) return duplicates;
+        for (const edit of parameters.nodes) applyNode(graph, edit);
       });
     },
   }));
   pi.registerTool(defineTool({
     name: "edge", label: "Graph edge",
-    description: `Create, replace, or delete directed edges between existing nodes. Supply one or more edits in 'edges' (batch mode), or single-edge fields 'from'/'to'/'relation'/'feedback'/'delete'. There is one edge per ordered pair. Edits are applied in order, then compiled once; a failure leaves the saved graph unchanged. Omitted or false feedback creates a dependency: the target waits for the source to complete successfully and receives its filesystem state. True feedback creates a route to a dependency ancestor without execution ordering or filesystem input.`,
+    constrainedSampling: { type: "json_schema", strict: "prefer" },
+    description: `Create, replace, or delete directed edges between existing nodes. Supply a nonempty 'edges' array; use one element for a single edit. Each ordered pair may appear only once per call. There is one edge per ordered pair. Edits are applied in order, then compiled once; a failure leaves the saved graph unchanged. Omitted or false feedback creates a dependency: the target waits for the source to complete successfully and receives its filesystem state. True feedback creates a route to a dependency ancestor without execution ordering or filesystem input.`,
     parameters: Type.Object({
-      from: Type.Optional(Type.String({ description: "Single-edge mode: existing source node name." })),
-      to: Type.Optional(Type.String({ description: "Single-edge mode: existing target node name, different from source." })),
-      relation: Type.Optional(Type.String({ description: "Human-readable relationship; feedback determines runtime behavior." })),
-      feedback: Type.Optional(Type.Boolean({ description: "True for feedback; otherwise a dependency." })),
-      delete: Type.Optional(Type.Boolean({ description: "Remove the ordered pair." })),
-      edges: Type.Optional(Type.Array(Type.Object({
+      edges: Type.Array(Type.Object({
         from: Type.String({ description: "Existing source node name." }),
         to: Type.String({ description: "Existing target node name, different from source." }),
         relation: Type.Optional(Type.String({ description: "Human-readable relationship; feedback determines runtime behavior." })),
         feedback: Type.Optional(Type.Boolean({ description: "True for feedback; otherwise a dependency." })),
         delete: Type.Optional(Type.Boolean({ description: "Remove the ordered pair." })),
-      }, { additionalProperties: false }), { minItems: 1, description: "Batch edge edits, applied in order." })),
+      }, { additionalProperties: false }), { minItems: 1, description: "Batch edge edits, applied in order." }),
     }, { additionalProperties: false }),
     async execute(_id, parameters) {
       return mutate(graph => {
-        let edits: EdgeEdit[] = [];
-        if (parameters.edges !== undefined) {
-          if (parameters.from !== undefined || parameters.to !== undefined || parameters.relation !== undefined || parameters.feedback !== undefined || parameters.delete !== undefined) {
-            return [{ code: "mutation-input", message: "Use either single-edge fields or batch edges, not both. The saved graph was not changed." }];
-          }
-          if (!parameters.edges.length) {
-            return [{ code: "mutation-input", message: "A batch requires at least one edge edit. The saved graph was not changed." }];
-          }
-          edits = parameters.edges;
-        } else if (parameters.from !== undefined || parameters.to !== undefined) {
-          if (!parameters.from || !parameters.to) {
-            return [{ code: "mutation-input", message: "Provide both 'from' and 'to' for single-edge mode. The saved graph was not changed." }];
-          }
-          edits = [{ from: parameters.from, to: parameters.to, relation: parameters.relation, feedback: parameters.feedback, delete: parameters.delete }];
-        }
-        if (!edits.length) return [{ code: "mutation-input", message: "Provide edge endpoints or a non-empty edges array. The saved graph was not changed." }];
-        for (const edit of edits) applyEdge(graph, edit);
+        const duplicates = duplicateTargets("edges", parameters.edges.map(edit => JSON.stringify([edit.from, edit.to])));
+        if (duplicates.length) return duplicates;
+        for (const edit of parameters.edges) applyEdge(graph, edit);
       });
     },
   }));

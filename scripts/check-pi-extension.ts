@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, chmodSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { loadExtensions } from "../pi/packages/coding-agent/src/core/extensions/loader.ts";
+import { convertResponsesTools } from "../pi/packages/ai/src/api/openai-responses-shared.ts";
 import { validateToolArguments } from "../pi/packages/ai/src/utils/validation.ts";
 import type { ExtensionContext } from "../pi/packages/coding-agent/src/core/extensions/types.ts";
 
@@ -41,6 +42,38 @@ try {
   }
   const node = (edit: Record<string, unknown>) => call("node", { nodes: [edit] });
   const edge = (edit: Record<string, unknown>) => call("edge", { edges: [edit] });
+  // Regression: run 72feb3ad repeatedly supplied both single and batch fields.
+  // Verify the actual provider schema, then exercise nullable wire arguments
+  // through Pi's validator and the real compiler (not direct execute alone).
+  for (const name of ["node", "edge"]) {
+    const tool = extension.tools.get(name)!.definition;
+    const wire = convertResponsesTools([tool])[0] as any;
+    assert.equal(wire.strict, true);
+    assert.equal(wire.description, tool.description);
+    const key = name === "node" ? "nodes" : "edges";
+    assert.deepEqual(Object.keys(wire.parameters.properties), [key]);
+    assert.deepEqual(wire.parameters.required, [key]);
+    assert.equal(wire.parameters.additionalProperties, false);
+    assert.equal(wire.parameters.properties[key].type, "array");
+    const item = wire.parameters.properties[key].items;
+    for (const field of name === "node" ? ["task", "delete"] : ["relation", "feedback", "delete"]) {
+      assert.ok(item.properties[field].anyOf.some((variant: any) => variant.type === "null"));
+    }
+  }
+  const nullableNodes = JSON.parse((await call("node", {
+    nodes: [{ name: "nullable-build", task: "Build", delete: null }, { name: "nullable-review", task: "Review", delete: null }],
+  })).content[0].text);
+  assert.equal(nullableNodes.mutationApplied, true);
+  const nullableEdge = JSON.parse((await call("edge", {
+    edges: [{ from: "nullable-build", to: "nullable-review", relation: null, feedback: null, delete: null }],
+  })).content[0].text);
+  assert.equal(nullableEdge.mutationApplied, true);
+  assert.equal(JSON.parse((await node({ name: "nullable-build", task: "Updated", delete: null })).content[0].text).mutationApplied, true);
+  assert.equal(JSON.parse((await edge({
+    from: "nullable-build", to: "nullable-review", relation: null, feedback: null, delete: true,
+  })).content[0].text).mutationApplied, true);
+  await node({ name: "nullable-build", task: null, delete: true });
+  await node({ name: "nullable-review", delete: true });
   const firstMutation = await node({ name: "build", task: "Build it" });
   const firstResult = JSON.parse(firstMutation.content[0].text);
   assert.equal(firstResult.mutationApplied, true);
@@ -129,10 +162,7 @@ try {
     ] }, "E208"],
     ["node", { nodes: [{ name: "new", task: "New task" }, { name: "invalid" }] }, "E203"],
     ["node", { nodes: [{ name: "new" }] }, "E203"],
-    ["node", { name: "contract", nodes: batchNodes }, "mutation-input"],
-    ["node", { task: "orphan" }, "mutation-input"],
-    ["edge", { from: "contract", edges: batchEdges }, "mutation-input"],
-    ["edge", { from: "contract" }, "mutation-input"],
+
   ] as const) {
     const response = await call(toolName, edits);
     const rejectedBatch = JSON.parse(response.content[0].text);
@@ -142,9 +172,41 @@ try {
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
     assert.deepEqual(await toolResultHook({ toolName, details: response.details, isError: false }), { isError: true });
   }
+  // Duplicate targets are rejected before applying even the first valid edit
+  // or invoking the compiler. Identical repeats and delete+replace also fail.
+  const beforeDuplicates = readFileSync(compilerCalls, "utf8");
+  for (const [toolName, key, edits] of [
+    ["node", "nodes", [{ name: "new", task: "New" }, { name: "contract", task: "First" }, { name: "contract", task: "Last" }]],
+    ["node", "nodes", [{ name: "new", task: "New" }, { name: "contract", delete: true }, { name: "contract", task: "Recreate" }]],
+    ["node", "nodes", [{ name: "new", task: "New" }, { name: "contract", task: "Same" }, { name: "contract", task: "Same" }]],
+    ["edge", "edges", [{ from: "contract", to: "search", delete: true }, { from: "contract", to: "parser", delete: true }, { from: "contract", to: "parser" }]],
+    ["edge", "edges", [{ from: "contract", to: "search", delete: true }, { from: "contract", to: "parser" }, { from: "contract", to: "parser", feedback: true }]],
+    ["edge", "edges", [{ from: "contract", to: "search", delete: true }, { from: "contract", to: "parser" }, { from: "contract", to: "parser" }]],
+  ] as const) {
+    const response = await call(toolName, { [key]: edits });
+    const rejectedDuplicate = JSON.parse(response.content[0].text);
+    assert.equal(rejectedDuplicate.mutationApplied, false);
+    assert.equal(rejectedDuplicate.diagnostics[0].code, "duplicate-target");
+    assert.equal(rejectedDuplicate.diagnostics[0].path, `${key}[2]`);
+    assert.ok(rejectedDuplicate.diagnostics[0].message.includes(`${key}[1]`));
+    assert.match(rejectedDuplicate.diagnostics[0].message, /contract/);
+    assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
+    assert.equal(readFileSync(compilerCalls, "utf8"), beforeDuplicates);
+    assert.deepEqual(await toolResultHook({ toolName, details: response.details, isError: false }), { isError: true });
+  }
   for (const [toolName, invalid] of [
+    ["node", {}],
+    ["node", { nodes: null }],
+    ["node", { name: "contract", task: "Legacy single edit" }],
+    ["node", { name: "contract", nodes: batchNodes }],
+    ["node", { name: "", task: "", delete: false, nodes: batchNodes }],
     ["node", { nodes: [] }],
     ["node", { nodes: batchNodes, edges: batchEdges }],
+    ["edge", {}],
+    ["edge", { edges: null }],
+    ["edge", { from: "contract", to: "parser" }],
+    ["edge", { from: "contract", edges: batchEdges }],
+    ["edge", { from: "", to: "", relation: "", feedback: false, delete: false, edges: batchEdges }],
     ["edge", { edges: [] }],
     ["edge", { edges: batchEdges, nodes: batchNodes }],
   ] as const) {
@@ -152,10 +214,10 @@ try {
     assert.throws(() => validateToolArguments(tool, { type: "toolCall", id: "invalid", name: toolName, arguments: invalid }));
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
   }
-  // Single-entity fallback without array wrapper works seamlessly:
-  const directSingle = JSON.parse((await call("node", { name: "direct", task: "Direct task" })).content[0].text);
-  assert.equal(directSingle.mutationApplied, true);
-  await call("node", { name: "direct", delete: true });
+  // A single edit uses the same array interface.
+  const single = JSON.parse((await node({ name: "single", task: "Single task" })).content[0].text);
+  assert.equal(single.mutationApplied, true);
+  await node({ name: "single", delete: true });
   // Reversing an edge creates a temporary cycle; only the final batch must compile.
   const rewired = JSON.parse((await call("edge", { edges: [
     { from: "parser", to: "contract" },
@@ -164,10 +226,9 @@ try {
   ] })).content[0].text);
   assert.equal(rewired.mutationApplied, true);
   assert.deepEqual(rewired.plan.roots, ["parser"]);
-  // Node deletion removes incident edges; replacements and repeated edits follow array order.
+  // Node deletion removes incident edges; other targets can be replaced atomically.
   assert.equal(JSON.parse((await call("node", { nodes: [
     { name: "contract", delete: true },
-    { name: "search", task: "First replacement" },
     { name: "search", task: "Final replacement" },
   ] })).content[0].text).mutationApplied, true);
   const afterDeletion = JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"));

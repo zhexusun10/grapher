@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { motion } from "motion/react";
-import { Settings2, FolderGit2, RotateCcw, Terminal, Plus, Check, X, Copy } from "lucide-react";
+import { Settings2, FolderGit2, RotateCcw, Terminal, Plus, Check, X, Copy, Sliders } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
 import { ProviderSettings } from "../ProviderSettings";
 
@@ -153,6 +153,67 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 effectiveRoleModels={effectiveRoleModels}
                 envOverrides={envOverrides}
               />
+            </div>
+
+            {/* Section 3: 执行并发与反馈重试控制 */}
+            <div className="settings-card">
+              <div className="settings-card-title">
+                <Sliders size={16} />
+                <h4>执行并发与重试控制</h4>
+              </div>
+              <p className="section-desc">
+                设置图执行引擎的最大并发子任务数及节点失败后的自动反馈重试轮次。
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div className="settings-control-row">
+                  <div className="settings-control-label">
+                    <span>并发任务上限 (maxParallel)</span>
+                    <span className="settings-control-badge">{config.maxParallel ?? 4} 并发</span>
+                  </div>
+                  <div className="settings-slider-wrapper">
+                    <input
+                      type="range"
+                      min={1}
+                      max={8}
+                      step={1}
+                      value={config.maxParallel ?? 4}
+                      onChange={(e) => setConfig((prev) => ({ ...prev, maxParallel: Number(e.target.value) }))}
+                      className="settings-range-slider"
+                    />
+                    <div className="settings-slider-ticks">
+                      <span>1 (串行)</span>
+                      <span>2</span>
+                      <span>4 (推荐)</span>
+                      <span>6</span>
+                      <span>8 (极限)</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="settings-control-row">
+                  <div className="settings-control-label">
+                    <span>最大反馈重试 (maxFeedback)</span>
+                    <span className="settings-control-badge">{config.maxFeedback ?? 3} 次</span>
+                  </div>
+                  <div className="settings-slider-wrapper">
+                    <input
+                      type="range"
+                      min={0}
+                      max={10}
+                      step={1}
+                      value={config.maxFeedback ?? 3}
+                      onChange={(e) => setConfig((prev) => ({ ...prev, maxFeedback: Number(e.target.value) }))}
+                      className="settings-range-slider"
+                    />
+                    <div className="settings-slider-ticks">
+                      <span>0 (不重试)</span>
+                      <span>3 (推荐)</span>
+                      <span>5</span>
+                      <span>10</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Section 4: 数据管理 */}

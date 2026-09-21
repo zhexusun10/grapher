@@ -316,11 +316,6 @@ a,
   flex-shrink: 0;
 }
 
-.project-workspace-item.active .proj-icon {
-  background: var(--brand-default);
-  color: var(--text-inverse);
-  border-color: var(--brand-default);
-}
 
 .proj-details {
   flex: 1;
@@ -3512,15 +3507,18 @@ a,
 @keyframes nodeAppear {
   0% {
     opacity: 0;
-    transform: scale(0.85) translateY(12px);
+    transform: scale(0.82) translateY(14px);
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
   }
-  65% {
+  60% {
     opacity: 1;
     transform: scale(1.02) translateY(-2px);
+    box-shadow: 0 0 0 4px var(--brand-subtle, rgba(37, 99, 235, 0.12));
   }
   100% {
     opacity: 1;
     transform: scale(1) translateY(0);
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
   }
 }
 
@@ -3533,7 +3531,7 @@ a,
   border-radius: 8px;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
   transition: border-color 0.15s, box-shadow 0.15s;
-  animation: nodeAppear 0.4s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  animation: nodeAppear 0.45s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 
 .task-node.selected {
@@ -3609,25 +3607,36 @@ a,
 
 
 .react-flow__handle {
-  width: 7px;
-  height: 7px;
-  background: var(--brand-default);
-  border: 1.5px solid var(--bg-canvas);
+  width: 6px;
+  height: 6px;
+  background: var(--text-tertiary, #94A3B8);
+  border: 1px solid var(--bg-canvas);
   border-radius: 50%;
-  min-width: 7px;
-  min-height: 7px;
+  min-width: 6px;
+  min-height: 6px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
 }
 
 .react-flow__handle.connected {
-  opacity: 1;
+  opacity: 0.8;
   pointer-events: auto;
 }
 
 .react-flow__handle.connected.feedback {
   background: var(--graph-edge-feedback);
+}
+
+/* 隐藏 target handles，消除遮挡 edge 箭头的圆点，让箭头直接指向卡片边框 */
+.react-flow__handle[type="target"],
+.react-flow__handle#top,
+.react-flow__handle#left-target,
+.react-flow__handle#right-target {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  background: transparent !important;
+  border: none !important;
 }
 
 /* 拓扑图边的文字与背景胶囊：默认完全不显示，仅在 hover 边或选中时显示 */
@@ -3646,19 +3655,28 @@ a,
   transform: translateY(0);
 }
 
-@keyframes edgeAppear {
-  from {
+@keyframes edgeDrawIn {
+  0% {
+    stroke-dashoffset: 800;
     opacity: 0;
-    stroke-dashoffset: 40;
   }
-  to {
+  20% {
     opacity: 1;
+  }
+  100% {
     stroke-dashoffset: 0;
+    opacity: 1;
   }
 }
 
 .react-flow__edge-path {
-  animation: edgeAppear 0.45s ease-out backwards;
+  transition: stroke 0.2s ease, stroke-width 0.2s ease;
+}
+
+.react-flow__edge.edge-entering .react-flow__edge-path,
+.react-flow__edge-path.edge-entering {
+  stroke-dasharray: 800;
+  animation: edgeDrawIn 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.15s backwards;
 }
 
 .react-flow__edge:hover .react-flow__edge-path {
@@ -5161,6 +5179,60 @@ a,
   outline: none;
 }
 
+.settings-control-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.settings-control-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-control-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: var(--brand-subtle, rgba(37, 99, 235, 0.1));
+  color: var(--brand-default, #2563eb);
+  border: 1px solid var(--brand-border, rgba(37, 99, 235, 0.2));
+}
+
+.settings-slider-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-range-slider {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--brand-default, #2563eb);
+  cursor: pointer;
+}
+
+.settings-slider-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -5732,6 +5804,12 @@ a,
 
 .tool-call-card:hover {
   border-color: var(--border-subtle);
+}
+
+.tool-call-card.running {
+  border-color: rgba(99, 102, 241, 0.45);
+  background: rgba(99, 102, 241, 0.025);
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.15), 0 2px 10px rgba(99, 102, 241, 0.08);
 }
 
 .tool-call-card.error {

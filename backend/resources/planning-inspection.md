@@ -2,7 +2,17 @@
 
 Planner exposes exactly `node`, `edge`, `read`, and `bash`, plus compiler feedback from graph mutations.
 
-`node` accepts a nonempty `nodes` array or single-node fields (`name`, `task`, `delete`); `edge` accepts a nonempty `edges` array or single-edge fields (`from`, `to`, `relation`, `feedback`, `delete`). Single-item edits can be passed directly or as a length-one array. Each tool applies its edits in order and compiles once. A failed mutation leaves the saved graph unchanged.
+`node` accepts only a nonempty `nodes` array; `edge` accepts only a nonempty `edges` array. A single edit uses a length-one array. Top-level single-edit fields are rejected. Within a call, node names and ordered edge pairs must be unique, including identical repeats or delete-and-recreate edits. Duplicate diagnostics identify the array positions and target; the entire batch is rejected before applying edits or invoking the compiler. To replace a target, supply its final edit once. Each valid batch applies its edits in order and compiles once. A failed mutation leaves the saved graph unchanged.
+
+```json
+{"nodes":[{"name":"build","task":"Implement the requested change."}]}
+```
+
+```json
+{"edges":[{"from":"build","to":"review"}]}
+```
+
+An edge batch may delete an old edge and add a different edge atomically. Only the resulting graph is compiled, so a temporary cycle during rewiring does not block a valid final graph. Opposite edge directions are different ordered pairs; dependency and feedback edits for the same direction are the same target.
 
 `read` uses Pi's native implementation and description, including offset/limit behavior. `bash` uses Pi's native backend without write-command filtering or implicit errexit/pipefail. Planner has no automatic skills/extensions or project context files.
 

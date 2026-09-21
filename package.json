@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "pi:verify": "node scripts/pi-baseline.mjs verify",
-    "test:pi": "node --check engine/system-prompt.mjs && node scripts/pi-baseline.mjs verify",
+    "test:pi": "node --check engine/system-prompt.mjs && node scripts/pi-baseline.mjs verify && node --test scripts/agent-dir.test.mjs scripts/planning-trajectory.test.mjs",
     "pi:setup": "node scripts/pi-baseline.mjs setup",
     "pi:build": "node scripts/pi-baseline.mjs build",
     "pi": "node engine/entrypoint.mjs",

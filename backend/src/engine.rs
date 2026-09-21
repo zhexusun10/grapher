@@ -106,6 +106,12 @@ impl PiModelConfig {
                     _ => Some("off".to_string()),
                 }
             }
+            PiRole::Planner => Some(
+                std::env::var(role.thinking_env_var())
+                    .ok()
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| "medium".into()),
+            ),
             _ => std::env::var(role.thinking_env_var())
                 .ok()
                 .filter(|t| !t.trim().is_empty()),
@@ -292,7 +298,28 @@ pub struct PiRequest<'request> {
     pub system_prompt: Option<&'request str>,
 }
 
-pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Result<String, String> {
+pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<String, String> {
+    let variable = request
+        .role
+        .model_env_var()
+        .replace("_MODEL", "_TIMEOUT_SECONDS");
+    let seconds = match std::env::var(&variable) {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("{variable} must be a positive integer"))?,
+        Err(std::env::VarError::NotPresent) => 900,
+        Err(error) => return Err(format!("Invalid {variable}: {error}")),
+    };
+    run_pi_with_timeout(request, on_output, Duration::from_secs(seconds))
+}
+
+fn run_pi_with_timeout(
+    request: PiRequest<'_>,
+    mut on_output: impl FnMut(String),
+    timeout: Duration,
+) -> Result<String, String> {
     let phase = request.role.name();
     let config = request.config;
     #[cfg(not(feature = "fixture"))]
@@ -302,8 +329,11 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     // legacy command fields cannot select a different engine implementation.
     #[cfg(not(feature = "fixture"))]
     let mut command = crate::native::execution_command(
-        request.role, Path::new(&config.repository), request.cwd,
-        &crate::workspace::data_root(), request.session_dir,
+        request.role,
+        Path::new(&config.repository),
+        request.cwd,
+        &crate::workspace::data_root(),
+        request.session_dir,
     )?;
     // Process substitution is exclusively a test capability.
     #[cfg(feature = "fixture")]
@@ -344,7 +374,9 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
             crate::native::installation_root().join("backend/resources/planner.ts")
         };
         #[cfg(not(feature = "fixture"))]
-        let extension = extension_path.to_str().ok_or("Invalid Planner extension path")?;
+        let extension = extension_path
+            .to_str()
+            .ok_or("Invalid Planner extension path")?;
         command.args(["--extension", extension, "--no-context-files"]);
     }
     if !config.model.trim().is_empty() {
@@ -407,8 +439,13 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     #[cfg(not(feature = "fixture"))]
     {
         let graph = request.cwd.canonicalize().map_err(|e| e.to_string())?
-            != Path::new(&config.repository).canonicalize().map_err(|e| e.to_string())?;
-        command.env("GRAPHER_EXECUTION_KIND", if graph { "graph" } else { "source" });
+            != Path::new(&config.repository)
+                .canonicalize()
+                .map_err(|e| e.to_string())?;
+        command.env(
+            "GRAPHER_EXECUTION_KIND",
+            if graph { "graph" } else { "source" },
+        );
         command.env("GRAPHER_SOURCE_ALIAS", &config.repository);
     }
     command.env(
@@ -433,6 +470,7 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.process_group(0);
+    let started = Instant::now();
     let mut child = command
         .spawn()
         .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
@@ -446,17 +484,14 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
         "{}\n",
         serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "timestamp":crate::model::now()})
     ));
-    let task = request.task;
-    if let Err(error) = child
-        .stdin
-        .take()
-        .ok_or("Pi stdin unavailable")?
-        .write_all(task.as_bytes())
-    {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error.to_string());
-    }
+    let mut stdin = child.stdin.take().ok_or("Pi stdin unavailable")?;
+    let task = request.task.as_bytes().to_vec();
+    let (input_sender, input_receiver) = mpsc::channel();
+    // Large tasks can fill the pipe before an unresponsive child reads stdin.
+    // Keep input delivery inside the same deadline as output collection.
+    thread::spawn(move || {
+        let _ = input_sender.send(stdin.write_all(&task).map_err(|error| error.to_string()));
+    });
     let (sender, receiver) = mpsc::channel();
     let stdout = child.stdout.take().ok_or("Pi stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("Pi stderr unavailable")?;
@@ -481,12 +516,25 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
             }
         }
     });
-    let started = Instant::now();
+    let mut input_error = None;
     let mut final_text = String::new();
     let mut agent_error = None;
     let mut stderr_tail = String::new();
     let mut exited_at = None;
+    let mut timed_out = false;
     loop {
+        // Check even while output is arriving: a noisy child can also hang.
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            break;
+        }
+        if let Ok(Err(error)) = input_receiver.try_recv() {
+            input_error = Some(error);
+        }
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok((is_error, line)) => {
                 if is_error {
@@ -540,7 +588,18 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
                 };
                 on_output(format!("{}\n", received_line.as_deref().unwrap_or(&line)));
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+                {
+                    break;
+                }
+                // A child may close its pipes and keep running. Keep the deadline
+                // active instead of blocking indefinitely in wait().
+                thread::sleep(Duration::from_millis(10));
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if exited_at.is_none()
                     && child
@@ -561,10 +620,19 @@ pub fn run_pi(request: PiRequest<'_>, mut on_output: impl FnMut(String)) -> Resu
     // guaranteed to be covered; tasks must finish background work before returning.
     on_output(format!(
         "{}\n",
-        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success(), "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
+        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success() && !timed_out && input_error.is_none(), "timedOut":timed_out, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
     ));
+    if timed_out {
+        return Err(format!(
+            "{phase} timed out after {} seconds",
+            timeout.as_secs_f64()
+        ));
+    }
     if !status.success() {
         return Err(format!("Pi exited with {status}: {stderr_tail}"));
+    }
+    if let Some(error) = input_error {
+        return Err(format!("Cannot send task to {phase}: {error}"));
     }
     if let Some(error) = agent_error {
         return Err(error);
@@ -647,6 +715,89 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn timeout_settles_silent_and_streaming_children() {
+        for script in [
+            "while :; do sleep 1; done",
+            "while :; do echo '{}'; sleep 0.01; done",
+            "exec 1>&- 2>&-; sleep 10",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let config = Config {
+                engine: "pi".into(),
+                pi_command: "/bin/sh".into(),
+                pi_args: vec!["-c".into(), script.into()],
+                repository: temp.path().to_string_lossy().into(),
+                model: "mock/model".into(),
+                max_parallel: 1,
+                max_feedback: 0,
+            };
+            let mut output = String::new();
+            let task = "x".repeat(1024 * 1024);
+            let start = Instant::now();
+            let result = run_pi_with_timeout(
+                PiRequest {
+                    role: PiRole::Planner,
+                    config: &config,
+                    cwd: temp.path(),
+                    task: &task,
+                    session_dir: &temp.path().join("session"),
+                    extension: None,
+                    tools: Some(""),
+                    session_id: None,
+                    extra_args: vec![],
+                    environment: vec![],
+                    system_prompt: None,
+                },
+                |line| output.push_str(&line),
+                Duration::from_millis(150),
+            );
+            assert!(result.unwrap_err().contains("Planner timed out"));
+            assert!(start.elapsed() < Duration::from_secs(5));
+            let exited: Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
+            assert_eq!(exited["type"], "grapher_process_exited");
+            assert_eq!(exited["timedOut"], true);
+            assert_eq!(exited["success"], false);
+        }
+    }
+
+    #[test]
+    fn planner_budget_is_explicit_and_overridable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original = std::env::var_os("PLANNER_THINKING");
+        let config = Config {
+            repository: "/tmp/fake".into(),
+            model: "mock/model".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            #[cfg(feature = "fixture")]
+            engine: "pi".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: "node".into(),
+            #[cfg(feature = "fixture")]
+            pi_args: vec![],
+        };
+        std::env::remove_var("PLANNER_THINKING");
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::Planner, &config)
+                .thinking
+                .as_deref(),
+            Some("medium")
+        );
+        std::env::set_var("PLANNER_THINKING", "high");
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::Planner, &config)
+                .thinking
+                .as_deref(),
+            Some("high")
+        );
+        match original {
+            Some(value) => std::env::set_var("PLANNER_THINKING", value),
+            None => std::env::remove_var("PLANNER_THINKING"),
+        }
+    }
 
     #[test]
     fn partitioner_model_follows_base_config_model_with_thinking_off() {

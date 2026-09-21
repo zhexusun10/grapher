@@ -133,7 +133,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
   };
 
   const rolesList = useMemo(() => {
-    return Object.entries(planning.roles || {}).filter(([key]) => key !== "partition");
+    return Object.entries(planning.roles || {});
   }, [planning.roles]);
 
   const totalToolCalls = useMemo(() => {

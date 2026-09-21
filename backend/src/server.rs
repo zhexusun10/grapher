@@ -92,7 +92,7 @@ mod prompt_tests {
                 engine: "pi".into(),
                 pi_command: "/bin/sh".into(),
                 pi_args: vec![script.to_string_lossy().into()],
-                model: String::new(),
+                model: "mock/model".into(),
                 max_parallel: 4,
                 max_feedback: 3,
             },
@@ -1117,7 +1117,19 @@ fn plan_goal_internal(
             None,
         ));
     }
-    if service.driving.load(Ordering::SeqCst) || service.planning.swap(true, Ordering::SeqCst) {
+    if service.driving.load(Ordering::SeqCst) {
+        return Err(("Another operation is running".into(), None));
+    }
+    // Allow up to 1.5s grace period if previous planning process is terminating (e.g. on steer / interrupt)
+    let mut acquired = false;
+    for _ in 0..30 {
+        if !service.planning.swap(true, Ordering::SeqCst) {
+            acquired = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !acquired {
         return Err(("Another operation is running".into(), None));
     }
     let service = service.clone();

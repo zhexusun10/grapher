@@ -85,8 +85,8 @@ Edge 只表示真实的文件状态或执行顺序依赖。不要仅为了让图
 | `PLANNER_MODEL` | 覆盖 Planner 模型 |
 | `NODE_AGENT_MODEL` | 覆盖执行节点模型 |
 | `MERGER_MODEL` | 覆盖发布冲突处理模型 |
-| `*_THINKING` | 对应角色的 thinking 配置 |
-| `*_TIMEOUT_SECONDS` | 对应角色超时 |
+| `*_THINKING` | 对应角色的 thinking 配置；Planner 未配置时显式使用 `medium`，不继承共享 Pi 设置 |
+| `*_TIMEOUT_SECONDS` | 对应角色进程的超时秒数，正整数，默认 900；超时终止进程组并记录 `timedOut` |
 | `PARTITIONER_SYSTEM_PROMPT` | 开发用 Partitioner prompt 覆盖 |
 | `PLANNER_SYSTEM_PROMPT` | 开发用 Planner prompt 覆盖 |
 

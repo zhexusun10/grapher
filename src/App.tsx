@@ -186,6 +186,9 @@ export default function App() {
     }
   });
 
+  const [recentlyAddedEdgeIds, setRecentlyAddedEdgeIds] = useState<Set<string>>(new Set());
+  const pendingToolArgsRef = useRef<Map<string, any>>(new Map());
+
   const currentRepoPath = useMemo(() => config.repository || repoInfo?.path || "default", [config.repository, repoInfo]);
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
   
@@ -498,6 +501,31 @@ export default function App() {
       setEditPrefillText("");
       return newMsg;
     };
+
+    if (isPlanning) {
+      // 规划器正在工作中，用户发送补充或纠偏要求，直接转向 (Steer)
+      recordMessage(displayMsg);
+      (async () => {
+        // 1. 中止当前的规划流请求
+        if (planningAbortControllerRef.current) {
+          planningAbortControllerRef.current.abort();
+          planningAbortControllerRef.current = null;
+        }
+        // 2. 终止后端当前正在运行的 Pi 规划进程
+        try {
+          await runtimeService.control("stop");
+        } catch (e) {
+          console.warn("Stop command before steer failed:", e);
+        }
+        // 3. 稍等片刻确保退出
+        await new Promise((r) => setTimeout(r, 100));
+        // 4. 将新指令作为转向补充要求，重新触发规划
+        const baseGoal = state.graph.originalGoal || goal;
+        const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求（实时转向）：\n${text}` : text;
+        handlePlanGoal(combinedGoal, options);
+      })();
+      return;
+    }
 
     if (active) {
       const displayLabel = targetNodeName && targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
@@ -1428,6 +1456,9 @@ export default function App() {
               };
             });
           } else if (pEvent?.type === "tool_execution_start") {
+            if (pEvent.toolCallId || pEvent.toolName) {
+              pendingToolArgsRef.current.set(pEvent.toolCallId || pEvent.toolName, pEvent.args || {});
+            }
             const toolItem: TranscriptItem = {
               id: pEvent.toolCallId || `plan_tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               type: "tool_call",
@@ -1443,79 +1474,6 @@ export default function App() {
               plannerThinkingActive: false,
               tools: [...prev.tools, toolItem],
             }));
-
-            // 实时增量将 node 和 edge 工具调用的图结构同步至 graph
-            if (pEvent.toolName === "node") {
-              const args = pEvent.args || {};
-              setState((prev) => {
-                let nextNodes = [...prev.graph.nodes];
-                let nextEdges = [...prev.graph.edges];
-                if (Array.isArray(args.nodes) || Array.isArray(args.edges)) {
-                  if (Array.isArray(args.nodes)) {
-                    for (const n of args.nodes) {
-                      if (!n || !n.name) continue;
-                      nextNodes = nextNodes.filter((item) => item.name !== n.name);
-                      if (n.delete) {
-                        nextEdges = nextEdges.filter((e) => e.from !== n.name && e.to !== n.name);
-                      } else {
-                        nextNodes.push({ name: n.name, task: n.task || "" });
-                      }
-                    }
-                  }
-                  if (Array.isArray(args.edges)) {
-                    for (const e of args.edges) {
-                      if (!e || !e.from || !e.to) continue;
-                      nextEdges = nextEdges.filter((item) => item.from !== e.from || item.to !== e.to);
-                      if (!e.delete) {
-                        nextEdges.push({
-                          from: e.from,
-                          to: e.to,
-                          relation: e.relation || "",
-                          feedback: Boolean(e.feedback),
-                        });
-                      }
-                    }
-                  }
-                } else if (args.name) {
-                  nextNodes = nextNodes.filter((item) => item.name !== args.name);
-                  if (args.delete) {
-                    nextEdges = nextEdges.filter((e) => e.from !== args.name && e.to !== args.name);
-                  } else {
-                    nextNodes.push({ name: args.name, task: args.task || "" });
-                  }
-                }
-                return {
-                  ...prev,
-                  graph: {
-                    ...prev.graph,
-                    nodes: nextNodes,
-                    edges: nextEdges,
-                  },
-                };
-              });
-            } else if (pEvent.toolName === "edge") {
-              const args = pEvent.args || {};
-              if (args.from && args.to) {
-                setState((prev) => {
-                  let nextEdges = prev.graph.edges.filter((item) => item.from !== args.from || item.to !== args.to);
-                  if (!args.delete) {
-                    nextEdges.push({
-                      from: args.from,
-                      to: args.to,
-                      relation: args.relation || "",
-                      feedback: Boolean(args.feedback),
-                    });
-                  }
-                  return {
-                    ...prev,
-                    graph: {
-                      ...prev.graph,
-                      edges: nextEdges,
-                    },
-                  };
-                });
-              }
-            }
           } else if (pEvent?.type === "tool_execution_end") {
             const resText = (pEvent.result?.content ?? [])
               .filter((i: any) => i.type === "text")
@@ -1530,6 +1488,120 @@ export default function App() {
               resText.includes("[Showing lines") ||
               resText.includes("Full output:")
             );
+
+            const savedArgs = pendingToolArgsRef.current.get(pEvent.toolCallId) ||
+              pendingToolArgsRef.current.get(pEvent.toolName) ||
+              {};
+            if (pEvent.toolCallId) pendingToolArgsRef.current.delete(pEvent.toolCallId);
+            const args = pEvent.args || savedArgs;
+
+            if (!isErr) {
+              // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
+              if (pEvent.toolName === "node") {
+                setState((prev) => {
+                  let nextNodes = [...prev.graph.nodes];
+                  let nextEdges = [...prev.graph.edges];
+                  if (Array.isArray(args.nodes) || Array.isArray(args.edges)) {
+                    if (Array.isArray(args.nodes)) {
+                      for (const n of args.nodes) {
+                        if (!n || !n.name) continue;
+                        nextNodes = nextNodes.filter((item) => item.name !== n.name);
+                        if (n.delete) {
+                          nextEdges = nextEdges.filter((e) => e.from !== n.name && e.to !== n.name);
+                        } else {
+                          nextNodes.push({ name: n.name, task: n.task || "" });
+                        }
+                      }
+                    }
+                    if (Array.isArray(args.edges)) {
+                      for (const e of args.edges) {
+                        if (!e || !e.from || !e.to) continue;
+                        nextEdges = nextEdges.filter((item) => item.from !== e.from || item.to !== e.to);
+                        if (!e.delete) {
+                          nextEdges.push({
+                            from: e.from,
+                            to: e.to,
+                            relation: e.relation || "",
+                            feedback: Boolean(e.feedback),
+                          });
+                        }
+                      }
+                    }
+                  } else if (args.name) {
+                    nextNodes = nextNodes.filter((item) => item.name !== args.name);
+                    if (args.delete) {
+                      nextEdges = nextEdges.filter((e) => e.from !== args.name && e.to !== args.name);
+                    } else {
+                      nextNodes.push({ name: args.name, task: args.task || "" });
+                    }
+                  }
+                  return {
+                    ...prev,
+                    graph: {
+                      ...prev.graph,
+                      nodes: nextNodes,
+                      edges: nextEdges,
+                    },
+                  };
+                });
+              } else if (pEvent.toolName === "edge") {
+                const rawEdgeList = Array.isArray(args.edges)
+                  ? args.edges
+                  : (args.from && args.to ? [args] : []);
+                if (rawEdgeList.length > 0) {
+                  const addedIds: string[] = [];
+                  setState((prev) => {
+                    let nextEdges = [...prev.graph.edges];
+                    for (const e of rawEdgeList) {
+                      if (!e || !e.from || !e.to) continue;
+                      nextEdges = nextEdges.filter((item) => item.from !== e.from || item.to !== e.to);
+                      if (!e.delete) {
+                        nextEdges.push({
+                          from: e.from,
+                          to: e.to,
+                          relation: e.relation || "",
+                          feedback: Boolean(e.feedback),
+                        });
+                        addedIds.push(`${e.from}-${e.feedback ? "fb" : "dep"}-${e.to}`);
+                      }
+                    }
+                    return {
+                      ...prev,
+                      graph: {
+                        ...prev.graph,
+                        edges: nextEdges,
+                      },
+                    };
+                  });
+                  if (addedIds.length > 0) {
+                    setRecentlyAddedEdgeIds((prev) => new Set([...prev, ...addedIds]));
+                    setTimeout(() => {
+                      setRecentlyAddedEdgeIds((prev) => {
+                        const next = new Set(prev);
+                        for (const id of addedIds) next.delete(id);
+                        return next;
+                      });
+                    }, 1200);
+                  }
+                }
+              }
+
+              // 尝试解析并同步编译计划（executionBatches），用于实时驱动拓扑卡片摆位
+              try {
+                if (resText) {
+                  const parsed = JSON.parse(resText);
+                  if (parsed?.plan?.executionBatches) {
+                    setState((prev) => ({
+                      ...prev,
+                      plan: parsed.plan,
+                    }));
+                  }
+                }
+              } catch {
+                // 非 JSON 输出则忽略
+              }
+            }
+
             setPlannerStream((prev) => {
               const updateTool = (t: TranscriptItem) => ({
                 ...t,
@@ -1601,6 +1673,13 @@ export default function App() {
       }));
     } catch (err: any) {
       if (!planningRecovery.current(scope)) return;
+      const isAbort =
+        err?.name === "AbortError" ||
+        String(err?.message || err).includes("AbortError") ||
+        String(err?.message || err).includes("The user aborted a request");
+      if (isAbort) {
+        return;
+      }
       setError(String(err?.message || err));
       void planningRecovery.finish(scope, err?.summary, err?.planningId);
       setPlannerStream((prev) => ({
@@ -1873,22 +1952,21 @@ export default function App() {
       const useRight = isFeedback && (getNodeX(edge.from) > 160 && getNodeX(edge.to) > 160);
       const sourceHandle = isFeedback ? (useRight ? "right-source" : "left-source") : "bottom";
       const targetHandle = isFeedback ? (useRight ? "right-target" : "left-target") : "top";
+      const edgeId = `${edge.from}-${isFeedback ? "fb" : "dep"}-${edge.to}`;
+      const isNew = recentlyAddedEdgeIds.has(edgeId);
 
       return {
-        id: `${edge.from}-${isFeedback ? "fb" : "dep"}-${edge.to}`,
+        id: edgeId,
         source: edge.from,
         target: edge.to,
         type: isFeedback ? "smoothstep" : "workflow",
         sourceHandle,
         targetHandle,
+        className: isNew ? "edge-entering" : undefined,
         animated: !isFeedback && state.nodes[edge.from]?.status === "running",
         pathOptions: isFeedback ? { borderRadius: 20, offset: 35 } : undefined,
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          color: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
-          width: 14,
-          height: 14,
-        },
+        markerEnd: isFeedback ? "url(#workflow-arrow-feedback)" : "url(#workflow-arrow-default)",
+        data: { isNew },
         style: {
           stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
           strokeWidth: 1.5,
@@ -1912,7 +1990,7 @@ export default function App() {
         labelBgBorderRadius: 4,
       };
     });
-  }, [state.graph.edges, state.graph.nodes, state.plan, state.nodes]);
+  }, [state.graph.edges, state.graph.nodes, state.plan, state.nodes, recentlyAddedEdgeIds]);
 
   const isLandingView = state.graph.nodes.length === 0 &&
     !isPlanning &&

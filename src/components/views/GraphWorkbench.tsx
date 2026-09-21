@@ -20,6 +20,7 @@ import { ExecutionTranscript } from "../ExecutionTranscript";
 import { PlanningSummaryCard } from "../PlanningSummaryCard";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
+import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
 
 interface GraphWorkbenchProps {
   state: Snapshot;
@@ -403,6 +404,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const hasGraphContent = state.graph.nodes.length > 0 || hasGraphToolCalled;
   const showGraphPane = routeType === "graph" && (hasGraphContent || (!isPlanning && state.graph.nodes.length > 0));
 
+  const animatedNodes = useAnimatedNodes(nodes);
+
   const prevNodesCountRef = useRef(nodes.length);
   useEffect(() => {
     if (nodes.length > 0 && nodes.length !== prevNodesCountRef.current) {
@@ -412,6 +415,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
     }
   }, [nodes.length]);
+
+  const prevEdgesCountRef = useRef(edges.length);
+  useEffect(() => {
+    if (edges.length > 0 && edges.length !== prevEdgesCountRef.current) {
+      prevEdgesCountRef.current = edges.length;
+      if (graphFlowRef.current) {
+        void graphFlowRef.current.fitView({ padding: 0.18, duration: 450, minZoom: 0.3, maxZoom: 1.5 });
+      }
+    }
+  }, [edges.length]);
 
   const prevMsgCountRef = useRef(effectiveMessages.length);
   useEffect(() => {
@@ -1011,19 +1024,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 placeholder={
                   isPlannerDisabled
                     ? "拓扑图已批准执行，无法再向规划器发送消息"
+                    : isPlanning
+                    ? "输入补充规划或纠偏要求，发送将实时转向 (Steer)…"
                     : isSerialExecution
                     ? "向当前任务发送介入指令…"
                     : ""
                 }
-                isExecuting={active}
+                isExecuting={active || isPlanning}
                 isWorking={isWorking}
                 onInterrupt={onInterrupt}
                 value={editPrefillText || undefined}
                 onChange={(e) => onEditPrefillTextChange?.(e.target.value)}
                 onCancel={onCancelEditMessage}
                 disabled={
-                  locked ||
-                  isPlannerDisabled
+                  isPlannerDisabled ||
+                  (locked && !isPlanning)
                 }
               />
             </motion.div>
@@ -1075,36 +1090,60 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               </div>
 
               <div className="graph-canvas">
+                {/* 自定义高清晰度箭头 Marker 定义，解决被 handle 圆点遮挡问题 */}
+                <svg style={{ position: "absolute", width: 0, height: 0, pointerEvents: "none" }} aria-hidden="true">
+                  <defs>
+                    <marker
+                      id="workflow-arrow-default"
+                      viewBox="0 0 12 12"
+                      refX="10"
+                      refY="6"
+                      markerWidth="9"
+                      markerHeight="9"
+                      orient="auto"
+                    >
+                      <path d="M 2 2.5 L 10 6 L 2 9.5 Z" fill={tokens.graphEdgeDefault || "#94A3B8"} />
+                    </marker>
+                    <marker
+                      id="workflow-arrow-feedback"
+                      viewBox="0 0 12 12"
+                      refX="10"
+                      refY="6"
+                      markerWidth="9"
+                      markerHeight="9"
+                      orient="auto"
+                    >
+                      <path d="M 2 2.5 L 10 6 L 2 9.5 Z" fill={tokens.graphEdgeFeedback || "#8B5CF6"} />
+                    </marker>
+                  </defs>
+                </svg>
+
+                <ReactFlow
+                  key={state.runId || "active-plan"}
+                  onInit={(instance) => centerGraph(instance, graphKey)}
+                  nodes={animatedNodes}
+                  edges={edges}
+                  nodeTypes={nodeTypes}
+                  edgeTypes={edgeTypes}
+                  onNodeClick={(_, node) => {
+                    setSelected(node.id);
+                  }}
+                  onPaneClick={() => {
+                    setSelected("");
+                  }}
+                  minZoom={0.3}
+                  maxZoom={1.6}
+                  nodesDraggable={false}
+                  nodesConnectable={false}
+                  elementsSelectable={false}
+                  proOptions={{ hideAttribution: true }}
+                >
+                  <Background color={tokens.graphGridDot} gap={20} size={1} />
+                  <Controls showInteractive={false} />
+                </ReactFlow>
+
                 {state.graph.nodes.length > 0 && (
                   <>
-                    <ReactFlow
-                      key={state.runId || "active-plan"}
-                      onInit={(instance) => centerGraph(instance, graphKey)}
-                      style={{
-                        opacity: graphViewportReady ? 1 : 0,
-                        pointerEvents: graphViewportReady ? "auto" : "none",
-                      }}
-                      nodes={nodes}
-                      edges={edges}
-                      nodeTypes={nodeTypes}
-                      edgeTypes={edgeTypes}
-                      onNodeClick={(_, node) => {
-                        setSelected(node.id);
-                      }}
-                      onPaneClick={() => {
-                        setSelected("");
-                      }}
-                      minZoom={0.3}
-                      maxZoom={1.6}
-                      nodesDraggable={false}
-                      nodesConnectable={false}
-                      elementsSelectable={false}
-                      proOptions={{ hideAttribution: true }}
-                    >
-                      <Background color={tokens.graphGridDot} gap={20} size={1} />
-                      <Controls showInteractive={false} />
-                    </ReactFlow>
-
                     <div className="graph-note">
                       <span className="note-line" />依赖前进
                       <span className="note-line feedback" />反馈重试

@@ -156,6 +156,15 @@ pub fn agent_dir() -> Result<PathBuf, String> {
         .mode(0o700)
         .create(&path)
         .map_err(|e| e.to_string())?;
+    let target_models = path.join("models.json");
+    if !target_models.exists() {
+        if let Some(home) = std::env::var_os("HOME") {
+            let source_models = PathBuf::from(home).join(".pi/agent/models.json");
+            if source_models.exists() {
+                let _ = std::os::unix::fs::symlink(&source_models, &target_models);
+            }
+        }
+    }
     path.canonicalize().map_err(|e| e.to_string())
 }
 

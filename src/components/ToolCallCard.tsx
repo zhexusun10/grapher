@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   Terminal,
   FileText,
@@ -144,7 +145,10 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     };
 
     return (
-      <div
+      <motion.div
+        initial={{ opacity: 0, y: 10, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
         className={`tool-call-card ${meta.type} ${status} ${
           isError ? "error" : hasSubcommandWarning ? "warning" : ""
         }`}
@@ -238,57 +242,68 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
           </div>
         </div>
 
-        {isExpanded && (
-          <div className="tool-call-body">
-            {toolName === "bash" && (
-              <div className="tool-meta-bar">
-                <div className="tool-meta-item">
-                  <span className="meta-lbl">退出码:</span>
-                  <span
-                    className={`meta-val ${
-                      exitCode === 0 ? "success" : exitCode !== null ? "error" : "neutral"
-                    }`}
-                  >
-                    {exitCode !== null ? exitCode : "退出码未知"}
-                  </span>
-                </div>
-                <div className="tool-meta-item">
-                  <span className="meta-lbl">输出状态:</span>
-                  <span className={`meta-val ${isTruncated ? "warning" : "neutral"}`}>
-                    {isTruncated ? "已截断 (Truncated)" : "完整 (Complete)"}
-                  </span>
-                </div>
-                {args.command && (
-                  <div className="tool-meta-item cmd-full">
-                    <span className="meta-lbl">命令:</span>
-                    <code className="meta-val-code">{args.command}</code>
+        <AnimatePresence initial={false}>
+          {isExpanded && (
+            <motion.div
+              key="tool-body-anim"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+              style={{ overflow: "hidden" }}
+            >
+              <div className="tool-call-body">
+                {toolName === "bash" && (
+                  <div className="tool-meta-bar">
+                    <div className="tool-meta-item">
+                      <span className="meta-lbl">退出码:</span>
+                      <span
+                        className={`meta-val ${
+                          exitCode === 0 ? "success" : exitCode !== null ? "error" : "neutral"
+                        }`}
+                      >
+                        {exitCode !== null ? exitCode : "退出码未知"}
+                      </span>
+                    </div>
+                    <div className="tool-meta-item">
+                      <span className="meta-lbl">输出状态:</span>
+                      <span className={`meta-val ${isTruncated ? "warning" : "neutral"}`}>
+                        {isTruncated ? "已截断 (Truncated)" : "完整 (Complete)"}
+                      </span>
+                    </div>
+                    {args.command && (
+                      <div className="tool-meta-item cmd-full">
+                        <span className="meta-lbl">命令:</span>
+                        <code className="meta-val-code">{args.command}</code>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {Object.keys(args).length > 0 && (
+                  <div className="tool-args-section">
+                    <div className="section-label">参数 (Arguments)</div>
+                    <pre className="tool-args-code">
+                      {JSON.stringify(args, null, 2)}
+                    </pre>
+                  </div>
+                )}
+
+                {item.result !== undefined && item.result !== null && (
+                  <div className="tool-result-section">
+                    <div className="section-label">
+                      {isError ? "错误输出 (Error Output)" : "执行结果 (Result Output)"}
+                    </div>
+                    <pre className={`tool-result-code ${isError ? "error" : ""}`}>
+                      {item.result.trim() || "(无文本输出)"}
+                    </pre>
                   </div>
                 )}
               </div>
-            )}
-
-            {Object.keys(args).length > 0 && (
-              <div className="tool-args-section">
-                <div className="section-label">参数 (Arguments)</div>
-                <pre className="tool-args-code">
-                  {JSON.stringify(args, null, 2)}
-                </pre>
-              </div>
-            )}
-
-            {item.result !== undefined && item.result !== null && (
-              <div className="tool-result-section">
-                <div className="section-label">
-                  {isError ? "错误输出 (Error Output)" : "执行结果 (Result Output)"}
-                </div>
-                <pre className={`tool-result-code ${isError ? "error" : ""}`}>
-                  {item.result.trim() || "(无文本输出)"}
-                </pre>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
     );
   }
 );

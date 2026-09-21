@@ -282,7 +282,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           files: currentAttachment ? [currentAttachment] : [],
           rawText: trimmed,
           displayText,
-          mode: isExecuting ? "steer" : undefined,
+          mode: (isExecuting || isWorking) ? "steer" : undefined,
         });
       }
 
@@ -457,18 +457,36 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                if (isWorking) {
+                if (isWorking && !hasText && !selectedFile) {
                   onInterrupt?.();
                 } else {
                   handleSubmitAction();
                 }
               }}
-              disabled={!isWorking && !canSubmit}
-              className={`prompt-box-send-btn ${isWorking ? "working active" : canSubmit ? "active" : ""}`}
-              title={isWorking ? "点击打断执行" : "发送消息"}
-              aria-label={isWorking ? "点击打断执行" : "发送消息"}
+              disabled={isWorking ? (!hasText && !selectedFile && !onInterrupt) : !canSubmit}
+              className={`prompt-box-send-btn ${
+                isWorking && !hasText && !selectedFile
+                  ? "working active"
+                  : canSubmit
+                  ? "active"
+                  : ""
+              }`}
+              title={
+                isWorking
+                  ? hasText || selectedFile
+                    ? "发送以实时调整方向 (Steer)"
+                    : "点击打断执行"
+                  : "发送消息"
+              }
+              aria-label={
+                isWorking
+                  ? hasText || selectedFile
+                    ? "发送以实时调整方向 (Steer)"
+                    : "点击打断执行"
+                  : "发送消息"
+              }
             >
-              {isWorking ? (
+              {isWorking && !hasText && !selectedFile ? (
                 <Square size={compact ? 8 : 10} className="prompt-box-stop-icon" />
               ) : isBusy || isPreparing ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
