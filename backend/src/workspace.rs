@@ -563,7 +563,9 @@ pub fn prepare_with_merger_expected(
         &["checkout", "-q", "-B", "grapher-node", "refs/grapher/base"],
     )?;
 
-    // Fetch and merge each parent dependency from their advertised refs
+    // Fetch every dependency before composing. A later dependency can already
+    // contain an earlier one, including its conflict resolutions.
+    let mut parent_heads = Vec::new();
     for parent in parents {
         let node_refspec = format!("+refs/grapher/nodes/{parent}:refs/grapher/parents/{parent}");
         let head_refspec = format!("+refs/grapher/heads/{parent}:refs/grapher/parents/{parent}");
@@ -592,12 +594,18 @@ pub fn prepare_with_merger_expected(
                 ],
             )?;
         }
+        parent_heads.push(git(
+            path,
+            &["rev-parse", &format!("refs/grapher/parents/{parent}")],
+        )?);
+    }
+    for incoming in independent_heads(path, &parent_heads)? {
         if git(
             path,
             &[
                 "merge-base",
                 "--is-ancestor",
-                &format!("refs/grapher/parents/{parent}"),
+                &incoming,
                 "HEAD",
             ],
         )
@@ -611,7 +619,7 @@ pub fn prepare_with_merger_expected(
                 "merge",
                 "--no-edit",
                 "--no-ff",
-                &format!("refs/grapher/parents/{parent}"),
+                &incoming,
             ],
         ) {
             let pending = git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).ok();
@@ -623,7 +631,6 @@ pub fn prepare_with_merger_expected(
             if let Err(merger_error) = resolve() {
                 return Err(format!("Workspace composition blocked at {}. Resolve and commit the merge in this worktree, then use 'Use resolved workspace'.\nMerger: {merger_error}", path.display()));
             }
-            let incoming = format!("refs/grapher/parents/{parent}");
             if git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok()
                 || !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
                 || git(path, &["merge-base", "--is-ancestor", &incoming, "HEAD"]).is_err()
@@ -634,6 +641,28 @@ pub fn prepare_with_merger_expected(
         }
     }
     git(path, &["rev-parse", "HEAD"])
+}
+
+/// Keep only commits not contained in another input, preserving input order.
+/// Callers supply resolved commit IDs, not movable refs. Use actual Git history
+/// rather than graph reachability: an agent may have rewritten its history.
+pub(crate) fn independent_heads(repository: &Path, heads: &[String]) -> Result<Vec<String>, String> {
+    if heads.len() < 2 {
+        return Ok(heads.to_vec());
+    }
+    let mut args = vec!["merge-base", "--independent"];
+    args.extend(heads.iter().map(String::as_str));
+    let output = repository_git(repository, &args)?;
+    let mut remaining: std::collections::BTreeSet<_> = output.lines().collect();
+    let result = heads
+        .iter()
+        .filter(|head| remaining.remove(head.as_str()))
+        .cloned()
+        .collect();
+    if !remaining.is_empty() {
+        return Err("Dependency inputs must be resolved full commit IDs".into());
+    }
+    Ok(result)
 }
 
 /// Snapshot an isolated node and import its commit into the host repository.

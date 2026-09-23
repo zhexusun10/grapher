@@ -53,7 +53,9 @@ pub fn merge_graph(
     if !git(repository, &["status", "--porcelain"])?.is_empty() {
         return Err("User directory changed during execution. Preserve or reconcile local changes, then retry publication.".into());
     }
-    for head in heads {
+    // Complete a pending merge above before pruning, so publication retries
+    // retain their original incoming commit even if it is now redundant.
+    for head in &workspace::independent_heads(repository, heads)? {
         if git(repository, &["merge-base", "--is-ancestor", head, "HEAD"]).is_ok() {
             continue;
         }
