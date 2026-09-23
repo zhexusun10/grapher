@@ -1896,7 +1896,7 @@ export default function App() {
       return (safeIndex - (Math.max(1, batch.length) - 1) / 2) * 260 + 160;
     };
 
-    return state.graph.nodes.map((node) => {
+    const taskNodes: WorkNode[] = state.graph.nodes.map((node) => {
       const layer = Math.max(0, layers.findIndex((batch) => batch.includes(node.name)));
       const nodeAttempts = state.executions.filter((execution) => execution.node === node.name);
 
@@ -1921,7 +1921,7 @@ export default function App() {
         width: 236,
         position: {
           x: getNodeX(node.name),
-          y: layer * 180 + 24,
+          y: layer * ((state.mergers ?? []).some((m) => m.node.startsWith("merge:")) ? 270 : 180) + 24,
         },
         data: {
           name: node.name,
@@ -1944,7 +1944,31 @@ export default function App() {
         },
       };
     });
-  }, [state.graph, state.plan, state.nodes, state.executions, selected]);
+    // A merger is an execution, not a planner node. Show one card per fan-in
+    // target only after a real conflict has launched the resolver.
+    const mergeTargets = new Map<string, NonNullable<typeof state.mergers>[number]>();
+    for (const merger of state.mergers ?? []) {
+      const target = merger.node.startsWith("merge:") ? merger.node.slice(6) : "";
+      if (target && state.graph.nodes.some((node) => node.name === target)) {
+        mergeTargets.set(target, merger);
+      }
+    }
+    return [...taskNodes, ...Array.from(mergeTargets, ([target, merger]): WorkNode => {
+      const node = taskNodes.find((item) => item.id === target)!;
+      const attempts = (state.mergers ?? []).filter((item) => item.node === `merge:${target}`).length;
+      return {
+        id: `merger:${target}`, type: "work", width: 236,
+        position: { x: node.position.x, y: node.position.y - 130 },
+        data: {
+          name: `merger · ${target}`, task: "合并上游分支冲突",
+          status: merger.status === "completed" ? "done" : merger.status === "running" ? "running" : "failed",
+          attempts, hint: `合并至 ${target}`, reviewer: false, selected: false,
+          worktree: merger.worktree, hasTop: true, hasBottom: true,
+          hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
+        },
+      };
+    })];
+  }, [state.graph, state.plan, state.nodes, state.executions, state.mergers, selected]);
 
   const edges = useMemo<Edge[]>(() => {
     const layers = computeExecutionLayers(state.graph, state.plan);
@@ -1956,7 +1980,10 @@ export default function App() {
       return (safeIndex - (Math.max(1, batch.length) - 1) / 2) * 260 + 160;
     };
 
-    return state.graph.edges.map((edge) => {
+    const mergeTargets = new Set((state.mergers ?? [])
+      .map((merger) => merger.node.startsWith("merge:") ? merger.node.slice(6) : "")
+      .filter((target) => target && state.graph.nodes.some((node) => node.name === target)));
+    const graphEdges = state.graph.edges.map((edge) => {
       const isFeedback = !!edge.feedback;
       const useRight = isFeedback && (getNodeX(edge.from) > 160 && getNodeX(edge.to) > 160);
       const sourceHandle = isFeedback ? (useRight ? "right-source" : "left-source") : "bottom";
@@ -1967,7 +1994,7 @@ export default function App() {
       return {
         id: edgeId,
         source: edge.from,
-        target: edge.to,
+        target: !isFeedback && mergeTargets.has(edge.to) ? `merger:${edge.to}` : edge.to,
         type: isFeedback ? "smoothstep" : "workflow",
         sourceHandle,
         targetHandle,
@@ -1999,7 +2026,13 @@ export default function App() {
         labelBgBorderRadius: 4,
       };
     });
-  }, [state.graph.edges, state.graph.nodes, state.plan, state.nodes, recentlyAddedEdgeIds]);
+    return [...graphEdges, ...Array.from(mergeTargets, (target): Edge => ({
+      id: `merger:${target}->${target}`, source: `merger:${target}`, target,
+      sourceHandle: "bottom", targetHandle: "top", type: "workflow",
+      markerEnd: "url(#workflow-arrow-default)",
+      style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
+    }))];
+  }, [state.graph.edges, state.graph.nodes, state.plan, state.nodes, state.mergers, recentlyAddedEdgeIds]);
 
   const isLandingView = state.graph.nodes.length === 0 &&
     !isPlanning &&
@@ -2143,7 +2176,7 @@ export default function App() {
                 key={state.runId}
                 runId={state.runId}
                 publication={state.publication}
-                mergers={state.mergers ?? []}
+                mergers={(state.mergers ?? []).filter((merger) => merger.node === "merger")}
                 busy={busy || repositoryBlocked}
                 onRetry={() => control("retry_publication")}
               />

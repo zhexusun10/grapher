@@ -3,7 +3,8 @@ export interface GraphNode { name: string; task: string }
 export interface GraphEdge { from: string; to: string; relation: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
-export interface Config { repository: string; model: string; maxParallel: number; maxFeedback: number }
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; maxParallel: number; maxFeedback: number }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null }
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; from?: string; to?: string; accepted?: boolean; error?: string; execution?: Execution; instruction?: string; human?: boolean }
@@ -88,7 +89,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", maxParallel: 4, maxFeedback: 3 };
+export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "medium", maxParallel: 4, maxFeedback: 3 };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},

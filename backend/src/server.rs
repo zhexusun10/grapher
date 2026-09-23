@@ -2,7 +2,7 @@ use crate::{
     compiler,
     engine::{parse_route_decision, run_pi, PiModelConfig, PiRequest, PiRole},
     model::*,
-    runtime::{perform, Runtime},
+    runtime::{perform_with_merger, Runtime},
     snapshot_view::{execution_page, snapshot_metadata},
 };
 use serde::Serialize;
@@ -24,6 +24,42 @@ pub struct Service {
     driving: AtomicBool,
     planning: AtomicBool,
     extension: PathBuf,
+}
+
+// Worker logs flow through one bounded-batch event writer rather than each
+// worker acquiring Runtime's mutex on every output chunk. A flush barrier
+// commits all earlier output before that worker emits Finished/Failed.
+enum OutputMessage {
+    Text { execution_id: String, text: String },
+    Flush(std::sync::mpsc::Sender<Result<(), String>>),
+}
+
+fn persist_outputs(service: Arc<Service>, rx: std::sync::mpsc::Receiver<OutputMessage>) {
+    let mut failure: Option<String> = None;
+    while let Ok(first) = rx.recv() {
+        let mut events = Vec::with_capacity(64);
+        let mut barrier = None;
+        let mut next = Some(first);
+        loop {
+            match next.take() {
+                Some(OutputMessage::Text { execution_id, text }) => {
+                    events.push(EventKind::Output { execution_id, text });
+                }
+                Some(OutputMessage::Flush(reply)) => barrier = Some(reply),
+                None => break,
+            }
+            if barrier.is_some() || events.len() == 64 { break; }
+            next = rx.try_recv().ok();
+        }
+        if failure.is_none() && !events.is_empty() {
+            failure = service.runtime.lock().map_err(|e| e.to_string())
+                .and_then(|mut runtime| runtime.emit_outputs(events)).err();
+            if let Some(error) = &failure { eprintln!("Cannot persist Pi output: {error}"); }
+        }
+        if let Some(reply) = barrier {
+            let _ = reply.send(failure.clone().map_or(Ok(()), Err));
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -68,6 +104,64 @@ fn split_prompt_template<'a>(template: &'a str) -> (&'a str, &'a str) {
 mod prompt_tests {
     use super::*;
 
+    #[test]
+    fn buffered_output_flushes_before_finish_and_replays() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("runtime");
+        let service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&root).unwrap()),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let id = Uuid::new_v4().to_string();
+        let execution = Execution {
+            id: id.clone(), node: "task".into(), revision: 1, attempt: 1,
+            session_id: id.clone(), worktree: "".into(), before: "".into(),
+            after: None, status: "running".into(), output: String::new(),
+            started_at: now(), completed_at: None,
+        };
+        {
+            let mut runtime = service.runtime.lock().unwrap();
+            let config = serde_json::from_value(serde_json::json!({
+                "repository": temp.path(), "model": "test", "maxParallel": 8, "maxFeedback": 0
+            })).unwrap();
+            runtime.create(Graph {
+                original_goal: "test".into(),
+                nodes: vec![Node { name: "task".into(), task: "test".into() }],
+                edges: vec![],
+            }, config).unwrap();
+            runtime.emit(EventKind::Started { execution: execution.clone() }).unwrap();
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(256);
+        let writer_service = service.clone();
+        let writer = thread::spawn(move || persist_outputs(writer_service, rx));
+        let producers: Vec<_> = (0..8).map(|_| {
+            let tx = tx.clone();
+            let id = id.clone();
+            thread::spawn(move || {
+                for _ in 0..100 {
+                    tx.send(OutputMessage::Text { execution_id: id.clone(), text: "x".into() }).unwrap();
+                }
+                let (reply, ack) = std::sync::mpsc::channel();
+                tx.send(OutputMessage::Flush(reply)).unwrap();
+                ack.recv().unwrap().unwrap();
+            })
+        }).collect();
+        for producer in producers { producer.join().unwrap(); }
+        service.runtime.lock().unwrap().emit(EventKind::Finished {
+            execution_id: id.clone(), head: "done".into(), output: "result".into(),
+        }).unwrap();
+        drop(tx);
+        writer.join().unwrap();
+        let runtime = service.runtime.lock().unwrap();
+        let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+        assert_eq!(replay.events.iter().filter(|e| matches!(e.kind, EventKind::Output { .. })).count(), 800);
+        assert_eq!(replay.events.iter().filter(|e| matches!(e.kind, EventKind::Finished { .. })).count(), 1);
+        let finish = replay.events.last().unwrap();
+        assert!(matches!(finish.kind, EventKind::Finished { .. }));
+    }
+
     #[cfg(feature = "fixture")]
     #[test]
     fn partitioner_failure_does_not_create_or_approve_a_run() {
@@ -93,6 +187,7 @@ mod prompt_tests {
                 pi_command: "/bin/sh".into(),
                 pi_args: vec![script.to_string_lossy().into()],
                 model: "mock/model".into(),
+                thinking_level: "medium".into(),
                 max_parallel: 4,
                 max_feedback: 3,
             },
@@ -164,6 +259,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     pi_command: "/bin/sh".into(),
                     pi_args: vec![script.to_string_lossy().into()],
                     model: "test".into(),
+                    thinking_level: "medium".into(),
                     max_parallel: 4,
                     max_feedback: 2,
                 },
@@ -341,6 +437,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     pi_command: "/bin/sh".into(),
                     pi_args: vec![script.to_string_lossy().into()],
                     model: "test".into(),
+                    thinking_level: "medium".into(),
                     max_parallel: 4,
                     max_feedback: 1,
                 },
@@ -427,6 +524,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             #[cfg(feature = "fixture")]
             pi_args: Vec::new(),
             model: "test-model".into(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 1,
         };
@@ -479,6 +577,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             #[cfg(feature = "fixture")]
             pi_args: Vec::new(),
             model: String::new(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 1,
         };
@@ -577,6 +676,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             pi_command: String::new(),
             pi_args: Vec::new(),
             model: String::new(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 1,
         };
@@ -662,6 +762,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         let mut config = Config {
             repository: "/tmp/fake".into(),
             model: "".into(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
             #[cfg(feature = "fixture")]
@@ -706,6 +807,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         let new_config = Config {
             repository: temp_dir.path().to_string_lossy().into(),
             model: "openai/gpt-4o".into(),
+            thinking_level: "high".into(),
             max_parallel: 2,
             max_feedback: 3,
             #[cfg(feature = "fixture")]
@@ -717,6 +819,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         };
         let updated = save_config(new_config.clone(), &service).unwrap();
         assert_eq!(updated.config.model, "openai/gpt-4o");
+        assert_eq!(updated.config.thinking_level, "high");
         assert_eq!(updated.effective_role_models.get("planner").unwrap(), "openai/gpt-4o");
         assert_eq!(updated.effective_role_models.get("partitioner").unwrap(), "openai/gpt-4o");
         assert_eq!(updated.effective_role_models.get("nodeAgent").unwrap(), "openai/gpt-4o");
@@ -726,10 +829,12 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         assert!(config_file.exists());
         let saved_disk: Config = serde_json::from_str(&fs::read_to_string(&config_file).unwrap()).unwrap();
         assert_eq!(saved_disk.model, "openai/gpt-4o");
+        assert_eq!(saved_disk.thinking_level, "high");
 
         // 4. Verify new bootstrap reloads the persisted config
         let reloaded = bootstrap(&service, false).unwrap();
         assert_eq!(reloaded.config.model, "openai/gpt-4o");
+        assert_eq!(reloaded.config.thinking_level, "high");
         assert_eq!(reloaded.effective_role_models.get("planner").unwrap(), "openai/gpt-4o");
     }
 }
@@ -813,6 +918,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
                 .map(|r| r.path.clone())
                 .unwrap_or_default(),
             model: String::new(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
             #[cfg(feature = "fixture")]
@@ -1470,6 +1576,9 @@ fn drive(service: Arc<Service>) {
         return;
     }
     thread::spawn(move || {
+        let (output_tx, output_rx) = std::sync::mpsc::sync_channel(256);
+        let writer_service = service.clone();
+        let writer = thread::spawn(move || persist_outputs(writer_service, output_rx));
         let result = (|| -> Result<(), String> {
             let (completed_tx, completed_rx) = std::sync::mpsc::channel();
             let mut in_flight = 0usize;
@@ -1540,7 +1649,12 @@ fn drive(service: Arc<Service>) {
                         );
                         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                         match result {
-                            Ok(head) => runtime.emit(EventKind::PublicationCompleted { head })?,
+                            Ok(head) => {
+                                runtime.emit(EventKind::PublicationCompleted { head })?;
+                                if let Err(error) = runtime.cleanup_worktrees() {
+                                    eprintln!("Cannot clean completed run worktrees: {error}");
+                                }
+                            },
                             Err(error) => runtime.emit(EventKind::PublicationFailed { error })?,
                         }
                     }
@@ -1551,21 +1665,17 @@ fn drive(service: Arc<Service>) {
                     let service = service.clone();
                     let root = root.clone();
                     let completed_tx = completed_tx.clone();
+                    let output_tx = output_tx.clone();
                     thread::spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            perform(
+                            perform_with_merger(
                                 &job,
                                 &root,
                                 &parents,
                                 |text| {
-                                    if let Ok(mut runtime) = service.runtime.lock() {
-                                        if let Err(error) = runtime.emit(EventKind::Output {
-                                            execution_id: job.execution.id.clone(),
-                                            text,
-                                        }) {
-                                            eprintln!("Cannot persist Pi output: {error}");
-                                        }
-                                    }
+                                    let _ = output_tx.send(OutputMessage::Text {
+                                        execution_id: job.execution.id.clone(), text,
+                                    });
                                 },
                                 |head| {
                                     service
@@ -1577,9 +1687,18 @@ fn drive(service: Arc<Service>) {
                                             head,
                                         })
                                 },
+                                |event| {
+                                    service.runtime.lock().map_err(|e| e.to_string())?.emit(event)
+                                },
                             )
                         }))
                         .unwrap_or_else(|_| Err("Execution worker panicked".into()));
+                        let (reply, ack) = std::sync::mpsc::channel();
+                        let flushed = output_tx.send(OutputMessage::Flush(reply))
+                            .map_err(|_| "Output writer stopped before execution finished".to_string())
+                            .and_then(|_| ack.recv().map_err(|_| "Output writer stopped before flushing".to_string()))
+                            .and_then(|result| result);
+                        let result = if let Err(error) = flushed { Err(error) } else { result };
                         let result = service
                             .runtime
                             .lock()
@@ -1608,6 +1727,8 @@ fn drive(service: Arc<Service>) {
             }
             Ok(())
         })();
+        drop(output_tx);
+        if writer.join().is_err() { eprintln!("Output writer panicked"); }
         if let Err(error) = result {
             eprintln!("Runtime halted safely: {error}");
             if let Ok(mut runtime) = service.runtime.lock() {
@@ -2488,6 +2609,6 @@ pub fn run() -> Result<(), String> {
 pub mod benchmark {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../grapher-tests/benchmark/server.rs"
+        "/benchmark/server.rs"
     ));
 }

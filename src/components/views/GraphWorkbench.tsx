@@ -115,7 +115,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const selectedNode = state.graph.nodes.find((item) => item.name === selected);
   const selectedState = selectedNode ? state.nodes[selectedNode.name] : undefined;
   const attempts = selectedNode
-    ? state.executions.filter((item) => item.node === selectedNode.name)
+    ? [...state.executions.filter((item) => item.node === selectedNode.name),
+       ...(state.mergers ?? []).filter((item) => item.node === `merge:${selectedNode.name}`)]
+        .sort((a, b) => a.startedAt - b.startedAt)
     : [];
   const execution: Execution | undefined = attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
 
@@ -129,7 +131,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const suppressAutoScrollRef = useRef(false);
   const resumeAutoScrollFrameRef = useRef<number | null>(null);
   const resetChatScrollFrameRef = useRef<number | null>(null);
+  const revealChatFrameRef = useRef<number | null>(null);
+  const [readyConversationKey, setReadyConversationKey] = useState("");
   const activeConversationViewRef = useRef(conversationViewKey);
+  const conversationGenerationRef = useRef(0);
   const isScrollingToBottomRef = useRef(false);
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
@@ -138,6 +143,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   if (activeConversationViewRef.current !== conversationViewKey) {
     activeConversationViewRef.current = conversationViewKey;
+    conversationGenerationRef.current += 1;
     isUserScrolledUpRef.current = false;
     suppressAutoScrollRef.current = false;
   }
@@ -259,6 +265,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
     if (resetChatScrollFrameRef.current !== null) {
       cancelAnimationFrame(resetChatScrollFrameRef.current);
+    }
+    if (revealChatFrameRef.current !== null) {
+      cancelAnimationFrame(revealChatFrameRef.current);
     }
     if (graphFitFrameRef.current !== null) {
       cancelAnimationFrame(graphFitFrameRef.current);
@@ -428,6 +437,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, [effectiveMessages.length]);
 
+  const revealNodeConversation = useCallback(() => {
+    const key = conversationViewKey;
+    const generation = conversationGenerationRef.current;
+    if (revealChatFrameRef.current !== null) cancelAnimationFrame(revealChatFrameRef.current);
+    // Let the transcript parse and measure its rows before the first visible frame.
+    revealChatFrameRef.current = requestAnimationFrame(() => {
+      revealChatFrameRef.current = requestAnimationFrame(() => {
+        revealChatFrameRef.current = null;
+        if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
+        const el = chatScrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+        setReadyConversationKey(key);
+      });
+    });
+  }, [conversationViewKey]);
+
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -486,7 +511,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               )}
             </div>
 
-            <div className="initial-query-scroll" ref={chatScrollRef} onScroll={handleChatScroll}>
+            <div
+              className="initial-query-scroll"
+              ref={chatScrollRef}
+              onScroll={handleChatScroll}
+              style={execution && readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
+            >
               <div className="chat-messages-stream">
                 <div style={{ padding: "0 4px" }}>
                   <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }}>
@@ -506,7 +536,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     >
                       {attempts.map((item) => (
                         <option key={item.id} value={item.id}>
-                          #{item.attempt} · {item.status}
+                          {item.node.startsWith("merge:") ? "merger" : `#${item.attempt}`} · {item.status}
                         </option>
                       ))}
                     </select>
@@ -533,6 +563,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         runId={state.runId}
                         execution={execution}
                         onUserResize={handleExpandableContentChange}
+                        onInitialOutputReady={revealNodeConversation}
                       />
                     </div>
                     <details className="workspace-details" style={{ marginTop: 12 }}>
@@ -1102,7 +1133,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   nodeTypes={nodeTypes}
                   edgeTypes={edgeTypes}
                   onNodeClick={(_, node) => {
-                    setSelected(node.id);
+                    if (node.id.startsWith("merger:")) {
+                      const target = node.id.slice(7);
+                      setSelected(target);
+                      setAttemptId((state.mergers ?? []).filter((item) => item.node === `merge:${target}`).at(-1)?.id ?? "");
+                    } else {
+                      setSelected(node.id);
+                      setAttemptId("");
+                    }
                   }}
                   onPaneClick={() => {
                     setSelected("");

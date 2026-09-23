@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
-import { motion } from "motion/react";
-import { Settings2, FolderGit2, RotateCcw, Terminal, Plus, Check, X, Copy, Sliders } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
+import { Settings2, FolderGit2, RotateCcw, Terminal, Check, X, Copy, Sliders } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
 import { ProviderSettings } from "../ProviderSettings";
 
@@ -35,6 +35,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   onClearHistory,
   onSaveConfig,
 }) => {
+  const reduceMotion = useReducedMotion();
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -47,11 +49,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 
   return (
     <motion.div
-      className="modal-backdrop"
+      className="modal-backdrop settings-backdrop"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.2, ease: "easeOut" }}
+      transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeInOut" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -61,10 +63,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
-        initial={{ opacity: 0, scale: 0.95, y: 14 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 10 }}
-        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+        initial={{ opacity: 0, scale: 0.985, y: reduceMotion ? 0 : 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0, transition: { duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] } }}
+        exit={{ opacity: 0, scale: 0.99, y: reduceMotion ? 0 : 6, transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.4, 0, 1, 1] } }}
       >
         <header className="settings-modal-header">
           <div className="settings-header-title-wrap">
@@ -72,8 +73,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <Settings2 size={18} />
             </div>
             <div>
-              <h2 id="modal-title">Setting</h2>
-              <small>管理工作区、模型、Provider 认证及 Execution Instance 并发参数</small>
+              <h2 id="modal-title">设置</h2>
             </div>
           </div>
           <button className="icon-button" aria-label="关闭弹窗" onClick={onClose}>
@@ -87,11 +87,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <div className="settings-card">
               <div className="settings-card-title">
                 <FolderGit2 size={16} />
-                <h4>本地项目工作区绑定</h4>
+                <h4>工作区</h4>
               </div>
-              <p className="section-desc">
-                支持本地 Git 仓库或任意普通文件夹（自动维护零侵入影子仓库沙箱，不污染原项目）。
-              </p>
               <div className="setting-input-row">
                 <input
                   className="repo-path-input"
@@ -136,7 +133,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 </div>
               ) : (
                 <div className="repo-status-hint">
-                  提示：未检测到有效 Git 信息，请确保选择的文件夹包含 <code>.git</code>。
+                  尚未选择工作区
                 </div>
               )}
             </div>
@@ -145,11 +142,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <div className="settings-card">
               <div className="settings-card-title">
                 <Terminal size={16} />
-                <h4>模型与 Pi Provider 认证 (/login)</h4>
+                <h4>模型与 Provider</h4>
               </div>
               <ProviderSettings
                 model={config.model}
                 onModel={model => setConfig(prev => ({ ...prev, model }))}
+                thinkingLevel={config.thinkingLevel ?? "medium"}
+                onThinkingLevel={thinkingLevel => setConfig(prev => ({ ...prev, thinkingLevel }))}
                 effectiveRoleModels={effectiveRoleModels}
                 envOverrides={envOverrides}
               />
@@ -159,15 +158,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <div className="settings-card">
               <div className="settings-card-title">
                 <Sliders size={16} />
-                <h4>执行并发与重试控制</h4>
+                <h4>并发与重试</h4>
               </div>
-              <p className="section-desc">
-                设置图执行引擎的最大并发子任务数及节点失败后的自动反馈重试轮次。
-              </p>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div className="settings-control-row">
                   <div className="settings-control-label">
-                    <span>并发任务上限 (maxParallel)</span>
+                    <span>并发任务上限</span>
                     <span className="settings-control-badge">{config.maxParallel ?? 4} 并发</span>
                   </div>
                   <div className="settings-slider-wrapper">
@@ -192,7 +188,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 
                 <div className="settings-control-row">
                   <div className="settings-control-label">
-                    <span>最大反馈重试 (maxFeedback)</span>
+                    <span>最大反馈重试</span>
                     <span className="settings-control-badge">{config.maxFeedback ?? 3} 次</span>
                   </div>
                   <div className="settings-slider-wrapper">
@@ -223,7 +219,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 <h4>存储与重置</h4>
               </div>
               <div className="section-desc">
-                <p>Grapher 将运行时快照与事件保存在本地 SQLite 数据库中。路径：</p>
+                <p>数据路径</p>
                 <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
                   <code>{dataPath || "本地系统应用目录"}</code>
                   <button 
@@ -244,7 +240,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               取消
             </button>
             <button type="button" className="primary save-config-btn" onClick={onSaveConfig}>
-              <Check size={14} /> 保存所有配置
+              <Check size={14} /> 保存设置
             </button>
           </footer>
         </div>

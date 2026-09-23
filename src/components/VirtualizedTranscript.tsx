@@ -62,18 +62,24 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const [heightVersion, setHeightVersion] = useState(0);
   const [, setExpansionVersion] = useState(0);
   const layoutRef = useRef({ ids: [] as string[], offsets: [0] });
+  const prevOffsetsRef = useRef<number[]>([0]);
+
+  // Schedule a single heightVersion bump per microtask batch.
+  // Microtasks fire before the browser paints (unlike RAF which fires
+  // after paint), so the re-render with corrected offsets happens in
+  // the same frame as the DOM measurements, eliminating flicker.
+  const heightFlushScheduledRef = useRef(false);
+
   const measure = useCallback((id: string, height: number) => {
     if (height <= 0 || itemHeightsRef.current.get(id) === height) return;
-    const oldHeight = itemHeightsRef.current.get(id) ?? 72;
     itemHeightsRef.current.set(id, height);
-    const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
-    const { ids, offsets } = layoutRef.current;
-    const index = ids.indexOf(id);
-    if (scrollParent && isUserScrolledUpRef.current && index >= 0 && index < rowAt(offsets, scrollParent.scrollTop)) {
-      scrollParent.scrollTop += height - oldHeight;
-      setScrollTop(scrollParent.scrollTop);
+    if (!heightFlushScheduledRef.current) {
+      heightFlushScheduledRef.current = true;
+      queueMicrotask(() => {
+        heightFlushScheduledRef.current = false;
+        setHeightVersion(value => value + 1);
+      });
     }
-    setHeightVersion(value => value + 1);
   }, []);
   const [containerHeight, setContainerHeight] = useState(600);
 
@@ -536,11 +542,39 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const offsets = useMemo(() => rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion]);
   layoutRef.current = { ids: items.map(item => item.id), offsets };
   const totalOffsetsHeight = offsets[offsets.length - 1] ?? 0;
+
+  // Scroll correction: when height measurements cause offsets to change,
+  // adjust scrollTop synchronously (before paint) so content above the
+  // viewport doesn't visually shift. This runs in the same paint frame
+  // as the paddingTop change, eliminating the two-frame jitter.
+  // We do NOT call setScrollTop here to avoid a cascading re-render;
+  // the passive scroll listener will pick up the change naturally.
+  useLayoutEffect(() => {
+    if (!isUserScrolledUpRef.current || suppressAutoFollowRef.current) {
+      prevOffsetsRef.current = offsets;
+      return;
+    }
+    const prev = prevOffsetsRef.current;
+    const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
+    if (scrollParent && prev.length > 1 && offsets.length > 1) {
+      // Find which row is at the current scroll position using the OLD offsets
+      const viewportTopRow = rowAt(prev, scrollParent.scrollTop);
+      // Compute how much the offset of that row shifted
+      if (viewportTopRow < offsets.length - 1 && viewportTopRow < prev.length - 1) {
+        const delta = offsets[viewportTopRow] - prev[viewportTopRow];
+        if (delta !== 0) {
+          scrollParent.scrollTop += delta;
+        }
+      }
+    }
+    prevOffsetsRef.current = offsets;
+  }, [offsets]);
+
   const targetScrollTop = isUserScrolledUpRef.current
     ? scrollTop
     : Math.max(0, totalOffsetsHeight - containerHeight);
   const { visibleItems, paddingTop, paddingBottom } = useMemo(() => {
-    const range = isVirtual ? visibleRows(offsets, targetScrollTop, containerHeight, 12)
+    const range = isVirtual ? visibleRows(offsets, targetScrollTop, containerHeight, 30)
       : { start: 0, end: totalCount, paddingTop: 0, paddingBottom: 0 };
     return { visibleItems: items.slice(range.start, range.end), ...range };
   }, [items, offsets, isVirtual, targetScrollTop, containerHeight, totalCount]);

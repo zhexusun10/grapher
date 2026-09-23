@@ -438,6 +438,18 @@ pub fn prepare(
     base: &str,
     parents: &[String],
 ) -> Result<String, String> {
+    prepare_with_merger(repository, path, base, parents, || {
+        Err("Workspace composition blocked; resolve and commit the merge manually".into())
+    })
+}
+
+pub fn prepare_with_merger(
+    repository: &Path,
+    path: &Path,
+    base: &str,
+    parents: &[String],
+    mut resolve: impl FnMut() -> Result<(), String>,
+) -> Result<String, String> {
     let canonical_repo = repository
         .canonicalize()
         .unwrap_or_else(|_| repository.to_path_buf());
@@ -455,6 +467,16 @@ pub fn prepare(
         }
     }
 
+    // The shadow HEAD is frozen at approval. Do not silently build a graph
+    // against a different user directory if files changed since then.
+    // Publication checks again before writing back to catch later edits.
+    if !is_standard_git(&canonical_repo) {
+        let head = repository_git(&canonical_repo, &["rev-parse", "HEAD"])?;
+        let status = repository_git(&canonical_repo, &["status", "--porcelain"])?;
+        if head != base || !status.is_empty() {
+            return Err("Shadow workspace changed after approval; restore the approved files or start a new run".into());
+        }
+    }
     fs::create_dir_all(path).map_err(|error| error.to_string())?;
 
     // Determine the source Git location (either standard repository or shadow repo)
@@ -572,7 +594,23 @@ pub fn prepare(
                 &format!("refs/grapher/parents/{parent}"),
             ],
         ) {
-            return Err(format!("Workspace composition blocked at {}. Resolve and commit the merge in this worktree, then use 'Use resolved workspace'.\n{error}", path.display()));
+            let pending = git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).ok();
+            if pending.is_none()
+                || git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
+            {
+                return Err(format!("Workspace composition failed at {}: {error}", path.display()));
+            }
+            if let Err(merger_error) = resolve() {
+                return Err(format!("Workspace composition blocked at {}. Resolve and commit the merge in this worktree, then use 'Use resolved workspace'.\nMerger: {merger_error}", path.display()));
+            }
+            let incoming = format!("refs/grapher/parents/{parent}");
+            if git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok()
+                || !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
+                || git(path, &["merge-base", "--is-ancestor", &incoming, "HEAD"]).is_err()
+                || !git(path, &["status", "--porcelain"])?.is_empty()
+            {
+                return Err(format!("Workspace composition blocked at {}. Merger did not finish a clean merge preserving the incoming parent; resolve and commit, then use 'Use resolved workspace'.", path.display()));
+            }
         }
     }
     git(path, &["rev-parse", "HEAD"])

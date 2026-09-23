@@ -117,6 +117,10 @@ impl Runtime {
         self.store.append(&mut self.state, kind)
     }
 
+    pub fn emit_outputs(&mut self, events: Vec<EventKind>) -> Result<(), String> {
+        self.store.append_batch(&mut self.state, events)
+    }
+
     fn recover_publication(&mut self) -> Result<(), String> {
         let interrupted: Vec<String> = self
             .state
@@ -126,9 +130,14 @@ impl Runtime {
             .map(|e| e.id.clone())
             .collect();
         for execution_id in interrupted {
+            let publication_merge = self.state.mergers.iter().any(|e| e.id == execution_id && e.node == "merger");
             self.emit(EventKind::MergerFailed {
                 execution_id,
-                error: "Merger interrupted; inspect the merge and retry publication.".into(),
+                error: if publication_merge {
+                    "Merger interrupted; inspect the merge and retry publication."
+                } else {
+                    "Merger interrupted; inspect the node worktree and rerun or resolve it."
+                }.into(),
             })?;
         }
         if matches!(self.state.phase.as_str(), "publishing" | "merging") {
@@ -162,10 +171,28 @@ impl Runtime {
                 .any(|node| node.status == "running")
     }
 
+    /// Remove only the worktree directory owned by this run. Failed runs retain
+    /// their checkout until explicitly reset/deleted so conflicts can be inspected.
+    pub fn cleanup_worktrees(&self) -> Result<(), String> {
+        if self.is_serial() || Uuid::parse_str(&self.state.run_id).is_err() {
+            return Ok(());
+        }
+        let Some(config) = &self.state.config else { return Ok(()); };
+        let repository = Path::new(&config.repository);
+        if !repository.is_absolute() { return Ok(()); }
+        let Some(parent) = repository.parent() else { return Ok(()); };
+        let dir = parent.join(".grapher-worktrees").join(&self.state.run_id);
+        if dir.is_dir() && !dir.is_symlink() {
+            fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     pub fn reset_workspace(&mut self) -> Result<Snapshot, String> {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());
         }
+        self.cleanup_worktrees()?;
         let current_config = self.state.config.clone();
         self.state = Snapshot {
             config: current_config,
@@ -178,6 +205,7 @@ impl Runtime {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());
         }
+        self.cleanup_worktrees()?;
         self.store.clear()?;
         let current_config = self.state.config.clone();
         self.state = Snapshot {
@@ -191,6 +219,7 @@ impl Runtime {
         if self.state.run_id == run_id && self.active() {
             return Err("Cannot delete the currently running execution".into());
         }
+        if self.state.run_id == run_id { self.cleanup_worktrees()?; }
         self.store.delete_run(run_id)?;
         if self.state.run_id == run_id {
             let current_config = self.state.config.clone();
@@ -708,7 +737,18 @@ pub fn perform(
     root: &Path,
     parents: &[String],
     on_output: impl FnMut(String),
+    on_prepared: impl FnMut(String) -> Result<(), String>,
+) -> Result<(String, String), String> {
+    perform_with_merger(job, root, parents, on_output, on_prepared, |_| Err("Merger event sink is unavailable".into()))
+}
+
+pub fn perform_with_merger(
+    job: &Job,
+    root: &Path,
+    parents: &[String],
+    on_output: impl FnMut(String),
     mut on_prepared: impl FnMut(String) -> Result<(), String>,
+    mut on_merger_event: impl FnMut(EventKind) -> Result<(), String>,
 ) -> Result<(String, String), String> {
     let repository = resolve_repository(root, &job.config)?;
     let path = Path::new(&job.execution.worktree);
@@ -716,7 +756,18 @@ pub fn perform(
     if path != repository {
         crate::native::require_graph_execution()?;
     }
-    let before = workspace::prepare(&repository, path, &job.execution.before, parents)?;
+    let before = workspace::prepare_with_merger(&repository, path, &job.execution.before, parents, || {
+        let attempt = job.execution.attempt;
+        crate::graph_merge::resolve_with_merger_for_node(
+            path,
+            &job.task,
+            &job.config,
+            root,
+            attempt,
+            &format!("merge:{}", job.execution.node),
+            &mut on_merger_event,
+        )
+    })?;
     on_prepared(before)?;
     let output = engine::execute(
         &job.config,

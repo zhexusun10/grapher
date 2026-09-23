@@ -145,10 +145,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     };
 
     return (
-      <motion.div
-        initial={false}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
+      <div
         className={`tool-call-card ${meta.type} ${status} ${
           isError ? "error" : hasSubcommandWarning ? "warning" : ""
         }`}
@@ -303,7 +300,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
             </motion.div>
           )}
         </AnimatePresence>
-      </motion.div>
+      </div>
     );
   }
 );

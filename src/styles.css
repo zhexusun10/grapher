@@ -171,6 +171,9 @@ h3 {
 /* 侧边栏 (悬浮圆角卡片模式) */
 .sidebar {
   --sidebar-content-width: 200px;
+  --sidebar-anim-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --sidebar-width-duration: 0.28s;
+  --sidebar-content-duration: 0.18s;
   width: 230px;
   flex-shrink: 0;
   margin: 12px 0 12px 12px;
@@ -184,9 +187,12 @@ h3 {
   flex-direction: column;
   z-index: 10;
   overflow: hidden;
-  transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1), padding 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  transition:
+    width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    padding var(--sidebar-width-duration) var(--sidebar-anim-ease);
 }
 
+/* ---------- Expanded state content sizing ---------- */
 .sidebar:not(.is-collapsed) .sidebar-brand-row,
 .sidebar:not(.is-collapsed) .nav-section,
 .sidebar:not(.is-collapsed) .projects-list,
@@ -197,18 +203,19 @@ h3 {
   flex-shrink: 0;
 }
 
-.sidebar:not(.is-collapsed) .runs-list,
-.sidebar:not(.is-collapsed) .projects-list {
-  animation: sidebarListFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-@keyframes sidebarListFadeIn {
-  0% {
-    opacity: 0;
-  }
-  100% {
-    opacity: 1;
-  }
+/* ---------- Content fade / slide shared transition ---------- */
+.sidebar .brand,
+.sidebar .nav-section > span,
+.sidebar .projects-list,
+.sidebar .runs-list,
+.sidebar .sidebar-bottom-btn > span {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+  transition:
+    opacity var(--sidebar-content-duration) var(--sidebar-anim-ease),
+    visibility var(--sidebar-content-duration) var(--sidebar-anim-ease),
+    transform var(--sidebar-content-duration) var(--sidebar-anim-ease);
 }
 
 
@@ -267,12 +274,35 @@ a,
   padding-right: 8px;
 }
 
+/* Collapse: fade out + slide left, finish BEFORE width shrinks */
 .sidebar.is-collapsed .brand,
 .sidebar.is-collapsed .nav-section > span,
-.sidebar.is-collapsed .projects-list,
-.sidebar.is-collapsed .runs-list,
 .sidebar.is-collapsed .sidebar-bottom-btn > span {
-  display: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-6px);
+  transition-delay: 0s;
+  transition-duration: calc(var(--sidebar-content-duration) * 0.6);
+  pointer-events: none;
+  width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.sidebar.is-collapsed .projects-list,
+.sidebar.is-collapsed .runs-list {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-6px);
+  transition-delay: 0s;
+  transition-duration: calc(var(--sidebar-content-duration) * 0.6);
+  pointer-events: none;
+  max-height: 0;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  flex: 0;
+  min-height: 0;
 }
 
 .sidebar.is-collapsed .sidebar-brand-row,
@@ -297,7 +327,12 @@ a,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sidebar {
+  .sidebar,
+  .sidebar .brand,
+  .sidebar .nav-section > span,
+  .sidebar .projects-list,
+  .sidebar .runs-list,
+  .sidebar .sidebar-bottom-btn > span {
     transition: none;
   }
 }
@@ -907,7 +942,6 @@ a,
 
 .run-item.chosen .run-title-text {
   color: var(--text-primary);
-  font-weight: 600;
 }
 
 .run-item.active-running {
@@ -5198,7 +5232,12 @@ a,
 }
 
 /* 3. 运行配置悬浮窗与视图 */
+.modal-backdrop.settings-backdrop {
+  backdrop-filter: none;
+}
+
 .modal.settings-modal {
+  will-change: transform, opacity;
   width: 740px;
   max-width: calc(100vw - 40px);
   max-height: 86vh;
@@ -5247,14 +5286,6 @@ a,
   color: var(--text-primary);
   margin: 0;
   line-height: 1.2;
-}
-
-.settings-header-title-wrap small {
-  display: block;
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-top: 3px;
-  line-height: 1.3;
 }
 
 .settings-modal-content {
@@ -5385,6 +5416,25 @@ a,
 .repo-path-input:focus {
   border-color: var(--brand-default);
   outline: none;
+}
+
+.settings-thinking-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.settings-thinking-field select {
+  min-width: 160px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
 }
 
 .settings-control-row {

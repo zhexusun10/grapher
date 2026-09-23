@@ -80,6 +80,22 @@ fn approval_captures_planner_files_before_allocating_graph_workspaces() {
 }
 
 #[test]
+fn shadow_prepare_refuses_user_edits_after_approval() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    runtime.approve().unwrap();
+    let base = runtime.state.base.clone();
+    let job = runtime.jobs().unwrap().remove(0);
+    let node = Path::new(&job.execution.worktree);
+    fs::write(source.join("tracked.txt"), "edited after approval").unwrap();
+    let error = workspace::prepare(&source, node, &base, &[]).unwrap_err();
+    assert!(error.contains("changed after approval"));
+    assert!(!node.exists());
+    assert_eq!(workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    fs::write(source.join("tracked.txt"), "original").unwrap();
+    workspace::prepare(&source, node, &base, &[]).unwrap();
+}
+
+#[test]
 fn child_inherits_parent_files_with_a_fresh_task_and_session() {
     let graph = Graph {
         original_goal: "test".into(),
@@ -130,6 +146,89 @@ fn child_inherits_parent_files_with_a_fresh_task_and_session() {
         "parent result"
     );
     assert!(!source.join("from-parent.txt").exists());
+}
+
+#[test]
+fn fan_in_conflict_invokes_merger_and_preserves_both_parents() {
+    for standard_git in [true, false] {
+        let (_temp, source, mut runtime) = setup(standard_git, single());
+        runtime.approve().unwrap();
+        let base = runtime.state.base.clone();
+        for (name, text) in [("left", "left\n"), ("right", "right\n")] {
+            let path = source.parent().unwrap().join(format!("{name}-workspace"));
+            workspace::prepare(&source, &path, &base, &[]).unwrap();
+            fs::write(path.join("tracked.txt"), text).unwrap();
+            workspace::snapshot_node(&path, &source, name).unwrap();
+        }
+        let target = source.parent().unwrap().join("fan-in");
+        let mut calls = 0;
+        let head = workspace::prepare_with_merger(
+            &source, &target, &base, &["left".into(), "right".into()], || {
+                calls += 1;
+                assert!(workspace::git(&target, &["rev-parse", "MERGE_HEAD"]).is_ok());
+                fs::write(target.join("tracked.txt"), "left and right\n").unwrap();
+                workspace::git(&target, &["add", "-A"]).unwrap();
+                workspace::git(&target, &["commit", "--no-edit"]).unwrap();
+                Ok(())
+            },
+        ).unwrap();
+        assert_eq!(calls, 1);
+        for name in ["left", "right"] {
+            workspace::git(&target, &["merge-base", "--is-ancestor", &format!("refs/grapher/parents/{name}"), &head]).unwrap();
+        }
+        assert_eq!(fs::read_to_string(target.join("tracked.txt")).unwrap(), "left and right\n");
+    }
+}
+
+#[test]
+fn failed_fan_in_merger_preserves_conflict_for_manual_resolution() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let base = runtime.state.base.clone();
+    for (name, content) in [("a", "a"), ("b", "b")] {
+        let path = source.parent().unwrap().join(format!("workspace-{name}"));
+        workspace::prepare(&source, &path, &base, &[]).unwrap();
+        fs::write(path.join("tracked.txt"), content).unwrap();
+        workspace::snapshot_node(&path, &source, name).unwrap();
+    }
+    let target = source.parent().unwrap().join("conflicted");
+    let error = workspace::prepare_with_merger(&source, &target, &base, &["a".into(), "b".into()], || {
+        Err("resolver unavailable".into())
+    }).unwrap_err();
+    assert!(error.starts_with("Workspace composition blocked"));
+    assert!(error.contains("resolver unavailable"));
+    assert!(workspace::git(&target, &["rev-parse", "MERGE_HEAD"]).is_ok());
+    assert!(!workspace::git(&target, &["diff", "--name-only", "--diff-filter=U"]).unwrap().is_empty());
+}
+
+#[test]
+fn node_merger_events_do_not_enter_publication_phase() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let mut merger = runtime.jobs().unwrap().remove(0).execution;
+    merger.id = Uuid::new_v4().to_string();
+    merger.node = "merge:task".into();
+    runtime.emit(EventKind::MergerStarted { execution: merger.clone() }).unwrap();
+    assert_eq!(runtime.state.phase, "running");
+    runtime.emit(EventKind::MergerFinished { execution_id: merger.id, head: runtime.state.base.clone() }).unwrap();
+    assert_eq!(runtime.state.phase, "running");
+    assert!(runtime.state.publication.is_none());
+}
+
+#[test]
+fn reset_cleans_only_its_run_worktrees() {
+    let (temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    let path = Path::new(&job.execution.worktree);
+    fs::create_dir_all(path).unwrap();
+    let other = temp.path().join(".grapher-worktrees").join("other-run");
+    fs::create_dir_all(&other).unwrap();
+    runtime.emit(EventKind::Failed { node: job.execution.node, execution_id: Some(job.execution.id), error: "test".into() }).unwrap();
+    runtime.reset_workspace().unwrap();
+    assert!(!path.exists());
+    assert!(other.exists());
+    assert!(source.exists());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
@@ -13,10 +13,12 @@ export function ExecutionTranscript({
   runId,
   execution,
   onUserResize,
+  onInitialOutputReady,
 }: {
   runId: string;
   execution: Execution;
   onUserResize?: () => void;
+  onInitialOutputReady?: () => void;
 }) {
   const cacheKey = `${runId}:${execution.id}`;
   const cached = executionTranscriptCache.get(cacheKey);
@@ -28,6 +30,11 @@ export function ExecutionTranscript({
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
   const [isFetchingFirstPage, setIsFetchingFirstPage] = useState(!cached && paged && !execution.output);
+  const [initialOutputReady, setInitialOutputReady] = useState(!paged || !!cached?.complete);
+
+  useLayoutEffect(() => {
+    if (initialOutputReady) onInitialOutputReady?.();
+  }, [initialOutputReady, onInitialOutputReady]);
 
   useEffect(() => {
     if (!paged) return;
@@ -35,6 +42,7 @@ export function ExecutionTranscript({
     if (cachedEntry?.complete && execution.status !== "running") {
       setRecord({ id: execution.id, text: cachedEntry.text });
       setIsFetchingFirstPage(false);
+      setInitialOutputReady(true);
       return;
     }
 
@@ -67,9 +75,14 @@ export function ExecutionTranscript({
         if (page.content || page.status !== "running") {
           setRecord({ id: execution.id, text: finalText });
         }
+        // Wait for the entire initial snapshot, not just its first page, before showing the chat.
+        if (page.complete) setInitialOutputReady(true);
         if (!page.complete || page.status === "running") timer = setTimeout(poll, page.complete ? 150 : 0);
       } catch (error) {
-        if (!abort.signal.aborted) setError(String(error));
+        if (!abort.signal.aborted) {
+          setError(String(error));
+          setInitialOutputReady(true);
+        }
       }
     };
     void poll();

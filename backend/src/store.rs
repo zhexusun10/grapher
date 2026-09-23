@@ -33,6 +33,25 @@ impl Store {
         Ok(())
     }
 
+    /// Persist a bounded batch atomically, then update the in-memory projection.
+    /// Never expose output in memory if the transaction did not commit.
+    pub fn append_batch(&mut self, state: &mut Snapshot, kinds: Vec<EventKind>) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        let mut events = Vec::with_capacity(kinds.len());
+        for kind in kinds {
+            let timestamp = now();
+            let payload = serde_json::to_string(&kind).map_err(|e| e.to_string())?;
+            transaction.execute(
+                "INSERT INTO events(run_id, timestamp, payload) VALUES (?1, ?2, ?3)",
+                params![state.run_id, timestamp, payload],
+            ).map_err(|e| e.to_string())?;
+            events.push(Event { sequence: transaction.last_insert_rowid(), timestamp, kind });
+        }
+        transaction.commit().map_err(|e| e.to_string())?;
+        for event in events { apply(state, &event); }
+        Ok(())
+    }
+
     pub fn runs(&self) -> Result<Vec<String>, String> {
         let mut statement = self
             .connection

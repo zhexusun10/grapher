@@ -76,6 +76,19 @@ pub fn resolve_with_merger(
     config: &Config,
     root: &Path,
     attempt: usize,
+    emit: impl FnMut(EventKind) -> Result<(), String>,
+) -> Result<(), String> {
+    resolve_with_merger_for_node(repository, query, config, root, attempt, "merger", emit)
+}
+
+/// Resolve an in-progress merge in either the publication checkout or a DAG node checkout.
+pub fn resolve_with_merger_for_node(
+    repository: &Path,
+    query: &str,
+    config: &Config,
+    root: &Path,
+    attempt: usize,
+    node: &str,
     mut emit: impl FnMut(EventKind) -> Result<(), String>,
 ) -> Result<(), String> {
     let canonical = repository.canonicalize().map_err(|e| e.to_string())?;
@@ -92,7 +105,7 @@ pub fn resolve_with_merger(
     emit(EventKind::MergerStarted {
         execution: Execution {
             id: id.clone(),
-            node: "merger".into(),
+            node: node.into(),
             revision: 1,
             attempt,
             session_id: id.clone(),
@@ -105,7 +118,7 @@ pub fn resolve_with_merger(
             completed_at: None,
         },
     })?;
-    let prompt = format!("User query:\n{query}\n\n修复当前 Git merge conflicts。保留各节点已完成的有效修改，不要修改与冲突无关的内容。解决冲突后暂存已解决的文件，并检查不存在未解决的冲突。");
+    let prompt = format!("User query:\n{query}\n\n修复当前 Git merge conflicts。保留各节点已完成的有效修改，不要修改与冲突无关的内容。解决冲突后暂存已解决的文件，并检查不存在未解决的冲突。不要丢弃 incoming parent 的提交。");
     // Make native Git commands work in a plain folder without adding a .git
     // entry there. This environment is scoped to the merger process tree.
     let environment = if workspace::is_standard_git(repository) {
@@ -172,7 +185,7 @@ pub fn resolve_with_merger(
         })?,
     }
     fs::write(directory.join("result.json"), serde_json::to_vec_pretty(&serde_json::json!({
-        "id": id, "name": "merger", "cwd": repository,
+        "id": id, "name": "merger", "node": node, "cwd": repository,
         "status": if result.is_ok() { "completed" } else { "failed" }, "error": result.as_ref().err(),
     })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     result

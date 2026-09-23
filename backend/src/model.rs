@@ -105,8 +105,14 @@ pub struct Config {
     #[serde(default = "test_args")]
     pub pi_args: Vec<String>,
     pub model: String,
+    #[serde(default = "default_thinking_level")]
+    pub thinking_level: String,
     pub max_parallel: usize,
     pub max_feedback: usize,
+}
+
+fn default_thinking_level() -> String {
+    "medium".into()
 }
 
 #[cfg(feature = "fixture")]
@@ -473,9 +479,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::MergerStarted { execution } => {
             state.mergers.push(execution.clone());
-            state.phase = "merging".into();
-            if let Some(publication) = &mut state.publication {
-                publication.status = "merging".into();
+            if execution.node == "merger" {
+                state.phase = "merging".into();
+                if let Some(publication) = &mut state.publication {
+                    publication.status = "merging".into();
+                }
             }
         }
         EventKind::MergerFinished { execution_id, head } => {
@@ -484,9 +492,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 execution.after = Some(head.clone());
                 execution.completed_at = Some(event.timestamp);
             }
-            state.phase = "publishing".into();
-            if let Some(publication) = &mut state.publication {
-                publication.status = "publishing".into();
+            if state.mergers.iter().any(|e| e.id == *execution_id && e.node == "merger") {
+                state.phase = "publishing".into();
+                if let Some(publication) = &mut state.publication {
+                    publication.status = "publishing".into();
+                }
             }
         }
         EventKind::MergerFailed {

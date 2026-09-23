@@ -110,11 +110,14 @@ impl PiModelConfig {
                 std::env::var(role.thinking_env_var())
                     .ok()
                     .filter(|t| !t.trim().is_empty())
-                    .unwrap_or_else(|| "medium".into()),
+                    .unwrap_or_else(|| base_config.thinking_level.clone()),
             ),
-            _ => std::env::var(role.thinking_env_var())
-                .ok()
-                .filter(|t| !t.trim().is_empty()),
+            _ => Some(
+                std::env::var(role.thinking_env_var())
+                    .ok()
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| base_config.thinking_level.clone()),
+            ),
         };
 
         Self { model, thinking }
@@ -734,6 +737,7 @@ mod tests {
                 pi_args: vec!["-c".into(), script.into()],
                 repository: temp.path().to_string_lossy().into(),
                 model: "mock/model".into(),
+                thinking_level: "medium".into(),
                 max_parallel: 1,
                 max_feedback: 0,
             };
@@ -780,6 +784,7 @@ mod tests {
             pi_args: vec!["-c".into(), "sleep 1.2; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
+            thinking_level: "medium".into(),
             max_parallel: 1,
             max_feedback: 0,
         };
@@ -807,9 +812,10 @@ mod tests {
     fn planner_budget_is_explicit_and_overridable() {
         let _guard = ENV_LOCK.lock().unwrap();
         let original = std::env::var_os("PLANNER_THINKING");
-        let config = Config {
+        let mut config = Config {
             repository: "/tmp/fake".into(),
             model: "mock/model".into(),
+            thinking_level: "medium".into(),
             max_parallel: 1,
             max_feedback: 0,
             #[cfg(feature = "fixture")]
@@ -826,6 +832,11 @@ mod tests {
                 .as_deref(),
             Some("medium")
         );
+        config.thinking_level = "low".into();
+        assert_eq!(PiModelConfig::resolve(PiRole::Planner, &config).thinking.as_deref(), Some("low"));
+        assert_eq!(PiModelConfig::resolve(PiRole::NodeAgent, &config).thinking.as_deref(), Some("low"));
+        assert_eq!(PiModelConfig::resolve(PiRole::Merger, &config).thinking.as_deref(), Some("low"));
+        assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &config).thinking.as_deref(), Some("off"));
         std::env::set_var("PLANNER_THINKING", "high");
         assert_eq!(
             PiModelConfig::resolve(PiRole::Planner, &config)
@@ -848,6 +859,7 @@ mod tests {
         let custom_config = Config {
             repository: "/tmp/fake".into(),
             model: "anthropic/claude-3-7-sonnet".into(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
             #[cfg(feature = "fixture")]
@@ -879,6 +891,7 @@ mod tests {
         let config = Config {
             repository: "/tmp/fake".into(),
             model: String::new(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
             #[cfg(feature = "fixture")]
@@ -902,6 +915,7 @@ mod tests {
         let config = Config {
             repository: "/tmp/fake".into(),
             model: "some-model".into(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
             #[cfg(feature = "fixture")]
@@ -934,6 +948,7 @@ mod tests {
         let config = Config {
             repository: "/tmp/fake".into(),
             model: "claude-3-7-sonnet".into(),
+            thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
             #[cfg(feature = "fixture")]

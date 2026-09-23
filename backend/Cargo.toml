@@ -22,37 +22,37 @@ tempfile = "3"
 
 [[example]]
 name = "benchmark"
-path = "../../grapher-tests/backend-examples/benchmark.rs"
+path = "examples/benchmark.rs"
 required-features = ["benchmark"]
 
 [[test]]
 name = "core"
-path = "../../grapher-tests/backend-tests/core.rs"
+path = "tests/core.rs"
 required-features = ["fixture"]
 
 [[test]]
 name = "engine"
-path = "../../grapher-tests/backend-tests/engine.rs"
+path = "tests/engine.rs"
 required-features = ["fixture"]
 
 [[test]]
 name = "graph_merge"
-path = "../../grapher-tests/backend-tests/graph_merge.rs"
+path = "tests/graph_merge.rs"
 
 [[test]]
 name = "publication"
-path = "../../grapher-tests/backend-tests/publication.rs"
+path = "tests/publication.rs"
 required-features = ["fixture"]
 
 [[test]]
 name = "publication_state"
-path = "../../grapher-tests/backend-tests/publication_state.rs"
+path = "tests/publication_state.rs"
 required-features = ["fixture"]
 
 [[test]]
 name = "sandbox"
-path = "../../grapher-tests/backend-tests/sandbox.rs"
+path = "tests/sandbox.rs"
 
 [[test]]
 name = "shadow"
-path = "../../grapher-tests/backend-tests/shadow.rs"
+path = "tests/shadow.rs"

@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
+import type { ThinkingLevel } from "../types";
 import {
   providerAuth,
   type LoginState,
@@ -52,11 +53,15 @@ function AuthLink({ url, label }: { url?: string; label?: string }) {
 export function ProviderSettings({
   model,
   onModel,
+  thinkingLevel,
+  onThinkingLevel,
   effectiveRoleModels,
   envOverrides = {},
 }: {
   model: string;
   onModel: (model: string) => void;
+  thinkingLevel: ThinkingLevel;
+  onThinkingLevel: (level: ThinkingLevel) => void;
   effectiveRoleModels?: Record<string, string>;
   envOverrides?: Record<string, string>;
 }) {
@@ -293,14 +298,14 @@ export function ProviderSettings({
               </div>
             ))}
             <div style={{ color: "var(--text-muted, #888)", fontSize: "11px", marginTop: "2px" }}>
-              受环境变量覆盖的角色将优先使用环境变量指定的模型。如需完全通过界面配置，请从 .env 或系统环境变量中移除对应项。
+              环境变量优先于界面设置。
             </div>
           </div>
         )}
 
         <div className="form-grid">
           <label className="form-field">
-            <span>模型所属 Provider 过滤</span>
+            <span>Provider 筛选</span>
             <select
               value={providerFilter}
               disabled={busy || pending}
@@ -317,7 +322,7 @@ export function ProviderSettings({
           </label>
 
           <label className="form-field">
-            <span>当前默认执行模型</span>
+            <span>默认模型</span>
             <div className="model-input-wrapper">
               <input
                 list="provider-models"
@@ -339,7 +344,7 @@ export function ProviderSettings({
             </div>
             {model && !model.includes("/") && (
               <div style={{ color: "#f87171", fontSize: "11px", marginTop: "4px" }}>
-                ⚠ 模型缺少 Provider 前缀，请使用 <code>provider/model</code> 格式（例如: <code>openai/gpt-4o</code>）
+                请使用 <code>provider/model</code> 格式
               </div>
             )}
             {catalog?.models && catalog.models.length > 0 && (
@@ -380,10 +385,26 @@ export function ProviderSettings({
           </label>
         </div>
 
+        <label className="settings-thinking-field">
+          <span>思考等级</span>
+          <select
+            value={thinkingLevel}
+            onChange={(e) => onThinkingLevel(e.target.value as ThinkingLevel)}
+          >
+            <option value="off">关闭</option>
+            <option value="minimal">最少 (minimal)</option>
+            <option value="low">低 (low)</option>
+            <option value="medium">中 (medium)</option>
+            <option value="high">高 (high)</option>
+            <option value="xhigh">极高 (xhigh)</option>
+            <option value="max">最大 (max)</option>
+          </select>
+        </label>
+
         {effectiveRoleModels && (
           <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "11px", color: "var(--text-muted, #888)", marginTop: "8px" }}>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ fontWeight: 600 }}>当前后端实际生效:</span>
+              <span style={{ fontWeight: 600 }}>当前生效：</span>
               <span>规划 (Planner): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.planner || "未设置"}</code></span>
               <span>任务切分 (Partitioner): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.partitioner || "未设置"}</code></span>
               <span>节点执行 (Node): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.nodeAgent || "未设置"}</code></span>
@@ -399,7 +420,7 @@ export function ProviderSettings({
         {availableModels.length > 0 && (
           <div className="model-quick-chips">
             <span className="quick-chips-label">
-              <Sparkles size={12} /> 快捷选用已可用模型:
+              <Sparkles size={12} /> 可用模型
             </span>
             <div className="quick-chips-list">
               {availableModels.slice(0, 8).map((m) => {
@@ -430,14 +451,12 @@ export function ProviderSettings({
           </div>
           <div>
             <div className="pi-auth-main-title">
-              <h5>Pi 统一认证中心 (/login)</h5>
+              <h5>Provider 认证</h5>
               <span className="auth-stat-badge">
                 已就绪 {configuredCount} / {providers.length}
               </span>
             </div>
-            <p className="section-desc pi-auth-desc">
-              凭证由本地 Pi 内核统一安全管理（保存在 <code>~/.grapher/pi-agent/auth.json</code>），Partitioner、Planner、Node Agent、Merger 天然共享，无需重复绑定。
-            </p>
+
           </div>
         </div>
 

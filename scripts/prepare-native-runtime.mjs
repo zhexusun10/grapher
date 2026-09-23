@@ -15,6 +15,9 @@ try {
   execFileSync('git', ['clone', '--local', '--no-hardlinks', '--no-checkout', source, join(destination, 'pi')], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   cpSync(source, join(destination, 'pi'), { ...options, filter: path => resolve(path) !== join(source, '.git') });
   cpSync(join(root, 'engine'), join(destination, 'engine'), options);
+  // tsx resolves the module format of execution-cli.ts from the nearest
+  // package.json. Preserve the installation's ESM boundary in the copy.
+  cpSync(join(root, 'package.json'), join(destination, 'package.json'));
   mkdirSync(join(destination, 'scripts'));
   for (const name of ['pi-baseline.mjs', 'cargo.mjs']) cpSync(join(root, 'scripts', name), join(destination, 'scripts', name));
   // Populate the clone index without checking out over the installed dependencies.
