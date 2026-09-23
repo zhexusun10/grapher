@@ -18,6 +18,7 @@ pub struct Job {
     pub config: Config,
     pub task: String,
     pub feedback_source: bool,
+    pub expected_source_head: String,
 }
 
 /// Test builds alone support actuator selection.
@@ -364,7 +365,10 @@ impl Runtime {
         if !self.state.nodes.contains_key(node) || instruction.trim().is_empty() {
             return Err("Select a node and enter an instruction".into());
         }
-        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        if !self.is_serial() && !workspace::is_standard_git(&repository) {
+            workspace::check_shadow_source(&repository, self.state.published_head.as_deref().unwrap_or(&self.state.base))?;
+        }
         self.emit(EventKind::Invalidated {
             nodes: downstream(&self.state.graph, node).into_iter().collect(),
             target: node.into(),
@@ -546,6 +550,7 @@ impl Runtime {
                 config: config.clone(),
                 task,
                 feedback_source,
+                expected_source_head: self.state.published_head.clone().unwrap_or_else(|| self.state.base.clone()),
             });
         }
         if jobs.is_empty()
@@ -756,7 +761,7 @@ pub fn perform_with_merger(
     if path != repository {
         crate::native::require_graph_execution()?;
     }
-    let before = workspace::prepare_with_merger(&repository, path, &job.execution.before, parents, || {
+    let before = workspace::prepare_with_merger_expected(&repository, path, &job.execution.before, parents, &job.expected_source_head, || {
         let attempt = job.execution.attempt;
         crate::graph_merge::resolve_with_merger_for_node(
             path,

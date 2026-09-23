@@ -1,18 +1,49 @@
 use crate::model::{Config, Execution, Route};
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{mpsc, Mutex, OnceLock},
+    sync::{mpsc, Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
 
 static PROCESSES: OnceLock<Mutex<BTreeSet<u32>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct NodeRpc {
+    sender: mpsc::Sender<String>,
+    pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<(), String>>>>>,
+}
+static NODE_RPC: OnceLock<Mutex<HashMap<String, NodeRpc>>> = OnceLock::new();
+
+/// Acknowledged by Pi's RPC protocol, not merely by a successful pipe write.
+pub fn steer(execution_id: &str, instruction: &str) -> Result<(), String> {
+    let rpc = NODE_RPC.get_or_init(Default::default).lock().map_err(|e| e.to_string())?
+        .get(execution_id).cloned().ok_or("Node execution is no longer accepting messages")?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = mpsc::channel();
+    rpc.pending.lock().map_err(|e| e.to_string())?.insert(id.clone(), tx);
+    let command = serde_json::json!({"id": id, "type": "prompt", "message": instruction, "streamingBehavior": "steer"}).to_string();
+    if rpc.sender.send(command).is_err() {
+        rpc.pending.lock().map_err(|e| e.to_string())?.remove(&id);
+        return Err("Node RPC input closed".into());
+    }
+    let result = rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "Node did not acknowledge the steer request".to_string());
+    rpc.pending.lock().map_err(|e| e.to_string())?.remove(&id);
+    result?
+}
+
+struct NodeRpcGuard(String);
+impl Drop for NodeRpcGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = NODE_RPC.get_or_init(Default::default).lock() { map.remove(&self.0); }
+    }
+}
 
 struct ProcessGuard(u32);
 
@@ -348,13 +379,12 @@ fn run_pi_with_timeout(
         command.args(&config.pi_args);
         command
     };
-    command.args([
-        "--mode",
-        "json",
-        "--print",
-        "--no-prompt-templates",
-        "--no-themes",
-    ]);
+    // Fixture tests opt in with an explicit marker; existing print-mode fixtures
+    // retain their original protocol.
+    let rpc_node = request.role == PiRole::NodeAgent && (!cfg!(feature = "fixture")
+        || request.environment.iter().any(|(key, value)| *key == "GRAPHER_TEST_NODE_RPC" && value == "1"));
+    command.args(["--mode", if rpc_node { "rpc" } else { "json" }, "--no-prompt-templates", "--no-themes"]);
+    if !rpc_node { command.arg("--print"); }
     if request.role == PiRole::NodeAgent {
         command.arg("--approve");
     } else {
@@ -491,13 +521,38 @@ fn run_pi_with_timeout(
         serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "timestamp":crate::model::now()})
     ));
     let mut stdin = child.stdin.take().ok_or("Pi stdin unavailable")?;
-    let task = request.task.as_bytes().to_vec();
     let (input_sender, input_receiver) = mpsc::channel();
-    // Large tasks can fill the pipe before an unresponsive child reads stdin.
-    // Keep input delivery inside the same deadline as output collection.
-    thread::spawn(move || {
-        let _ = input_sender.send(stdin.write_all(&task).map_err(|error| error.to_string()));
-    });
+    let mut rpc_sender = None;
+    let mut rpc_guard = None;
+    let mut rpc_pending = None;
+    let initial_rpc_id = uuid::Uuid::new_v4().to_string();
+    if rpc_node {
+        let id = request.session_dir.file_name().ok_or("Missing execution identity")?.to_string_lossy().to_string();
+        let (tx, rx) = mpsc::channel::<String>();
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        NODE_RPC.get_or_init(Default::default).lock().map_err(|e| e.to_string())?
+            .insert(id.clone(), NodeRpc { sender: tx.clone(), pending: pending.clone() });
+        rpc_guard = Some(NodeRpcGuard(id));
+        rpc_pending = Some(pending);
+        let initial = serde_json::json!({"id": initial_rpc_id, "type": "prompt", "message": request.task}).to_string();
+        tx.send(initial).map_err(|e| e.to_string())?;
+        rpc_sender = Some(tx);
+        thread::spawn(move || {
+            for command in rx {
+                if let Err(error) = writeln!(stdin, "{command}").and_then(|_| stdin.flush()) {
+                    let _ = input_sender.send(Err(error.to_string()));
+                    break;
+                }
+            }
+            // Closing stdin asks RPC Pi to shut down cleanly after agent_end.
+        });
+    } else {
+        let task = request.task.as_bytes().to_vec();
+        // Large tasks can fill the pipe before an unresponsive child reads stdin.
+        thread::spawn(move || {
+            let _ = input_sender.send(stdin.write_all(&task).map_err(|error| error.to_string()));
+        });
+    }
     let (sender, receiver) = mpsc::channel();
     let stdout = child.stdout.take().ok_or("Pi stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("Pi stderr unavailable")?;
@@ -528,7 +583,14 @@ fn run_pi_with_timeout(
     let mut stderr_tail = String::new();
     let mut exited_at = None;
     let mut timed_out = false;
+    let mut agent_ended = None::<Instant>;
     loop {
+        // Leave a brief handoff window for a concurrent steer arriving at the
+        // end of a turn. RPC prompt starts another turn if Pi is already idle.
+        if rpc_node && agent_ended.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
+            let pending_empty = rpc_pending.as_ref().is_some_and(|p| p.lock().is_ok_and(|p| p.is_empty()));
+            if pending_empty { break; }
+        }
         // Check even while output is arriving: a noisy child can also hang.
         if timeout.is_some_and(|limit| started.elapsed() >= limit) {
             timed_out = true;
@@ -555,6 +617,23 @@ fn run_pi_with_timeout(
                 }
                 if let Ok(event) = serde_json::from_str::<Value>(&line) {
                     match event["type"].as_str().unwrap_or_default() {
+                        "agent_start" | "turn_start" if rpc_node => agent_ended = None,
+                        "agent_settled" if rpc_node => agent_ended = Some(Instant::now()),
+                        "response" if rpc_node => {
+                            if event["id"].as_str() == Some(initial_rpc_id.as_str()) && event["success"] == false {
+                                agent_error = Some(event["error"].as_str().unwrap_or("Pi rejected the initial prompt").to_string());
+                                agent_ended = Some(Instant::now());
+                            }
+                            if let (Some(id), Some(pending)) = (event["id"].as_str(), &rpc_pending) {
+                                if let Ok(mut pending) = pending.lock() {
+                                    if let Some(reply) = pending.remove(id) {
+                                        let result = if event["success"] == true { Ok(()) }
+                                            else { Err(event["error"].as_str().unwrap_or("Pi rejected steer").to_string()) };
+                                        let _ = reply.send(result);
+                                    }
+                                }
+                            }
+                        }
                         "message_end" if event["message"]["role"] == "assistant" => {
                             let message = &event["message"];
                             final_text = message["content"]
@@ -621,6 +700,9 @@ fn run_pi_with_timeout(
             }
         }
     }
+    // Do not hold the input pipe open after the final agent turn.
+    drop(rpc_guard);
+    drop(rpc_sender);
     let status = child.wait().map_err(|error| error.to_string())?;
     // ProcessGuard clears the process group. Detached descendants are not
     // guaranteed to be covered; tasks must finish background work before returning.
@@ -721,6 +803,81 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn node_rpc_steer_uses_current_execution_without_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("rpc.py");
+        fs::write(&script, r#"import json, sys
+first = json.loads(sys.stdin.readline())
+assert first['type'] == 'prompt' and first['message'] == 'original'
+print(json.dumps({'type':'response','command':'prompt','success':True}), flush=True)
+print(json.dumps({'type':'tool_execution_start'}), flush=True)
+second = json.loads(sys.stdin.readline())
+assert second['type'] == 'prompt' and second['streamingBehavior'] == 'steer'
+assert second['message'] == 'new instruction'
+print(json.dumps({'type':'response','id':second['id'],'command':'prompt','success':True}), flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'steered result'}]}}), flush=True)
+print(json.dumps({'type':'agent_settled'}), flush=True)
+sys.stdin.read()
+"#).unwrap();
+        let config = Config {
+            engine: "pi".into(), pi_command: "python3".into(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0,
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let session = temp.path().join(&id);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn({
+            let root = temp.path().to_path_buf();
+            move || {
+                let mut output = String::new();
+                let result = run_pi(PiRequest {
+                    role: PiRole::NodeAgent, config: &config, cwd: &root,
+                    task: "original", session_dir: &session, extension: None,
+                    tools: None, session_id: None, extra_args: vec![],
+                    environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None,
+                }, |line| {
+                    if line.contains("tool_execution_start") { let _ = ready_tx.send(()); }
+                    output.push_str(&line);
+                });
+                (result, output)
+            }
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        steer(&id, "new instruction").unwrap();
+        let (result, output) = worker.join().unwrap();
+        assert_eq!(result.unwrap(), "steered result");
+        assert!(output.contains("steered result"));
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn node_rpc_initial_prompt_failure_closes_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("reject.py");
+        fs::write(&script, r#"import json, sys
+prompt = json.loads(sys.stdin.readline())
+print(json.dumps({'type':'response','id':prompt['id'],'command':'prompt','success':False,'error':'no model available'}), flush=True)
+sys.stdin.read()
+"#).unwrap();
+        let config = Config {
+            engine: "pi".into(), pi_command: "python3".into(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0,
+        };
+        let result = run_pi_with_timeout(PiRequest {
+            role: PiRole::NodeAgent, config: &config, cwd: temp.path(), task: "original",
+            session_dir: &temp.path().join("session"), extension: None, tools: None,
+            session_id: None, extra_args: vec![],
+            environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None,
+        }, |_| {}, Some(Duration::from_secs(5)));
+        assert_eq!(result.unwrap_err(), "no model available");
+    }
 
     #[cfg(feature = "fixture")]
     #[test]

@@ -9,6 +9,7 @@ export interface ConfirmModalState {
   confirmText: string;
   danger?: boolean;
   onConfirm: () => void;
+  onCancel?: () => void;
 }
 
 interface ConfirmModalProps {
@@ -17,27 +18,35 @@ interface ConfirmModalProps {
 }
 
 export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, onClose }) => {
+  const cancel = () => {
+    config?.onCancel?.();
+    onClose();
+  };
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") cancel();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [config, onClose]);
 
   if (!config) return null;
 
   return (
     <motion.div
-      className="modal-backdrop"
+      className="modal-backdrop confirm-backdrop"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.18, ease: "easeOut" }}
-      onClick={onClose}
+      onClick={cancel}
     >
       <motion.div
         className="confirm-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
+        aria-describedby="confirm-dialog-message"
         initial={{ opacity: 0, scale: 0.94, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 8 }}
@@ -49,8 +58,8 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
             {config.danger ? <AlertTriangle size={18} /> : <Trash2 size={18} />}
           </div>
           <div className="confirm-texts">
-            <h4>{config.title}</h4>
-            <p>{config.message}</p>
+            <h4 id="confirm-dialog-title">{config.title}</h4>
+            <p id="confirm-dialog-message">{config.message}</p>
             {config.detail && (
               <small style={{ whiteSpace: "pre-wrap" }}>{config.detail}</small>
             )}
@@ -60,7 +69,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
           <button
             type="button"
             className="cancel-btn"
-            onClick={onClose}
+            onClick={cancel}
           >
             取消
           </button>

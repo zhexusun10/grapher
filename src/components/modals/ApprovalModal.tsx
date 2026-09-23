@@ -63,7 +63,6 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
         <div className="approval-summary">
           <ShieldCheck size={32} />
           <h3>{state.graph.nodes.length} 个节点，{state.plan?.executionBatches.length ?? 0} 个执行层</h3>
-          <p>{state.graph.originalGoal}</p>
           <ul>
             <li>
               Graph 模式的节点在用户仓库旁的 .grapher-worktrees 中执行，完成后自动合并回用户仓库。

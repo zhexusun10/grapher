@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import {
-  Clock, Cpu, AlertTriangle, AlertCircle, ChevronDown, ChevronUp,
+  Clock, Cpu, AlertCircle, ChevronDown, ChevronUp,
   Copy, Check, FileText, CheckCircle2, PauseCircle, Wrench
 } from "lucide-react";
 import type { PlanningSummary, PlanningRoleMetrics, Snapshot, TokenUsage } from "../types";
@@ -140,10 +140,6 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
     return rolesList.reduce((acc, [, r]) => acc + (r.tools || 0), 0);
   }, [rolesList]);
 
-  const totalToolErrors = useMemo(() => {
-    return rolesList.reduce((acc, [, r]) => acc + (r.toolErrors || 0), 0);
-  }, [rolesList]);
-
   const totalUsage = useMemo(() => {
     const sum: TokenUsage = {
       input: 0,
@@ -246,19 +242,13 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
           <span className="stat-value neutral">{formatSeconds(running && planning.createdAt ? Math.max(0, now - planning.createdAt) / 1000 : planning.totalPlanningDuration)}</span>
         </div>
 
-        <div className="planning-stat-box" title="规划过程中工具调用总数与失败数">
+        <div className="planning-stat-box" title="规划过程中工具调用总数">
           <span className="stat-label">
             <Wrench size={12} />
             工具调用
           </span>
           <span className="stat-value neutral">
             {running ? "完成后统计" : totalToolCalls}
-            {totalToolErrors > 0 ? (
-              <span className="tool-errors-tag" title={`${totalToolErrors} 次工具执行报错`}>
-                <AlertTriangle size={10} />
-                {totalToolErrors} 错
-              </span>
-            ) : null}
           </span>
         </div>
       </div>

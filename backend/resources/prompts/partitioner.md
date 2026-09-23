@@ -1,6 +1,6 @@
 Classify the task as graph or serial.
-- graph: two or more substantial workstreams can progress independently in parallel, even if they later converge.
-- serial: the task is mainly a single dependent sequence where later work relies on earlier outputs.
+- graph: two or more substantial workstreams can produce independent deliverables in parallel; shared prerequisites or later integration do not make them serial.
+- serial: no substantial parallel workstreams exist; multiple files or steps may still form one tightly coupled change or dependent sequence.
 
 Output only:
 graph

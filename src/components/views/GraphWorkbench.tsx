@@ -1,9 +1,9 @@
-import React, { useRef, useState, useEffect, useLayoutEffect, useCallback } from "react";
+import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
 import {
   Code2, ArrowLeft, Terminal, FolderGit2, GitBranch, RotateCcw,
   Workflow, Check, Play, Pause, Compass, ArrowDown, Clock, Loader2,
-  Pencil, ChevronLeft, ChevronRight
+  Pencil, ChevronLeft, ChevronRight, X, ArrowUp
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -11,13 +11,15 @@ import {
   Graph, Execution, Status, PlanningSummary, emptyGraph, TranscriptItem,
   ChatMessage, PlanMode
 } from "../../types";
-import { PromptBox } from "../ui/chatgpt-prompt-input";
+import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
+import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTranscript } from "../ExecutionTranscript";
 import { PlanningSummaryCard } from "../PlanningSummaryCard";
+import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
@@ -39,7 +41,9 @@ interface GraphWorkbenchProps {
   onInterrupt?: () => void;
   isPlanning: boolean;
   plannerStream: any;
-  onSendMessage: (val: string, options?: { mode?: "followUp" | "steer" }) => void;
+  recoveredPlanningId?: string;
+  onSendMessage: (val: string, options?: PromptBoxSubmitOptions) => boolean | void | Promise<boolean>;
+  onRequestConfirmation: (config: ConfirmModalState) => void;
   followUpQueue?: Array<{ id: string; text: string; node?: string; timestamp: number }>;
   onCancelFollowUp?: (id: string) => void;
   onControl: (action: string, extra?: Record<string, unknown>) => void;
@@ -71,12 +75,86 @@ const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean
 );
 StreamingAssistantBubble.displayName = "StreamingAssistantBubble";
 
+function EditableUserBubble({ text, editing, draft, onDraftChange, onEdit, onCancel, onSend, disabled, children }: {
+  text: string;
+  editing: boolean;
+  draft: string;
+  onDraftChange: (value: string) => void;
+  onEdit?: () => void;
+  onCancel: () => void;
+  onSend: (value: string) => boolean | void | Promise<boolean>;
+  disabled?: boolean;
+  children?: React.ReactNode;
+}) {
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [editSize, setEditSize] = useState<{ width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!editing) return;
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.focus();
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+    }
+  }, [editing]);
+  const submit = () => {
+    const value = draft.trim();
+    if (value && !disabled) onSend(value);
+  };
+  const beginEdit = () => {
+    if (bubbleRef.current) {
+      const { width, height } = bubbleRef.current.getBoundingClientRect();
+      setEditSize({ width, height });
+    }
+    onEdit?.();
+  };
+  return (
+    <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}`}>
+      {children}
+      <div className="chat-bubble-body">
+        {editing ? (
+          <div className="chat-bubble-actions">
+            <button type="button" className="chat-bubble-action-btn" onClick={onCancel} title="取消修改" aria-label="取消修改"><X size={14} /></button>
+            <button type="button" className="chat-bubble-action-btn send" onClick={submit} disabled={disabled || !draft.trim()} title="发送修改" aria-label="发送修改"><ArrowUp size={14} /></button>
+          </div>
+        ) : onEdit ? (
+          <button type="button" className="chat-message-edit-btn" onClick={beginEdit} title="修改" aria-label="修改"><Pencil size={14} /></button>
+        ) : null}
+        <div
+          ref={bubbleRef}
+          className={`chat-bubble-user${editing ? " editing" : ""}`}
+          style={editing && editSize ? { width: editSize.width, height: editSize.height } : undefined}
+        >
+          {editing ? (
+            <textarea
+              ref={textareaRef}
+              className="chat-bubble-edit-textarea"
+              aria-label="修改消息内容"
+              value={draft}
+              onChange={(event) => onDraftChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") { event.stopPropagation(); onCancel(); }
+                if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) {
+                  event.preventDefault(); submit();
+                }
+              }}
+              rows={1}
+            />
+          ) : text}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   state,
   routeType,
   selected,
   setSelected,
   failedPlanning,
+  recoveredPlanningId,
   effectiveMessages,
   branchInfo,
   onSwitchBranch,
@@ -90,6 +168,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   isPlanning,
   plannerStream,
   onSendMessage,
+  onRequestConfirmation,
   followUpQueue,
   onCancelFollowUp,
   onControl,
@@ -112,17 +191,48 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   tokens,
 }) => {
   const [attemptId, setAttemptId] = useState("");
+  const [editingTaskNode, setEditingTaskNode] = useState("");
+  const [taskDraft, setTaskDraft] = useState("");
+  useEffect(() => {
+    setEditingTaskNode("");
+    onCancelEditMessage?.();
+  }, [selected, state.runId]);
   const selectedNode = state.graph.nodes.find((item) => item.name === selected);
   const selectedState = selectedNode ? state.nodes[selectedNode.name] : undefined;
+  const nodeMessages = useMemo(() => {
+    if (!selectedNode) return [];
+    const local = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === selectedNode.name && msg.runId === state.runId);
+    const recorded = state.events.filter((event) => ((event.type === "invalidated" && event.human && event.target === selectedNode.name) ||
+      (event.type === "steered" && event.node === selectedNode.name)) &&
+      !local.some((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction)
+    ).map((event): ChatMessage => ({
+      id: `event-${event.sequence}`, parentId: null, role: "user",
+      text: event.instruction || "", node: selectedNode.name, runId: state.runId,
+    }));
+    return [...recorded, ...local];
+  }, [selectedNode?.name, effectiveMessages, state.runId, state.events]);
   const attempts = selectedNode
     ? [...state.executions.filter((item) => item.node === selectedNode.name),
        ...(state.mergers ?? []).filter((item) => item.node === `merge:${selectedNode.name}`)]
         .sort((a, b) => a.startedAt - b.startedAt)
     : [];
   const execution: Execution | undefined = attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
+  const isSelectedNodeWorking = Boolean(
+    execution
+      ? execution.status === "running" && execution.completedAt == null
+      : selectedState?.status === "running"
+  );
 
   const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}:${execution?.id || ""}`;
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
+  // Live SSE is ephemeral. After reload or run selection, replay the durable
+  // planning JSONL associated with the selected run, never a previous run's stream.
+  const showLivePlanner = !recoveredPlanningId && !failedPlanning &&
+    ((plannerStream.runId === state.runId && !!state.planningId) ||
+      (isPlanning && !plannerStream.runId));
+  const savedPlannerId = recoveredPlanningId || (failedPlanning
+    ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
+    : (routeType === "graph" ? state.planningId : undefined));
   const workbenchRef = useRef<HTMLDivElement>(null);
   const [isResizing, setIsResizing] = useState(false);
   const currentWidthRef = useRef<number>(390);
@@ -384,13 +494,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     : undefined;
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
+  const isSerialWorking = Boolean(
+    serialExecution
+      ? serialExecution.status === "running" && serialExecution.completedAt == null
+      : serialNodeState?.status === "running"
+  );
+  const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialWorking) : isPlanning;
   const isPlannerDisabled = !isSerialExecution && Boolean(state.approved);
 
   useEffect(() => {
-    if (isPlannerDisabled && editingMessage) {
+    if (isPlannerDisabled && !selectedNode && editingMessage) {
       onCancelEditMessage?.();
     }
-  }, [isPlannerDisabled, editingMessage, onCancelEditMessage]);
+  }, [isPlannerDisabled, selectedNode, editingMessage, onCancelEditMessage]);
 
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
   const graphKey = `${state.runId || state.graph.originalGoal}:${state.graph.nodes.map((node) => node.name).join("|")}`;
@@ -518,30 +634,55 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               style={execution && readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
             >
               <div className="chat-messages-stream">
-                <div style={{ padding: "0 4px" }}>
-                  <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }}>
-                    Task
-                  </div>
-                  <p style={{ fontSize: "12px", lineHeight: 1.6, color: "var(--text-primary)", margin: 0, whiteSpace: "pre-wrap" }}>
-                    {selectedNode.task}
-                  </p>
+                <div className="chat-message-row user">
+                  <EditableUserBubble
+                    text={selectedNode.task}
+                    editing={editingTaskNode === selectedNode.name}
+                    draft={taskDraft}
+                    onDraftChange={setTaskDraft}
+                    onEdit={!locked && !active ? () => {
+                      onCancelEditMessage?.();
+                      setEditingTaskNode(selectedNode.name);
+                      setTaskDraft(selectedNode.task);
+                    } : undefined}
+                    onCancel={() => setEditingTaskNode("")}
+                    disabled={locked || active || taskDraft.trim() === selectedNode.task}
+                    onSend={(value) => {
+                      const saveTask = () => {
+                        onSave({ ...state.graph, nodes: state.graph.nodes.map((node) =>
+                          node.name === selectedNode.name ? { ...node, task: value } : node
+                        ) });
+                        setEditingTaskNode("");
+                      };
+                      if (state.approved) {
+                        onRequestConfirmation({
+                          title: "修改 Task？",
+                          message: "修改 Task 将创建新的待审批运行，当前运行不会继续。",
+                          confirmText: "确认修改",
+                          danger: true,
+                          onConfirm: saveTask,
+                        });
+                        return false;
+                      }
+                      saveTask();
+                    }}
+                  />
                 </div>
 
-                {attempts.length > 0 && (
-                  <label className="attempt-picker">
-                    <span>执行记录</span>
-                    <select
-                      value={execution?.id ?? ""}
-                      onChange={(event) => setAttemptId(event.target.value)}
-                    >
-                      {attempts.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.node.startsWith("merge:") ? "merger" : `#${item.attempt}`} · {item.status}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
+                {nodeMessages.map((msg) => (
+                  <div key={msg.id} className="chat-message-row user">
+                    <EditableUserBubble
+                      text={msg.text.replace(/^\[@[^\]]+\]\s*/, "")}
+                      editing={editingMessage?.id === msg.id}
+                      draft={editPrefillText ?? ""}
+                      onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                      onEdit={onEditMessage && !locked ? () => { setEditingTaskNode(""); onEditMessage(msg); } : undefined}
+                      onCancel={() => onCancelEditMessage?.()}
+                      onSend={onSendMessage}
+                      disabled={locked}
+                    />
+                  </div>
+                ))}
 
                 {execution && (
                   <motion.div
@@ -593,7 +734,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   </div>
                 )}
 
-                {isWorking && (
+                {isSelectedNodeWorking && (
                   <div className="working-indicator" role="status" aria-live="polite">
                     <span className="working-indicator-dot" />
                     Working…
@@ -635,35 +776,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   )}
                 </div>
               )}
-              {editingMessage && (
-                <div className="prompt-box-editing-banner">
-                  <div className="editing-banner-content">
-                    <span className="editing-banner-dot" />
-                    <span>正在修改历史消息（将创建新分支，已有执行记录完整保留）</span>
-                  </div>
-                  {onCancelEditMessage && (
-                    <button type="button" onClick={onCancelEditMessage} className="editing-cancel-btn">
-                      取消
-                    </button>
-                  )}
-                </div>
-              )}
               <PromptBox
                 compact
                 onSubmit={(val, options) => onSendMessage(val, options)}
                 placeholder={
                   !state.approved
                     ? "图规划审批启动后，可在此向选定节点发送介入指令…"
+                    : isSelectedNodeWorking
+                    ? `向 @${selectedNode.name} 实时发送 Steer（当前工具调用后生效）…`
                     : `向 @${selectedNode.name} 发送介入指令…`
                 }
-                isExecuting={active}
-                isWorking={isWorking}
+                isExecuting={isSelectedNodeWorking}
+                isWorking={isSelectedNodeWorking}
                 onInterrupt={onInterrupt}
-                value={editPrefillText || undefined}
-                onChange={(e) => onEditPrefillTextChange?.(e.target.value)}
-                onCancel={onCancelEditMessage}
                 disabled={
                   locked ||
+                  !!editingMessage ||
                   !state.approved
                 }
               />
@@ -682,18 +810,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
                   >
                     {msg.role === "user" ? (
-                      <div className="chat-user-message-card-wrapper">
-                        {!isPlannerDisabled && onEditMessage && (
-                          <button
-                            type="button"
-                            className="chat-message-edit-btn"
-                            onClick={() => onEditMessage(msg)}
-                            title="修改消息内容并重新发送"
-                            aria-label="修改消息内容并重新发送"
-                          >
-                            <Pencil size={14} />
-                          </button>
-                        )}
+                      <EditableUserBubble
+                        text={msg.text.trim()}
+                        editing={editingMessage?.id === msg.id}
+                        draft={editPrefillText ?? ""}
+                        onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                        onEdit={!isPlannerDisabled && (!locked || isPlanning) && onEditMessage ? () => onEditMessage(msg) : undefined}
+                        onCancel={() => onCancelEditMessage?.()}
+                        onSend={onSendMessage}
+                        disabled={isPlannerDisabled || (locked && !isPlanning)}
+                      >
                         {branchInfo?.[msg.id] && branchInfo[msg.id].count > 1 && (
                           <div className="chat-branch-pager">
                             <button
@@ -719,10 +845,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             </button>
                           </div>
                         )}
-                        <div className="chat-bubble-user">
-                          {msg.text.trim()}
-                        </div>
-                      </div>
+                      </EditableUserBubble>
                     ) : (
                       <div className={`chat-bubble-${msg.role} chat-message-${msg.role}`}>
                         <MarkdownRenderer content={msg.text} />
@@ -809,7 +932,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
 
                 {/* Planner 顺序流式记录：严格按实际发生时序呈现工具调用、思维链与输出文字 */}
-                {plannerStream.items && plannerStream.items.length > 0 ? (
+                {!showLivePlanner && savedPlannerId ? (
+                  <PlanningActivity key={savedPlannerId} planning={{ planningId: savedPlannerId }} onUserResize={handleExpandableContentChange} />
+                ) : showLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                     {plannerStream.items.map((item: TranscriptItem, idx: number) => {
                       const isLast = idx === plannerStream.items.length - 1;
@@ -855,7 +980,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     })}
                   </div>
                 ) : (
-                  (plannerStream.plannerThinking || plannerStream.plannerText || (isPlanning && plannerStream.stage === "planning")) && (
+                  showLivePlanner && (plannerStream.plannerThinking || smoothPlannerText) && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                       {plannerStream.plannerThinking && (
                         <ThinkingCard
@@ -877,16 +1002,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           </div>
                         </motion.div>
                       )}
-                      {isPlanning && plannerStream.stage === "planning" && !plannerStream.plannerThinking && !plannerStream.plannerText && (
-                        <div className="stream-card-hint" style={{ padding: "8px 0" }}>
-                          <Workflow size={14} className="spin" style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
-                          正在计算独立 Git worktree 执行批次与验收复审依赖...
-                        </div>
-                      )}
                     </div>
                   )
                 )}
-                {isWorking && (
+                {isMainViewWorking && (
                   <div className="working-indicator" role="status" aria-live="polite">
                     <span className="working-indicator-dot" />
                     Working…
@@ -1012,19 +1131,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   )}
                 </div>
               )}
-              {editingMessage && !isPlannerDisabled && (
-                <div className="prompt-box-editing-banner">
-                  <div className="editing-banner-content">
-                    <span className="editing-banner-dot" />
-                    <span>正在修改历史消息（将创建新分支，已有执行记录完整保留）</span>
-                  </div>
-                  {onCancelEditMessage && (
-                    <button type="button" onClick={onCancelEditMessage} className="editing-cancel-btn">
-                      取消
-                    </button>
-                  )}
-                </div>
-              )}
               <PromptBox
                 compact
                 onSubmit={(val, options) => onSendMessage(val, options)}
@@ -1037,13 +1143,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     ? "向当前任务发送介入指令…"
                     : ""
                 }
-                isExecuting={active || isPlanning}
-                isWorking={isWorking}
+                isExecuting={isMainViewWorking}
+                isWorking={isMainViewWorking}
                 onInterrupt={onInterrupt}
-                value={editPrefillText || undefined}
-                onChange={(e) => onEditPrefillTextChange?.(e.target.value)}
-                onCancel={onCancelEditMessage}
                 disabled={
+                  !!editingMessage ||
                   isPlannerDisabled ||
                   (locked && !isPlanning)
                 }
@@ -1160,12 +1264,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <>
                     <div className="graph-note">
                       <span className="note-line" />依赖前进
-                      <span className="note-line feedback" />反馈重试
+                      <span className="note-line feedback" />执行反馈
                     </div>
 
                     <div className="planner-off">
                       <span />Planner {isPlanning ? "规划中" : state.graph.nodes.length ? "已离线" : "未启动"}
-                      <span className="planner-cost">0 运行时协调 Token</span>
                     </div>
                   </>
                 )}
@@ -1178,7 +1281,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <span className="progress-dot" />
                       {completed} / {state.graph.nodes.length} 节点完成
                     </span>
-                    <span>{phaseText[state.phase] ?? state.phase} · 并发限制 {state.config?.maxParallel ?? config.maxParallel}</span>
+                    <span>{phaseText[state.phase] ?? state.phase}</span>
                   </div>
                   <div className="progress-track">
                     <div style={{ width: `${(completed / Math.max(1, state.graph.nodes.length)) * 100}%` }} />

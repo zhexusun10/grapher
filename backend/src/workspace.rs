@@ -326,6 +326,17 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().into())
 }
 
+/// Guard a shadow checkout against edits outside this run without creating a
+/// fresh snapshot or moving its approval base.
+pub fn check_shadow_source(repository: &Path, expected_head: &str) -> Result<(), String> {
+    let head = repository_git(repository, &["rev-parse", "HEAD"])?;
+    let status = repository_git(repository, &["status", "--porcelain"])?;
+    if head != expected_head || !status.is_empty() {
+        return Err("Shadow workspace changed after approval; restore the approved files or start a new run".into());
+    }
+    Ok(())
+}
+
 /// Run Git against either a normal checkout or the existing external shadow
 /// repository. Publication must never create/rebaseline a shadow repository.
 pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String> {
@@ -448,6 +459,19 @@ pub fn prepare_with_merger(
     path: &Path,
     base: &str,
     parents: &[String],
+    resolve: impl FnMut() -> Result<(), String>,
+) -> Result<String, String> {
+    prepare_with_merger_expected(repository, path, base, parents, base, resolve)
+}
+
+/// Allow a previously published graph to rerun from its original base, but
+/// only if the user directory still matches the exact published snapshot.
+pub fn prepare_with_merger_expected(
+    repository: &Path,
+    path: &Path,
+    base: &str,
+    parents: &[String],
+    expected_source_head: &str,
     mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
     let canonical_repo = repository
@@ -471,11 +495,7 @@ pub fn prepare_with_merger(
     // against a different user directory if files changed since then.
     // Publication checks again before writing back to catch later edits.
     if !is_standard_git(&canonical_repo) {
-        let head = repository_git(&canonical_repo, &["rev-parse", "HEAD"])?;
-        let status = repository_git(&canonical_repo, &["status", "--porcelain"])?;
-        if head != base || !status.is_empty() {
-            return Err("Shadow workspace changed after approval; restore the approved files or start a new run".into());
-        }
+        check_shadow_source(&canonical_repo, expected_source_head)?;
     }
     fs::create_dir_all(path).map_err(|error| error.to_string())?;
 

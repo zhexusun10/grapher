@@ -1760,8 +1760,30 @@ fn control(
     action: String,
     node: Option<String>,
     instruction: Option<String>,
+    run_id: Option<String>,
+    execution_id: Option<String>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
+    if action == "steer" {
+        let node = node.ok_or("Select a node to steer")?;
+        let instruction = instruction.ok_or("Enter a steering message")?;
+        if instruction.trim().is_empty() { return Err("Enter a steering message".into()); }
+        let execution_id = execution_id.ok_or("Missing execution identity")?;
+        {
+            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            if run_id.as_deref() != Some(runtime.state.run_id.as_str())
+                || !runtime.state.executions.iter().any(|e| e.id == execution_id && e.node == node && e.status == "running") {
+                return Err("Node execution is no longer running; send a new instruction instead".into());
+            }
+        }
+        crate::engine::steer(&execution_id, instruction.trim())?;
+        let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
+            return Err("Run changed while steering".into());
+        }
+        runtime.emit(EventKind::Steered { execution_id, node, instruction: instruction.trim().into() })?;
+        return Ok(runtime.state.clone());
+    }
     if matches!(action.as_str(), "stop" | "cancel") {
         crate::engine::terminate_all();
         let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
@@ -2119,6 +2141,8 @@ pub fn dispatch(
             argument(&body, "action")?,
             argument(&body, "node")?,
             argument(&body, "instruction")?,
+            argument(&body, "runId")?,
+            argument(&body, "executionId")?,
             service,
         )?),
         "repository_status" => {

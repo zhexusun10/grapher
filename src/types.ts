@@ -7,7 +7,7 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; maxParallel: number; maxFeedback: number }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null }
-export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; from?: string; to?: string; accepted?: boolean; error?: string; execution?: Execution; instruction?: string; human?: boolean }
+export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; from?: string; to?: string; accepted?: boolean; error?: string; execution?: Execution; instruction?: string; target?: string; execution_id?: string; human?: boolean }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
   input: number;

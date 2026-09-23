@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import type { PlanningSummary } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
-export function PlanningActivity({ planning }: { planning: PlanningSummary }) {
+export function PlanningActivity({ planning, onUserResize }: { planning: { planningId: string }; onUserResize?: () => void }) {
   const [record, setRecord] = useState({ id: "", content: "" });
   const output = record.id === planning.planningId ? record.content : "";
   const [loading, setLoading] = useState(false);
@@ -49,7 +48,7 @@ export function PlanningActivity({ planning }: { planning: PlanningSummary }) {
     {error && <p role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>重试</button></p>}
     {!loading && !error && !output && <p>没有可用的规划输出。</p>}
     {output && <div className="planning-activity-output">
-      <VirtualizedTranscript key={`${planning.planningId}:planner`} output={output} />
+      <VirtualizedTranscript key={`${planning.planningId}:planner`} output={output} onUserResize={onUserResize} />
     </div>}
   </section>;
 }

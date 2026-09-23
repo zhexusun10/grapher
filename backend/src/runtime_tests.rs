@@ -96,6 +96,54 @@ fn shadow_prepare_refuses_user_edits_after_approval() {
 }
 
 #[test]
+fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_rebasing() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: vec![
+            Node { name: "parent".into(), task: "parent task".into() },
+            Node { name: "child".into(), task: "child task".into() },
+        ],
+        edges: vec![Edge { from: "parent".into(), to: "child".into(), relation: "files".into(), feedback: false }],
+    };
+    let (_temp, source, mut runtime) = setup(false, graph);
+    runtime.approve().unwrap();
+    let base = runtime.state.base.clone();
+    for name in ["parent", "child"] {
+        let job = runtime.jobs().unwrap().remove(0);
+        let path = Path::new(&job.execution.worktree);
+        workspace::prepare(&source, path, &job.execution.before, &runtime.parents(name)).unwrap();
+        fs::write(path.join(format!("{name}.txt")), name).unwrap();
+        let head = workspace::snapshot_node(path, &source, name).unwrap();
+        runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
+    }
+    runtime.jobs().unwrap();
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || Err("merge conflict".into())).unwrap();
+    runtime.emit(EventKind::PublicationCompleted { head: published.clone() }).unwrap();
+    assert_ne!(published, base);
+    fs::write(source.join("tracked.txt"), "external edit").unwrap();
+    assert!(runtime.intervene("parent", "new instruction").unwrap_err().contains("changed after approval"));
+    assert_eq!(runtime.state.nodes["parent"].status, "done");
+    fs::write(source.join("tracked.txt"), "original").unwrap();
+    runtime.intervene("parent", "new instruction").unwrap();
+    assert_eq!(runtime.state.nodes["parent"].status, "dirty");
+    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert!(runtime.state.nodes["child"].head.is_none());
+    assert_eq!(runtime.state.base, base);
+    let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(replay.published_head.as_deref(), Some(published.as_str()));
+    let job = runtime.jobs().unwrap().remove(0);
+    assert_eq!(job.execution.node, "parent");
+    assert_eq!(job.expected_source_head, published);
+    let path = Path::new(&job.execution.worktree);
+    workspace::prepare_with_merger_expected(&source, path, &job.execution.before, &[], &job.expected_source_head, || Err("merge conflict".into())).unwrap();
+    fs::write(source.join("tracked.txt"), "external edit").unwrap();
+    let next = source.parent().unwrap().join("another-worktree");
+    assert!(workspace::prepare_with_merger_expected(&source, &next, &base, &[], &job.expected_source_head, || Err("merge conflict".into())).unwrap_err().contains("changed after approval"));
+    fs::remove_dir_all(workspace::shadow_repo_dir(&source)).unwrap();
+}
+
+#[test]
 fn child_inherits_parent_files_with_a_fresh_task_and_session() {
     let graph = Graph {
         original_goal: "test".into(),

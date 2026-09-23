@@ -23,7 +23,7 @@ export interface PromptBoxProps
   extends Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, "onSubmit"> {
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLTextAreaElement> | any) => void;
-  onSubmit?: (message: string, options?: PromptBoxSubmitOptions) => void;
+  onSubmit?: (message: string, options?: PromptBoxSubmitOptions) => boolean | void | Promise<boolean>;
   placeholder?: string;
   disabled?: boolean;
   isBusy?: boolean;
@@ -160,7 +160,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [isPreparing, setIsPreparing] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const submittingRef = useRef(false);
     const pillLayoutId = useId();
+    const composingRef = useRef(false);
+    const compositionEndedAtRef = useRef(0);
 
     // 同步外部 value 变化（如编辑消息回填或清除）
     useEffect(() => {
@@ -223,8 +227,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     const handleSubmitAction = async () => {
       const trimmed = currentText.trim();
-      if ((!trimmed && !selectedFile) || disabled || isBusy || isPreparing) return;
-
+      if ((!trimmed && !selectedFile) || disabled || isBusy || isPreparing || submittingRef.current) return;
+      submittingRef.current = true;
+      setIsSubmitting(true);
       let combinedPrompt = trimmed;
       let displayText = trimmed;
       const currentAttachment = selectedFile;
@@ -277,22 +282,33 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         }
       }
 
-      if (onSubmit) {
-        onSubmit(combinedPrompt, {
-          files: currentAttachment ? [currentAttachment] : [],
-          rawText: trimmed,
-          displayText,
-          mode: (isExecuting || isWorking) ? "steer" : undefined,
-        });
-      }
+      try {
+        if (onSubmit) {
+          const accepted = await onSubmit(combinedPrompt, {
+            files: currentAttachment ? [currentAttachment] : [],
+            rawText: trimmed,
+            displayText,
+            mode: (isExecuting || isWorking) ? "steer" : undefined,
+          });
+          if (accepted === false) return;
+        }
 
-      setInternalValue("");
-      setSelectedImage(null);
-      setSelectedFile(null);
+        setInternalValue("");
+        setSelectedImage(null);
+        setSelectedFile(null);
+      } catch (error) {
+        console.error("Failed to send message:", error);
+      } finally {
+        submittingRef.current = false;
+        setIsSubmitting(false);
+      }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
+        // IME candidate selection (including the final Enter) is not a send.
+        if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229 ||
+            Date.now() - compositionEndedAtRef.current < 50) return;
         e.preventDefault();
         handleSubmitAction();
       } else if (e.key === "Escape") {
@@ -300,7 +316,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     };
 
-    const canSubmit = (hasText || !!selectedFile) && !disabled && !isBusy && !isPreparing;
+    const canSubmit = (hasText || !!selectedFile) && !disabled && !isBusy && !isPreparing && !isSubmitting;
 
     return (
       <motion.div
@@ -390,9 +406,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             rows={1}
             value={currentText}
             onChange={handleTextChange}
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={() => { composingRef.current = false; compositionEndedAtRef.current = Date.now(); }}
             onKeyDown={handleKeyDown}
             placeholder={placeholder}
-            disabled={disabled || isBusy || isPreparing}
+            disabled={disabled || isBusy || isPreparing || isSubmitting}
             className="prompt-box-textarea"
             {...restProps}
           />
@@ -463,7 +481,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   handleSubmitAction();
                 }
               }}
-              disabled={isWorking ? (!hasText && !selectedFile && !onInterrupt) : !canSubmit}
+              disabled={isSubmitting || (isWorking ? (!hasText && !selectedFile && !onInterrupt) : !canSubmit)}
               className={`prompt-box-send-btn ${
                 isWorking && !hasText && !selectedFile
                   ? "working active"
@@ -488,7 +506,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             >
               {isWorking && !hasText && !selectedFile ? (
                 <Square size={compact ? 8 : 10} className="prompt-box-stop-icon" />
-              ) : isBusy || isPreparing ? (
+              ) : isBusy || isPreparing || isSubmitting ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
               ) : (
                 <motion.span

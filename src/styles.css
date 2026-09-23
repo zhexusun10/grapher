@@ -307,13 +307,17 @@ a,
 
 .sidebar.is-collapsed .sidebar-brand-row,
 .sidebar.is-collapsed .nav-section,
-.sidebar.is-collapsed .sidebar-bottom,
-.sidebar.is-collapsed .sidebar-bottom-btn {
+.sidebar.is-collapsed .sidebar-bottom {
   width: 100% !important;
   min-width: 0 !important;
   justify-content: center !important;
   padding-left: 0 !important;
   padding-right: 0 !important;
+}
+
+.sidebar.is-collapsed .sidebar-bottom {
+  display: flex !important;
+  align-items: center !important;
 }
 
 .sidebar.is-collapsed .nav-section {
@@ -326,12 +330,30 @@ a,
   height: 32px;
 }
 
+.sidebar.is-collapsed .sidebar-bottom-btn {
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  justify-content: center !important;
+  align-items: center !important;
+  margin: 0 auto !important;
+  border-radius: 7px;
+  box-sizing: border-box;
+}
+
+.sidebar.is-collapsed .sidebar-bottom-btn:hover {
+  border-color: transparent;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sidebar,
   .sidebar .brand,
   .sidebar .nav-section > span,
   .sidebar .projects-list,
   .sidebar .runs-list,
+  .sidebar .sidebar-bottom-btn,
   .sidebar .sidebar-bottom-btn > span {
     transition: none;
   }
@@ -581,18 +603,24 @@ a,
   margin: 3px 2px;
 }
 
-/* 原生确认弹窗 */
+/* 应用内确认弹窗 */
+.modal-backdrop.confirm-backdrop {
+  background: rgba(15, 23, 42, 0.25);
+  backdrop-filter: blur(2px);
+  padding: 24px;
+}
+
 .confirm-dialog {
-  width: 380px;
-  max-width: 90vw;
+  width: 480px;
+  max-width: 100%;
   background: #ffffff;
   border: 1px solid var(--border-default);
   border-radius: 12px;
   box-shadow: 0 16px 36px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(0, 0, 0, 0.04);
-  padding: 20px 22px 18px;
+  padding: 24px 26px 22px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
   animation: confirmDialogScaleIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -638,7 +666,7 @@ a,
 }
 
 .confirm-texts h4 {
-  font-size: 13.5px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
@@ -646,14 +674,14 @@ a,
 }
 
 .confirm-texts p {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.45;
   color: var(--text-primary);
   margin: 0;
 }
 
 .confirm-texts small {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--text-secondary);
   margin-top: 2px;
@@ -1122,6 +1150,15 @@ a,
   background: var(--brand-subtle);
   color: var(--brand-default);
   border-color: var(--brand-border);
+}
+
+.sidebar-bottom-btn:focus-visible {
+  outline: 2px solid var(--brand-default);
+  outline-offset: 2px;
+}
+
+.sidebar-bottom-btn svg {
+  flex-shrink: 0;
 }
 
 .local-indicator {
@@ -2596,12 +2633,34 @@ a,
 .chat-user-message-card-wrapper {
   position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 6px;
   max-width: 86%;
 }
 
-.chat-message-edit-btn {
+.chat-user-message-card-wrapper.inline-editing {
+  max-width: none;
+}
+
+.chat-bubble-body {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat-bubble-actions {
+  position: absolute;
+  left: -62px;
+  bottom: 0;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.chat-message-edit-btn,
+.chat-bubble-action-btn {
   opacity: 0;
   pointer-events: none;
   width: 26px;
@@ -2619,20 +2678,45 @@ a,
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
-.chat-user-message-card-wrapper:hover .chat-message-edit-btn {
+.chat-user-message-card-wrapper:hover .chat-message-edit-btn,
+.chat-user-message-card-wrapper:focus-within .chat-message-edit-btn {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);
 }
 
-.chat-message-edit-btn:hover {
+.chat-bubble-action-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-bubble-action-btn.send {
+  background: var(--brand-default);
+  border-color: var(--brand-default);
+  color: white;
+}
+
+.chat-bubble-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-message-edit-btn:hover,
+.chat-bubble-action-btn:hover:not(:disabled) {
   background: var(--brand-subtle, #EFF6FF);
   border-color: var(--brand-border, #BFDBFE);
   color: var(--brand-default, #2563EB);
   transform: scale(1.08);
 }
 
-.chat-message-edit-btn:active {
+.chat-bubble-action-btn.send:hover:not(:disabled) {
+  background: var(--brand-default);
+  border-color: var(--brand-default);
+  color: white;
+}
+
+.chat-message-edit-btn:active,
+.chat-bubble-action-btn:active:not(:disabled) {
   transform: scale(0.95);
 }
 
@@ -2696,6 +2780,33 @@ a,
   word-break: break-word;
   white-space: pre-wrap;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.chat-bubble-user.editing {
+  box-sizing: border-box;
+  flex: none;
+  overflow: hidden;
+}
+
+.chat-bubble-edit-textarea {
+  display: block;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  resize: none;
+}
+
+/* The inline editor uses the bubble itself as its focus affordance. */
+.chat-bubble-edit-textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .chat-bubble-assistant,
@@ -3959,7 +4070,7 @@ a,
 .graph-note {
   position: absolute;
   bottom: 16px;
-  left: 50px;
+  right: 17px;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -3984,7 +4095,7 @@ a,
 .planner-off {
   position: absolute;
   bottom: 16px;
-  right: 17px;
+  left: 50px;
   font-size: 8px;
   color: var(--text-secondary);
   display: flex;
@@ -3998,13 +4109,6 @@ a,
   height: 4px;
   background: var(--text-secondary);
   border-radius: 50%;
-}
-
-.planner-cost {
-  border-left: 1px solid var(--border-default);
-  margin-left: 2px;
-  padding-left: 7px;
-  color: var(--text-secondary);
 }
 
 .graph-bottom {
@@ -4272,25 +4376,6 @@ a,
   font-size: 11px;
   color: var(--text-secondary);
   font-style: italic;
-}
-
-.attempt-picker {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin: 17px 0;
-  font-size: 10px;
-  color: var(--text-secondary);
-}
-
-.attempt-picker select {
-  border: 1px solid var(--border-default);
-  background: var(--bg-canvas);
-  border-radius: 5px;
-  padding: 5px;
-  color: var(--text-primary);
-  font-size: 10px;
-  max-width: 75%;
 }
 
 .session-label {
@@ -5593,10 +5678,6 @@ a,
 
   .main {
     padding: 0 12px;
-  }
-
-  .planner-cost {
-    display: none;
   }
 
   .approval-row>span {

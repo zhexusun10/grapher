@@ -201,6 +201,11 @@ pub enum EventKind {
         execution_id: String,
         head: String,
     },
+    Steered {
+        execution_id: String,
+        node: String,
+        instruction: String,
+    },
     Output {
         execution_id: String,
         text: String,
@@ -300,6 +305,9 @@ pub struct Snapshot {
     pub paused: bool,
     pub phase: String,
     pub base: String,
+    /// Last successfully published source HEAD, distinct from the graph's approval base.
+    #[serde(default)]
+    pub published_head: Option<String>,
     pub feedback_counts: BTreeMap<String, usize>,
 }
 
@@ -352,6 +360,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.error = None;
             state.executions.push(execution.clone());
         }
+        EventKind::Steered { .. } => {}
         EventKind::Output { execution_id, text } => {
             if let Some(execution) = state
                 .executions
@@ -460,6 +469,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = "publishing".into();
         }
         EventKind::PublicationCompleted { head } => {
+            state.published_head = Some(head.clone());
             if let Some(publication) = &mut state.publication {
                 publication.status = "completed".into();
                 publication.head = Some(head.clone());

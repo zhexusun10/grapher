@@ -10,8 +10,8 @@ interface SidebarProps {
   onRemoveProject: (project: ProjectItem) => void;
   runs: string[];
   currentRunId: string;
-  activeBackendRunId: string | null;
-  activeBackendPhase: string | null;
+  activeBackendRunId?: string | null;
+  activeBackendPhase?: string | null;
   runIndicators: Record<string, { unread: boolean; phase: string }>;
   onLoadRun: (runId: string) => void;
   onDeleteRun: (runId: string) => void;
@@ -77,9 +77,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   return (
     <aside className={`sidebar${isCollapsed ? " is-collapsed" : ""}`} aria-label="侧边栏">
       <div className="sidebar-brand-row">
-        <a className="brand" href="#" onClick={(event) => event.preventDefault()}>
+        <div className="brand">
           <strong>Grapher</strong>
-        </a>
+        </div>
         <button
           type="button"
           className="sidebar-toggle-btn"
@@ -212,7 +212,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           title="Setting"
           aria-label="设置"
         >
-          <Settings2 size={16} />
+          <Settings2 size={18} />
           <span>Setting</span>
         </button>
       </div>

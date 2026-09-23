@@ -413,6 +413,7 @@ export default function App() {
   }, []);
 
   const initialPlannerStream = {
+    runId: "",
     stage: "idle" as "idle" | "partitioning" | "planning" | "done" | "error",
     items: [] as TranscriptItem[],
     partitionerThinking: "",
@@ -453,22 +454,16 @@ export default function App() {
     setModal(null);
   });
 
-  // 待办跟进队列（用于运行中输入的 Follow-up 指令）
-  const [followUpQueue, setFollowUpQueue] = useState<Array<{ id: string; text: string; node?: string; timestamp: number }>>([]);
-
-  const handleCancelFollowUp = (id: string) => {
-    setFollowUpQueue((prev) => prev.filter((item) => item.id !== id));
-  };
-
   const handleSendMessage = (
     val: string,
-    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[] }
-  ) => {
+    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[] },
+    rerunConfirmed = false
+  ): boolean | void | Promise<boolean> => {
     const text = val.trim();
-    if (!text) return;
+    if (!text) return false;
     if (repositoryBlocked) {
       setError(repositoryStatus?.error || "正在确认项目绑定，请稍后重试。");
-      return;
+      return false;
     }
     const selectedNode = state.graph.nodes.find((item) => item.name === selected);
     const targetNodeName = selectedNode
@@ -479,7 +474,11 @@ export default function App() {
 
     // 用户 approve graph 之后禁止再向 planner 发送消息
     if (!targetNodeName && state.approved) {
-      return;
+      return false;
+    }
+    if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
+      setError("发布期间不能介入节点，请等待发布结束或处理发布失败。");
+      return false;
     }
 
     const displayMsg = options?.displayText || text;
@@ -494,6 +493,8 @@ export default function App() {
         role: "user",
         text: textToRecord,
         timestamp: Date.now(),
+        runId: state.runId,
+        node: targetNodeName,
       };
       setSessionEntries((prev) => [...prev, newMsg]);
       setActiveLeafId(newMsg.id);
@@ -527,40 +528,83 @@ export default function App() {
       return;
     }
 
-    if (active) {
-      const displayLabel = targetNodeName && targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
-      recordMessage(`${displayLabel}${displayMsg}`);
-      run(async () => {
-        await requireRepository(state.config?.repository || config.repository);
-        try {
-          await runtimeService.control("stop");
-        } catch {
-          // ignore
-        }
-        await new Promise((r) => setTimeout(r, 120));
-        if (targetNodeName) {
-          const snap = await runtimeService.control("intervene", {
-            node: targetNodeName,
-            instruction: text,
-          });
-          setState(snap);
-        } else {
-          const baseGoal = state.graph.originalGoal || goal;
-          const combinedGoal = baseGoal ? `${baseGoal}\n\n补充执行要求：\n${text}` : text;
-          handlePlanGoal(combinedGoal, options);
-        }
-      });
-      return;
+    if (active && targetNodeName) {
+      const execution = [...state.executions].reverse().find((item) => item.node === targetNodeName && item.status === "running");
+      if (execution) {
+        const displayLabel = targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
+        const message = recordMessage(`${displayLabel}${displayMsg}`);
+        run(async () => {
+          try {
+            await requireRepository(state.config?.repository || config.repository);
+            const snap = await runtimeService.control("steer", {
+              runId: state.runId, executionId: execution.id, node: targetNodeName, instruction: text,
+            });
+            setState(snap);
+          } catch (error) {
+            setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
+            setActiveLeafId(parentId);
+            throw error;
+          }
+        });
+        return;
+      }
+      setError("请等待正在运行的节点结束后，再介入已完成的节点。");
+      return false;
     }
 
-    if (selectedNode) {
-      // 针对具体选定节点的微调与介入
-      recordMessage(`[@${selectedNode.name}] ${displayMsg}`);
-      control("intervene", { node: selectedNode.name, instruction: text });
-    } else if (routeType === "serial" && state.graph.nodes.length > 0) {
-      // 串行单任务介入
-      recordMessage(displayMsg);
-      control("intervene", { node: state.graph.nodes[0]?.name || "task", instruction: text });
+    // Only a completed node needs confirmation. Unfinished nodes with no
+    // downstream work yet accept follow-up instructions without a dialog.
+    if (!rerunConfirmed && targetNodeName && state.nodes[targetNodeName]?.status === "done") {
+      const affected = new Set([targetNodeName]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const edge of state.graph.edges) {
+          if (!edge.feedback && affected.has(edge.from) && !affected.has(edge.to)) {
+            affected.add(edge.to);
+            changed = true;
+          }
+        }
+      }
+      const descendants = [...affected].filter((name) => name !== targetNodeName);
+      const confirmedRunId = state.runId;
+      return new Promise<boolean>((resolve) => {
+        setConfirmModal({
+          title: `向 @${targetNodeName} 追加消息？`,
+          message: `节点 @${targetNodeName} 已完成。确认向它追加一条用户消息吗？`,
+          detail: `为处理追加的消息，该节点需要再次运行。${descendants.length ? `\n下游节点将被阻断并重跑：${descendants.join("、")}。` : ""}\n已有结果可能被覆盖。`,
+          confirmText: "确认追加消息",
+          danger: true,
+          onCancel: () => resolve(false),
+          onConfirm: () => {
+            if (viewedRunIdRef.current !== confirmedRunId) {
+              setError("运行已切换，请在当前运行重新发送消息。");
+              resolve(false);
+              return;
+            }
+            resolve(handleSendMessage(val, options, true) !== false);
+          },
+        });
+      });
+    }
+
+    if (targetNodeName) {
+      // A submitted instruction is an explicit request to continue even if the
+      // previous execution was stopped and left the graph paused/dirty.
+      const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg);
+      run(async () => {
+        let snap: Snapshot;
+        try {
+          await requireRepository(state.config?.repository || config.repository);
+          snap = await runtimeService.control("intervene", { node: targetNodeName, instruction: text });
+        } catch (error) {
+          setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
+          setActiveLeafId(parentId);
+          throw error;
+        }
+        setState(snap);
+        if (snap.paused) setState(await runtimeService.control("resume"));
+      });
     } else {
       // 未选中具体节点：处于与 AI 规划器对话面板，追加规划要求并触发重新规划
       const baseGoal = state.graph.originalGoal || goal;
@@ -1165,6 +1209,7 @@ export default function App() {
     setIsPlanning(true);
     setRouteType("undecided");
     setPlannerStream({
+      runId: "",
       stage: "partitioning",
       items: [],
       partitionerThinking: "",
@@ -1677,6 +1722,7 @@ export default function App() {
       setSelected("");
       setPlannerStream((prev) => ({
         ...prev,
+        runId: snapshot.runId,
         items: closeRunningThinkingItem(prev.items),
         stage: "done",
       }));
@@ -1867,25 +1913,6 @@ export default function App() {
     }
   }, [isPlanning]);
 
-  // 自动出队并派发排队跟进的 Follow-up 指令
-  const prevActiveRef = useRef(active);
-  useEffect(() => {
-    if (prevActiveRef.current && !active && followUpQueue.length > 0) {
-      const nextItem = followUpQueue[0];
-      setFollowUpQueue((prev) => prev.slice(1));
-      const targetNodeName = nextItem.node || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
-      if (targetNodeName) {
-        control("intervene", { node: targetNodeName, instruction: nextItem.text });
-      } else {
-        if (state.approved) return;
-        const baseGoal = state.graph.originalGoal || goal;
-        const combinedGoal = baseGoal ? `${baseGoal}\n\n补充执行要求：\n${nextItem.text}` : nextItem.text;
-        handlePlanGoal(combinedGoal);
-      }
-    }
-    prevActiveRef.current = active;
-  }, [active, followUpQueue, routeType, state.graph.nodes, state.graph.originalGoal, goal]);
-
   const nodes = useMemo<WorkNode[]>(() => {
     const layers = computeExecutionLayers(state.graph, state.plan);
     const getNodeX = (nodeName: string) => {
@@ -2037,6 +2064,7 @@ export default function App() {
   const isLandingView = state.graph.nodes.length === 0 &&
     !isPlanning &&
     !recoveredPlanning &&
+    !failedPlanning &&
     mainTab === "graph";
 
   return (
@@ -2055,8 +2083,6 @@ export default function App() {
         runs={runs}
         runLabels={runLabels}
         currentRunId={state.runId}
-        activeBackendRunId={activeBackendRunId}
-        activeBackendPhase={activeBackendPhase}
         runIndicators={runIndicators}
         onLoadRun={(id) => run(async () => {
           clearRunUnread(id);
@@ -2115,36 +2141,7 @@ export default function App() {
             {active && <button type="button" onClick={() => control("cancel")} disabled={busy}>停止执行</button>}
           </div>
         )}
-        {activeBackendRunId &&
-          ["running", "publishing", "merging"].includes(activeBackendPhase ?? "") &&
-          state.runId !== activeBackendRunId && (
-            <div className="background-run-banner">
-              <div className="background-run-info">
-                <span className="pulse-indicator" />
-                <span>
-                  后台有任务正在执行中: <strong>Graph {activeBackendRunId.slice(0, 8)}</strong>
-                </span>
-              </div>
-              <button
-                type="button"
-                className="background-run-action-btn"
-                onClick={() => run(async () => {
-                  clearRunUnread(activeBackendRunId);
-                  if (activeBackendRunId !== state.runId) setPlannerStream(initialPlannerStream);
-                  const snapshot = await runtimeService.loadRun(activeBackendRunId);
-                  const deduced = deduceRouteType(snapshot);
-                  setState(snapshot);
-                  markSnapshotRead(snapshot);
-                  setRouteType(deduced);
-                  setGoal(snapshot.graph.originalGoal || "");
-                  if (activeBackendRunId !== state.runId) resetSessionMessages();
-                  setSelected("");
-                })}
-              >
-                返回运行中的任务
-              </button>
-            </div>
-        )}
+
 
         <AnimatePresence mode="wait" initial={false}>
           {isLandingView ? (
@@ -2199,9 +2196,9 @@ export default function App() {
                 onInterrupt={handleInterrupt}
                 isPlanning={isPlanning || !!recoveredPlanning}
                 plannerStream={plannerStream}
+                recoveredPlanningId={recoveredPlanning?.planningId}
                 onSendMessage={handleSendMessage}
-                followUpQueue={followUpQueue}
-                onCancelFollowUp={handleCancelFollowUp}
+                onRequestConfirmation={setConfirmModal}
                 onControl={control}
                 onSave={save}
                 onOpenEditor={() => setModal("editor")}
