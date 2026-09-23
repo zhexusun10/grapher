@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { Settings2, FolderGit2, RotateCcw, Terminal, Check, X, Copy, Sliders } from "lucide-react";
+import { Settings2, RotateCcw, Terminal, Check, X, Copy, Sliders } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
 import { ProviderSettings } from "../ProviderSettings";
 
@@ -9,30 +9,36 @@ interface SettingsModalProps {
   onClose: () => void;
   config: Config;
   setConfig: React.Dispatch<React.SetStateAction<Config>>;
-  repoInfo: RepositoryInfo | null;
+  repoInfo?: RepositoryInfo | null;
   dataPath: string;
   effectiveRoleModels?: Record<string, string>;
   envOverrides?: Record<string, string>;
-  onOpenProject: () => void;
-  onDetectRepository: (path?: string) => void;
-  onResetWorkspace: () => void;
-  onClearHistory: () => void;
+  onOpenProject?: () => void;
+  onDetectRepository?: (path?: string) => void;
+  onResetWorkspace?: () => void;
+  onClearHistory?: () => void;
   onSaveConfig: () => void;
 }
+
+const PARALLEL_STEPS = [
+  { value: 1, tag: "串行" },
+  { value: 2 },
+  { value: 3 },
+  { value: 4, tag: "推荐" },
+  { value: 5 },
+  { value: 6 },
+  { value: 7 },
+  { value: 8, tag: "极限" },
+];
 
 export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   isOpen,
   onClose,
   config,
   setConfig,
-  repoInfo,
   dataPath,
   effectiveRoleModels,
   envOverrides,
-  onOpenProject,
-  onDetectRepository,
-  onResetWorkspace,
-  onClearHistory,
   onSaveConfig,
 }) => {
   const reduceMotion = useReducedMotion();
@@ -83,62 +89,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 
         <div className="settings-modal-content">
           <div className="settings-sections">
-            {/* Section 1: 本地项目工作区 */}
-            <div className="settings-card">
-              <div className="settings-card-title">
-                <FolderGit2 size={16} />
-                <h4>工作区</h4>
-              </div>
-              <div className="setting-input-row">
-                <input
-                  className="repo-path-input"
-                  value={config.repository}
-                  onChange={(e) => setConfig({ ...config, repository: e.target.value })}
-                  placeholder="/Users/username/Projects/my-app"
-                />
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={onOpenProject}
-                  title="调起系统文件夹选择器"
-                >
-                  <FolderGit2 size={14} /> 浏览本地目录
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => onDetectRepository(config.repository || undefined)}
-                  title="检测 Git 信息"
-                >
-                  <RotateCcw size={14} /> 检测状态
-                </button>
-              </div>
-
-              {repoInfo ? (
-                <div className="repo-status-card">
-                  <div className="repo-status-header">
-                    <span className="repo-name">
-                      <FolderGit2 size={15} />
-                      <strong>{repoInfo.name}</strong>
-                    </span>
-                    <span className={`status-badge ${repoInfo.clean ? "clean" : "warning"}`}>
-                      {repoInfo.clean ? "✓ 工作树干净 (Clean)" : "⚠ 有未提交改动 (Dirty)"}
-                    </span>
-                  </div>
-                  <div className="repo-status-meta">
-                    <span>当前分支: <code>{repoInfo.branch}</code></span>
-                    {repoInfo.head && <span>HEAD: <code>{repoInfo.head}</code></span>}
-                  </div>
-                  <div className="repo-status-path">{repoInfo.path}</div>
-                </div>
-              ) : (
-                <div className="repo-status-hint">
-                  尚未选择工作区
-                </div>
-              )}
-            </div>
-
-            {/* Section 2: 模型与 Provider */}
+            {/* Section 1: 模型与 Provider */}
             <div className="settings-card">
               <div className="settings-card-title">
                 <Terminal size={16} />
@@ -154,11 +105,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               />
             </div>
 
-            {/* Section 3: 执行并发与反馈重试控制 */}
+            {/* Section 2: 并发控制 */}
             <div className="settings-card">
               <div className="settings-card-title">
                 <Sliders size={16} />
-                <h4>并发与重试</h4>
+                <h4>并发控制</h4>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div className="settings-control-row">
@@ -175,44 +126,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                       value={config.maxParallel ?? 4}
                       onChange={(e) => setConfig((prev) => ({ ...prev, maxParallel: Number(e.target.value) }))}
                       className="settings-range-slider"
+                      aria-label="并发任务上限"
                     />
-                    <div className="settings-slider-ticks">
-                      <span>1 (串行)</span>
-                      <span>2</span>
-                      <span>4 (推荐)</span>
-                      <span>6</span>
-                      <span>8 (极限)</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="settings-control-row">
-                  <div className="settings-control-label">
-                    <span>最大反馈重试</span>
-                    <span className="settings-control-badge">{config.maxFeedback ?? 3} 次</span>
-                  </div>
-                  <div className="settings-slider-wrapper">
-                    <input
-                      type="range"
-                      min={0}
-                      max={10}
-                      step={1}
-                      value={config.maxFeedback ?? 3}
-                      onChange={(e) => setConfig((prev) => ({ ...prev, maxFeedback: Number(e.target.value) }))}
-                      className="settings-range-slider"
-                    />
-                    <div className="settings-slider-ticks">
-                      <span>0 (不重试)</span>
-                      <span>3 (推荐)</span>
-                      <span>5</span>
-                      <span>10</span>
+                    <div className="settings-slider-ticks-track">
+                      {PARALLEL_STEPS.map((step) => {
+                        const isSelected = (config.maxParallel ?? 4) === step.value;
+                        return (
+                          <button
+                            key={step.value}
+                            type="button"
+                            className={`settings-slider-tick-item ${isSelected ? "active" : ""}`}
+                            style={{ left: `calc(8px + (100% - 16px) * ${(step.value - 1) / 7})` }}
+                            onClick={() => setConfig((prev) => ({ ...prev, maxParallel: step.value }))}
+                            title={`设置为 ${step.value} 并发${step.tag ? ` (${step.tag})` : ""}`}
+                          >
+                            <span className="tick-number">{step.value}</span>
+                            {step.tag && <span className="tick-tag">{step.tag}</span>}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Section 4: 数据管理 */}
+            {/* Section 3: 存储与重置 */}
             <div className="settings-card">
               <div className="settings-card-title">
                 <RotateCcw size={16} />

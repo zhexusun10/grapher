@@ -72,7 +72,7 @@ Edge 只表示真实的文件状态或执行顺序依赖。不要仅为了让图
 - `repository`：项目绝对路径。
 - `model`：Pi 模型，可写为 `provider/model`。
 - `maxParallel`：Graph 并发数，范围 1 到 8。
-- `maxFeedback`：每条 feedback 路径最大自动修订次数，范围 0 到 10。
+- `maxFeedback`：每条 feedback 路径最大自动修订次数，固定最多 3 次。
 
 常用环境变量：
 

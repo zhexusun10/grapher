@@ -42,6 +42,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
                 .map(|mode| vec![("GRAPHER_MODE", mode.into())])
                 .unwrap_or_default(),
             system_prompt: None,
+            images: None,
         },
         |text| output.push_str(&text),
     );
@@ -273,6 +274,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             extra_args: Vec::new(),
             environment: Vec::new(),
             system_prompt: Some("Custom system prompt content for test"),
+            images: None,
         },
         |text| output.push_str(&text),
     );
@@ -316,6 +318,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             extra_args: Vec::new(),
             environment: Vec::new(),
             system_prompt: None,
+            images: None,
         },
         |text| node_agent_out.push_str(&text),
     );
@@ -355,6 +358,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             extra_args: Vec::new(),
             environment: Vec::new(),
             system_prompt: None,
+            images: None,
         },
         |text| planner_out.push_str(&text),
     );
@@ -390,6 +394,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             extra_args: vec!["--no-tools", "--no-context-files"],
             environment: Vec::new(),
             system_prompt: None,
+            images: None,
         },
         |text| partitioner_out.push_str(&text),
     );
@@ -454,6 +459,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
                     ("GRAPHER_WORKSPACE_ROOT", "/wrong/root".into()),
                 ],
                 system_prompt: None,
+                images: None,
             },
             |text| output.push_str(&text),
         )
@@ -514,6 +520,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             extra_args: vec![],
             environment: vec![],
             system_prompt: None,
+            images: None,
         },
         |text| output.push_str(&text),
     )
@@ -612,6 +619,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             extra_args: Vec::new(),
             environment: Vec::new(),
             system_prompt: None,
+            images: None,
         },
         |text| output.push_str(&text),
     );

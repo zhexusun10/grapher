@@ -69,7 +69,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
             </li>
             <li>Planner 已直接修改源项目；拒绝计划不会撤销这些修改。</li>
             <li>批准会将源项目当前变更暂存并提交为基线，包括您此前未提交的修改；这会改变 Git 暂存状态。被 Git 忽略的未跟踪文件不会随快照传递。</li>
-            <li>每个节点分配独立隔离会话；验证失败最多自动反馈重试 {state.config?.maxFeedback ?? config.maxFeedback} 次。</li>
+            <li>每个节点分配独立隔离会话；验证失败最多自动反馈重试 3 次。</li>
             <li>节点执行期间在隔离工作区内修改文件；整图完成后会将结果写回 {state.config?.repository || config.repository}。</li>
             <li className="warning">
               Execution Instance 可执行 shell 指令并调用模型，请审视节点任务定义后再行批准。

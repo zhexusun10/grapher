@@ -108,7 +108,12 @@ pub struct Config {
     #[serde(default = "default_thinking_level")]
     pub thinking_level: String,
     pub max_parallel: usize,
+    #[serde(default = "default_max_feedback")]
     pub max_feedback: usize,
+}
+
+fn default_max_feedback() -> usize {
+    3
 }
 
 fn default_thinking_level() -> String {
@@ -189,6 +194,12 @@ pub enum EventKind {
     },
     Approved {
         base: String,
+    },
+    GraphRevised {
+        graph: Graph,
+        planning_id: String,
+        planning: PlanningSummary,
+        invalidated: Vec<String>,
     },
     Paused {
         paused: bool,
@@ -330,7 +341,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.config = Some(config.clone());
             state.planning_id = planning_id.clone();
             state.planning = planning.clone();
-            state.plan = crate::compiler::compile(graph, true).ok();
+            state.plan = crate::compiler::compile_legacy(graph, true).ok();
             state.nodes = graph
                 .nodes
                 .iter()
@@ -345,6 +356,29 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.approved = true;
             state.base = base.clone();
             state.phase = "running".into();
+        }
+        EventKind::GraphRevised { graph, planning_id, planning, invalidated } => {
+            let changed = state.graph != *graph;
+            state.graph = graph.clone();
+            state.plan = crate::compiler::compile_legacy(graph, true).ok();
+            state.planning_id = Some(planning_id.clone());
+            state.planning = Some(planning.clone());
+            state.nodes.retain(|name, _| graph.nodes.iter().any(|node| node.name == *name));
+            for node in &graph.nodes {
+                state.nodes.entry(node.name.clone()).or_default();
+            }
+            for name in invalidated {
+                let node = state.nodes.get_mut(name).unwrap();
+                node.status = "dirty".into();
+                node.head = None;
+                node.error = None;
+                node.revision += 1;
+            }
+            state.feedback_counts.retain(|key, _| graph.edges.iter().any(|edge| edge.feedback && key == &format!("{}->{}", edge.from, edge.to)));
+            if changed {
+                state.publication = None;
+                state.phase = if state.paused { "paused" } else { "running" }.into();
+            }
         }
         EventKind::Paused { paused } => {
             state.paused = *paused;
@@ -531,4 +565,19 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
     }
     state.events.push(event.clone());
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    #[serde(default = "default_image_type")]
+    pub r#type: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    pub data: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+fn default_image_type() -> String {
+    "image".to_string()
 }

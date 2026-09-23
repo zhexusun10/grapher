@@ -1,5 +1,5 @@
 use grapher::{
-    compiler::{compile, downstream},
+    compiler::{compile, compile_legacy, downstream},
     engine::feedback,
     model::*,
     runtime::{perform, Runtime},
@@ -103,6 +103,50 @@ fn compiler_emits_dependency_layers_and_ignores_feedback_for_topology() {
         vec![vec!["spec"], vec!["backend", "frontend"], vec!["review"]]
     );
     assert_eq!(plan.terminals, vec!["review"]);
+}
+
+#[test]
+fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
+    let mut candidate = Graph {
+        original_goal: "Implement and verify two branches".into(),
+        nodes: ["server", "server_tests", "web", "web_tests", "acceptance"]
+            .into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() })
+            .collect(),
+        edges: [
+            ("server", "server_tests", false),
+            ("server", "acceptance", false),
+            ("web", "web_tests", false),
+            ("web", "acceptance", false),
+            ("server_tests", "acceptance", false),
+            ("web_tests", "acceptance", false),
+            ("acceptance", "server_tests", true),
+        ]
+        .into_iter()
+        .map(|(from, to, feedback)| Edge {
+            from: from.into(), to: to.into(), relation: String::new(), feedback,
+        })
+        .collect(),
+    };
+    let diagnostics = compile(&candidate, false).unwrap_err();
+    assert_eq!(diagnostics.iter().filter(|item| item.code == "E209").count(), 2);
+    assert!(diagnostics.iter().any(|item| item.message.contains("server → server_tests → acceptance")));
+    assert!(diagnostics.iter().any(|item| item.message.contains("web → web_tests → acceptance")));
+    assert!(compile_legacy(&candidate, true).is_ok());
+    let mut historical = Snapshot::default();
+    grapher::model::apply(&mut historical, &Event {
+        sequence: 1, timestamp: 0,
+        kind: EventKind::Created {
+            graph: candidate.clone(), config: config(), planning_id: None, planning: None,
+        },
+    });
+    assert_eq!(historical.graph, candidate);
+    assert!(historical.plan.is_some());
+    candidate.edges.retain(|edge| {
+        !(edge.to == "acceptance" && (edge.from == "server" || edge.from == "web"))
+    });
+    assert!(compile(&candidate, true).is_ok());
+    assert!(candidate.edges.iter().any(|edge| edge.feedback));
 }
 
 #[test]
@@ -570,6 +614,22 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     let host_ref_b =
         workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).unwrap();
     assert_eq!(host_ref_b, head_b);
+}
+
+#[test]
+fn graph_result_cannot_discard_its_prepared_commit() {
+    let temp = TempDir::new().unwrap();
+    let repository = grapher::fixture::repository(temp.path()).unwrap();
+    let base = workspace::verify(&repository).unwrap();
+    let child = temp.path().join("child");
+    let prepared = workspace::prepare(&repository, &child, &base, &[]).unwrap();
+    workspace::verify_prepared_ancestor(&child, &prepared).unwrap();
+    workspace::git(&child, &["checkout", "--orphan", "rewritten"]).unwrap();
+    workspace::git(&child, &["add", "-A"]).unwrap();
+    workspace::git(&child, &["commit", "-m", "Rewrite history"]).unwrap();
+    assert!(workspace::verify_prepared_ancestor(&child, &prepared)
+        .unwrap_err()
+        .contains("discarded its prepared Git history"));
 }
 
 #[test]

@@ -22,13 +22,23 @@ struct NodeRpc {
 static NODE_RPC: OnceLock<Mutex<HashMap<String, NodeRpc>>> = OnceLock::new();
 
 /// Acknowledged by Pi's RPC protocol, not merely by a successful pipe write.
-pub fn steer(execution_id: &str, instruction: &str) -> Result<(), String> {
+pub fn steer(
+    execution_id: &str,
+    instruction: &str,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+) -> Result<(), String> {
     let rpc = NODE_RPC.get_or_init(Default::default).lock().map_err(|e| e.to_string())?
         .get(execution_id).cloned().ok_or("Node execution is no longer accepting messages")?;
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = mpsc::channel();
     rpc.pending.lock().map_err(|e| e.to_string())?.insert(id.clone(), tx);
-    let command = serde_json::json!({"id": id, "type": "prompt", "message": instruction, "streamingBehavior": "steer"}).to_string();
+    let mut command_val = serde_json::json!({"id": id, "type": "prompt", "message": instruction, "streamingBehavior": "steer"});
+    if let Some(imgs) = images {
+        if !imgs.is_empty() {
+            command_val["images"] = serde_json::json!(imgs);
+        }
+    }
+    let command = command_val.to_string();
     if rpc.sender.send(command).is_err() {
         rpc.pending.lock().map_err(|e| e.to_string())?.remove(&id);
         return Err("Node RPC input closed".into());
@@ -330,6 +340,7 @@ pub struct PiRequest<'request> {
     pub extra_args: Vec<&'request str>,
     pub environment: Vec<(&'request str, String)>,
     pub system_prompt: Option<&'request str>,
+    pub images: Option<&'request [crate::model::ImageAttachment]>,
 }
 
 pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<String, String> {
@@ -534,7 +545,13 @@ fn run_pi_with_timeout(
             .insert(id.clone(), NodeRpc { sender: tx.clone(), pending: pending.clone() });
         rpc_guard = Some(NodeRpcGuard(id));
         rpc_pending = Some(pending);
-        let initial = serde_json::json!({"id": initial_rpc_id, "type": "prompt", "message": request.task}).to_string();
+        let mut initial_val = serde_json::json!({"id": initial_rpc_id, "type": "prompt", "message": request.task});
+        if let Some(imgs) = request.images {
+            if !imgs.is_empty() {
+                initial_val["images"] = serde_json::json!(imgs);
+            }
+        }
+        let initial = initial_val.to_string();
         tx.send(initial).map_err(|e| e.to_string())?;
         rpc_sender = Some(tx);
         thread::spawn(move || {
@@ -784,6 +801,7 @@ pub fn execute(
             extra_args,
             environment: vec![("GRAPHER_MODE", "node".into())],
             system_prompt: None,
+            images: None,
         },
         on_output,
     )
@@ -840,6 +858,7 @@ sys.stdin.read()
                     task: "original", session_dir: &session, extension: None,
                     tools: None, session_id: None, extra_args: vec![],
                     environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None,
+                    images: None,
                 }, |line| {
                     if line.contains("tool_execution_start") { let _ = ready_tx.send(()); }
                     output.push_str(&line);
@@ -848,10 +867,70 @@ sys.stdin.read()
             }
         });
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        steer(&id, "new instruction").unwrap();
+        steer(&id, "new instruction", None).unwrap();
         let (result, output) = worker.join().unwrap();
         assert_eq!(result.unwrap(), "steered result");
         assert!(output.contains("steered result"));
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn node_rpc_steer_transmits_images_properly() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("rpc_images.py");
+        fs::write(&script, r#"import json, sys
+first = json.loads(sys.stdin.readline())
+assert first['type'] == 'prompt' and first['message'] == 'original'
+print(json.dumps({'type':'response','command':'prompt','success':True}), flush=True)
+print(json.dumps({'type':'tool_execution_start'}), flush=True)
+second = json.loads(sys.stdin.readline())
+assert second['type'] == 'prompt' and second['streamingBehavior'] == 'steer'
+assert second['message'] == 'instruction with image'
+assert 'images' in second and len(second['images']) == 1
+assert second['images'][0]['mimeType'] == 'image/png'
+assert second['images'][0]['data'] == 'ZmFrZQ=='
+print(json.dumps({'type':'response','id':second['id'],'command':'prompt','success':True}), flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'image received'}]}}), flush=True)
+print(json.dumps({'type':'agent_settled'}), flush=True)
+sys.stdin.read()
+"#).unwrap();
+        let config = Config {
+            engine: "pi".into(), pi_command: "python3".into(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0,
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let session = temp.path().join(&id);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn({
+            let root = temp.path().to_path_buf();
+            move || {
+                let mut output = String::new();
+                let result = run_pi(PiRequest {
+                    role: PiRole::NodeAgent, config: &config, cwd: &root,
+                    task: "original", session_dir: &session, extension: None,
+                    tools: None, session_id: None, extra_args: vec![],
+                    environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None,
+                    images: None,
+                }, |line| {
+                    if line.contains("tool_execution_start") { let _ = ready_tx.send(()); }
+                    output.push_str(&line);
+                });
+                (result, output)
+            }
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let test_image = crate::model::ImageAttachment {
+            r#type: "image".into(),
+            mime_type: "image/png".into(),
+            data: "ZmFrZQ==".into(),
+            name: Some("test.png".into()),
+        };
+        steer(&id, "instruction with image", Some(vec![test_image])).unwrap();
+        let (result, output) = worker.join().unwrap();
+        assert_eq!(result.unwrap(), "image received");
+        assert!(output.contains("image received"));
     }
 
     #[cfg(feature = "fixture")]
@@ -875,6 +954,7 @@ sys.stdin.read()
             session_dir: &temp.path().join("session"), extension: None, tools: None,
             session_id: None, extra_args: vec![],
             environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None,
+            images: None,
         }, |_| {}, Some(Duration::from_secs(5)));
         assert_eq!(result.unwrap_err(), "no model available");
     }
@@ -914,6 +994,7 @@ sys.stdin.read()
                     extra_args: vec![],
                     environment: vec![],
                     system_prompt: None,
+                    images: None,
                 },
                 |line| output.push_str(&line),
                 Some(Duration::from_millis(150)),
@@ -957,6 +1038,7 @@ sys.stdin.read()
             extra_args: vec![],
             environment: vec![],
             system_prompt: None,
+            images: None,
         }, |_| {});
         match original {
             Some(value) => std::env::set_var(&variable, value),

@@ -1,6 +1,6 @@
 use crate::model::{Graph, Plan};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Diagnostic {
@@ -25,7 +25,44 @@ pub fn downstream(graph: &Graph, start: &str) -> BTreeSet<String> {
     seen
 }
 
+fn alternate_dependency_path(graph: &Graph, from: &str, to: &str) -> Option<Vec<String>> {
+    let mut queue = VecDeque::from([from.to_string()]);
+    let mut previous = BTreeMap::<String, Option<String>>::from([(from.to_string(), None)]);
+    while let Some(name) = queue.pop_front() {
+        let neighbors: BTreeSet<_> = graph.edges.iter()
+            .filter(|edge| !edge.feedback && edge.from == name && !(edge.from == from && edge.to == to))
+            .map(|edge| edge.to.clone())
+            .collect();
+        for next in neighbors {
+            if previous.contains_key(&next) {
+                continue;
+            }
+            previous.insert(next.clone(), Some(name.clone()));
+            if next == to {
+                let mut path = vec![next];
+                while let Some(Some(parent)) = previous.get(path.last().unwrap()) {
+                    path.push(parent.clone());
+                }
+                path.reverse();
+                return Some(path);
+            }
+            queue.push_back(next);
+        }
+    }
+    None
+}
+
 pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>> {
+    compile_with_policy(graph, final_check, true)
+}
+
+/// Replay persisted graphs from older runs without changing their historical
+/// plan. New graph mutations and runs use `compile`, which rejects redundancy.
+pub fn compile_legacy(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>> {
+    compile_with_policy(graph, final_check, false)
+}
+
+fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool) -> Result<Plan, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut add = |code: &str, message: String| {
         errors.push(Diagnostic {
@@ -184,6 +221,22 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
     for edge in graph.edges.iter().filter(|edge| edge.feedback) {
         if !downstream(graph, &edge.to).contains(&edge.from) {
             errors.push(Diagnostic { code: "E207".into(), message: format!("Feedback {} → {} requires a dependency path from {} to {}. Nodes currently reachable from {} through dependencies: {}. Feedback does not provide execution ordering.", edge.from, edge.to, edge.to, edge.from, edge.to, downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", ")) });
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    if reject_redundant {
+        for edge in &dependencies {
+            if let Some(path) = alternate_dependency_path(graph, &edge.from, &edge.to) {
+                errors.push(Diagnostic {
+                    code: "E209".into(),
+                    message: format!(
+                        "Redundant dependency {} → {}. Remove this direct edge: {} already provides execution ordering and carries upstream filesystem state to {}.",
+                        edge.from, edge.to, path.join(" → "), edge.to
+                    ),
+                });
+            }
         }
     }
     if !errors.is_empty() {

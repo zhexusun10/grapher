@@ -665,6 +665,14 @@ pub(crate) fn independent_heads(repository: &Path, heads: &[String]) -> Result<V
     Ok(result)
 }
 
+/// A graph node must retain its prepared commit so dependency paths carry
+/// their upstream filesystem history.
+pub fn verify_prepared_ancestor(path: &Path, prepared_head: &str) -> Result<(), String> {
+    git(path, &["merge-base", "--is-ancestor", prepared_head, "HEAD"])
+        .map(|_| ())
+        .map_err(|_| "Node rewrote or discarded its prepared Git history; downstream dependencies cannot safely inherit its result".into())
+}
+
 /// Snapshot an isolated node and import its commit into the host repository.
 /// Repository identity stays in the host Runtime rather than the agent checkout.
 pub fn snapshot_node(path: &Path, repository: &Path, node_id: &str) -> Result<String, String> {

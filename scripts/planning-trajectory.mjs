@@ -47,8 +47,10 @@ const reports = files.map(file => {
           lastGraphFailure = mutation.diagnostics ?? [];
           graphRejectionStreak++;
           longestGraphRejectionStreak = Math.max(longestGraphRejectionStreak, graphRejectionStreak);
-          for (const diagnostic of lastGraphFailure) {
-            graphDiagnostics[diagnostic.code] = (graphDiagnostics[diagnostic.code] ?? 0) + 1;
+          const diagnosticCodes = e.result?.details?.diagnosticCodes
+            ?? lastGraphFailure.map(diagnostic => diagnostic.code).filter(Boolean);
+          for (const code of diagnosticCodes) {
+            graphDiagnostics[code] = (graphDiagnostics[code] ?? 0) + 1;
           }
         }
       }

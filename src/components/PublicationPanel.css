@@ -2,7 +2,11 @@
 .publication-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .publication-heading span { color: #526277; }
 .publication-panel p { margin: 8px 0; overflow-wrap: anywhere; }
-.publication-panel.completed { border-color: #99c8a7; background: #f1faf4; }
+.publication-panel.completed { position: absolute; z-index: 30; top: 12px; left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 36px); margin: 0; border-color: #99c8a7; background: #f1faf4; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.15); }
+.publication-panel.completed .publication-heading { flex-wrap: nowrap; }
+.publication-panel.completed .publication-heading span { min-width: 0; }
+.publication-close { margin-left: auto; flex-shrink: 0; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #526277; cursor: pointer; }
+.publication-close:hover { background: #dceee2; color: #1d5731; }
 .publication-panel.failed { border-color: #e4b6a3; background: #fff5f0; }
 .publication-error { color: #a02e17; white-space: pre-wrap; }
 .publication-mergers summary { cursor: pointer; font-weight: 600; padding: 8px 0; }

@@ -1,38 +1,42 @@
 import React from "react";
 import { BaseEdge, getBezierPath, Position, type EdgeProps } from "@xyflow/react";
 
-function getStraightEntryPath({
-  sourceX,
-  sourceY,
-  targetX,
-  targetY,
-  leadIn = 20,
-}: {
-  sourceX: number;
-  sourceY: number;
-  targetX: number;
-  targetY: number;
-  leadIn?: number;
-}): [string, number, number] {
-  if (sourceX === targetX) {
+function workflowPath(sourceX: number, sourceY: number, targetX: number, targetY: number) {
+  const bend = Math.max(18, Math.abs(targetY - sourceY) * 0.46);
+  return [
+    `M${sourceX},${sourceY} C${sourceX},${sourceY + bend} ${targetX},${targetY - bend} ${targetX},${targetY}`,
+    (sourceX + targetX) / 2,
+    (sourceY + targetY) / 2,
+  ] as [string, number, number];
+}
+
+// An individual, rounded lane: leave and enter ONLY at the edge's card ports.
+// No artificial branch/junction is created on the canvas.
+function lanePath(sourceX: number, sourceY: number, targetX: number, targetY: number,
+  laneX: number, sidePort: boolean): [string, number, number] {
+  const direction = laneX < Math.min(sourceX, targetX) ? -1 : 1;
+  if (sidePort) {
+    const vertical = targetY >= sourceY ? 1 : -1;
+    const radius = Math.min(18, Math.abs(targetY - sourceY) / 3);
     return [
-      `M${sourceX},${sourceY} L${targetX},${targetY}`,
-      sourceX,
+      `M${sourceX},${sourceY} H${laneX - direction * radius} Q${laneX},${sourceY} ${laneX},${sourceY + vertical * radius}` +
+      ` V${targetY - vertical * radius} Q${laneX},${targetY} ${laneX - direction * radius},${targetY} H${targetX}`,
+      laneX,
       (sourceY + targetY) / 2,
     ];
   }
-
-  // 保证终点前有一段纯垂直段，使得连线从正上方垂直扎入箭头中心，多条依赖线在此汇合
-  const effectiveLeadIn = Math.min(leadIn, Math.max(10, (targetY - sourceY) * 0.3));
-  const midY = targetY - effectiveLeadIn;
-  const cY1 = sourceY + (midY - sourceY) * 0.45;
-  const cY2 = midY - (midY - sourceY) * 0.15;
-
-  const path = `M${sourceX},${sourceY} C${sourceX},${cY1} ${targetX},${cY2} ${targetX},${midY} L${targetX},${targetY}`;
-  const labelX = (sourceX + targetX) / 2;
-  const labelY = (sourceY + midY) / 2;
-
-  return [path, labelX, labelY];
+  const exitY = sourceY + 32;
+  const enterY = targetY - 32;
+  const vertical = enterY >= exitY ? 1 : -1;
+  const radius = Math.min(16, Math.abs(enterY - exitY) / 3);
+  return [
+    `M${sourceX},${sourceY} V${exitY - radius} Q${sourceX},${exitY} ${sourceX + direction * radius},${exitY}` +
+    ` H${laneX - direction * radius} Q${laneX},${exitY} ${laneX},${exitY + vertical * radius}` +
+    ` V${enterY - vertical * radius} Q${laneX},${enterY} ${laneX - direction * radius},${enterY}` +
+    ` H${targetX + direction * radius} Q${targetX},${enterY} ${targetX},${enterY + radius} V${targetY}`,
+    laneX,
+    (sourceY + targetY) / 2,
+  ];
 }
 
 export const SmoothWorkflowEdge = React.memo(({
@@ -54,19 +58,12 @@ export const SmoothWorkflowEdge = React.memo(({
   interactionWidth,
   data,
 }: EdgeProps) => {
-  const isStandardTop = targetPosition === Position.Top && sourcePosition === Position.Bottom;
-  const [path, labelX, labelY] = isStandardTop
-    ? getStraightEntryPath({ sourceX, sourceY, targetX, targetY })
-    : getBezierPath({
-        sourceX,
-        sourceY,
-        sourcePosition,
-        targetX,
-        targetY,
-        targetPosition,
-      });
-
-  const effectiveMarkerEnd = markerEnd || "url(#workflow-arrow-default)";
+  const routeX = typeof data?.routeX === "number" ? data.routeX : undefined;
+  const [path, labelX, labelY] = routeX !== undefined
+    ? lanePath(sourceX, sourceY, targetX, targetY, routeX, !!data?.routeSide)
+    : sourcePosition === Position.Bottom && targetPosition === Position.Top
+      ? workflowPath(sourceX, sourceY, targetX, targetY)
+      : getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
 
   return (
     <BaseEdge
@@ -74,7 +71,7 @@ export const SmoothWorkflowEdge = React.memo(({
       path={path}
       style={style}
       className={data?.isNew ? "edge-entering" : undefined}
-      markerEnd={effectiveMarkerEnd}
+      markerEnd={markerEnd || "url(#workflow-arrow-default)"}
       markerStart={markerStart}
       label={label}
       labelX={labelX}

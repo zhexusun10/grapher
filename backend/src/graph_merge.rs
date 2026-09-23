@@ -157,6 +157,7 @@ pub fn resolve_with_merger_for_node(
             extra_args,
             environment,
             system_prompt: Some(&prompt),
+            images: None,
         },
         |text| {
             if let Err(error) = log.write_all(text.as_bytes()) {

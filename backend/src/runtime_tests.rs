@@ -80,6 +80,73 @@ fn approval_captures_planner_files_before_allocating_graph_workspaces() {
 }
 
 #[test]
+fn planner_revision_keeps_approval_and_unaffected_node_results() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: ["keep", "change", "child"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        edges: vec![Edge { from: "change".into(), to: "child".into(), relation: "files".into(), feedback: false }],
+    };
+    let (_temp, source, mut runtime) = setup(true, graph.clone());
+    runtime.approve().unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let base = runtime.state.base.clone();
+    let roots = runtime.jobs().unwrap();
+    assert_eq!(roots.len(), 2);
+    for job in roots {
+        let name = &job.execution.node;
+        let path = Path::new(&job.execution.worktree);
+        workspace::prepare(&source, path, &job.execution.before, &runtime.parents(name)).unwrap();
+        fs::write(path.join(format!("{name}.txt")), name).unwrap();
+        let head = workspace::snapshot_node(path, &source, name).unwrap();
+        runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
+    }
+    // Both roots finished while child has not started.
+    let keep_head = runtime.state.nodes["keep"].head.clone();
+    let mut revised = graph;
+    revised.nodes.iter_mut().find(|node| node.name == "change").unwrap().task = "new task".into();
+    revised.nodes.push(Node { name: "added".into(), task: "new node".into() });
+    let planning = PlanningSummary { planning_id: "revision-1".into(), ..Default::default() };
+    runtime.revise_graph(revised, planning).unwrap();
+    assert_eq!(runtime.state.run_id, run_id);
+    assert_eq!(runtime.state.base, base);
+    assert!(runtime.state.approved);
+    assert_eq!(runtime.state.nodes["keep"].status, "done");
+    assert_eq!(runtime.state.nodes["keep"].head, keep_head);
+    assert_eq!(runtime.state.nodes["change"].status, "dirty");
+    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert_eq!(runtime.state.nodes["added"].status, "waiting");
+    let replay = runtime.store.load(&run_id).unwrap();
+    assert_eq!(replay.nodes["keep"].head, keep_head);
+    assert_eq!(replay.nodes["child"].status, "dirty");
+    assert_eq!(replay.planning_id.as_deref(), Some("revision-1"));
+    let jobs = runtime.jobs().unwrap();
+    assert!(jobs.iter().all(|job| job.execution.node != "keep" && job.execution.node != "child"));
+}
+
+#[test]
+fn graph_revision_invalidates_only_nodes_with_new_inputs() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: ["source", "other", "consumer"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        edges: vec![],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph.clone());
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    for job in jobs {
+        runtime.emit(EventKind::Finished { execution_id: job.execution.id, head: runtime.state.base.clone(), output: "done".into() }).unwrap();
+    }
+    let mut revised = graph;
+    revised.edges.push(Edge { from: "source".into(), to: "consumer".into(), relation: "new input".into(), feedback: false });
+    runtime.revise_graph(revised, PlanningSummary { planning_id: "new-edge".into(), ..Default::default() }).unwrap();
+    assert_eq!(runtime.state.nodes["source"].status, "done");
+    assert_eq!(runtime.state.nodes["other"].status, "done");
+    assert_eq!(runtime.state.nodes["consumer"].status, "dirty");
+    assert_eq!(runtime.state.nodes["consumer"].head, None);
+    assert_eq!(runtime.jobs().unwrap().iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["consumer"]);
+}
+
+#[test]
 fn shadow_prepare_refuses_user_edits_after_approval() {
     let (_temp, source, mut runtime) = setup(false, single());
     runtime.approve().unwrap();

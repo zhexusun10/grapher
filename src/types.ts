@@ -40,6 +40,13 @@ export interface PlanningSummary {
   repository?: string;
 }
 
+export interface SkillItem {
+  name: string;
+  description: string;
+  path: string;
+  scope: "workspace" | "global" | "builtin";
+}
+
 export interface Snapshot {
   runId: string;
   planType?: "serial" | "graph";
@@ -115,11 +122,19 @@ export const example: Graph = {
 export type PlanRouteType = "undecided" | "serial" | "graph";
 export type PlanMode = "auto" | "serial" | "graph";
 
+export interface ImageAttachment {
+  type: "image";
+  mimeType: string;
+  data: string; // Base64 encoded string
+  name?: string;
+}
+
 export interface ChatMessage {
   id: string;
   parentId?: string | null;
   role: "user" | "assistant";
   text: string;
+  images?: ImageAttachment[];
   timestamp?: number;
   runId?: string;
   node?: string;

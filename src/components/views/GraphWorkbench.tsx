@@ -9,7 +9,7 @@ import { motion, AnimatePresence } from "motion/react";
 import {
   Snapshot, PlanRouteType, RepositoryInfo, Config,
   Graph, Execution, Status, PlanningSummary, emptyGraph, TranscriptItem,
-  ChatMessage, PlanMode
+  ChatMessage, PlanMode, ImageAttachment
 } from "../../types";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
@@ -75,8 +75,9 @@ const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean
 );
 StreamingAssistantBubble.displayName = "StreamingAssistantBubble";
 
-function EditableUserBubble({ text, editing, draft, onDraftChange, onEdit, onCancel, onSend, disabled, children }: {
+function EditableUserBubble({ text, images, editing, draft, onDraftChange, onEdit, onCancel, onSend, disabled, children }: {
   text: string;
+  images?: ImageAttachment[];
   editing: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
@@ -126,6 +127,19 @@ function EditableUserBubble({ text, editing, draft, onDraftChange, onEdit, onCan
           className={`chat-bubble-user${editing ? " editing" : ""}`}
           style={editing && editSize ? { width: editSize.width, height: editSize.height } : undefined}
         >
+          {images && images.length > 0 && (
+            <div className="chat-user-images-preview">
+              {images.map((img, idx) => (
+                <div key={idx} className="chat-user-image-thumb">
+                  <img
+                    src={`data:${img.mimeType};base64,${img.data}`}
+                    alt={img.name || `图片 ${idx + 1}`}
+                    className="chat-user-img"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
           {editing ? (
             <textarea
               ref={textareaRef}
@@ -266,7 +280,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       graphFitFrameRef.current = requestAnimationFrame(() => {
         graphFitFrameRef.current = null;
         if (graphFlowRef.current !== instance) return;
-        void instance.fitView({ padding: 0.15, minZoom: 0.3, maxZoom: 1.6 }).then(() => {
+        void instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6 }).then(() => {
           if (graphFlowRef.current === instance) setReadyGraphKey(key);
         });
       });
@@ -500,14 +514,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       : serialNodeState?.status === "running"
   );
   const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialWorking) : isPlanning;
-  const isPlannerDisabled = !isSerialExecution && Boolean(state.approved);
-
-  useEffect(() => {
-    if (isPlannerDisabled && !selectedNode && editingMessage) {
-      onCancelEditMessage?.();
-    }
-  }, [isPlannerDisabled, selectedNode, editingMessage, onCancelEditMessage]);
-
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
   const graphKey = `${state.runId || state.graph.originalGoal}:${state.graph.nodes.map((node) => node.name).join("|")}`;
   const graphViewportReady = readyGraphKey === graphKey;
@@ -525,7 +531,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (nodes.length > 0 && nodes.length !== prevNodesCountRef.current) {
       prevNodesCountRef.current = nodes.length;
       if (graphFlowRef.current) {
-        void graphFlowRef.current.fitView({ padding: 0.18, duration: 400, minZoom: 0.3, maxZoom: 1.5 });
+        void graphFlowRef.current.fitView({ padding: 0.24, duration: 400, minZoom: 0.3, maxZoom: 1.5 });
       }
     }
   }, [nodes.length]);
@@ -535,7 +541,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (edges.length > 0 && edges.length !== prevEdgesCountRef.current) {
       prevEdgesCountRef.current = edges.length;
       if (graphFlowRef.current) {
-        void graphFlowRef.current.fitView({ padding: 0.18, duration: 450, minZoom: 0.3, maxZoom: 1.5 });
+        void graphFlowRef.current.fitView({ padding: 0.24, duration: 450, minZoom: 0.3, maxZoom: 1.5 });
       }
     }
   }, [edges.length]);
@@ -778,6 +784,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               )}
               <PromptBox
                 compact
+                repository={config?.repository}
                 onSubmit={(val, options) => onSendMessage(val, options)}
                 placeholder={
                   !state.approved
@@ -812,13 +819,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     {msg.role === "user" ? (
                       <EditableUserBubble
                         text={msg.text.trim()}
+                        images={msg.images}
                         editing={editingMessage?.id === msg.id}
                         draft={editPrefillText ?? ""}
                         onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                        onEdit={!isPlannerDisabled && (!locked || isPlanning) && onEditMessage ? () => onEditMessage(msg) : undefined}
+                        onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage(msg) : undefined}
                         onCancel={() => onCancelEditMessage?.()}
                         onSend={onSendMessage}
-                        disabled={isPlannerDisabled || (locked && !isPlanning)}
+                        disabled={locked && !isPlanning}
                       >
                         {branchInfo?.[msg.id] && branchInfo[msg.id].count > 1 && (
                           <div className="chat-branch-pager">
@@ -1133,14 +1141,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               )}
               <PromptBox
                 compact
+                repository={config?.repository}
                 onSubmit={(val, options) => onSendMessage(val, options)}
                 placeholder={
-                  isPlannerDisabled
-                    ? "拓扑图已批准执行，无法再向规划器发送消息"
-                    : isPlanning
+                  isPlanning
                     ? "输入补充规划或纠偏要求，发送将实时转向 (Steer)…"
                     : isSerialExecution
                     ? "向当前任务发送介入指令…"
+                    : state.approved
+                    ? "向规划器修改当前图，保留未受影响的节点结果…"
                     : ""
                 }
                 isExecuting={isMainViewWorking}
@@ -1148,7 +1157,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 onInterrupt={onInterrupt}
                 disabled={
                   !!editingMessage ||
-                  isPlannerDisabled ||
                   (locked && !isPlanning)
                 }
               />

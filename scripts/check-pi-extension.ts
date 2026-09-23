@@ -75,44 +75,41 @@ try {
   await node({ name: "nullable-build", task: null, delete: true });
   await node({ name: "nullable-review", delete: true });
   const firstMutation = await node({ name: "build", task: "Build it" });
+  assert.deepEqual(Object.keys(firstMutation), ["content"]);
   const firstResult = JSON.parse(firstMutation.content[0].text);
-  assert.equal(firstResult.mutationApplied, true);
-  assert.equal(firstResult.structuralCheck, "passed");
-  assert.equal(firstResult.accepted, undefined);
-  assert.equal(firstResult.graphCompiled, undefined);
+  assert.deepEqual(firstResult, { mutationApplied: true });
   await node({ name: "review", task: "Review it" });
   const beforeFeedback = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   const prematureFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true })).content[0].text);
   assert.equal(prematureFeedback.mutationApplied, false);
-  assert.equal(prematureFeedback.structuralCheck, "failed");
-  assert.equal(prematureFeedback.diagnostics[0].code, "E207");
-  assert.match(prematureFeedback.diagnostics[0].message, /dependency path from build to review/);
-  assert.deepEqual(prematureFeedback.savedTopology.edges, []);
+  assert.deepEqual(Object.keys(prematureFeedback), ["mutationApplied", "diagnostics"]);
+  assert.match(prematureFeedback.diagnostics[0], /dependency path from build to review/);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeFeedback);
   const missingEndpoint = JSON.parse((await edge({ from: "build", to: "missing", feedback: false })).content[0].text);
-  assert.equal(missingEndpoint.diagnostics[0].code, "E204");
-  assert.match(missingEndpoint.diagnostics[0].message, /Missing: missing/);
-  assert.deepEqual(missingEndpoint.savedTopology.nodes.sort(), ["build", "review"]);
-  const dependency = JSON.parse((await edge({ from: "build", to: "review" })).content[0].text);
-  assert.equal(dependency.mutationApplied, true);
+  assert.match(missingEndpoint.diagnostics[0], /Missing: missing/);
+  assert.match(missingEndpoint.diagnostics[0], /Existing nodes: build, review/);
+  const dependency = await edge({ from: "build", to: "review" });
+  assert.deepEqual(Object.keys(dependency), ["content"]);
+  assert.deepEqual(JSON.parse(dependency.content[0].text), { mutationApplied: true });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges[0].feedback, false);
   const before = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
   const rejected = await edge({ from: "review", to: "build", feedback: false });
-  assert.match(JSON.stringify(rejected), /E101/);
+  assert.deepEqual(Object.keys(rejected), ["content", "details"]);
+  assert.deepEqual(rejected.details.diagnosticCodes, ["E101"]);
+  assert.doesNotMatch(rejected.content[0].text, /E101/);
   const cycle = JSON.parse(rejected.content[0].text);
   assert.equal(cycle.mutationApplied, false);
-  assert.deepEqual(cycle.savedTopology.edges, JSON.parse(before).edges);
-  assert.match(cycle.diagnostics[0].message, /build → review/);
-  assert.match(cycle.diagnostics[0].message, /review → build/);
+  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), before);
+  assert.match(cycle.diagnostics[0], /build → review/);
+  assert.match(cycle.diagnostics[0], /review → build/);
   const toolResultHook = extension.handlers.get("tool_result")![0];
   assert.deepEqual(await toolResultHook({ toolName: "edge", details: rejected.details, isError: false }), { isError: true });
   const accepted = await node({ name: "review", task: "Review it" });
   assert.equal(await toolResultHook({ toolName: "node", details: accepted.details, isError: false }), undefined);
-  assert.equal(JSON.parse(accepted.content[0].text).graph, undefined);
+  assert.deepEqual(JSON.parse(accepted.content[0].text), { mutationApplied: true });
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), before);
   const repairedFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true })).content[0].text);
-  assert.equal(repairedFeedback.mutationApplied, true);
-  assert.equal(repairedFeedback.structuralCheck, "passed");
+  assert.deepEqual(repairedFeedback, { mutationApplied: true });
   const portableGraph = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   for (const task of [`Work at ${repository}.`, `Read ${repository}/sample.txt`]) {
     await node({ name: "build", task });
@@ -143,15 +140,27 @@ try {
     { from: "integration", to: "verification" },
   ];
   const nodeBatch = JSON.parse((await call("node", { nodes: batchNodes })).content[0].text);
-  assert.equal(nodeBatch.mutationApplied, true);
+  assert.deepEqual(nodeBatch, { mutationApplied: true });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
   const batchResult = JSON.parse((await call("edge", { edges: batchEdges })).content[0].text);
-  assert.equal(batchResult.mutationApplied, true);
-  assert.deepEqual(batchResult.plan.executionBatches, [["contract"], ["parser", "search"], ["integration"], ["verification"]]);
+  assert.deepEqual(batchResult, { mutationApplied: true });
   assert.equal(readFileSync(compilerCalls, "utf8"), "compile\ncompile\n");
   const batchSaved = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   assert.equal(JSON.parse(batchSaved).originalGoal, "Batch fixture");
   assert.ok(JSON.parse(batchSaved).edges.every((edge: { feedback: boolean }) => edge.feedback === false));
+  const redundant = await call("edge", { edges: [
+    { from: "contract", to: "integration", relation: "Integration uses the contract" },
+    { from: "contract", to: "verification", relation: "Verification uses the contract" },
+  ] });
+  const redundantResult = JSON.parse(redundant.content[0].text);
+  assert.equal(redundantResult.mutationApplied, false);
+  assert.equal(redundantResult.diagnostics.length, 2);
+  assert.deepEqual(redundant.details.diagnosticCodes, ["E209", "E209"]);
+  assert.match(redundantResult.diagnostics[0], /contract → parser → integration/);
+  assert.equal(redundantResult.retryHint, undefined);
+  assert.deepEqual(Object.keys(redundantResult), ["mutationApplied", "diagnostics"]);
+  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
+  assert.deepEqual(await toolResultHook({ toolName: "edge", details: redundant.details, isError: false }), { isError: true });
   for (const [toolName, edits, code] of [
     ["edge", { edges: [{ from: "verification", to: "contract" }] }, "E101"],
     ["edge", { edges: [{ from: "contract", to: "missing" }] }, "E204"],
@@ -167,8 +176,9 @@ try {
     const response = await call(toolName, edits);
     const rejectedBatch = JSON.parse(response.content[0].text);
     assert.equal(rejectedBatch.mutationApplied, false);
-    assert.equal(rejectedBatch.diagnostics[0].code, code);
-    assert.deepEqual(rejectedBatch.savedTopology, { nodes: batchNodes.map(n => n.name), edges: JSON.parse(batchSaved).edges });
+    assert.equal(typeof rejectedBatch.diagnostics[0], "string");
+    assert.equal(response.details.diagnosticCodes[0], code);
+    assert.deepEqual(Object.keys(rejectedBatch), ["mutationApplied", "diagnostics"]);
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
     assert.deepEqual(await toolResultHook({ toolName, details: response.details, isError: false }), { isError: true });
   }
@@ -186,10 +196,10 @@ try {
     const response = await call(toolName, { [key]: edits });
     const rejectedDuplicate = JSON.parse(response.content[0].text);
     assert.equal(rejectedDuplicate.mutationApplied, false);
-    assert.equal(rejectedDuplicate.diagnostics[0].code, "duplicate-target");
-    assert.equal(rejectedDuplicate.diagnostics[0].path, `${key}[2]`);
-    assert.ok(rejectedDuplicate.diagnostics[0].message.includes(`${key}[1]`));
-    assert.match(rejectedDuplicate.diagnostics[0].message, /contract/);
+    assert.deepEqual(response.details.diagnosticCodes, ["duplicate-target"]);
+    assert.match(rejectedDuplicate.diagnostics[0], new RegExp(`${key}\\[2\\]`));
+    assert.ok(rejectedDuplicate.diagnostics[0].includes(`${key}[1]`));
+    assert.match(rejectedDuplicate.diagnostics[0], /contract/);
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
     assert.equal(readFileSync(compilerCalls, "utf8"), beforeDuplicates);
     assert.deepEqual(await toolResultHook({ toolName, details: response.details, isError: false }), { isError: true });
@@ -222,11 +232,22 @@ try {
   const rewired = JSON.parse((await call("edge", { edges: [
     { from: "parser", to: "contract" },
     { from: "contract", to: "parser", delete: true },
+    { from: "parser", to: "integration", delete: true },
     { from: "verification", to: "parser", feedback: true },
   ] })).content[0].text);
   assert.equal(rewired.mutationApplied, true);
-  assert.deepEqual(rewired.plan.roots, ["parser"]);
+  assert.deepEqual(rewired, { mutationApplied: true });
   // Node deletion removes incident edges; other targets can be replaced atomically.
+  assert.equal(JSON.parse((await call("node", { nodes: [
+    { name: "contract", delete: true },
+    { name: "search", task: "Final replacement" },
+  ] })).content[0].text).mutationApplied, false);
+  // The failed mutation leaves the saved graph untouched; add a direct path
+  // around the deleted node in the same batch before removing it.
+  assert.equal(JSON.parse((await call("edge", { edges: [
+    { from: "parser", to: "integration" },
+    { from: "parser", to: "contract", delete: true },
+  ] })).content[0].text).mutationApplied, true);
   assert.equal(JSON.parse((await call("node", { nodes: [
     { name: "contract", delete: true },
     { name: "search", task: "Final replacement" },
@@ -241,7 +262,9 @@ try {
   ] })).content[0].text).mutationApplied, true);
   const beforeUnavailable = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   process.env.GRAPHER_COMPILER_PATH = join(root, "missing-compiler");
-  assert.match((await call("node", { nodes: [{ name: "fix", task: "Changed" }] })).content[0].text, /compiler-unavailable/);
+  const unavailable = await call("node", { nodes: [{ name: "fix", task: "Changed" }] });
+  assert.deepEqual(unavailable.details.diagnosticCodes, ["compiler-unavailable"]);
+  assert.match(unavailable.content[0].text, /missing-compiler ENOENT/);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeUnavailable);
   process.env.GRAPHER_COMPILER_PATH = compilerPath;
 

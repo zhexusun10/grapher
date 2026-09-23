@@ -76,7 +76,7 @@ pub fn main(input_path: &str) -> Result<(), String> {
         role,
         config: &config, cwd: &repository, task: &task,
         session_dir: &root.join("session"), extension: if stage == "planner" { Some(&extension) } else { None },
-        tools: Some(tools), session_id: None, extra_args, environment, system_prompt: Some(&system),
+        tools: Some(tools), session_id: None, extra_args, environment, system_prompt: Some(&system), images: None,
     }, |text| { if let Err(error) = log.write_all(text.as_bytes()) { log_error = Some(error.to_string()); } });
     let result = match log_error { Some(error) => Err(format!("Cannot retain planning evidence: {error}")), None => result };
     write_json(&root.join("result.json"), &json!({"status":if result.is_ok(){"PASS"}else{"FAIL"},"durationMs":started.elapsed().as_millis(),"response":result.as_ref().ok(),"error":result.as_ref().err()}));

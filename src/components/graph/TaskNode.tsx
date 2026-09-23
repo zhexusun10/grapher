@@ -48,12 +48,8 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
       className={`task-node ${data.selected ? "selected" : ""} ${data.status}`}
       title={`${data.task}${data.hint ? `\n\n依赖关系:\n${data.hint}` : ""}\n尝试: ${data.attempts}\n工作区: ${data.worktree || "未生成"}`}
     >
-      <Handle
-        id="top"
-        type="target"
-        position={Position.Top}
-        className={`react-flow__handle ${data.hasTop ? "connected" : ""}`}
-      />
+      <Handle id="top" type="target" position={Position.Top}
+        className={`react-flow__handle ${data.hasTop ? "connected" : ""}`} />
       <div className="node-heading">
         <span className={`node-icon ${data.reviewer ? "review" : ""}`}>
           {data.reviewer ? <ShieldCheck size={16} /> : <Code2 size={16} />}
@@ -76,40 +72,16 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
           {data.attempts > 0 ? `#${data.attempts} 尝试` : "尚未执行"}
         </span>
       </div>
-      <Handle
-        id="bottom"
-        type="source"
-        position={Position.Bottom}
-        className={`react-flow__handle ${data.hasBottom ? "connected" : ""}`}
-      />
-      <Handle
-        id="left-target"
-        type="target"
-        position={Position.Left}
-        style={{ top: "35%" }}
-        className={`react-flow__handle ${data.hasLeftTarget ? "connected feedback" : ""}`}
-      />
-      <Handle
-        id="left-source"
-        type="source"
-        position={Position.Left}
-        style={{ top: "65%" }}
-        className={`react-flow__handle ${data.hasLeftSource ? "connected feedback" : ""}`}
-      />
-      <Handle
-        id="right-target"
-        type="target"
-        position={Position.Right}
-        style={{ top: "35%" }}
-        className={`react-flow__handle ${data.hasRightTarget ? "connected feedback" : ""}`}
-      />
-      <Handle
-        id="right-source"
-        type="source"
-        position={Position.Right}
-        style={{ top: "65%" }}
-        className={`react-flow__handle ${data.hasRightSource ? "connected feedback" : ""}`}
-      />
+      <Handle id="bottom" type="source" position={Position.Bottom}
+        className={`react-flow__handle ${data.hasBottom ? "connected" : ""}`} />
+      <Handle id="left-target" type="target" position={Position.Left} style={{ top: "35%" }}
+        className={`react-flow__handle ${data.hasLeftTarget ? "connected feedback" : ""}`} />
+      <Handle id="left-source" type="source" position={Position.Left} style={{ top: "65%" }}
+        className={`react-flow__handle ${data.hasLeftSource ? "connected feedback" : ""}`} />
+      <Handle id="right-target" type="target" position={Position.Right} style={{ top: "35%" }}
+        className={`react-flow__handle ${data.hasRightTarget ? "connected feedback" : ""}`} />
+      <Handle id="right-source" type="source" position={Position.Right} style={{ top: "65%" }}
+        className={`react-flow__handle ${data.hasRightSource ? "connected feedback" : ""}`} />
     </div>
   );
 });

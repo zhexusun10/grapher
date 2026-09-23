@@ -7,7 +7,8 @@ import {
   defaultConfig, emptyGraph, emptySnapshot,
   type Config, type Graph, type Plan, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType, type TranscriptItem, type NodeState,
-  type PlanningSummary, type Execution, type PlanMode, type ChatMessage
+  type PlanningSummary, type Execution, type PlanMode, type ChatMessage,
+  type ImageAttachment
 } from "./types";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
@@ -89,7 +90,9 @@ const edgeTypes = { workflow: SmoothWorkflowEdge };
 
 function computeExecutionLayers(graph: Graph, plan?: Plan | null): string[][] {
   if (plan?.executionBatches && plan.executionBatches.length > 0) {
-    return plan.executionBatches;
+    const scheduled = new Set(plan.executionBatches.flat());
+    const missing = graph.nodes.map((node) => node.name).filter((name) => !scheduled.has(name));
+    return missing.length ? [...plan.executionBatches, missing] : plan.executionBatches;
   }
   const nodeNames = graph.nodes.map((n) => n.name);
   if (nodeNames.length === 0) return [];
@@ -132,12 +135,12 @@ export default function App() {
     }
   });
   const [config, setConfig] = useState<Config>(() => {
-    let initialConfig: Config = { ...defaultConfig };
+    let initialConfig: Config = { ...defaultConfig, maxFeedback: 3 };
     try {
       const savedConfig = localStorage.getItem("grapher_config");
       if (savedConfig) {
         const parsed = JSON.parse(savedConfig);
-        initialConfig = { ...initialConfig, ...parsed, model: "" };
+        initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: 3 };
       }
     } catch {}
     try {
@@ -152,7 +155,7 @@ export default function App() {
         }
       }
     } catch {}
-    return initialConfig;
+    return { ...initialConfig, maxFeedback: 3 };
   });
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
   const [effectiveRoleModels, setEffectiveRoleModels] = useState<Record<string, string>>({});
@@ -397,15 +400,11 @@ export default function App() {
 
   // 开始编辑消息
   const handleStartEditMessage = useCallback((msg: ChatMessage) => {
-    const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
-    if (!selected && !isSerialExecution && state.approved) {
-      return;
-    }
     setEditingMessage(msg);
     // 剥离可能存在的 [@node] 格式前缀以便用户编辑纯指令
     const cleanText = msg.text.replace(/^\[@[^\]]+\]\s*/, "");
     setEditPrefillText(cleanText);
-  }, [routeType, selected, state.approved, state.graph.nodes.length]);
+  }, []);
 
   const handleCancelEditMessage = useCallback(() => {
     setEditingMessage(null);
@@ -456,7 +455,7 @@ export default function App() {
 
   const handleSendMessage = (
     val: string,
-    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[] },
+    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[]; images?: ImageAttachment[] },
     rerunConfirmed = false
   ): boolean | void | Promise<boolean> => {
     const text = val.trim();
@@ -472,10 +471,6 @@ export default function App() {
           ? (state.graph.nodes[0]?.name || "task")
           : undefined);
 
-    // 用户 approve graph 之后禁止再向 planner 发送消息
-    if (!targetNodeName && state.approved) {
-      return false;
-    }
     if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
       setError("发布期间不能介入节点，请等待发布结束或处理发布失败。");
       return false;
@@ -492,6 +487,7 @@ export default function App() {
         parentId,
         role: "user",
         text: textToRecord,
+        images: options?.images,
         timestamp: Date.now(),
         runId: state.runId,
         node: targetNodeName,
@@ -523,7 +519,8 @@ export default function App() {
         // 4. 将新指令作为转向补充要求，重新触发规划
         const baseGoal = state.graph.originalGoal || goal;
         const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求（实时转向）：\n${text}` : text;
-        handlePlanGoal(combinedGoal, options);
+        handlePlanGoal(state.approved && routeType === "graph" ? text : combinedGoal, options,
+          routeType === "graph" ? "graph" : undefined, state.approved && routeType === "graph" ? state.runId : undefined);
       })();
       return;
     }
@@ -537,7 +534,7 @@ export default function App() {
           try {
             await requireRepository(state.config?.repository || config.repository);
             const snap = await runtimeService.control("steer", {
-              runId: state.runId, executionId: execution.id, node: targetNodeName, instruction: text,
+              runId: state.runId, executionId: execution.id, node: targetNodeName, instruction: text, images: options?.images,
             });
             setState(snap);
           } catch (error) {
@@ -609,7 +606,8 @@ export default function App() {
       // 未选中具体节点：处于与 AI 规划器对话面板，追加规划要求并触发重新规划
       const baseGoal = state.graph.originalGoal || goal;
       const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求：\n${text}` : text;
-      handlePlanGoal(combinedGoal, options);
+      handlePlanGoal(state.approved && routeType === "graph" ? text : combinedGoal, options,
+        routeType === "graph" ? "graph" : undefined, state.approved && routeType === "graph" ? state.runId : undefined);
     }
   };
 
@@ -718,6 +716,7 @@ export default function App() {
     const nextConfigObj: Config = {
       ...data.config,
       repository: activeRepo || (activeInfo ? activeInfo.path : ""),
+      maxFeedback: 3,
     };
     setConfig(nextConfigObj);
     setDataPath(data.dataPath);
@@ -1089,7 +1088,7 @@ export default function App() {
       setRepoInfo(info);
       repoPath = info.path;
     }
-    const nextConfig = { ...config, repository: repoPath };
+    const nextConfig = { ...config, repository: repoPath, maxFeedback: 3 };
     setConfig(nextConfig);
     try {
       localStorage.setItem("grapher_config", JSON.stringify(nextConfig));
@@ -1169,15 +1168,17 @@ export default function App() {
 
   const handlePlanGoal = (
     inputGoal?: string,
-    options?: { displayText?: string; rawText?: string; files?: File[] }
+    options?: { displayText?: string; rawText?: string; files?: File[]; images?: ImageAttachment[] },
+    mode?: PlanMode,
+    revisionRunId?: string
   ) => run(async () => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return;
     if (config.repository) await requireRepository(config.repository);
-    setGoal(targetGoal);
+    if (!revisionRunId) setGoal(targetGoal);
     setError("");
     setIsPlanning(true);
-    setRouteType("undecided");
+    if (!revisionRunId) setRouteType("undecided");
     setPlannerStream({
       runId: "",
       stage: "partitioning",
@@ -1197,14 +1198,16 @@ export default function App() {
       parentId,
       role: "user",
       text: options?.displayText || targetGoal,
+      images: options?.images,
       timestamp: Date.now(),
+      runId: revisionRunId,
     };
     setSessionEntries((prev) => [...prev, newMsg]);
     setActiveLeafId(newMsg.id);
     setEditingMessage(null);
     setEditPrefillText("");
 
-    setState((prev) => ({
+    if (!revisionRunId) setState((prev) => ({
       ...prev,
       graph: {
         ...prev.graph,
@@ -1519,7 +1522,7 @@ export default function App() {
             if (pEvent.toolCallId) pendingToolArgsRef.current.delete(pEvent.toolCallId);
             const args = pEvent.args || savedArgs;
 
-            if (!isErr) {
+            if (!isErr && !revisionRunId) {
               // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
               if (pEvent.toolName === "node") {
                 setState((prev) => {
@@ -1680,8 +1683,10 @@ export default function App() {
           }
         }
       },
-      planMode,
-      abortController.signal
+      mode ?? planMode,
+      abortController.signal,
+      options?.images,
+      revisionRunId
     );
       if (!planningRecovery.current(scope)) return;
       setState(snapshot);
@@ -1883,43 +1888,80 @@ export default function App() {
     }
   }, [isPlanning]);
 
-  const nodes = useMemo<WorkNode[]>(() => {
+  // Keep the same geometry for nodes and edges. Wider rows leave room for
+  // edge channels; taller layers keep adjacent-layer paths below the cards.
+  const graphLayout = useMemo(() => {
     const layers = computeExecutionLayers(state.graph, state.plan);
-    const getNodeX = (nodeName: string) => {
-      const layer = Math.max(0, layers.findIndex((batch) => batch.includes(nodeName)));
-      const batch = layers[layer] || [];
-      const idx = batch.indexOf(nodeName);
-      const safeIndex = idx >= 0 ? idx : 0;
-      return (safeIndex - (Math.max(1, batch.length) - 1) / 2) * 260 + 160;
-    };
+    const hasMergers = (state.mergers ?? []).some((m) => m.node.startsWith("merge:"));
+    const positions = new Map<string, { x: number; y: number; layer: number }>();
+    layers.forEach((batch, layer) => batch.forEach((name, index) => {
+      positions.set(name, {
+        x: (index - (batch.length - 1) / 2) * 300 + 160,
+        y: layer * (hasMergers ? 320 : 210) + 24,
+        layer,
+      });
+    }));
+    const xs = Array.from(positions.values(), (position) => position.x);
+    return { positions, minX: Math.min(...xs, 160), maxX: Math.max(...xs, 160) + 236 };
+  }, [state.graph, state.plan, state.mergers]);
 
+  const mergeTargets = useMemo(() => {
+    const targets = new Map<string, NonNullable<typeof state.mergers>[number]>();
+    for (const merger of state.mergers ?? []) {
+      const target = merger.node.startsWith("merge:") ? merger.node.slice(6) : "";
+      if (target && state.graph.nodes.some((node) => node.name === target)) targets.set(target, merger);
+    }
+    return targets;
+  }, [state.mergers, state.graph.nodes]);
+  // Reuse the card's existing top/bottom/side ports. Route only long edges
+  // around intermediate rows; never insert a new port or an off-card junction.
+  const edgeRouting = useMemo(() => {
+    const rowBounds = new Map<number, { min: number; max: number }>();
+    for (const position of graphLayout.positions.values()) {
+      const row = rowBounds.get(position.layer);
+      if (row) {
+        row.min = Math.min(row.min, position.x);
+        row.max = Math.max(row.max, position.x);
+      } else rowBounds.set(position.layer, { min: position.x, max: position.x });
+    }
+    const laneCount = { left: 0, right: 0 };
+    const center = (graphLayout.minX + graphLayout.maxX) / 2;
+    return new Map<string, { sourceHandle: string; targetHandle: string; routeX?: number; routeSide?: string }>(state.graph.edges.map((edge) => {
+      const from = graphLayout.positions.get(edge.from);
+      const to = graphLayout.positions.get(edge.to);
+      const side = from && to && (from.x + to.x + 236) / 2 > center ? "right" : "left";
+      const boundary = side === "left" ? "min" : "max";
+      const sideRoute = !!edge.feedback && !!from && !!to &&
+        from.x === rowBounds.get(from.layer)?.[boundary] &&
+        to.x === rowBounds.get(to.layer)?.[boundary];
+      const routed = !!edge.feedback || (!!from && !!to && to.layer - from.layer > 1);
+      const routeX = routed
+        ? side === "left" ? graphLayout.minX - 48 - laneCount.left++ * 14
+          : graphLayout.maxX + 48 + laneCount.right++ * 14
+        : undefined;
+      return [`${edge.from}-${edge.feedback ? "fb" : "dep"}-${edge.to}`, {
+        sourceHandle: sideRoute ? `${side}-source` : "bottom",
+        targetHandle: sideRoute ? `${side}-target` : "top",
+        routeX,
+        routeSide: sideRoute ? side : undefined,
+      }] as const;
+    }));
+  }, [state.graph.edges, graphLayout]);
+
+  const nodes = useMemo<WorkNode[]>(() => {
     const taskNodes: WorkNode[] = state.graph.nodes.map((node) => {
-      const layer = Math.max(0, layers.findIndex((batch) => batch.includes(node.name)));
+      const position = graphLayout.positions.get(node.name) ?? { x: 160, y: 24, layer: 0 };
       const nodeAttempts = state.executions.filter((execution) => execution.node === node.name);
 
-      const hasTop = state.graph.edges.some((e) => e.to === node.name && !e.feedback);
-      const hasBottom = state.graph.edges.some((e) => e.from === node.name && !e.feedback);
-      const hasLeftTarget = state.graph.edges.some(
-        (e) => e.to === node.name && e.feedback && !(getNodeX(e.from) > 160 && getNodeX(e.to) > 160)
-      );
-      const hasLeftSource = state.graph.edges.some(
-        (e) => e.from === node.name && e.feedback && !(getNodeX(e.from) > 160 && getNodeX(e.to) > 160)
-      );
-      const hasRightTarget = state.graph.edges.some(
-        (e) => e.to === node.name && e.feedback && (getNodeX(e.from) > 160 && getNodeX(e.to) > 160)
-      );
-      const hasRightSource = state.graph.edges.some(
-        (e) => e.from === node.name && e.feedback && (getNodeX(e.from) > 160 && getNodeX(e.to) > 160)
-      );
-
+      const incoming = state.graph.edges.filter((edge) => edge.to === node.name);
+      const outgoing = state.graph.edges.filter((edge) => edge.from === node.name);
+      const route = (edge: Graph["edges"][number]) =>
+        edgeRouting.get(`${edge.from}-${edge.feedback ? "fb" : "dep"}-${edge.to}`);
       return {
         id: node.name,
         type: "work",
         width: 236,
-        position: {
-          x: getNodeX(node.name),
-          y: layer * ((state.mergers ?? []).some((m) => m.node.startsWith("merge:")) ? 270 : 180) + 24,
-        },
+        position: { x: position.x, y: position.y },
         data: {
           name: node.name,
           task: node.task,
@@ -1932,30 +1974,23 @@ export default function App() {
           reviewer: state.graph.edges.some((edge) => edge.from === node.name && edge.feedback),
           selected: selected === node.name,
           worktree: nodeAttempts.at(-1)?.worktree ?? "",
-          hasTop,
-          hasBottom,
-          hasLeftTarget,
-          hasLeftSource,
-          hasRightTarget,
-          hasRightSource,
+          hasTop: incoming.some((edge) => route(edge)?.targetHandle === "top") || mergeTargets.has(node.name),
+          hasBottom: outgoing.some((edge) => route(edge)?.sourceHandle === "bottom"),
+          hasLeftTarget: incoming.some((edge) => route(edge)?.targetHandle === "left-target"),
+          hasLeftSource: outgoing.some((edge) => route(edge)?.sourceHandle === "left-source"),
+          hasRightTarget: incoming.some((edge) => route(edge)?.targetHandle === "right-target"),
+          hasRightSource: outgoing.some((edge) => route(edge)?.sourceHandle === "right-source"),
         },
       };
     });
     // A merger is an execution, not a planner node. Show one card per fan-in
     // target only after a real conflict has launched the resolver.
-    const mergeTargets = new Map<string, NonNullable<typeof state.mergers>[number]>();
-    for (const merger of state.mergers ?? []) {
-      const target = merger.node.startsWith("merge:") ? merger.node.slice(6) : "";
-      if (target && state.graph.nodes.some((node) => node.name === target)) {
-        mergeTargets.set(target, merger);
-      }
-    }
     return [...taskNodes, ...Array.from(mergeTargets, ([target, merger]): WorkNode => {
       const node = taskNodes.find((item) => item.id === target)!;
       const attempts = (state.mergers ?? []).filter((item) => item.node === `merge:${target}`).length;
       return {
         id: `merger:${target}`, type: "work", width: 236,
-        position: { x: node.position.x, y: node.position.y - 130 },
+        position: { x: node.position.x, y: node.position.y - 155 },
         data: {
           name: `merger · ${target}`, task: "合并上游分支冲突",
           status: merger.status === "completed" ? "done" : merger.status === "running" ? "running" : "failed",
@@ -1965,41 +2000,26 @@ export default function App() {
         },
       };
     })];
-  }, [state.graph, state.plan, state.nodes, state.executions, state.mergers, selected]);
+  }, [state.graph, state.nodes, state.executions, state.mergers, selected, graphLayout, edgeRouting, mergeTargets]);
 
   const edges = useMemo<Edge[]>(() => {
-    const layers = computeExecutionLayers(state.graph, state.plan);
-    const getNodeX = (nodeName: string) => {
-      const layer = Math.max(0, layers.findIndex((batch) => batch.includes(nodeName)));
-      const batch = layers[layer] || [];
-      const idx = batch.indexOf(nodeName);
-      const safeIndex = idx >= 0 ? idx : 0;
-      return (safeIndex - (Math.max(1, batch.length) - 1) / 2) * 260 + 160;
-    };
-
-    const mergeTargets = new Set((state.mergers ?? [])
-      .map((merger) => merger.node.startsWith("merge:") ? merger.node.slice(6) : "")
-      .filter((target) => target && state.graph.nodes.some((node) => node.name === target)));
     const graphEdges = state.graph.edges.map((edge) => {
       const isFeedback = !!edge.feedback;
-      const useRight = isFeedback && (getNodeX(edge.from) > 160 && getNodeX(edge.to) > 160);
-      const sourceHandle = isFeedback ? (useRight ? "right-source" : "left-source") : "bottom";
-      const targetHandle = isFeedback ? (useRight ? "right-target" : "left-target") : "top";
       const edgeId = `${edge.from}-${isFeedback ? "fb" : "dep"}-${edge.to}`;
+      const routing = edgeRouting.get(edgeId);
       const isNew = recentlyAddedEdgeIds.has(edgeId);
 
       return {
         id: edgeId,
         source: edge.from,
         target: !isFeedback && mergeTargets.has(edge.to) ? `merger:${edge.to}` : edge.to,
-        type: isFeedback ? "smoothstep" : "workflow",
-        sourceHandle,
-        targetHandle,
+        type: "workflow",
+        sourceHandle: routing?.sourceHandle ?? "bottom",
+        targetHandle: routing?.targetHandle ?? "top",
         className: isNew ? "edge-entering" : undefined,
         animated: !isFeedback && state.nodes[edge.from]?.status === "running",
-        pathOptions: isFeedback ? { borderRadius: 20, offset: 35 } : undefined,
         markerEnd: isFeedback ? "url(#workflow-arrow-feedback)" : "url(#workflow-arrow-default)",
-        data: { isNew },
+        data: { isNew, routeX: routing?.routeX, routeSide: routing?.routeSide },
         style: {
           stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
           strokeWidth: 1.5,
@@ -2023,13 +2043,13 @@ export default function App() {
         labelBgBorderRadius: 4,
       };
     });
-    return [...graphEdges, ...Array.from(mergeTargets, (target): Edge => ({
+    return [...graphEdges, ...Array.from(mergeTargets.keys(), (target): Edge => ({
       id: `merger:${target}->${target}`, source: `merger:${target}`, target,
       sourceHandle: "bottom", targetHandle: "top", type: "workflow",
       markerEnd: "url(#workflow-arrow-default)",
       style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
     }))];
-  }, [state.graph.edges, state.graph.nodes, state.plan, state.nodes, state.mergers, recentlyAddedEdgeIds]);
+  }, [state.graph.edges, state.nodes, recentlyAddedEdgeIds, edgeRouting, mergeTargets]);
 
   const isLandingView = state.graph.nodes.length === 0 &&
     !isPlanning &&
@@ -2104,14 +2124,6 @@ export default function App() {
             )}
           </AnimatePresence>
         </div>
-        {repositoryBlocked && (
-          <div className="background-run-banner" role="alert">
-            <span>{repositoryStatus?.error || "项目绑定已失效，请重新选择目录。"} <code>{config.repository}</code></span>
-            <button type="button" onClick={handleOpenProject} disabled={busy}>重新选择目录</button>
-            {active && <button type="button" onClick={() => control("cancel")} disabled={busy}>停止执行</button>}
-          </div>
-        )}
-
 
         <AnimatePresence mode="wait" initial={false}>
           {isLandingView ? (
@@ -2125,6 +2137,7 @@ export default function App() {
               onPlanModeChange={handlePlanModeChange}
               isWorking={isAgentWorking}
               onInterrupt={handleInterrupt}
+              repository={config?.repository}
             />
           ) : (
             <motion.div
@@ -2202,14 +2215,9 @@ export default function App() {
             onClose={() => setModal(null)}
             config={config}
             setConfig={setConfig}
-            repoInfo={repoInfo}
             dataPath={dataPath}
             effectiveRoleModels={effectiveRoleModels}
             envOverrides={envOverrides}
-            onOpenProject={handleOpenProject}
-            onDetectRepository={handleDetectRepository}
-            onResetWorkspace={handleResetWorkspace}
-            onClearHistory={handleClearHistory}
             onSaveConfig={handleSaveConfig}
           />
         )}

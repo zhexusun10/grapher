@@ -12,6 +12,7 @@ interface LandingViewProps {
   onPlanModeChange?: (mode: PlanMode) => void;
   isWorking?: boolean;
   onInterrupt?: () => void;
+  repository?: string;
 }
 
 export const LandingView: React.FC<LandingViewProps> = React.memo(({
@@ -23,6 +24,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
   onPlanModeChange,
   isWorking,
   onInterrupt,
+  repository,
 }) => {
   return (
     <motion.div
@@ -65,6 +67,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
         </div>
         <div style={{ width: "100%", position: "relative" }}>
           <PromptBox
+            repository={repository}
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
             onSubmit={(val, options) => onPlanGoal(val, options)}

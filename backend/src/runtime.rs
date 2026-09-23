@@ -6,6 +6,7 @@ use crate::{
     workspace,
 };
 use std::{
+    collections::BTreeSet,
     fs,
     os::fd::AsRawFd,
     path::{Path, PathBuf},
@@ -282,8 +283,10 @@ impl Runtime {
         if !known_engine(&config.engine) {
             return Err("Unknown test actuator".into());
         }
-        if !(1..=8).contains(&config.max_parallel) || config.max_feedback > 10 {
-            return Err("Concurrency must be 1–8; feedback limit must be 0–10".into());
+        let mut config = config;
+        config.max_feedback = config.max_feedback.min(3);
+        if !(1..=8).contains(&config.max_parallel) {
+            return Err("Concurrency must be 1–8; feedback limit is capped at 3".into());
         }
         #[cfg(feature = "fixture")]
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
@@ -335,6 +338,43 @@ impl Runtime {
         // after planning and approval, before any node workspace is allocated.
         let base = workspace::snapshot_repository(&repository)?;
         self.emit(EventKind::Approved { base })
+    }
+
+    /// Apply a planner revision to the approved run without discarding completed work.
+    /// Only nodes whose task or inputs changed (and their consumers) become dirty.
+    pub fn revise_graph(&mut self, graph: Graph, planning: PlanningSummary) -> Result<(), String> {
+        if !self.state.approved || self.is_serial() || self.active()
+            || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+            return Err("Wait for active executions/publication before revising the approved graph".into());
+        }
+        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        let previous = &self.state.graph;
+        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
+        if self.state.published_head.is_some() && previous.nodes.iter().any(|node| !names.contains(node.name.as_str()) && self.state.nodes[&node.name].status == "done") {
+            return Err("Cannot remove already published nodes from this run".into());
+        }
+        let mut invalidated = BTreeSet::new();
+        for node in &graph.nodes {
+            let Some(old) = previous.nodes.iter().find(|old| old.name == node.name) else { continue };
+            let inputs = |g: &Graph| {
+                g.edges.iter().filter(|edge| edge.to == node.name && !edge.feedback)
+                    .map(|edge| edge.from.clone()).collect::<BTreeSet<_>>()
+            };
+            let reviews = |g: &Graph| {
+                g.edges.iter().filter(|edge| edge.from == node.name && edge.feedback)
+                    .map(|edge| edge.to.clone()).collect::<BTreeSet<_>>()
+            };
+            if old.task != node.task || inputs(previous) != inputs(&graph) || reviews(previous) != reviews(&graph) {
+                invalidated.extend(downstream(&graph, &node.name));
+            }
+        }
+        // New consumers of changed nodes must also be invalidated; all others
+        // retain their heads, revisions, execution history and worktrees.
+        let invalidated: Vec<_> = invalidated.into_iter().collect();
+        self.emit(EventKind::GraphRevised {
+            graph, planning_id: planning.planning_id.clone(), planning, invalidated,
+        })
     }
 
     pub fn pause(&mut self, paused: bool) -> Result<(), String> {
@@ -400,6 +440,7 @@ impl Runtime {
         }
         let config = self.state.config.as_ref().ok_or("Missing config")?;
         let repository = resolve_repository(&self.root, config)?;
+        workspace::verify_prepared_ancestor(path, &execution.before)?;
         let head = workspace::snapshot_node(path, &repository, node)?;
         self.emit(EventKind::Finished {
             execution_id: execution.id,
@@ -694,7 +735,7 @@ impl Runtime {
                     .get(&format!("{}->{}", edge.from, edge.to))
                     .copied()
                     .unwrap_or(0)
-                    >= self.state.config.as_ref().unwrap().max_feedback
+                    >= self.state.config.as_ref().unwrap().max_feedback.min(3)
             {
                 self.emit(EventKind::Failed {
                     node: from.into(),
@@ -773,7 +814,7 @@ pub fn perform_with_merger(
             &mut on_merger_event,
         )
     })?;
-    on_prepared(before)?;
+    on_prepared(before.clone())?;
     let output = engine::execute(
         &job.config,
         &job.execution,
@@ -782,6 +823,9 @@ pub fn perform_with_merger(
         root,
         on_output,
     )?;
+    if path != repository {
+        workspace::verify_prepared_ancestor(path, &before)?;
+    }
     let head = workspace::snapshot_execution(path, &repository, &job.execution.node)?;
     Ok((head, output))
 }

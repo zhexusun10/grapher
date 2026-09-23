@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { X } from "lucide-react";
 import type { Execution, Publication } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
 import "./PublicationPanel.css";
@@ -12,13 +13,17 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [attemptId, setAttemptId] = useState("");
+  const [dismissedResult, setDismissedResult] = useState("");
   const execution = mergers.find(e => e.id === attemptId) ?? mergers.at(-1);
   if (!publication) return null;
+  const resultId = `${runId}:${publication.head}:${publication.completedAt}`;
+  if (publication.status === "completed" && dismissedResult === resultId) return null;
   return <section className={`publication-panel ${publication.status}`} aria-label="Graph 结果回写">
     <div className="publication-heading">
       <strong role="status" aria-live="polite">{labels[publication.status]}</strong>
       <span title="每个终点节点的提交已包含其上游依赖的结果">{publication.heads.length} 个终点结果（含上游变更）</span>
       {publication.status === "failed" && <button type="button" className="secondary" disabled={busy} onClick={onRetry}>重试回写</button>}
+      {publication.status === "completed" && <button type="button" className="publication-close" aria-label="关闭回写结果" onClick={() => setDismissedResult(resultId)}><X size={16} /></button>}
     </div>
     <p className="publication-target">目标目录：<code>{publication.repository}</code></p>
     {publication.status !== "completed" && publication.status !== "failed" && <p>节点执行已结束。正在写入最终结果，请等待回写完成后再修改目标目录。</p>}

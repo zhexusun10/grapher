@@ -9,10 +9,10 @@ test('separates rejected graph attempts, successful mutations and process outcom
   const dir = mkdtempSync(join(tmpdir(), 'grapher-trajectory-'));
   try {
     const events = [{ type: 'grapher_process_started', timestamp: 1000 }];
-    function call(id, name, start, end, mutation, isError = false) {
+    function call(id, name, start, end, mutation, isError = false, diagnosticCodes) {
       events.push({ type: 'tool_execution_start', toolCallId: id, toolName: name, grapherReceivedAt: 1000 + start, args: {} });
       events.push({ type: 'tool_execution_end', toolCallId: id, toolName: name, grapherReceivedAt: 1000 + end, isError,
-        result: { content: [{ type: 'text', text: JSON.stringify(mutation) }] } });
+        result: { content: [{ type: 'text', text: JSON.stringify(mutation) }], ...(diagnosticCodes ? { details: { diagnosticCodes } } : {}) } });
     }
     call('explore', 'bash', 10, 30, {}, true);
     const rejected = { mutationApplied: false, diagnostics: [{ code: 'mutation-input' }] };
@@ -32,9 +32,11 @@ test('separates rejected graph attempts, successful mutations and process outcom
     assert.deepEqual(failed.graphDiagnostics, { 'mutation-input': 2 });
     assert.equal(failed.toolWallMs, 21, 'overlapping tools must not double count');
     call('c', 'node', 60, 65, { mutationApplied: true });
-    call('d', 'edge', 70, 71, rejected, true);
+    call('d', 'edge', 70, 71, { mutationApplied: false, diagnostics: ['Redundant dependency'] }, true, ['E209']);
     const recovered = report();
     assert.equal(recovered.firstSuccessfulGraphMutationMs, 65);
     assert.equal(recovered.longestGraphRejectionStreak, 2);
+    assert.deepEqual(recovered.graphDiagnostics, { 'mutation-input': 2, E209: 1 });
+    assert.deepEqual(recovered.lastGraphFailure, ['Redundant dependency']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

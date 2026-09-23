@@ -1,4 +1,7 @@
-import { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, Snapshot } from "../types";
+import { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot } from "../types";
+
+const filesCache = new Map<string, string[]>();
+const skillsCache = new Map<string, SkillItem[]>();
 
 async function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   let response: Response;
@@ -59,12 +62,14 @@ export const runtimeService = {
     config: Config,
     onEvent: (event: import("../types").PlanStreamEvent) => void,
     mode?: import("../types").PlanMode,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    images?: import("../types").ImageAttachment[],
+    revisionRunId?: string
   ): Promise<Snapshot> {
     const response = await fetch("/api/plan_goal_stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, config, mode }),
+      body: JSON.stringify({ goal, config, mode, images, revisionRunId }),
       signal,
     });
 
@@ -182,4 +187,37 @@ export const runtimeService = {
   resetWorkspace: () => request<Snapshot>("reset_workspace"),
   clearHistory: () => request<void>("clear_history"),
   deleteRun: (runId: string) => request<void>("delete_run", { runId }),
+  listFiles: async (repository?: string, forceRefresh = false): Promise<string[]> => {
+    const key = repository || "__default__";
+    if (!forceRefresh && filesCache.has(key)) {
+      return filesCache.get(key)!;
+    }
+    try {
+      const res = await request<{ files: string[] }>("list_files", repository ? { repository } : {});
+      const files = res?.files || [];
+      filesCache.set(key, files);
+      return files;
+    } catch (err) {
+      console.warn("Failed to list files:", err);
+      return [];
+    }
+  },
+  listSkills: async (repository?: string, forceRefresh = false): Promise<SkillItem[]> => {
+    const key = repository || "__default__";
+    if (!forceRefresh && skillsCache.has(key)) {
+      const cached = skillsCache.get(key)!;
+      if (cached.length > 0) return cached;
+    }
+    try {
+      const res = await request<{ skills: SkillItem[] }>("list_skills", repository ? { repository } : {});
+      const skills = res?.skills || [];
+      if (skills.length > 0) {
+        skillsCache.set(key, skills);
+      }
+      return skills;
+    } catch (err) {
+      console.warn("Failed to list skills:", err);
+      return skillsCache.get(key) || [];
+    }
+  },
 };

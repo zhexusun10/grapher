@@ -10,7 +10,7 @@ if (!process.env.PATH?.includes(cargoBin)) {
 const frontendPort = 1420;
 const backendPort = Number(process.env.GRAPHER_PORT) || 1421;
 
-function killPortListeners(...ports) {
+function killPortListenersSync(...ports) {
   for (const port of ports) {
     try {
       const output = execSync(`lsof -nP -sTCP:LISTEN -ti:${port}`, {
@@ -32,7 +32,37 @@ function killPortListeners(...ports) {
   }
 }
 
-killPortListeners(frontendPort, backendPort);
+function waitForPortClosed(port, timeoutMs = 3000) {
+  const start = Date.now();
+  return new Promise((resolve) => {
+    function check() {
+      const socket = net.createConnection({ port, host: "127.0.0.1" });
+      socket.once("connect", () => {
+        socket.end();
+        socket.destroy();
+        if (Date.now() - start > timeoutMs) {
+          resolve();
+        } else {
+          setTimeout(check, 50);
+        }
+      });
+      socket.once("error", () => {
+        socket.destroy();
+        resolve();
+      });
+    }
+    check();
+  });
+}
+
+async function cleanPorts(...ports) {
+  killPortListenersSync(...ports);
+  for (const port of ports) {
+    await waitForPortClosed(port);
+  }
+}
+
+await cleanPorts(frontendPort, backendPort);
 
 const children = [];
 let stopping = false;
@@ -44,34 +74,36 @@ function stop(code = 0) {
       try { process.kill(-child.pid, "SIGTERM"); } catch {}
     }
   }
-  killPortListeners(frontendPort, backendPort);
+  killPortListenersSync(frontendPort, backendPort);
   process.exitCode = code;
 }
 
 process.on("SIGINT", () => stop());
 process.on("SIGTERM", () => stop());
 
-function waitForPort(port, timeoutMs = 60000) {
+function waitForBackend(port, timeoutMs = 60000) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
-    function check() {
+    async function check() {
       if (stopping) {
         return reject(new Error("Process stopping"));
       }
-      const socket = net.createConnection({ port, host: "127.0.0.1" });
-      socket.once("connect", () => {
-        socket.end();
-        socket.destroy();
-        resolve();
-      });
-      socket.once("error", () => {
-        socket.destroy();
-        if (Date.now() - start > timeoutMs) {
-          reject(new Error(`Timeout waiting for port ${port}`));
-        } else {
-          setTimeout(check, 150);
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/`, {
+          signal: AbortSignal.timeout(800),
+        });
+        if (res.status) {
+          return resolve();
         }
-      });
+      } catch {
+        // Backend not ready yet
+      }
+
+      if (Date.now() - start > timeoutMs) {
+        reject(new Error(`Timeout waiting for backend on port ${port}`));
+      } else {
+        setTimeout(check, 150);
+      }
     }
     check();
   });
@@ -100,7 +132,7 @@ backend.on("exit", (code) => {
 // 2. 等待后端端口就绪
 console.log(`[dev] Waiting for backend to listen on port ${backendPort}...`);
 try {
-  await waitForPort(backendPort, 60000);
+  await waitForBackend(backendPort, 60000);
 } catch (error) {
   if (!stopping) {
     console.error(`[dev] Backend startup failed or timed out: ${error.message}`);

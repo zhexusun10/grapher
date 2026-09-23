@@ -7,7 +7,7 @@ type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; ed
 
 type NodeEdit = { name: string; task?: string; delete?: boolean };
 type EdgeEdit = { from: string; to: string; relation?: string; feedback?: boolean; delete?: boolean };
-type Diagnostic = { code: string; message: string; path?: string };
+type Diagnostic = { code: string; message: string };
 
 function duplicateTargets(field: "nodes" | "edges", targets: string[]): Diagnostic[] {
   const firstIndex = new Map<string, number>();
@@ -17,8 +17,7 @@ function duplicateTargets(field: "nodes" | "edges", targets: string[]): Diagnost
     if (first === undefined) firstIndex.set(target, index);
     else diagnostics.push({
       code: "duplicate-target",
-      path: `${field}[${index}]`,
-      message: `${field}[${index}] repeats target ${target} from ${field}[${first}]. Supply one edit per target. The saved graph was not changed.`,
+      message: `${field}[${index}] repeats target ${target} from ${field}[${first}]. Supply one edit per target.`,
     });
   });
   return diagnostics;
@@ -37,12 +36,15 @@ function applyEdge(graph: Graph, edit: EdgeEdit) {
 
 export default function grapherPlanner(pi: ExtensionAPI) {
   const graphPath = process.env.GRAPHER_GRAPH_PATH!;
-  const result = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], details: { grapherRejected: isError }, isError });
-  // Pi derives execution errors from throws or tool_result hooks, not an
-  // arbitrary isError property returned by execute. Preserve diagnostics while
-  // making rejected graph mutations visible as errors in its event stream.
+  const result = (text: string, diagnosticCodes?: string[]) => ({
+    content: [{ type: "text" as const, text }],
+    ...(diagnosticCodes ? { details: { diagnosticCodes } } : {}),
+  });
+  // Pi derives execution errors from tool_result hooks, not an isError property
+  // returned by execute. Keep diagnostic codes in internal details only.
   pi.on("tool_result", async event => {
-    if ((event.details as { grapherRejected?: boolean } | undefined)?.grapherRejected) {
+    if ((event.toolName === "node" || event.toolName === "edge")
+      && (event.details as { diagnosticCodes?: string[] } | undefined)?.diagnosticCodes) {
       return { isError: true };
     }
   });
@@ -55,27 +57,21 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   function mutate(change: (graph: Graph) => Diagnostic[] | void) {
     const saved: Graph = JSON.parse(readFileSync(graphPath, "utf8"));
     const graph: Graph = structuredClone(saved);
-    const rejected = (diagnostics: { code: string; message: string }[]) => result(JSON.stringify({
+    const rejected = (diagnostics: Diagnostic[]) => result(JSON.stringify({
       mutationApplied: false,
-      structuralCheck: "failed",
-      diagnostics,
-      attemptedTopology: { nodes: graph.nodes.map(node => node.name), edges: graph.edges },
-      savedTopology: { nodes: saved.nodes.map(node => node.name), edges: saved.edges },
-    }), true);
+      diagnostics: diagnostics.map(diagnostic => diagnostic.message),
+    }), diagnostics.map(diagnostic => diagnostic.code));
     const inputErrors = change(graph);
     if (inputErrors?.length) return rejected(inputErrors);
     const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false }), encoding: "utf8", timeout: 10000 });
     if (checked.error || checked.status !== 0) return rejected([{ code: "compiler-unavailable", message: checked.error?.message || checked.stderr || `Compiler exited with status ${checked.status}` }]);
     let output;
     try { output = JSON.parse(checked.stdout); }
-    catch { return rejected([{ code: "compiler-response", message: "Compiler returned invalid JSON. The saved graph was not changed." }]); }
+    catch { return rejected([{ code: "compiler-response", message: "Compiler returned invalid JSON." }]); }
     if (output.diagnostics?.length) return rejected(output.diagnostics);
-    if (!output.plan) return rejected([{ code: "compiler-response", message: "Compiler returned no plan. The saved graph was not changed." }]);
+    if (!output.plan) return rejected([{ code: "compiler-response", message: "Compiler returned no plan." }]);
     writeFileSync(graphPath, JSON.stringify(graph));
-    // Return only new information. The planner authored the graph, while the
-    // compiler plan tells it whether the current structure is executable.
-    // Failure responses retain savedTopology because correction needs it.
-    return result(JSON.stringify({ mutationApplied: true, structuralCheck: "passed", plan: output.plan }));
+    return result(JSON.stringify({ mutationApplied: true }));
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node",

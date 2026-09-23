@@ -164,6 +164,48 @@ mod prompt_tests {
 
     #[cfg(feature = "fixture")]
     #[test]
+    fn planner_revision_updates_approved_run_without_reapproval() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let script = temp.path().join("revise.sh");
+        fs::write(&script, r#"printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Revised"}]}}'
+"#).unwrap();
+        let root = temp.path().join("runtime");
+        let mut runtime = Runtime::open(&root).unwrap();
+        let config = Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+        };
+        runtime.create(Graph {
+            original_goal: "test".into(), nodes: vec![Node { name: "keep".into(), task: "keep".into() }], edges: vec![],
+        }, config.clone()).unwrap();
+        runtime.set_route("graph").unwrap();
+        runtime.approve().unwrap();
+        let run_id = runtime.state.run_id.clone();
+        let base = runtime.state.base.clone();
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime), driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let snapshot = plan_goal_internal(
+            "Add a node".into(), config, Some("graph"), None, Some(run_id.clone()), &service,
+            |_| {}, |_| {}, |_| {},
+        ).unwrap();
+        assert_eq!(snapshot.run_id, run_id);
+        assert_eq!(snapshot.base, base);
+        assert!(snapshot.approved);
+        assert_eq!(snapshot.nodes["keep"].status, "waiting");
+        assert_eq!(snapshot.nodes["added"].status, "waiting");
+        let replay = service.runtime.lock().unwrap().store.load(&run_id).unwrap();
+        assert!(replay.approved);
+        assert!(replay.graph.nodes.iter().any(|node| node.name == "added"));
+        assert_eq!(replay.events.iter().filter(|e| matches!(e.kind, EventKind::Approved { .. })).count(), 1);
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
     fn partitioner_failure_does_not_create_or_approve_a_run() {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path().join("repository");
@@ -191,6 +233,8 @@ mod prompt_tests {
                 max_parallel: 4,
                 max_feedback: 3,
             },
+            None,
+            None,
             None,
             &service,
             |_| {},
@@ -758,6 +802,51 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     }
 
     #[test]
+    fn list_files_and_list_skills_dispatch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("runtime");
+        let service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&root).unwrap()),
+            driving: AtomicBool::new(false),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(repo.join("package.json"), "{}").unwrap();
+
+        let skill_dir = repo.join(".agents").join("skills").join("my-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: Test skill description\n---\n# My Skill\n",
+        )
+        .unwrap();
+
+        let files_res = dispatch(
+            &service,
+            "list_files",
+            serde_json::json!({ "repository": repo.to_string_lossy() }),
+        )
+        .unwrap();
+        let files: Vec<String> = serde_json::from_value(files_res["files"].clone()).unwrap();
+        assert!(files.contains(&"package.json".to_string()));
+        assert!(files.contains(&"src/main.rs".to_string()));
+
+        let skills_res = dispatch(
+            &service,
+            "list_skills",
+            serde_json::json!({ "repository": repo.to_string_lossy() }),
+        )
+        .unwrap();
+        let skills: Vec<serde_json::Value> =
+            serde_json::from_value(skills_res["skills"].clone()).unwrap();
+        assert!(skills.iter().any(|s| s["name"] == "my-skill" && s["scope"] == "workspace"));
+    }
+
+    #[test]
     fn planning_preflight_checks_model_format() {
         let mut config = Config {
             repository: "/tmp/fake".into(),
@@ -928,6 +1017,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
             #[cfg(feature = "fixture")]
             pi_args: vec![entrypoint.to_string_lossy().into()],
         });
+    config.max_feedback = config.max_feedback.min(3);
     if config.repository.is_empty() {
         if let Some(ref repo) = detected_repo {
             config.repository = repo.path.clone();
@@ -1034,7 +1124,8 @@ fn save_graph(
     Ok(runtime.state.clone())
 }
 
-fn save_config(config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
+fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
+    config.max_feedback = 3;
     let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
     let config_path = runtime.root.join("config.json");
     if let Ok(bytes) = serde_json::to_vec_pretty(&config) {
@@ -1204,10 +1295,43 @@ fn validate_role_model_preflight(role: PiRole, model: &str) -> Result<(), String
     Ok(())
 }
 
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    const TABLE: [i8; 256] = {
+        let mut t = [-1i8; 256];
+        let mut i = 0usize;
+        while i < 26 { t[(b'A' + i as u8) as usize] = i as i8; i += 1; }
+        let mut i = 0usize;
+        while i < 26 { t[(b'a' + i as u8) as usize] = (26 + i) as i8; i += 1; }
+        let mut i = 0usize;
+        while i < 10 { t[(b'0' + i as u8) as usize] = (52 + i) as i8; i += 1; }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+    let clean: Vec<u8> = input.bytes().filter(|&b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &b in &clean {
+        if b == b'=' { break; }
+        let val = TABLE[b as usize];
+        if val < 0 { continue; }
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 fn plan_goal_internal(
     goal: String,
     config: Config,
     mode: Option<&str>,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+    revision_run_id: Option<String>,
     service: &Arc<Service>,
     mut on_partitioner_line: impl FnMut(&str),
     mut on_route: impl FnMut(&Route),
@@ -1216,6 +1340,8 @@ fn plan_goal_internal(
     if goal.trim().is_empty() {
         return Err(("Enter a goal".into(), None));
     }
+    let mut config = config;
+    config.max_feedback = config.max_feedback.min(3);
     #[cfg(feature = "fixture")]
     if config.engine != "pi" {
         return Err((
@@ -1223,7 +1349,7 @@ fn plan_goal_internal(
             None,
         ));
     }
-    if service.driving.load(Ordering::SeqCst) {
+    if revision_run_id.is_none() && service.driving.load(Ordering::SeqCst) {
         return Err(("Another operation is running".into(), None));
     }
     // Allow up to 1.5s grace period if previous planning process is terminating (e.g. on steer / interrupt)
@@ -1240,7 +1366,33 @@ fn plan_goal_internal(
     }
     let service = service.clone();
     let cleanup = service.clone();
-    let result = (move || {
+    let mut resume_after = false;
+    let result = (|| {
+        let original_graph = if let Some(ref run_id) = revision_run_id {
+            if mode != Some("graph") {
+                return Err(("Approved graph revisions require graph mode".into(), None));
+            }
+            let mut runtime = service.runtime.lock().map_err(|error| (error.to_string(), None))?;
+            if runtime.state.run_id != *run_id || !runtime.state.approved
+                || runtime.state.plan_type.as_deref() != Some("graph")
+                || runtime.state.config.as_ref().map(|c| c.repository.as_str()) != Some(config.repository.as_str())
+                || matches!(runtime.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+                return Err(("Approved graph is no longer available for revision".into(), None));
+            }
+            if !runtime.state.paused && runtime.state.phase == "running" {
+                runtime.pause(true).map_err(|error| (error, None))?;
+                resume_after = true;
+            }
+            Some(runtime.state.graph.clone())
+        } else { None };
+        if original_graph.is_some() {
+            // Drain in-flight jobs; a revision must never replace graph inputs
+            // underneath an executing node or an ongoing publication.
+            while service.driving.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        let service = service.clone();
         let planning_start = std::time::Instant::now();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1262,7 +1414,7 @@ fn plan_goal_internal(
         fs::write(
             directory.join("request.json"),
             serde_json::to_vec(&serde_json::json!({
-                "goal": goal, "config": config, "mode": mode
+                "goal": goal, "config": config, "mode": mode, "revisionRunId": revision_run_id
             }))
             .map_err(|e| (e.to_string(), None))?,
         )
@@ -1280,6 +1432,33 @@ fn plan_goal_internal(
             ..Default::default()
         };
         write_planning_summary(&directory, &running).map_err(|error| (error, None))?;
+        let mut image_file_args: Vec<String> = Vec::new();
+        if let Some(ref imgs) = images {
+            if !imgs.is_empty() {
+                let attach_dir = directory.join("attachments");
+                let _ = fs::create_dir_all(&attach_dir);
+                for (idx, img) in imgs.iter().enumerate() {
+                    let ext = match img.mime_type.as_str() {
+                        "image/jpeg" | "image/jpg" => "jpg",
+                        "image/png" => "png",
+                        "image/webp" => "webp",
+                        "image/gif" => "gif",
+                        _ => "png",
+                    };
+                    let file_name = img.name.clone().unwrap_or_else(|| format!("image_{idx}.{ext}"));
+                    let file_path = attach_dir.join(&file_name);
+                    if let Some(bytes) = decode_base64(&img.data) {
+                        if fs::write(&file_path, bytes).is_ok() {
+                            if let Ok(canon) = file_path.canonicalize() {
+                                image_file_args.push(format!("@{}", canon.to_string_lossy()));
+                            } else {
+                                image_file_args.push(format!("@{}", file_path.to_string_lossy()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let plan_outcome = (|| -> Result<Snapshot, String> {
             let route_path = directory.join("route.json");
             let (route, partition_metrics) = match mode {
@@ -1313,6 +1492,9 @@ fn plan_goal_internal(
                         partitioner_extra_args.push("--thinking");
                         partitioner_extra_args.push(thinking.as_str());
                     }
+                    for arg in &image_file_args {
+                        partitioner_extra_args.push(arg.as_str());
+                    }
                     let mut log = String::new();
                     let mut partition_log =
                         fs::File::create(directory.join("partition.jsonl")).map_err(|e| e.to_string())?;
@@ -1334,6 +1516,7 @@ fn plan_goal_internal(
                                 ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
                             ],
                             system_prompt: Some(&partitioner_system_prompt),
+                            images: None,
                         },
                         |text| {
                             if let Err(error) = partition_log.write_all(text.as_bytes()) {
@@ -1377,10 +1560,10 @@ fn plan_goal_internal(
                     let graph_path = directory.join("graph.json");
                     fs::write(
                         &graph_path,
-                        serde_json::to_string(&Graph {
+                        serde_json::to_string(&original_graph.clone().unwrap_or_else(|| Graph {
                             original_goal: goal.clone(),
                             ..Graph::default()
-                        })
+                        }))
                         .unwrap(),
                     )
                     .map_err(|error| error.to_string())?;
@@ -1389,11 +1572,18 @@ fn plan_goal_internal(
                     let (default_planner_system, _) = split_prompt_template(PLANNER_PROMPT);
                     let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                         .unwrap_or_else(|_| default_planner_system.to_string());
-                    let task = format!("User query:\n\n{goal}");
+                    let task = if let Some(ref existing) = original_graph {
+                        format!("Existing approved graph:\n{}\n\nRevise this graph in place using node/edge tools. Preserve unrelated nodes, tasks and dependencies; completed nodes must not change unless explicitly requested. Do not modify repository files after approval. User request:\n{goal}", serde_json::to_string_pretty(existing).unwrap())
+                    } else {
+                        format!("User query:\n\n{goal}")
+                    };
                     let mut planner_extra_args = Vec::new();
                     if let Some(thinking) = &planner_model_cfg.thinking {
                         planner_extra_args.push("--thinking");
                         planner_extra_args.push(thinking.as_str());
+                    }
+                    for arg in &image_file_args {
+                        planner_extra_args.push(arg.as_str());
                     }
                     let mut log = String::new();
                     let mut planner_log = fs::File::create(directory.join("planner.jsonl"))
@@ -1408,7 +1598,7 @@ fn plan_goal_internal(
                             task: &task,
                             session_dir: &directory.join("planner-session"),
                             extension: Some(&service.extension),
-                            tools: Some("node,edge,read,bash"),
+                            tools: Some(if original_graph.is_some() { "node,edge,read" } else { "node,edge,read,bash" }),
                             session_id: None,
                             extra_args: planner_extra_args,
                             environment: vec![
@@ -1423,6 +1613,7 @@ fn plan_goal_internal(
                                 ),
                             ],
                             system_prompt: Some(&planner_system_prompt),
+                            images: None,
                         },
                         |text| {
                             if let Err(error) = planner_log.write_all(text.as_bytes()) {
@@ -1471,17 +1662,18 @@ fn plan_goal_internal(
                 repository: Some(repo_str.clone()),
             };
 
-            let final_config = config.clone();
             let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-            runtime.create_with_planning(
-                graph,
-                final_config,
-                Some(planning_id.clone()),
-                Some(summary.clone()),
-            )?;
-            runtime.set_route(&route.plan_type)?;
-            if route.plan_type == "serial" {
-                runtime.approve()?;
+            if let Some(ref run_id) = revision_run_id {
+                if runtime.state.run_id != *run_id {
+                    return Err("Run changed during graph revision".into());
+                }
+                runtime.revise_graph(graph, summary.clone())?;
+            } else {
+                runtime.create_with_planning(graph, config.clone(), Some(planning_id.clone()), Some(summary.clone()))?;
+                runtime.set_route(&route.plan_type)?;
+                if route.plan_type == "serial" {
+                    runtime.approve()?;
+                }
             }
             let snapshot = runtime.state.clone();
             drop(runtime);
@@ -1536,6 +1728,18 @@ fn plan_goal_internal(
         }
     })();
     cleanup.planning.store(false, Ordering::SeqCst);
+    if resume_after {
+        if let Ok(mut runtime) = service.runtime.lock() {
+            if runtime.state.approved && runtime.state.paused && runtime.state.phase == "paused" {
+                let _ = runtime.pause(false);
+            }
+        }
+    }
+    if revision_run_id.is_some() && service.runtime.lock().map(|runtime| {
+        runtime.state.phase == "running" && !runtime.state.paused
+    }).unwrap_or(false) {
+        drive(service.clone());
+    }
     result
 }
 
@@ -1567,8 +1771,25 @@ fn recover_plannings(root: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn plan_goal(goal: String, config: Config, mode: Option<String>, service: &Arc<Service>) -> Result<Snapshot, String> {
-    plan_goal_internal(goal, config, mode.as_deref(), service, |_| {}, |_| {}, |_| {}).map_err(|(error, _)| error)
+fn plan_goal(
+    goal: String,
+    config: Config,
+    mode: Option<String>,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+    service: &Arc<Service>,
+) -> Result<Snapshot, String> {
+    plan_goal_internal(
+        goal,
+        config,
+        mode.as_deref(),
+        images,
+        None,
+        service,
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .map_err(|(error, _)| error)
 }
 
 fn drive(service: Arc<Service>) {
@@ -1762,6 +1983,7 @@ fn control(
     instruction: Option<String>,
     run_id: Option<String>,
     execution_id: Option<String>,
+    images: Option<Vec<crate::model::ImageAttachment>>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     if action == "steer" {
@@ -1776,7 +1998,7 @@ fn control(
                 return Err("Node execution is no longer running; send a new instruction instead".into());
             }
         }
-        crate::engine::steer(&execution_id, instruction.trim())?;
+        crate::engine::steer(&execution_id, instruction.trim(), images)?;
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
         if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
             return Err("Run changed while steering".into());
@@ -2062,6 +2284,341 @@ fn get_execution_output(
     execution_page(state, &execution_id, offset)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillItem {
+    name: String,
+    description: String,
+    path: String,
+    scope: String,
+}
+
+fn parse_skill_markdown(path: &std::path::Path) -> Option<(String, String)> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut name = None;
+    let mut description = None;
+
+    if content.starts_with("---") {
+        if let Some(end_idx) = content[3..].find("---") {
+            let frontmatter = &content[3..3 + end_idx];
+            let mut in_desc_block = false;
+            let mut desc_lines = Vec::new();
+
+            for line in frontmatter.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("name:") {
+                    in_desc_block = false;
+                    let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
+                    if !val.is_empty() {
+                        name = Some(val.to_string());
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("description:") {
+                    let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
+                    if val.is_empty() || val == ">-" || val == "|" || val == ">" {
+                        in_desc_block = true;
+                    } else {
+                        in_desc_block = false;
+                        description = Some(val.to_string());
+                    }
+                } else if in_desc_block {
+                    if line.starts_with("  ") || line.starts_with('\t') {
+                        let t = line.trim();
+                        if !t.is_empty() {
+                            desc_lines.push(t);
+                        }
+                    } else if !trimmed.is_empty() {
+                        in_desc_block = false;
+                    }
+                }
+            }
+
+            if description.is_none() && !desc_lines.is_empty() {
+                description = Some(desc_lines.join(" "));
+            }
+        }
+    }
+
+    let skill_name = name.unwrap_or_else(|| {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "skill".to_string())
+    });
+
+    let skill_desc = description.unwrap_or_else(|| {
+        content
+            .lines()
+            .find(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with('#') && !t.starts_with("---")
+            })
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    });
+
+    Some((skill_name, skill_desc))
+}
+
+fn resolve_repo_path(
+    service: &Arc<Service>,
+    repository_param: Option<String>,
+) -> PathBuf {
+    if let Some(repo) = repository_param.filter(|s| !s.trim().is_empty()) {
+        return PathBuf::from(repo);
+    }
+    if let Ok(runtime) = service.runtime.lock() {
+        if let Some(config) = &runtime.state.config {
+            if !config.repository.trim().is_empty() {
+                return PathBuf::from(&config.repository);
+            }
+        }
+    }
+    if let Ok(Some(repo)) = crate::workspace::detect(None) {
+        return PathBuf::from(repo.path);
+    }
+    // 当进程在子目录（如 backend/）执行时，通过 git rev-parse 向上查找仓库根目录
+    if let Ok(output) = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .output()
+    {
+        if output.status.success() {
+            let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !toplevel.is_empty() {
+                return PathBuf::from(toplevel);
+            }
+        }
+    }
+    if let Some(parent) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent() {
+        if parent.exists() {
+            return parent.to_path_buf();
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn is_excluded_project_path(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    // 排除技能目录、内部框架目录、版本控制和编译产物，不把 skill 规则文档当做项目文件
+    if lower.starts_with(".agents/")
+        || lower == ".agents"
+        || lower.starts_with(".pi/")
+        || lower == ".pi"
+        || lower.starts_with(".git/")
+        || lower == ".git"
+        || lower.starts_with(".grapher/")
+        || lower == ".grapher"
+        || lower.starts_with(".gemini/")
+        || lower == ".gemini"
+        || lower.starts_with(".codex/")
+        || lower == ".codex"
+        || lower.starts_with("node_modules/")
+        || lower == "node_modules"
+        || lower.starts_with("target/")
+        || lower == "target"
+        || lower.starts_with("dist/")
+        || lower == "dist"
+        || lower.starts_with("build/")
+        || lower == "build"
+        || lower.starts_with(".next/")
+        || lower == ".next"
+        || lower.ends_with(".ds_store")
+    {
+        return true;
+    }
+    // 排除任何以点开头的隐藏目录（如 .cache/, .husky/ 等），保留根目录常规点文件（如 .gitignore, .env.example）
+    for (idx, part) in rel_path.split('/').enumerate() {
+        if part.starts_with('.') {
+            let is_root_file = idx == 0 && !rel_path.contains('/');
+            let is_allowed_dotfile = part == ".gitignore" || part == ".gitmodules" || part.starts_with(".env");
+            if !(is_root_file && is_allowed_dotfile) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn collect_files_from_dir(dir: &std::path::Path) -> Vec<String> {
+    let mut files = Vec::new();
+    let is_git = dir.join(".git").exists() || crate::workspace::is_standard_git(dir);
+    if is_git {
+        if let Ok(output) = std::process::Command::new("git")
+            .arg("ls-files")
+            .arg("--cached")
+            .arg("--others")
+            .arg("--exclude-standard")
+            .current_dir(dir)
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && !is_excluded_project_path(trimmed) {
+                        files.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        fn walk(walk_dir: &std::path::Path, base: &std::path::Path, files: &mut Vec<String>, limit: usize) {
+            if files.len() >= limit {
+                return;
+            }
+            if let Ok(entries) = fs::read_dir(walk_dir) {
+                for entry in entries.flatten() {
+                    if files.len() >= limit {
+                        break;
+                    }
+                    let path = entry.path();
+                    if let Ok(rel) = path.strip_prefix(base) {
+                        let rel_str = rel.to_string_lossy();
+                        if is_excluded_project_path(&rel_str) {
+                            continue;
+                        }
+                    }
+                    if path.is_dir() {
+                        walk(&path, base, files, limit);
+                    } else if path.is_file() {
+                        if let Ok(rel) = path.strip_prefix(base) {
+                            let rel_str = rel.to_string_lossy().to_string();
+                            if !is_excluded_project_path(&rel_str) {
+                                files.push(rel_str);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        walk(dir, dir, &mut files, 3000);
+    }
+    files
+}
+
+fn list_files(
+    service: &Arc<Service>,
+    repository_param: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let repo_path = resolve_repo_path(service, repository_param);
+    let mut files = if repo_path.exists() {
+        collect_files_from_dir(&repo_path)
+    } else {
+        Vec::new()
+    };
+
+    files.sort();
+    Ok(serde_json::json!({ "files": files }))
+}
+
+fn list_skills(
+    service: &Arc<Service>,
+    repository_param: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let repo_path = resolve_repo_path(service, repository_param);
+    let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+    let mut search_dirs: Vec<(PathBuf, &'static str)> = Vec::new();
+
+    // 1. Pi 工作区技能规范 (Project Skills: .agents/skills, .pi/skills, skills)
+    search_dirs.push((repo_path.join(".agents").join("skills"), "workspace"));
+    search_dirs.push((repo_path.join(".pi").join("skills"), "workspace"));
+    search_dirs.push((repo_path.join("skills"), "workspace"));
+
+    // 2. Grapher 宿主内置技能规范 (Grapher Host App: .agents/skills, .pi/skills, skills)
+    if let Some(grapher_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent() {
+        if grapher_root != repo_path {
+            search_dirs.push((grapher_root.join(".agents").join("skills"), "builtin"));
+            search_dirs.push((grapher_root.join(".pi").join("skills"), "builtin"));
+            search_dirs.push((grapher_root.join("skills"), "builtin"));
+        }
+    }
+
+    // 3. Pi 全局用户技能规范 (User Skills: agent_dir/skills, ~/.pi/agent/skills, ~/.agents/skills, ~/.pi/skills)
+    if let Ok(agent_dir) = crate::native::agent_dir() {
+        search_dirs.push((agent_dir.join("skills"), "global"));
+    }
+    if let Some(ref home) = home_dir {
+        search_dirs.push((home.join(".grapher").join("pi-agent").join("skills"), "global"));
+        search_dirs.push((home.join(".pi").join("agent").join("skills"), "global"));
+        search_dirs.push((home.join(".agents").join("skills"), "global"));
+        search_dirs.push((home.join(".pi").join("skills"), "global"));
+    }
+
+    let mut skills = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    fn scan_skills_dir(
+        dir: &std::path::Path,
+        scope: &str,
+        skills: &mut Vec<SkillItem>,
+        seen_names: &mut std::collections::HashSet<String>,
+    ) {
+        if !dir.exists() || !dir.is_dir() {
+            return;
+        }
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let skill_md = path.join("SKILL.md");
+                    if skill_md.exists() {
+                        if let Some((name, desc)) = parse_skill_markdown(&skill_md) {
+                            if !seen_names.contains(&name) {
+                                seen_names.insert(name.clone());
+                                skills.push(SkillItem {
+                                    name,
+                                    description: desc,
+                                    path: skill_md.to_string_lossy().to_string(),
+                                    scope: scope.to_string(),
+                                });
+                            }
+                        }
+                    } else {
+                        // 深入子分组目录扫描
+                        scan_skills_dir(&path, scope, skills, seen_names);
+                    }
+                } else if path.is_file() {
+                    // Pi 规范：~/.pi/agent/skills 与 ~/.pi/skills 支持直接根级单文件技能
+                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if file_name.ends_with(".md") && file_name != "README.md" && file_name != "AGENTS.md" {
+                        if let Some((name, desc)) = parse_skill_markdown(&path) {
+                            if !seen_names.contains(&name) {
+                                seen_names.insert(name.clone());
+                                skills.push(SkillItem {
+                                    name,
+                                    description: desc,
+                                    path: path.to_string_lossy().to_string(),
+                                    scope: scope.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (dir, scope) in &search_dirs {
+        scan_skills_dir(dir, scope, &mut skills, &mut seen_names);
+    }
+
+    skills.sort_by(|a, b| {
+        let scope_order = |s: &str| match s {
+            "workspace" => 0,
+            "builtin" => 1,
+            "global" => 2,
+            _ => 3,
+        };
+        scope_order(&a.scope)
+            .cmp(&scope_order(&b.scope))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(serde_json::json!({ "skills": skills }))
+}
+
 pub fn dispatch(
     service: &Arc<Service>,
     command: &str,
@@ -2100,6 +2657,7 @@ pub fn dispatch(
             argument(&body, "goal")?,
             argument(&body, "config")?,
             argument(&body, "mode").ok(),
+            argument(&body, "images").ok(),
             service,
         )?),
         "get_execution_output" => return get_execution_output(&body, service),
@@ -2143,6 +2701,7 @@ pub fn dispatch(
             argument(&body, "instruction")?,
             argument(&body, "runId")?,
             argument(&body, "executionId")?,
+            argument(&body, "images").ok(),
             service,
         )?),
         "repository_status" => {
@@ -2152,6 +2711,8 @@ pub fn dispatch(
         }
         "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),
         "pick_repository" => to_value(crate::workspace::pick_repository()?),
+        "list_files" => to_value(list_files(service, argument(&body, "repository").ok())?),
+        "list_skills" => to_value(list_skills(service, argument(&body, "repository").ok())?),
         "reset_workspace" => to_value(reset_workspace(service)?),
         "clear_history" => to_value(clear_history(service)?),
         "delete_run" => to_value(delete_run(argument(&body, "runId")?, service)?),
@@ -2424,11 +2985,13 @@ pub fn run() -> Result<(), String> {
                         serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string())
                     });
 
-                    let (goal, config, plan_mode): (String, Config, Option<String>) = match body_res.and_then(|body| {
+                    let (goal, config, plan_mode, images, revision_run_id): (String, Config, Option<String>, Option<Vec<crate::model::ImageAttachment>>, Option<String>) = match body_res.and_then(|body| {
                         let goal: String = argument(&body, "goal")?;
                         let config: Config = argument(&body, "config")?;
                         let mode: Option<String> = argument(&body, "mode").ok();
-                        Ok((goal, config, mode))
+                        let images: Option<Vec<crate::model::ImageAttachment>> = argument(&body, "images").ok();
+                        let revision_run_id: Option<String> = argument(&body, "revisionRunId").ok();
+                        Ok((goal, config, mode, images, revision_run_id))
                     }) {
                         Ok(tuple) => tuple,
                         Err(err) => {
@@ -2477,6 +3040,8 @@ pub fn run() -> Result<(), String> {
                             goal,
                             config,
                             plan_mode.as_deref(),
+                            images,
+                            revision_run_id,
                             &service_clone,
                             |line| {
                                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
