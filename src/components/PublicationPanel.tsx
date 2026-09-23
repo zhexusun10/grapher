@@ -17,7 +17,7 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
   return <section className={`publication-panel ${publication.status}`} aria-label="Graph 结果回写">
     <div className="publication-heading">
       <strong role="status" aria-live="polite">{labels[publication.status]}</strong>
-      <span>{publication.heads.length} 个节点结果</span>
+      <span title="每个终点节点的提交已包含其上游依赖的结果">{publication.heads.length} 个终点结果（含上游变更）</span>
       {publication.status === "failed" && <button type="button" className="secondary" disabled={busy} onClick={onRetry}>重试回写</button>}
     </div>
     <p className="publication-target">目标目录：<code>{publication.repository}</code></p>

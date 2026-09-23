@@ -137,7 +137,7 @@ export default function App() {
       const savedConfig = localStorage.getItem("grapher_config");
       if (savedConfig) {
         const parsed = JSON.parse(savedConfig);
-        initialConfig = { ...initialConfig, ...parsed };
+        initialConfig = { ...initialConfig, ...parsed, model: "" };
       }
     } catch {}
     try {
@@ -713,47 +713,17 @@ export default function App() {
     }
 
     setRepoInfo(activeInfo);
-    let savedModel = "";
-    try {
-      const raw = localStorage.getItem("grapher_config");
-      if (raw) savedModel = JSON.parse(raw).model || "";
-    } catch {}
-
-    // Choose model with priority:
-    // 1) savedModel with a provider prefix ("provider/model")
-    // 2) backend data.config.model with a provider prefix
-    // 3) non-empty savedModel
-    // 4) backend data.config.model
-    let chosenModel = "";
-    if (savedModel && savedModel.includes("/")) {
-      chosenModel = savedModel;
-    } else if (data.config?.model && data.config.model.includes("/")) {
-      chosenModel = data.config.model;
-    } else if (savedModel) {
-      chosenModel = savedModel;
-    } else if (data.config?.model) {
-      chosenModel = data.config.model;
-    } else {
-      chosenModel = "";
-    }
-
+    // Bootstrap owns the persisted model. A browser cache from an older session
+    // must not silently replace it or write it back to the backend.
     const nextConfigObj: Config = {
       ...data.config,
-      model: chosenModel,
       repository: activeRepo || (activeInfo ? activeInfo.path : ""),
     };
     setConfig(nextConfigObj);
     setDataPath(data.dataPath);
-
-    if (chosenModel && chosenModel !== data.config?.model) {
-      try {
-        const synced = await runtimeService.saveConfig(nextConfigObj);
-        if (synced.effectiveRoleModels) setEffectiveRoleModels(synced.effectiveRoleModels);
-        if (synced.envOverrides) setEnvOverrides(synced.envOverrides);
-      } catch (err) {
-        console.warn("Failed to sync initial model to backend:", err);
-      }
-    }
+    try {
+      localStorage.setItem("grapher_config", JSON.stringify(nextConfigObj));
+    } catch {}
 
     if (storedWorkspaceRuns === null) {
       if (data.runs && data.runs.length > 0 && activeRepo) {

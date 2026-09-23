@@ -99,9 +99,10 @@ backend/src/       Rust Compiler、Runtime、Workspace、HTTP API、SQLite
 backend/resources/ Partitioner/Planner prompts 与工具权限契约
 engine/            锁定 Pi 入口、Provider/Auth host、模型数据
 src/               React UI 与 HTTP client
-scripts/           开发、Pi 基线和 HTTP/UI 回归脚本
-../grapher-tests/benchmark/  外置规划质量和 Runtime benchmark
-../grapher-tests/backend-tests/ 外置 Rust 集成测试
+scripts/           开发、Pi 基线、Runtime benchmark 运行器和回归测试
+backend/benchmark/ Runtime/Planning benchmark host
+backend/tests/     Rust 集成测试
+../grapher-tests/benchmark/  外置规划评测 corpus、grader 与 HTTP/前端适配器
 pi/                upstream Pi submodule
 ```
 
@@ -168,12 +169,13 @@ npm run benchmark                 # 3 serial + 3 graph case
 npm run benchmark:planner         # 只评估 graph planning
 npm run benchmark:validate        # 每个 case 固定采样 3 次
 npm run benchmark:runtime         # 执行机制回归
-npm run test:benchmark            # grader 回归，不调用模型
+npm run test:runtime              # 9 个隔离 Runtime case，无需外置 harness / 模型
+npm run test:benchmark            # Runtime + 外置规划证据检查，不调用模型
 ```
 
 规划 benchmark 默认使用锁定的 `engine/entrypoint.mjs`，与应用共用专用 Pi 认证目录和工具环境；模型跟随已保存的 Grapher 配置或显式角色覆盖，不再隐式选择其他模型。`BENCHMARK_PI_MODEL=provider/model` 可指定候选模型。未配置模型时明确失败。
 
-规划 benchmark 只记录路由、编译、工具边界、活动轨迹、时间、token 和生成图证据。图的任务划分、依赖是否有用、并行性和整体质量由人工核验；系统不调用模型 judge，也不输出图质量分数。它不创建 Runtime、不批准图、不执行节点，保留完整 graph、compiler、events 和 trajectory 文件供人工核验。Harness 与测试源码位于 Grapher 仓库外的 sibling `../grapher-tests/`；Cargo manifest 和 npm scripts 只引用这些外置文件。默认证据写入 Grapher 仓库旁的 `grapher-benchmark-results/`，可通过 `GRAPHER_BENCHMARK_RESULTS_DIR` 覆盖。评测契约见 [外置 benchmark 架构](../grapher-tests/benchmark/architecture.md)，被测系统边界见 [system-under-test.md](../grapher-tests/benchmark/system-under-test.md)。
+规划 benchmark 只记录路由、编译、工具边界、活动轨迹、时间、token 和生成图证据。图的任务划分、依赖是否有用、并行性和整体质量由人工核验；系统不调用模型 judge，也不输出图质量分数。它不创建 Runtime、不批准图、不执行节点，保留完整 graph、compiler、events 和 trajectory 文件供人工核验。规划评测的 corpus、grader 与 HTTP/前端适配器仍位于 sibling `../grapher-tests/`；Runtime host、运行器和回归测试位于本仓库的 `backend/benchmark/` 与 `scripts/`。Runtime host 的失败同时写入 `result.json` 并返回非零退出码；运行器区分断言失败和 host 崩溃/缺失证据。`benchmark:runtime` 的 B011 HTTP case 仍需要外置 HTTP 适配器。规划证据默认写入 Grapher 仓库旁的 `grapher-benchmark-results/`，可通过 `GRAPHER_BENCHMARK_RESULTS_DIR` 覆盖。评测契约见 [外置 benchmark 架构](../grapher-tests/benchmark/architecture.md)，被测系统边界见 [system-under-test.md](../grapher-tests/benchmark/system-under-test.md)。
 
 ## 已知约束
 

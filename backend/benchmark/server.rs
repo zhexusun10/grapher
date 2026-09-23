@@ -462,7 +462,15 @@ pub fn main() {
         crate::engine::terminate_all();
         return;
     }
-    let result = run_case(&id, &root, &service, &window);
+    let result = run_case(&id, &root, &service, &window).and_then(|_| {
+        // Test the host's failure reporting without depending on a flaky runtime
+        // race or intentionally breaking a production invariant.
+        if std::env::var_os("BENCHMARK_TEST_FORCE_FAILURE").is_some() {
+            Err("Injected benchmark host failure".into())
+        } else {
+            Ok(())
+        }
+    });
     if result.is_err() && service.driving.load(Ordering::SeqCst) {
         crate::engine::terminate_all();
         let deadline = Instant::now();
@@ -479,9 +487,15 @@ pub fn main() {
             serde_json::to_value(event).unwrap(),
         );
     }
+    let failed = result.is_err();
     write_json(
         &root.join("result.json"),
-        &json!({"caseId":id,"startedAt":started,"endedAt":now(),"durationMs":now()-started,"status":if result.is_ok(){"PASS"}else{"FAIL"},"error":result.err(),"grapherRunId":state.run_id,"nodeExecutionCount":state.executions.len(),"retryCount":state.executions.iter().filter(|e|e.attempt>1).count()}),
+        &json!({"caseId":id,"startedAt":started,"endedAt":now(),"durationMs":now()-started,"status":if failed {"FAIL"}else{"PASS"},"error":result.err(),"grapherRunId":state.run_id,"nodeExecutionCount":state.executions.len(),"retryCount":state.executions.iter().filter(|e|e.attempt>1).count()}),
     );
     crate::engine::terminate_all();
+    // The artifact is useful for diagnostics, but it must not hide a failed case
+    // from callers that rely on the process exit status (CI, shell, other harnesses).
+    if failed {
+        std::process::exit(1);
+    }
 }
