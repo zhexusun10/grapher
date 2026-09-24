@@ -485,14 +485,36 @@ fn git_file_url(path: &Path) -> Result<String, String> {
     let value = path.to_str().ok_or("Invalid Git repository path")?;
     #[cfg(windows)]
     {
-        let value = value.replace('\\', "/");
-        if value.as_bytes().get(1) == Some(&b':') {
-            return Ok(format!("file:///{value}"));
+        // canonicalize() returns \\?\C:\... on Windows. Git for Windows does
+        // not understand that device prefix in a file URL (file:////?/C:/...).
+        // Convert only at the Git URL boundary, leaving OS paths untouched.
+        if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            return Ok(format!("file://{}", unc.replace('\\', "/")));
         }
-        return Ok(format!("file://{value}"));
+        let local = value.strip_prefix(r"\\?\").unwrap_or(value);
+        if local.as_bytes().get(1) == Some(&b':') && local.as_bytes()[0].is_ascii_alphabetic() {
+            return Ok(format!("file:///{}", local.replace('\\', "/")));
+        }
+        if let Some(unc) = local.strip_prefix(r"\\") {
+            return Ok(format!("file://{}", unc.replace('\\', "/")));
+        }
+        return Err(format!("Unsupported Windows Git repository path: {value}"));
     }
     #[cfg(not(windows))]
     Ok(format!("file://{value}"))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn git_file_url_handles_windows_extended_paths() {
+    assert_eq!(
+        git_file_url(Path::new(r"\\?\C:\Users\Test User\source")).unwrap(),
+        "file:///C:/Users/Test User/source"
+    );
+    assert_eq!(
+        git_file_url(Path::new(r"\\?\UNC\server\share\repo")).unwrap(),
+        "file://server/share/repo"
+    );
 }
 
 /// Allow a previously published graph to rerun from its original base, but

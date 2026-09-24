@@ -12,7 +12,7 @@ use std::{
 use std::os::fd::AsRawFd;
 
 pub struct RuntimeLock {
-    marker: fs::File,
+    _marker: fs::File,
     #[cfg(windows)]
     mutex: usize,
     #[cfg(windows)]
@@ -37,7 +37,7 @@ pub fn acquire(root: &Path) -> Result<RuntimeLock, String> {
         if result != 0 {
             return Err("Another Grapher instance owns this runtime. Close it before opening this data directory again.".into());
         }
-        return Ok(RuntimeLock { marker });
+        return Ok(RuntimeLock { _marker: marker });
     }
 
     #[cfg(windows)]
@@ -66,21 +66,21 @@ pub fn acquire(root: &Path) -> Result<RuntimeLock, String> {
             return Err("Another Grapher instance owns this runtime. Close it before opening this data directory again.".into());
         }
         return Ok(RuntimeLock {
-            marker,
+            _marker: marker,
             mutex: mutex as usize,
             key,
         });
     }
 
     #[cfg(not(any(unix, windows)))]
-    Ok(RuntimeLock { marker })
+    Ok(RuntimeLock { _marker: marker })
 }
 
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
         #[cfg(unix)]
         unsafe {
-            let _ = libc::flock(self.marker.as_raw_fd(), libc::LOCK_UN);
+            let _ = libc::flock(self._marker.as_raw_fd(), libc::LOCK_UN);
         }
 
         #[cfg(windows)]

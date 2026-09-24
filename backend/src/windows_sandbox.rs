@@ -196,6 +196,13 @@ unsafe fn grant_access(
         return Ok(());
     }
     if path.is_file() && hard_link_count(path)? > 1 {
+        // System executables in PATH commonly have multiple hard links. Never
+        // modify the ACL on those files: it would grant access via every name.
+        // For read-only tool paths, leave their existing AppContainer ACL alone;
+        // launching a tool without sufficient access will fail closed.
+        if access == GENERIC_READ_EXECUTE {
+            return Ok(());
+        }
         return Err(format!(
             "Windows Graph sandbox refuses a hard-linked allowed file: {}",
             path.display()
@@ -535,13 +542,17 @@ mod tests {
             std::fs::create_dir_all(path).unwrap();
         }
         std::fs::write(source.join("marker.txt"), "source").unwrap();
+        // cmd.exe in System32 is often hard-linked. Use a private copy so the
+        // test never changes ACLs on a shared operating-system executable.
+        let target = engine.join("cmd.exe");
+        std::fs::copy(r"C:\Windows\System32\cmd.exe", &target).unwrap();
         let current_marker = current.join("marker.txt");
         std::fs::write(&current_marker, "current").unwrap();
 
         let values = [
             (
                 "GRAPHER_WINDOWS_SANDBOX_TARGET",
-                r"C:\Windows\System32\cmd.exe".to_string(),
+                target.to_string_lossy().into_owned(),
             ),
             ("GRAPHER_WINDOWS_SANDBOX_PREFIX", "/C".into()),
             (

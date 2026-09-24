@@ -1592,7 +1592,7 @@ a,
   width: fit-content;
   max-width: 100%;
   gap: 4px;
-  transform: translateX(clamp(0px, 9.5vw, 150px));
+  transform: translateX(clamp(0px, 12.5vw, 200px));
   transition: transform 0.2s ease;
 }
 

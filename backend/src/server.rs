@@ -2479,7 +2479,7 @@ fn collect_files_from_dir(dir: &std::path::Path) -> Vec<String> {
                     }
                     let path = entry.path();
                     if let Ok(rel) = path.strip_prefix(base) {
-                        let rel_str = rel.to_string_lossy();
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
                         if is_excluded_project_path(&rel_str) {
                             continue;
                         }
@@ -2488,7 +2488,7 @@ fn collect_files_from_dir(dir: &std::path::Path) -> Vec<String> {
                         walk(&path, base, files, limit);
                     } else if path.is_file() {
                         if let Ok(rel) = path.strip_prefix(base) {
-                            let rel_str = rel.to_string_lossy().to_string();
+                            let rel_str = rel.to_string_lossy().replace('\\', "/");
                             if !is_excluded_project_path(&rel_str) {
                                 files.push(rel_str);
                             }
