@@ -5,9 +5,10 @@ Pi 是 Grapher 唯一的生产 Execution Instance Engine。一次模型执行称
 ## 所有权边界
 
 - `pi/`：未修改的 upstream Pi submodule，拥有 execution core、provider/API、认证、CLI、SDK、skills 和 extensions。
+- `engine/pi-compat.ts`：生产侧 Pi SDK、私有路径解析与 CLI 入口的集中适配边界；升级时优先审阅此处，并检查进程启动和认证适配。
 - `engine/entrypoint.mjs`：校验锁定基线，并通过仓库内 tsx 启动 upstream CLI；不回退到全局 Pi。
 - `engine/pi-lock.json`：锁定 upstream commit、package lock 和模型目录校验和。
-- `engine/model-data/`：由 upstream hydration 流程产生的模型目录构建输入，不是 Grapher 自行维护的 provider 实现。
+- `engine/model-data/`：由 upstream hydration 流程产生的模型目录和 `.manifest.json` 校验清单，供全新 clone 离线构建；不是 Grapher 自行维护的 provider 实现。
 - `engine/provider-host.ts`：在独立进程中调用 upstream `ModelRuntime`。
 - `backend/src/engine.rs`：拥有进程组、角色配置、取消、JSON 事件消费和 Execution Instance 生命周期。
 - `backend/src/native.rs`：宿主启动策略、Graph 映射能力门槛、专用认证目录和旧 lease 检查。
@@ -28,7 +29,7 @@ npm run pi
 npm run pi:build
 ```
 
-要求 Node.js 22.19+、Git 和 npm。`pi:setup` 校验 commit/lock/checksum，安装 upstream 依赖并恢复固定模型目录；`pi:build` 执行 upstream offline build。
+要求 Node.js 22.19+、Git 和 npm。`pi:setup` 校验 commit/lock/checksum，安装 upstream 依赖、恢复固定模型目录并执行 offline build（新版本的源码入口需要 sibling workspace 的 `dist/`）；`pi:build` 可单独重建。
 
 开发入口直接使用锁定源码和仓库内 tsx，不要求系统安装 Pi。认证可在 Grapher 设置界面完成，也可通过 `npm run pi` 使用 upstream `/login`、`/logout`。
 
@@ -67,9 +68,9 @@ npm run test:http
 1. 运行 `npm run pi:verify`，确认当前 submodule 与锁文件一致；保留父仓库已有修改。
 2. 在 `pi/` 中 fetch 目标 upstream，记录并审阅完整 commit SHA。
 3. 仅使用显式目标 SHA 更新 submodule；不要使用启动时 `git pull` 或 `submodule update --remote`。
-4. 使用新 upstream 的 lockfile 安装依赖并运行模型数据 hydration。
-5. 更新 `engine/pi-lock.json`、`engine/model-data/` 和父仓库 gitlink。
-6. 运行 setup、verify、offline build、CLI smoke、后端测试、HTTP/UI 测试和 `npm run test:native`；后者包含两个实际 Pi CLI 经生产 launcher 执行工具及绝对脚本的检查。
+4. 使用新 upstream 的 lockfile 安装依赖（`npm ci --prefix pi`），并运行 `npm --prefix pi run hydrate:model-data`。
+5. 运行 `npm run pi:adopt -- <完整的 40 位 SHA>`：在确认 Pi 工作树干净且模型数据有效后，生成新 `engine/pi-lock.json` 并同步 `engine/model-data/`。审阅生成的变更，将父仓库 gitlink 一并提交。此命令不 fetch、pull 或跳过基线验证。
+6. 先运行 `npm run pi:setup`（或已 `npm ci` 后运行 `npm run pi:build`），再检查 `engine/pi-compat.ts` 的 Pi API 合约并运行 `npm run test:pi`、verify、CLI smoke、后端测试、HTTP/UI 测试和 `npm run test:native`；后者包含两个实际 Pi CLI 经生产 launcher 执行工具及绝对脚本的检查。
 7. 若使用 fork commit，必须先推送到可公开获取的 remote，再更新 `.gitmodules` 并用全新 clone 验证。
 
-基线更新、适配层修改和校验数据应在同一变更中提交。任何构建或合约测试失败都不能标记为可发布。
+基线更新、适配层修改和校验数据应在同一变更中提交。集中适配减少升级时的修改范围，**不保证任意上游版本的 API/行为兼容**：尤其是 Provider/Auth、扩展事件、工具语义和私有 CLI 入口，仍须通过实际回归验证。任何构建或合约测试失败都不能标记为可发布。

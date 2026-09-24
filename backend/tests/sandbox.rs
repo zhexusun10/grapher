@@ -181,7 +181,9 @@ fn node_network_and_upstream_tools_work_inside_sandbox() {
         "Pi entrypoint failed: {}",
         String::from_utf8_lossy(&cli.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&cli.stdout).trim(), "0.85.1");
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.join("engine/pi-lock.json")).unwrap()).unwrap();
+    assert_eq!(String::from_utf8_lossy(&cli.stdout).trim(), lock["packageVersion"].as_str().unwrap());
 }
 
 #[test]

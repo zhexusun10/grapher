@@ -1,11 +1,11 @@
 import { createWorkspacePaths } from './workspace-paths.mjs';
 import { registerWorkspaceTools } from './workspace-tools.ts';
-import type { ExtensionAPI } from "../pi/packages/coding-agent/src/index.ts";
 import {
   createBashToolDefinition,
   createLocalBashOperations,
   type BashOperations,
-} from "../pi/packages/coding-agent/src/core/tools/bash.ts";
+  type ExtensionAPI,
+} from './pi-compat.ts';
 
 export default function (pi: ExtensionAPI) {
   const cwd = process.cwd();

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { toolchainEnv } from "./cargo.mjs";
@@ -31,6 +31,10 @@ export function verifyBaseline() {
 export function restoreModelData() {
   const destination = join(source, "packages/ai/src/providers/data");
   mkdirSync(destination, { recursive: true });
+  // Removed providers from an older local hydration must not survive an upgrade.
+  for (const name of readdirSync(destination)) {
+    if (name.endsWith('.json') && !(name in lock.modelData)) rmSync(join(destination, name));
+  }
   for (const name of Object.keys(lock.modelData)) copyFileSync(join(root, "engine/model-data", name), join(destination, name));
 }
 
@@ -38,11 +42,23 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     verifyBaseline();
     const action = process.argv[2] ?? "verify";
-    const run = (...args) => execFileSync("npm", [...args, "--prefix", source], { stdio: "inherit", env: toolchainEnv() });
+    // npm on Windows is a .cmd shim, which execFileSync cannot launch. npm run
+    // provides the actual JS CLI path; invoke it through the current Node.
+    const run = (...args) => {
+      const npmCli = process.env.npm_execpath;
+      if (process.platform === "win32" && !npmCli) {
+        throw new Error("Run Pi setup/build via npm run so npm_execpath is available");
+      }
+      execFileSync(npmCli ? process.execPath : "npm", npmCli ? [npmCli, ...args, "--prefix", source] : [...args, "--prefix", source], {
+        stdio: "inherit", env: toolchainEnv(),
+      });
+    };
     if (action === "setup") {
       run("ci");
       restoreModelData();
-      run("run", "check:model-data");
+      // Pi source imports sibling workspaces via their built dist/ exports.
+      // Validating model data alone leaves a fresh installation unable to run.
+      run("run", "build:offline");
     } else if (action === "build") {
       restoreModelData();
       run("run", "build:offline");

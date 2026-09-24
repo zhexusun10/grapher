@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "pi:verify": "node scripts/pi-baseline.mjs verify",
-    "test:pi": "node --check engine/system-prompt.mjs && node scripts/pi-baseline.mjs verify && node --test scripts/agent-dir.test.mjs scripts/planning-trajectory.test.mjs && node --import ./pi/node_modules/tsx/dist/loader.mjs --test scripts/execution-retry.test.ts",
+    "test:pi": "node --check engine/system-prompt.mjs && node scripts/pi-baseline.mjs verify && node --test scripts/adopt-pi.test.mjs scripts/agent-dir.test.mjs scripts/planning-trajectory.test.mjs && node --import ./pi/node_modules/tsx/dist/loader.mjs --test scripts/execution-retry.test.ts scripts/pi-compat.test.ts",
     "pi:setup": "node scripts/pi-baseline.mjs setup",
     "pi:build": "node scripts/pi-baseline.mjs build",
+    "pi:adopt": "node scripts/adopt-pi.mjs",
     "pi": "node engine/entrypoint.mjs",
     "test:native": "node --test scripts/workspace-paths.test.mjs && node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --lib native::tests",
     "probe:file-mapping": "node --import ./pi/node_modules/tsx/dist/loader.mjs scripts/check-file-tool-mapping.ts",

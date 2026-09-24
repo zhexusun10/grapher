@@ -1,6 +1,6 @@
 // The only production Provider/Auth binding to Pi: its public SDK export.
 import { createInterface } from "node:readline";
-import { ModelRuntime } from "../pi/packages/coding-agent/src/index.ts";
+import { ModelRuntime } from "./pi-compat.ts";
 import { ProviderAuthAdapter } from "./provider-auth-adapter.mjs";
 import { verifyBaseline } from "../scripts/pi-baseline.mjs";
 import { configureAgentDir } from "./agent-dir.mjs";

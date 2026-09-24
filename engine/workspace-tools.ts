@@ -1,12 +1,14 @@
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import type { ExtensionAPI } from '../pi/packages/coding-agent/src/core/extensions/types.ts';
-import { resolveToCwd } from '../pi/packages/coding-agent/src/core/tools/path-utils.ts';
-import { createReadToolDefinition } from '../pi/packages/coding-agent/src/core/tools/read.ts';
-import { createWriteToolDefinition } from '../pi/packages/coding-agent/src/core/tools/write.ts';
-import { createEditToolDefinition } from '../pi/packages/coding-agent/src/core/tools/edit.ts';
-import { createLsToolDefinition } from '../pi/packages/coding-agent/src/core/tools/ls.ts';
-import { createFindToolDefinition } from '../pi/packages/coding-agent/src/core/tools/find.ts';
-import { createGrepToolDefinition } from '../pi/packages/coding-agent/src/core/tools/grep.ts';
+import {
+  resolveToCwd,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+  createEditToolDefinition,
+  createLsToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  type ExtensionAPI,
+} from './pi-compat.ts';
 
 // Backend supplies the roots; tool input cannot choose an execution. This is an
 // explicit file-tool adapter, not a process-wide namespace or security boundary.

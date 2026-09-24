@@ -1,4 +1,4 @@
-import { SettingsManager } from '../pi/packages/coding-agent/src/core/settings-manager.ts';
+import { SettingsManager } from './pi-compat.ts';
 
 // Enforce the host's reconnect budget without modifying upstream or persisted
 // user settings. Cap exponential backoff at its base to keep every wait at 2s.
