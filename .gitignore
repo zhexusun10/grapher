@@ -25,6 +25,7 @@ pnpm-debug.log*
 backend/target/
 .grapher/
 .pi/
+.agents/skills/
 
 # Python
 .venv/

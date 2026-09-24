@@ -14,7 +14,9 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, LocalFree, GENERIC_ALL, HANDLE_FLAG_INHERIT},
+    Foundation::{
+        CloseHandle, GetLastError, LocalFree, GENERIC_ALL, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
+    },
     Security::Authorization::{
         BuildTrusteeWithSidW, ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW,
         SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID,
@@ -41,6 +43,9 @@ use windows_sys::Win32::{
         },
     },
 };
+
+#[cfg(test)]
+use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
 
 const FILE_TRAVERSE: u32 = 0x20;
 const FILE_READ_ATTRIBUTES: u32 = 0x80;
@@ -342,19 +347,6 @@ fn resolve_path(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn protected_tool_directory(path: &Path) -> bool {
-    // Unprivileged users cannot edit ACLs under these system installations.
-    // Windows normally grants AppContainers read/execute there already; if a
-    // tool is not readable its launch fails rather than weakening isolation.
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    ["SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
-        .iter()
-        .filter_map(|name| env::var_os(name))
-        .map(PathBuf::from)
-        .filter_map(|root| root.canonicalize().ok())
-        .any(|root| canonical.starts_with(root))
-}
-
 fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String> {
     let current = resolve_path(
         &env::var("GRAPHER_WINDOWS_SANDBOX_CURRENT")
@@ -403,18 +395,11 @@ fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String>
         grant_access(&target, sid, GENERIC_READ_EXECUTE, 0)?;
     }
 
-    if let Some(path) = env::var_os("PATH") {
-        for directory in std::env::split_paths(&path) {
-            if directory.is_dir() {
-                let canonical = directory.canonicalize().unwrap_or(directory.clone());
-                if canonical.starts_with(&source) || protected_tool_directory(&directory) {
-                    continue;
-                }
-                grant_traverse(&directory, sid)?;
-                grant_tree(&directory, sid, GENERIC_READ_EXECUTE)?;
-            }
-        }
-    }
+    // Never walk or rewrite every directory in PATH. CI's PATH includes entire
+    // SDK/toolchain trees; recursively changing their ACLs can take minutes and
+    // also exposes arbitrary programs to the container. The executable above
+    // and Grapher-owned roots are explicit grants. External tools retain their
+    // OS ACLs; an inaccessible tool must fail rather than broadening access.
     Ok(())
 }
 
@@ -431,7 +416,11 @@ pub fn run_helper(arguments: &[String]) -> Result<i32, String> {
     unsafe {
         let (app_sid, capability_sid) = create_profile(&profile)?;
         let result = (|| {
+            #[cfg(test)]
+            eprintln!("AppContainer probe: granting workspace ACLs");
             prepare_access(app_sid)?;
+            #[cfg(test)]
+            eprintln!("AppContainer probe: workspace ACLs ready");
             let temp = session.join("tmp");
             env::set_var("TEMP", &temp);
             env::set_var("TMP", &temp);
@@ -502,6 +491,8 @@ pub fn run_helper(arguments: &[String]) -> Result<i32, String> {
                 }
             }
             let mut process = PROCESS_INFORMATION::default();
+            #[cfg(test)]
+            eprintln!("AppContainer probe: creating sandboxed process");
             let created = CreateProcessW(
                 application.as_ptr(),
                 command_line.as_mut_ptr(),
@@ -519,7 +510,27 @@ pub fn run_helper(arguments: &[String]) -> Result<i32, String> {
                 return Err(windows_error("CreateProcessW(AppContainer)"));
             }
             CloseHandle(process.hThread);
-            WaitForSingleObject(process.hProcess, INFINITE);
+            // A broken sandbox probe must fail promptly rather than hanging CI.
+            // Real agent executions remain governed by the outer process job.
+            #[cfg(test)]
+            let wait_limit = 30_000;
+            #[cfg(not(test))]
+            let wait_limit = INFINITE;
+            #[cfg(test)]
+            eprintln!("AppContainer probe: waiting for sandboxed process");
+            let waited = WaitForSingleObject(process.hProcess, wait_limit);
+            #[cfg(test)]
+            if waited == WAIT_TIMEOUT {
+                windows_sys::Win32::System::Threading::TerminateProcess(process.hProcess, 1);
+                WaitForSingleObject(process.hProcess, INFINITE);
+                CloseHandle(process.hProcess);
+                return Err("AppContainer test process did not exit within 30 seconds".into());
+            }
+            if waited != WAIT_OBJECT_0 {
+                let error = windows_error("WaitForSingleObject(AppContainer)");
+                CloseHandle(process.hProcess);
+                return Err(error);
+            }
             let mut exit_code = 1u32;
             if GetExitCodeProcess(process.hProcess, &mut exit_code) == 0 {
                 CloseHandle(process.hProcess);
@@ -541,6 +552,24 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    // Run only by the parent test inside the sandbox. File access is checked
+    // directly instead of passing a script through cmd.exe's /C quoting rules.
+    #[test]
+    #[ignore = "AppContainer child probe"]
+    fn appcontainer_probe_child() {
+        assert_eq!(
+            env::var("GRAPHER_WINDOWS_SANDBOX_PROBE").as_deref(),
+            Ok("1")
+        );
+        let source = PathBuf::from(env::var("GRAPHER_WINDOWS_SANDBOX_SOURCE").unwrap());
+        let current = PathBuf::from(env::var("GRAPHER_WINDOWS_SANDBOX_CURRENT").unwrap());
+        let session = PathBuf::from(env::var("GRAPHER_WINDOWS_SANDBOX_SESSION").unwrap());
+        assert!(fs::read_to_string(source.join("marker.txt")).is_err());
+        assert!(fs::write(source.join("forbidden.txt"), "forbidden").is_err());
+        fs::write(current.join("allowed.txt"), "allowed").unwrap();
+        fs::write(session.join("allowed.txt"), "session").unwrap();
+    }
+
     #[test]
     fn appcontainer_allows_current_workspace_and_denies_source() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -555,10 +584,10 @@ mod tests {
             std::fs::create_dir_all(path).unwrap();
         }
         std::fs::write(source.join("marker.txt"), "source").unwrap();
-        // cmd.exe in System32 is often hard-linked. Use a private copy so the
-        // test never changes ACLs on a shared operating-system executable.
-        let target = engine.join("cmd.exe");
-        std::fs::copy(r"C:\Windows\System32\cmd.exe", &target).unwrap();
+        // The test executable is statically built and its path is under our
+        // allowed engine root; no system executable ACLs or shell are needed.
+        let target = engine.join("sandbox-probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &target).unwrap();
         let current_marker = current.join("marker.txt");
         std::fs::write(&current_marker, "current").unwrap();
 
@@ -567,7 +596,8 @@ mod tests {
                 "GRAPHER_WINDOWS_SANDBOX_TARGET",
                 target.to_string_lossy().into_owned(),
             ),
-            ("GRAPHER_WINDOWS_SANDBOX_PREFIX", "/C".into()),
+            ("GRAPHER_WINDOWS_SANDBOX_PREFIX", "--exact".into()),
+            ("GRAPHER_WINDOWS_SANDBOX_PROBE", "1".into()),
             (
                 "GRAPHER_WINDOWS_SANDBOX_CURRENT",
                 current.to_string_lossy().into_owned(),
@@ -597,16 +627,12 @@ mod tests {
         for (key, value) in &values {
             std::env::set_var(key, value);
         }
-        let command = format!(
-            "type \"{}\" > \"{}\" 2>nul & echo allowed > \"{}\"",
-            source.join("marker.txt").display(),
-            current.join("source-read.txt").display(),
-            current.join("allowed.txt").display(),
-        );
         let result = run_helper(&[
             "grapher.exe".into(),
             "--grapher-windows-sandbox-helper".into(),
-            command,
+            "windows_sandbox::tests::appcontainer_probe_child".into(),
+            "--include-ignored".into(),
+            "--nocapture".into(),
         ]);
         for (key, value) in previous {
             match value {
@@ -621,10 +647,11 @@ mod tests {
                 .trim(),
             "allowed"
         );
-        assert!(std::fs::read_to_string(current.join("source-read.txt"))
-            .unwrap()
-            .trim()
-            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(session.join("allowed.txt")).unwrap(),
+            "session"
+        );
+        assert!(!source.join("forbidden.txt").exists());
         assert_eq!(
             std::fs::read_to_string(source.join("marker.txt")).unwrap(),
             "source"

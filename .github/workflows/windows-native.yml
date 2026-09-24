@@ -29,7 +29,10 @@ jobs:
       - name: Check production backend
         run: cargo check --manifest-path backend/Cargo.toml --no-default-features
       - name: Run backend library tests
-        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib
+        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib -- --skip windows_sandbox::tests::appcontainer_allows_current_workspace_and_denies_source
+      - name: Run Windows AppContainer boundary test
+        timeout-minutes: 3
+        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib windows_sandbox::tests::appcontainer_allows_current_workspace_and_denies_source -- --nocapture
       - name: Run native path and lifecycle checks
         run: npm run test:native
       - name: Run project binding checks
