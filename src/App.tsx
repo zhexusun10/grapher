@@ -149,7 +149,7 @@ export default function App() {
         const list: ProjectItem[] = JSON.parse(saved);
         if (list.length > 0) {
           const sorted = [...list].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-          if (!initialConfig.repository && sorted[0]?.path) {
+          if (sorted[0]?.path) {
             initialConfig.repository = sorted[0].path;
           }
         }
@@ -637,77 +637,70 @@ export default function App() {
     let activeRepo = "";
     let activeInfo: RepositoryInfo | null = null;
 
-    if (storedProjects !== null) {
-      if (data.repositoryInfo) {
-        const info = data.repositoryInfo;
-        const exists = storedProjects.some((p) => p.path === info.path);
-        if (exists) {
-          const updatedProjects = storedProjects.map((p) =>
-            p.path === info.path
-              ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
-              : p
-          );
-          setProjects(updatedProjects);
-          try {
-            localStorage.setItem("grapher_projects", JSON.stringify(updatedProjects));
-          } catch {}
-          activeRepo = info.path;
-          activeInfo = info;
-        } else if (storedProjects.length > 0) {
-          const sorted = [...storedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-          setProjects(storedProjects);
-          activeRepo = sorted[0].path;
-          activeInfo = {
-            name: sorted[0].name,
-            path: sorted[0].path,
-            branch: sorted[0].branch,
-            head: sorted[0].branch || "",
-            clean: sorted[0].clean,
-            isShadow: sorted[0].isShadow,
-          };
-        } else {
-          setProjects([]);
-          activeRepo = "";
-          activeInfo = null;
-        }
-      } else if (storedProjects.length > 0) {
-        const sorted = [...storedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-        setProjects(storedProjects);
-        activeRepo = sorted[0].path;
-        activeInfo = {
-          name: sorted[0].name,
-          path: sorted[0].path,
-          branch: sorted[0].branch,
-          head: sorted[0].branch || "",
-          clean: sorted[0].clean,
-          isShadow: sorted[0].isShadow,
-        };
-      } else {
-        setProjects([]);
-        activeRepo = "";
-        activeInfo = null;
-      }
-    } else {
-      if (data.repositoryInfo) {
-        const info = data.repositoryInfo;
-        const item: ProjectItem = {
-          id: info.path,
-          name: info.name,
-          path: info.path,
-          branch: info.branch,
-          clean: info.clean,
-          isShadow: info.isShadow,
-          lastOpened: Date.now(),
-        };
-        setProjects([item]);
+    if (storedProjects !== null && storedProjects.length > 0) {
+      const sorted = [...storedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+      const latestProj = sorted[0];
+      activeRepo = latestProj.path;
+
+      if (data.repositoryInfo && data.repositoryInfo.path === latestProj.path) {
+        activeInfo = data.repositoryInfo;
+        const updatedProjects = sorted.map((p) =>
+          p.path === latestProj.path
+            ? { ...p, branch: data.repositoryInfo!.branch, clean: data.repositoryInfo!.clean, isShadow: data.repositoryInfo!.isShadow }
+            : p
+        );
+        setProjects(updatedProjects);
         try {
-          localStorage.setItem("grapher_projects", JSON.stringify([item]));
+          localStorage.setItem("grapher_projects", JSON.stringify(updatedProjects));
         } catch {}
-        activeRepo = info.path;
-        activeInfo = info;
       } else {
-        setProjects([]);
+        activeInfo = {
+          name: latestProj.name,
+          path: latestProj.path,
+          branch: latestProj.branch,
+          head: latestProj.branch || "",
+          clean: latestProj.clean,
+          isShadow: latestProj.isShadow,
+        };
+        setProjects(sorted);
+        runtimeService.detectRepository(latestProj.path).then((detected) => {
+          if (detected) {
+            setRepoInfo(detected);
+            setProjects((prev) => {
+              const updated = prev.map((p) =>
+                p.path === latestProj.path
+                  ? { ...p, branch: detected.branch, clean: detected.clean, isShadow: detected.isShadow }
+                  : p
+              );
+              try {
+                localStorage.setItem("grapher_projects", JSON.stringify(updated));
+              } catch {}
+              return updated;
+            });
+          }
+        }).catch(() => {});
       }
+    } else if (data.repositoryInfo) {
+      const info = data.repositoryInfo;
+      const item: ProjectItem = {
+        id: info.path,
+        name: info.name,
+        path: info.path,
+        branch: info.branch,
+        clean: info.clean,
+        isShadow: info.isShadow,
+        lastOpened: Date.now(),
+      };
+      setProjects([item]);
+      try {
+        localStorage.setItem("grapher_projects", JSON.stringify([item]));
+      } catch {}
+      activeRepo = info.path;
+      activeInfo = info;
+    } else {
+      setProjects([]);
+      activeRepo = "";
+      activeInfo = null;
     }
 
     setRepoInfo(activeInfo);
@@ -723,6 +716,9 @@ export default function App() {
     try {
       localStorage.setItem("grapher_config", JSON.stringify(nextConfigObj));
     } catch {}
+    if (nextConfigObj.repository && nextConfigObj.repository !== data.config.repository) {
+      void runtimeService.saveConfig(nextConfigObj).catch(() => {});
+    }
 
     if (storedWorkspaceRuns === null) {
       if (data.runs && data.runs.length > 0 && activeRepo) {
@@ -737,12 +733,15 @@ export default function App() {
     }
 
     const currentRuns = (storedWorkspaceRuns ? (storedWorkspaceRuns[activeRepo] || []) : null) ?? (data.runs || []);
-    if (
-      activeRepo &&
+    const isActivelyRunning = Boolean(
       data.snapshot.runId &&
+      data.snapshot.phase === "running" &&
+      activeRepo &&
       (data.snapshot.config?.repository === activeRepo || (!data.snapshot.config?.repository && activeRepo === (data.repositoryInfo?.path || ""))) &&
       currentRuns.includes(data.snapshot.runId)
-    ) {
+    );
+
+    if (isActivelyRunning) {
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       markSnapshotRead(data.snapshot);
@@ -751,22 +750,14 @@ export default function App() {
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
       setSelected("");
-    } else if (activeRepo && currentRuns.length > 0) {
+    } else {
+      // 每次打开项目前端，不载入最新对话，而是载入最新 workspace 文件夹的初始页面
       try {
-        const snap = await runtimeService.loadRun(currentRuns[0]);
-        const deduced = deduceRouteType(snap);
-        setState(snap);
-        setRouteType(deduced);
-        setGoal(snap.graph.originalGoal || "");
-        setSelected("");
+        const resetSnap = await runtimeService.resetWorkspace();
+        setState(resetSnap);
       } catch {
         setState(emptySnapshot);
-        setRouteType("undecided");
-        setGoal("");
-        setSelected("");
       }
-    } else {
-      setState(emptySnapshot);
       setRouteType("undecided");
       setGoal("");
       setSelected("");
@@ -774,7 +765,7 @@ export default function App() {
     }
 
     const targetRepo = activeRepo || data.config.repository || data.repositoryInfo?.path;
-    if (targetRepo) {
+    if (targetRepo && isActivelyRunning) {
       void planningRecovery.restore(planningRecovery.begin(targetRepo), data.snapshot);
     }
   }, [planningRecovery]);
