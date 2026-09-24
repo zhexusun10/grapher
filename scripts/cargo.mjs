@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +20,7 @@ export function toolchainEnv(base = process.env) {
 
 function cargoExecutable() {
   if (process.env.CARGO) return process.env.CARGO;
-  const rustupCargo = join(homedir(), ".cargo", "bin", "cargo");
+  const rustupCargo = join(homedir(), ".cargo", "bin", process.platform === "win32" ? "cargo.exe" : "cargo");
   return existsSync(rustupCargo) ? rustupCargo : "cargo";
 }
 
@@ -30,7 +30,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     stdio: "inherit",
   });
   for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => child.kill(signal));
+    process.on(signal, () => {
+      if (process.platform === "win32" && child.pid) {
+        try { execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
+      } else {
+        child.kill(signal);
+      }
+    });
   }
   child.on("error", error => {
     console.error(`Cannot start Cargo: ${error.message}`);

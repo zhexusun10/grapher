@@ -1,18 +1,21 @@
-use crate::model::{Config, Execution, Route};
+use crate::{
+    model::{Config, Execution, Route},
+    process_control,
+};
 use serde_json::Value;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     fs,
     io::{BufRead, BufReader, Write},
-    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{mpsc, Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
 
-static PROCESSES: OnceLock<Mutex<BTreeSet<u32>>> = OnceLock::new();
+#[cfg(feature = "fixture")]
+use std::process::Command;
 
 #[derive(Clone)]
 struct NodeRpc {
@@ -55,27 +58,16 @@ impl Drop for NodeRpcGuard {
     }
 }
 
-struct ProcessGuard(u32);
+struct ProcessGuard(process_control::ProcessTree);
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        unsafe {
-            libc::kill(-(self.0 as i32), libc::SIGKILL);
-        }
-        if let Ok(mut processes) = PROCESSES.get_or_init(Default::default).lock() {
-            processes.remove(&self.0);
-        }
+        self.0.terminate();
     }
 }
 
 pub fn terminate_all() {
-    if let Ok(processes) = PROCESSES.get_or_init(Default::default).lock() {
-        for process in processes.iter() {
-            unsafe {
-                libc::kill(-(*process as i32), libc::SIGKILL);
-            }
-        }
-    }
+    process_control::terminate_all();
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -516,17 +508,17 @@ fn run_pi_with_timeout(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.process_group(0);
+    process_control::configure_command(&mut command);
     let started = Instant::now();
     let mut child = command
         .spawn()
         .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
-    PROCESSES
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|error| error.to_string())?
-        .insert(child.id());
-    let _guard = ProcessGuard(child.id());
+    let process_tree = process_control::track(&child).map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        error
+    })?;
+    let _guard = ProcessGuard(process_tree.clone());
     on_output(format!(
         "{}\n",
         serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "timestamp":crate::model::now()})
@@ -611,9 +603,7 @@ fn run_pi_with_timeout(
         // Check even while output is arriving: a noisy child can also hang.
         if timeout.is_some_and(|limit| started.elapsed() >= limit) {
             timed_out = true;
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
+            process_tree.terminate();
             let _ = child.kill();
             break;
         }
@@ -768,13 +758,24 @@ pub fn execute(
     } else {
         task.into()
     };
-    let execution_date = Command::new("/bin/date")
-        .args(["-u", "+%Y-%m-%d"])
-        .output()
+    let execution_date = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|date| date.trim().to_string());
+        .map(|duration| {
+            let days = duration.as_secs() / 86_400;
+            // Howard Hinnant's civil-from-days conversion, using UTC days.
+            let z = days as i64 + 719_468;
+            let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+            let doe = z - era * 146_097;
+            let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+            let y = yoe + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let day = doy - (153 * mp + 2) / 5 + 1;
+            let month = mp + if mp < 10 { 3 } else { -9 };
+            let year = y + if month <= 2 { 1 } else { 0 };
+            format!("{year:04}-{month:02}-{day:02}")
+        });
     let task = if let Some(date) = execution_date {
         format!("{task}\n\nHost execution date (UTC): {date}. If your deliverable requires a date, use this observed date rather than guessing.")
     } else {

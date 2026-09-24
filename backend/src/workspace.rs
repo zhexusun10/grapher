@@ -179,14 +179,38 @@ pub fn pick_folder() -> Result<Option<PathBuf>, String> {
         }
         Ok(None)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // The script is constant: the selected path is returned through stdout,
+        // never interpolated into PowerShell source.
+        let script = r#"Add-Type -AssemblyName System.Windows.Forms; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [System.Windows.Forms.Application]::EnableVisualStyles(); $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Select a project folder'; $dialog.ShowNewFolderButton = $false; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.WriteLine($dialog.SelectedPath) }"#;
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ])
+            .output()
+            .map_err(|error| format!("Windows folder picker is unavailable: {error}"))?;
+        if !output.status.success() {
+            return Err("Windows folder picker failed; use the absolute path prompt instead".into());
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok((!path.is_empty()).then(|| PathBuf::from(path)))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Ok(None)
     }
 }
 
 pub fn pick_repository() -> Result<PickResult, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         if let Some(folder) = pick_folder()? {
             let info = detect(Some(&folder))?;
@@ -210,7 +234,7 @@ pub fn pick_repository() -> Result<PickResult, String> {
             })
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Ok(PickResult {
             supported: false,
@@ -290,17 +314,10 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
 }
 
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let hooks_path = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let hooks_config = format!("core.hooksPath={hooks_path}");
     let output = Command::new("git")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "user.name=Grapher",
-            "-c",
-            "user.email=runtime@grapher.local",
-        ])
+        .args(["-c", hooks_config.as_str(), "-c", "commit.gpgsign=false", "-c", "user.name=Grapher", "-c", "user.email=runtime@grapher.local"])
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -464,6 +481,20 @@ pub fn prepare_with_merger(
     prepare_with_merger_expected(repository, path, base, parents, base, resolve)
 }
 
+fn git_file_url(path: &Path) -> Result<String, String> {
+    let value = path.to_str().ok_or("Invalid Git repository path")?;
+    #[cfg(windows)]
+    {
+        let value = value.replace('\\', "/");
+        if value.as_bytes().get(1) == Some(&b':') {
+            return Ok(format!("file:///{value}"));
+        }
+        return Ok(format!("file://{value}"));
+    }
+    #[cfg(not(windows))]
+    Ok(format!("file://{value}"))
+}
+
 /// Allow a previously published graph to rerun from its original base, but
 /// only if the user directory still matches the exact published snapshot.
 pub fn prepare_with_merger_expected(
@@ -538,7 +569,7 @@ pub fn prepare_with_merger_expected(
         )?;
         shadow
     };
-    let source_url = format!("file://{}", source_git_path.display());
+    let source_url = git_file_url(&source_git_path)?;
 
     // Initialize standalone Git repository in node's workspace
     git(path, &["init", "-q"])?;
@@ -710,7 +741,7 @@ pub fn snapshot_node(path: &Path, repository: &Path, node_id: &str) -> Result<St
         &["update-ref", "refs/heads/grapher-node", &head],
     )?;
 
-    let path_url = format!("file://{}", canonical_path.display());
+    let path_url = git_file_url(&canonical_path)?;
     let head_refspec = format!("+refs/heads/grapher-node:refs/grapher/heads/{head}");
     let node_refspec = format!("+refs/heads/grapher-node:refs/grapher/nodes/{node_id}");
     let fetch_args = [

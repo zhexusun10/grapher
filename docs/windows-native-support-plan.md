@@ -6,14 +6,20 @@ Grapher 当前不能在 Windows 原生构建或运行。阻塞不只是 `scripts
 
 建议按“平台编译与 Serial 首先可用、Graph 安全边界单独过门槛”的路线实施。Windows 原生启动可以先覆盖 UI、配置、规划和 Serial；Graph 并发、shadow repo、合并和发布只有在 Windows 上建立并通过验证的隔离机制后才算支持。Job Object 解决进程生命周期，不提供文件系统隔离，不能用它替代 Seatbelt。
 
-**目标**：Windows 10/11 x64 原生运行，不依赖 WSL2、Docker、虚拟机或管理员权限。初期以源码开发启动为目标，不承诺安装包、自动更新或 ARM64。
+## 当前实现状态
+
+阶段 0/1/2/3 的代码已落地：Windows 10/11 x64 可使用 MSVC Rust toolchain、Git for Windows、Node.js 和普通用户权限运行 backend/frontend；规划、审批、Serial、Graph 并发、worktree、合并、发布、取消和运行时锁均保留。Windows 进程执行使用 Job Object，并在 Job 接管后恢复挂起的子进程；Unix 继续使用原有 process group 和 `flock` 行为。
+
+Windows Graph 使用 Windows AppContainer 作为文件系统访问边界。每个 Graph Execution Instance 使用独立容器 SID，只向当前 worktree、session/runtime 数据、引擎副本、agent 配置和必要工具目录授予访问权限，并授予网络 capability；源仓库、兄弟 worktree、其他 session 和共享 Git object 数据库不在授权集合中。路径工具适配仍只是易用性层，不能替代该 OS 访问控制。
+
+已加入 `.github/workflows/windows-native.yml`，用于 Windows MSVC 下的前端检查、构建、backend `cargo check` 和 library tests，并执行 native/binding 回归。完整 Windows 交付仍需在真实 Windows 主机上验证 AppContainer 对源目录、兄弟节点、session、Git metadata、junction/symlink/reparse point、子进程、Provider/Auth 和一次完整 Graph 发布流程的拒绝/允许边界。
 
 ## 仓库现状与主要阻塞
 
 | 区域 | 现状 | 影响 |
 | --- | --- | --- |
 | Rust 构建 | `backend/src/engine.rs`、`provider_auth.rs`、`runtime.rs` 无条件导入 `std::os::unix`；还调用 `process_group`、`libc::kill`、`flock` | Windows target 无法编译 |
-| Graph 执行 | `backend/src/native.rs` 使用 `/usr/bin/sandbox-exec`；`sandbox.rs` 的实现是 Seatbelt 专用；非 Serial 在审批和启动时要求该能力 | Windows 上 Graph 被明确拒绝，且生产 launcher 直接启动 Seatbelt |
+| Graph 执行 | macOS 使用 `/usr/bin/sandbox-exec`；Windows 使用 AppContainer helper、每实例 SID 和 ACL；非 Serial 在审批和启动时要求对应 capability | capability 或授权失败时拒绝当前 Graph，不降级为无隔离执行 |
 | 文件系统语义 | Git worktree、shadow repo、清理、符号链接和路径映射跨平台覆盖不足 | 合并、隔离、删除和路径边界可能与 macOS 不同 |
 | 生命周期 | engine 与 Provider/Auth bridge 通过负 PID 杀 Unix 进程组；server 监听 Unix 信号 | 取消/超时可能遗留 Pi、Node 和工具后代进程 |
 | 主机交互 | `workspace::pick_repository` 仅 macOS 启用；文件夹选择器用 AppleScript | Windows UI 无法选择仓库 |
@@ -31,7 +37,7 @@ Grapher 当前不能在 Windows 原生构建或运行。阻塞不只是 `scripts
 - `process_control`：Unix process group 与 Windows Job Object，共用 spawn、超时、取消、wait 接口。
 - `runtime_lock`：提供跨进程独占锁，并在 `Runtime` drop 时释放。
 - `shutdown`：主线程接收 Ctrl-C/关闭事件并触发有序停机；信号回调不做阻塞清理。
-- `sandbox`：明确区分 `Seatbelt`、Windows 实现及“不支持”。能力探测失败必须关闭 Graph，而不是静默降级为无隔离执行。
+- `sandbox`：明确区分 `Seatbelt`、Windows AppContainer 实现及“不支持”。任何平台 capability 探测或授权失败都必须关闭该次 Graph 启动，而不是静默降级为无隔离执行。
 - 文件夹选择：平台原生对话框，或由前端选择目录后交由后端校验；不通过拼接 PowerShell 脚本文本处理任意路径。
 
 不建议在业务代码散布 `cfg(windows)`，也不建议将平台 API 简化成只负责启动 `Command` 的 trait：取消、子孙进程、资源释放和 sandbox capability 都是生命周期契约的一部分。
@@ -73,7 +79,7 @@ Grapher 当前不能在 Windows 原生构建或运行。阻塞不只是 `scripts
 
 ### 6. 开发与 UI 启动
 
-`npm run dev` 改为 Node 跨平台实现：PATH 用 `path.delimiter` 和 `path.join`；端口检测/清理使用 Node API 或平台小型 helper，不能因清理失败而误杀无关 PID；child 生命周期使用明确的 Windows tree termination 实现，避免 Unix `detached`/负 PID 假设。停止行为须等待子进程退出并有超时错误。
+`npm run dev` 使用 Node 跨平台实现：PATH 用 `path.delimiter` 和 `path.join`；端口检测使用平台工具，但发现已占用端口时只报告 PID 并退出，绝不尝试终止非本次启动的进程；child 生命周期使用明确的 Windows tree termination 实现，避免 Unix `detached`/负 PID 假设。停止行为须等待子进程退出并有超时错误。
 
 Cargo wrapper 继续优先尊重 `CARGO` 和 PATH，并正确转发 Windows Ctrl-C/退出码。文件夹选择可先由前端原生目录输入/选择能力交互，后端仍须校验路径与 Git 状态。
 
@@ -87,7 +93,7 @@ Cargo wrapper 继续优先尊重 `CARGO` 和 PATH，并正确转发 Windows Ctrl
 
 ### 阶段 1：平台编译与 Serial 工作流
 
-拆出平台模块，处理锁、shutdown、系统日期、folder picker、路径和 `dev.mjs`。在 Windows 支持仓库选择/绑定、规划、批准、Serial 执行和取消。Graph capability 未就绪时保持明确关闭。
+拆出平台模块，处理锁、shutdown、系统日期、folder picker、路径和 `dev.mjs`。Windows 支持仓库选择/绑定、规划、批准、Serial 和 Graph 执行、取消。Graph capability 未就绪时仅拒绝当前执行请求，不改变其他功能。
 
 **通过条件**：Windows `cargo check`、Rust tests、`npm run check/build` 和 dev 启停通过；Serial 可实际调用 provider 与 Pi，完成一次仓库内文件修改；应用退出无后代进程残留；macOS 回归通过。
 
@@ -99,7 +105,7 @@ Cargo wrapper 继续优先尊重 `CARGO` 和 PATH，并正确转发 Windows Ctrl
 
 ### 阶段 3：Graph sandbox 技术验证
 
-单独原型候选 Windows 文件访问控制；实现攻击性测试覆盖源目录、兄弟节点、session、Git metadata、junction/symlink/reparse point、子进程和临时退出。未过门槛时停止 Graph 实施并发布 Serial-only 支持。
+以 Windows AppContainer 为平台 sandbox provider，完成攻击性测试覆盖源目录、兄弟节点、session、Git metadata、junction/symlink/reparse point、hard link、子进程和临时退出。授权失败时停止当前 Graph 实施并返回明确错误，不退回无隔离执行。
 
 **通过条件**：在普通权限账户下，测试证明越界读写被 OS 拒绝，同时允许目标 Git/Node/provider 工作流；无静默降级；独立审查 sandbox threat model。
 
@@ -133,7 +139,7 @@ Cargo wrapper 继续优先尊重 `CARGO` 和 PATH，并正确转发 Windows Ctrl
 ## 关键实现文件
 
 - 进程与 backend 生命周期：`backend/src/engine.rs`、`backend/src/provider_auth.rs`、`backend/src/server.rs`
-- 安全与执行启动：`backend/src/native.rs`、`backend/src/sandbox.rs`
+- 安全与执行启动：`backend/src/native.rs`、`backend/src/sandbox.rs`、`backend/src/windows_sandbox.rs`
 - 锁与平台交互：`backend/src/runtime.rs`、`backend/src/workspace.rs`
 - Pi 工具集成：`engine/entrypoint.mjs`、`engine/prompt-extension.ts`、`engine/workspace-tools.ts`、`engine/workspace-paths.mjs`
 - 开发脚本：`scripts/dev.mjs`、`scripts/cargo.mjs`、`scripts/prepare-native-runtime.mjs`

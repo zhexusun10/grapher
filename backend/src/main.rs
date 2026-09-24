@@ -1,6 +1,18 @@
 use std::io::{self, Read};
 
 fn main() {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--grapher-windows-sandbox-helper") {
+        let arguments: Vec<String> = std::env::args().collect();
+        match grapher::windows_sandbox::run_helper(&arguments) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("Windows Graph sandbox launch failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if std::env::args().nth(1).as_deref() == Some("--compile") {
         let mut input = String::new();
         io::stdin()

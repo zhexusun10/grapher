@@ -5,10 +5,14 @@ pub mod engine;
 pub mod fixture;
 pub mod graph_merge;
 pub mod model;
+pub mod process_control;
 pub mod provider_auth;
 pub mod runtime;
+pub mod runtime_lock;
 pub mod sandbox;
 pub mod server;
 pub mod snapshot_view;
 pub mod store;
 pub mod workspace;
+#[cfg(windows)]
+pub mod windows_sandbox;

@@ -1,0 +1,36 @@
+name: Windows Native Baseline
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows-native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+      - name: Install Grapher dependencies
+        run: npm ci
+      - name: Install pinned Pi dependencies and baseline data
+        run: npm run pi:setup
+      - name: Check frontend
+        run: npm run check
+      - name: Build frontend
+        run: npm run build
+      - name: Check production backend
+        run: cargo check --manifest-path backend/Cargo.toml --no-default-features
+      - name: Run backend library tests
+        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib
+      - name: Run native path and lifecycle checks
+        run: npm run test:native
+      - name: Run project binding checks
+        run: npm run test:bindings

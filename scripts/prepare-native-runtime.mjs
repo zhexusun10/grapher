@@ -9,7 +9,11 @@ import { root, source, verifyBaseline } from './pi-baseline.mjs';
 verifyBaseline();
 const destination = mkdtempSync(join(tmpdir(), 'grapher-native-engine-'));
 try {
-  const options = { recursive: true, mode: constants.COPYFILE_FICLONE, verbatimSymlinks: true };
+  const options = {
+    recursive: true,
+    mode: constants.COPYFILE_FICLONE,
+    verbatimSymlinks: process.platform !== 'win32',
+  };
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   // Independent metadata; never retain the submodule's pointer into source/.git.
   execFileSync('git', ['clone', '--local', '--no-hardlinks', '--no-checkout', source, join(destination, 'pi')], { env, stdio: ['ignore', 'ignore', 'pipe'] });

@@ -3,7 +3,6 @@
 use serde_json::Value;
 use std::{
     io::{BufRead, BufReader, Write},
-    os::unix::process::CommandExt,
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{mpsc, Mutex, OnceLock},
@@ -15,15 +14,14 @@ static BRIDGE: OnceLock<Mutex<Option<Bridge>>> = OnceLock::new();
 
 struct Bridge {
     child: Child,
+    process_tree: crate::process_control::ProcessTree,
     input: ChildStdin,
     output: mpsc::Receiver<String>,
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
-        unsafe {
-            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-        }
+        self.process_tree.terminate();
         let _ = self.child.wait();
     }
 }
@@ -31,7 +29,8 @@ impl Drop for Bridge {
 impl Bridge {
     fn start() -> Result<Self, String> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let mut child = Command::new("node")
+        let mut command = Command::new("node");
+        command
             .arg(root.join("pi/node_modules/tsx/dist/cli.mjs"))
             .arg("--tsconfig")
             .arg(root.join("pi/tsconfig.json"))
@@ -40,10 +39,16 @@ impl Bridge {
             .env("PI_CODING_AGENT_DIR", crate::native::agent_dir()?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
+            .stderr(Stdio::null());
+        crate::process_control::configure_command(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|_| "Cannot start Provider/Auth Adapter. Run npm run pi:setup.")?;
+        let process_tree = crate::process_control::track(&child).map_err(|error| {
+            let _ = child.kill();
+            let _ = child.wait();
+            error
+        })?;
         let input = child.stdin.take().ok_or("Adapter input unavailable")?;
         let stdout = child.stdout.take().ok_or("Adapter output unavailable")?;
         let (tx, output) = mpsc::sync_channel(1);
@@ -57,6 +62,7 @@ impl Bridge {
         });
         Ok(Self {
             child,
+            process_tree,
             input,
             output,
         })

@@ -16,7 +16,8 @@ let diagnostics = '';
 try {
   await mkdir(source);
   await writeFile(join(source, 'value'), 'base');
-  const git = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+  const hooksPath = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const git = (...args) => execFileSync('git', ['-c', `core.hooksPath=${hooksPath}`, '-c', 'commit.gpgsign=false',
     '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: source, encoding: 'utf8' }).trim();
   git('init', '-q');
   git('add', '-A');
@@ -26,7 +27,7 @@ try {
   await once(listener, 'listening');
   const port = listener.address().port;
   await new Promise(done => listener.close(done));
-  child = spawn(resolve('backend/target/debug/grapher'), [], {
+  child = spawn(`${resolve('backend/target/debug/grapher')}${process.platform === 'win32' ? '.exe' : ''}`, [], {
     env: { ...process.env, GRAPHER_DATA_DIR: join(root, 'data'), GRAPHER_PORT: String(port) },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -79,8 +80,18 @@ try {
 } finally {
   if (child?.pid && child.exitCode === null && child.signalCode === null) {
     const exited = once(child, 'exit');
-    const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
-    child.kill('SIGTERM');
+    const timer = setTimeout(() => {
+      if (process.platform === 'win32') {
+        try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      } else {
+        try { child.kill('SIGKILL'); } catch {}
+      }
+    }, 5000);
+    if (process.platform === 'win32') {
+      try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+    } else {
+      child.kill('SIGTERM');
+    }
     try { await exited; } finally { clearTimeout(timer); }
   }
   await rm(root, { recursive: true, force: true });

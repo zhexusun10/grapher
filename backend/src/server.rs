@@ -1231,6 +1231,10 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
 }
 
 pub fn validate_planning_preflight(config: &Config, mode: Option<&str>) -> Result<(), String> {
+    #[cfg(not(feature = "fixture"))]
+    if mode == Some("graph") {
+        crate::native::require_graph_execution()?;
+    }
     let need_partitioner = mode.is_none();
     let need_planner = mode != Some("serial");
 
@@ -2518,7 +2522,9 @@ fn list_skills(
     repository_param: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let repo_path = resolve_repo_path(service, repository_param);
-    let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+    let home_dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
     let mut search_dirs: Vec<(PathBuf, &'static str)> = Vec::new();
 
     // 1. Pi 工作区技能规范 (Project Skills: .agents/skills, .pi/skills, skills)
@@ -2901,13 +2907,15 @@ pub fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "1421".into())
         .parse()
         .map_err(|_| "Invalid GRAPHER_PORT")?;
-    let server = Server::http(("127.0.0.1", port)).map_err(|error| error.to_string())?;
-    let mut signals = signal_hook::iterator::Signals::new([
-        signal_hook::consts::SIGINT,
-        signal_hook::consts::SIGTERM,
-    ])
-    .map_err(|error| error.to_string())?;
+    let server = Arc::new(Server::http(("127.0.0.1", port)).map_err(|error| error.to_string())?);
+    #[cfg(unix)]
+    let signal_list = [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
+    #[cfg(windows)]
+    let signal_list = [signal_hook::consts::SIGINT];
+    let mut signals = signal_hook::iterator::Signals::new(signal_list)
+        .map_err(|error| error.to_string())?;
     let shutdown_service = service.clone();
+    let shutdown_server = server.clone();
     thread::spawn(move || {
         if signals.forever().next().is_some() {
             if let Ok(mut runtime) = shutdown_service.runtime.lock() {
@@ -2924,7 +2932,7 @@ pub fn run() -> Result<(), String> {
             }
             crate::engine::terminate_all();
             crate::provider_auth::shutdown();
-            std::process::exit(0);
+            shutdown_server.unblock();
         }
     });
     eprintln!(

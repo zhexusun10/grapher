@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { mkdirSync, existsSync, symlinkSync, accessSync, statSync, constants } from 'node:fs';
+import { mkdirSync, existsSync, symlinkSync, copyFileSync, accessSync, statSync, constants } from 'node:fs';
 
 // Reuse only Pi's known managed executables, not its configuration or plugins.
 // No downloads on the planning critical path and no replacement of local tools.
@@ -14,8 +14,14 @@ export function reuseManagedTools(directory, upstreamDirectory) {
     } catch { continue; }
     const bin = join(directory, 'bin');
     mkdirSync(bin, { recursive: true, mode: 0o700 });
+    if (process.platform === 'win32') {
+      try { copyFileSync(source, join(bin, name)); } catch {}
+      continue;
+    }
     try { symlinkSync(source, join(bin, name)); }
-    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
   }
 }
 
@@ -31,9 +37,11 @@ export function configureAgentDir() {
   const targetModels = join(directory, 'models.json');
   const sourceModels = join(homedir(), '.pi', 'agent', 'models.json');
   if (!existsSync(targetModels) && existsSync(sourceModels)) {
-    try {
-      symlinkSync(sourceModels, targetModels);
-    } catch {}
+    if (process.platform === 'win32') {
+      try { copyFileSync(sourceModels, targetModels); } catch {}
+    } else {
+      try { symlinkSync(sourceModels, targetModels); } catch {}
+    }
   }
 
   reuseManagedTools(directory, join(homedir(), '.pi', 'agent'));

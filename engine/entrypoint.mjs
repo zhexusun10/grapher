@@ -1,5 +1,5 @@
 // Grapher-owned launcher. No global Pi fallback and no changes to upstream code.
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -45,7 +45,13 @@ try {
     ...process.argv.slice(2),
     "--extension", join(root, "engine/prompt-extension.ts"),
   ], { stdio: "inherit", env: childEnv });
-  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => {
+    if (process.platform === "win32" && child.pid) {
+      try { execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
+    } else {
+      child.kill(signal);
+    }
+  });
   child.on("error", (error) => { console.error(error.message); process.exitCode = 1; });
   child.on("exit", (code, signal) => { process.exitCode = code ?? (signal === "SIGINT" ? 130 : 143); });
 } catch (error) {

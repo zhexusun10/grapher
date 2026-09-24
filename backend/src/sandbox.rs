@@ -165,5 +165,5 @@ fn write_profile(
 }
 
 pub fn supported() -> bool {
-    cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file()
+    cfg!(target_os = "windows") || (cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file())
 }

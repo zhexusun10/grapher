@@ -10,7 +10,8 @@ Docker/容器执行实现已移除，当前执行入口为宿主原生 Pi。Grap
 
 ## 环境要求
 
-- macOS 与系统自带 sandbox-exec：目前验证此平台的原生执行与路径保护；Linux/Windows 后端尚未验证。
+- macOS 与系统自带 sandbox-exec：目前验证此平台的原生 Graph 执行与路径保护。
+- Windows 10/11 x64：使用原生 AppContainer 文件访问边界，支持完整 Graph 与 Serial 执行。
 - Node.js 22.19+
 - Rust stable
 - Git、npm

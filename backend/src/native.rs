@@ -12,7 +12,12 @@ static RUNTIME: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 pub fn require_graph_execution() -> Result<(), String> {
     if !crate::sandbox::supported() {
-        return Err("Native Graph execution requires macOS sandbox-exec".into());
+        return Err(if cfg!(target_os = "windows") {
+            "Windows Graph execution requires the Windows AppContainer filesystem sandbox."
+                .into()
+        } else {
+            "Native Graph execution requires macOS sandbox-exec".into()
+        });
     }
     Ok(())
 }
@@ -72,8 +77,8 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         }
         require_graph_execution()?;
     }
-    if !cfg!(target_os = "macos") {
-        return Err("The native execution backend is currently validated only on macOS".into());
+    if !cfg!(target_os = "macos") && !cfg!(target_os = "windows") && cwd != repository {
+        return Err("Private Graph workspaces are unavailable on this host".into());
     }
     Ok(())
 }
@@ -115,53 +120,107 @@ pub fn execution_command(
         })
         .ok_or("Graph workspace must be .grapher-worktrees/<run>/<instance>")?;
     let engine = prepared_runtime()?;
-    let profile = session.join("execution-instance.sb");
-    crate::sandbox::write_execution_profile(
-        &profile,
-        &source,
-        worktree_root,
-        &current,
-        data,
-        session,
-        &engine,
-    )?;
-    let mut command = Command::new("/usr/bin/sandbox-exec");
-    command
-        .arg("-f")
-        .arg(profile)
-        .arg("node")
-        .arg(engine.join("engine/entrypoint.mjs"));
-    command
-        .current_dir(&current)
-        .env("PI_CODING_AGENT_DIR", agent_dir()?);
-    Ok(command)
+    #[cfg(target_os = "macos")]
+    {
+        let profile = session.join("execution-instance.sb");
+        crate::sandbox::write_execution_profile(
+            &profile,
+            &source,
+            worktree_root,
+            &current,
+            data,
+            session,
+            &engine,
+        )?;
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command
+            .arg("-f")
+            .arg(profile)
+            .arg("node")
+            .arg(engine.join("engine/entrypoint.mjs"));
+        command
+            .current_dir(&current)
+            .env("PI_CODING_AGENT_DIR", agent_dir()?);
+        return Ok(command);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let helper = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut command = Command::new(helper);
+        command
+            .arg("--grapher-windows-sandbox-helper")
+            .current_dir(&current)
+            .env("GRAPHER_WINDOWS_SANDBOX_TARGET", resolve_program("node")?)
+            .env("GRAPHER_WINDOWS_SANDBOX_PREFIX", engine.join("engine/entrypoint.mjs"))
+            .env("GRAPHER_WINDOWS_SANDBOX_CURRENT", &current)
+            .env("GRAPHER_WINDOWS_SANDBOX_SESSION", session)
+            .env("GRAPHER_WINDOWS_SANDBOX_DATA", data)
+            .env("GRAPHER_WINDOWS_SANDBOX_SOURCE", &source)
+            .env("GRAPHER_WINDOWS_SANDBOX_ENGINE", &engine)
+            .env("PI_CODING_AGENT_DIR", agent_dir()?);
+        return Ok(command);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (source, worktree_root, data, session, engine);
+        Err("Native Graph execution is not available without a validated host filesystem sandbox".into())
+    }
+}
+
+#[cfg(windows)]
+fn resolve_program(program: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(program);
+    if candidate.is_absolute() && candidate.is_file() {
+        return Ok(candidate);
+    }
+    let path = std::env::var_os("PATH").ok_or("PATH is required")?;
+    for directory in std::env::split_paths(&path) {
+        let direct = directory.join(program);
+        if direct.is_file() {
+            return Ok(direct);
+        }
+        #[cfg(windows)]
+        if direct.extension().is_none() {
+            let exe = directory.join(format!("{program}.exe"));
+            if exe.is_file() {
+                return Ok(exe);
+            }
+        }
+    }
+    Err(format!("Cannot resolve {program} from PATH"))
 }
 
 /// Shared upstream-owned credentials/config; this is not a directory mapping.
 pub fn agent_dir() -> Result<PathBuf, String> {
+    let home = PathBuf::from(
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .ok_or("HOME or USERPROFILE is required")?,
+    );
     let path = if let Some(path) = std::env::var_os("PI_CODING_AGENT_DIR") {
         PathBuf::from(path)
     } else {
-        PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?).join(".grapher/pi-agent")
+        PathBuf::from(&home).join(".grapher/pi-agent")
     };
     let path = if path == Path::new("~") || path.starts_with("~/") {
-        PathBuf::from(std::env::var_os("HOME").ok_or("HOME is required")?)
-            .join(path.strip_prefix("~").unwrap())
+        home.join(path.strip_prefix("~").unwrap())
     } else {
         path
     };
-    use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&path)
-        .map_err(|e| e.to_string())?;
+    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     let target_models = path.join("models.json");
     if !target_models.exists() {
-        if let Some(home) = std::env::var_os("HOME") {
-            let source_models = PathBuf::from(home).join(".pi/agent/models.json");
-            if source_models.exists() {
+        let source_models = home.join(".pi/agent/models.json");
+        if source_models.exists() {
+            #[cfg(unix)]
+            {
                 let _ = std::os::unix::fs::symlink(&source_models, &target_models);
+            }
+            #[cfg(windows)]
+            {
+                // Windows symlink creation commonly requires a developer mode
+                // or elevated privilege; a private copy preserves startup.
+                let _ = fs::copy(&source_models, &target_models);
             }
         }
     }
@@ -215,13 +274,18 @@ mod tests {
         let node = temp.path().join("node");
         fs::create_dir(&source).unwrap();
         fs::create_dir(&node).unwrap();
-        let alias = temp.path().join("alias");
-        std::os::unix::fs::symlink(&node, &alias).unwrap();
-        for cwd in [&node, &alias] {
-            assert!(validate_workspace(PiRole::NodeAgent, &source, cwd)
+        assert!(validate_workspace(PiRole::NodeAgent, &source, &node)
+            .unwrap_err()
+            .contains("private Git"));
+        assert!(validate_workspace(PiRole::Planner, &source, &node).is_err());
+        #[cfg(unix)]
+        {
+            let alias = temp.path().join("alias");
+            std::os::unix::fs::symlink(&node, &alias).unwrap();
+            assert!(validate_workspace(PiRole::NodeAgent, &source, &alias)
                 .unwrap_err()
                 .contains("private Git"));
-            assert!(validate_workspace(PiRole::Planner, &source, cwd).is_err());
+            assert!(validate_workspace(PiRole::Planner, &source, &alias).is_err());
         }
     }
 

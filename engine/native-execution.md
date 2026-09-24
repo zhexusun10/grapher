@@ -2,7 +2,7 @@
 
 ## 当前契约
 
-所有角色使用宿主 Node 和锁定 Pi，不依赖 Docker/VM。Planner、Partitioner、Serial 和 Merger 在源项目运行；Graph 节点在各自独立 Git 工作区运行，并通过 Seatbelt 禁止直接访问源目录、兄弟工作区及其他会话。
+所有角色使用宿主 Node 和锁定 Pi，不依赖 Docker/VM。Planner、Partitioner、Serial 和 Merger 在源项目运行；macOS Graph 节点使用 Seatbelt，Windows Graph 节点使用每实例 AppContainer 文件访问边界，均在各自独立 Git 工作区运行。
 
 Agent 新任务、节点交付和生成配置以项目根目录相对路径为约定，例如 `src/app.ts`、`reports/result.json`。项目外资料和脚本使用实际宿主绝对路径。Graph 的模型侧普通节点路径呈现为 `./...`，根目录为 `.`；后端保留物理目录用于诊断。file URL/URI 等结构化编码继续使用源项目绝对路径，避免生成无效 URI。旧项目绝对路径适配保留作为兼容层，不是新任务的首选路径。
 
@@ -45,9 +45,9 @@ Planner 先落地，批准时对源目录当前文件生成基线，再分配节
 ## 尚未解决的边界
 
 - 没有任意子进程的通用目录重映射；shell 适配不是完整 shell 解释器。
-- 取消主要依靠进程组，尚无所有后代写入停止的可靠屏障。Pi bash 本身可能创建独立进程组，不能只把风险归于显式 setsid。
+- 取消、超时和服务关闭由平台进程树控制：macOS/Unix 使用 process group，Windows 使用 Job Object；这只解决生命周期，不提供文件系统隔离。
 - 宿主服务、硬链接、共享认证等不是恶意多租户安全边界。
-- Windows/Linux 原生后端未实现。
+- Windows Graph 文件系统边界使用 AppContainer；Windows 与 macOS 均保留 Graph、并发 worktree、合并和发布能力。Linux 原生后端仍未实现。
 - 真正 Xcode 项目、未知扩展及任意工具链仍需单独验证。
 
 ## 验证

@@ -2,13 +2,13 @@ use crate::{
     compiler::{compile, downstream},
     engine,
     model::*,
+    runtime_lock::{acquire, RuntimeLock},
     store::Store,
     workspace,
 };
 use std::{
     collections::BTreeSet,
     fs,
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -47,32 +47,13 @@ pub struct Runtime {
     pub store: Store,
     pub state: Snapshot,
     pub root: PathBuf,
-    _lock: fs::File,
-}
-
-impl Drop for Runtime {
-    fn drop(&mut self) {
-        // A concurrent process spawn can inherit this file description until exec.
-        // Release the owner's lock explicitly instead of waiting for every copy to close.
-        unsafe {
-            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
+    _lock: RuntimeLock,
 }
 
 impl Runtime {
     pub fn open(root: &Path) -> Result<Self, String> {
         fs::create_dir_all(root).map_err(|error| error.to_string())?;
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(root.join("runtime.lock"))
-            .map_err(|error| error.to_string())?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err("Another Grapher instance owns this runtime. Close it before opening this data directory again.".into());
-        }
+        let lock = acquire(root)?;
         let store = Store::open(&root.join("events.sqlite"))?;
         #[allow(unused_mut)]
         let mut state = if let Some(run) = store.runs()?.first() {
@@ -312,6 +293,10 @@ impl Runtime {
                     && self.state.graph.nodes[0].name == "task"))
         {
             return Err("Invalid execution route or routing phase".into());
+        }
+        #[cfg(not(feature = "fixture"))]
+        if plan_type == "graph" {
+            crate::native::require_graph_execution()?;
         }
         self.emit(EventKind::Routed { plan_type: plan_type.into() })
     }

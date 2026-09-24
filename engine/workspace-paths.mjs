@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 
 import { pathToFileURL } from 'node:url';
 
@@ -38,9 +38,12 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   // is intentionally inaccessible here. Do not stat it from the node.
   const base = resolve(originalRoot);
   const WORKSPACE_PATH = base;
-  const aliases = [...new Set([resolve(directory), root])].sort((a, b) => b.length - a.length);
-  const projects = [...new Set([base, resolve(sourceAlias)])].sort((a, b) => b.length - a.length);
-  const boundary = c => c === undefined || /[\s/"'`<>:;,&|()\[\]{}]/.test(c);
+  const variants = value => process.platform === 'win32'
+    ? [value, value.replaceAll('\\', '/')]
+    : [value];
+  const aliases = [...new Set([...new Set([resolve(directory), root])].flatMap(variants))].sort((a, b) => b.length - a.length);
+  const projects = [...new Set([...new Set([base, resolve(sourceAlias)])].flatMap(variants))].sort((a, b) => b.length - a.length);
+  const boundary = c => c === undefined || /[\s\\/"'`<>:;,&|()\[\]{}]/.test(c);
   function replace(text, source, replacement) {
     if (typeof text !== 'string') return text;
     let output = '', cursor = 0;
@@ -59,7 +62,9 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     value => value,
     value => JSON.stringify(value).slice(1, -1),
     value => value.replaceAll('/', '\\/'),
-    value => value.replace(/[^a-zA-Z0-9_./-]/g, character => `\\${character}`),
+    value => value.replaceAll('\\', '/'),
+    value => value.replaceAll('\\', '\\\\'),
+    value => value.replace(/[^a-zA-Z0-9_./\\-]/g, character => `\\${character}`),
     value => value.replaceAll("'", "'\\''"),
     value => pathToFileURL(value).href,
     value => encodeURI(value),
@@ -67,15 +72,16 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   ];
   // Plain filesystem paths are presented relative to the project root. Keep
   // structured URI encodings valid; do not turn file URLs into file://./... .
-  const replacements = [...new Map(aliases.flatMap(alias => spellings.map((encode, index) => [encode(alias), index >= 5 ? encode(base) : '.'])).reverse()).entries()]
+  const replacements = [...new Map(aliases.flatMap(alias => spellings.map((encode, index) => [encode(alias), index >= 7 ? encode(base) : '.'])).reverse()).entries()]
     .sort(([a], [b]) => b.length - a.length);
+  const pathPrefix = (value, prefix) => value === prefix || value.startsWith(prefix + '/') || value.startsWith(prefix + '\\');
+  const commandPrefixes = [...new Set(variants(WORKSPACE_PATH))].sort((a, b) => b.length - a.length);
+  const commandRoot = process.platform === 'win32' ? root.replaceAll('\\', '/') : root;
   const visible = text => replacements.reduce((value, [alias, project]) => replace(value, alias, project), text);
   const physical = value => {
-    if (typeof value !== 'string') return value;
-    // Path arguments are paths, not prose: punctuation is part of the filename.
-    if (value !== WORKSPACE_PATH && !value.startsWith(WORKSPACE_PATH + '/')) return value;
-    // Translate only the prefix; let the filesystem resolve .. and symlinks.
-    return root + value.slice(WORKSPACE_PATH.length);
+    if (typeof value !== 'string' || !pathPrefix(value, WORKSPACE_PATH)) return value;
+    const suffix = value.slice(WORKSPACE_PATH.length).replaceAll('\\', sep);
+    return root + suffix;
   };
   function mapCommand(text, WORKSPACE_PATH) {
     // A quoted sh -c argument is parsed again by the child shell. Translate at
@@ -87,7 +93,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       for (let j = i + 1; j < words.length && /^-[a-zA-Z]+$/.test(words[j].value); j++) {
         if (!words[j].value.includes('c')) continue;
         const script = words[j + 1];
-        if (script?.literal && script.value.includes(WORKSPACE_PATH)) {
+        if (script?.literal && commandPrefixes.some(prefix => script.value.includes(prefix))) {
           replacements.push({ ...script, replacement: shellQuote(mapCommand(script.value, WORKSPACE_PATH)) });
           i = j + 1;
         }
@@ -102,6 +108,15 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     const parentheses = [];
     for (let i = 0; i < text.length; i++) {
       const c = text[i];
+      const source = commandPrefixes.find(prefix => text.startsWith(prefix, i)
+        && (i === 0 || boundary(text[i - 1]) || text[i - 1] === '=')
+        && boundary(text[i + prefix.length]));
+      if (source) {
+        const shellPath = commandRoot;
+        result += quote === "'" ? shellPath.replaceAll("'", "'\\''") : quote === '"' ? shellPath.replace(/[\\$`\"]/g, '\\$&') : shellQuote(shellPath);
+        i += source.length - 1;
+        continue;
+      }
       if (c === '\\' && quote !== "'") { result += text.slice(i, i + 2); i++; continue; }
       // $(...) has its own shell quoting context even inside double quotes.
       if (quote !== "'" && c === '$' && text[i + 1] === '(') {
@@ -130,11 +145,11 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       const assignment = word.value.match(/^([A-Za-z_][A-Za-z_0-9]*=|--[A-Za-z_][A-Za-z_0-9-]*=)(.*)$/s);
       const prefix = assignment?.[1] ?? '';
       const value = assignment?.[2] ?? word.value;
-      const project = projects.find(project => value === project || value.startsWith(project + '/'));
+      const project = projects.find(project => pathPrefix(value, project));
       if (!project) continue;
       // Unquoted globs must retain glob semantics; the scanner below handles them.
       if (/[*?\[\]{}]/.test(value)) continue;
-      edits.push({ ...word, replacement: prefix + shellQuote(root + value.slice(project.length)) });
+      edits.push({ ...word, replacement: prefix + shellQuote(commandRoot + value.slice(project.length).replaceAll('\\', '/')) });
     }
     for (const edit of edits.reverse()) text = text.slice(0, edit.start) + edit.replacement + text.slice(edit.end);
     return projects.reduce((value, project) => mapCommand(value, project), text);
