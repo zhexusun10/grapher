@@ -13,10 +13,13 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
-# Environment
-.env
-.env.local
-.env.*.local
+# Local environment and credentials; only the placeholder is publishable
+.env*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
 
 # Grapher runtime and Rust outputs
 backend/target/

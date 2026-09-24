@@ -342,6 +342,19 @@ fn resolve_path(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn protected_tool_directory(path: &Path) -> bool {
+    // Unprivileged users cannot edit ACLs under these system installations.
+    // Windows normally grants AppContainers read/execute there already; if a
+    // tool is not readable its launch fails rather than weakening isolation.
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    ["SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(|name| env::var_os(name))
+        .map(PathBuf::from)
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| canonical.starts_with(root))
+}
+
 fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String> {
     let current = resolve_path(
         &env::var("GRAPHER_WINDOWS_SANDBOX_CURRENT")
@@ -394,7 +407,7 @@ fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String>
         for directory in std::env::split_paths(&path) {
             if directory.is_dir() {
                 let canonical = directory.canonicalize().unwrap_or(directory.clone());
-                if canonical.starts_with(&source) {
+                if canonical.starts_with(&source) || protected_tool_directory(&directory) {
                     continue;
                 }
                 grant_traverse(&directory, sid)?;

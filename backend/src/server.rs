@@ -784,21 +784,43 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     }
 
     #[test]
-    fn origin_check_allows_custom_ports_and_blocks_malicious_origins() {
-        assert!(is_trusted_origin_or_host("http://localhost:5173", 1421));
-        assert!(is_trusted_origin_or_host("http://localhost:1420", 1421));
-        assert!(is_trusted_origin_or_host("http://127.0.0.1:3000", 1421));
-        assert!(is_trusted_origin_or_host("http://[::1]:5173", 1421));
-        assert!(is_trusted_origin_or_host("tauri://localhost", 1421));
-        assert!(is_trusted_origin_or_host("127.0.0.1:1421", 1421));
-        assert!(is_trusted_origin_or_host("localhost:1421", 1421));
+    fn planning_attachment_ignores_client_filename() {
+        let image = ImageAttachment {
+            r#type: "image".into(), mime_type: "image/png".into(),
+            data: String::new(), name: Some("../../config.json".into()),
+        };
+        let dir = PathBuf::from("planning").join("attachments");
+        assert_eq!(planning_attachment_path(&dir, 2, &image), dir.join("image_2.png"));
+        let image = ImageAttachment { name: Some("/tmp/other".into()), ..image };
+        assert_eq!(planning_attachment_path(&dir, 2, &image), dir.join("image_2.png"));
+    }
 
-        // Malicious or remote origins must be blocked
-        assert!(!is_trusted_origin_or_host("http://evil.com", 1421));
-        assert!(!is_trusted_origin_or_host("http://evil.com:5173", 1421));
-        assert!(!is_trusted_origin_or_host("http://localhost.evil.com", 1421));
-        assert!(!is_trusted_origin_or_host("http://127.0.0.1.attacker.com", 1421));
-        assert!(!is_trusted_origin_or_host("http://attacker.com:5173", 1421));
+    #[test]
+    fn local_http_boundary_rejects_other_ports_and_malformed_origins() {
+        assert!(is_trusted_host("127.0.0.1:1421", 1421));
+        assert!(is_trusted_host("localhost:1421", 1421));
+        assert!(!is_trusted_host("localhost:1420", 1421));
+        assert!(!is_trusted_host("0.0.0.0:1421", 1421));
+        assert!(!is_trusted_host("localhost:1421.evil.com", 1421));
+        assert!(!is_trusted_host("localhost:1421@evil.com", 1421));
+        assert!(!is_trusted_host("evil.com:1421", 1421));
+
+        assert!(is_trusted_origin("http://localhost:1420", 1421));
+        assert!(is_trusted_origin("http://127.0.0.1:1420", 1421));
+        assert!(is_trusted_origin("http://localhost:1421", 1421));
+        assert!(!is_trusted_origin("http://localhost:5173", 1421));
+        assert!(!is_trusted_origin("http://127.0.0.1:3000", 1421));
+        assert!(!is_trusted_origin("http://evil.com", 1421));
+        assert!(!is_trusted_origin("http://localhost.evil.com:1420", 1421));
+        assert!(!is_trusted_origin("http://localhost:1420.evil.com", 1421));
+        assert!(!is_trusted_origin("http://localhost:1420/path", 1421));
+        assert!(!is_trusted_origin("http://localhost:1420@evil.com", 1421));
+        assert!(!is_trusted_origin("null", 1421));
+        assert!(!is_trusted_origin("tauri://localhost", 1421));
+        assert!(origin_matches_allowlist("https://example.com:443", "https://example.com:443"));
+        assert!(!origin_matches_allowlist("https://example.com.evil", "https://example.com"));
+        assert!(!origin_matches_allowlist("http://example.com/path", "http://example.com/path"));
+        assert!(!origin_matches_allowlist("http://", "http://"));
     }
 
     #[test]
@@ -1442,15 +1464,7 @@ fn plan_goal_internal(
                 let attach_dir = directory.join("attachments");
                 let _ = fs::create_dir_all(&attach_dir);
                 for (idx, img) in imgs.iter().enumerate() {
-                    let ext = match img.mime_type.as_str() {
-                        "image/jpeg" | "image/jpg" => "jpg",
-                        "image/png" => "png",
-                        "image/webp" => "webp",
-                        "image/gif" => "gif",
-                        _ => "png",
-                    };
-                    let file_name = img.name.clone().unwrap_or_else(|| format!("image_{idx}.{ext}"));
-                    let file_path = attach_dir.join(&file_name);
+                    let file_path = planning_attachment_path(&attach_dir, idx, img);
                     if let Some(bytes) = decode_base64(&img.data) {
                         if fs::write(&file_path, bytes).is_ok() {
                             if let Ok(canon) = file_path.canonicalize() {
@@ -2086,6 +2100,18 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     runtime.delete_run(&run_id)
+}
+
+fn planning_attachment_path(dir: &std::path::Path, index: usize, image: &ImageAttachment) -> PathBuf {
+    let ext = match image.mime_type.as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
+    // Client filenames are display data, not paths under our writable data dir.
+    dir.join(format!("image_{index}.{ext}"))
 }
 
 fn is_valid_planning_id(id: &str) -> bool {
@@ -2809,79 +2835,37 @@ fn send_sse_event(tx: &std::sync::mpsc::Sender<Vec<u8>>, event: &str, data: &ser
     let _ = tx.send(payload.into_bytes());
 }
 
-pub fn is_trusted_origin_or_host(value: &str, backend_port: u16) -> bool {
-    let raw = value.trim();
-    if raw.is_empty() {
-        return false;
-    }
+// Host is not an authentication mechanism, but an exact loopback authority
+// check prevents DNS rebinding from using a remote hostname to reach this API.
+fn is_trusted_host(host: &str, backend_port: u16) -> bool {
+    host == format!("127.0.0.1:{backend_port}")
+        || host == format!("localhost:{backend_port}")
+}
 
-    // Check optional GRAPHER_ALLOWED_ORIGINS environment variable
-    if let Ok(allowed) = std::env::var("GRAPHER_ALLOWED_ORIGINS") {
-        for origin in allowed.split(',') {
-            let o = origin.trim();
-            if !o.is_empty() && (o == raw || raw.starts_with(o)) {
-                return true;
-            }
-        }
-    }
-
-    // Strip scheme if present
-    let without_scheme = if let Some(stripped) = raw.strip_prefix("http://") {
-        stripped
-    } else if let Some(stripped) = raw.strip_prefix("https://") {
-        stripped
-    } else if let Some(stripped) = raw.strip_prefix("tauri://") {
-        stripped
-    } else {
-        raw
-    };
-
-    // Strip path or query if present (e.g. "localhost:5173/path")
-    let authority = without_scheme
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("");
-    if authority.is_empty() {
-        return false;
-    }
-
-    // Special check for tauri://localhost
-    if raw.starts_with("tauri://") && authority == "localhost" {
+fn is_trusted_origin(origin: &str, backend_port: u16) -> bool {
+    let local = ["localhost", "127.0.0.1"];
+    if local.iter().any(|host| {
+        origin == format!("http://{host}:{backend_port}")
+            || origin == format!("http://{host}:1420")
+    }) {
         return true;
     }
+    // Opt-in for nonstandard frontends only. Never use this to authorize Host.
+    std::env::var("GRAPHER_ALLOWED_ORIGINS")
+        .is_ok_and(|allowed| origin_matches_allowlist(origin, &allowed))
+}
 
-    // Extract host (handle IPv6 [::1]:port vs host:port)
-    let host = if authority.starts_with('[') {
-        if let Some(end_bracket) = authority.find(']') {
-            &authority[1..end_bracket]
-        } else {
-            authority
-        }
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-
-    // Any loopback address on any port is trusted
-    if host == "localhost"
-        || host == "127.0.0.1"
-        || host == "0.0.0.0"
-        || host == "::1"
-        || host == "[::1]"
-    {
-        return true;
-    }
-
-    // Direct match against backend port
-    let backend_host_1 = format!("127.0.0.1:{backend_port}");
-    let backend_host_2 = format!("localhost:{backend_port}");
-    if authority == backend_host_1 || authority == backend_host_2 {
-        return true;
-    }
-
-    false
+fn origin_matches_allowlist(origin: &str, allowed: &str) -> bool {
+    allowed.split(',').any(|entry| {
+        let entry = entry.trim();
+        let authority = entry.strip_prefix("http://")
+            .or_else(|| entry.strip_prefix("https://"));
+        authority.is_some_and(|host| {
+            !host.is_empty()
+                && !host.chars().any(|c| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@'))
+                && entry == origin
+        })
+    })
 }
 
 pub fn run() -> Result<(), String> {
@@ -2967,29 +2951,31 @@ pub fn run() -> Result<(), String> {
                 .iter()
                 .find(|h| h.field.equiv("Origin"))
                 .map(|h| h.value.as_str().to_string());
-            let trusted = request
-                .headers()
-                .iter()
-                .filter(|h| h.field.equiv("Host") || h.field.equiv("Origin"))
-                .all(|h| is_trusted_origin_or_host(h.value.as_str(), port));
+            let hosts: Vec<_> = request.headers().iter().filter(|h| h.field.equiv("Host")).collect();
+            let origins: Vec<_> = request.headers().iter().filter(|h| h.field.equiv("Origin")).collect();
+            let trusted = hosts.len() == 1
+                && is_trusted_host(hosts[0].value.as_str(), port)
+                && origins.len() <= 1
+                && origins.iter().all(|h| is_trusted_origin(h.value.as_str(), port));
             if !trusted {
                 let _ = request
                     .respond(Response::from_string("Untrusted origin").with_status_code(403));
                 return;
             }
             if request.method() == &tiny_http::Method::Options {
-                let origin = req_origin.unwrap_or_else(|| "*".to_string());
-                let response = Response::empty(204)
-                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], origin.as_bytes()).unwrap())
-                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, OPTIONS"[..]).unwrap())
-                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type, Authorization"[..]).unwrap())
-                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Max-Age"[..], &b"86400"[..]).unwrap());
+                let mut response = Response::empty(204)
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"POST, OPTIONS"[..]).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type"[..]).unwrap());
+                if let Some(ref origin) = req_origin {
+                    response = response.with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], origin.as_bytes()).unwrap());
+                }
                 let _ = request.respond(response);
                 return;
             }
             let url = request.url().split('?').next().unwrap_or("/").to_string();
             if let Some(command) = url.strip_prefix("/api/") {
-                // JSON-only requests and no CORS prevent other websites from issuing commands.
+                // JSON-only POST + exact Host/Origin checks limit browser access.
+                // This is still an unauthenticated, trusted-user local API.
                 let is_json = request.headers().iter().any(|h| {
                     h.field.equiv("Content-Type")
                         && h.value.as_str().split(';').next() == Some("application/json")
