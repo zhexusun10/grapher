@@ -50,7 +50,9 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
         graph_merge::merge_graph(&source, &heads, || panic!("No conflict expected")).unwrap();
     assert!(!source.join("delete.txt").exists());
     assert_eq!(
-        fs::read_to_string(source.join("shared.txt")).unwrap(),
+        fs::read_to_string(source.join("shared.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "updated\n"
     );
     assert_eq!(fs::read_to_string(source.join("new.txt")).unwrap(), "new");
@@ -103,7 +105,9 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
     .unwrap();
     assert_eq!(resolutions, 1);
     assert_eq!(
-        fs::read_to_string(source.join("shared.txt")).unwrap(),
+        fs::read_to_string(source.join("shared.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "left\nright\n"
     );
     assert!(source.join("last.txt").exists());

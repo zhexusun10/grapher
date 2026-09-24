@@ -65,11 +65,15 @@ fn resolved_conflict_does_not_drop_remaining_heads() {
     .unwrap();
     assert_eq!(resolutions, 1);
     assert_eq!(
-        fs::read_to_string(source.join("shared")).unwrap(),
+        fs::read_to_string(source.join("shared"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "first\nsecond\n"
     );
     assert_eq!(
-        fs::read_to_string(source.join("last.txt")).unwrap(),
+        fs::read_to_string(source.join("last.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "last\n"
     );
     git(&source, &["merge-base", "--is-ancestor", &c, "HEAD"]).unwrap();
@@ -171,7 +175,9 @@ fn resolved_descendant_avoids_reopening_ancestor_conflicts() {
     .unwrap();
     for path in [&child, &source] {
         assert_eq!(
-            fs::read_to_string(path.join("shared")).unwrap(),
+            fs::read_to_string(path.join("shared"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "combined\n"
         );
         for head in &heads {

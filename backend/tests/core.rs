@@ -712,8 +712,11 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
         &[],
     )
     .unwrap();
+    // Git for Windows may check out text as CRLF (core.autocrlf=true).
     assert_eq!(
-        fs::read_to_string(Path::new(&retry.execution.worktree).join("resolved.txt")).unwrap(),
+        fs::read_to_string(Path::new(&retry.execution.worktree).join("resolved.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "human resolution\n"
     );
 }

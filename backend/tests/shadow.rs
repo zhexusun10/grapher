@@ -58,7 +58,9 @@ fn shadow_git_zero_pollution_for_plain_directory() {
     let before_wt2 = workspace::prepare(&plain_project, &wt2, &head, &[after_wt1]).unwrap();
     assert_ne!(before_wt2, head);
     assert_eq!(
-        fs::read_to_string(wt2.join("main.py")).unwrap(),
+        fs::read_to_string(wt2.join("main.py"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "print('modified in worktree')\n"
     );
 
