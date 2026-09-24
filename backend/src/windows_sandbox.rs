@@ -564,8 +564,20 @@ mod tests {
         let source = PathBuf::from(env::var("GRAPHER_WINDOWS_SANDBOX_SOURCE").unwrap());
         let current = PathBuf::from(env::var("GRAPHER_WINDOWS_SANDBOX_CURRENT").unwrap());
         let session = PathBuf::from(env::var("GRAPHER_WINDOWS_SANDBOX_SESSION").unwrap());
-        assert!(fs::read_to_string(source.join("marker.txt")).is_err());
-        assert!(fs::write(source.join("forbidden.txt"), "forbidden").is_err());
+        let sibling = current.parent().unwrap().join("sibling");
+        let other_session = session.parent().unwrap().join("other-session");
+        for denied in [&source, &sibling, &other_session] {
+            assert!(
+                fs::read_to_string(denied.join("marker.txt")).is_err(),
+                "{}",
+                denied.display()
+            );
+            assert!(
+                fs::write(denied.join("forbidden.txt"), "forbidden").is_err(),
+                "{}",
+                denied.display()
+            );
+        }
         fs::write(current.join("allowed.txt"), "allowed").unwrap();
         fs::write(session.join("allowed.txt"), "session").unwrap();
     }
@@ -576,14 +588,27 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
         let current = root.path().join(".grapher-worktrees/run/node");
+        let sibling = current.parent().unwrap().join("sibling");
         let data = root.path().join("data");
         let session = data.join("sessions/test-session");
+        let other_session = data.join("sessions/other-session");
         let engine = root.path().join("engine");
         let agent = root.path().join("agent");
-        for path in [&source, &current, &data, &session, &engine, &agent] {
+        for path in [
+            &source,
+            &current,
+            &sibling,
+            &data,
+            &session,
+            &other_session,
+            &engine,
+            &agent,
+        ] {
             std::fs::create_dir_all(path).unwrap();
         }
-        std::fs::write(source.join("marker.txt"), "source").unwrap();
+        for path in [&source, &sibling, &other_session] {
+            std::fs::write(path.join("marker.txt"), "protected").unwrap();
+        }
         // The test executable is statically built and its path is under our
         // allowed engine root; no system executable ACLs or shell are needed.
         let target = engine.join("sandbox-probe.exe");
@@ -651,11 +676,13 @@ mod tests {
             std::fs::read_to_string(session.join("allowed.txt")).unwrap(),
             "session"
         );
-        assert!(!source.join("forbidden.txt").exists());
-        assert_eq!(
-            std::fs::read_to_string(source.join("marker.txt")).unwrap(),
-            "source"
-        );
+        for path in [&source, &sibling, &other_session] {
+            assert!(!path.join("forbidden.txt").exists());
+            assert_eq!(
+                std::fs::read_to_string(path.join("marker.txt")).unwrap(),
+                "protected"
+            );
+        }
         assert_eq!(std::fs::read_to_string(current_marker).unwrap(), "current");
     }
 }

@@ -22,6 +22,9 @@ jobs:
         run: npm ci
       - name: Install pinned Pi dependencies and baseline data
         run: npm run pi:setup
+      - name: Exercise pinned Pi CLI and Provider/Auth IPC (offline)
+        timeout-minutes: 3
+        run: node --test scripts/pi-process-contract.test.mjs
       - name: Check frontend
         run: npm run check
       - name: Build frontend
@@ -33,6 +36,9 @@ jobs:
       - name: Run Windows AppContainer boundary test
         timeout-minutes: 3
         run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib windows_sandbox::tests::appcontainer_allows_current_workspace_and_denies_source -- --nocapture
+      - name: Run offline Graph, Serial, publication, and recovery fixtures
+        timeout-minutes: 10
+        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --features fixture --test core --test graph_merge --test shadow --test publication --test publication_state
       - name: Run native path and lifecycle checks
         run: npm run test:native
       - name: Run project binding checks

@@ -4,7 +4,7 @@
 
 > **Don't orchestrate agents. Compile work.**
 
-Grapher is a local multi-agent coding system. It routes a goal to a single task or compiles it into an inspectable execution graph. A deterministic Rust runtime schedules independent Pi execution instances, combines results through Git file states, and declares completion only after successfully publishing to the user's project. It is an experimental local developer tool, not a hosted multi-tenant service.
+Grapher is a local multi-agent coding system. It routes a goal to a single task or compiles it into an inspectable execution graph. A deterministic Rust runtime schedules independent Pi execution instances, combines results through Git file states, and declares completion only after successfully publishing to the user's project. 
 
 Unlike chat-based agent orchestration, the planner exits after compilation rather than managing nodes during execution. Agents exchange Git file states, not conversation transcripts. Retries and feedback are explicit, bounded state transitions. A graph is complete only after its valid results reach the user's project. Linear work stays serial; more agents are not automatically better.
 

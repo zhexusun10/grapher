@@ -115,7 +115,9 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
             .is_empty()
     );
 
-    #[cfg(feature = "fixture")]
+    // This merger fixture uses /bin/sh. The cross-platform publication path
+    // above runs on Windows; a native Windows merger needs its own shell-free probe.
+    #[cfg(all(feature = "fixture", unix))]
     {
         use grapher::model::{Config, EventKind};
         let base = workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap();
