@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { createWorkspacePaths } from '../engine/workspace-paths.mjs';
 
-test('literal shell mapping preserves quoting, external paths and opaque content', () => {
+test('literal shell mapping preserves quoting, external paths and opaque content', { skip: process.platform === 'win32' }, () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-path-regression-')));
   try {
     const source = join(root, 'source');
@@ -64,4 +64,22 @@ test('literal shell mapping preserves quoting, external paths and opaque content
     assert.deepEqual(paths.view(opaque), opaque);
     assert.deepEqual(paths.view({id:workspace, textSignature:workspace, text:`Read ${workspace}/marker`}), {id:workspace, textSignature:workspace, text:'Read ./marker'});
   } finally { rmSync(root, {recursive:true, force:true}); }
+});
+
+test('Windows workspace mapping preserves native and slash paths without requiring a POSIX shell', { skip: process.platform !== 'win32' }, () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-path-regression-')));
+  try {
+    const source = join(root, 'source');
+    const workspace = join(root, 'node with spaces');
+    mkdirSync(source); mkdirSync(workspace);
+    const paths = createWorkspacePaths(workspace, source);
+    const slashSource = source.replaceAll('\\', '/');
+    const slashWorkspace = workspace.replaceAll('\\', '/');
+    assert.equal(paths.physical(join(source, 'marker')), join(workspace, 'marker'));
+    assert.equal(paths.visible(join(workspace, 'marker')), '.\\marker');
+    assert.equal(paths.visible(`${slashWorkspace}/marker`), './marker');
+    assert.equal(paths.command(`cat ${slashSource}/marker`), `cat '${slashWorkspace}/marker'`);
+    assert.equal(paths.command(`cat ${slashSource}-other/marker`), `cat ${slashSource}-other/marker`);
+    assert.deepEqual(paths.view({ [join(workspace, 'marker')]: workspace }), { ['.\\marker']: '.' });
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
