@@ -2909,15 +2909,33 @@ pub fn run() -> Result<(), String> {
         .map_err(|_| "Invalid GRAPHER_PORT")?;
     let server = Arc::new(Server::http(("127.0.0.1", port)).map_err(|error| error.to_string())?);
     #[cfg(unix)]
-    let signal_list = [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM];
+    let mut signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+    ])
+    .map_err(|error| error.to_string())?;
     #[cfg(windows)]
-    let signal_list = [signal_hook::consts::SIGINT];
-    let mut signals = signal_hook::iterator::Signals::new(signal_list)
-        .map_err(|error| error.to_string())?;
+    let shutdown_requested = {
+        // signal-hook's iterator module is Unix-only; its flag API supports
+        // the Windows CRT SIGINT handler without doing work in the handler.
+        let requested = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGINT, requested.clone())
+            .map_err(|error| error.to_string())?;
+        requested
+    };
     let shutdown_service = service.clone();
     let shutdown_server = server.clone();
     thread::spawn(move || {
-        if signals.forever().next().is_some() {
+        #[cfg(unix)]
+        let stop = signals.forever().next().is_some();
+        #[cfg(windows)]
+        let stop = {
+            while !shutdown_requested.load(Ordering::SeqCst) {
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
+            true
+        };
+        if stop {
             if let Ok(mut runtime) = shutdown_service.runtime.lock() {
                 if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
                     let _ = runtime.emit(EventKind::PublicationFailed {

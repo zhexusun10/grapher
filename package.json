@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "pi:verify": "node scripts/pi-baseline.mjs verify",
-    "test:pi": "node --check engine/system-prompt.mjs && node scripts/pi-baseline.mjs verify && node --test scripts/adopt-pi.test.mjs scripts/agent-dir.test.mjs scripts/planning-trajectory.test.mjs && node --import ./pi/node_modules/tsx/dist/loader.mjs --test scripts/execution-retry.test.ts scripts/pi-compat.test.ts",
+    "test:pi": "node --check engine/system-prompt.mjs && node scripts/pi-baseline.mjs verify && node --test scripts/adopt-pi.test.mjs scripts/agent-dir.test.mjs scripts/planning-trajectory.test.mjs scripts/pi-process-contract.test.mjs && node --import ./pi/node_modules/tsx/dist/loader.mjs --test scripts/execution-retry.test.ts scripts/pi-compat.test.ts",
+    "pi:upgrade-check": "npm run pi:verify && npm run pi:build && npm run test:pi && npm run check && npm run test && npm run test:extensions && npm run test:native && npm run test:bindings && npm run test:http",
     "pi:setup": "node scripts/pi-baseline.mjs setup",
     "pi:build": "node scripts/pi-baseline.mjs build",
     "pi:adopt": "node scripts/adopt-pi.mjs",

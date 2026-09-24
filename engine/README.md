@@ -52,7 +52,7 @@ Graph 首次执行将经过 baseline 校验的 Pi 及已安装依赖复制到源
 
 ## Provider/Auth Adapter
 
-Adapter 支持 upstream provider catalog、login、poll、交互响应、cancel 和 logout。长期凭据及刷新逻辑留在 upstream `ModelRuntime`；浏览器只接收非敏感状态并提交当前认证交互所需输入。宿主 Adapter、`npm run pi` 和原生执行共享专用 `~/.grapher/pi-agent`（或 `PI_CODING_AGENT_DIR`）。不读取或自动复制旧 `~/.pi/agent` 凭据。
+Adapter 支持 upstream provider catalog、login、poll、交互响应、cancel 和 logout。长期凭据及刷新逻辑留在 upstream `ModelRuntime`；浏览器只接收非敏感状态并提交当前认证交互所需输入。宿主 Adapter、`npm run pi` 和原生执行共享专用 `~/.grapher/pi-agent`（或 `PI_CODING_AGENT_DIR`）。不读取或自动复制旧 `~/.pi/agent` 凭据。`test:pi` 在隔离的空认证目录中测试真实 CLI 版本与 Provider/Auth IPC catalog（包括关闭输入后的完整输出），不调用付费模型。
 
 修改 provider/auth 边界时，应同时验证：
 
@@ -70,7 +70,7 @@ npm run test:http
 3. 仅使用显式目标 SHA 更新 submodule；不要使用启动时 `git pull` 或 `submodule update --remote`。
 4. 使用新 upstream 的 lockfile 安装依赖（`npm ci --prefix pi`），并运行 `npm --prefix pi run hydrate:model-data`。
 5. 运行 `npm run pi:adopt -- <完整的 40 位 SHA>`：在确认 Pi 工作树干净且模型数据有效后，生成新 `engine/pi-lock.json` 并同步 `engine/model-data/`。审阅生成的变更，将父仓库 gitlink 一并提交。此命令不 fetch、pull 或跳过基线验证。
-6. 先运行 `npm run pi:setup`（或已 `npm ci` 后运行 `npm run pi:build`），再检查 `engine/pi-compat.ts` 的 Pi API 合约并运行 `npm run test:pi`、verify、CLI smoke、后端测试、HTTP/UI 测试和 `npm run test:native`；后者包含两个实际 Pi CLI 经生产 launcher 执行工具及绝对脚本的检查。
+6. 先运行 `npm run pi:setup`，审阅 `engine/pi-compat.ts` 的源码级绑定，然后运行 `npm run pi:upgrade-check`（校验基线、离线构建、CLI/Provider/Auth 合约、类型、后端、extensions、native、bindings、HTTP）。此命令不调用付费模型，但 HTTP/benchmark 检查需要相邻的 `../grapher-tests` 测试仓库；仍需人工检查认证交互和真实模型调用。`test:native` 包含两个实际 Pi CLI 经生产 launcher 执行工具及绝对脚本的检查。
 7. 若使用 fork commit，必须先推送到可公开获取的 remote，再更新 `.gitmodules` 并用全新 clone 验证。
 
 基线更新、适配层修改和校验数据应在同一变更中提交。集中适配减少升级时的修改范围，**不保证任意上游版本的 API/行为兼容**：尤其是 Provider/Auth、扩展事件、工具语义和私有 CLI 入口，仍须通过实际回归验证。任何构建或合约测试失败都不能标记为可发布。

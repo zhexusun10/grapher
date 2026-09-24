@@ -119,6 +119,8 @@ pub fn execution_command(
                 .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
         })
         .ok_or("Graph workspace must be .grapher-worktrees/<run>/<instance>")?;
+    #[cfg(windows)]
+    let _ = worktree_root; // Validation is required even though Windows uses the current path.
     let engine = prepared_runtime()?;
     #[cfg(target_os = "macos")]
     {
