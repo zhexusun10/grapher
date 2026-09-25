@@ -21,6 +21,8 @@ fn base_command() -> Command {
     // The private PID namespace prevents /proc/<backend-pid>/root or /fd from
     // reaching the parent's unmasked view. Network remains inherited for Pi.
     // Dropping capabilities prevents an agent from unmounting the barriers.
+    // A bind of / can inherit MS_NODEV in an unprivileged user namespace.
+    // Preserve the task container's /dev for Git, Pi, and native tools.
     command.args([
         "--die-with-parent",
         "--unshare-user",
@@ -30,6 +32,9 @@ fn base_command() -> Command {
         "--bind",
         "/",
         "/",
+        "--dev-bind",
+        "/dev",
+        "/dev",
         "--proc",
         "/proc",
     ]);
@@ -116,7 +121,7 @@ fn probe() -> Result<(), String> {
             &installation,
         )?;
         command.args(["--", "/bin/sh", "-c",
-            "test ! -e \"$1/secret\" && ! (echo bad > \"$1/secret\") 2>/dev/null && ! (echo bad > \"$4/code\") 2>/dev/null && echo ok > \"$2/write\" && echo ok > \"$3/write\"",
+            ": <>/dev/null && test ! -e \"$1/secret\" && ! (echo bad > \"$1/secret\") 2>/dev/null && ! (echo bad > \"$4/code\") 2>/dev/null && echo ok > \"$2/write\" && echo ok > \"$3/write\"",
             "probe"])
             .args([&source, &current, &session, &installation]);
         let output = command.stdout(Stdio::null()).output().map_err(|e| {
@@ -247,6 +252,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retains_container_device_nodes() {
+        let command = base_command();
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args
+            .windows(3)
+            .any(|part| part == ["--dev-bind", "/dev", "/dev"]));
+    }
+
+    #[test]
     fn session_inside_masked_source_remains_writable() {
         require_supported().expect("Linux Graph requires bwrap in CI");
         let temp = tempfile::tempdir().unwrap();
@@ -273,7 +287,7 @@ mod tests {
         let mut probe = Command::new(BWRAP);
         let result = probe.args(&args[..args.len()-2]).args([
             "/bin/sh", "-c",
-            "set -e; test ! -f \"$1/secret\"; ! (echo bad > \"$1/secret\") 2>/dev/null; echo ok > \"$2/new\"",
+            "set -e; : <>/dev/null; test ! -f \"$1/secret\"; ! (echo bad > \"$1/secret\") 2>/dev/null; echo ok > \"$2/new\"",
             "probe",
         ]).args([&source, &session]).current_dir(&current).output().unwrap();
         assert!(
@@ -319,7 +333,7 @@ mod tests {
             .collect::<Vec<_>>();
         let output = Command::new(BWRAP).args(&args[..args.len()-2]).args([
             "/bin/sh", "-c",
-            "set -e; test ! -f \"$1/protected\"; ! (echo leak > \"$1/protected\") 2>/dev/null; echo ok > \"$2/new\"",
+            "set -e; : <>/dev/null; test ! -f \"$1/protected\"; ! (echo leak > \"$1/protected\") 2>/dev/null; echo ok > \"$2/new\"",
             "probe",
         ]).args([&common, &current]).current_dir(&current).output().unwrap();
         assert!(
@@ -362,7 +376,7 @@ mod tests {
             .args([
                 "/bin/sh",
                 "-c",
-                "set -e; test ! -e \"$1/package.json\"; echo ok > \"$2/write\"",
+                "set -e; : <>/dev/null; test ! -e \"$1/package.json\"; echo ok > \"$2/write\"",
                 "probe",
             ])
             .args([&source, &current])
@@ -424,7 +438,7 @@ mod tests {
         );
         let mut cmd = Command::new(BWRAP);
         cmd.args(&args[..args.len() - 2]); // keep production mounts through `--`
-        cmd.args(["/bin/sh", "-c", "set -e; test ! -f \"$1/marker\"; test ! -f \"/proc/1/root$1/marker\"; test ! -f \"$2/marker\"; test ! -f \"$3/marker\"; test ! -f \"$4/source-link/marker\"; ! (echo leak > \"$1/new\") 2>/dev/null; ! (echo leak > \"$2/new\") 2>/dev/null; echo ok > new; echo ok > \"$5/new\"; echo ok > \"$4/new\"; test -f \"$6/marker\"; test -f \"$7/marker\"; ! (echo leak > \"$7/marker\") 2>/dev/null", "probe"])
+        cmd.args(["/bin/sh", "-c", "set -e; : <>/dev/null; test ! -f \"$1/marker\"; test ! -f \"/proc/1/root$1/marker\"; test ! -f \"$2/marker\"; test ! -f \"$3/marker\"; test ! -f \"$4/source-link/marker\"; ! (echo leak > \"$1/new\") 2>/dev/null; ! (echo leak > \"$2/new\") 2>/dev/null; echo ok > new; echo ok > \"$5/new\"; echo ok > \"$4/new\"; test -f \"$6/marker\"; test -f \"$7/marker\"; ! (echo leak > \"$7/marker\") 2>/dev/null", "probe"])
             .args([&source, &sibling, &other, &outside, &session, &pi_dir, &engine])
             .current_dir(&current);
         let output = cmd.output().unwrap();
@@ -433,6 +447,21 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // Git/Pi opens /dev/null; it must also work in the real node view.
+        let git = Command::new(BWRAP)
+            .args(&args[..args.len() - 2])
+            .args(["git", "-C"])
+            .arg(&current)
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(&current)
+            .output()
+            .unwrap();
+        assert!(
+            git.status.success(),
+            "{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        assert_eq!(git.stdout, b"true\n");
         assert!(!source.join("new").exists());
         assert!(!sibling.join("new").exists());
         assert!(!other.join("new").exists());

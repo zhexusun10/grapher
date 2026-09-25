@@ -61,7 +61,8 @@ class GrapherAgent(BaseInstalledAgent):
             ("if [ \"$(uname -s)\" = Linux ]; then "
              "test -x /usr/bin/bwrap && /usr/bin/bwrap --die-with-parent "
              "--unshare-user --unshare-pid --cap-drop ALL "
-             "--bind / / --proc /proc -- /bin/true; fi"),
+             "--bind / / --dev-bind /dev /dev --proc /proc "
+             "-- /bin/sh -c ': <>/dev/null'; fi"),
             f"node {qroot}/scripts/pi-baseline.mjs verify",
             f'test -z "$(git -C {qroot} status --porcelain --untracked-files=normal)"',
             f'test "$({binary} --build-identity)" = "$(git -C {qroot} rev-parse HEAD)"',

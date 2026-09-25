@@ -4,9 +4,9 @@
 
 ## Linux Graph 前提（影响成绩）
 
-Linux Graph 节点使用 **bubblewrap (bwrap)** 创建每实例 user/mount/PID namespace：只回挂当前私有 Git 仓库与当前 session；源目录、其他工作区及 Grapher 数据库由空的只读挂载遮蔽，引擎副本及原始 Grapher 安装目录只读，保留任务容器网络供模型认证使用。**Harbor 的外层任务容器不等于节点隔离**。请在任务镜像内安装 `/usr/bin/bwrap`（bubblewrap），并确保容器安全策略允许非特权 user/mount/PID namespace 和 bind/proc mount；适配器安装和 Grapher Graph preflight 会执行真实 bwrap 探测，失败即停止，不会强制 Serial 或使用 fixture 绕过边界。某些默认 Docker/云环境会禁用 user namespace，必须调整任务环境策略（不是把 Grapher 图节点改为无隔离）。
+Linux Graph 节点使用 **bubblewrap (bwrap)** 创建每实例 user/mount/PID namespace：只回挂当前私有 Git 仓库与当前 session；源目录、其他工作区及 Grapher 数据库由空的只读挂载遮蔽，引擎副本及原始 Grapher 安装目录只读，保留任务容器网络供模型认证使用，并显式回挂容器自身的 `/dev`（否则嵌套挂载可能使 Git/Pi 无法打开 `/dev/null`）。**Harbor 的外层任务容器不等于节点隔离**。请在任务镜像内安装 `/usr/bin/bwrap`（bubblewrap），并确保容器安全策略允许非特权 user/mount/PID namespace 和 bind/proc mount；适配器安装和 Grapher Graph preflight 会执行真实 bwrap 探测（包括 `/dev/null` 读写），失败即停止，不会强制 Serial 或使用 fixture 绕过边界。某些默认 Docker/云环境会禁用 user namespace，必须调整任务环境策略（不是把 Grapher 图节点改为无隔离）。
 
-**验收状态：** 当前开发环境是 macOS，没有可运行的 Harbor Linux 任务容器；Linux 代码经交叉编译类型检查，Harbor 0.23.0 的 Python 3.12 实际包导入、安装/运行接口及指标映射已在 macOS 上模拟验证；但还需要在目标 Harbor 镜像运行 `cargo test --lib linux_sandbox`、真实模型 Graph→发布→verifier 端到端与路径/网络回归，才能报告可横向比较的完整分数。未通过隔离预检的 trial 属于环境不兼容，不是模型语义失败。Linux CI 在 `.github/workflows/linux-native.yml` 测真实 bwrap 隔离、并行原生 Pi 节点、源码/二进制同一 commit 和 Harbor adapter 取消后的进程清理；还需在实际 Harbor 容器复现该流程（外层 Docker/云环境的 namespace 策略可能不同）。
+**验收状态：** 当前开发环境是 macOS，没有可运行的 Harbor Linux 任务容器；Linux 代码经交叉编译类型检查，Harbor 0.23.0 的 Python 3.12 实际包导入、安装/运行接口及指标映射已在 macOS 上模拟验证。先前 Linux CI 的真实 Pi 双节点测试曾因 `/dev/null` 无法访问而失败；已补 `/dev` 挂载和预检，仍需重新通过 CI，并在目标 Harbor 镜像运行 `cargo test --lib linux_sandbox`、真实模型 Graph→发布→verifier 端到端与路径/网络回归，才能报告可横向比较的完整分数。未通过隔离预检的 trial 属于环境不兼容，不是模型语义失败。Linux CI 在 `.github/workflows/linux-native.yml` 测真实 bwrap 隔离、并行原生 Pi 节点、源码/二进制同一 commit 和 Harbor adapter 取消后的进程清理；还需在实际 Harbor 容器复现该流程（外层 Docker/云环境的 namespace 策略可能不同）。
 
 ## 准备环境
 

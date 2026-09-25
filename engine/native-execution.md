@@ -47,7 +47,7 @@ Planner 先落地，批准时对源目录当前文件生成基线，再分配节
 - macOS、Windows 和 Linux 的 `bash` 都由原生 shell 执行；尚未实现的是任意子进程的透明目录重映射。执行前的绝对路径兼容转换不解析完整 shell 语法，无法映射程序运行时拼接或脚本内部硬编码的源项目路径。
 - 取消、超时和服务关闭由平台进程树控制：macOS/Unix 使用 process group，Windows 使用 Job Object；这只解决生命周期，不提供文件系统隔离。
 - 宿主服务、硬链接、共享认证等不是恶意多租户安全边界。
-- Windows Graph 文件系统边界使用 AppContainer。Linux Graph 的隔离使用 bubblewrap；它必须在任务容器内成功创建 user/mount/PID namespace，遮蔽源目录、兄弟工作区和其他 session，允许当前节点/当前 session，且将引擎副本与原始 Grapher 安装目录设为只读（包括副本依赖符号链接的目标）。不支持 user namespace 的 Harbor 容器必须先调整环境。Linux 仍需在真实 Harbor 镜像中验证隔离、并发与发布链；当前 macOS 主机上的交叉编译检查不构成平台验收。
+- Windows Graph 文件系统边界使用 AppContainer。Linux Graph 的隔离使用 bubblewrap；它必须在任务容器内成功创建 user/mount/PID namespace，遮蔽源目录、兄弟工作区和其他 session，允许当前节点/当前 session，且将引擎副本与原始 Grapher 安装目录设为只读（包括副本依赖符号链接的目标）；显式回挂容器的 `/dev`，预检 `/dev/null` 读写及原有源目录隔离。不支持 user namespace 的 Harbor 容器必须先调整环境。Linux 仍需在真实 Harbor 镜像中验证隔离、并发与发布链；当前 macOS 主机上的交叉编译检查不构成平台验收。
 - 真正 Xcode 项目、未知扩展及任意工具链仍需单独验证。
 
 ## 验证

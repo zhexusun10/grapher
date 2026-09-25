@@ -55,6 +55,8 @@ class HarborAgentTests(unittest.TestCase):
             preflight = agent.exec_as_agent.await_args.kwargs["command"]
             self.assertIn("--build-identity", preflight)
             self.assertIn("--unshare-user", preflight)
+            self.assertIn("--dev-bind /dev /dev", preflight)
+            self.assertIn("<>/dev/null", preflight)
             self.assertIn("pi-baseline.mjs verify", preflight)
             agent.exec_as_agent.reset_mock()
             asyncio.run(agent.run("Original Harbor instruction", env, AgentContext()))

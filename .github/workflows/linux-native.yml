@@ -21,7 +21,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y bubblewrap build-essential git
           test -x /usr/bin/bwrap
-          /usr/bin/bwrap --die-with-parent --unshare-user --unshare-pid --cap-drop ALL --bind / / --proc /proc -- /bin/true
+          /usr/bin/bwrap --die-with-parent --unshare-user --unshare-pid --cap-drop ALL --bind / / --dev-bind /dev /dev --proc /proc -- /bin/sh -c ': <>/dev/null'
       - name: Install pinned Pi
         run: npm run pi:setup
       - name: Verify isolated Pi model catalog contract
