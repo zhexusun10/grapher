@@ -18,7 +18,7 @@ A common approach is to have an LLM continuously break down work, delegate to su
 | Who decides what runs next? | A Rust state machine schedules according to the compiled DAG, dependencies, concurrency limits, and feedback waves—not the next message from a coordinator. |
 | What do agents exchange? | **Filesystem state** represented by Git, not chat transcripts. Downstream workspaces combine upstream commits. |
 | How are failures and rework handled? | Each attempt uses a fresh Pi session. Failures block only affected branches. Feedback edges have explicit targets and limits; changes invalidate downstream results. |
-| When is work complete? | Only after valid terminal results have been successfully published to the user's directory. Conflicts or a dirty directory preserve state rather than reporting false success. |
+| When is work complete? | Only after valid terminal results have been successfully published to the user's directory. A Git conflict during final publication triggers a dedicated merger to attempt resolution; unresolved conflicts or a dirty directory preserve state rather than reporting false success. |
 | What is the source of truth? | SQLite append-only events and the backend runtime. The UI displays projections and provides approval, pause, and intervention controls. |
 
 Grapher is **not** a substitute for model quality, and not every task benefits from a graph. Single or linear tasks use Serial; unnecessary parallelism can cause conflicts. A graph makes concurrency, dependencies, feedback, and delivery boundaries explicit and inspectable instead of merely letting multiple models talk. See the [architecture document](agent.md) for technical details and invariants.
