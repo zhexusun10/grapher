@@ -357,7 +357,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let temp = tempfile::TempDir::new().unwrap();
         let repo = crate::fixture::repository(temp.path()).unwrap();
         let script = temp.path().join("running-revise.sh");
-        fs::write(&script, r#"printf '%s' '{"originalGoal":"test","nodes":[{"name":"change","task":"updated"},{"name":"other","task":"other"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+        fs::write(&script, r#"cat >/dev/null
+printf '%s' '{"originalGoal":"test","nodes":[{"name":"change","task":"updated"},{"name":"other","task":"other"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
 "#).unwrap();
         let config = Config {
@@ -414,7 +415,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let temp = tempfile::TempDir::new().unwrap();
         let repo = crate::fixture::repository(temp.path()).unwrap();
         let script = temp.path().join("auto-approve.sh");
-        fs::write(&script, r#"printf '%s' '{"originalGoal":"test","nodes":[{"name":"work","task":"work"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+        fs::write(&script, r#"cat >/dev/null
+printf '%s' '{"originalGoal":"test","nodes":[{"name":"work","task":"work"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
 "#).unwrap();
         let config = Config {
@@ -654,7 +656,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let repository = crate::fixture::repository(root).unwrap();
         let release = root.join("release-slow");
         let script = root.join("worker.sh");
-        fs::write(&script, format!(r#"case "$PWD" in
+        fs::write(&script, format!(r#"cat >/dev/null
+case "$PWD" in
   *a_slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > slow.txt ;;
   *z_fast-*) echo done > fast.txt ;;
   *) echo done > downstream.txt ;;
