@@ -123,7 +123,7 @@ Compiler 输出 `executionBatches`、`roots`、`terminals` 和 warnings。Mutati
 
 ### Node 与 Execution Instance
 
-Graph Node 是稳定的任务定义；Execution Instance 是一次执行尝试。每次首次运行、反馈重跑或人工介入都会创建新的 Pi session，不恢复旧会话。历史 execution 只读保留。
+Graph Node 是稳定的任务定义；Execution Instance 是一次执行尝试。首次运行、反馈重跑与手动重跑创建新的 Pi session；已完成节点的人工追加指令在新 execution 中恢复原节点 Pi session 与工作区，向其上下文发送新的用户消息。历史 execution 的输出与提交只读保留。
 
 节点状态为：
 
@@ -169,9 +169,9 @@ backend -----/                 |
 
 路由由 Graph 决定，评价由节点完成，状态迁移由 Runtime 完成。
 
-### 人工介入
+### 人工追加指令与手动重跑
 
-用户必须先暂停并等待活动 execution 结束，之后可向某节点追加指令。Runtime 增加该节点 revision，并将它和普通依赖后继标为 `dirty`；重跑使用 fresh Execution Instance。
+节点正在执行时，用户可直接通过 Pi RPC `steer` 向该 session 发送新消息，不等待 execution 结束，也不触发 `dirty`。已完成节点可继续原 Pi session 发送新的用户消息，或不附加指令而重跑原任务；只有受影响的节点正在执行时才需等待。Runtime 对已执行的受影响节点增加 revision 并标为 `dirty`，从未执行过的下游节点保持 `waiting`。已完成节点的后续消息不与原节点任务拼接。
 
 下游工作区组合发生 Git 冲突时，节点进入 `blocked`。用户在保留的工作区完成并提交冲突解决后，通过 `Use resolved workspace` 继续；原任务仍由新的 Execution Instance 完成。
 
@@ -269,7 +269,7 @@ SQLite 保存 append-only Graph events；`Snapshot` 是事件 reducer 的当前�
 
 - Graph、Config、Plan 与节点状态。
 - Execution / merger 元数据和工作区 revision。
-- Feedback、人工介入、审批、暂停和发布事件。
+- Feedback、人工追加指令、手动重跑、审批、暂停和发布事件。
 - Planning identity 与汇总指标。
 
 完整 execution 输出和 planning JSONL 按会话保存在数据目录，普通 snapshot/list API 只返回 metadata。UI 按 `(runId, executionId, byteOffset)` 或 planning cursor 分页读取，单页最多 256 KiB。
@@ -304,7 +304,7 @@ React UI 负责：
 - 工作区选择、目标提交和规划输出。
 - Graph 审批、状态可视化和执行时间线。
 - Execution/merger 日志分页展示。
-- 暂停、恢复、介入、冲突确认和发布重试。
+- 暂停、恢复、人工追加指令、手动重跑、冲突确认和发布重试。
 
 前端不得自行推导权威状态或模拟后端执行。所有状态来自 Runtime snapshot/event projection。
 

@@ -120,7 +120,7 @@ pub fn resolve_with_merger_for_node(
             completed_at: None,
         },
     })?;
-    let prompt = format!("User query:\n{query}\n\n修复当前 Git merge conflicts。保留各节点已完成的有效修改，不要修改与冲突无关的内容。解决冲突后暂存已解决的文件，并检查不存在未解决的冲突。不要丢弃 incoming parent 的提交。");
+    let prompt = format!("User query:\n{query}\n\nResolve the current Git merge conflicts. Preserve valid changes completed by each node. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming parent's commit.");
     // Make native Git commands work in a plain folder without adding a .git
     // entry there. This environment is scoped to the merger process tree.
     let environment = if workspace::is_standard_git(repository) {
@@ -149,7 +149,7 @@ pub fn resolve_with_merger_for_node(
             role: PiRole::Merger,
             config: &merger_config,
             cwd: repository,
-            task: "修复当前合并冲突。",
+            task: "Resolve the current merge conflicts.",
             session_dir: &directory,
             extension: None,
             tools: Some("read,write,bash,edit"),

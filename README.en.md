@@ -19,7 +19,7 @@ A common approach is to have an LLM continuously break down work, delegate to su
 | What do agents exchange? | **Filesystem state** represented by Git, not chat transcripts. Downstream workspaces combine upstream commits. |
 | How are failures and rework handled? | Each attempt uses a fresh Pi session. Failures block only affected branches. Feedback edges have explicit targets and limits; changes invalidate downstream results. |
 | When is work complete? | Only after valid terminal results have been successfully published to the user's directory. A Git conflict during final publication triggers a dedicated merger to attempt resolution; unresolved conflicts or a dirty directory preserve state rather than reporting false success. |
-| What is the source of truth? | SQLite append-only events and the backend runtime. The UI displays projections and provides approval, pause, and intervention controls. |
+| What is the source of truth? | SQLite append-only events and the backend runtime. The UI displays projections and provides approval, pause, follow-up, and rerun controls. |
 
 Grapher is **not** a substitute for model quality, and not every task benefits from a graph. Single or linear tasks use Serial; unnecessary parallelism can cause conflicts. A graph makes concurrency, dependencies, feedback, and delivery boundaries explicit and inspectable instead of merely letting multiple models talk. See the [architecture document](agent.md) for technical details and invariants.
 
@@ -50,7 +50,7 @@ Open <http://127.0.0.1:1420>. The first launch may take time while Cargo compile
 
 1. Enter a goal; the Partitioner routes it to Serial (one task, automatically approved) or Graph.
 2. For Graph, the Planner generates a graph, the Compiler validates it, and the user reviews and approves it. Independent nodes need not be connected by edges.
-3. The runtime executes nodes, combines Git states, and handles bounded feedback and conflicts. The UI supports pausing, intervention, and history inspection.
+3. The runtime executes nodes, combines Git states, and handles bounded feedback and conflicts. The UI supports pausing, follow-up instructions, reruns, and history inspection.
 4. Graph work is complete only after successful publication; publication failures preserve state for inspection or retry.
 
 In production mode, the local server serves the page and API at `127.0.0.1:1421`:

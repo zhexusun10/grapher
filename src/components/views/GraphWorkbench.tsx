@@ -2,8 +2,8 @@ import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMe
 import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
 import {
   Code2, ArrowLeft, Terminal, FolderGit2, GitBranch, RotateCcw,
-  Workflow, Check, Play, Pause, Compass, ArrowDown, Clock, Loader2,
-  Pencil, ChevronLeft, ChevronRight, X, ArrowUp
+  Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2,
+  Pencil, X, ArrowUp
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -30,8 +30,6 @@ interface GraphWorkbenchProps {
   selected: string;
   setSelected: (name: string) => void;
   effectiveMessages: Array<ChatMessage>;
-  branchInfo?: Record<string, { index: number; count: number; prevId?: string; nextId?: string }>;
-  onSwitchBranch?: (targetId: string) => void;
   onEditMessage?: (msg: ChatMessage) => void;
   editingMessage?: ChatMessage | null;
   editPrefillText?: string;
@@ -75,7 +73,7 @@ const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean
 );
 StreamingAssistantBubble.displayName = "StreamingAssistantBubble";
 
-function EditableUserBubble({ text, images, editing, draft, onDraftChange, onEdit, onCancel, onSend, disabled, children }: {
+function EditableUserBubble({ text, images, editing, draft, onDraftChange, onEdit, onCancel, onSend, disabled }: {
   text: string;
   images?: ImageAttachment[];
   editing: boolean;
@@ -85,7 +83,6 @@ function EditableUserBubble({ text, images, editing, draft, onDraftChange, onEdi
   onCancel: () => void;
   onSend: (value: string) => boolean | void | Promise<boolean>;
   disabled?: boolean;
-  children?: React.ReactNode;
 }) {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -112,7 +109,6 @@ function EditableUserBubble({ text, images, editing, draft, onDraftChange, onEdi
   };
   return (
     <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}`}>
-      {children}
       <div className="chat-bubble-body">
         {editing ? (
           <div className="chat-bubble-actions">
@@ -170,8 +166,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   failedPlanning,
   recoveredPlanningId,
   effectiveMessages,
-  branchInfo,
-  onSwitchBranch,
   onEditMessage,
   editingMessage,
   editPrefillText,
@@ -237,20 +231,68 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       : selectedState?.status === "running"
   );
 
+  const nodeTurns = useMemo(() => {
+    if (!selectedNode) return [];
+    const turns: Array<{
+      id: string;
+      isInitial: boolean;
+      taskText?: string;
+      userMessage?: ChatMessage;
+      executions: Execution[];
+    }> = [];
+
+    turns.push({
+      id: `turn-0-${selectedNode.name}`,
+      isInitial: true,
+      taskText: selectedNode.task,
+      executions: attempts.length > 0 ? [attempts[0]] : [],
+    });
+
+    nodeMessages.forEach((msg, idx) => {
+      const execIndex = idx + 1;
+      const execs = execIndex < attempts.length ? [attempts[execIndex]] : [];
+      turns.push({
+        id: msg.id,
+        isInitial: false,
+        userMessage: msg,
+        executions: execs,
+      });
+    });
+
+    if (attempts.length > nodeMessages.length + 1) {
+      const assigned = new Set(turns.flatMap((t) => t.executions.map((e) => e.id)));
+      const unassigned = attempts.filter((e) => !assigned.has(e.id));
+      if (unassigned.length > 0) {
+        turns[0].executions.push(...unassigned);
+        turns[0].executions.sort((a, b) => a.startedAt - b.startedAt);
+      }
+    }
+
+    return turns;
+  }, [selectedNode, attempts, nodeMessages]);
+
   const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}:${execution?.id || ""}`;
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   // Live SSE is ephemeral. After reload or run selection, replay the durable
   // planning JSONL associated with the selected run, never a previous run's stream.
   const showLivePlanner = !recoveredPlanningId && !failedPlanning &&
-    ((plannerStream.runId === state.runId && !!state.planningId) ||
-      (isPlanning && !plannerStream.runId));
+    (isPlanning ||
+      (plannerStream.runId === state.runId && !!state.planningId));
   const savedPlannerId = recoveredPlanningId || (failedPlanning
     ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
     : (routeType === "graph" ? state.planningId : undefined));
+  const hasTurn0InStream = Boolean(
+    plannerStream.items &&
+    plannerStream.items.length > 0 &&
+    plannerStream.items[0].role !== "user"
+  );
+  const showSavedPlanner = Boolean(savedPlannerId && !hasTurn0InStream);
   const workbenchRef = useRef<HTMLDivElement>(null);
   const [isResizing, setIsResizing] = useState(false);
   const currentWidthRef = useRef<number>(390);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const expandedCardObserverRef = useRef<ResizeObserver | null>(null);
+  const expandedCardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUserScrolledUpRef = useRef(false);
   const suppressAutoScrollRef = useRef(false);
   const resumeAutoScrollFrameRef = useRef<number | null>(null);
@@ -263,7 +305,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
-  const [readyGraphKey, setReadyGraphKey] = useState("");
+  const graphRunRef = useRef(state.runId);
 
   if (activeConversationViewRef.current !== conversationViewKey) {
     activeConversationViewRef.current = conversationViewKey;
@@ -272,7 +314,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     suppressAutoScrollRef.current = false;
   }
 
-  const centerGraph = useCallback((instance: ReactFlowInstance<any, any>, key: string) => {
+  const centerGraph = useCallback((instance: ReactFlowInstance<any, any>) => {
     graphFlowRef.current = instance;
     if (graphFitFrameRef.current !== null) cancelAnimationFrame(graphFitFrameRef.current);
 
@@ -280,9 +322,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       graphFitFrameRef.current = requestAnimationFrame(() => {
         graphFitFrameRef.current = null;
         if (graphFlowRef.current !== instance) return;
-        void instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6 }).then(() => {
-          if (graphFlowRef.current === instance) setReadyGraphKey(key);
-        });
+        void instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6 });
       });
     });
   }, []);
@@ -367,13 +407,38 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     };
   }, []);
 
-  const handleExpandableContentChange = useCallback(() => {
+  const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
     suppressAutoScrollRef.current = true;
     isUserScrolledUpRef.current = true;
+    expandedCardObserverRef.current?.disconnect();
+    if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
 
-    if (resumeAutoScrollFrameRef.current !== null) {
-      cancelAnimationFrame(resumeAutoScrollFrameRef.current);
+    // Follow the card during its opening animation, without jumping past the
+    // header when the expanded content is taller than the viewport.
+    if (expanded && card) {
+      const reveal = () => {
+        const scroll = chatScrollRef.current;
+        if (!scroll || !scroll.contains(card)) return;
+        const viewport = scroll.getBoundingClientRect();
+        const bounds = card.getBoundingClientRect();
+        const available = viewport.height - 24;
+        const delta = bounds.height > available
+          ? bounds.top - viewport.top - 12
+          : bounds.bottom - viewport.bottom + 12;
+        if (delta > 0) scroll.scrollTop += delta;
+      };
+      const observer = new ResizeObserver(reveal);
+      observer.observe(card);
+      expandedCardObserverRef.current = observer;
+      expandedCardTimerRef.current = setTimeout(() => {
+        reveal();
+        observer.disconnect();
+        if (expandedCardObserverRef.current === observer) expandedCardObserverRef.current = null;
+        expandedCardTimerRef.current = null;
+      }, 400);
     }
+
+    if (resumeAutoScrollFrameRef.current !== null) cancelAnimationFrame(resumeAutoScrollFrameRef.current);
     resumeAutoScrollFrameRef.current = requestAnimationFrame(() => {
       resumeAutoScrollFrameRef.current = requestAnimationFrame(() => {
         resumeAutoScrollFrameRef.current = null;
@@ -383,7 +448,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     });
   }, [handleChatScroll]);
 
+  useLayoutEffect(() => {
+    const view = chatScrollRef.current?.parentElement;
+    const composer = view?.querySelector<HTMLElement>(".pane-bottom-chat");
+    if (!view || !composer) return;
+    const update = () => view.style.setProperty("--composer-height", `${composer.getBoundingClientRect().height}px`);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(composer);
+    return () => observer.disconnect();
+  }, [conversationViewKey]);
+
   useEffect(() => () => {
+    expandedCardObserverRef.current?.disconnect();
+    if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
     if (resumeAutoScrollFrameRef.current !== null) {
       cancelAnimationFrame(resumeAutoScrollFrameRef.current);
     }
@@ -503,9 +581,63 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const serialNode = routeType === "serial" && state.graph.nodes.length > 0 ? state.graph.nodes[0] : undefined;
   const serialNodeState = serialNode ? state.nodes[serialNode.name] : undefined;
-  const serialExecution: Execution | undefined = serialNode
-    ? state.executions.filter((item) => item.node === serialNode.name).pop()
-    : undefined;
+  const serialExecutions = useMemo(() => {
+    if (!serialNode) return [];
+    return state.executions
+      .filter((item) => item.node === serialNode.name)
+      .sort((a, b) => a.startedAt - b.startedAt);
+  }, [serialNode, state.executions]);
+  const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
+
+  const serialTurns = useMemo(() => {
+    if (routeType !== "serial" || !serialNode) return [];
+    const turns: Array<{
+      id: string;
+      userMessage: ChatMessage;
+      isInitial: boolean;
+      executions: Execution[];
+    }> = [];
+
+    const messages = effectiveMessages.length > 0 ? effectiveMessages : (
+      state.graph.originalGoal ? [{
+        id: "msg-initial-goal",
+        parentId: null,
+        role: "user" as const,
+        text: state.graph.originalGoal,
+      }] : []
+    );
+
+    if (messages.length === 0) return [];
+
+    turns.push({
+      id: messages[0].id,
+      userMessage: messages[0],
+      isInitial: true,
+      executions: serialExecutions.length > 0 ? [serialExecutions[0]] : [],
+    });
+
+    messages.slice(1).forEach((msg, idx) => {
+      const execIndex = idx + 1;
+      const execs = execIndex < serialExecutions.length ? [serialExecutions[execIndex]] : [];
+      turns.push({
+        id: msg.id,
+        userMessage: msg,
+        isInitial: false,
+        executions: execs,
+      });
+    });
+
+    if (serialExecutions.length > messages.length) {
+      const assigned = new Set(turns.flatMap((t) => t.executions.map((e) => e.id)));
+      const unassigned = serialExecutions.filter((e) => !assigned.has(e.id));
+      if (unassigned.length > 0) {
+        turns[0].executions.push(...unassigned);
+        turns[0].executions.sort((a, b) => a.startedAt - b.startedAt);
+      }
+    }
+
+    return turns;
+  }, [routeType, serialNode, effectiveMessages, serialExecutions, state.graph.originalGoal]);
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
   const isSerialWorking = Boolean(
@@ -515,18 +647,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   );
   const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialWorking) : isPlanning;
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
-  const graphKey = `${state.runId || state.graph.originalGoal}:${state.graph.nodes.map((node) => node.name).join("|")}`;
-  const graphViewportReady = readyGraphKey === graphKey;
-
+  // A session switch keeps ReactFlow mounted; refit after the new nodes arrive.
   const hasGraphToolCalled =
     (plannerStream.items || []).some((t: any) => t.toolName === "node" || t.toolName === "edge") ||
     (plannerStream.tools || []).some((t: any) => t.toolName === "node" || t.toolName === "edge");
   const hasGraphContent = state.graph.nodes.length > 0 || hasGraphToolCalled;
   const showGraphPane = routeType === "graph" && (hasGraphContent || (!isPlanning && state.graph.nodes.length > 0));
 
-  const animatedNodes = useAnimatedNodes(nodes);
-
+  const animatedNodes = useAnimatedNodes(nodes, state.runId);
   const prevNodesCountRef = useRef(nodes.length);
+  const prevEdgesCountRef = useRef(edges.length);
+
+  useLayoutEffect(() => {
+    if (graphRunRef.current === state.runId) return;
+    graphRunRef.current = state.runId;
+    prevNodesCountRef.current = nodes.length;
+    prevEdgesCountRef.current = edges.length;
+    if (showGraphPane && graphFlowRef.current) centerGraph(graphFlowRef.current);
+  }, [state.runId, nodes.length, edges.length, showGraphPane, centerGraph]);
+
   useEffect(() => {
     if (nodes.length > 0 && nodes.length !== prevNodesCountRef.current) {
       prevNodesCountRef.current = nodes.length;
@@ -536,7 +675,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, [nodes.length]);
 
-  const prevEdgesCountRef = useRef(edges.length);
   useEffect(() => {
     if (edges.length > 0 && edges.length !== prevEdgesCountRef.current) {
       prevEdgesCountRef.current = edges.length;
@@ -599,10 +737,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     });
   }, [conversationViewKey]);
 
-  useEffect(() => {
-    if (routeType !== "graph") setReadyGraphKey("");
-  }, [routeType]);
-
   return (
     <section
       className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"}`}
@@ -640,89 +774,94 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               style={execution && readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
             >
               <div className="chat-messages-stream">
-                <div className="chat-message-row user">
-                  <EditableUserBubble
-                    text={selectedNode.task}
-                    editing={editingTaskNode === selectedNode.name}
-                    draft={taskDraft}
-                    onDraftChange={setTaskDraft}
-                    onEdit={!locked && !active ? () => {
-                      onCancelEditMessage?.();
-                      setEditingTaskNode(selectedNode.name);
-                      setTaskDraft(selectedNode.task);
-                    } : undefined}
-                    onCancel={() => setEditingTaskNode("")}
-                    disabled={locked || active || taskDraft.trim() === selectedNode.task}
-                    onSend={(value) => {
-                      const saveTask = () => {
-                        onSave({ ...state.graph, nodes: state.graph.nodes.map((node) =>
-                          node.name === selectedNode.name ? { ...node, task: value } : node
-                        ) });
-                        setEditingTaskNode("");
-                      };
-                      if (state.approved) {
-                        onRequestConfirmation({
-                          title: "修改 Task？",
-                          message: "修改 Task 将创建新的待审批运行，当前运行不会继续。",
-                          confirmText: "确认修改",
-                          danger: true,
-                          onConfirm: saveTask,
-                        });
-                        return false;
-                      }
-                      saveTask();
-                    }}
-                  />
-                </div>
+                {nodeTurns.map((turn) => (
+                  <React.Fragment key={turn.id}>
+                    {turn.isInitial ? (
+                      <div className="chat-message-row user">
+                        <EditableUserBubble
+                          text={turn.taskText || selectedNode.task}
+                          editing={editingTaskNode === selectedNode.name}
+                          draft={taskDraft}
+                          onDraftChange={setTaskDraft}
+                          onEdit={!locked && !active ? () => {
+                            onCancelEditMessage?.();
+                            setEditingTaskNode(selectedNode.name);
+                            setTaskDraft(selectedNode.task);
+                          } : undefined}
+                          onCancel={() => setEditingTaskNode("")}
+                          disabled={locked || active || taskDraft.trim() === selectedNode.task}
+                          onSend={(value) => {
+                            const saveTask = () => {
+                              onSave({ ...state.graph, nodes: state.graph.nodes.map((node) =>
+                                node.name === selectedNode.name ? { ...node, task: value } : node
+                              ) });
+                              setEditingTaskNode("");
+                            };
+                            if (state.approved) {
+                              onRequestConfirmation({
+                                title: "修改 Task？",
+                                message: "修改 Task 将创建新的待审批运行，当前运行不会继续。",
+                                confirmText: "确认修改",
+                                danger: true,
+                                onConfirm: saveTask,
+                              });
+                              return false;
+                            }
+                            saveTask();
+                          }}
+                        />
+                      </div>
+                    ) : turn.userMessage ? (
+                      <div key={turn.userMessage.id} className="chat-message-row user">
+                        <EditableUserBubble
+                          text={turn.userMessage.text.replace(/^\[@[^\]]+\]\s*/, "")}
+                          editing={editingMessage?.id === turn.userMessage.id}
+                          draft={editPrefillText ?? ""}
+                          onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                          onEdit={onEditMessage && !locked ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
+                          onCancel={() => onCancelEditMessage?.()}
+                          onSend={onSendMessage}
+                          disabled={locked}
+                        />
+                      </div>
+                    ) : null}
 
-                {nodeMessages.map((msg) => (
-                  <div key={msg.id} className="chat-message-row user">
-                    <EditableUserBubble
-                      text={msg.text.replace(/^\[@[^\]]+\]\s*/, "")}
-                      editing={editingMessage?.id === msg.id}
-                      draft={editPrefillText ?? ""}
-                      onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                      onEdit={onEditMessage && !locked ? () => { setEditingTaskNode(""); onEditMessage(msg); } : undefined}
-                      onCancel={() => onCancelEditMessage?.()}
-                      onSend={onSendMessage}
-                      disabled={locked}
-                    />
-                  </div>
+                    {turn.executions.map((exec) => (
+                      <motion.div
+                        key={exec.id}
+                        className="serial-execution-panel"
+                        initial={false}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.3 }}
+                      >
+                        <div className="session-label">
+                          <strong>Pi Session</strong>
+                          <span className={`status-badge ${exec.status}`}>
+                            {statusText[exec.status as Status] ?? exec.status}
+                          </span>
+                          <ExecutionTiming execution={exec} />
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                          <ExecutionTranscript
+                            key={exec.id}
+                            runId={state.runId}
+                            execution={exec}
+                            onUserResize={handleExpandableContentChange}
+                            onInitialOutputReady={exec.id === execution?.id ? revealNodeConversation : undefined}
+                          />
+                        </div>
+                        <details className="workspace-details" style={{ marginTop: 12 }}>
+                          <summary><FolderGit2 size={12} />工作区与会话信息</summary>
+                          <p>Worktree: {exec.worktree}</p>
+                          <p>Session ID: {exec.sessionId}</p>
+                          <p>Commit Before: {exec.before}</p>
+                          <p>Commit After: {exec.after ?? "pending"}</p>
+                          <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
+                        </details>
+                      </motion.div>
+                    ))}
+                  </React.Fragment>
                 ))}
-
-                {execution && (
-                  <motion.div
-                    className="serial-execution-panel"
-                    initial={false}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3 }}
-                  >
-                    <div className="session-label">
-                      <strong>Pi Session</strong>
-                      <span className={`status-badge ${execution.status}`}>
-                        {statusText[execution.status as Status] ?? execution.status}
-                      </span>
-                      <ExecutionTiming execution={execution} />
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                      <ExecutionTranscript
-                        key={execution.id}
-                        runId={state.runId}
-                        execution={execution}
-                        onUserResize={handleExpandableContentChange}
-                        onInitialOutputReady={revealNodeConversation}
-                      />
-                    </div>
-                    <details className="workspace-details" style={{ marginTop: 12 }}>
-                      <summary><FolderGit2 size={12} />工作区与会话信息</summary>
-                      <p>Worktree: {execution.worktree}</p>
-                      <p>Session ID: {execution.sessionId}</p>
-                      <p>Commit Before: {execution.before}</p>
-                      <p>Commit After: {execution.after ?? "pending"}</p>
-                      <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
-                    </details>
-                  </motion.div>
-                )}
 
                 {selectedState?.error && (
                   <div className="node-error" style={{ marginTop: 12 }}>
@@ -808,210 +947,269 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           <div className="initial-query-view">
             <div className="initial-query-scroll" ref={chatScrollRef} onScroll={handleChatScroll}>
               <div className="chat-messages-stream">
-                {effectiveMessages.map((msg) => (
-                  <motion.div
-                    key={msg.id}
-                    className={`chat-message-row ${msg.role}`}
-                    initial={false}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-                  >
-                    {msg.role === "user" ? (
-                      <EditableUserBubble
-                        text={msg.text.trim()}
-                        images={msg.images}
-                        editing={editingMessage?.id === msg.id}
-                        draft={editPrefillText ?? ""}
-                        onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                        onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage(msg) : undefined}
-                        onCancel={() => onCancelEditMessage?.()}
-                        onSend={onSendMessage}
-                        disabled={locked && !isPlanning}
-                      >
-                        {branchInfo?.[msg.id] && branchInfo[msg.id].count > 1 && (
-                          <div className="chat-branch-pager">
-                            <button
-                              type="button"
-                              disabled={branchInfo[msg.id].index <= 0}
-                              onClick={() => onSwitchBranch?.(branchInfo[msg.id].prevId!)}
-                              className="chat-branch-pager-btn"
-                              title="切换到上一分支"
-                            >
-                              <ChevronLeft size={12} />
-                            </button>
-                            <span className="chat-branch-pager-text">
-                              {branchInfo[msg.id].index + 1}/{branchInfo[msg.id].count}
-                            </span>
-                            <button
-                              type="button"
-                              disabled={branchInfo[msg.id].index >= branchInfo[msg.id].count - 1}
-                              onClick={() => onSwitchBranch?.(branchInfo[msg.id].nextId!)}
-                              className="chat-branch-pager-btn"
-                              title="切换到下一分支"
-                            >
-                              <ChevronRight size={12} />
-                            </button>
-                          </div>
+                {routeType === "serial" ? (
+                  <div className="serial-turns-container" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {serialTurns.map((turn, turnIdx) => (
+                      <React.Fragment key={turn.id}>
+                        {turn.userMessage && (
+                          <motion.div
+                            className="chat-message-row user"
+                            initial={false}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                          >
+                            <EditableUserBubble
+                              text={turn.userMessage.text.trim()}
+                              images={turn.userMessage.images}
+                              editing={editingMessage?.id === turn.userMessage.id}
+                              draft={editPrefillText ?? ""}
+                              onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                              onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage(turn.userMessage!) : undefined}
+                              onCancel={() => onCancelEditMessage?.()}
+                              onSend={onSendMessage}
+                              disabled={locked && !isPlanning}
+                            />
+                          </motion.div>
                         )}
-                      </EditableUserBubble>
-                    ) : (
-                      <div className={`chat-bubble-${msg.role} chat-message-${msg.role}`}>
-                        <MarkdownRenderer content={msg.text} />
-                      </div>
-                    )}
-                  </motion.div>
-                ))}
 
+                        {turn.isInitial && (
+                          <motion.div
+                            className="route-decision-pill serial"
+                            initial={{ opacity: 0, scale: 0.96 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            transition={{ duration: 0.25, ease: "easeOut" }}
+                          >
+                            <Compass size={13} />
+                            <span>任务路线决策：单节点执行</span>
+                          </motion.div>
+                        )}
 
+                        {turn.executions.length > 0 ? (
+                          turn.executions.map((exec) => (
+                            <motion.div
+                              key={exec.id}
+                              className="serial-execution-panel"
+                              initial={false}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ duration: 0.3 }}
+                            >
+                              <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                                <ExecutionTranscript
+                                  key={exec.id}
+                                  runId={state.runId}
+                                  execution={exec}
+                                  onUserResize={handleExpandableContentChange}
+                                />
+                              </div>
 
-                {/* 任务路线决策结果或评估中加载状态 */}
-                {((isPlanning && routeType === "undecided") || routeType !== "undecided") && (
-                  <motion.div
-                    className={`route-decision-pill ${routeType}`}
-                    initial={{ opacity: 0, scale: 0.96 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 0.25, ease: "easeOut" }}
-                  >
-                    {routeType === "undecided" ? (
-                      <>
-                        <Loader2 size={13} className="spin" />
-                        <span>正在评估任务路线决策...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Compass size={13} />
-                        <span>
-                          {routeType === "serial"
-                            ? "任务路线决策：单节点执行"
-                            : "任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）"}
-                        </span>
-                      </>
-                    )}
-                  </motion.div>
-                )}
-
-                {/* 单节点串行执行会话与流式实时日志 */}
-                {routeType === "serial" && state.graph.nodes.length > 0 && (
-                  <motion.div
-                    className="serial-execution-panel"
-                    initial={false}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3 }}
-                  >
-                    {serialExecution ? (
-                      <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                        <ExecutionTranscript
-                          key={serialExecution.id}
-                          runId={state.runId}
-                          execution={serialExecution}
-                          onUserResize={handleExpandableContentChange}
-                        />
-                      </div>
-                    ) : (
-                      <div className="stream-card-hint" style={{ padding: "8px 0", marginTop: 6 }}>
-                        <Workflow size={14} className="spin" style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
-                        独立沙箱正在推进中，正在启动 Pi 实例执行任务...
-                      </div>
-                    )}
-
-                    {serialExecution && (
-                      <details className="workspace-details" style={{ marginTop: 12 }}>
-                        <summary><FolderGit2 size={12} />工作区与会话信息</summary>
-                        <p>工作目录: {serialExecution.worktree}</p>
-                        <p>会话实例: {serialExecution.sessionId}</p>
-                        {(() => {
-                          if (serialExecution.pid) return <p>进程 PID: {serialExecution.pid}</p>;
-                          const pidMatch = serialExecution.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
-                                           serialExecution.output.match(/"pid":(\d+)/);
-                          return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
-                        })()}
-                        <p>Commit Before: {serialExecution.before || "HEAD"}</p>
-                        <p>Commit After: {serialExecution.after ?? "pending"}</p>
-                        <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
-                      </details>
-                    )}
+                              <details className="workspace-details" style={{ marginTop: 12 }}>
+                                <summary><FolderGit2 size={12} />工作区与会话信息</summary>
+                                <p>工作目录: {exec.worktree}</p>
+                                <p>会话实例: {exec.sessionId}</p>
+                                {(() => {
+                                  if (exec.pid) return <p>进程 PID: {exec.pid}</p>;
+                                  const pidMatch = exec.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
+                                                   exec.output.match(/"pid":(\d+)/);
+                                  return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
+                                })()}
+                                <p>Commit Before: {exec.before || "HEAD"}</p>
+                                <p>Commit After: {exec.after ?? "pending"}</p>
+                                <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
+                              </details>
+                            </motion.div>
+                          ))
+                        ) : (
+                          turnIdx === 0 && (
+                            <div className="stream-card-hint" style={{ padding: "8px 0", marginTop: 6 }}>
+                              <Workflow size={14} className="spin" style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
+                              独立沙箱正在推进中，正在启动 Pi 实例执行任务...
+                            </div>
+                          )
+                        )}
+                      </React.Fragment>
+                    ))}
 
                     {serialNodeState?.error && (
                       <div className="node-error" style={{ marginTop: 12 }}>
                         {serialNodeState.error}
                       </div>
                     )}
-                  </motion.div>
-                )}
-
-                {/* Planner 顺序流式记录：严格按实际发生时序呈现工具调用、思维链与输出文字 */}
-                {!showLivePlanner && savedPlannerId ? (
-                  <PlanningActivity key={savedPlannerId} planning={{ planningId: savedPlannerId }} onUserResize={handleExpandableContentChange} />
-                ) : showLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-                    {plannerStream.items.map((item: TranscriptItem, idx: number) => {
-                      const isLast = idx === plannerStream.items.length - 1;
-                      if (item.type === "tool_call") {
-                        return (
-                          <ToolCallCard
-                            key={item.id}
-                            item={item}
-                            onExpandedChange={handleExpandableContentChange}
-                          />
-                        );
-                      }
-                      if (item.type === "thinking") {
-                        return (
-                          <ThinkingCard
-                            key={item.id}
-                            item={item}
-                            isStreaming={isPlanning && item.status === "running"}
-                            title="思考过程"
-                            defaultExpanded={true}
-                            onExpandedChange={handleExpandableContentChange}
-                          />
-                        );
-                      }
-                      if (item.type === "text") {
-                        return (
-                          <motion.div
-                            key={item.id}
-                            className="chat-message-row assistant"
-                            initial={false}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                          >
-                            <div className="chat-bubble-assistant chat-message-assistant">
-                              <StreamingAssistantBubble
-                                content={item.content || ""}
-                                isStreaming={isPlanning && isLast && item.status === "running"}
-                              />
-                            </div>
-                          </motion.div>
-                        );
-                      }
-                      return null;
-                    })}
                   </div>
                 ) : (
-                  showLivePlanner && (plannerStream.plannerThinking || smoothPlannerText) && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-                      {plannerStream.plannerThinking && (
-                        <ThinkingCard
-                          content={plannerStream.plannerThinking}
-                          isStreaming={isPlanning && plannerStream.plannerThinkingActive}
-                          title="思考过程"
-                          defaultExpanded={true}
-                          onExpandedChange={handleExpandableContentChange}
-                        />
-                      )}
-                      {smoothPlannerText && (
-                        <motion.div
-                          className="chat-message-row assistant"
-                          initial={false}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                        >
-                          <div className="chat-bubble-assistant chat-message-assistant">
-                            <MarkdownRenderer content={smoothPlannerText} isStreaming={isPlanning} />
+                  <>
+                    {effectiveMessages.length > 0 && (
+                      <motion.div
+                        key={effectiveMessages[0].id}
+                        className={`chat-message-row ${effectiveMessages[0].role}`}
+                        initial={false}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                      >
+                        {effectiveMessages[0].role === "user" ? (
+                          <EditableUserBubble
+                            text={effectiveMessages[0].text.trim()}
+                            images={effectiveMessages[0].images}
+                            editing={editingMessage?.id === effectiveMessages[0].id}
+                            draft={editPrefillText ?? ""}
+                            onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                            onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage(effectiveMessages[0]) : undefined}
+                            onCancel={() => onCancelEditMessage?.()}
+                            onSend={onSendMessage}
+                            disabled={locked && !isPlanning}
+                          />
+                        ) : (
+                          <div className={`chat-bubble-${effectiveMessages[0].role} chat-message-${effectiveMessages[0].role}`}>
+                            <MarkdownRenderer content={effectiveMessages[0].text} />
                           </div>
-                        </motion.div>
-                      )}
-                    </div>
-                  )
+                        )}
+                      </motion.div>
+                    )}
+
+                    {/* 任务路线决策结果或评估中加载状态 */}
+                    {((isPlanning && routeType === "undecided") || routeType !== "undecided") && (
+                      <motion.div
+                        className={`route-decision-pill ${routeType}`}
+                        initial={{ opacity: 0, scale: 0.96 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ duration: 0.25, ease: "easeOut" }}
+                      >
+                        {routeType === "undecided" ? (
+                          <>
+                            <Loader2 size={13} className="spin" />
+                            <span>正在评估任务路线决策...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Compass size={13} />
+                            <span>任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）</span>
+                          </>
+                        )}
+                      </motion.div>
+                    )}
+
+                    {/* 历史保存的规划活动记录（如重新加载或未被活动流完全覆盖时） */}
+                    {showSavedPlanner && (
+                      <PlanningActivity
+                        key={savedPlannerId}
+                        planning={{ planningId: savedPlannerId! }}
+                        onUserResize={handleExpandableContentChange}
+                      />
+                    )}
+
+                    {/* 保留当前对话中的跟进消息；实时流已有同一消息时不重复渲染。 */}
+                    {effectiveMessages.slice(1).filter((msg) =>
+                      !showLivePlanner || !plannerStream.items?.some((item: TranscriptItem) => item.role === "user" && item.id === msg.id)
+                    ).map((msg) => (
+                      <div className="chat-message-row user" key={msg.id}>
+                        <EditableUserBubble
+                          text={msg.text.trim()}
+                          images={msg.images}
+                          editing={editingMessage?.id === msg.id}
+                          draft={editPrefillText ?? ""}
+                          onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                          onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage(msg) : undefined}
+                          onCancel={() => onCancelEditMessage?.()}
+                          onSend={onSendMessage}
+                          disabled={locked && !isPlanning}
+                        />
+                      </div>
+                    ))}
+
+                    {/* Planner 顺序流式记录：严格按实际发生时序呈现用户追加消息、工具调用、思维链与输出文字 */}
+                    {showLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                        {plannerStream.items.map((item: TranscriptItem, idx: number) => {
+                          const isLast = idx === plannerStream.items.length - 1;
+                          if (item.role === "user") {
+                            return (
+                              <motion.div
+                                key={item.id}
+                                className="chat-message-row user"
+                                initial={false}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                              >
+                                <EditableUserBubble
+                                  text={item.content || ""}
+                                  editing={editingMessage?.id === item.id}
+                                  draft={editPrefillText ?? ""}
+                                  onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                                  onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: item.content || "" }) : undefined}
+                                  onCancel={() => onCancelEditMessage?.()}
+                                  onSend={onSendMessage}
+                                  disabled={locked && !isPlanning}
+                                />
+                              </motion.div>
+                            );
+                          }
+                          if (item.type === "tool_call") {
+                            return (
+                              <ToolCallCard
+                                key={item.id}
+                                item={item}
+                                onExpandedChange={handleExpandableContentChange}
+                              />
+                            );
+                          }
+                          if (item.type === "thinking") {
+                            return (
+                              <ThinkingCard
+                                key={item.id}
+                                item={item}
+                                isStreaming={isPlanning && item.status === "running"}
+                                title="思考过程"
+                                defaultExpanded={true}
+                                onExpandedChange={handleExpandableContentChange}
+                              />
+                            );
+                          }
+                          if (item.type === "text") {
+                            return (
+                              <motion.div
+                                key={item.id}
+                                className="chat-message-row assistant"
+                                initial={false}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                              >
+                                <div className="chat-bubble-assistant chat-message-assistant">
+                                  <StreamingAssistantBubble
+                                    content={item.content || ""}
+                                    isStreaming={isPlanning && isLast && item.status === "running"}
+                                  />
+                                </div>
+                              </motion.div>
+                            );
+                          }
+                          return null;
+                        })}
+                      </div>
+                    ) : (
+                      showLivePlanner && (plannerStream.plannerThinking || smoothPlannerText) && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                          {plannerStream.plannerThinking && (
+                            <ThinkingCard
+                              content={plannerStream.plannerThinking}
+                              isStreaming={isPlanning && plannerStream.plannerThinkingActive}
+                              title="思考过程"
+                              defaultExpanded={true}
+                              onExpandedChange={handleExpandableContentChange}
+                            />
+                          )}
+                          {smoothPlannerText && (
+                            <motion.div
+                              className="chat-message-row assistant"
+                              initial={false}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                            >
+                              <div className="chat-bubble-assistant chat-message-assistant">
+                                <MarkdownRenderer content={smoothPlannerText} isStreaming={isPlanning} />
+                              </div>
+                            </motion.div>
+                          )}
+                        </div>
+                      )
+                    )}
+                  </>
                 )}
                 {isMainViewWorking && (
                   <div className="working-indicator" role="status" aria-live="polite">
@@ -1021,37 +1219,39 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
               </div>
 
-              {/* 失败规划摘要：当最近规划未通过时独立呈现，不与旧 run 混淆，亦不继承旧 run 事件 */}
-              {failedPlanning && (
+              {/* 输出期间暂时隐藏摘要，停止后再展示当前结果 */}
+              {failedPlanning && !isPlanning && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 >
                   <PlanningSummaryCard
+                    key={failedPlanning.planningId}
                     planning={failedPlanning}
                     state={undefined}
-                    defaultExpanded={true}
+                    defaultExpanded={false}
                   />
                 </motion.div>
               )}
 
               {/* 当前 Run 的规划阶段摘要（仅在多节点图模式下且当前 Run 自身拥有有效规划时展示） */}
-              {routeType === "graph" && state.planning && (!failedPlanning || state.planning.planningId !== failedPlanning.planningId) && (
+              {!isPlanning && routeType === "graph" && state.planning && (!failedPlanning || state.planning.planningId !== failedPlanning.planningId) && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 >
                   <PlanningSummaryCard
+                    key={state.planning.planningId}
                     planning={state.planning}
                     state={state}
-                    defaultExpanded={!failedPlanning}
+                    defaultExpanded={false}
                   />
                 </motion.div>
               )}
 
-              {routeType === "graph" && state.graph.nodes.length > 0 && (
+              {!isPlanning && routeType === "graph" && state.graph.nodes.length > 0 && (
                 <motion.div
                   className="plan-summary-card"
                   initial={{ opacity: 0, y: 14 }}
@@ -1147,10 +1347,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   isPlanning
                     ? "输入补充规划或纠偏要求，发送将实时转向 (Steer)…"
                     : isSerialExecution
-                    ? "向当前任务发送介入指令…"
+                    ? "向当前任务发送介入指令，直接在对话框中继续对话…"
                     : state.approved
                     ? "向规划器修改当前图，保留未受影响的节点结果…"
-                    : ""
+                    : "向规划器追加指令，直接在对话框中继续对话并调整图规划…"
                 }
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
@@ -1238,8 +1438,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </svg>
 
                 <ReactFlow
-                  key={state.runId || "active-plan"}
-                  onInit={(instance) => centerGraph(instance, graphKey)}
+                  onInit={(instance) => centerGraph(instance)}
                   nodes={animatedNodes}
                   edges={edges}
                   nodeTypes={nodeTypes}
@@ -1319,7 +1518,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             type="button"
                             className="secondary"
                             disabled={locked || active || !selected}
-                            onClick={() => onControl("intervene", { instruction: "Rerun this task and verify the latest workspace state." })}
+                            onClick={() => onControl("rerun")}
                           >
                             <RotateCcw size={13} />重跑选定节点
                           </button>
@@ -1333,11 +1532,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             {state.paused ? "继续" : "暂停"}
                           </button>
                         </>
-                      ) : (
-                        <button type="button" className="secondary" disabled={locked || active} onClick={() => onSave({ ...state.graph, originalGoal: goal })}>
-                          <Check size={14} />编译并检查
-                        </button>
-                      )}
+                      ) : null}
                     </div>
                   </div>
                 </div>

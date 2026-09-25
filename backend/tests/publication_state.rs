@@ -61,7 +61,7 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
     assert_eq!(runtime.state.phase, "publishing");
     assert!(runtime.active());
     assert!(runtime.pause(true).is_err());
-    assert!(runtime.intervene("other", "change").is_err());
+    assert!(runtime.rerun("other").is_err());
     let id = runtime.state.run_id.clone();
     assert_eq!(runtime.store.load(&id).unwrap().phase, "publishing");
     let execution = Execution {

@@ -286,9 +286,8 @@ export default function App() {
     });
   };
 
-  // 对话流消息树结构（移植自 pi 的 /tree 架构，no summary 版本）
+  // 每个运行的消息按发送顺序显示；修改旧消息也作为新的跟进指令追加。
   const [sessionEntries, setSessionEntries] = useState<ChatMessage[]>([]);
-  const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [editPrefillText, setEditPrefillText] = useState<string>("");
   const planningAbortControllerRef = useRef<AbortController | null>(null);
@@ -311,36 +310,12 @@ export default function App() {
 
   const resetSessionMessages = useCallback(() => {
     setSessionEntries([]);
-    setActiveLeafId(null);
     setEditingMessage(null);
     setEditPrefillText("");
   }, []);
 
-  // 沿 parentId 回溯构造当前分支链（从根节点至当前叶子节点）
-  const getBranch = useCallback((leafId: string | null, entries: ChatMessage[]): ChatMessage[] => {
-    if (!leafId || entries.length === 0) return [];
-    const byId = new Map<string, ChatMessage>();
-    for (const entry of entries) {
-      byId.set(entry.id, entry);
-    }
-    const path: ChatMessage[] = [];
-    let current = byId.get(leafId);
-    const visited = new Set<string>();
-    while (current && !visited.has(current.id)) {
-      visited.add(current.id);
-      path.push(current);
-      current = current.parentId ? byId.get(current.parentId) : undefined;
-    }
-    path.reverse();
-    return path;
-  }, []);
-
-  const branchMessages = useMemo(() => {
-    return getBranch(activeLeafId, sessionEntries);
-  }, [activeLeafId, sessionEntries, getBranch]);
-
   const effectiveMessages = useMemo<ChatMessage[]>(() => {
-    if (branchMessages.length > 0) return branchMessages;
+    if (sessionEntries.length > 0) return sessionEntries;
     const initialGoal = state.graph.originalGoal || goal;
     if (initialGoal) {
       return [
@@ -353,48 +328,7 @@ export default function App() {
       ];
     }
     return [];
-  }, [branchMessages, state.graph.originalGoal, goal]);
-
-  // 计算分支信息（同一 parentId 下存在多个 sibling 分支时的页码与切换目标）
-  const branchInfo = useMemo(() => {
-    const map: Record<string, { index: number; count: number; prevId?: string; nextId?: string }> = {};
-    if (sessionEntries.length === 0) return map;
-
-    const siblingsByParent = new Map<string | null, ChatMessage[]>();
-    for (const entry of sessionEntries) {
-      const p = entry.parentId ?? null;
-      const list = siblingsByParent.get(p) || [];
-      list.push(entry);
-      siblingsByParent.set(p, list);
-    }
-
-    for (const siblings of siblingsByParent.values()) {
-      if (siblings.length > 1) {
-        siblings.forEach((s, idx) => {
-          map[s.id] = {
-            index: idx,
-            count: siblings.length,
-            prevId: idx > 0 ? siblings[idx - 1].id : undefined,
-            nextId: idx < siblings.length - 1 ? siblings[idx + 1].id : undefined,
-          };
-        });
-      }
-    }
-    return map;
-  }, [sessionEntries]);
-
-  // 切换到同级兄弟分支（沿着该节点深入到最新叶子节点）
-  const handleSwitchBranch = useCallback((targetId: string) => {
-    let currentId = targetId;
-    while (true) {
-      const children = sessionEntries.filter((e) => (e.parentId ?? null) === currentId);
-      if (children.length === 0) break;
-      currentId = children[children.length - 1].id;
-    }
-    setActiveLeafId(currentId);
-    setEditingMessage(null);
-    setEditPrefillText("");
-  }, [sessionEntries]);
+  }, [sessionEntries, state.graph.originalGoal, goal]);
 
   const [routeType, setRouteType] = useState<PlanRouteType>(() => deduceRouteType(emptySnapshot));
 
@@ -439,7 +373,7 @@ export default function App() {
   };
 
   const control = (action: string, extra: Record<string, unknown> = {}) => run(async () => {
-    if (["approve", "resume", "intervene", "resolve", "retry_publication"].includes(action)) {
+    if (["approve", "resume", "intervene", "rerun", "resolve", "retry_publication"].includes(action)) {
       await requireRepository(state.config?.repository || config.repository);
     }
     const defaultNode = selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
@@ -455,8 +389,7 @@ export default function App() {
 
   const handleSendMessage = (
     val: string,
-    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[]; images?: ImageAttachment[] },
-    rerunConfirmed = false
+    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[]; images?: ImageAttachment[] }
   ): boolean | void | Promise<boolean> => {
     const text = val.trim();
     if (!text) return false;
@@ -477,9 +410,7 @@ export default function App() {
     }
 
     const displayMsg = options?.displayText || text;
-    const parentId = editingMessage
-      ? (editingMessage.parentId ?? null)
-      : (activeLeafId ?? (effectiveMessages.length > 0 ? effectiveMessages[effectiveMessages.length - 1].id : null));
+    const parentId = sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null;
 
     const recordMessage = (textToRecord: string) => {
       const newMsg: ChatMessage = {
@@ -493,7 +424,6 @@ export default function App() {
         node: targetNodeName,
       };
       setSessionEntries((prev) => [...prev, newMsg]);
-      setActiveLeafId(newMsg.id);
       setEditingMessage(null);
       setEditPrefillText("");
       return newMsg;
@@ -501,7 +431,6 @@ export default function App() {
 
     if (isPlanning) {
       // 规划器正在工作中，用户发送补充或纠偏要求，直接转向 (Steer)
-      recordMessage(displayMsg);
       (async () => {
         // 1. 中止当前的规划流请求
         if (planningAbortControllerRef.current) {
@@ -516,11 +445,9 @@ export default function App() {
         }
         // 3. 稍等片刻确保退出
         await new Promise((r) => setTimeout(r, 100));
-        // 4. 将新指令作为转向补充要求，重新触发规划
-        const baseGoal = state.graph.originalGoal || goal;
-        const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求（实时转向）：\n${text}` : text;
-        handlePlanGoal(state.approved && routeType === "graph" ? text : combinedGoal, options,
-          routeType === "graph" ? "graph" : undefined, state.approved && routeType === "graph" ? state.runId : undefined);
+        // 4. 将新指令作为转向补充要求，直接在当前图规划基础上继续规划
+        const isGraphMode = routeType === "graph" || state.graph.nodes.length > 0;
+        handlePlanGoal(text, options, isGraphMode ? "graph" : undefined, state.runId || undefined);
       })();
       return;
     }
@@ -539,75 +466,38 @@ export default function App() {
             setState(snap);
           } catch (error) {
             setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
-            setActiveLeafId(parentId);
             throw error;
           }
         });
         return;
       }
-      setError("请等待正在运行的节点结束后，再介入已完成的节点。");
-      return false;
-    }
-
-    // Only a completed node needs confirmation. Unfinished nodes with no
-    // downstream work yet accept follow-up instructions without a dialog.
-    if (!rerunConfirmed && targetNodeName && state.nodes[targetNodeName]?.status === "done") {
-      const affected = new Set([targetNodeName]);
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const edge of state.graph.edges) {
-          if (!edge.feedback && affected.has(edge.from) && !affected.has(edge.to)) {
-            affected.add(edge.to);
-            changed = true;
-          }
-        }
-      }
-      const descendants = [...affected].filter((name) => name !== targetNodeName);
-      const confirmedRunId = state.runId;
-      return new Promise<boolean>((resolve) => {
-        setConfirmModal({
-          title: `向 @${targetNodeName} 追加消息？`,
-          message: `节点 @${targetNodeName} 已完成。确认向它追加一条用户消息吗？`,
-          detail: `为处理追加的消息，该节点需要再次运行。${descendants.length ? `\n下游节点将被阻断并重跑：${descendants.join("、")}。` : ""}\n已有结果可能被覆盖。`,
-          confirmText: "确认追加消息",
-          danger: true,
-          onCancel: () => resolve(false),
-          onConfirm: () => {
-            if (viewedRunIdRef.current !== confirmedRunId) {
-              setError("运行已切换，请在当前运行重新发送消息。");
-              resolve(false);
-              return;
-            }
-            resolve(handleSendMessage(val, options, true) !== false);
-          },
-        });
-      });
+      // A different node may be running; the backend will reject only if that
+      // execution depends on the node being revised.
     }
 
     if (targetNodeName) {
-      // A submitted instruction is an explicit request to continue even if the
-      // previous execution was stopped and left the graph paused/dirty.
       const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg);
       run(async () => {
-        let snap: Snapshot;
         try {
           await requireRepository(state.config?.repository || config.repository);
-          snap = await runtimeService.control("intervene", { node: targetNodeName, instruction: text });
+          const snap = await runtimeService.control("intervene", { node: targetNodeName, instruction: text });
+          setState(snap);
+          if (snap.paused) setState(await runtimeService.control("resume"));
         } catch (error) {
           setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
-          setActiveLeafId(parentId);
           throw error;
         }
-        setState(snap);
-        if (snap.paused) setState(await runtimeService.control("resume"));
       });
     } else {
-      // 未选中具体节点：处于与 AI 规划器对话面板，追加规划要求并触发重新规划
-      const baseGoal = state.graph.originalGoal || goal;
-      const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求：\n${text}` : text;
-      handlePlanGoal(state.approved && routeType === "graph" ? text : combinedGoal, options,
-        routeType === "graph" ? "graph" : undefined, state.approved && routeType === "graph" ? state.runId : undefined);
+      // 未选中具体节点：处于与 AI 规划器对话面板，直接在对话框中继续对话更新规划
+      const isPlannerContinuation = (routeType === "graph" || state.graph.nodes.length > 0) && !!state.runId;
+      if (isPlannerContinuation) {
+        handlePlanGoal(text, options, "graph", state.runId);
+      } else {
+        const baseGoal = state.graph.originalGoal || goal;
+        const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求：\n${text}` : text;
+        handlePlanGoal(combinedGoal, options);
+      }
     }
   };
 
@@ -1166,24 +1056,18 @@ export default function App() {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return;
     if (config.repository) await requireRepository(config.repository);
-    if (!revisionRunId) setGoal(targetGoal);
+    const isContinuing = Boolean(revisionRunId || (routeType === "graph" && state.graph.nodes.length > 0 && state.runId));
+    const effectiveRevisionRunId = revisionRunId || (isContinuing ? state.runId : undefined);
+    const effectiveMode = mode || (isContinuing ? "graph" : planMode);
+
+    if (!isContinuing) setGoal(targetGoal);
     setError("");
     setIsPlanning(true);
-    if (!revisionRunId) setRouteType("undecided");
-    setPlannerStream({
-      runId: "",
-      stage: "partitioning",
-      items: [],
-      partitionerThinking: "",
-      partitionerThinkingActive: false,
-      partitionerText: "",
-      plannerThinking: "",
-      plannerThinkingActive: false,
-      plannerText: "",
-      tools: [],
-    });
+    // Explicit modes bypass the Partitioner on the backend; show that route
+    // immediately instead of displaying an Auto-only evaluation placeholder.
+    if (!isContinuing) setRouteType(effectiveMode === "auto" ? "undecided" : effectiveMode);
     setSelected("");
-    const parentId = editingMessage ? (editingMessage.parentId ?? null) : null;
+    const parentId = sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null;
     const newMsg: ChatMessage = {
       id: `msg-${Date.now()}`,
       parentId,
@@ -1191,23 +1075,54 @@ export default function App() {
       text: options?.displayText || targetGoal,
       images: options?.images,
       timestamp: Date.now(),
-      runId: revisionRunId,
+      runId: effectiveRevisionRunId,
     };
     setSessionEntries((prev) => [...prev, newMsg]);
-    setActiveLeafId(newMsg.id);
     setEditingMessage(null);
     setEditPrefillText("");
 
-    if (!revisionRunId) setState((prev) => ({
-      ...prev,
-      graph: {
-        ...prev.graph,
-        nodes: [],
-        edges: [],
-        originalGoal: targetGoal,
-      },
-      nodes: {},
-    }));
+    if (!isContinuing) {
+      setPlannerStream({
+        runId: "",
+        stage: effectiveMode === "auto" ? "partitioning" : effectiveMode === "graph" ? "planning" : "idle",
+        items: [],
+        partitionerThinking: "",
+        partitionerThinkingActive: false,
+        partitionerText: "",
+        plannerThinking: "",
+        plannerThinkingActive: false,
+        plannerText: "",
+        tools: [],
+      });
+      setState((prev) => ({
+        ...prev,
+        graph: {
+          ...prev.graph,
+          nodes: [],
+          edges: [],
+          originalGoal: targetGoal,
+        },
+        nodes: {},
+      }));
+    } else {
+      setPlannerStream((prev) => ({
+        ...prev,
+        stage: "planning",
+        items: [
+          ...prev.items,
+          {
+            id: newMsg.id,
+            type: "text",
+            role: "user",
+            content: options?.displayText || targetGoal,
+            timestamp: Date.now(),
+          },
+        ],
+        plannerThinking: "",
+        plannerThinkingActive: false,
+        plannerText: "",
+      }));
+    }
     const scope = planningRecovery.begin(config.repository);
     try {
       if (!config.repository) {
@@ -1513,7 +1428,7 @@ export default function App() {
             if (pEvent.toolCallId) pendingToolArgsRef.current.delete(pEvent.toolCallId);
             const args = pEvent.args || savedArgs;
 
-            if (!isErr && !revisionRunId) {
+            if (!isErr) {
               // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
               if (pEvent.toolName === "node") {
                 setState((prev) => {
@@ -1674,10 +1589,10 @@ export default function App() {
           }
         }
       },
-      mode ?? planMode,
+      effectiveMode,
       abortController.signal,
       options?.images,
-      revisionRunId
+      effectiveRevisionRunId
     );
       if (!planningRecovery.current(scope)) return;
       setState(snapshot);
@@ -1837,10 +1752,12 @@ export default function App() {
   }, [busy, activeBackendRunId, activeBackendPhase, observeRunSnapshot]);
 
   useEffect(() => {
-    if (routeType === "serial" && state.phase === "awaiting_approval" && !busy && !repositoryBlocked) {
+    // Only an actual serial route may auto-start. A manually edited Graph IR
+    // with a single node named "task" must still wait for explicit approval.
+    if (state.planType === "serial" && routeType === "serial" && state.phase === "awaiting_approval" && !busy && !repositoryBlocked) {
       control("approve");
     }
-  }, [routeType, state.phase, busy, repositoryBlocked]);
+  }, [routeType, state.planType, state.phase, busy, repositoryBlocked]);
 
   const activeProject = useMemo(() => {
     return projects.find((p) => p.path === config.repository) || (repoInfo?.path === config.repository ? {
@@ -2159,8 +2076,6 @@ export default function App() {
                 setSelected={setSelected}
                 failedPlanning={failedPlanning}
                 effectiveMessages={effectiveMessages}
-                branchInfo={branchInfo}
-                onSwitchBranch={handleSwitchBranch}
                 onEditMessage={handleStartEditMessage}
                 editingMessage={editingMessage}
                 editPrefillText={editPrefillText}

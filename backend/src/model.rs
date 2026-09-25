@@ -161,6 +161,8 @@ pub struct NodeState {
     pub revision: usize,
     pub head: Option<String>,
     pub instruction: String,
+    #[serde(default)]
+    pub human_instruction: bool,
     pub error: Option<String>,
 }
 
@@ -171,6 +173,7 @@ impl Default for NodeState {
             revision: 1,
             head: None,
             instruction: String::new(),
+            human_instruction: false,
             error: None,
         }
     }
@@ -369,13 +372,25 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             for name in invalidated {
                 let node = state.nodes.get_mut(name).unwrap();
-                node.status = "dirty".into();
+                // A node with no prior execution has no result to invalidate.
+                node.status = if node.status == "waiting" ||
+                    (node.status == "blocked" && !state.executions.iter().any(|execution| execution.node == *name)) {
+                    "waiting"
+                } else {
+                    "dirty"
+                }.into();
                 node.head = None;
                 node.error = None;
-                node.revision += 1;
+                node.instruction.clear();
+                node.human_instruction = false;
+                if node.status == "dirty" { node.revision += 1; }
             }
             state.feedback_counts.retain(|key, _| graph.edges.iter().any(|edge| edge.feedback && key == &format!("{}->{}", edge.from, edge.to)));
-            if changed {
+            if !state.approved {
+                // Draft revisions must stay approvable, including after Reject.
+                // No Approved event means there can be no execution.
+                state.phase = "awaiting_approval".into();
+            } else if changed {
                 state.publication = None;
                 state.phase = if state.paused { "paused" } else { "running" }.into();
             }
@@ -463,22 +478,27 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         } => {
             state.publication = None;
             for name in nodes {
+                let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
                 let node = state.nodes.get_mut(name).unwrap();
-                node.status = "dirty".into();
+                let unstarted = node.status == "waiting" || (node.status == "blocked" && never_executed);
+                node.status = if unstarted { "waiting" } else { "dirty" }.into();
                 node.error = None;
                 if name != target {
                     node.head = None;
                 }
-                if *human {
+                if *human && !unstarted {
                     node.revision += 1;
                 }
             }
-            state
-                .nodes
-                .get_mut(target)
-                .unwrap()
-                .instruction
-                .push_str(&format!("\n{instruction}"));
+            let target_node = state.nodes.get_mut(target).unwrap();
+            if *human {
+                // A new user follow-up replaces previous instructions rather than
+                // accumulating prompt suffixes across fresh executions.
+                target_node.instruction = instruction.clone();
+                target_node.human_instruction = !instruction.is_empty();
+            } else {
+                target_node.instruction.push_str(&format!("\n{instruction}"));
+            }
             state.phase = if state.paused { "paused" } else { "running" }.into();
         }
         EventKind::Feedback { from, to, accepted } => {

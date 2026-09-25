@@ -10,7 +10,7 @@ interface VirtualizedTranscriptProps {
   output: string;
   className?: string;
   emptyText?: string;
-  onUserResize?: () => void;
+  onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -437,12 +437,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     }
   }, []);
 
-  const handleExpandedChange = useCallback((id: string, expanded: boolean) => {
+  const handleExpandedChange = useCallback((id: string, expanded: boolean, card?: HTMLElement) => {
     expandedRows.current.set(id, expanded);
     suppressAutoFollowRef.current = true;
     isUserScrolledUpRef.current = true;
     setExpansionVersion(value => value + 1);
-    onUserResize?.();
+    onUserResize?.(expanded, card);
 
     if (resumeAutoFollowFrameRef.current !== null) {
       cancelAnimationFrame(resumeAutoFollowFrameRef.current);
@@ -593,7 +593,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
               return (
                 <div key={item.id} className="transcript-row tool-row">
                   <ToolCallCard item={item} expanded={expandedRows.current.get(item.id)}
-                    onExpandedChange={expanded => handleExpandedChange(item.id, expanded)} />
+                    onExpandedChange={(expanded, card) => handleExpandedChange(item.id, expanded, card)} />
                 </div>
               );
             }

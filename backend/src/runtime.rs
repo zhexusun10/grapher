@@ -18,6 +18,7 @@ pub struct Job {
     pub execution: Execution,
     pub config: Config,
     pub task: String,
+    pub resume_execution_id: Option<String>,
     pub feedback_source: bool,
     pub expected_source_head: String,
 }
@@ -325,6 +326,25 @@ impl Runtime {
         self.emit(EventKind::Approved { base })
     }
 
+    pub fn update_draft_graph(
+        &mut self,
+        graph: Graph,
+        planning_id: String,
+        planning: PlanningSummary,
+    ) -> Result<(), String> {
+        if self.state.approved {
+            return self.revise_graph(graph, planning);
+        }
+        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        self.emit(EventKind::GraphRevised {
+            graph,
+            planning_id,
+            planning,
+            invalidated: vec![],
+        })
+    }
+
     /// Apply a planner revision to the approved run without discarding completed work.
     /// Only nodes whose task or inputs changed (and their consumers) become dirty.
     pub fn revise_graph(&mut self, graph: Graph, planning: PlanningSummary) -> Result<(), String> {
@@ -379,25 +399,41 @@ impl Runtime {
     }
 
     pub fn intervene(&mut self, node: &str, instruction: &str) -> Result<(), String> {
-        if self.state.phase == "publication_failed" {
+        if instruction.trim().is_empty() {
+            return Err("Enter an instruction for the node".into());
+        }
+        if !self.state.executions.iter().any(|execution| execution.node == node && execution.after.is_some()) {
+            return Err("No completed node session to continue; revise the plan instead".into());
+        }
+        self.invalidate_node(node, instruction.trim())
+    }
+
+    pub fn rerun(&mut self, node: &str) -> Result<(), String> {
+        self.invalidate_node(node, "")
+    }
+
+    fn invalidate_node(&mut self, node: &str, instruction: &str) -> Result<(), String> {
+        if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
             return Err("Resolve or retry publication before changing node results".into());
         }
-        if !self.state.approved || self.active() {
-            return Err(
-                "Approve, then pause and wait for active executions before intervening".into(),
-            );
+        if !self.state.approved {
+            return Err("Approve the graph before updating a node".into());
         }
-        if !self.state.nodes.contains_key(node) || instruction.trim().is_empty() {
-            return Err("Select a node and enter an instruction".into());
+        if !self.state.nodes.contains_key(node) {
+            return Err("Select a node to rerun".into());
+        }
+        let affected = downstream(&self.state.graph, node);
+        if self.state.executions.iter().any(|execution| execution.status == "running" && affected.contains(&execution.node)) {
+            return Err("Steer a running node directly; wait for running downstream nodes before rerunning their inputs".into());
         }
         let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
         if !self.is_serial() && !workspace::is_standard_git(&repository) {
             workspace::check_shadow_source(&repository, self.state.published_head.as_deref().unwrap_or(&self.state.base))?;
         }
         self.emit(EventKind::Invalidated {
-            nodes: downstream(&self.state.graph, node).into_iter().collect(),
+            nodes: affected.into_iter().collect(),
             target: node.into(),
-            instruction: instruction.trim().into(),
+            instruction: instruction.into(),
             human: true,
         })
     }
@@ -432,10 +468,7 @@ impl Runtime {
             head,
             output: "Human-resolved workspace. Pi task will run in a fresh execution.".into(),
         })?;
-        self.intervene(
-            node,
-            "Continue from the human-resolved workspace and complete the original task.",
-        )
+        self.rerun(node)
     }
 
     pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
@@ -520,6 +553,17 @@ impl Runtime {
                 .head
                 .clone()
                 .unwrap_or(self.state.base.clone());
+            let resume = if self.state.nodes[&node.name].human_instruction {
+                Some(self.state.executions.iter().rev()
+                    .find(|execution| execution.node == node.name && execution.after.is_some())
+                    .ok_or("No completed node session to continue")?)
+            } else {
+                None
+            };
+            let resume_execution_id = resume.map(|previous| self.state.executions.iter()
+                .find(|execution| execution.session_id == previous.session_id)
+                .map(|execution| execution.id.clone())
+                .unwrap_or_else(|| previous.id.clone()));
             let execution = Execution {
                 id: id.clone(),
                 node: node.name.clone(),
@@ -531,8 +575,10 @@ impl Runtime {
                     .filter(|execution| execution.node == node.name)
                     .count()
                     + 1,
-                session_id: Uuid::new_v4().to_string(),
-                worktree: if self.is_serial() {
+                session_id: resume.map(|previous| previous.session_id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string()),
+                worktree: if let Some(previous) = resume {
+                    previous.worktree.clone()
+                } else if self.is_serial() {
                     resolve_repository(&self.root, &config)?
                         .to_string_lossy()
                         .into()
@@ -558,10 +604,16 @@ impl Runtime {
                 started_at: now(),
                 completed_at: None,
             };
-            let task = format!(
-                "{}\n{}",
-                node.task, self.state.nodes[&node.name].instruction
-            );
+            let state = &self.state.nodes[&node.name];
+            let task = if state.instruction.is_empty() {
+                node.task.clone()
+            } else if state.human_instruction {
+                // A follow-up is its own user request in a fresh execution,
+                // not an addendum to the original node task.
+                state.instruction.clone()
+            } else {
+                format!("{}\n{}", node.task, state.instruction)
+            };
             let feedback_source = self
                 .state
                 .graph
@@ -575,6 +627,7 @@ impl Runtime {
                 execution,
                 config: config.clone(),
                 task,
+                resume_execution_id,
                 feedback_source,
                 expected_source_head: self.state.published_head.clone().unwrap_or_else(|| self.state.base.clone()),
             });
@@ -805,6 +858,7 @@ pub fn perform_with_merger(
         &job.execution,
         &job.task,
         job.feedback_source,
+        job.resume_execution_id.as_deref(),
         root,
         on_output,
     )?;

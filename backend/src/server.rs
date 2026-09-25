@@ -77,29 +77,6 @@ pub struct Bootstrap {
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
 const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
 
-#[allow(dead_code)]
-fn render_prompt(template: &str, replacements: &[(&str, &str)]) -> String {
-    let mut rendered = template.to_string();
-    for (key, value) in replacements {
-        let double_brace = format!("{{{{{key}}}}}");
-        let single_brace = format!("{{{key}}}");
-        if rendered.contains(&double_brace) {
-            rendered = rendered.replace(&double_brace, value);
-        } else if rendered.contains(&single_brace) {
-            rendered = rendered.replace(&single_brace, value);
-        }
-    }
-    rendered
-}
-
-fn split_prompt_template<'a>(template: &'a str) -> (&'a str, &'a str) {
-    if let Some((system, query)) = template.split_once("User query:") {
-        (system.trim(), query.trim())
-    } else {
-        (template.trim(), "")
-    }
-}
-
 #[cfg(test)]
 mod prompt_tests {
     use super::*;
@@ -202,6 +179,119 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         assert!(replay.approved);
         assert!(replay.graph.nodes.iter().any(|node| node.name == "added"));
         assert_eq!(replay.events.iter().filter(|e| matches!(e.kind, EventKind::Approved { .. })).count(), 1);
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn draft_planner_revision_stays_unapproved_and_approvable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let script = temp.path().join("revise-draft.sh");
+        fs::write(&script, r#"test "$(cat)" = "Update the draft" || exit 14
+printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Revised"}]}}'
+"#).unwrap();
+        let root = temp.path().join("runtime");
+        let mut runtime = Runtime::open(&root).unwrap();
+        let config = Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+        };
+        runtime.create(Graph {
+            original_goal: "test".into(), nodes: vec![Node { name: "keep".into(), task: "keep".into() }], edges: vec![],
+        }, config.clone()).unwrap();
+        runtime.set_route("graph").unwrap();
+        let run_id = runtime.state.run_id.clone();
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime), driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        for rejected in [false, true] {
+            if rejected {
+                service.runtime.lock().unwrap().emit(EventKind::Rejected).unwrap();
+            }
+            let snapshot = plan_goal_internal(
+                "Update the draft".into(), config.clone(), Some("graph"), None, Some(run_id.clone()), &service,
+                |_| {}, |_| {}, |_| {},
+            ).unwrap();
+            assert_eq!(snapshot.phase, "awaiting_approval");
+            assert!(!snapshot.approved);
+            assert!(snapshot.executions.is_empty());
+            let replay = service.runtime.lock().unwrap().store.load(&run_id).unwrap();
+            assert_eq!(replay.phase, "awaiting_approval");
+            assert!(!replay.approved);
+            assert!(replay.events.iter().all(|e| !matches!(e.kind, EventKind::Approved { .. } | EventKind::Started { .. })));
+        }
+        service.runtime.lock().unwrap().approve().unwrap();
+        assert!(service.runtime.lock().unwrap().state.approved);
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+            driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let config = Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![],
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+        };
+        let graph = Graph {
+            original_goal: "test".into(),
+            nodes: vec![Node { name: "task".into(), task: "original prompt".into() }], edges: vec![],
+        };
+        let initial = save_graph(graph.clone(), config.clone(), &service).unwrap();
+        assert_eq!(initial.plan_type.as_deref(), Some("graph"));
+        service.runtime.lock().unwrap().emit(EventKind::Rejected).unwrap();
+
+        // Saving Graph IR or editing a node's task uses this same API.
+        for task in ["edited IR", "edited node prompt"] {
+            let mut edited = graph.clone();
+            edited.nodes[0].task = task.into();
+            let snapshot = save_graph(edited, config.clone(), &service).unwrap();
+            assert_ne!(snapshot.run_id, initial.run_id);
+            assert_eq!(snapshot.plan_type.as_deref(), Some("graph"));
+            assert_eq!(snapshot.phase, "awaiting_approval");
+            assert!(!snapshot.approved);
+            assert!(snapshot.executions.is_empty());
+            let replay = service.runtime.lock().unwrap().store.load(&snapshot.run_id).unwrap();
+            assert_eq!(replay.phase, "awaiting_approval");
+            assert_eq!(replay.plan_type.as_deref(), Some("graph"));
+            service.runtime.lock().unwrap().emit(EventKind::Rejected).unwrap();
+        }
+        service.runtime.lock().unwrap().approve().unwrap_err(); // Still rejected until edited again.
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn partitioner_receives_unmodified_goal() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let script = temp.path().join("partition.sh");
+        fs::write(&script, r#"test "$(cat)" = "Build two modules" || exit 17
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"serial"}]}}'
+"#).unwrap();
+        let service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+            driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let config = Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+        };
+        let snapshot = plan_goal_internal(
+            "Build two modules".into(), config, None, None, None, &service,
+            |_| {}, |_| {}, |_| {},
+        ).unwrap();
+        assert_eq!(snapshot.plan_type.as_deref(), Some("serial"));
     }
 
     #[cfg(feature = "fixture")]
@@ -772,14 +862,8 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     #[test]
     fn planning_prompts_separate_user_query_from_system() {
         for template in [PLANNER_PROMPT, PARTITIONER_PROMPT] {
-            let (system, query) = split_prompt_template(template);
-            assert!(!system.contains("{{query}}"));
-            assert!(!system.contains("Goal:"));
-            assert_eq!(query, "{{query}}");
-            assert_eq!(
-                render_prompt(query, &[("query", "Build a graph")]),
-                "Build a graph"
-            );
+            assert!(!template.contains("{{query}}"));
+            assert!(!template.contains("User query:"));
         }
     }
 
@@ -1143,6 +1227,9 @@ fn save_graph(
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     runtime.create(graph, config)?;
+    // Manual Graph IR and node-task edits always create an approvable graph
+    // draft, even when the only node happens to be named "task".
+    runtime.set_route("graph")?;
     Ok(runtime.state.clone())
 }
 
@@ -1396,16 +1483,16 @@ fn plan_goal_internal(
     let result = (|| {
         let original_graph = if let Some(ref run_id) = revision_run_id {
             if mode != Some("graph") {
-                return Err(("Approved graph revisions require graph mode".into(), None));
+                return Err(("Graph revisions require graph mode".into(), None));
             }
             let mut runtime = service.runtime.lock().map_err(|error| (error.to_string(), None))?;
-            if runtime.state.run_id != *run_id || !runtime.state.approved
+            if runtime.state.run_id != *run_id
                 || runtime.state.plan_type.as_deref() != Some("graph")
                 || runtime.state.config.as_ref().map(|c| c.repository.as_str()) != Some(config.repository.as_str())
                 || matches!(runtime.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
-                return Err(("Approved graph is no longer available for revision".into(), None));
+                return Err(("Graph is no longer available for revision".into(), None));
             }
-            if !runtime.state.paused && runtime.state.phase == "running" {
+            if runtime.state.approved && !runtime.state.paused && runtime.state.phase == "running" {
                 runtime.pause(true).map_err(|error| (error, None))?;
                 resume_after = true;
             }
@@ -1499,10 +1586,9 @@ fn plan_goal_internal(
                     (route, PlanningRoleMetrics::default())
                 }
                 _ => {
-                    let (default_partitioner_system, _) = split_prompt_template(PARTITIONER_PROMPT);
                     let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
-                        .unwrap_or_else(|_| default_partitioner_system.to_string());
-                    let task = format!("User query:\n\n{goal}");
+                        .unwrap_or_else(|_| PARTITIONER_PROMPT.trim().to_string());
+                    let task = goal.clone();
                     let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
                     let partitioner_config = partitioner_model_cfg.effective_config(&config);
                     let mut partitioner_extra_args = vec!["--no-tools", "--no-context-files"];
@@ -1587,10 +1673,9 @@ fn plan_goal_internal(
                     .map_err(|error| error.to_string())?;
                     let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
                     let planner_config = planner_model_cfg.effective_config(&config);
-                    let (default_planner_system, _) = split_prompt_template(PLANNER_PROMPT);
                     let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
-                        .unwrap_or_else(|_| default_planner_system.to_string());
-                    let task = format!("User query:\n\n{goal}");
+                        .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
+                    let task = goal.clone();
                     let mut planner_extra_args = Vec::new();
                     if let Some(thinking) = &planner_model_cfg.thinking {
                         planner_extra_args.push("--thinking");
@@ -1599,9 +1684,20 @@ fn plan_goal_internal(
                     for arg in &image_file_args {
                         planner_extra_args.push(arg.as_str());
                     }
+                    if original_graph.is_some() && directory.join("planner-session").exists() {
+                        planner_extra_args.push("-c");
+                    }
                     let mut log = String::new();
-                    let mut planner_log = fs::File::create(directory.join("planner.jsonl"))
-                        .map_err(|e| e.to_string())?;
+                    let mut planner_log = if original_graph.is_some() {
+                        fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(directory.join("planner.jsonl"))
+                            .map_err(|e| e.to_string())?
+                    } else {
+                        fs::File::create(directory.join("planner.jsonl"))
+                            .map_err(|e| e.to_string())?
+                    };
                     let mut log_error = None;
                     let planner_start = std::time::Instant::now();
                     let planner_result = run_pi(
@@ -1681,7 +1777,11 @@ fn plan_goal_internal(
                 if runtime.state.run_id != *run_id {
                     return Err("Run changed during graph revision".into());
                 }
-                runtime.revise_graph(graph, summary.clone())?;
+                if runtime.state.approved {
+                    runtime.revise_graph(graph, summary.clone())?;
+                } else {
+                    runtime.update_draft_graph(graph, planning_id.clone(), summary.clone())?;
+                }
             } else {
                 runtime.create_with_planning(graph, config.clone(), Some(planning_id.clone()), Some(summary.clone()))?;
                 runtime.set_route(&route.plan_type)?;
@@ -2033,10 +2133,10 @@ fn control(
     }
     if matches!(
         action.as_str(),
-        "intervene" | "resolve" | "retry_publication"
+        "resolve" | "retry_publication"
     ) && service.driving.load(Ordering::SeqCst)
     {
-        return Err("Wait for active executions to finish before intervening".into());
+        return Err("Wait for active executions to finish before resolving or retrying publication".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     match action.as_str() {
@@ -2054,6 +2154,7 @@ fn control(
             node.as_deref().unwrap_or_default(),
             instruction.as_deref().unwrap_or_default(),
         )?,
+        "rerun" => runtime.rerun(node.as_deref().unwrap_or_default())?,
         "resolve" => runtime.resolved(node.as_deref().unwrap_or_default())?,
         _ => return Err("Unknown action".into()),
     }
@@ -2061,7 +2162,7 @@ fn control(
     drop(runtime);
     if matches!(
         action.as_str(),
-        "approve" | "resume" | "intervene" | "resolve" | "retry_publication"
+        "approve" | "resume" | "intervene" | "rerun" | "resolve" | "retry_publication"
     ) {
         drive(service.clone());
     }

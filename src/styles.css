@@ -2831,11 +2831,12 @@ a,
   overflow-y: auto;
   overflow-x: hidden;
   padding: 16px 18px;
-  padding-bottom: 120px;
+  padding-bottom: 16px;
   display: flex;
   flex-direction: column;
   gap: 16px;
   box-sizing: border-box;
+  min-height: 0;
 }
 
 /* 对话流与 Chatbot 消息样式（无生硬卡片，靠右展示） */
@@ -2968,50 +2969,6 @@ a,
 .chat-message-edit-btn:active,
 .chat-bubble-action-btn:active:not(:disabled) {
   transform: scale(0.95);
-}
-
-/* 兄弟分支切换器 (如 1/2 ◀ ▶) */
-.chat-branch-pager {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  font-size: 11.5px;
-  color: var(--text-secondary, #64748B);
-  user-select: none;
-  background: var(--bg-surface, #F7F7F8);
-  border: 1px solid var(--border-default, #E2E8F0);
-  padding: 1px 4px;
-  border-radius: 12px;
-  flex-shrink: 0;
-}
-
-.chat-branch-pager-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary, #64748B);
-  cursor: pointer;
-  padding: 2px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  transition: all 0.12s ease;
-}
-
-.chat-branch-pager-btn:hover:not(:disabled) {
-  color: var(--text-primary, #0F172A);
-  background: var(--bg-surface-active, #E2E8F0);
-}
-
-.chat-branch-pager-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.chat-branch-pager-text {
-  font-size: 11px;
-  font-family: var(--font-mono, monospace);
-  padding: 0 2px;
 }
 
 .chat-message-row.assistant {
@@ -3607,10 +3564,7 @@ a,
 
 
 .pane-bottom-chat {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  position: relative;
   padding: 10px 14px 14px;
   background: color-mix(in srgb, var(--bg-surface) 70%, transparent);
   backdrop-filter: blur(14px);
@@ -6115,7 +6069,6 @@ a,
 .conversation-pane.full-width .initial-query-scroll {
   width: 100%;
   padding: 24px 20px;
-  padding-bottom: 120px;
 }
 
 .conversation-pane.full-width .chat-messages-stream {
@@ -6980,7 +6933,7 @@ a,
 
 .scroll-to-bottom-btn {
   position: absolute;
-  bottom: 110px;
+  bottom: calc(var(--composer-height, 110px) + 10px);
   right: 18px;
   display: inline-flex;
   align-items: center;

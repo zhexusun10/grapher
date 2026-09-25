@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Terminal,
@@ -24,12 +24,13 @@ interface ToolCallCardProps {
   item: TranscriptItem;
   defaultExpanded?: boolean;
   expanded?: boolean;
-  onExpandedChange?: (expanded: boolean) => void;
+  onExpandedChange?: (expanded: boolean, card?: HTMLElement) => void;
 }
 
 export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
   ({ item, defaultExpanded = false, expanded, onExpandedChange }) => {
     const [isCopied, setIsCopied] = useState(false);
+    const cardRef = useRef<HTMLDivElement>(null);
 
     const toolName = item.toolName || "tool";
     const args = item.args || {};
@@ -66,7 +67,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     const isExpanded = expanded ?? localExpanded;
     const toggleExpanded = () => {
       setIsExpanded(!isExpanded);
-      onExpandedChange?.(!isExpanded);
+      onExpandedChange?.(!isExpanded, cardRef.current ?? undefined);
     };
 
     // Select icon & title based on tool type
@@ -146,6 +147,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     return (
       <div
+        ref={cardRef}
         className={`tool-call-card ${meta.type} ${status} ${
           isError ? "error" : hasSubcommandWarning ? "warning" : ""
         }`}

@@ -276,6 +276,9 @@ try {
   assert.deepEqual([...extracted.extensions[0].tools.keys()].sort(), ["bash", "edge", "node"]);
   const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
   assert.match(JSON.stringify(listed), /sample.txt/);
+  const plannerPrompt = await extracted.extensions[1].handlers.get("before_agent_start")![0]({ systemPrompt: "base" });
+  assert.match(plannerPrompt.systemPrompt, /Use project-root-relative paths in Bash commands, project files, and node task handoffs/);
+  assert.doesNotMatch(plannerPrompt.systemPrompt, /generated configuration/);
 
   // Partitioner and Merger use the same namespace without the Planner extension.
   for (const mode of ["partition", "merger"]) {
@@ -286,7 +289,12 @@ try {
     assert.equal(hooks.has("before_agent_start"), mode !== "partition", "Working roles receive the relative-path convention");
     assert.equal(hooks.has("context"), false, "No content rewriting");
     if (mode === "partition") assert.equal(roleExtension.extensions[0].tools.size, 0);
-    else assert.ok(roleExtension.extensions[0].tools.has("bash"));
+    else {
+      assert.ok(roleExtension.extensions[0].tools.has("bash"));
+      const mergerPrompt = await hooks.get("before_agent_start")![0]({ systemPrompt: "base" });
+      assert.match(mergerPrompt.systemPrompt, /Use project-root-relative paths in Bash commands and project files/);
+      assert.doesNotMatch(mergerPrompt.systemPrompt, /handoffs|generated configuration/);
+    }
   }
   // Exercise the production node adapter with real read/write/edit/bash tools.
   process.env.GRAPHER_MODE = "node";

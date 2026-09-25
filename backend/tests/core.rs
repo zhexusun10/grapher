@@ -388,7 +388,7 @@ fn failure_propagates_but_independent_work_remains_ready() {
 }
 
 #[test]
-fn pause_drains_and_human_intervention_preserves_history() {
+fn pause_drains_and_rerun_preserves_history() {
     let temp = TempDir::new().unwrap();
     let mut runtime = runtime(temp.path());
     runtime
@@ -398,19 +398,50 @@ fn pause_drains_and_human_intervention_preserves_history() {
         .unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     runtime.pause(true).unwrap();
-    assert!(runtime.intervene("spec", "change").is_err());
+    assert!(runtime.rerun("spec").is_err());
     runtime
         .finish(&job.execution, Ok(("spec-head".into(), "done".into())))
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
-    runtime.intervene("frontend", "Use Svelte").unwrap();
-    assert_eq!(runtime.state.nodes["frontend"].revision, 2);
+    assert!(runtime.intervene("frontend", "Use Svelte").is_err()); // No session yet.
+    runtime.intervene("spec", "Use Svelte").unwrap();
+    runtime.intervene("spec", "Switch to React").unwrap();
+    assert_eq!(runtime.state.nodes["spec"].revision, 3);
     assert_eq!(runtime.state.nodes["backend"].revision, 1);
-    assert_eq!(runtime.state.nodes["spec"].status, "done");
+    assert_eq!(runtime.state.nodes["backend"].status, "waiting");
     assert_eq!(runtime.state.executions.len(), 1);
-    assert!(runtime.state.nodes["frontend"]
-        .instruction
-        .contains("Use Svelte"));
+    assert_eq!(runtime.state.nodes["spec"].instruction, "Switch to React");
+    let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(replay.nodes["spec"].instruction, "Switch to React");
+    runtime.pause(false).unwrap();
+    let follow_up = runtime.jobs().unwrap().remove(0);
+    assert_eq!(follow_up.task, "Switch to React");
+    assert_eq!(follow_up.execution.session_id, job.execution.session_id);
+    assert_eq!(follow_up.execution.worktree, job.execution.worktree);
+    assert_eq!(follow_up.resume_execution_id.as_deref(), Some(job.execution.id.as_str()));
+}
+
+#[test]
+fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = runtime(temp.path());
+    runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+    let spec = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Steered {
+        execution_id: spec.execution.id.clone(), node: "spec".into(), instruction: "clarify".into(),
+    }).unwrap();
+    assert_eq!(runtime.state.nodes["spec"].status, "running");
+    assert!(runtime.state.graph.nodes.iter().all(|node| runtime.state.nodes[&node.name].status != "dirty"));
+    runtime.finish(&spec.execution, Ok(("spec-head".into(), "done".into()))).unwrap();
+    let jobs = runtime.jobs().unwrap();
+    let frontend = jobs.iter().find(|job| job.execution.node == "frontend").unwrap();
+    runtime.finish(&frontend.execution, Ok(("frontend-head".into(), "done".into()))).unwrap();
+    assert_eq!(runtime.state.nodes["backend"].status, "running");
+    runtime.intervene("frontend", "new instruction").unwrap();
+    assert_eq!(runtime.state.nodes["frontend"].status, "dirty");
+    assert_eq!(runtime.state.nodes["review"].status, "waiting");
+    assert_eq!(runtime.state.nodes["review"].revision, 1);
+    assert_eq!(runtime.state.nodes["backend"].status, "running");
 }
 
 #[test]
@@ -704,6 +735,7 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
 
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
+    assert_eq!(retry.task, "Complete the work");
     assert_eq!(retry.execution.before, resolved_head);
     workspace::prepare(
         &repository,

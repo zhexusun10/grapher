@@ -13,11 +13,15 @@ export default function (pi: ExtensionAPI) {
   const paths = process.env.GRAPHER_EXECUTION_KIND === 'graph' && project
     ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;
   const view = (value: any): any => paths ? paths.view(value) : value;
-  // A shared convention, not a change to filesystem resolution. Each shell
-  // still observes cd; ../ is never redirected to the source project's parent.
+  // Scope path guidance to each role's actual responsibilities.
+  const pathGuideline = process.env.GRAPHER_MODE === 'planner'
+    ? 'Use project-root-relative paths in Bash commands, project files, and node task handoffs.'
+    : process.env.GRAPHER_MODE === 'node'
+      ? 'Use project-root-relative paths in Bash commands and project files.'
+      : 'Use project-root-relative paths in Bash commands and project files.';
   if (process.env.GRAPHER_MODE !== 'partition') {
     pi.on('before_agent_start', async event => ({
-      systemPrompt: `${paths ? paths.visible(event.systemPrompt) : event.systemPrompt}\n\nUse project-root-relative paths for project files, node handoffs and generated configuration. Use original host absolute paths for external files and scripts. In bash, relative paths follow the shell's current directory after cd. Do not use ../ to mean the source project's parent; use an explicit host absolute path for external siblings. Existing absolute project references are compatibility inputs, not the preferred form for new work.`,
+      systemPrompt: `${paths ? paths.visible(event.systemPrompt) : event.systemPrompt}\n\n${pathGuideline}`,
     }));
   }
   // Planner owns its native bash tool; Partitioner has no tools.

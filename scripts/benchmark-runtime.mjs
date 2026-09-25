@@ -12,7 +12,7 @@ const args = process.argv.slice(2);
 const opt = (key, fallback) => { const i = args.indexOf(key); return i < 0 ? fallback : args[i + 1]; };
 const label = opt('--label', 'run');
 const selected = opt('--case', null);
-const names = ['Minimal fixture execution', 'Dependency chain', 'Actual parallel fan-out', 'Fan-in composition', 'Compiler rejects dependency cycle', 'Pi process failure propagation', 'REVISE then ACCEPT', 'Frontend contract and intervention', 'Feedback limit and independent branch', 'HTTP lifecycle and planning failure diagnostics'];
+const names = ['Minimal fixture execution', 'Dependency chain', 'Actual parallel fan-out', 'Fan-in composition', 'Compiler rejects dependency cycle', 'Pi process failure propagation', 'REVISE then ACCEPT', 'Frontend contract and rerun', 'Feedback limit and independent branch', 'HTTP lifecycle and planning failure diagnostics'];
 const ids = ['B001', 'B002', 'B003', 'B004', 'B005', 'B006', 'B007', 'B008', 'B009', 'B011'];
 const runId = `${/^[a-zA-Z0-9_-]+$/.test(label) ? label : 'invalid'}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
 const root = path.join(harnessRoot, 'benchmark-results', runId);

@@ -530,7 +530,11 @@ fn run_pi_with_timeout(
     let mut rpc_pending = None;
     let initial_rpc_id = uuid::Uuid::new_v4().to_string();
     if rpc_node {
-        let id = request.session_dir.file_name().ok_or("Missing execution identity")?.to_string_lossy().to_string();
+        let id = request.environment.iter()
+            .find(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID")
+            .map(|(_, value)| value.clone())
+            .or_else(|| request.session_dir.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .ok_or("Missing execution identity")?;
         let (tx, rx) = mpsc::channel::<String>();
         let pending = Arc::new(Mutex::new(HashMap::new()));
         NODE_RPC.get_or_init(Default::default).lock().map_err(|e| e.to_string())?
@@ -746,6 +750,7 @@ pub fn execute(
     execution: &Execution,
     task: &str,
     feedback_source: bool,
+    resume_execution_id: Option<&str>,
     root: &Path,
     on_output: impl FnMut(String),
 ) -> Result<String, String> {
@@ -758,30 +763,17 @@ pub fn execute(
     } else {
         task.into()
     };
-    let execution_date = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|duration| {
-            let days = duration.as_secs() / 86_400;
-            // Howard Hinnant's civil-from-days conversion, using UTC days.
-            let z = days as i64 + 719_468;
-            let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-            let doe = z - era * 146_097;
-            let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-            let y = yoe + era * 400;
-            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-            let mp = (5 * doy + 2) / 153;
-            let day = doy - (153 * mp + 2) / 5 + 1;
-            let month = mp + if mp < 10 { 3 } else { -9 };
-            let year = y + if month <= 2 { 1 } else { 0 };
-            format!("{year:04}-{month:02}-{day:02}")
-        });
-    let task = if let Some(date) = execution_date {
-        format!("{task}\n\nHost execution date (UTC): {date}. If your deliverable requires a date, use this observed date rather than guessing.")
-    } else {
-        task
-    };
-    let session_dir = root.join("sessions").join(&execution.id);
+    let session_dir = root.join("sessions").join(resume_execution_id.unwrap_or(&execution.id));
+    if resume_execution_id.is_some() && !cfg!(feature = "fixture") {
+        let suffix = format!("_{}.jsonl", execution.session_id);
+        let found = fs::read_dir(&session_dir)
+            .map_err(|error| format!("Cannot resume node session: {error}"))?
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(&suffix));
+        if !found {
+            return Err("Cannot resume node session: persisted Pi conversation is missing".into());
+        }
+    }
     let model_config = PiModelConfig::resolve(PiRole::NodeAgent, config);
     let effective_config = model_config.effective_config(config);
     let mut extra_args = Vec::new();
@@ -800,7 +792,7 @@ pub fn execute(
             tools: None,
             session_id: Some(&execution.session_id),
             extra_args,
-            environment: vec![("GRAPHER_MODE", "node".into())],
+            environment: vec![("GRAPHER_MODE", "node".into()), ("GRAPHER_NODE_EXECUTION_ID", execution.id.clone())],
             system_prompt: None,
             images: None,
         },

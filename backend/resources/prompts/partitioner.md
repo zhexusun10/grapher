@@ -6,7 +6,3 @@ Output only:
 graph
 or
 serial
-
-User query:
-
-{{query}}

@@ -7,14 +7,21 @@ function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - t, 3);
 }
 
-export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[]): T[] {
-  const [renderedNodes, setRenderedNodes] = useState<T[]>(targetNodes);
+export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[], graphId = ""): T[] {
+  const [rendered, setRendered] = useState<{ graphId: string; nodes: T[] }>({ graphId, nodes: targetNodes });
   const currentPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const animationFrameRef = useRef<number | null>(null);
   const targetNodesRef = useRef<T[]>(targetNodes);
   targetNodesRef.current = targetNodes;
 
   useEffect(() => {
+    // Node IDs are local to a run. Never interpolate a new run from the old
+    // run's positions (nor display the previous run for the first frame).
+    if (rendered.graphId !== graphId) {
+      if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+      currentPositionsRef.current = new Map();
+    }
     const currentPositions = currentPositionsRef.current;
     let hasMovedNodes = false;
     const startPositions = new Map<string, { x: number; y: number }>();
@@ -52,7 +59,7 @@ export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[]): T[
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
-      setRenderedNodes(targetNodes);
+      setRendered({ graphId, nodes: targetNodes });
       return;
     }
 
@@ -92,14 +99,14 @@ export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[]): T[
         };
       });
 
-      setRenderedNodes(nextRendered);
+      setRendered({ graphId, nodes: nextRendered });
 
       if (progress < 1) {
         animationFrameRef.current = requestAnimationFrame(step);
       } else {
         animationFrameRef.current = null;
         // 动画结束，确保最终坐标精确对齐
-        setRenderedNodes(latestTargets);
+        setRendered({ graphId, nodes: latestTargets });
       }
     };
 
@@ -111,7 +118,7 @@ export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[]): T[
         animationFrameRef.current = null;
       }
     };
-  }, [targetNodes]);
+  }, [targetNodes, graphId]);
 
-  return renderedNodes;
+  return rendered.graphId === graphId ? rendered.nodes : targetNodes;
 }

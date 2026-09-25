@@ -78,8 +78,8 @@ export default async function () {
     assert.equal(readFileSync(join(cwd, 'nested-ran'), 'utf8'), 'ok');
     const system = await hooks.get('before_agent_start')![0]({ systemPrompt: 'base' });
     assert.ok(system.systemPrompt.startsWith('base\n\n'));
-    assert.match(system.systemPrompt, /project-root-relative/);
-    assert.match(system.systemPrompt, /external files/);
+    assert.match(system.systemPrompt, /Use project-root-relative paths in Bash commands and project files/);
+    assert.doesNotMatch(system.systemPrompt, /handoffs|generated configuration|after cd/);
     const systemWithCwd = await hooks.get('before_agent_start')![0]({ systemPrompt: `Original instructions.\nCurrent working directory: ${cwd}` });
     assert.ok(systemWithCwd.systemPrompt.startsWith('Original instructions.\nCurrent working directory: .\n\n'));
     const updates: any[] = [];

@@ -65,12 +65,14 @@ export function calculateApprovalWaitingTime(
 ): { durationSeconds: number; isWaiting: boolean } {
   if (!state) return { durationSeconds: 0, isWaiting: false };
   const completedAt = getPlanningCompletedAt(planning, state);
-  const approvedEvent = state.events?.find((e) => e.type === "approved");
-  if (approvedEvent && completedAt > 0) {
-    const duration = Math.max(0, (approvedEvent.timestamp - completedAt) / 1000);
+  // Reject ends this approval window just as Approve does. Use the persisted
+  // event time so the duration stays fixed after reload or session switching.
+  const decision = state.events?.find((e) => e.type === "approved" || e.type === "rejected");
+  if (decision && completedAt > 0) {
+    const duration = Math.max(0, (decision.timestamp - completedAt) / 1000);
     return { durationSeconds: duration, isWaiting: false };
   }
-  if (!state.approved && completedAt > 0) {
+  if (state.phase === "awaiting_approval" && !state.approved && completedAt > 0) {
     const duration = Math.max(0, (now - completedAt) / 1000);
     return { durationSeconds: duration, isWaiting: true };
   }
@@ -106,6 +108,10 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(Date.now);
+
+  useEffect(() => {
+    setExpanded(defaultExpanded);
+  }, [planning.planningId, defaultExpanded]);
 
   const approvalWaiting = useMemo(
     () => calculateApprovalWaitingTime(planning, state, now),
@@ -192,6 +198,8 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
             type="button"
             className="planning-toggle-btn"
             onClick={() => setExpanded(!expanded)}
+            aria-expanded={expanded}
+            aria-label={expanded ? "收起明细" : "展开明细"}
             title={expanded ? "收起明细" : "展开明细"}
           >
             {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
@@ -217,7 +225,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
           <span className="stat-value planning-duration">{running ? "完成后统计" : formatSeconds(planning.modelDuration)}</span>
         </div>
 
-        <div className="planning-stat-box" title={planning.status === "failed" || planning.error || running ? "规划状态" : "规划创建至用户点击审批的等待耗时"}>
+        <div className="planning-stat-box" title={planning.status === "failed" || planning.error || running ? "规划状态" : "规划完成至用户审批或拒绝的等待耗时"}>
           <span className="stat-label">
             {planning.status === "failed" || planning.error ? <AlertCircle size={12} /> : <Clock size={12} />}
             {planning.status === "failed" || planning.error || running ? "规划状态" : "审批等待"}

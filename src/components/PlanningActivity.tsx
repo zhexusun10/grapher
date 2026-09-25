@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
-export function PlanningActivity({ planning, onUserResize }: { planning: { planningId: string }; onUserResize?: () => void }) {
+export function PlanningActivity({ planning, onUserResize }: { planning: { planningId: string }; onUserResize?: (expanded?: boolean, card?: HTMLElement) => void }) {
   const [record, setRecord] = useState({ id: "", content: "" });
   const output = record.id === planning.planningId ? record.content : "";
   const [loading, setLoading] = useState(false);

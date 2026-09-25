@@ -313,12 +313,12 @@ fn run_case(
             window,
             root,
             "control",
-            json!({"action":"intervene","node":"A","instruction":"Add a brief second revision"}),
+            json!({"action":"rerun","node":"A"}),
         )?;
         s = settled(window, root, service)?;
         check(
             s["nodes"]["A"]["revision"] == 2 && s["executions"].as_array().unwrap().len() == 2,
-            "Intervention must preserve first attempt and run second revision",
+            Rerun must preserve first attempt and run the original task again",
         )?;
         write_json(&root.join("frontend-before.json"), &before);
         write_json(&root.join("frontend-after.json"), &s);

@@ -113,11 +113,11 @@ fn planner_revision_keeps_approval_and_unaffected_node_results() {
     assert_eq!(runtime.state.nodes["keep"].status, "done");
     assert_eq!(runtime.state.nodes["keep"].head, keep_head);
     assert_eq!(runtime.state.nodes["change"].status, "dirty");
-    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert_eq!(runtime.state.nodes["child"].status, "waiting");
     assert_eq!(runtime.state.nodes["added"].status, "waiting");
     let replay = runtime.store.load(&run_id).unwrap();
     assert_eq!(replay.nodes["keep"].head, keep_head);
-    assert_eq!(replay.nodes["child"].status, "dirty");
+    assert_eq!(replay.nodes["child"].status, "waiting");
     assert_eq!(replay.planning_id.as_deref(), Some("revision-1"));
     let jobs = runtime.jobs().unwrap();
     assert!(jobs.iter().all(|job| job.execution.node != "keep" && job.execution.node != "child"));
@@ -134,6 +134,10 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
     for job in jobs {
+        runtime.emit(EventKind::Finished { execution_id: job.execution.id, head: runtime.state.base.clone(), output: "done".into() }).unwrap();
+    }
+    // The consumer has actually executed, so changing its input invalidates its result.
+    for job in runtime.jobs().unwrap() {
         runtime.emit(EventKind::Finished { execution_id: job.execution.id, head: runtime.state.base.clone(), output: "done".into() }).unwrap();
     }
     let mut revised = graph;
@@ -189,10 +193,10 @@ fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_reba
     runtime.emit(EventKind::PublicationCompleted { head: published.clone() }).unwrap();
     assert_ne!(published, base);
     fs::write(source.join("tracked.txt"), "external edit").unwrap();
-    assert!(runtime.intervene("parent", "new instruction").unwrap_err().contains("changed after approval"));
+    assert!(runtime.rerun("parent").unwrap_err().contains("changed after approval"));
     assert_eq!(runtime.state.nodes["parent"].status, "done");
     fs::write(source.join("tracked.txt"), "original").unwrap();
-    runtime.intervene("parent", "new instruction").unwrap();
+    runtime.rerun("parent").unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "dirty");
     assert_eq!(runtime.state.nodes["child"].status, "dirty");
     assert!(runtime.state.nodes["child"].head.is_none());
@@ -380,7 +384,7 @@ fn moved_binding_blocks_scheduling_resume_intervention_and_publication() {
     runtime.pause(true).unwrap();
     assert!(runtime.pause(false).unwrap_err().contains("项目绑定已失效"));
     assert!(runtime.state.paused);
-    assert!(runtime.intervene("task", "retry").unwrap_err().contains("项目绑定已失效"));
+    assert!(runtime.rerun("task").unwrap_err().contains("项目绑定已失效"));
     assert!(runtime.resolved("task").unwrap_err().contains("项目绑定已失效"));
     runtime.emit(EventKind::PublicationStarted { repository: source.to_string_lossy().into(), heads: vec![runtime.state.base.clone()] }).unwrap();
     runtime.emit(EventKind::PublicationFailed { error: "interrupted".into() }).unwrap();

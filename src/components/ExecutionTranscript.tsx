@@ -17,7 +17,7 @@ export function ExecutionTranscript({
 }: {
   runId: string;
   execution: Execution;
-  onUserResize?: () => void;
+  onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
   onInitialOutputReady?: () => void;
 }) {
   const cacheKey = `${runId}:${execution.id}`;
