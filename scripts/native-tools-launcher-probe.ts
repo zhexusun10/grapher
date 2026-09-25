@@ -63,7 +63,10 @@ export default async function () {
       const code = `require('node:fs').writeFileSync(Buffer.from(${JSON.stringify(Buffer.from(path).toString('base64'))}, 'base64').toString(), 'BAD')`;
       await assert.rejects(call('bash', { command: `${quote(process.execPath)} -e ${quote(code)}` }), /exited with code/);
     }
-    assert.throws(() => writeFileSync(join(runtime, 'engine/entrypoint.mjs'), 'BAD'), /permitted|denied/i);
+    const engineEntrypoint = join(runtime, 'engine/entrypoint.mjs');
+    const originalEntrypoint = readFileSync(engineEntrypoint);
+    assert.throws(() => writeFileSync(engineEntrypoint, 'BAD'), { code: /^(EPERM|EACCES|EROFS)$/ });
+    assert.deepEqual(readFileSync(engineEntrypoint), originalEntrypoint);
     const shell = await call('bash', { command: 'false | true; false; printf native-ok' });
     assert.equal(shell.details.exitCode, 0);
     assert.equal(text(shell).trim(), 'native-ok');
