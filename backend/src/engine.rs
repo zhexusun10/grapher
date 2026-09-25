@@ -21,8 +21,25 @@ use std::process::Command;
 struct NodeRpc {
     sender: mpsc::Sender<String>,
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<(), String>>>>>,
+    revision_run_id: Option<String>,
 }
 static NODE_RPC: OnceLock<Mutex<HashMap<String, NodeRpc>>> = OnceLock::new();
+
+/// Planner and node agents use distinct RPC identities. Only one planning
+/// operation is admitted by the server at a time.
+pub fn planner_revision_run_id() -> Result<Option<String>, String> {
+    NODE_RPC.get_or_init(Default::default).lock().map_err(|e| e.to_string())?
+        .iter().find(|(id, _)| id.starts_with("planner:"))
+        .map(|(_, rpc)| rpc.revision_run_id.clone())
+        .ok_or("Planner is no longer accepting messages".into())
+}
+
+pub fn steer_planner(instruction: &str, images: Option<Vec<crate::model::ImageAttachment>>) -> Result<(), String> {
+    let id = NODE_RPC.get_or_init(Default::default).lock().map_err(|e| e.to_string())?
+        .keys().find(|id| id.starts_with("planner:")).cloned()
+        .ok_or("Planner is no longer accepting messages")?;
+    steer(&id, instruction, images)
+}
 
 /// Acknowledged by Pi's RPC protocol, not merely by a successful pipe write.
 pub fn steer(
@@ -384,10 +401,11 @@ fn run_pi_with_timeout(
     };
     // Fixture tests opt in with an explicit marker; existing print-mode fixtures
     // retain their original protocol.
-    let rpc_node = request.role == PiRole::NodeAgent && (!cfg!(feature = "fixture")
-        || request.environment.iter().any(|(key, value)| *key == "GRAPHER_TEST_NODE_RPC" && value == "1"));
-    command.args(["--mode", if rpc_node { "rpc" } else { "json" }, "--no-prompt-templates", "--no-themes"]);
-    if !rpc_node { command.arg("--print"); }
+    let rpc_agent = (request.role == PiRole::NodeAgent || request.role == PiRole::Planner)
+        && (!cfg!(feature = "fixture")
+            || request.environment.iter().any(|(key, value)| *key == "GRAPHER_TEST_NODE_RPC" && value == "1"));
+    command.args(["--mode", if rpc_agent { "rpc" } else { "json" }, "--no-prompt-templates", "--no-themes"]);
+    if !rpc_agent { command.arg("--print"); }
     if request.role == PiRole::NodeAgent {
         command.arg("--approve");
     } else {
@@ -529,16 +547,26 @@ fn run_pi_with_timeout(
     let mut rpc_guard = None;
     let mut rpc_pending = None;
     let initial_rpc_id = uuid::Uuid::new_v4().to_string();
-    if rpc_node {
-        let id = request.environment.iter()
-            .find(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID")
-            .map(|(_, value)| value.clone())
-            .or_else(|| request.session_dir.file_name().map(|name| name.to_string_lossy().into_owned()))
-            .ok_or("Missing execution identity")?;
+    if rpc_agent {
+        let id = if request.role == PiRole::Planner {
+            format!("planner:{}", request.session_dir.parent()
+                .and_then(|parent| parent.file_name())
+                .ok_or("Missing planning identity")?.to_string_lossy())
+        } else {
+            request.environment.iter()
+                .find(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID")
+                .map(|(_, value)| value.clone())
+                .or_else(|| request.session_dir.file_name().map(|name| name.to_string_lossy().into_owned()))
+                .ok_or("Missing execution identity")?
+        };
         let (tx, rx) = mpsc::channel::<String>();
         let pending = Arc::new(Mutex::new(HashMap::new()));
+        let revision_run_id = if request.role == PiRole::Planner {
+            request.environment.iter().find(|(key, _)| *key == "GRAPHER_PLANNER_RUN_ID")
+                .map(|(_, id)| id.clone()).filter(|id| !id.is_empty())
+        } else { None };
         NODE_RPC.get_or_init(Default::default).lock().map_err(|e| e.to_string())?
-            .insert(id.clone(), NodeRpc { sender: tx.clone(), pending: pending.clone() });
+            .insert(id.clone(), NodeRpc { sender: tx.clone(), pending: pending.clone(), revision_run_id });
         rpc_guard = Some(NodeRpcGuard(id));
         rpc_pending = Some(pending);
         let mut initial_val = serde_json::json!({"id": initial_rpc_id, "type": "prompt", "message": request.task});
@@ -600,7 +628,7 @@ fn run_pi_with_timeout(
     loop {
         // Leave a brief handoff window for a concurrent steer arriving at the
         // end of a turn. RPC prompt starts another turn if Pi is already idle.
-        if rpc_node && agent_ended.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
+        if rpc_agent && agent_ended.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
             let pending_empty = rpc_pending.as_ref().is_some_and(|p| p.lock().is_ok_and(|p| p.is_empty()));
             if pending_empty { break; }
         }
@@ -628,9 +656,9 @@ fn run_pi_with_timeout(
                 }
                 if let Ok(event) = serde_json::from_str::<Value>(&line) {
                     match event["type"].as_str().unwrap_or_default() {
-                        "agent_start" | "turn_start" if rpc_node => agent_ended = None,
-                        "agent_settled" if rpc_node => agent_ended = Some(Instant::now()),
-                        "response" if rpc_node => {
+                        "agent_start" | "turn_start" if rpc_agent => agent_ended = None,
+                        "agent_settled" if rpc_agent => agent_ended = Some(Instant::now()),
+                        "response" if rpc_agent => {
                             if event["id"].as_str() == Some(initial_rpc_id.as_str()) && event["success"] == false {
                                 agent_error = Some(event["error"].as_str().unwrap_or("Pi rejected the initial prompt").to_string());
                                 agent_ended = Some(Instant::now());
@@ -640,6 +668,9 @@ fn run_pi_with_timeout(
                                     if let Some(reply) = pending.remove(id) {
                                         let result = if event["success"] == true { Ok(()) }
                                             else { Err(event["error"].as_str().unwrap_or("Pi rejected steer").to_string()) };
+                                        // Acceptance can precede the next turn_start. Do not
+                                        // exit on an earlier agent_settled and drop this turn.
+                                        if result.is_ok() { agent_ended = None; }
                                         let _ = reply.send(result);
                                     }
                                 }
@@ -814,6 +845,54 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn planner_rpc_steer_keeps_session_and_delivers_follow_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("planner_rpc.py");
+        fs::write(&script, r#"import json, sys
+first = json.loads(sys.stdin.readline())
+assert first['type'] == 'prompt' and first['message'] == 'original'
+print(json.dumps({'type':'tool_execution_start'}), flush=True)
+print(json.dumps({'type':'agent_settled'}), flush=True)
+second = json.loads(sys.stdin.readline())
+assert second['type'] == 'prompt' and second['streamingBehavior'] == 'steer'
+assert second['message'] == 'additional requirement'
+print(json.dumps({'type':'response','id':second['id'],'success':True}), flush=True)
+import time; time.sleep(0.7)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'revised'}]}}), flush=True)
+print(json.dumps({'type':'agent_settled'}), flush=True)
+sys.stdin.read()
+"#).unwrap();
+        let config = Config {
+            engine: "pi".into(), pi_command: "python3".into(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0,
+        };
+        let session = temp.path().join("planning-1").join("planner-session");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn({
+            let root = temp.path().to_path_buf();
+            move || run_pi(PiRequest {
+                role: PiRole::Planner, config: &config, cwd: &root, task: "original",
+                session_dir: &session, extension: None, tools: None, session_id: None,
+                extra_args: vec![], environment: vec![
+                    ("GRAPHER_TEST_NODE_RPC", "1".into()),
+                    ("GRAPHER_PLANNER_RUN_ID", "run-test".into()),
+                ],
+                system_prompt: None, images: None,
+            }, |line| {
+                if line.contains("tool_execution_start") { let _ = ready_tx.send(()); }
+            })
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(planner_revision_run_id().unwrap().as_deref(), Some("run-test"));
+        steer_planner("additional requirement", None).unwrap();
+        assert_eq!(worker.join().unwrap().unwrap(), "revised");
+        assert!(planner_revision_run_id().is_err());
+    }
 
     #[cfg(feature = "fixture")]
     #[test]

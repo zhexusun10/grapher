@@ -56,7 +56,6 @@ Grapher 不运行一个持续在线的 LLM Coordinator。Planner 完成后，调
 | `backend/src/server.rs` | 本地 HTTP API、规划流程和 runtime driver |
 | `engine/` | 锁定 Pi 入口、模型数据与适配层 |
 | `src/` | React UI、运行时服务和图/会话视图 |
-| `../grapher-tests/benchmark/` | 外置规划质量与 Runtime 回归，不属于产品运行路径 |
 | `pi/` | 未修改的 upstream Pi submodule |
 
 ## 3. 规划与 Graph IR

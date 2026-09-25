@@ -86,7 +86,7 @@ npm run test:pi               # 锁定版本的 Pi 与认证传输契约测试
 npm run test:native           # 宿主原生回归测试（依赖平台）
 ```
 
-`npm run test:http`、`npm run test:benchmark`、`npm run benchmark:planner` 依赖**未包含在本仓库内**的同级目录 `../grapher-tests/`；克隆本仓库本身即可运行上述基本检查，但不能运行这些外置评测。`npm run test:runtime` 使用仓库内的运行时测试程序。固定样例和无模型测试不能证明真实服务商的语义质量或全部沙箱边界；发布前需要平台和真实模型验收。
+本仓库不提供 benchmark 或相关 host。HTTP API 的绑定和生命周期测试由 `npm run test:bindings` 使用仓库内的 `scripts/check-project-binding.mjs` 完成；其余上述基本检查也可在本仓库运行。固定样例和无模型测试不能证明真实服务商的语义质量或全部沙箱边界；发布前需要平台和真实模型验收。
 
 ## 文档导航
 

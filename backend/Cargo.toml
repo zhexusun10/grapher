@@ -6,7 +6,6 @@ license = "MIT"
 
 [features]
 default = []
-benchmark = ["fixture"]
 fixture = []
 
 [dependencies]
@@ -32,11 +31,6 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
-
-[[example]]
-name = "benchmark"
-path = "examples/benchmark.rs"
-required-features = ["benchmark"]
 
 [[test]]
 name = "core"

@@ -349,6 +349,8 @@ export default function App() {
     runId: "",
     stage: "idle" as "idle" | "partitioning" | "planning" | "done" | "error",
     items: [] as TranscriptItem[],
+    representedPlanningIds: [] as string[],
+    isContinuation: false,
     partitionerThinking: "",
     partitionerThinkingActive: false,
     partitionerText: "",
@@ -429,26 +431,49 @@ export default function App() {
       return newMsg;
     };
 
-    if (isPlanning) {
-      // 规划器正在工作中，用户发送补充或纠偏要求，直接转向 (Steer)
-      (async () => {
-        // 1. 中止当前的规划流请求
-        if (planningAbortControllerRef.current) {
-          planningAbortControllerRef.current.abort();
-          planningAbortControllerRef.current = null;
-        }
-        // 2. 终止后端当前正在运行的 Pi 规划进程
+    if (isPlanning || recoveredPlanning?.status === "running") {
+      // A node conversation still steers that node, even while Planner is active.
+      const execution = targetNodeName && [...state.executions].reverse()
+        .find((item) => item.node === targetNodeName && item.status === "running");
+      if (execution) {
+        const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`);
+        run(async () => {
+          try {
+            await runtimeService.control("steer", {
+              runId: state.runId, executionId: execution.id, node: targetNodeName,
+              instruction: text, images: options?.images,
+            });
+          } catch (error) {
+            setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
+            throw error;
+          }
+        });
+        return;
+      }
+      if (plannerStream.stage === "partitioning") {
+        setError("任务路由器仍在工作，请等待 Planner 启动后再追加消息。");
+        return false;
+      }
+      // Keep the SSE stream and Pi process alive. Pi's RPC steer inserts a new
+      // user turn into the current Planner session instead of restarting it.
+      const message = recordMessage(displayMsg);
+      setPlannerStream((prev) => ({
+        ...prev,
+        items: [...closeRunningThinkingItem(prev.items), {
+          id: message.id, type: "text", role: "user", content: displayMsg, timestamp: message.timestamp,
+        }],
+      }));
+      run(async () => {
         try {
-          await runtimeService.control("stop");
-        } catch (e) {
-          console.warn("Stop command before steer failed:", e);
+          await runtimeService.control("steer_planner", {
+            runId: plannerStream.runId || undefined, instruction: text, images: options?.images,
+          });
+        } catch (error) {
+          setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
+          setPlannerStream((prev) => ({ ...prev, items: prev.items.filter((item) => item.id !== message.id) }));
+          throw error;
         }
-        // 3. 稍等片刻确保退出
-        await new Promise((r) => setTimeout(r, 100));
-        // 4. 将新指令作为转向补充要求，直接在当前图规划基础上继续规划
-        const isGraphMode = routeType === "graph" || state.graph.nodes.length > 0;
-        handlePlanGoal(text, options, isGraphMode ? "graph" : undefined, state.runId || undefined);
-      })();
+      });
       return;
     }
 
@@ -1058,6 +1083,9 @@ export default function App() {
     if (config.repository) await requireRepository(config.repository);
     const isContinuing = Boolean(revisionRunId || (routeType === "graph" && state.graph.nodes.length > 0 && state.runId));
     const effectiveRevisionRunId = revisionRunId || (isContinuing ? state.runId : undefined);
+    // Tool edits are provisional until the backend atomically commits the
+    // revision; never show them as the executing graph while nodes are running.
+    const liveRevision = isContinuing && state.approved;
     const effectiveMode = mode || (isContinuing ? "graph" : planMode);
 
     if (!isContinuing) setGoal(targetGoal);
@@ -1086,6 +1114,8 @@ export default function App() {
         runId: "",
         stage: effectiveMode === "auto" ? "partitioning" : effectiveMode === "graph" ? "planning" : "idle",
         items: [],
+        representedPlanningIds: [],
+        isContinuation: false,
         partitionerThinking: "",
         partitionerThinkingActive: false,
         partitionerText: "",
@@ -1108,6 +1138,7 @@ export default function App() {
       setPlannerStream((prev) => ({
         ...prev,
         stage: "planning",
+        isContinuation: true,
         items: [
           ...prev.items,
           {
@@ -1428,7 +1459,7 @@ export default function App() {
             if (pEvent.toolCallId) pendingToolArgsRef.current.delete(pEvent.toolCallId);
             const args = pEvent.args || savedArgs;
 
-            if (!isErr) {
+            if (!isErr && !liveRevision) {
               // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
               if (pEvent.toolName === "node") {
                 setState((prev) => {
@@ -1585,6 +1616,12 @@ export default function App() {
             setState(event.snapshot);
             setRouteType(deduceRouteType(event.snapshot));
             recordRunToWorkspace(event.snapshot.runId);
+            const id = event.snapshot.planningId;
+            if (id) setPlannerStream((prev) => ({
+              ...prev,
+              representedPlanningIds: prev.representedPlanningIds.includes(id)
+                ? prev.representedPlanningIds : [...prev.representedPlanningIds, id],
+            }));
             void planningRecovery.finish(scope);
           }
         }
@@ -1605,6 +1642,8 @@ export default function App() {
         ...prev,
         runId: snapshot.runId,
         items: closeRunningThinkingItem(prev.items),
+        representedPlanningIds: snapshot.planningId && !prev.representedPlanningIds.includes(snapshot.planningId)
+          ? [...prev.representedPlanningIds, snapshot.planningId] : prev.representedPlanningIds,
         stage: "done",
       }));
     } catch (err: any) {

@@ -3352,12 +3352,20 @@ a,
 }
 
 .planning-activity-output {
-  display: flex;
-  height: 440px;
+  min-width: 0;
+}
+
+/* Saved Planner turns belong to the same scrollable conversation as the
+   summary below them; a fixed-height clipped transcript hides earlier cards. */
+.planning-activity-output .transcript-inline {
+  display: block;
+  height: auto;
   min-height: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 8px;
+  overflow: visible;
+}
+
+.planning-activity-output .transcript-inline .transcript-scroll-area {
+  display: block;
 }
 
 .planning-stats-grid {

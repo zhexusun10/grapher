@@ -77,6 +77,7 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
         output: String::new(),
         started_at: now(),
         completed_at: None,
+        metrics: None,
     };
     runtime
         .emit(EventKind::MergerStarted { execution })

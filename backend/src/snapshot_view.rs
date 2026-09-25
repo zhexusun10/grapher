@@ -16,7 +16,7 @@ fn execution_metadata(execution: &Execution) -> Value {
         "attempt": execution.attempt, "sessionId": execution.session_id,
         "worktree": execution.worktree, "before": execution.before, "after": execution.after,
         "status": execution.status, "startedAt": execution.started_at, "completedAt": execution.completed_at,
-        "output": "", "outputBytes": execution.output.len(), "pid": pid
+        "output": "", "outputBytes": execution.output.len(), "pid": pid, "metrics": execution.metrics
     })
 }
 
@@ -41,7 +41,8 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         "executions": state.executions.iter().map(execution_metadata).collect::<Vec<_>>(),
         "mergers": state.mergers.iter().map(execution_metadata).collect::<Vec<_>>(),
         "publication": state.publication, "events": events, "approved": state.approved,
-        "paused": state.paused, "phase": state.phase, "base": state.base, "feedbackCounts": state.feedback_counts
+        "paused": state.paused, "phase": state.phase, "base": state.base, "feedbackCounts": state.feedback_counts,
+        "runMetrics": state.run_metrics
     });
     if let Some(plan_type) = &state.plan_type {
         metadata["planType"] = json!(plan_type);

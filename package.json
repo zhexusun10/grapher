@@ -7,7 +7,7 @@
   "scripts": {
     "pi:verify": "node scripts/pi-baseline.mjs verify",
     "test:pi": "node --check engine/system-prompt.mjs && node scripts/pi-baseline.mjs verify && node --test scripts/adopt-pi.test.mjs scripts/agent-dir.test.mjs scripts/planning-trajectory.test.mjs scripts/pi-process-contract.test.mjs && node --import ./pi/node_modules/tsx/dist/loader.mjs --test scripts/execution-retry.test.ts scripts/pi-compat.test.ts",
-    "pi:upgrade-check": "npm run pi:verify && npm run pi:build && npm run test:pi && npm run check && npm run test && npm run test:extensions && npm run test:native && npm run test:bindings && npm run test:http",
+    "pi:upgrade-check": "npm run pi:verify && npm run pi:build && npm run test:pi && npm run check && npm run test && npm run test:extensions && npm run test:native && npm run test:bindings",
     "pi:setup": "node scripts/pi-baseline.mjs setup",
     "pi:build": "node scripts/pi-baseline.mjs build",
     "pi:adopt": "node scripts/adopt-pi.mjs",
@@ -21,13 +21,6 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture",
-    "benchmark": "node ../grapher-tests/benchmark/run.mjs",
-    "benchmark:validate": "node ../grapher-tests/benchmark/validate.mjs",
-    "benchmark:planner": "node ../grapher-tests/benchmark/run.mjs --planner-only",
-    "benchmark:runtime": "node scripts/benchmark-runtime.mjs",
-    "test:runtime": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --features benchmark --example benchmark --bin grapher && node --test scripts/benchmark-host.test.mjs",
-    "test:benchmark": "npm run test:runtime && node --test ../grapher-tests/benchmark/planning-environment.test.mjs ../grapher-tests/benchmark/planning-boundary.test.mjs ../grapher-tests/benchmark/replay-selection.test.mjs ../grapher-tests/benchmark/results-paths.test.mjs && npm run test:extensions",
-    "test:http": "npm run build && node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --features fixture --bin grapher && node ../grapher-tests/scripts/test-http.mjs",
     "frontend": "vite --host 127.0.0.1",
     "backend": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher",
     "start": "node scripts/cargo.mjs run --release --manifest-path backend/Cargo.toml --bin grapher"

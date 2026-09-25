@@ -225,7 +225,7 @@ fn nonzero_exit_and_empty_response_fail_closed() {
 
 #[test]
 fn successful_provider_retry_clears_the_previous_assistant_error() {
-    // Supplemental adapter protocol regression, not a substitute for the real-Pi benchmark.
+    // Supplemental adapter protocol regression, not a substitute for real-Pi acceptance testing.
     let (result, stream) = execute_script(
         r#"cat >/dev/null
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"Temporary provider failure","content":[]}}' '{"type":"auto_retry_start","attempt":1}' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Recovered successfully"}]}}'

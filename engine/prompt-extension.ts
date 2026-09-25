@@ -1,3 +1,4 @@
+import { grapherSystemPrompt } from './system-prompt.mjs';
 import { createWorkspacePaths } from './workspace-paths.mjs';
 import { registerWorkspaceTools } from './workspace-tools.ts';
 import {
@@ -20,9 +21,12 @@ export default function (pi: ExtensionAPI) {
       ? 'Use project-root-relative paths in Bash commands and project files.'
       : 'Use project-root-relative paths in Bash commands and project files.';
   if (process.env.GRAPHER_MODE !== 'partition') {
-    pi.on('before_agent_start', async event => ({
-      systemPrompt: `${paths ? paths.visible(event.systemPrompt) : event.systemPrompt}\n\n${pathGuideline}`,
-    }));
+    pi.on('before_agent_start', async event => {
+      const systemPrompt = grapherSystemPrompt(event.systemPrompt);
+      return {
+        systemPrompt: `${paths ? paths.visible(systemPrompt) : systemPrompt}\n\n${pathGuideline}`,
+      };
+    });
   }
   // Planner owns its native bash tool; Partitioner has no tools.
   // The launcher loads this adapter for every role, so execution-only tool

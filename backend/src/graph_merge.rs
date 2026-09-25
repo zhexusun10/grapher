@@ -118,6 +118,7 @@ pub fn resolve_with_merger_for_node(
             output: String::new(),
             started_at: now(),
             completed_at: None,
+            metrics: None,
         },
     })?;
     let prompt = format!("User query:\n{query}\n\nResolve the current Git merge conflicts. Preserve valid changes completed by each node. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming parent's commit.");
@@ -178,14 +179,21 @@ pub fn resolve_with_merger_for_node(
         finish_merge(repository, &incoming)
     });
     match &result {
-        Ok(()) => emit(EventKind::MergerFinished {
-            execution_id: id.clone(),
-            head: git(repository, &["rev-parse", "HEAD"])?,
-        })?,
-        Err(error) => emit(EventKind::MergerFailed {
-            execution_id: id.clone(),
-            error: error.clone(),
-        })?,
+        Ok(()) => {
+            let head = git(repository, &["rev-parse", "HEAD"])?;
+            eprintln!("[Grapher] [Merger] Finished resolving conflicts for '{node}' (HEAD: {head})");
+            emit(EventKind::MergerFinished {
+                execution_id: id.clone(),
+                head,
+            })?
+        }
+        Err(error) => {
+            eprintln!("[Grapher] [Merger] Failed resolving conflicts for '{node}': {error}");
+            emit(EventKind::MergerFailed {
+                execution_id: id.clone(),
+                error: error.clone(),
+            })?
+        }
     }
     fs::write(directory.join("result.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "id": id, "name": "merger", "node": node, "cwd": repository,

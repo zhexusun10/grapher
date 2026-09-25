@@ -8,7 +8,7 @@ use crate::{
 use serde::Serialize;
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -96,7 +96,7 @@ mod prompt_tests {
             id: id.clone(), node: "task".into(), revision: 1, attempt: 1,
             session_id: id.clone(), worktree: "".into(), before: "".into(),
             after: None, status: "running".into(), output: String::new(),
-            started_at: now(), completed_at: None,
+            started_at: now(), completed_at: None, metrics: None,
         };
         {
             let mut runtime = service.runtime.lock().unwrap();
@@ -145,7 +145,10 @@ mod prompt_tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = crate::fixture::repository(temp.path()).unwrap();
         let script = temp.path().join("revise.sh");
-        fs::write(&script, r#"printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+        fs::write(&script, r#"input="$(cat)"
+printf '%s' "$input" | grep -q -- '- keep: waiting' || exit 11
+printf '%s' "$input" | grep -q 'Add a node' || exit 12
+printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"added","task":"added"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Revised"}]}}'
 "#).unwrap();
         let root = temp.path().join("runtime");
@@ -161,6 +164,9 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         runtime.set_route("graph").unwrap();
         runtime.approve().unwrap();
         let run_id = runtime.state.run_id.clone();
+        assert_eq!(planner_followup_prompt("New conversation", None, &runtime.state), "New conversation");
+        assert_eq!(planner_followup_prompt("Follow up", Some(&run_id), &runtime.state),
+            "Current graph node status:\n- keep: waiting\n\nFollow up");
         let base = runtime.state.base.clone();
         let service = Arc::new(Service {
             runtime: Mutex::new(runtime), driving: AtomicBool::new(false), planning: AtomicBool::new(false),
@@ -179,6 +185,227 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         assert!(replay.approved);
         assert!(replay.graph.nodes.iter().any(|node| node.name == "added"));
         assert_eq!(replay.events.iter().filter(|e| matches!(e.kind, EventKind::Approved { .. })).count(), 1);
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn manually_created_graph_uses_one_planner_session_even_before_first_revision_succeeds() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("runtime");
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let mut runtime = Runtime::open(&root).unwrap();
+        runtime.create(Graph {
+            original_goal: "test".into(), nodes: vec![Node { name: "first".into(), task: "first".into() }], edges: vec![],
+        }, Config { repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![], model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1 }).unwrap();
+        runtime.set_route("graph").unwrap();
+        let attempt = root.join("planning").join(Uuid::new_v4().to_string());
+        let expected = root.join("planner-sessions").join(&runtime.state.run_id);
+        assert_eq!(planner_session_directory(&root, &attempt, &repo, Some(&runtime.state)).unwrap(),
+            (expected.clone(), runtime.state.run_id.clone()));
+        fs::create_dir_all(&expected).unwrap();
+        fs::write(expected.join("turns.jsonl"), format!(
+            "{{\"type\":\"session\",\"id\":\"{}\",\"cwd\":\"{}\"}}\n",
+            runtime.state.run_id, repo.display(),
+        )).unwrap();
+        assert_eq!(planner_session_directory(&root, &attempt, &repo, Some(&runtime.state)).unwrap(),
+            (expected, runtime.state.run_id.clone()));
+        assert_eq!(planner_node_status(&runtime.state), "Current graph node status:\n- first: waiting\n");
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn legacy_planner_session_keeps_its_original_pi_identity() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("runtime");
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let mut runtime = Runtime::open(&root).unwrap();
+        let planning_id = Uuid::new_v4().to_string();
+        runtime.create_with_planning(Graph {
+            original_goal: "test".into(), nodes: vec![Node { name: "first".into(), task: "first".into() }], edges: vec![],
+        }, Config { repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![], model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1 },
+        Some(planning_id.clone()), None).unwrap();
+        runtime.set_route("graph").unwrap();
+        let legacy = Uuid::new_v4().to_string();
+        let session = root.join("planning").join(planning_id).join("planner-session");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("legacy.jsonl"), format!(
+            "{{\"type\":\"session\",\"id\":\"{legacy}\",\"cwd\":\"{}\"}}\n", repo.display(),
+        )).unwrap();
+        let attempt = root.join("planning").join(Uuid::new_v4().to_string());
+        assert_eq!(planner_session_directory(&root, &attempt, &repo, Some(&runtime.state)).unwrap(),
+            (session.clone(), legacy));
+        fs::write(session.join("legacy.jsonl"), "corrupt\n").unwrap();
+        assert!(planner_session_directory(&root, &attempt, &repo, Some(&runtime.state)).is_err());
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn planner_continues_the_same_run_session_across_revisions_and_reload() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let script = temp.path().join("planner-session.sh");
+        fs::write(&script, r#"session=''
+identity=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-dir) session="$2"; shift 2 ;;
+    --session-id) identity="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$session" ] && [ -n "$identity" ] || exit 11
+printf '%s|%s\n' "$session" "$identity" >> "$(dirname "$0")/session-trace.txt"
+if [ -f "$session/turns.jsonl" ]; then
+  grep -q "\"id\":\"$identity\"" "$session/turns.jsonl" || exit 12
+  printf '%s' '{"originalGoal":"initial","nodes":[{"name":"first","task":"first"},{"name":"next","task":"next"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+else
+  printf '%s' '{"originalGoal":"initial","nodes":[{"name":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+  printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$PWD" > "$session/turns.jsonl"
+fi
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
+"#).unwrap();
+        let root = temp.path().join("runtime");
+        let config = Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+        };
+        let make_service = || Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&root).unwrap()),
+            driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let first_service = make_service();
+        let first = plan_goal_internal(
+            "initial".into(), config.clone(), Some("graph"), None, None, &first_service,
+            |_| {}, |_| {}, |_| {},
+        ).unwrap();
+        let first_id = first.planning_id.clone().unwrap();
+        drop(first_service);
+        // Reload from the event store, not a process-local session pointer.
+        let service = make_service();
+        assert_eq!(service.runtime.lock().unwrap().state.run_id, first.run_id);
+        let second = plan_goal_internal(
+            "revision".into(), config, Some("graph"), None, Some(first.run_id.clone()), &service,
+            |_| {}, |_| {}, |_| {},
+        ).unwrap();
+        assert_ne!(first_id, second.planning_id.clone().unwrap());
+        assert_eq!(second.graph.nodes.len(), 2);
+        let trace = fs::read_to_string(temp.path().join("session-trace.txt")).unwrap();
+        let lines: Vec<_> = trace.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], format!("{}|{}", root.join("planning").join(&first_id).join("planner-session").display(), first_id));
+        assert_eq!(lines[1], lines[0]);
+        for id in [&first_id, second.planning_id.as_ref().unwrap()] {
+            assert!(root.join("planning").join(id).join("planner.jsonl").is_file());
+        }
+        assert!(!root.join("planning").join(second.planning_id.unwrap()).join("planner-session").exists());
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn planner_revises_waiting_node_while_unaffected_node_is_running() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let script = temp.path().join("live-revise.sh");
+        fs::write(&script, r#"input="$(cat)"
+printf '%s' "$input" | grep -q -- '- keep: running' || exit 11
+printf '%s' "$input" | grep -q -- '- pending: waiting' || exit 12
+printf '%s' "$input" | grep -q 'Update pending' || exit 13
+printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"pending","task":"updated"}],"edges":[{"from":"keep","to":"pending","relation":"files","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
+"#).unwrap();
+        let config = Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+        };
+        let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+        runtime.create(Graph {
+            original_goal: "test".into(),
+            nodes: vec![Node { name: "keep".into(), task: "keep".into() }, Node { name: "pending".into(), task: "pending".into() }],
+            edges: vec![Edge { from: "keep".into(), to: "pending".into(), relation: "files".into(), feedback: false }],
+        }, config.clone()).unwrap();
+        runtime.set_route("graph").unwrap();
+        runtime.approve().unwrap();
+        let run_id = runtime.state.run_id.clone();
+        let running = runtime.jobs().unwrap().remove(0).execution;
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime), driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let snapshot = plan_goal_internal(
+            "Update pending".into(), config, Some("graph"), None, Some(run_id.clone()), &service,
+            |_| {}, |_| {}, |_| {},
+        ).unwrap();
+        assert_eq!(snapshot.run_id, run_id);
+        assert!(snapshot.approved);
+        assert!(!snapshot.paused);
+        assert_eq!(snapshot.nodes["keep"].status, "running");
+        assert_eq!(snapshot.executions.iter().find(|exec| exec.id == running.id).unwrap().status, "running");
+        assert_eq!(snapshot.nodes["pending"].status, "waiting");
+        assert_eq!(snapshot.graph.nodes.iter().find(|node| node.name == "pending").unwrap().task, "updated");
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn running_revision_drains_only_affected_execution_before_commit() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let script = temp.path().join("running-revise.sh");
+        fs::write(&script, r#"printf '%s' '{"originalGoal":"test","nodes":[{"name":"change","task":"updated"},{"name":"other","task":"other"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
+"#).unwrap();
+        let config = Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+        };
+        let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+        runtime.create(Graph {
+            original_goal: "test".into(),
+            nodes: ["change", "other"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
+            edges: vec![],
+        }, config.clone()).unwrap();
+        runtime.set_route("graph").unwrap();
+        runtime.approve().unwrap();
+        let run_id = runtime.state.run_id.clone();
+        runtime.jobs().unwrap();
+        // Pretend the driver owns the already-started jobs; complete only the
+        // affected one below. The unrelated job remains running throughout.
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime), driving: AtomicBool::new(true), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let worker = {
+            let service = service.clone();
+            thread::spawn(move || plan_goal_internal(
+                "Change active node".into(), config, Some("graph"), None, Some(run_id), &service,
+                |_| {}, |_| {}, |_| {},
+            ))
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let snapshot = service.runtime.lock().unwrap().state.clone();
+            if snapshot.paused {
+                assert_eq!(snapshot.nodes["other"].status, "running");
+                let execution = snapshot.executions.iter().find(|item| item.node == "change").unwrap();
+                service.runtime.lock().unwrap().emit(EventKind::Finished {
+                    execution_id: execution.id.clone(), head: snapshot.base, output: "completed".into(),
+                }).unwrap();
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "Planner did not pause for affected execution");
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let snapshot = worker.join().unwrap().unwrap();
+        assert!(!snapshot.paused);
+        assert_eq!(snapshot.nodes["change"].status, "dirty");
+        assert_eq!(snapshot.nodes["other"].status, "running");
     }
 
     #[cfg(feature = "fixture")]
@@ -465,6 +692,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             output: text.clone(),
             started_at: now(),
             completed_at: None,
+            metrics: None,
         };
         let service = Arc::new(Service {
             runtime: Mutex::new(runtime),
@@ -696,6 +924,105 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         let loaded = runtime.store.load(&runtime.state.run_id).unwrap();
         assert_eq!(loaded.planning_id.as_deref(), Some("test-plan-id"));
         assert_eq!(loaded.planning.as_ref(), Some(&summary));
+    }
+
+    #[test]
+    fn execution_and_run_metrics_parsing_and_persistence() {
+        let sample_output = r#"
+{"type":"grapher_process_started","pid":123,"timestamp":1726300000000}
+{"type":"tool_execution_start","toolName":"read"}
+{"type":"tool_execution_end","toolName":"read","isError":false}
+{"type":"tool_execution_start","toolName":"bash"}
+{"type":"tool_execution_end","toolName":"bash","isError":true}
+{"type":"message_end","message":{"role":"assistant","usage":{"input":150,"output":250,"cacheRead":20,"cacheWrite":10,"reasoning":80,"totalTokens":400}}}
+{"type":"grapher_process_exited","elapsedMs":8500,"success":true,"timestamp":1726300008500}
+"#;
+        let exec_metrics = crate::model::parse_execution_metrics(sample_output, 1726300000000, 1726300008500);
+        assert_eq!(exec_metrics.duration_seconds, 8.5);
+        assert_eq!(exec_metrics.assistant_messages, 1);
+        assert_eq!(exec_metrics.tools, 2);
+        assert_eq!(exec_metrics.tool_errors, 1);
+        assert_eq!(exec_metrics.usage.input, 150);
+        assert_eq!(exec_metrics.usage.output, 250);
+        assert_eq!(exec_metrics.usage.total_tokens, 400);
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut runtime = Runtime::open(temp.path()).unwrap();
+        let config = Config {
+            repository: String::new(),
+            #[cfg(feature = "fixture")]
+            engine: "fixture".into(),
+            #[cfg(feature = "fixture")]
+            pi_command: String::new(),
+            #[cfg(feature = "fixture")]
+            pi_args: Vec::new(),
+            model: "test-model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 2,
+            max_feedback: 1,
+        };
+        runtime
+            .create(
+                Graph {
+                    original_goal: "Test execution metrics".into(),
+                    nodes: vec![Node {
+                        name: "worker".into(),
+                        task: "Run worker".into(),
+                    }],
+                    edges: Vec::new(),
+                },
+                config,
+            )
+            .unwrap();
+
+        let execution = Execution {
+            id: "exec-1".into(),
+            node: "worker".into(),
+            revision: 1,
+            attempt: 1,
+            session_id: "session-1".into(),
+            worktree: "".into(),
+            before: "base-head".into(),
+            after: None,
+            status: "running".into(),
+            output: String::new(),
+            started_at: 1726300000000,
+            completed_at: None,
+            metrics: None,
+        };
+        runtime.emit(EventKind::Started { execution }).unwrap();
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: "exec-1".into(),
+                head: "finished-head".into(),
+                output: sample_output.into(),
+            })
+            .unwrap();
+
+        // Execution metrics should be populated
+        let execution = &runtime.state.executions[0];
+        assert_eq!(execution.status, "completed");
+        let m = execution.metrics.as_ref().expect("Execution metrics must be parsed");
+        assert_eq!(m.duration_seconds, 8.5);
+        assert_eq!(m.tools, 2);
+        assert_eq!(m.tool_errors, 1);
+        assert_eq!(m.usage.total_tokens, 400);
+
+        // RunMetrics should be updated in snapshot
+        let run_m = runtime.state.run_metrics.as_ref().expect("Run metrics must be present");
+        assert_eq!(run_m.execution_usage.total_tokens, 400);
+        assert_eq!(run_m.total_usage.total_tokens, 400);
+        assert_eq!(run_m.tools, 2);
+
+        // Snapshot metadata projection should include metrics and runMetrics
+        let meta = crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap();
+        assert!(meta.get("runMetrics").is_some());
+        assert_eq!(meta["executions"][0]["metrics"]["durationSeconds"], 8.5);
+
+        // Replay from sqlite store
+        let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+        assert_eq!(replayed.executions[0].metrics, execution.metrics);
+        assert!(replayed.run_metrics.is_some());
     }
 
     #[test]
@@ -980,6 +1307,49 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         // 3. Model with valid provider prefix passes preflight format check
         config.model = "openai/gpt-4o".into();
         assert!(validate_planning_preflight(&config, None).is_ok());
+    }
+
+    #[cfg(not(feature = "fixture"))]
+    #[test]
+    fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
+        let config = Config {
+            repository: "/tmp/fake".into(),
+            model: "example/test".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 2,
+            max_feedback: 0,
+        };
+        let calls = std::cell::Cell::new(0);
+        let fetch = || {
+            calls.set(calls.get() + 1);
+            Some(serde_json::json!({ "result": { "providers": [] } }))
+        };
+        validate_planning_models_preflight(&config, None, &fetch).unwrap();
+        assert_eq!(calls.get(), 1);
+
+        calls.set(0);
+        let unavailable = || {
+            calls.set(calls.get() + 1);
+            None
+        };
+        validate_planning_models_preflight(&config, None, &unavailable).unwrap();
+        assert_eq!(calls.get(), 1); // A failed lookup is also reused.
+
+        calls.set(0);
+        let partitioner_model = PiModelConfig::resolve(PiRole::Partitioner, &config).model;
+        let provider = partitioner_model.split('/').next().unwrap();
+        let unauthenticated = || {
+            calls.set(calls.get() + 1);
+            Some(serde_json::json!({ "result": { "providers": [{ "id": provider, "configured": false }] } }))
+        };
+        let error = validate_planning_models_preflight(&config, None, &unauthenticated).unwrap_err();
+        assert!(error.contains("not authenticated"));
+        assert!(error.contains(&partitioner_model));
+        assert_eq!(calls.get(), 1);
+
+        let catalog = std::cell::OnceCell::new();
+        validate_role_model_preflight(PiRole::Partitioner, "invalid", &catalog, &fetch).unwrap_err();
+        assert!(catalog.get().is_none()); // Invalid format still fails before the lookup.
     }
 
     #[test]
@@ -1344,21 +1714,48 @@ pub fn validate_planning_preflight(config: &Config, mode: Option<&str>) -> Resul
     if mode == Some("graph") {
         crate::native::require_graph_execution()?;
     }
+    validate_planning_models_preflight(config, mode, || {
+        #[cfg(not(feature = "fixture"))]
+        {
+            crate::provider_auth::request(serde_json::json!({
+                "version": 1,
+                "operation": "catalog",
+                "refresh": false
+            })).ok()
+        }
+        #[cfg(feature = "fixture")]
+        { None }
+    })
+}
+
+fn validate_planning_models_preflight(
+    config: &Config,
+    mode: Option<&str>,
+    fetch_catalog: impl Fn() -> Option<serde_json::Value>,
+) -> Result<(), String> {
     let need_partitioner = mode.is_none();
     let need_planner = mode != Some("serial");
+    // Keep validation order and failure behavior, but reuse one catalog response
+    // when both roles need checking. Check each model's format before its lookup.
+    let catalog = std::cell::OnceCell::new();
 
     if need_partitioner {
         let partitioner_cfg = PiModelConfig::resolve(PiRole::Partitioner, config);
-        validate_role_model_preflight(PiRole::Partitioner, &partitioner_cfg.model)?;
+        validate_role_model_preflight(PiRole::Partitioner, &partitioner_cfg.model, &catalog, &fetch_catalog)?;
     }
     if need_planner {
         let planner_cfg = PiModelConfig::resolve(PiRole::Planner, config);
-        validate_role_model_preflight(PiRole::Planner, &planner_cfg.model)?;
+        validate_role_model_preflight(PiRole::Planner, &planner_cfg.model, &catalog, &fetch_catalog)?;
     }
     Ok(())
 }
 
-fn validate_role_model_preflight(role: PiRole, model: &str) -> Result<(), String> {
+fn validate_role_model_preflight(
+    role: PiRole,
+    model: &str,
+    _catalog: &std::cell::OnceCell<Option<serde_json::Value>>,
+    _fetch_catalog: &impl Fn() -> Option<serde_json::Value>,
+) -> Result<(), String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return Err(format!(
@@ -1385,11 +1782,8 @@ fn validate_role_model_preflight(role: PiRole, model: &str) -> Result<(), String
 
     #[cfg(not(feature = "fixture"))]
     {
-        if let Ok(resp) = crate::provider_auth::request(serde_json::json!({
-            "version": 1,
-            "operation": "catalog",
-            "refresh": false
-        })) {
+        let catalog = _catalog.get_or_init(_fetch_catalog);
+        if let Some(resp) = catalog {
             if let Some(providers) = resp.get("result").and_then(|r| r.get("providers")).and_then(|p| p.as_array()) {
                 if let Some(prov) = providers.iter().find(|p| p.get("id").and_then(|i| i.as_str()) == Some(provider_id)) {
                     let is_configured = prov.get("configured").and_then(|c| c.as_bool()).unwrap_or(false);
@@ -1439,6 +1833,105 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn planner_node_status(snapshot: &Snapshot) -> String {
+    let mut text = String::from("Current graph node status:\n");
+    for node in &snapshot.graph.nodes {
+        if let Some(state) = snapshot.nodes.get(&node.name) {
+            text.push_str(&format!("- {}: {}\n", node.name, state.status));
+        }
+    }
+    text
+}
+
+fn planner_followup_prompt(instruction: &str, revision_run_id: Option<&str>, snapshot: &Snapshot) -> String {
+    if revision_run_id == Some(snapshot.run_id.as_str()) && snapshot.approved
+        && snapshot.plan_type.as_deref() == Some("graph") {
+        format!("{}\n{}", planner_node_status(snapshot), instruction)
+    } else {
+        instruction.to_string()
+    }
+}
+
+/// Planning attempts have separate logs/graph files, but a run has exactly one
+/// Planner conversation. Older runs kept the Pi session in their first planning
+/// attempt; manual graphs (and attempts without a persisted session) use a
+/// dedicated run-scoped directory instead.
+fn stored_planner_session_id(
+    directory: &std::path::Path,
+    repository: &std::path::Path,
+    expected: &str,
+) -> Result<Option<String>, String> {
+    if !directory.is_dir() { return Ok(None); }
+    let repository = repository.canonicalize().map_err(|error| error.to_string())?;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut found_file = false;
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if entry.path().extension().is_none_or(|ext| ext != "jsonl") ||
+            !entry.file_type().map_err(|error| error.to_string())?.is_file() { continue; }
+        found_file = true;
+        // Pi's first JSONL entry is the session header. A corrupt or foreign
+        // session must not silently start a second conversation.
+        let mut header = String::new();
+        BufReader::new(fs::File::open(entry.path()).map_err(|error| error.to_string())?)
+            .take(8192).read_line(&mut header).map_err(|error| error.to_string())?;
+        let value: serde_json::Value = serde_json::from_str(&header)
+            .map_err(|_| "Invalid Planner session header".to_string())?;
+        let id = value.get("id").and_then(|id| id.as_str()).ok_or("Missing Planner session ID")?;
+        let cwd = value.get("cwd").and_then(|cwd| cwd.as_str()).ok_or("Missing Planner session repository")?;
+        if value.get("type").and_then(|kind| kind.as_str()) != Some("session")
+            || Uuid::parse_str(id).is_err()
+            || std::path::Path::new(cwd).canonicalize().ok().as_deref() != Some(repository.as_path()) {
+            return Err("Planner session belongs to another repository or is invalid".into());
+        }
+        ids.insert(id.to_string());
+    }
+    if !found_file { return Ok(None); }
+    if ids.contains(expected) { return Ok(Some(expected.to_string())); }
+    if ids.len() == 1 { return Ok(ids.into_iter().next()); } // Legacy session with a random Pi ID.
+    Err("Multiple Planner conversations found for one run; cannot select one safely".into())
+}
+
+fn planner_session_directory(
+    root: &std::path::Path,
+    attempt: &std::path::Path,
+    repository: &std::path::Path,
+    revision: Option<&Snapshot>,
+) -> Result<(PathBuf, String), String> {
+    let Some(snapshot) = revision else {
+        let id = attempt.file_name().and_then(|name| name.to_str()).ok_or("Invalid planning identity")?;
+        return Ok((attempt.join("planner-session"), id.to_string()));
+    };
+    if Uuid::parse_str(&snapshot.run_id).is_err() {
+        return Err("Invalid run identity for Planner session".into());
+    }
+    // Prefer the oldest surviving conversation, not the latest attempt. Its
+    // directory and Pi ID are stable across retries, reloads, and revisions.
+    let mut prior_planner_attempt = false;
+    for event in &snapshot.events {
+        let id = match &event.kind {
+            EventKind::Created { planning_id: Some(id), .. } | EventKind::GraphRevised { planning_id: id, .. } => id,
+            _ => continue,
+        };
+        if Uuid::parse_str(id).is_err() { continue; }
+        prior_planner_attempt = true;
+        let session = root.join("planning").join(id).join("planner-session");
+        if let Some(pi_id) = stored_planner_session_id(&session, repository, id)? {
+            return Ok((session, pi_id));
+        }
+    }
+    let session = root.join("planner-sessions").join(&snapshot.run_id);
+    if let Some(id) = stored_planner_session_id(&session, repository, &snapshot.run_id)? {
+        return Ok((session, id));
+    }
+    // A committed Planner turn with a missing session cannot safely start a
+    // new conversation. Fixtures do not persist Pi session files.
+    if prior_planner_attempt && !cfg!(feature = "fixture") {
+        return Err("Planner conversation is missing; cannot silently start a new session".into());
+    }
+    Ok((session, snapshot.run_id.clone()))
+}
+
 fn plan_goal_internal(
     goal: String,
     config: Config,
@@ -1465,7 +1958,7 @@ fn plan_goal_internal(
     if revision_run_id.is_none() && service.driving.load(Ordering::SeqCst) {
         return Err(("Another operation is running".into(), None));
     }
-    // Allow up to 1.5s grace period if previous planning process is terminating (e.g. on steer / interrupt)
+    // Allow up to 1.5s if an explicitly interrupted planning process is terminating.
     let mut acquired = false;
     for _ in 0..30 {
         if !service.planning.swap(true, Ordering::SeqCst) {
@@ -1485,26 +1978,15 @@ fn plan_goal_internal(
             if mode != Some("graph") {
                 return Err(("Graph revisions require graph mode".into(), None));
             }
-            let mut runtime = service.runtime.lock().map_err(|error| (error.to_string(), None))?;
+            let runtime = service.runtime.lock().map_err(|error| (error.to_string(), None))?;
             if runtime.state.run_id != *run_id
                 || runtime.state.plan_type.as_deref() != Some("graph")
                 || runtime.state.config.as_ref().map(|c| c.repository.as_str()) != Some(config.repository.as_str())
                 || matches!(runtime.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
                 return Err(("Graph is no longer available for revision".into(), None));
             }
-            if runtime.state.approved && !runtime.state.paused && runtime.state.phase == "running" {
-                runtime.pause(true).map_err(|error| (error, None))?;
-                resume_after = true;
-            }
             Some(runtime.state.graph.clone())
         } else { None };
-        if original_graph.is_some() {
-            // Drain in-flight jobs; a revision must never replace graph inputs
-            // underneath an executing node or an ongoing publication.
-            while service.driving.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
         let service = service.clone();
         let planning_start = std::time::Instant::now();
         let now_ms = std::time::SystemTime::now()
@@ -1647,6 +2129,10 @@ fn plan_goal_internal(
                     fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
                         .map_err(|error| error.to_string())?;
                     on_route(&route);
+                    eprintln!(
+                        "[Grapher] [Router] Goal routed as '{}' in {:.2}s (tokens: in={}, out={})",
+                        route.plan_type, partition_metrics.duration_seconds, partition_metrics.usage.input, partition_metrics.usage.output
+                    );
                     (route, partition_metrics)
                 }
             };
@@ -1675,7 +2161,12 @@ fn plan_goal_internal(
                     let planner_config = planner_model_cfg.effective_config(&config);
                     let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                         .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
-                    let task = goal.clone();
+                    // Append dynamic state only to the new user turn, never to
+                    // the shared system prompt or previous Planner turns.
+                    let task = {
+                        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                        planner_followup_prompt(&goal, revision_run_id.as_deref(), &runtime.state)
+                    };
                     let mut planner_extra_args = Vec::new();
                     if let Some(thinking) = &planner_model_cfg.thinking {
                         planner_extra_args.push("--thinking");
@@ -1684,20 +2175,18 @@ fn plan_goal_internal(
                     for arg in &image_file_args {
                         planner_extra_args.push(arg.as_str());
                     }
-                    if original_graph.is_some() && directory.join("planner-session").exists() {
-                        planner_extra_args.push("-c");
-                    }
-                    let mut log = String::new();
-                    let mut planner_log = if original_graph.is_some() {
-                        fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(directory.join("planner.jsonl"))
-                            .map_err(|e| e.to_string())?
-                    } else {
-                        fs::File::create(directory.join("planner.jsonl"))
-                            .map_err(|e| e.to_string())?
+                    let (planner_session_dir, planner_session_id) = {
+                        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                        planner_session_directory(
+                            &root, &directory, &repository,
+                            original_graph.as_ref().map(|_| &runtime.state),
+                        )?
                     };
+                    let mut log = String::new();
+                    // Each attempt retains its own stream/metrics for recovery;
+                    // only Pi's private conversation directory is shared.
+                    let mut planner_log = fs::File::create(directory.join("planner.jsonl"))
+                        .map_err(|e| e.to_string())?;
                     let mut log_error = None;
                     let planner_start = std::time::Instant::now();
                     let planner_result = run_pi(
@@ -1706,13 +2195,14 @@ fn plan_goal_internal(
                             config: &planner_config,
                             cwd: &repository,
                             task: &task,
-                            session_dir: &directory.join("planner-session"),
+                            session_dir: &planner_session_dir,
                             extension: Some(&service.extension),
                             tools: Some("node,edge,read,bash"),
-                            session_id: None,
+                            session_id: Some(&planner_session_id),
                             extra_args: planner_extra_args,
                             environment: vec![
                                 ("GRAPHER_MODE", "planner".into()),
+                                ("GRAPHER_PLANNER_RUN_ID", revision_run_id.clone().unwrap_or_default()),
                                 ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
                                 (
                                     "GRAPHER_COMPILER_PATH",
@@ -1761,6 +2251,18 @@ fn plan_goal_internal(
             if let Some(m) = planner_metrics {
                 roles.insert("planner".to_string(), m);
             }
+            if let Some(m) = roles.get("planner") {
+                eprintln!(
+                    "[Grapher] [Planner] Plan compiled: {} nodes, {} edges in {:.2}s (tokens: {}, tools: {}, errors: {})",
+                    graph.nodes.len(),
+                    graph.edges.len(),
+                    m.duration_seconds,
+                    m.usage.total_tokens,
+                    m.tools,
+                    m.tool_errors
+                );
+            }
+
             let summary = PlanningSummary {
                 planning_id: planning_id.clone(),
                 roles,
@@ -1778,6 +2280,24 @@ fn plan_goal_internal(
                     return Err("Run changed during graph revision".into());
                 }
                 if runtime.state.approved {
+                    // Validate before any pause. Unaffected executions keep running;
+                    // only when an affected job is in flight do we stop scheduling
+                    // new work and wait for that job to finish before invalidation.
+                    compiler::compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+                    loop {
+                        let affected = runtime.revision_affected(&graph);
+                        let busy = runtime.state.executions.iter().any(|execution|
+                            execution.status == "running" && affected.contains(&execution.node));
+                        if !busy { break; }
+                        if !runtime.state.paused {
+                            runtime.pause(true)?;
+                            resume_after = true;
+                        }
+                        drop(runtime);
+                        thread::sleep(std::time::Duration::from_millis(50));
+                        runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                        if runtime.state.run_id != *run_id { return Err("Run changed during graph revision".into()); }
+                    }
                     runtime.revise_graph(graph, summary.clone())?;
                 } else {
                     runtime.update_draft_graph(graph, planning_id.clone(), summary.clone())?;
@@ -1854,7 +2374,13 @@ fn plan_goal_internal(
     }).unwrap_or(false) {
         drive(service.clone());
     }
-    result
+    // A temporary pause is already undone; return that state rather than the
+    // snapshot captured while the affected workers were being drained.
+    result.map(|snapshot| {
+        if resume_after {
+            service.runtime.lock().map(|runtime| runtime.state.clone()).unwrap_or(snapshot)
+        } else { snapshot }
+    })
 }
 
 fn write_planning_summary(
@@ -1926,7 +2452,7 @@ fn drive(service: Arc<Service>) {
                     let jobs = if feedback_barrier {
                         Vec::new()
                     } else {
-                        runtime.jobs()?
+                        runtime.jobs_with_publication(!service.planning.load(Ordering::SeqCst))?
                     };
                     let parents: Vec<_> = jobs
                         .iter()
@@ -1935,6 +2461,10 @@ fn drive(service: Arc<Service>) {
                     (jobs, runtime.root.clone(), parents)
                 };
                 if jobs.is_empty() && in_flight == 0 {
+                    if service.planning.load(Ordering::SeqCst) {
+                        thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
+                    }
                     // PublicationStarted is durable before any user files change.
                     let publication = {
                         let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
@@ -1985,12 +2515,16 @@ fn drive(service: Arc<Service>) {
                         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                         match result {
                             Ok(head) => {
+                                eprintln!("[Grapher] [Publication] Completed! Published HEAD: {head}");
                                 runtime.emit(EventKind::PublicationCompleted { head })?;
                                 if let Err(error) = runtime.cleanup_worktrees() {
                                     eprintln!("Cannot clean completed run worktrees: {error}");
                                 }
                             },
-                            Err(error) => runtime.emit(EventKind::PublicationFailed { error })?,
+                            Err(error) => {
+                                eprintln!("[Grapher] [Publication] Failed: {error}");
+                                runtime.emit(EventKind::PublicationFailed { error })?;
+                            }
                         }
                     }
                     break;
@@ -2001,6 +2535,10 @@ fn drive(service: Arc<Service>) {
                     let root = root.clone();
                     let completed_tx = completed_tx.clone();
                     let output_tx = output_tx.clone();
+                    eprintln!(
+                        "[Grapher] [Execution] Started node '{}' (id: {}, attempt: {})",
+                        job.execution.node, job.execution.id, job.execution.attempt
+                    );
                     thread::spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             perform_with_merger(
@@ -2064,6 +2602,19 @@ fn drive(service: Arc<Service>) {
         })();
         drop(output_tx);
         if writer.join().is_err() { eprintln!("Output writer panicked"); }
+        if let Ok(runtime) = service.runtime.lock() {
+            if let Some(m) = &runtime.state.run_metrics {
+                eprintln!(
+                    "[Grapher] [RunSummary] Run '{}' settled (phase: {}, wall-clock: {:.2}s, total tokens: {}, tools: {}, errors: {})",
+                    runtime.state.run_id,
+                    runtime.state.phase,
+                    m.total_duration_seconds,
+                    m.total_usage.total_tokens,
+                    m.tools,
+                    m.tool_errors
+                );
+            }
+        }
         if let Err(error) = result {
             eprintln!("Runtime halted safely: {error}");
             if let Ok(mut runtime) = service.runtime.lock() {
@@ -2100,6 +2651,24 @@ fn control(
     images: Option<Vec<crate::model::ImageAttachment>>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
+    if action == "steer_planner" {
+        let instruction = instruction.ok_or("Enter a planning message")?;
+        if instruction.trim().is_empty() { return Err("Enter a planning message".into()); }
+        if !service.planning.load(Ordering::SeqCst) {
+            return Err("Planner is no longer accepting messages".into());
+        }
+        let active_run_id = crate::engine::planner_revision_run_id()?;
+        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        if run_id.as_ref().is_some_and(|id| active_run_id.as_ref() != Some(id))
+            || active_run_id.as_ref().is_some_and(|id| id != &runtime.state.run_id) {
+            return Err("Run changed while steering Planner".into());
+        }
+        let message = planner_followup_prompt(instruction.trim(), active_run_id.as_deref(), &runtime.state);
+        let snapshot = runtime.state.clone();
+        drop(runtime);
+        crate::engine::steer_planner(&message, images)?;
+        return Ok(snapshot);
+    }
     if action == "steer" {
         let node = node.ok_or("Select a node to steer")?;
         let instruction = instruction.ok_or("Enter a steering message")?;
@@ -3303,10 +3872,3 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(feature = "benchmark")]
-pub mod benchmark {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/benchmark/server.rs"
-    ));
-}

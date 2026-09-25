@@ -11,6 +11,10 @@ interface VirtualizedTranscriptProps {
   className?: string;
   emptyText?: string;
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
+  // Historical conversations share the workbench scroll area with the summary.
+  // They must render in document flow rather than virtualizing against that
+  // scroll area's unrelated coordinates.
+  inline?: boolean;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -42,6 +46,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   className = "",
   emptyText = "工作区就绪，等待节点指令输出…",
   onUserResize,
+  inline = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const expandedRows = useRef(new Map<string, boolean>());
@@ -463,6 +468,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   }, []);
 
   useLayoutEffect(() => {
+    if (inline) return;
     if (containerRef.current) {
       const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
       if (scrollParent) {
@@ -484,12 +490,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
         setScrollTop(scrollParent.scrollTop);
       }
     }
-  }, [itemsVersion, heightVersion, containerHeight]);
+  }, [itemsVersion, heightVersion, containerHeight, inline]);
 
   // Track container height & scroll position
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || inline) return;
     
     const scrollParent = getScrollParent(el) || el;
 
@@ -533,11 +539,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       scrollParent.removeEventListener('touchmove', onTouchMove);
       scrollParent.removeEventListener('scroll', onScroll);
     };
-  }, [syncScrollState]);
+  }, [syncScrollState, inline]);
 
   // Virtualization calculations
   const totalCount = items.length;
-  const isVirtual = totalCount > 35;
+  const isVirtual = !inline && totalCount > 35;
 
   const offsets = useMemo(() => rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion]);
   layoutRef.current = { ids: items.map(item => item.id), offsets };
@@ -580,7 +586,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   }, [items, offsets, isVirtual, targetScrollTop, containerHeight, totalCount]);
 
   return (
-    <div className={`virtualized-transcript-container ${className}`}>
+    <div className={`virtualized-transcript-container ${inline ? "transcript-inline" : ""} ${className}`}>
       <div
         ref={containerRef}
         className="transcript-scroll-area"

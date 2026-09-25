@@ -345,21 +345,14 @@ impl Runtime {
         })
     }
 
-    /// Apply a planner revision to the approved run without discarding completed work.
-    /// Only nodes whose task or inputs changed (and their consumers) become dirty.
-    pub fn revise_graph(&mut self, graph: Graph, planning: PlanningSummary) -> Result<(), String> {
-        if !self.state.approved || self.is_serial() || self.active()
-            || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
-            return Err("Wait for active executions/publication before revising the approved graph".into());
-        }
-        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
-        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+    /// Nodes whose work or dependencies change, plus consumers of those nodes.
+    /// Removed nodes must also finish before their execution state is discarded.
+    pub fn revision_affected(&self, graph: &Graph) -> BTreeSet<String> {
         let previous = &self.state.graph;
         let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
-        if self.state.published_head.is_some() && previous.nodes.iter().any(|node| !names.contains(node.name.as_str()) && self.state.nodes[&node.name].status == "done") {
-            return Err("Cannot remove already published nodes from this run".into());
-        }
-        let mut invalidated = BTreeSet::new();
+        let mut affected: BTreeSet<String> = previous.nodes.iter()
+            .filter(|node| !names.contains(node.name.as_str()))
+            .map(|node| node.name.clone()).collect();
         for node in &graph.nodes {
             let Some(old) = previous.nodes.iter().find(|old| old.name == node.name) else { continue };
             let inputs = |g: &Graph| {
@@ -370,13 +363,34 @@ impl Runtime {
                 g.edges.iter().filter(|edge| edge.from == node.name && edge.feedback)
                     .map(|edge| edge.to.clone()).collect::<BTreeSet<_>>()
             };
-            if old.task != node.task || inputs(previous) != inputs(&graph) || reviews(previous) != reviews(&graph) {
-                invalidated.extend(downstream(&graph, &node.name));
+            if old.task != node.task || inputs(previous) != inputs(graph) || reviews(previous) != reviews(graph) {
+                affected.extend(downstream(graph, &node.name));
             }
+        }
+        affected
+    }
+
+    /// Apply a planner revision without discarding unrelated work. The caller
+    /// must wait for any affected in-flight execution before replacing the graph.
+    pub fn revise_graph(&mut self, graph: Graph, planning: PlanningSummary) -> Result<(), String> {
+        if !self.state.approved || self.is_serial()
+            || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+            return Err("Wait for active executions/publication before revising the approved graph".into());
+        }
+        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        let previous = &self.state.graph;
+        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
+        if self.state.published_head.is_some() && previous.nodes.iter().any(|node| !names.contains(node.name.as_str()) && self.state.nodes[&node.name].status == "done") {
+            return Err("Cannot remove already published nodes from this run".into());
+        }
+        let affected = self.revision_affected(&graph);
+        if self.state.executions.iter().any(|execution| execution.status == "running" && affected.contains(&execution.node)) {
+            return Err("Wait for affected running nodes before revising the graph".into());
         }
         // New consumers of changed nodes must also be invalidated; all others
         // retain their heads, revisions, execution history and worktrees.
-        let invalidated: Vec<_> = invalidated.into_iter().collect();
+        let invalidated: Vec<_> = affected.into_iter().filter(|name| names.contains(name.as_str())).collect();
         self.emit(EventKind::GraphRevised {
             graph, planning_id: planning.planning_id.clone(), planning, invalidated,
         })
@@ -472,6 +486,12 @@ impl Runtime {
     }
 
     pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
+        self.jobs_with_publication(true)
+    }
+
+    /// During a live Planner revision, schedule ready nodes but defer publishing
+    /// or settling until the new graph has been committed (or planning failed).
+    pub fn jobs_with_publication(&mut self, allow_publication: bool) -> Result<Vec<Job>, String> {
         if !self.state.approved || self.state.paused
             || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed" | "completed")
             // Feedback may invalidate ancestors and their consumers. Drain the current
@@ -603,6 +623,7 @@ impl Runtime {
                 output: String::new(),
                 started_at: now(),
                 completed_at: None,
+                metrics: None,
             };
             let state = &self.state.nodes[&node.name];
             let task = if state.instruction.is_empty() {
@@ -632,7 +653,7 @@ impl Runtime {
                 expected_source_head: self.state.published_head.clone().unwrap_or_else(|| self.state.base.clone()),
             });
         }
-        if jobs.is_empty()
+        if allow_publication && jobs.is_empty()
             && !self.active()
             && !matches!(self.state.phase.as_str(), "completed" | "needs_attention")
         {
@@ -729,9 +750,19 @@ impl Runtime {
                     .unwrap_or_default();
                 self.emit(EventKind::Finished {
                     execution_id: execution.id.clone(),
-                    head,
+                    head: head.clone(),
                     output: format!("{raw}\n── Final response ──\n{output}\n"),
                 })?;
+                if let Some(exec) = self.state.executions.iter().chain(&self.state.mergers).find(|item| item.id == execution.id) {
+                    if let Some(m) = &exec.metrics {
+                        eprintln!(
+                            "[Grapher] [Execution] Node '{}' finished in {:.2}s (head: {}, tokens: in={}, out={}, tools: {}, errors: {})",
+                            exec.node, m.duration_seconds, head, m.usage.input, m.usage.output, m.tools, m.tool_errors
+                        );
+                    } else {
+                        eprintln!("[Grapher] [Execution] Node '{}' finished (head: {})", exec.node, head);
+                    }
+                }
                 Ok(if feedback_source {
                     Some((execution.node.clone(), output))
                 } else {
@@ -739,6 +770,7 @@ impl Runtime {
                 })
             }
             Err(error) => {
+                eprintln!("[Grapher] [Execution] Node '{}' failed: {error}", execution.node);
                 self.emit(EventKind::Failed {
                     node: execution.node.clone(),
                     execution_id: Some(execution.id.clone()),

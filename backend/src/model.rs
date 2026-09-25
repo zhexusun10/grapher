@@ -136,6 +136,35 @@ fn test_args() -> Vec<String> {
         .into()]
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionMetrics {
+    #[serde(default)]
+    pub duration_seconds: f64,
+    #[serde(default)]
+    pub assistant_messages: usize,
+    #[serde(default)]
+    pub tools: usize,
+    #[serde(default)]
+    pub tool_errors: usize,
+    #[serde(default)]
+    pub usage: TokenUsage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunMetrics {
+    pub total_duration_seconds: f64,
+    pub planning_duration_seconds: f64,
+    pub execution_duration_seconds: f64,
+    pub assistant_messages: usize,
+    pub tools: usize,
+    pub tool_errors: usize,
+    pub total_usage: TokenUsage,
+    pub planning_usage: TokenUsage,
+    pub execution_usage: TokenUsage,
+}
+
 /// One actual Execution Instance; its serialized event schema remains stable.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,6 +181,8 @@ pub struct Execution {
     pub output: String,
     pub started_at: u64,
     pub completed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<ExecutionMetrics>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -323,6 +354,159 @@ pub struct Snapshot {
     #[serde(default)]
     pub published_head: Option<String>,
     pub feedback_counts: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_metrics: Option<RunMetrics>,
+}
+
+pub fn parse_execution_metrics(output: &str, started_at: u64, completed_at: u64) -> ExecutionMetrics {
+    let mut duration_seconds = 0.0;
+    let mut assistant_messages = 0;
+    let mut tools = 0;
+    let mut tool_errors = 0;
+    let mut usage = TokenUsage::default();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            match value
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+            {
+                "grapher_process_exited" => {
+                    if let Some(elapsed) = value.get("elapsedMs").and_then(|v| v.as_f64()) {
+                        duration_seconds = elapsed / 1000.0;
+                    }
+                }
+                "message_end" => {
+                    if let Some(msg) = value.get("message") {
+                        if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                            assistant_messages += 1;
+                            if let Some(u) = msg.get("usage") {
+                                usage.input +=
+                                    u.get("input").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.output +=
+                                    u.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.cache_read +=
+                                    u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.cache_write +=
+                                    u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.reasoning +=
+                                    u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                usage.total_tokens +=
+                                    u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                            }
+                        }
+                    }
+                }
+                "tool_execution_start" => {
+                    tools += 1;
+                }
+                "tool_execution_end" => {
+                    if value.get("isError").and_then(|v| v.as_bool()).unwrap_or(false)
+                        || value
+                            .get("result")
+                            .and_then(|r| r.get("isError"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    {
+                        tool_errors += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if duration_seconds == 0.0 && completed_at >= started_at && started_at > 0 {
+        duration_seconds = (completed_at - started_at) as f64 / 1000.0;
+    }
+
+    ExecutionMetrics {
+        duration_seconds,
+        assistant_messages,
+        tools,
+        tool_errors,
+        usage,
+    }
+}
+
+impl Snapshot {
+    pub fn compute_run_metrics(&self) -> RunMetrics {
+        let mut planning_duration = 0.0;
+        let mut planning_messages = 0;
+        let mut planning_tools = 0;
+        let mut planning_tool_errors = 0;
+        let mut planning_usage = TokenUsage::default();
+
+        if let Some(planning) = &self.planning {
+            planning_duration = planning.total_planning_duration;
+            for metrics in planning.roles.values() {
+                planning_messages += metrics.assistant_messages;
+                planning_tools += metrics.tools;
+                planning_tool_errors += metrics.tool_errors;
+                planning_usage.input += metrics.usage.input;
+                planning_usage.output += metrics.usage.output;
+                planning_usage.cache_read += metrics.usage.cache_read;
+                planning_usage.cache_write += metrics.usage.cache_write;
+                planning_usage.reasoning += metrics.usage.reasoning;
+                planning_usage.total_tokens += metrics.usage.total_tokens;
+            }
+        }
+
+        let mut exec_duration = 0.0;
+        let mut exec_messages = 0;
+        let mut exec_tools = 0;
+        let mut exec_tool_errors = 0;
+        let mut exec_usage = TokenUsage::default();
+
+        for exec in self.executions.iter().chain(self.mergers.iter()) {
+            if let Some(metrics) = &exec.metrics {
+                exec_duration += metrics.duration_seconds;
+                exec_messages += metrics.assistant_messages;
+                exec_tools += metrics.tools;
+                exec_tool_errors += metrics.tool_errors;
+                exec_usage.input += metrics.usage.input;
+                exec_usage.output += metrics.usage.output;
+                exec_usage.cache_read += metrics.usage.cache_read;
+                exec_usage.cache_write += metrics.usage.cache_write;
+                exec_usage.reasoning += metrics.usage.reasoning;
+                exec_usage.total_tokens += metrics.usage.total_tokens;
+            }
+        }
+
+        let wall_clock_duration = if let (Some(first), Some(last)) = (self.events.first(), self.events.last()) {
+            if last.timestamp >= first.timestamp {
+                (last.timestamp - first.timestamp) as f64 / 1000.0
+            } else {
+                planning_duration + exec_duration
+            }
+        } else {
+            planning_duration + exec_duration
+        };
+
+        RunMetrics {
+            total_duration_seconds: wall_clock_duration,
+            planning_duration_seconds: planning_duration,
+            execution_duration_seconds: exec_duration,
+            assistant_messages: planning_messages + exec_messages,
+            tools: planning_tools + exec_tools,
+            tool_errors: planning_tool_errors + exec_tool_errors,
+            total_usage: TokenUsage {
+                input: planning_usage.input + exec_usage.input,
+                output: planning_usage.output + exec_usage.output,
+                cache_read: planning_usage.cache_read + exec_usage.cache_read,
+                cache_write: planning_usage.cache_write + exec_usage.cache_write,
+                reasoning: planning_usage.reasoning + exec_usage.reasoning,
+                total_tokens: planning_usage.total_tokens + exec_usage.total_tokens,
+            },
+            planning_usage,
+            execution_usage: exec_usage,
+        }
+    }
 }
 
 pub fn now() -> u64 {
@@ -373,8 +557,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             for name in invalidated {
                 let node = state.nodes.get_mut(name).unwrap();
                 // A node with no prior execution has no result to invalidate.
-                node.status = if node.status == "waiting" ||
-                    (node.status == "blocked" && !state.executions.iter().any(|execution| execution.node == *name)) {
+                node.status = if matches!(node.status.as_str(), "waiting" | "failed" | "blocked") {
                     "waiting"
                 } else {
                     "dirty"
@@ -437,15 +620,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             if let Some(execution) = state
                 .executions
                 .iter_mut()
+                .chain(state.mergers.iter_mut())
                 .find(|item| item.id == *execution_id)
             {
                 execution.status = "completed".into();
                 execution.after = Some(head.clone());
                 execution.completed_at = Some(event.timestamp);
                 execution.output = output.clone();
-                let node = state.nodes.get_mut(&execution.node).unwrap();
-                node.status = "done".into();
-                node.head = Some(head.clone());
+                execution.metrics = Some(parse_execution_metrics(output, execution.started_at, event.timestamp));
+                if let Some(node) = state.nodes.get_mut(&execution.node) {
+                    node.status = "done".into();
+                    node.head = Some(head.clone());
+                }
             }
         }
         EventKind::Failed {
@@ -459,10 +645,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             if let Some(execution) = state
                 .executions
                 .iter_mut()
+                .chain(state.mergers.iter_mut())
                 .find(|item| Some(&item.id) == execution_id.as_ref())
             {
                 execution.status = "failed".into();
                 execution.completed_at = Some(event.timestamp);
+                execution.metrics = Some(parse_execution_metrics(&execution.output, execution.started_at, event.timestamp));
             }
         }
         EventKind::Blocked { node, error } => {
@@ -555,6 +743,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 execution.status = "completed".into();
                 execution.after = Some(head.clone());
                 execution.completed_at = Some(event.timestamp);
+                execution.metrics = Some(parse_execution_metrics(&execution.output, execution.started_at, event.timestamp));
             }
             if state.mergers.iter().any(|e| e.id == *execution_id && e.node == "merger") {
                 state.phase = "publishing".into();
@@ -573,6 +762,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     .output
                     .push_str(&format!("\nMerger failed: {error}\n"));
                 execution.completed_at = Some(event.timestamp);
+                execution.metrics = Some(parse_execution_metrics(&execution.output, execution.started_at, event.timestamp));
             }
         }
         EventKind::Settled => {
@@ -585,6 +775,23 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
     }
     state.events.push(event.clone());
+    if matches!(&event.kind, EventKind::Output { .. }) {
+        // Output only changes the event clock; execution usage/duration is
+        // parsed on Finished/Failed. Preserve the live and replayed wall clock
+        // without rescanning every execution for each streamed chunk.
+        if let Some(metrics) = state.run_metrics.as_mut() {
+            let first = state.events.first().expect("just appended an event").timestamp;
+            metrics.total_duration_seconds = if event.timestamp >= first {
+                (event.timestamp - first) as f64 / 1000.0
+            } else {
+                metrics.planning_duration_seconds + metrics.execution_duration_seconds
+            };
+        } else {
+            state.run_metrics = Some(state.compute_run_metrics());
+        }
+    } else {
+        state.run_metrics = Some(state.compute_run_metrics());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,4 +807,32 @@ pub struct ImageAttachment {
 
 fn default_image_type() -> String {
     "image".to_string()
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+
+    #[test]
+    fn output_updates_wall_clock_without_changing_other_metrics() {
+        let mut state = Snapshot::default();
+        let mut roles = BTreeMap::new();
+        roles.insert("planner".into(), PlanningRoleMetrics {
+            duration_seconds: 2.0,
+            ..Default::default()
+        });
+        state.planning = Some(PlanningSummary { total_planning_duration: 3.0, roles, ..Default::default() });
+
+        for (sequence, timestamp, kind) in [
+            (1, 1_000, EventKind::Routed { plan_type: "serial".into() }),
+            (2, 2_500, EventKind::Output { execution_id: "node".into(), text: "first".into() }),
+            (3, 3_000, EventKind::Output { execution_id: "node".into(), text: "second".into() }),
+            // Preserve the existing fallback for non-monotonic persisted timestamps.
+            (4, 500, EventKind::Output { execution_id: "node".into(), text: "third".into() }),
+        ] {
+            apply(&mut state, &Event { sequence, timestamp, kind });
+            assert_eq!(state.run_metrics, Some(state.compute_run_metrics()));
+        }
+        assert_eq!(state.run_metrics.unwrap().total_duration_seconds, 3.0);
+    }
 }

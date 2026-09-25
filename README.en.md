@@ -85,7 +85,7 @@ npm run test:pi               # pinned Pi / auth transport contract
 npm run test:native           # host-native regression (platform dependent)
 ```
 
-`npm run test:http`, `npm run test:benchmark`, and `npm run benchmark:planner` depend on the sibling `../grapher-tests/`, which is **not included in this repository**. A clone of this repository is enough for the basic checks above, but not for those external evaluations. `npm run test:runtime` uses the runtime host in this repository. Fixtures and model-free tests cannot establish real provider semantic quality or every sandbox boundary; release requires platform and real-model acceptance testing.
+This repository no longer provides a benchmark or benchmark host. HTTP API binding and lifecycle checks run locally through `npm run test:bindings` and `scripts/check-project-binding.mjs`; the other basic checks above also work with this repository alone. Fixtures and model-free tests cannot establish real provider semantic quality or every sandbox boundary; release requires platform and real-model acceptance testing.
 
 ## Documentation
 

@@ -281,12 +281,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const savedPlannerId = recoveredPlanningId || (failedPlanning
     ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
     : (routeType === "graph" ? state.planningId : undefined));
-  const hasTurn0InStream = Boolean(
-    plannerStream.items &&
-    plannerStream.items.length > 0 &&
-    plannerStream.items[0].role !== "user"
-  );
-  const showSavedPlanner = Boolean(savedPlannerId && !hasTurn0InStream);
+  // A run owns one Planner conversation, although each planning attempt has
+  // its own durable output log. Replay every committed turn after a reload;
+  // exclude turns already present in the live SSE transcript.
+  const savedPlannerIds = useMemo(() => {
+    if (routeType !== "graph" || (isPlanning && !recoveredPlanningId && !plannerStream.runId && !plannerStream.isContinuation)) return [];
+    const ids = state.events
+      .filter((event) => event.type === "created" || event.type === "graph_revised")
+      .map((event) => event.planning_id)
+      .filter((id): id is string => Boolean(id));
+    if (savedPlannerId) ids.push(savedPlannerId);
+    const seen = new Set<string>();
+    return ids.filter((id) => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return !(showLivePlanner && plannerStream.items?.length > 0 &&
+        plannerStream.representedPlanningIds?.includes(id));
+    });
+  }, [routeType, isPlanning, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.runId, plannerStream.isContinuation, plannerStream.items, plannerStream.representedPlanningIds]);
   const workbenchRef = useRef<HTMLDivElement>(null);
   const [isResizing, setIsResizing] = useState(false);
   const currentWidthRef = useRef<number>(390);
@@ -1088,10 +1100,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
 
                     {/* 历史保存的规划活动记录（如重新加载或未被活动流完全覆盖时） */}
-                    {showSavedPlanner && (
+                    {savedPlannerIds.length > 0 && (
                       <PlanningActivity
-                        key={savedPlannerId}
-                        planning={{ planningId: savedPlannerId! }}
+                        key={savedPlannerIds.join(":")}
+                        planningIds={savedPlannerIds}
                         onUserResize={handleExpandableContentChange}
                       />
                     )}

@@ -124,6 +124,57 @@ fn planner_revision_keeps_approval_and_unaffected_node_results() {
 }
 
 #[test]
+fn planning_revision_defers_publication_but_not_ready_jobs() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: vec![Node { name: "first".into(), task: "first".into() }], edges: vec![],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs_with_publication(false).unwrap();
+    assert_eq!(jobs.len(), 1);
+    runtime.emit(EventKind::Finished {
+        execution_id: jobs[0].execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    assert!(runtime.jobs_with_publication(false).unwrap().is_empty());
+    assert_ne!(runtime.state.phase, "publishing");
+    assert!(runtime.jobs_with_publication(true).unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "publishing");
+}
+
+#[test]
+fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_waiting() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: ["running", "failed", "waiting"].into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        edges: vec![],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph.clone());
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    let active = jobs.iter().find(|job| job.execution.node == "running").unwrap();
+    let failed = jobs.iter().find(|job| job.execution.node == "failed").unwrap();
+    runtime.emit(EventKind::Failed {
+        node: "failed".into(), execution_id: Some(failed.execution.id.clone()), error: "failed".into(),
+    }).unwrap();
+    assert_eq!(runtime.state.nodes["waiting"].status, "waiting");
+    let mut revised = graph.clone();
+    revised.nodes.iter_mut().find(|node| node.name == "failed").unwrap().task = "fix".into();
+    revised.nodes.iter_mut().find(|node| node.name == "waiting").unwrap().task = "new task".into();
+    runtime.revise_graph(revised.clone(), PlanningSummary { planning_id: "live".into(), ..Default::default() }).unwrap();
+    assert!(!runtime.state.paused);
+    assert_eq!(runtime.state.nodes["running"].status, "running");
+    assert_eq!(runtime.state.executions.iter().find(|e| e.id == active.execution.id).unwrap().status, "running");
+    assert_eq!(runtime.state.nodes["failed"].status, "waiting");
+    assert_eq!(runtime.state.nodes["waiting"].status, "waiting");
+    assert_eq!(runtime.state.nodes["failed"].error, None);
+    revised.nodes.iter_mut().find(|node| node.name == "running").unwrap().task = "changed".into();
+    assert!(runtime.revise_graph(revised, PlanningSummary::default()).unwrap_err().contains("affected running"));
+    assert_eq!(runtime.state.nodes["running"].status, "running");
+}
+
+#[test]
 fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     let graph = Graph {
         original_goal: "test".into(),
