@@ -284,7 +284,12 @@ a,
   transition-delay: 0s;
   transition-duration: calc(var(--sidebar-content-duration) * 0.6);
   pointer-events: none;
-  width: 0;
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
   overflow: hidden;
   white-space: nowrap;
 }
@@ -325,9 +330,14 @@ a,
 }
 
 .sidebar.is-collapsed .icon-tiny-btn,
-.sidebar.is-collapsed .sidebar-add-btn {
-  width: 32px;
-  height: 32px;
+.sidebar.is-collapsed .sidebar-add-btn,
+.sidebar.is-collapsed .sidebar-toggle-btn {
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  margin: 0 auto !important;
+  box-sizing: border-box;
 }
 
 .sidebar.is-collapsed .sidebar-bottom-btn {
@@ -6020,14 +6030,14 @@ a,
 
 /* 响应式适配 */
 @media (max-width: 1180px) {
-  .sidebar {
+  .sidebar:not(.is-collapsed) {
     --sidebar-content-width: 162px;
     width: 184px;
     padding-left: 10px;
     padding-right: 10px;
   }
 
-  .brand {
+  .sidebar:not(.is-collapsed) .brand {
     font-size: 20px;
     padding-left: 6px;
     gap: 7px;

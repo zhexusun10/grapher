@@ -1,5 +1,5 @@
-//! Host-native execution with explicit Pi file-tool mapping and macOS path
-//! exclusions. Bash keeps native path semantics; there is no universal remap.
+//! Host-native execution with explicit Pi file-tool mapping and per-platform
+//! Graph filesystem boundaries. Bash keeps native path semantics.
 use crate::engine::PiRole;
 use std::{
     fs,
@@ -11,15 +11,20 @@ use std::{
 static RUNTIME: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 pub fn require_graph_execution() -> Result<(), String> {
-    if !crate::sandbox::supported() {
-        return Err(if cfg!(target_os = "windows") {
-            "Windows Graph execution requires the Windows AppContainer filesystem sandbox."
-                .into()
-        } else {
-            "Native Graph execution requires macOS sandbox-exec".into()
-        });
+    #[cfg(target_os = "linux")]
+    { return crate::linux_sandbox::require_supported(); }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if !crate::sandbox::supported() {
+            return Err(if cfg!(target_os = "windows") {
+                "Windows Graph execution requires the Windows AppContainer filesystem sandbox."
+                    .into()
+            } else {
+                "Native Graph execution requires macOS sandbox-exec".into()
+            });
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn prepared_runtime() -> Result<PathBuf, String> {
@@ -77,7 +82,7 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         }
         require_graph_execution()?;
     }
-    if !cfg!(target_os = "macos") && !cfg!(target_os = "windows") && cwd != repository {
+    if !cfg!(target_os = "macos") && !cfg!(target_os = "windows") && !cfg!(target_os = "linux") && cwd != repository {
         return Err("Private Graph workspaces are unavailable on this host".into());
     }
     Ok(())
@@ -162,7 +167,14 @@ pub fn execution_command(
             .env("PI_CODING_AGENT_DIR", agent_dir()?);
         return Ok(command);
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        let pi_dir = agent_dir()?;
+        crate::linux_sandbox::execution_command(
+            &source, worktree_root, &current, data, session, &engine, &pi_dir,
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (source, worktree_root, data, session, engine);
         Err("Native Graph execution is not available without a validated host filesystem sandbox".into())
@@ -211,7 +223,9 @@ pub fn agent_dir() -> Result<PathBuf, String> {
     };
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     let target_models = path.join("models.json");
-    if !target_models.exists() {
+    let isolated_models = std::env::var_os("GRAPHER_ISOLATED_PI_MODELS").as_deref()
+        == Some(std::ffi::OsStr::new("1"));
+    if !target_models.exists() && !isolated_models {
         let source_models = home.join(".pi/agent/models.json");
         if source_models.exists() {
             #[cfg(unix)]
@@ -292,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn graph_launcher_runs_parallel_native_tools_and_absolute_scripts() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();
@@ -308,6 +322,8 @@ mod tests {
         for path in [&a, &b] {
             crate::workspace::git(path, &["init", "-q"]).unwrap();
         }
+        // Linux also checks the source's (possibly external) Git common dir.
+        crate::workspace::git(&source, &["init", "-q"]).unwrap();
         fs::write(source.join("source-marker"), "SOURCE").unwrap();
         let other_session = data.join("sessions/other/private");
         fs::create_dir_all(other_session.parent().unwrap()).unwrap();
@@ -335,21 +351,24 @@ mod tests {
             fs::create_dir_all(&session).unwrap();
             let mut command =
                 execution_command(PiRole::NodeAgent, &source, cwd, &data, &session).unwrap();
-            // Also exclude the real installation, proving the copied Pi/.git
-            // and dependency symlinks do not reach back into it for self-hosting.
-            let profile = session.join("execution-instance.sb");
-            let mut policy = fs::read_to_string(&profile).unwrap();
-            policy.push_str(&format!(
-                "(deny file-read* file-write* (subpath {}))\n",
-                serde_json::to_string(
-                    &installation_root()
-                        .canonicalize()
-                        .unwrap()
-                        .to_string_lossy()
-                )
-                .unwrap()
-            ));
-            fs::write(profile, policy).unwrap();
+            // macOS additionally denies the original installation when
+            // testing Grapher on its own source; Linux's copied engine is RO.
+            #[cfg(target_os = "macos")]
+            {
+                let profile = session.join("execution-instance.sb");
+                let mut policy = fs::read_to_string(&profile).unwrap();
+                policy.push_str(&format!(
+                    "(deny file-read* file-write* (subpath {}))\n",
+                    serde_json::to_string(
+                        &installation_root()
+                            .canonicalize()
+                            .unwrap()
+                            .to_string_lossy()
+                    )
+                    .unwrap()
+                ));
+                fs::write(profile, policy).unwrap();
+            }
             command
                 .args([
                     "--mode",

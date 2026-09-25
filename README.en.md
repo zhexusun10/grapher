@@ -36,7 +36,7 @@ Goal -> Partitioner --serial--> one task (runs in project directory)
 
 ## Quick start
 
-**Requirements:** Node.js 22.19+, stable Rust, Git, npm, working Pi provider authentication, and network access. Native execution currently targets macOS (Seatbelt) and Windows 10/11 x64 (AppContainer). Windows CI covers compilation and regression tests, but the complete publishing/isolation path still needs validation on a real Windows host. Other systems have no guarantee of safe Graph execution; failures do not fall back to unisolated execution. Pi is a pinned upstream submodule, not a globally installed replacement.
+**Requirements:** Node.js 22.19+, stable Rust, Git, npm, working Pi provider authentication, and network access. Graph filesystem boundaries use macOS Seatbelt, Windows 10/11 x64 AppContainer, or Linux bubblewrap (the container must permit unprivileged user/mount/PID namespaces). Complete publishing/isolation and Harbor end-to-end runs still need real-platform validation on Windows and Linux. Failed preflight never falls back to unisolated execution. Pi is a pinned upstream submodule, not a globally installed replacement.
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
@@ -85,7 +85,7 @@ npm run test:pi               # pinned Pi / auth transport contract
 npm run test:native           # host-native regression (platform dependent)
 ```
 
-This repository no longer provides a benchmark or benchmark host. HTTP API binding and lifecycle checks run locally through `npm run test:bindings` and `scripts/check-project-binding.mjs`; the other basic checks above also work with this repository alone. Fixtures and model-free tests cannot establish real provider semantic quality or every sandbox boundary; release requires platform and real-model acceptance testing.
+`benchmark/` provides a Harbor custom agent adapter (not a benchmark dataset or host); see [Harbor setup and Linux Graph prerequisites](benchmark/README.md). HTTP API binding and lifecycle checks run locally through `npm run test:bindings` and `scripts/check-project-binding.mjs`; the other basic checks above also work with this repository alone. Fixtures and model-free tests cannot establish real provider semantic quality or every sandbox boundary; release requires platform and real-model acceptance testing.
 
 ## Documentation
 

@@ -13,6 +13,16 @@ fn main() {
         }
     }
 
+    if std::env::args().nth(1).as_deref() == Some("--build-identity") {
+        let revision = env!("GRAPHER_BUILD_COMMIT");
+        if env!("GRAPHER_BUILD_DIRTY") == "0" {
+            println!("{revision}");
+        } else {
+            println!("dirty:{revision}");
+        }
+        return;
+    }
+
     if std::env::args().nth(1).as_deref() == Some("--compile") {
         let mut input = String::new();
         io::stdin()

@@ -36,7 +36,7 @@ export function configureAgentDir() {
 
   const targetModels = join(directory, 'models.json');
   const sourceModels = join(homedir(), '.pi', 'agent', 'models.json');
-  if (!existsSync(targetModels) && existsSync(sourceModels)) {
+  if (process.env.GRAPHER_ISOLATED_PI_MODELS !== '1' && !existsSync(targetModels) && existsSync(sourceModels)) {
     if (process.platform === 'win32') {
       try { copyFileSync(sourceModels, targetModels); } catch {}
     } else {

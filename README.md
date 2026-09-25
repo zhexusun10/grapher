@@ -37,7 +37,7 @@ Grapher 是本地运行的多智能体编程系统：将目标路由为单任务
 
 ## 快速开始
 
-**依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、可用的 Pi 服务商认证和网络。当前原生执行针对 macOS（Seatbelt）与 Windows 10/11 x64（AppContainer）；Windows 持续集成已有编译与回归检查，仍需在真实 Windows 主机验证完整发布和隔离链。其他系统不保证图执行的安全性，失败不会降级到无隔离执行。Pi 是锁定版本的上游子模块，不会使用全局 Pi 替代。
+**依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、可用的 Pi 服务商认证和网络。Graph 文件系统隔离分别使用 macOS Seatbelt、Windows 10/11 x64 AppContainer、Linux bubblewrap（要求容器允许非特权 user/mount/PID namespace）。Windows 与 Linux 的完整发布、隔离及 Harbor 实机链仍需平台验收；预检失败不会降级到无隔离执行。Pi 是锁定版本的上游子模块，不会使用全局 Pi 替代。
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
@@ -86,7 +86,7 @@ npm run test:pi               # 锁定版本的 Pi 与认证传输契约测试
 npm run test:native           # 宿主原生回归测试（依赖平台）
 ```
 
-本仓库不提供 benchmark 或相关 host。HTTP API 的绑定和生命周期测试由 `npm run test:bindings` 使用仓库内的 `scripts/check-project-binding.mjs` 完成；其余上述基本检查也可在本仓库运行。固定样例和无模型测试不能证明真实服务商的语义质量或全部沙箱边界；发布前需要平台和真实模型验收。
+`benchmark/` 提供独立的 Harbor 自定义 agent 适配器（不包含 benchmark 数据集或 host）；参见 [Harbor 接入与 Linux Graph 前提](benchmark/README.md)。HTTP API 的绑定和生命周期测试由 `npm run test:bindings` 使用仓库内的 `scripts/check-project-binding.mjs` 完成；其余上述基本检查也可在本仓库运行。固定样例和无模型测试不能证明真实服务商的语义质量或全部沙箱边界；发布前需要平台和真实模型验收。
 
 ## 文档导航
 

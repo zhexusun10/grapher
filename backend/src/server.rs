@@ -2216,6 +2216,12 @@ fn plan_goal_internal(
                     (route, partition_metrics)
                 }
             };
+            // Do not spend Planner tokens on a Graph that cannot run in this
+            // environment (e.g. a Harbor container without user namespaces).
+            #[cfg(not(feature = "fixture"))]
+            if route.plan_type == "graph" {
+                crate::native::require_graph_execution()?;
+            }
             let mut planner_metrics = None;
             let graph = match route.plan_type.as_str() {
                 "serial" => Graph {

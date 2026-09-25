@@ -42,9 +42,9 @@ npm run pi:build
 | Node Agent | 开放 Pi 原生工具，允许受信工作区的 skills/extensions |
 | Merger | 固定冲突修复 prompt 和工具，不加载项目 context/自动扩展 |
 
-生产入口为安装目录内的 `engine/entrypoint.mjs`，通过宿主 Node 启动锁定 Pi。Planner/Partitioner/Serial/Merger 在源项目真实绝对路径执行，复用宿主 PATH、HOME、TMPDIR、原生程序与外部文件。Windows 与 macOS 均保留完整 Graph 执行；Windows Graph 由 backend helper 使用 AppContainer 启动并授予每实例最小文件访问范围。会话与 Planner 编译器均使用真实宿主路径。源目录角色保持原生工具行为；Graph 路径适配及呈现规则见下文。历史配置中的 command/args 只在 `fixture` 测试构建可注入。
+生产入口为安装目录内的 `engine/entrypoint.mjs`，通过宿主 Node 启动锁定 Pi。Planner/Partitioner/Serial/Merger 在源项目真实绝对路径执行，复用宿主 PATH、HOME、TMPDIR、原生程序与外部文件。Windows 与 macOS 均保留完整 Graph 执行；Linux Graph 需要 bubblewrap 与任务环境允许 user/mount/PID namespace，并在通过隔离预检后执行。Windows Graph 由 backend helper 使用 AppContainer 启动并授予每实例最小文件访问范围。会话与 Planner 编译器均使用真实宿主路径。源目录角色保持原生工具行为；Graph 路径适配及呈现规则见下文。历史配置中的 command/args 只在 `fixture` 测试构建可注入。
 
-**项目内相对、项目外绝对**：节点任务、交付和生成配置优先采用项目根相对路径。Graph 模型侧普通物理路径呈现为 `./...`，结构化 URI 保持有效的源项目绝对地址；文件工具和 bash 完整绝对项目路径适配作为兼容层保留。`cd`/`../` 保持原生语义，外部兄弟目录需明确绝对路径。宿主原生执行、外部脚本及 Seatbelt 保护保留。脚本文件内部硬编码路径和程序动态拼接路径仍不透明映射；这不是内核目录重映射。完整边界见 [native-execution.md](native-execution.md)。
+**项目内相对、项目外绝对**：节点任务、交付和生成配置优先采用项目根相对路径。Graph 模型侧普通物理路径呈现为 `./...`，结构化 URI 保持有效的源项目绝对地址；文件工具和 bash 完整绝对项目路径适配作为兼容层保留。`cd`/`../` 保持原生语义，外部兄弟目录需明确绝对路径。宿主原生执行、外部脚本及平台 Graph 文件系统边界保留。脚本文件内部硬编码路径和程序动态拼接路径仍不透明映射；这不是内核目录重映射。完整边界见 [native-execution.md](native-execution.md)。
 
 Graph 首次执行将经过 baseline 校验的 Pi 及已安装依赖复制到源项目外，一份副本供本 backend 的节点共享，解决自托管与目录保护冲突。节点只能读取这份引擎。无需密码或特权组件；没有 Docker/VM/chroot 后备路径。完整逻辑与验证见 [native-execution.md](native-execution.md)。
 
