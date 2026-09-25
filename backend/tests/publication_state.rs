@@ -8,7 +8,7 @@ fn config(source: &Path) -> Config {
         model: String::new(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 1,
+        max_feedback: 1, auto_approve: false,
         #[cfg(feature = "fixture")]
         engine: "pi".into(),
         #[cfg(feature = "fixture")]

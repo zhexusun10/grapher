@@ -1,6 +1,6 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { Settings2, RotateCcw, Terminal, Check, X, Copy, Sliders } from "lucide-react";
+import { Settings2, RotateCcw, Terminal, Check, X, Copy, Sliders, GitBranch } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
 import { ProviderSettings } from "../ProviderSettings";
 
@@ -17,7 +17,7 @@ interface SettingsModalProps {
   onDetectRepository?: (path?: string) => void;
   onResetWorkspace?: () => void;
   onClearHistory?: () => void;
-  onSaveConfig: () => void;
+  onSaveConfig: (autoApprove: boolean) => void;
 }
 
 const PARALLEL_STEPS = [
@@ -42,6 +42,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   onSaveConfig,
 }) => {
   const reduceMotion = useReducedMotion();
+  const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? false);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -151,6 +152,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               </div>
             </div>
 
+            <div className="settings-card">
+              <div className="settings-card-title">
+                <GitBranch size={16} />
+                <h4>图纸审批</h4>
+              </div>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>Auto Approve</strong>
+                  <small>自动批准 Planner 生成的图纸并开始执行</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={autoApprove}
+                  onChange={(event) => setAutoApprove(event.target.checked)}
+                  aria-label="Auto Approve Planner 图纸"
+                />
+              </label>
+            </div>
+
             {/* Section 3: 存储与重置 */}
             <div className="settings-card">
               <div className="settings-card-title">
@@ -178,7 +198,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <button type="button" className="secondary" onClick={onClose}>
               取消
             </button>
-            <button type="button" className="primary save-config-btn" onClick={onSaveConfig}>
+            <button type="button" className="primary save-config-btn" onClick={() => onSaveConfig(autoApprove)}>
               <Check size={14} /> 保存设置
             </button>
           </footer>

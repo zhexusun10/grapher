@@ -156,7 +156,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let config = Config {
             repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false,
         };
         runtime.create(Graph {
             original_goal: "test".into(), nodes: vec![Node { name: "keep".into(), task: "keep".into() }], edges: vec![],
@@ -198,7 +198,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             original_goal: "test".into(), nodes: vec![Node { name: "first".into(), task: "first".into() }], edges: vec![],
         }, Config { repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![], model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1 }).unwrap();
+            thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false }).unwrap();
         runtime.set_route("graph").unwrap();
         let attempt = root.join("planning").join(Uuid::new_v4().to_string());
         let expected = root.join("planner-sessions").join(&runtime.state.run_id);
@@ -226,7 +226,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             original_goal: "test".into(), nodes: vec![Node { name: "first".into(), task: "first".into() }], edges: vec![],
         }, Config { repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![], model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1 },
+            thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false },
         Some(planning_id.clone()), None).unwrap();
         runtime.set_route("graph").unwrap();
         let legacy = Uuid::new_v4().to_string();
@@ -272,7 +272,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let config = Config {
             repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false,
         };
         let make_service = || Arc::new(Service {
             runtime: Mutex::new(Runtime::open(&root).unwrap()),
@@ -322,7 +322,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let config = Config {
             repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false,
         };
         let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
         runtime.create(Graph {
@@ -363,7 +363,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let config = Config {
             repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false,
         };
         let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
         runtime.create(Graph {
@@ -410,6 +410,48 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 
     #[cfg(feature = "fixture")]
     #[test]
+    fn planner_auto_approve_only_when_enabled() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = crate::fixture::repository(temp.path()).unwrap();
+        let script = temp.path().join("auto-approve.sh");
+        fs::write(&script, r#"printf '%s' '{"originalGoal":"test","nodes":[{"name":"work","task":"work"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
+"#).unwrap();
+        let config = Config {
+            repository: repo.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2,
+            max_feedback: 1, auto_approve: false,
+        };
+        let service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+            driving: AtomicBool::new(false), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        let plan = |config: Config, revision: Option<String>| plan_goal_internal(
+            "test".into(), config, Some("graph"), None, revision, &service,
+            |_| {}, |_| {}, |_| {},
+        ).unwrap();
+        let draft = plan(config.clone(), None);
+        assert_eq!(draft.phase, "awaiting_approval");
+        assert!(!draft.approved);
+        assert!(!service.driving.load(Ordering::SeqCst));
+        let mut enabled = config;
+        enabled.auto_approve = true;
+        let approved = plan(enabled, Some(draft.run_id.clone()));
+        assert!(approved.approved);
+        assert_eq!(approved.run_id, draft.run_id);
+        let replay = service.runtime.lock().unwrap().store.load(&draft.run_id).unwrap();
+        assert_eq!(replay.events.iter().filter(|event| matches!(event.kind, EventKind::Approved { .. })).count(), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while service.driving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!service.runtime.lock().unwrap().state.executions.is_empty());
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
     fn draft_planner_revision_stays_unapproved_and_approvable() {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = crate::fixture::repository(temp.path()).unwrap();
@@ -423,7 +465,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let config = Config {
             repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false,
         };
         runtime.create(Graph {
             original_goal: "test".into(), nodes: vec![Node { name: "keep".into(), task: "keep".into() }], edges: vec![],
@@ -449,6 +491,17 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             assert_eq!(replay.phase, "awaiting_approval");
             assert!(!replay.approved);
             assert!(replay.events.iter().all(|e| !matches!(e.kind, EventKind::Approved { .. } | EventKind::Started { .. })));
+            let planning_id = snapshot.planning_id.clone();
+            let planning = snapshot.planning.clone();
+            let mut edited = snapshot.graph.clone();
+            edited.nodes[0].task = "manually edited prompt".into();
+            let edited_snapshot = save_graph(edited.clone(), config.clone(), Some(run_id.clone()), &service).unwrap();
+            assert_eq!(edited_snapshot.run_id, run_id);
+            assert_eq!(edited_snapshot.planning_id, planning_id);
+            assert_eq!(edited_snapshot.planning, planning);
+            let edited_replay = service.runtime.lock().unwrap().store.load(&run_id).unwrap();
+            assert_eq!(edited_replay.graph, edited);
+            assert_eq!(edited_replay.planning_id, planning_id);
         }
         service.runtime.lock().unwrap().approve().unwrap();
         assert!(service.runtime.lock().unwrap().state.approved);
@@ -467,32 +520,45 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let config = Config {
             repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![],
-            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false,
         };
         let graph = Graph {
             original_goal: "test".into(),
             nodes: vec![Node { name: "task".into(), task: "original prompt".into() }], edges: vec![],
         };
-        let initial = save_graph(graph.clone(), config.clone(), &service).unwrap();
+        let initial = save_graph(graph.clone(), config.clone(), None, &service).unwrap();
         assert_eq!(initial.plan_type.as_deref(), Some("graph"));
+        let run_id = initial.run_id.clone();
         service.runtime.lock().unwrap().emit(EventKind::Rejected).unwrap();
 
-        // Saving Graph IR or editing a node's task uses this same API.
+        // Saving Graph IR or editing a node prompt must update the same Run.
         for task in ["edited IR", "edited node prompt"] {
             let mut edited = graph.clone();
             edited.nodes[0].task = task.into();
-            let snapshot = save_graph(edited, config.clone(), &service).unwrap();
-            assert_ne!(snapshot.run_id, initial.run_id);
+            let snapshot = save_graph(edited.clone(), config.clone(), Some(run_id.clone()), &service).unwrap();
+            assert_eq!(snapshot.run_id, run_id);
+            assert_eq!(snapshot.graph, edited);
             assert_eq!(snapshot.plan_type.as_deref(), Some("graph"));
             assert_eq!(snapshot.phase, "awaiting_approval");
             assert!(!snapshot.approved);
             assert!(snapshot.executions.is_empty());
-            let replay = service.runtime.lock().unwrap().store.load(&snapshot.run_id).unwrap();
+            let runtime = service.runtime.lock().unwrap();
+            let replay = runtime.store.load(&run_id).unwrap();
+            assert_eq!(replay.graph, edited);
             assert_eq!(replay.phase, "awaiting_approval");
             assert_eq!(replay.plan_type.as_deref(), Some("graph"));
+            assert_eq!(runtime.store.runs().unwrap().len(), 1);
+            drop(runtime);
             service.runtime.lock().unwrap().emit(EventKind::Rejected).unwrap();
         }
+        assert!(save_graph(graph.clone(), config.clone(), Some("wrong-run".into()), &service).is_err());
+        assert_eq!(service.runtime.lock().unwrap().store.runs().unwrap().len(), 1);
         service.runtime.lock().unwrap().approve().unwrap_err(); // Still rejected until edited again.
+        let restored = save_graph(graph, config.clone(), Some(run_id.clone()), &service).unwrap();
+        assert_eq!(restored.run_id, run_id);
+        service.runtime.lock().unwrap().approve().unwrap();
+        assert!(save_graph(restored.graph, config, Some(run_id.clone()), &service).is_err());
+        assert_eq!(service.runtime.lock().unwrap().store.runs().unwrap().len(), 1);
     }
 
     #[cfg(feature = "fixture")]
@@ -512,7 +578,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let config = Config {
             repository: repo.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1,
+            model: "mock/model".into(), thinking_level: "medium".into(), max_parallel: 2, max_feedback: 1, auto_approve: false,
         };
         let snapshot = plan_goal_internal(
             "Build two modules".into(), config, None, None, None, &service,
@@ -548,7 +614,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
                 model: "mock/model".into(),
                 thinking_level: "medium".into(),
                 max_parallel: 4,
-                max_feedback: 3,
+                max_feedback: 3, auto_approve: false,
             },
             None,
             None,
@@ -622,7 +688,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     model: "test".into(),
                     thinking_level: "medium".into(),
                     max_parallel: 4,
-                    max_feedback: 2,
+                    max_feedback: 2, auto_approve: false,
                 },
             )
             .unwrap();
@@ -801,7 +867,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     model: "test".into(),
                     thinking_level: "medium".into(),
                     max_parallel: 4,
-                    max_feedback: 1,
+                    max_feedback: 1, auto_approve: false,
                 },
             )
             .unwrap();
@@ -888,7 +954,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             model: "test-model".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 1,
+            max_feedback: 1, auto_approve: false,
         };
         let mut roles = std::collections::BTreeMap::new();
         roles.insert("planner".to_string(), metrics);
@@ -959,7 +1025,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             model: "test-model".into(),
             thinking_level: "medium".into(),
             max_parallel: 2,
-            max_feedback: 1,
+            max_feedback: 1, auto_approve: false,
         };
         runtime
             .create(
@@ -1040,7 +1106,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             model: String::new(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 1,
+            max_feedback: 1, auto_approve: false,
         };
         let summary = PlanningSummary {
             planning_id: "legacy-plan-a".into(),
@@ -1139,7 +1205,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             model: String::new(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 1,
+            max_feedback: 1, auto_approve: false,
         };
         runtime
             .create(
@@ -1286,7 +1352,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             model: "".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 3,
+            max_feedback: 3, auto_approve: false,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -1317,7 +1383,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             model: "example/test".into(),
             thinking_level: "medium".into(),
             max_parallel: 2,
-            max_feedback: 0,
+            max_feedback: 0, auto_approve: false,
         };
         let calls = std::cell::Cell::new(0);
         let fetch = || {
@@ -1366,6 +1432,10 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         // 1. Initial bootstrap has empty model
         let initial = bootstrap(&service, false).unwrap();
         assert_eq!(initial.config.model, "");
+        assert!(!initial.config.auto_approve);
+        let mut legacy = serde_json::to_value(&initial.config).unwrap();
+        legacy.as_object_mut().unwrap().remove("autoApprove");
+        assert!(!serde_json::from_value::<Config>(legacy).unwrap().auto_approve);
         assert_eq!(initial.effective_role_models.get("planner").unwrap(), "");
 
         // 2. Save new config with valid model
@@ -1374,7 +1444,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             model: "openai/gpt-4o".into(),
             thinking_level: "high".into(),
             max_parallel: 2,
-            max_feedback: 3,
+            max_feedback: 3, auto_approve: true,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -1385,6 +1455,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         let updated = save_config(new_config.clone(), &service).unwrap();
         assert_eq!(updated.config.model, "openai/gpt-4o");
         assert_eq!(updated.config.thinking_level, "high");
+        assert!(updated.config.auto_approve);
         assert_eq!(updated.effective_role_models.get("planner").unwrap(), "openai/gpt-4o");
         assert_eq!(updated.effective_role_models.get("partitioner").unwrap(), "openai/gpt-4o");
         assert_eq!(updated.effective_role_models.get("nodeAgent").unwrap(), "openai/gpt-4o");
@@ -1395,11 +1466,13 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         let saved_disk: Config = serde_json::from_str(&fs::read_to_string(&config_file).unwrap()).unwrap();
         assert_eq!(saved_disk.model, "openai/gpt-4o");
         assert_eq!(saved_disk.thinking_level, "high");
+        assert!(saved_disk.auto_approve);
 
         // 4. Verify new bootstrap reloads the persisted config
         let reloaded = bootstrap(&service, false).unwrap();
         assert_eq!(reloaded.config.model, "openai/gpt-4o");
         assert_eq!(reloaded.config.thinking_level, "high");
+        assert!(reloaded.config.auto_approve);
         assert_eq!(reloaded.effective_role_models.get("planner").unwrap(), "openai/gpt-4o");
     }
 }
@@ -1485,7 +1558,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
             model: String::new(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 3,
+            max_feedback: 3, auto_approve: false,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -1590,16 +1663,23 @@ fn compile_graph(graph: Graph) -> Result<Plan, Vec<compiler::Diagnostic>> {
 fn save_graph(
     graph: Graph,
     config: Config,
+    run_id: Option<String>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
         return Err("Wait for the current operation to finish".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-    runtime.create(graph, config)?;
-    // Manual Graph IR and node-task edits always create an approvable graph
-    // draft, even when the only node happens to be named "task".
-    runtime.set_route("graph")?;
+    if let Some(expected) = run_id {
+        if runtime.state.run_id != expected {
+            return Err("Run changed while editing the graph".into());
+        }
+        runtime.edit_draft_graph(graph, config)?;
+    } else {
+        runtime.create(graph, config)?;
+        // A new manual Graph IR is a graph even if its only node is "task".
+        runtime.set_route("graph")?;
+    }
     Ok(runtime.state.clone())
 }
 
@@ -2305,14 +2385,15 @@ fn plan_goal_internal(
             } else {
                 runtime.create_with_planning(graph, config.clone(), Some(planning_id.clone()), Some(summary.clone()))?;
                 runtime.set_route(&route.plan_type)?;
-                if route.plan_type == "serial" {
-                    runtime.approve()?;
-                }
+            }
+            if (route.plan_type == "serial" && revision_run_id.is_none())
+                || (route.plan_type == "graph" && config.auto_approve && !runtime.state.approved) {
+                runtime.approve()?;
             }
             let snapshot = runtime.state.clone();
             drop(runtime);
             write_planning_summary(&directory, &summary)?;
-            if route.plan_type == "serial" {
+            if snapshot.approved && (route.plan_type == "serial" || config.auto_approve) {
                 drive(service.clone());
             }
             Ok(snapshot)
@@ -3348,6 +3429,7 @@ pub fn dispatch(
         "save_graph" => to_value(save_graph(
             argument(&body, "graph")?,
             argument(&body, "config")?,
+            argument(&body, "runId")?,
             service,
         )?),
         "save_config" => to_value(save_config(argument(&body, "config")?, service)?),

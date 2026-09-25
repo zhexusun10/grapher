@@ -45,7 +45,7 @@ fn config() -> Config {
         model: String::new(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3,
+        max_feedback: 3, auto_approve: false,
     }
 }
 

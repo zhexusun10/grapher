@@ -69,7 +69,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
         </header>
 
         <p className="modal-description">
-          使用语义化 name 声明节点与前驱后继依赖关系。保存后将通过 Rust 编译器校验并创建待审批运行。
+          使用语义化 name 声明节点与前驱后继依赖关系。保存后将通过 Rust 编译器校验；现有未审批图会在原对话中更新。
         </p>
         <textarea
           className="json-editor"

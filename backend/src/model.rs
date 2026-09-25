@@ -110,6 +110,8 @@ pub struct Config {
     pub max_parallel: usize,
     #[serde(default = "default_max_feedback")]
     pub max_feedback: usize,
+    #[serde(default)]
+    pub auto_approve: bool,
 }
 
 fn default_max_feedback() -> usize {
@@ -234,6 +236,11 @@ pub enum EventKind {
         planning_id: String,
         planning: PlanningSummary,
         invalidated: Vec<String>,
+    },
+    /// A manual edit of an unapproved draft. Keep its Run and Planner history.
+    DraftEdited {
+        graph: Graph,
+        config: Config,
     },
     Paused {
         paused: bool,
@@ -577,6 +584,17 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.publication = None;
                 state.phase = if state.paused { "paused" } else { "running" }.into();
             }
+        }
+        EventKind::DraftEdited { graph, config } => {
+            state.graph = graph.clone();
+            state.config = Some(config.clone());
+            state.plan_type = Some("graph".into());
+            state.plan = crate::compiler::compile_legacy(graph, true).ok();
+            state.nodes = graph.nodes.iter()
+                .map(|node| (node.name.clone(), NodeState::default()))
+                .collect();
+            state.phase = "awaiting_approval".into();
+            // Planning identity and conversation history stay with this Run.
         }
         EventKind::Paused { paused } => {
             state.paused = *paused;

@@ -116,7 +116,7 @@ function EditableUserBubble({ text, images, editing, draft, onDraftChange, onEdi
             <button type="button" className="chat-bubble-action-btn send" onClick={submit} disabled={disabled || !draft.trim()} title="发送修改" aria-label="发送修改"><ArrowUp size={14} /></button>
           </div>
         ) : onEdit ? (
-          <button type="button" className="chat-message-edit-btn" onClick={beginEdit} title="修改" aria-label="修改"><Pencil size={14} /></button>
+          <button type="button" className="chat-message-edit-btn" onClick={beginEdit} disabled={disabled} title="修改" aria-label="修改"><Pencil size={14} /></button>
         ) : null}
         <div
           ref={bubbleRef}
@@ -295,10 +295,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     return ids.filter((id) => {
       if (seen.has(id)) return false;
       seen.add(id);
-      return !(showLivePlanner && plannerStream.items?.length > 0 &&
+      // Only suppress a durable turn while it is actively streaming. Once
+      // planning stops, the JSONL is authoritative even if SSE was partial.
+      return !(isPlanning && showLivePlanner && plannerStream.items?.length > 0 &&
         plannerStream.representedPlanningIds?.includes(id));
     });
   }, [routeType, isPlanning, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.runId, plannerStream.isContinuation, plannerStream.items, plannerStream.representedPlanningIds]);
+  const savedPlannerKey = savedPlannerIds.join(":");
+  const [readySavedPlannerKey, setReadySavedPlannerKey] = useState("");
+  const useSavedPlanner = savedPlannerIds.length > 0 &&
+    (!showLivePlanner || readySavedPlannerKey === savedPlannerKey);
+  const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
   const workbenchRef = useRef<HTMLDivElement>(null);
   const [isResizing, setIsResizing] = useState(false);
   const currentWidthRef = useRef<number>(390);
@@ -795,7 +802,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           editing={editingTaskNode === selectedNode.name}
                           draft={taskDraft}
                           onDraftChange={setTaskDraft}
-                          onEdit={!locked && !active ? () => {
+                          onEdit={!active ? () => {
                             onCancelEditMessage?.();
                             setEditingTaskNode(selectedNode.name);
                             setTaskDraft(selectedNode.task);
@@ -830,7 +837,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           editing={editingMessage?.id === turn.userMessage.id}
                           draft={editPrefillText ?? ""}
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                          onEdit={onEditMessage && !locked ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
+                          onEdit={onEditMessage ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
                           onCancel={() => onCancelEditMessage?.()}
                           onSend={onSendMessage}
                           disabled={locked}
@@ -976,7 +983,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               editing={editingMessage?.id === turn.userMessage.id}
                               draft={editPrefillText ?? ""}
                               onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                              onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage(turn.userMessage!) : undefined}
+                              onEdit={onEditMessage ? () => onEditMessage(turn.userMessage!) : undefined}
                               onCancel={() => onCancelEditMessage?.()}
                               onSend={onSendMessage}
                               disabled={locked && !isPlanning}
@@ -1064,7 +1071,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             editing={editingMessage?.id === effectiveMessages[0].id}
                             draft={editPrefillText ?? ""}
                             onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                            onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage(effectiveMessages[0]) : undefined}
+                            onEdit={onEditMessage ? () => onEditMessage(effectiveMessages[0]) : undefined}
                             onCancel={() => onCancelEditMessage?.()}
                             onSend={onSendMessage}
                             disabled={locked && !isPlanning}
@@ -1101,16 +1108,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     {/* 历史保存的规划活动记录（如重新加载或未被活动流完全覆盖时） */}
                     {savedPlannerIds.length > 0 && (
-                      <PlanningActivity
-                        key={savedPlannerIds.join(":")}
-                        planningIds={savedPlannerIds}
-                        onUserResize={handleExpandableContentChange}
-                      />
+                      <div style={!useSavedPlanner ? { display: "none" } : undefined}>
+                        <PlanningActivity
+                          key={savedPlannerKey}
+                          planningIds={savedPlannerIds}
+                          showUserTurns={!isPlanning}
+                          skipFirstUser={state.events.some((event) => event.type === "created" && event.planning_id === savedPlannerIds[0])}
+                          onReady={() => setReadySavedPlannerKey(savedPlannerKey)}
+                          onUserResize={handleExpandableContentChange}
+                        />
+                      </div>
                     )}
 
                     {/* 保留当前对话中的跟进消息；实时流已有同一消息时不重复渲染。 */}
                     {effectiveMessages.slice(1).filter((msg) =>
-                      !showLivePlanner || !plannerStream.items?.some((item: TranscriptItem) => item.role === "user" && item.id === msg.id)
+                      // Persisted Planner turns already contain user follow-ups
+                      // in their correct chronological position.
+                      (isPlanning || !useSavedPlanner) && (!renderLivePlanner ||
+                        !plannerStream.items?.some((item: TranscriptItem) => item.role === "user" && item.id === msg.id))
                     ).map((msg) => (
                       <div className="chat-message-row user" key={msg.id}>
                         <EditableUserBubble
@@ -1119,7 +1134,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           editing={editingMessage?.id === msg.id}
                           draft={editPrefillText ?? ""}
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                          onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage(msg) : undefined}
+                          onEdit={onEditMessage ? () => onEditMessage(msg) : undefined}
                           onCancel={() => onCancelEditMessage?.()}
                           onSend={onSendMessage}
                           disabled={locked && !isPlanning}
@@ -1128,7 +1143,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     ))}
 
                     {/* Planner 顺序流式记录：严格按实际发生时序呈现用户追加消息、工具调用、思维链与输出文字 */}
-                    {showLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
+                    {renderLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                         {plannerStream.items.map((item: TranscriptItem, idx: number) => {
                           const isLast = idx === plannerStream.items.length - 1;
@@ -1146,7 +1161,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   editing={editingMessage?.id === item.id}
                                   draft={editPrefillText ?? ""}
                                   onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                                  onEdit={(!locked || isPlanning) && onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: item.content || "" }) : undefined}
+                                  onEdit={onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: item.content || "" }) : undefined}
                                   onCancel={() => onCancelEditMessage?.()}
                                   onSend={onSendMessage}
                                   disabled={locked && !isPlanning}
@@ -1196,7 +1211,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         })}
                       </div>
                     ) : (
-                      showLivePlanner && (plannerStream.plannerThinking || smoothPlannerText) && (
+                      renderLivePlanner && (plannerStream.plannerThinking || smoothPlannerText) && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                           {plannerStream.plannerThinking && (
                             <ThinkingCard

@@ -2,7 +2,13 @@ import { useEffect, useState } from "react";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
-export function PlanningActivity({ planningIds, onUserResize }: { planningIds: string[]; onUserResize?: (expanded?: boolean, card?: HTMLElement) => void }) {
+export function PlanningActivity({ planningIds, onReady, showUserTurns = false, skipFirstUser = false, onUserResize }: {
+  planningIds: string[];
+  onReady?: () => void;
+  showUserTurns?: boolean;
+  skipFirstUser?: boolean;
+  onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
+}) {
   const key = planningIds.join(":");
   const [record, setRecord] = useState({ id: "", content: "" });
   const output = record.id === key ? record.content : "";
@@ -37,7 +43,15 @@ export function PlanningActivity({ planningIds, onUserResize }: { planningIds: s
             if (page.content) setRecord({ id: key, content: text });
             offset = page.nextOffset;
             if (page.complete) {
-              if (!page.running) break;
+              if (!page.running) {
+                // A stopped process may leave its last JSONL record without a
+                // newline; the transcript parser waits for a complete line.
+                if (text && !text.endsWith("\n")) {
+                  text += "\n";
+                  setRecord({ id: key, content: text });
+                }
+                break;
+              }
               await wait();
             }
           }
@@ -45,7 +59,10 @@ export function PlanningActivity({ planningIds, onUserResize }: { planningIds: s
       } catch (error) {
         if (!abort.signal.aborted) setError(error instanceof Error ? error.message : String(error));
       } finally {
-        if (!abort.signal.aborted) setLoading(false);
+        if (!abort.signal.aborted) {
+          setLoading(false);
+          onReady?.();
+        }
       }
     };
     void poll();
@@ -57,7 +74,8 @@ export function PlanningActivity({ planningIds, onUserResize }: { planningIds: s
     {error && <p role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>重试</button></p>}
     {!loading && !error && !output && <p>没有可用的规划输出。</p>}
     {output && <div className="planning-activity-output">
-      <VirtualizedTranscript key={key} output={output} inline onUserResize={onUserResize} />
+      <VirtualizedTranscript key={`${key}:${showUserTurns}:${skipFirstUser}`} output={output} inline
+        showUserTurns={showUserTurns} skipFirstUser={skipFirstUser} onUserResize={onUserResize} />
     </div>}
   </section>;
 }

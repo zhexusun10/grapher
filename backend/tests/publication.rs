@@ -157,7 +157,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             model: String::new(),
             thinking_level: "medium".into(),
             max_parallel: 2,
-            max_feedback: 1,
+            max_feedback: 1, auto_approve: false,
         };
         let runtime_root = temp.path().join("runtime");
         let mut events = Vec::new();

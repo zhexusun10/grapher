@@ -985,7 +985,7 @@ export default function App() {
     }
   });
 
-  const handleSaveConfig = () => run(async () => {
+  const handleSaveConfig = (autoApprove: boolean) => run(async () => {
     let repoPath = config.repository.trim();
     let info: RepositoryInfo | null = null;
     if (repoPath) {
@@ -994,7 +994,7 @@ export default function App() {
       setRepoInfo(info);
       repoPath = info.path;
     }
-    const nextConfig = { ...config, repository: repoPath, maxFeedback: 3 };
+    const nextConfig = { ...config, repository: repoPath, maxFeedback: 3, autoApprove };
     setConfig(nextConfig);
     try {
       localStorage.setItem("grapher_config", JSON.stringify(nextConfig));
@@ -1023,13 +1023,25 @@ export default function App() {
   });
 
   const save = (graph: Graph) => run(async () => {
-    const snapshot = await runtimeService.saveGraph(graph, config);
+    // An unapproved/rejected graph is still the same conversation. Pass its
+    // identity so the backend edits that draft rather than creating a Run.
+    const draftRunId = state.runId && !state.approved &&
+      (state.phase === "rejected" || state.phase === "awaiting_approval") && routeType === "graph"
+      ? state.runId : undefined;
+    const snapshot = await runtimeService.saveGraph(graph, config, draftRunId);
     const deduced = deduceRouteType(snapshot);
     setState(snapshot);
     setRouteType(deduced);
     setGoal(graph.originalGoal);
     setModal(null);
     recordRunToWorkspace(snapshot.runId);
+    if (draftRunId && snapshot.runId === draftRunId) {
+      setRunLabels((prev) => {
+        const updated = { ...prev, [draftRunId]: graph.originalGoal || "" };
+        localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+        return updated;
+      });
+    }
     setSelected("");
   });
 

@@ -326,6 +326,30 @@ impl Runtime {
         self.emit(EventKind::Approved { base })
     }
 
+    pub fn edit_draft_graph(&mut self, graph: Graph, mut config: Config) -> Result<(), String> {
+        if self.state.run_id.is_empty() || self.state.approved
+            || !matches!(self.state.phase.as_str(), "rejected" | "awaiting_approval") {
+            return Err("Only an unapproved graph draft can be edited in place".into());
+        }
+        let previous = self.state.config.as_ref().ok_or("Missing config")?;
+        if config.repository != previous.repository {
+            return Err("Cannot move a draft to another repository".into());
+        }
+        resolve_repository(&self.root, &config)?;
+        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        #[cfg(feature = "fixture")]
+        if !known_engine(&config.engine) {
+            return Err("Unknown test actuator".into());
+        }
+        config.max_feedback = config.max_feedback.min(3);
+        if !(1..=8).contains(&config.max_parallel) {
+            return Err("Concurrency must be 1–8; feedback limit is capped at 3".into());
+        }
+        #[cfg(not(feature = "fixture"))]
+        crate::native::require_graph_execution()?;
+        self.emit(EventKind::DraftEdited { graph, config })
+    }
+
     pub fn update_draft_graph(
         &mut self,
         graph: Graph,

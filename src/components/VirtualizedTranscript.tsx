@@ -15,6 +15,8 @@ interface VirtualizedTranscriptProps {
   // They must render in document flow rather than virtualizing against that
   // scroll area's unrelated coordinates.
   inline?: boolean;
+  showUserTurns?: boolean;
+  skipFirstUser?: boolean;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -47,6 +49,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   emptyText = "工作区就绪，等待节点指令输出…",
   onUserResize,
   inline = false,
+  showUserTurns = false,
+  skipFirstUser = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const expandedRows = useRef(new Map<string, boolean>());
@@ -59,6 +63,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const itemsRef = useRef<TranscriptItem[]>([]);
   const pendingToolsRef = useRef<Map<string, TranscriptItem>>(new Map());
   const inTagThinkingRef = useRef<boolean>(false);
+  const seenFirstUserRef = useRef(false);
+  const userMessageStartsRef = useRef(new Set<string>());
+  const pendingUserStartRef = useRef(false);
+  const assistantStartIndexRef = useRef(0);
   const [itemsVersion, setItemsVersion] = useState(0);
 
   // Height cache for virtualization
@@ -95,6 +103,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       itemsRef.current = [];
       pendingToolsRef.current.clear();
       inTagThinkingRef.current = false;
+      seenFirstUserRef.current = false;
+      userMessageStartsRef.current.clear();
+      pendingUserStartRef.current = false;
+      assistantStartIndexRef.current = 0;
       setItemsVersion((v) => v + 1);
       return;
     }
@@ -105,6 +117,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       itemsRef.current = [];
       pendingToolsRef.current.clear();
       inTagThinkingRef.current = false;
+      seenFirstUserRef.current = false;
+      userMessageStartsRef.current.clear();
+      pendingUserStartRef.current = false;
+      assistantStartIndexRef.current = 0;
     }
 
     const unparsed = output.slice(lastProcessedPosRef.current);
@@ -133,6 +149,42 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
 
       try {
         const event = JSON.parse(line);
+
+        // Planner follow-ups live in its durable JSONL, not in the Run's
+        // transient browser messages. The first user turn is already shown as
+        // the original goal (except for manually created graphs).
+        if (showUserTurns && (event.type === "message_start" || event.type === "message_end") && event.message?.role === "user") {
+          const messageId = event.message.id;
+          if (event.type === "message_end") {
+            if (pendingUserStartRef.current || (messageId && userMessageStartsRef.current.has(messageId))) {
+              pendingUserStartRef.current = false;
+              continue;
+            }
+          } else {
+            pendingUserStartRef.current = true;
+            if (messageId) userMessageStartsRef.current.add(messageId);
+          }
+          const first = !seenFirstUserRef.current;
+          seenFirstUserRef.current = true;
+          if (first && skipFirstUser) continue;
+          const content = event.message.content;
+          const text = Array.isArray(content)
+            ? content.filter((part: { type: string }) => part.type === "text")
+              .map((part: { text?: string }) => part.text || "").join("\n")
+            : "";
+          const display = text.replace(/^User query:\n\n/, "")
+            .replace(/^Current graph node status:\n(?:- [^\n]*\n)*\n/, "");
+          if (display.trim()) currentItems.push({
+            id: `user_${messageId || `${Date.now()}_${Math.random()}`}`,
+            type: "text", role: "user", content: display, timestamp: Date.now(),
+          });
+          continue;
+        }
+
+        if (event.type === "message_start" && event.message?.role === "assistant") {
+          assistantStartIndexRef.current = currentItems.length;
+          continue;
+        }
 
         // Assistant streaming thinking delta (native protocol)
         if (
@@ -356,7 +408,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
 
           // Backfill thinking if message has thinking content and it wasn't captured from stream deltas
           const message = event.message;
-          if (message && Array.isArray(message.content)) {
+          if (message?.role === "assistant" && Array.isArray(message.content)) {
             for (const c of message.content) {
               if (c.type === "thinking" && c.thinking) {
                 const hasThinking = currentItems.some((i) => i.type === "thinking" && i.content === c.thinking);
@@ -372,7 +424,20 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
                 }
               }
             }
+            // Some saved sessions have only message_end (no text_delta), or
+            // were interrupted mid-stream. Recover the final assistant text.
+            const fullText = message.content.filter((c: { type: string }) => c.type === "text")
+              .map((c: { text?: string }) => c.text || "").join("");
+            const captured = currentItems.slice(assistantStartIndexRef.current)
+              .filter(item => item.type === "text" && item.role === "assistant")
+              .map(item => item.content || "").join("");
+            const missing = fullText.startsWith(captured) ? fullText.slice(captured.length) : "";
+            if (missing) currentItems.push({
+              id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              type: "text", role: "assistant", content: missing, timestamp: Date.now(),
+            });
           }
+          assistantStartIndexRef.current = currentItems.length;
           continue;
         }
 
@@ -421,7 +486,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     }
 
     setItemsVersion((v) => v + 1);
-  }, [output]);
+  }, [output, showUserTurns, skipFirstUser]);
 
   const items = itemsRef.current;
 

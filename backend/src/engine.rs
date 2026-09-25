@@ -869,7 +869,7 @@ sys.stdin.read()
             engine: "pi".into(), pi_command: "python3".into(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0,
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
         };
         let session = temp.path().join("planning-1").join("planner-session");
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -916,7 +916,7 @@ sys.stdin.read()
             engine: "pi".into(), pi_command: "python3".into(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0,
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
         };
         let id = uuid::Uuid::new_v4().to_string();
         let session = temp.path().join(&id);
@@ -970,7 +970,7 @@ sys.stdin.read()
             engine: "pi".into(), pi_command: "python3".into(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0,
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
         };
         let id = uuid::Uuid::new_v4().to_string();
         let session = temp.path().join(&id);
@@ -1019,7 +1019,7 @@ sys.stdin.read()
             engine: "pi".into(), pi_command: "python3".into(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0,
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
         };
         let result = run_pi_with_timeout(PiRequest {
             role: PiRole::NodeAgent, config: &config, cwd: temp.path(), task: "original",
@@ -1048,7 +1048,7 @@ sys.stdin.read()
                 model: "mock/model".into(),
                 thinking_level: "medium".into(),
                 max_parallel: 1,
-                max_feedback: 0,
+                max_feedback: 0, auto_approve: false,
             };
             let mut output = String::new();
             let task = "x".repeat(1024 * 1024);
@@ -1096,7 +1096,7 @@ sys.stdin.read()
             model: "mock/model".into(),
             thinking_level: "medium".into(),
             max_parallel: 1,
-            max_feedback: 0,
+            max_feedback: 0, auto_approve: false,
         };
         let result = run_pi(PiRequest {
             role: PiRole::NodeAgent,
@@ -1128,7 +1128,7 @@ sys.stdin.read()
             model: "mock/model".into(),
             thinking_level: "medium".into(),
             max_parallel: 1,
-            max_feedback: 0,
+            max_feedback: 0, auto_approve: false,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -1172,7 +1172,7 @@ sys.stdin.read()
             model: "anthropic/claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 3,
+            max_feedback: 3, auto_approve: false,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -1204,7 +1204,7 @@ sys.stdin.read()
             model: String::new(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 3,
+            max_feedback: 3, auto_approve: false,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -1228,7 +1228,7 @@ sys.stdin.read()
             model: "some-model".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 3,
+            max_feedback: 3, auto_approve: false,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -1261,7 +1261,7 @@ sys.stdin.read()
             model: "claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
-            max_feedback: 3,
+            max_feedback: 3, auto_approve: false,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]

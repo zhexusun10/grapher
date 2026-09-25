@@ -23,7 +23,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
         pi_args: vec![script_path.to_string_lossy().into()],
         model: String::new(),
         max_parallel: 2,
-        max_feedback: 3,
+        max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
     };
     let mut output = String::new();
@@ -257,7 +257,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_args: vec![script_path.to_string_lossy().into()],
         model: String::new(),
         max_parallel: 2,
-        max_feedback: 3,
+        max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
     };
     let mut output = String::new();
@@ -299,7 +299,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_args: vec![script_path.to_string_lossy().into()],
         model: "test-model".into(),
         max_parallel: 2,
-        max_feedback: 3,
+        max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
     };
 
@@ -431,7 +431,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_args: vec![script.to_string_lossy().into()],
         model: "test-model".into(),
         max_parallel: 2,
-        max_feedback: 3,
+        max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
     };
     for (role, name) in [
@@ -504,7 +504,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         model: "test-model".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3,
+        max_feedback: 3, auto_approve: false,
     };
     let mut output = String::new();
     run_pi(
@@ -568,7 +568,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         model: "internal-grapher-model".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3,
+        max_feedback: 3, auto_approve: false,
     };
 
     // Verify PiModelConfig::resolve for NodeAgent ignores PI_MODEL and uses base_config.model

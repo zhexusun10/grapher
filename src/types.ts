@@ -4,7 +4,7 @@ export interface GraphEdge { from: string; to: string; relation: string; feedbac
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; maxParallel: number; maxFeedback: number }
+export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; maxParallel: number; maxFeedback: number; autoApprove: boolean }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
 export interface ExecutionMetrics {
   durationSeconds: number;
@@ -117,7 +117,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "medium", maxParallel: 4, maxFeedback: 3 };
+export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "medium", maxParallel: 4, maxFeedback: 3, autoApprove: false };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},
