@@ -96,7 +96,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   pi.registerTool(defineTool({
     name: "edge", label: "Graph edge",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
-    description: `Create, replace, or delete directed edges between existing nodes. Supply a nonempty 'edges' array; use one element for a single edit. Each ordered pair may appear only once per call. There is one edge per ordered pair. Edits are applied in order, then compiled once; a failure leaves the saved graph unchanged. Omitted or false feedback creates a dependency: the target waits for the source to complete successfully and receives its filesystem state. True feedback creates a route to a dependency ancestor without execution ordering or filesystem input.`,
+    description: `Create, replace, or delete directed edges between existing nodes. Supply a nonempty 'edges' array; use one element for a single edit. Each ordered pair may appear only once per call. There is one edge per ordered pair. Edits are applied in order, then compiled once; a failure leaves the saved graph unchanged. Omitted or false feedback creates a dependency: the target waits for the source to complete successfully and receives its filesystem state. True feedback allows a descendant to choose whether to send an additional instruction to a dependency ancestor; it adds no execution ordering or filesystem input.`,
     parameters: Type.Object({
       edges: Type.Array(Type.Object({
         from: Type.String({ description: "Existing source node name." }),

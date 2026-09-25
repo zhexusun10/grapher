@@ -1590,11 +1590,7 @@ fn plan_goal_internal(
                     let (default_planner_system, _) = split_prompt_template(PLANNER_PROMPT);
                     let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                         .unwrap_or_else(|_| default_planner_system.to_string());
-                    let task = if let Some(ref existing) = original_graph {
-                        format!("Existing approved graph:\n{}\n\nRevise this graph in place using node/edge tools. Preserve unrelated nodes, tasks and dependencies; completed nodes must not change unless explicitly requested. Do not modify repository files after approval. User request:\n{goal}", serde_json::to_string_pretty(existing).unwrap())
-                    } else {
-                        format!("User query:\n\n{goal}")
-                    };
+                    let task = format!("User query:\n\n{goal}");
                     let mut planner_extra_args = Vec::new();
                     if let Some(thinking) = &planner_model_cfg.thinking {
                         planner_extra_args.push("--thinking");
@@ -1616,7 +1612,7 @@ fn plan_goal_internal(
                             task: &task,
                             session_dir: &directory.join("planner-session"),
                             extension: Some(&service.extension),
-                            tools: Some(if original_graph.is_some() { "node,edge,read" } else { "node,edge,read,bash" }),
+                            tools: Some("node,edge,read,bash"),
                             session_id: None,
                             extra_args: planner_extra_args,
                             environment: vec![
