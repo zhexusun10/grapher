@@ -241,9 +241,13 @@ pub fn execution_command(
         .arg("--")
         .arg("node")
         .arg(engine.join("engine/entrypoint.mjs"));
+    // PID namespaces reuse small PIDs across concurrent Graph nodes. tsx
+    // names its IPC socket <os.tmpdir()>/tsx-<uid>/<pid>.pipe, so a shared
+    // /tmp makes independent nodes collide (EADDRINUSE).
     command
         .current_dir(&current)
-        .env("PI_CODING_AGENT_DIR", pi_dir);
+        .env("PI_CODING_AGENT_DIR", pi_dir)
+        .env("TMPDIR", &session);
     Ok(command)
 }
 

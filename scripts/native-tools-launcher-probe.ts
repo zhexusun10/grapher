@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
 export default async function () {
@@ -29,6 +30,11 @@ export default async function () {
     const visible = join(source, 'mapped.txt');
     const sessionIndex = process.argv.indexOf('--session-dir');
     assert.ok(sessionIndex >= 0);
+    if (process.platform === 'linux') {
+      // Each PID namespace reuses the same tsx IPC PIDs; its temp root must
+      // belong to this node rather than the shared /tmp.
+      assert.equal(tmpdir(), process.argv[sessionIndex + 1]);
+    }
     writeFileSync(join(process.argv[sessionIndex + 1], 'probe-session-write'), label);
     await call('write', { path: visible, content: `first-${label}` });
     await call('edit', { path: visible, edits: [{ oldText: `first-${label}`, newText: `final-${label}` }] });
