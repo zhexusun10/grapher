@@ -30,6 +30,53 @@ fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> 
 }
 
 #[test]
+fn chained_source_alternates_fall_back_to_independent_fetch() {
+    let temp = TempDir::new().unwrap();
+    let (upstream, _) = repository(temp.path());
+    let source = temp.path().join("clone");
+    git(temp.path(), &["clone", "-q", "--shared", upstream.to_str().unwrap(), source.to_str().unwrap()]).unwrap();
+    assert!(source.join(".git/objects/info/alternates").is_file());
+    let base = snapshot_repository(&source).unwrap();
+    let child = temp.path().join("child");
+    prepare(&source, &child, &base, &[]).unwrap();
+    assert!(!child.join(".git/objects/info/alternates").exists());
+    assert_eq!(git(&child, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert_eq!(fs::read_to_string(child.join("shared")).unwrap(), "base\n");
+}
+
+#[test]
+fn borrowed_objects_use_source_hash_format() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    if git(&source, &["init", "-q", "--object-format=sha256"]).is_err() {
+        return; // Older Git releases do not support SHA-256 repositories.
+    }
+    fs::write(source.join("file"), "base").unwrap();
+    let base = snapshot_repository(&source).unwrap();
+    let node = temp.path().join("node");
+    prepare(&source, &node, &base, &[]).unwrap();
+    assert_eq!(git(&node, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert_eq!(git(&node, &["rev-parse", "--show-object-format=storage"]).unwrap(), "sha256");
+}
+
+#[test]
+fn node_reuses_source_objects_without_copying_history() {
+    let temp = TempDir::new().unwrap();
+    let (source, base) = repository(temp.path());
+    let parent = temp.path().join("parent");
+    let head = branch(&source, &base, &parent, "new", "parent");
+    let child = temp.path().join("child");
+    prepare(&source, &child, &base, &["parent".into()]).unwrap();
+    let objects = fs::read_to_string(child.join(".git/objects/info/alternates")).unwrap();
+    assert_eq!(Path::new(objects.trim()).canonicalize().unwrap(),
+        source.join(".git/objects").canonicalize().unwrap());
+    assert_eq!(git(&child, &["rev-parse", "refs/grapher/parents/parent"]).unwrap(), head);
+    assert_eq!(fs::read_to_string(child.join("new")).unwrap(), "parent");
+    assert!(fs::read_dir(child.join(".git/objects/pack")).unwrap().next().is_none());
+}
+
+#[test]
 fn completed_heads_land_in_source_and_repeated_publication_is_idempotent() {
     let temp = TempDir::new().unwrap();
     let (source, base) = repository(temp.path());

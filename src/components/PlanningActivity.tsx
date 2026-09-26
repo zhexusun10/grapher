@@ -1,6 +1,35 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
+
+export const planningTranscriptCache = new Map<string, { text: string; offset: number; complete: boolean }>();
+
+export async function prefetchPlanningTranscript(planningIds: string[], signal?: AbortSignal): Promise<string> {
+  const key = planningIds.join(":");
+  const cached = planningTranscriptCache.get(key);
+  if (cached && cached.complete) return cached.text;
+  let text = "";
+  for (const planningId of planningIds) {
+    let currentOffset = 0;
+    while (!signal?.aborted) {
+      const page = await runtimeService.getPlanningOutput(planningId, "planner", currentOffset, signal);
+      if (signal?.aborted) return text;
+      if (page.planningId !== planningId || page.role !== "planner" || page.nextOffset < currentOffset || (!page.complete && page.nextOffset === currentOffset)) {
+        throw new Error("规划记录与请求不匹配，请重试。");
+      }
+      text += page.content;
+      currentOffset = page.nextOffset;
+      if (page.complete) {
+        if (!page.running && text && !text.endsWith("\n")) {
+          text += "\n";
+        }
+        break;
+      }
+    }
+  }
+  planningTranscriptCache.set(key, { text, offset: text.length, complete: true });
+  return text;
+}
 
 export function PlanningActivity({ planningIds, onReady, showUserTurns = false, skipFirstUser = false, onUserResize }: {
   planningIds: string[];
@@ -10,17 +39,37 @@ export function PlanningActivity({ planningIds, onReady, showUserTurns = false, 
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
 }) {
   const key = planningIds.join(":");
-  const [record, setRecord] = useState({ id: "", content: "" });
+  const cached = planningTranscriptCache.get(key);
+  const [record, setRecord] = useState(() => ({
+    id: key,
+    content: cached ? cached.text : "",
+  }));
   const output = record.id === key ? record.content : "";
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(() => !cached);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
 
+  useLayoutEffect(() => {
+    if (cached?.complete) {
+      onReady?.();
+    }
+  }, [cached?.complete, onReady]);
+
   useEffect(() => {
+    const cachedEntry = planningTranscriptCache.get(key);
+    if (cachedEntry?.complete) {
+      setRecord({ id: key, content: cachedEntry.text });
+      setLoading(false);
+      onReady?.();
+      return;
+    }
+
     const abort = new AbortController();
-    setRecord({ id: key, content: "" });
+    if (!cachedEntry) {
+      setRecord({ id: key, content: "" });
+      setLoading(true);
+    }
     setError("");
-    setLoading(true);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let wake: (() => void) | undefined;
     const wait = () => new Promise<void>((resolve) => {
@@ -40,7 +89,10 @@ export function PlanningActivity({ planningIds, onReady, showUserTurns = false, 
               throw new Error("规划记录与请求不匹配，请重试。");
             }
             text += page.content;
-            if (page.content) setRecord({ id: key, content: text });
+            if (page.content) {
+              setRecord({ id: key, content: text });
+              planningTranscriptCache.set(key, { text, offset, complete: false });
+            }
             offset = page.nextOffset;
             if (page.complete) {
               if (!page.running) {
@@ -56,6 +108,7 @@ export function PlanningActivity({ planningIds, onReady, showUserTurns = false, 
             }
           }
         }
+        planningTranscriptCache.set(key, { text, offset: text.length, complete: true });
       } catch (error) {
         if (!abort.signal.aborted) setError(error instanceof Error ? error.message : String(error));
       } finally {
@@ -67,10 +120,10 @@ export function PlanningActivity({ planningIds, onReady, showUserTurns = false, 
     };
     void poll();
     return () => { abort.abort(); clearTimeout(timer); wake?.(); };
-  }, [key, retry]);
+  }, [key, retry, onReady]);
 
   return <section className="planning-activity" aria-label="规划活动记录">
-    {loading && <p role="status">正在加载规划活动…</p>}
+    {loading && !output && <p role="status">正在加载规划活动…</p>}
     {error && <p role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>重试</button></p>}
     {!loading && !error && !output && <p>没有可用的规划输出。</p>}
     {output && <div className="planning-activity-output">

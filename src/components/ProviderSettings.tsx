@@ -22,6 +22,7 @@ import {
   ChevronUp,
 } from "lucide-react";
 import type { ThinkingLevel } from "../types";
+import styles from "./ProviderSettings.module.css";
 import {
   providerAuth,
   type LoginState,
@@ -639,7 +640,7 @@ export function ProviderSettings({
           {/* Pending Pulse Waiter */}
           {pending && !login?.prompt && (
             <div className="pending-poll-indicator">
-              <div className="pulse-dot"></div>
+              <div className={styles.pulseDot}></div>
               <span>正在等待 Pi 内核完成授权校验，请在浏览器中确认...</span>
             </div>
           )}

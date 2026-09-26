@@ -76,7 +76,7 @@ Planner 只有四个工具：
 - `node`：创建、更新或删除节点。
 - `edge`：创建、更新或删除边。
 - `read`：Pi 原生读取工具，不额外限制仓库范围、符号链接或 Git metadata。
-- `bash`：Pi 原生 shell 工具，不再拦截写操作。
+- `bash`：Pi 原生 shell 工具，不拦截写操作。
 
 Planner 没有文件 edit/write 工具，也不参与运行期调度。bash 直接操作源目录，文件变化立即生效，不自动备份或回撤；Reject 只拒绝计划，不恢复文件。完整边界见 [planning-inspection.md](backend/resources/planning-inspection.md)。
 

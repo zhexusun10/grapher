@@ -2,18 +2,18 @@ import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMe
 import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
 import {
   Code2, ArrowLeft, Terminal, FolderGit2, GitBranch, RotateCcw,
-  Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2,
-  Pencil, X, ArrowUp
+  Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Snapshot, PlanRouteType, RepositoryInfo, Config,
   Graph, Execution, Status, PlanningSummary, emptyGraph, TranscriptItem,
-  ChatMessage, PlanMode, ImageAttachment
+  ChatMessage, PlanMode
 } from "../../types";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
+import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
 import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
@@ -23,6 +23,7 @@ import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
+import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 
 interface GraphWorkbenchProps {
   state: Snapshot;
@@ -63,99 +64,6 @@ interface GraphWorkbenchProps {
   edgeTypes: any;
   tokens: any;
   failedPlanning?: PlanningSummary | null;
-}
-
-const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean }> = React.memo(
-  ({ content, isStreaming }) => {
-    const smoothText = useSmoothStreamText(content, isStreaming);
-    return <MarkdownRenderer content={smoothText} isStreaming={isStreaming} />;
-  }
-);
-StreamingAssistantBubble.displayName = "StreamingAssistantBubble";
-
-function EditableUserBubble({ text, images, editing, draft, onDraftChange, onEdit, onCancel, onSend, disabled }: {
-  text: string;
-  images?: ImageAttachment[];
-  editing: boolean;
-  draft: string;
-  onDraftChange: (value: string) => void;
-  onEdit?: () => void;
-  onCancel: () => void;
-  onSend: (value: string) => boolean | void | Promise<boolean>;
-  disabled?: boolean;
-}) {
-  const bubbleRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [editSize, setEditSize] = useState<{ width: number; height: number } | null>(null);
-  useLayoutEffect(() => {
-    if (!editing) return;
-    const textarea = textareaRef.current;
-    if (textarea) {
-      textarea.focus();
-      const end = textarea.value.length;
-      textarea.setSelectionRange(end, end);
-    }
-  }, [editing]);
-  const submit = () => {
-    const value = draft.trim();
-    if (value && !disabled) onSend(value);
-  };
-  const beginEdit = () => {
-    if (bubbleRef.current) {
-      const { width, height } = bubbleRef.current.getBoundingClientRect();
-      setEditSize({ width, height });
-    }
-    onEdit?.();
-  };
-  return (
-    <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}`}>
-      <div className="chat-bubble-body">
-        {editing ? (
-          <div className="chat-bubble-actions">
-            <button type="button" className="chat-bubble-action-btn" onClick={onCancel} title="取消修改" aria-label="取消修改"><X size={14} /></button>
-            <button type="button" className="chat-bubble-action-btn send" onClick={submit} disabled={disabled || !draft.trim()} title="发送修改" aria-label="发送修改"><ArrowUp size={14} /></button>
-          </div>
-        ) : onEdit ? (
-          <button type="button" className="chat-message-edit-btn" onClick={beginEdit} disabled={disabled} title="修改" aria-label="修改"><Pencil size={14} /></button>
-        ) : null}
-        <div
-          ref={bubbleRef}
-          className={`chat-bubble-user${editing ? " editing" : ""}`}
-          style={editing && editSize ? { width: editSize.width, height: editSize.height } : undefined}
-        >
-          {images && images.length > 0 && (
-            <div className="chat-user-images-preview">
-              {images.map((img, idx) => (
-                <div key={idx} className="chat-user-image-thumb">
-                  <img
-                    src={`data:${img.mimeType};base64,${img.data}`}
-                    alt={img.name || `图片 ${idx + 1}`}
-                    className="chat-user-img"
-                  />
-                </div>
-              ))}
-            </div>
-          )}
-          {editing ? (
-            <textarea
-              ref={textareaRef}
-              className="chat-bubble-edit-textarea"
-              aria-label="修改消息内容"
-              value={draft}
-              onChange={(event) => onDraftChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") { event.stopPropagation(); onCancel(); }
-                if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) {
-                  event.preventDefault(); submit();
-                }
-              }}
-              rows={1}
-            />
-          ) : text}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
@@ -219,11 +127,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }));
     return [...recorded, ...local];
   }, [selectedNode?.name, effectiveMessages, state.runId, state.events]);
-  const attempts = selectedNode
+  const attempts = useMemo(() => selectedNode
     ? [...state.executions.filter((item) => item.node === selectedNode.name),
        ...(state.mergers ?? []).filter((item) => item.node === `merge:${selectedNode.name}`)]
         .sort((a, b) => a.startedAt - b.startedAt)
-    : [];
+    : [], [selectedNode?.name, state.executions, state.mergers]);
   const execution: Execution | undefined = attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
   const isSelectedNodeWorking = Boolean(
     execution
@@ -269,7 +177,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     return turns;
-  }, [selectedNode, attempts, nodeMessages]);
+  }, [selectedNode?.name, selectedNode?.task, attempts, nodeMessages]);
 
   const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}:${execution?.id || ""}`;
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
@@ -304,15 +212,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const savedPlannerKey = savedPlannerIds.join(":");
   const [readySavedPlannerKey, setReadySavedPlannerKey] = useState("");
   const useSavedPlanner = savedPlannerIds.length > 0 &&
-    (!showLivePlanner || readySavedPlannerKey === savedPlannerKey);
+    (!isPlanning || !showLivePlanner || readySavedPlannerKey === savedPlannerKey);
   const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
-  const workbenchRef = useRef<HTMLDivElement>(null);
-  const [isResizing, setIsResizing] = useState(false);
-  const currentWidthRef = useRef<number>(390);
+  const { workbenchRef, isResizing, initialWidth, handleStartResize, handleResetResizer } = useWorkbenchResizer();
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const expandedCardObserverRef = useRef<ResizeObserver | null>(null);
   const expandedCardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUserScrolledUpRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+  const prevScrollHeightRef = useRef(0);
+  const prevViewKeyRef = useRef("");
   const suppressAutoScrollRef = useRef(false);
   const resumeAutoScrollFrameRef = useRef<number | null>(null);
   const resetChatScrollFrameRef = useRef<number | null>(null);
@@ -324,7 +233,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
-  const graphRunRef = useRef(state.runId);
+  const currentRunKey = state.runId || state.graph.originalGoal || "initial";
+  const graphRunRef = useRef(currentRunKey);
+  const [readyGraphRunKey, setReadyGraphRunKey] = useState("");
+  const isGraphMountedForRun = readyGraphRunKey === currentRunKey;
 
   if (activeConversationViewRef.current !== conversationViewKey) {
     activeConversationViewRef.current = conversationViewKey;
@@ -333,7 +245,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     suppressAutoScrollRef.current = false;
   }
 
-  const centerGraph = useCallback((instance: ReactFlowInstance<any, any>) => {
+  const centerGraph = useCallback((instance: ReactFlowInstance<any, any>, targetKey = currentRunKey) => {
     graphFlowRef.current = instance;
     if (graphFitFrameRef.current !== null) cancelAnimationFrame(graphFitFrameRef.current);
 
@@ -341,30 +253,47 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       graphFitFrameRef.current = requestAnimationFrame(() => {
         graphFitFrameRef.current = null;
         if (graphFlowRef.current !== instance) return;
-        void instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6 });
+        void instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6, duration: 0 });
+        setReadyGraphRunKey(targetKey);
       });
     });
-  }, []);
+  }, [currentRunKey]);
 
   const handleChatScroll = useCallback(() => {
     if (!chatScrollRef.current) return;
     if (suppressAutoScrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    const prevScrollTop = lastScrollTopRef.current;
+    lastScrollTopRef.current = scrollTop;
+
+    const isScrollingUp = scrollTop < prevScrollTop - 1;
 
     if (isScrollingToBottomRef.current) {
-      if (distanceFromBottom <= 30) {
+      if (isScrollingUp) {
         isScrollingToBottomRef.current = false;
+        isUserScrolledUpRef.current = true;
+        setShowScrollBottom(distanceFromBottom > 24);
+        return;
       }
-      isUserScrolledUpRef.current = false;
-      setShowScrollBottom(false);
+      if (distanceFromBottom <= 15) {
+        isScrollingToBottomRef.current = false;
+        isUserScrolledUpRef.current = false;
+        setShowScrollBottom(false);
+      }
       return;
     }
 
-    if (distanceFromBottom > 80) {
+    if (isScrollingUp) {
       isUserScrolledUpRef.current = true;
-      setShowScrollBottom(true);
-    } else if (distanceFromBottom <= 30) {
+      setShowScrollBottom(distanceFromBottom > 24);
+      return;
+    }
+
+    if (distanceFromBottom > 20) {
+      isUserScrolledUpRef.current = true;
+      setShowScrollBottom(distanceFromBottom > 24);
+    } else if (distanceFromBottom <= 15) {
       isUserScrolledUpRef.current = false;
       setShowScrollBottom(false);
     }
@@ -382,33 +311,35 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, []);
 
+  const handleSendMessageWithScroll = useCallback((val: string, options?: PromptBoxSubmitOptions) => {
+    isUserScrolledUpRef.current = false;
+    isScrollingToBottomRef.current = true;
+    setShowScrollBottom(false);
+    return onSendMessage(val, options);
+  }, [onSendMessage]);
+
   // Listen to wheel and touch gestures on chat scroll container to immediately lock auto-scroll upon upward scrolling
   useEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      if (e.deltaY < -1) {
+      if (e.deltaY < -0.5) {
         isScrollingToBottomRef.current = false;
         isUserScrolledUpRef.current = true;
-      } else if (e.deltaY > 1) {
-        const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-        if (dist <= 30) {
-          isScrollingToBottomRef.current = false;
-          isUserScrolledUpRef.current = false;
-          setShowScrollBottom(false);
-        }
       }
     };
 
-    let startTouchY = 0;
+    let lastTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches[0]) startTouchY = e.touches[0].clientY;
+      if (e.touches[0]) lastTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
       if (e.touches[0]) {
-        const delta = e.touches[0].clientY - startTouchY;
-        if (delta > 2) {
+        const curY = e.touches[0].clientY;
+        const delta = curY - lastTouchY;
+        lastTouchY = curY;
+        if (delta > 1) {
           isScrollingToBottomRef.current = false;
           isUserScrolledUpRef.current = true;
         }
@@ -504,10 +435,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     const observer = new ResizeObserver(() => {
       if (suppressAutoScrollRef.current) return;
+      const el = chatScrollRef.current;
+      if (!el) return;
 
-      // Auto-scroll to bottom when content grows, unless user scrolled up or smooth-scrolling to bottom
-      if (!isUserScrolledUpRef.current && !isScrollingToBottomRef.current) {
-        el.scrollTop = el.scrollHeight;
+      const currentScrollHeight = el.scrollHeight;
+      const heightGrew = currentScrollHeight > prevScrollHeightRef.current + 2;
+      prevScrollHeightRef.current = currentScrollHeight;
+
+      // Auto-scroll to bottom ONLY when content actually grows, unless user scrolled up or smooth-scrolling to bottom
+      if (heightGrew && !isUserScrolledUpRef.current && !isScrollingToBottomRef.current) {
+        el.scrollTop = currentScrollHeight;
       }
       handleChatScroll();
     });
@@ -537,67 +474,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     execution?.output,
   ]);
 
-  // Initialize width from localStorage directly into CSS variable
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem("grapher_pane_width");
-      const width = saved ? Math.max(280, Math.min(800, Number(saved))) : 390;
-      currentWidthRef.current = width;
-      if (workbenchRef.current) {
-        workbenchRef.current.style.setProperty("--workbench-left-width", `${width}px`);
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  // Zero-react-render resizer: mutates CSS variable on container directly during mousemove
-  const handleStartResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-    const startX = e.clientX;
-    const startWidth = currentWidthRef.current;
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      if (!workbenchRef.current) return;
-      const rect = workbenchRef.current.getBoundingClientRect();
-      const delta = moveEvent.clientX - startX;
-      const clampedWidth = Math.max(280, Math.min(rect.width - 320, startWidth + delta));
-      currentWidthRef.current = clampedWidth;
-      workbenchRef.current.style.setProperty("--workbench-left-width", `${clampedWidth}px`);
-    };
-
-    const onMouseUp = () => {
-      setIsResizing(false);
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-      try {
-        localStorage.setItem("grapher_pane_width", String(currentWidthRef.current));
-      } catch {
-        // ignore
-      }
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-  }, []);
-
-  const handleResetResizer = useCallback(() => {
-    currentWidthRef.current = 390;
-    if (workbenchRef.current) {
-      workbenchRef.current.style.setProperty("--workbench-left-width", "390px");
-    }
-    try {
-      localStorage.setItem("grapher_pane_width", "390");
-    } catch {
-      // ignore
-    }
-  }, []);
-
-
-
-
-
   const serialNode = routeType === "serial" && state.graph.nodes.length > 0 ? state.graph.nodes[0] : undefined;
   const serialNodeState = serialNode ? state.nodes[serialNode.name] : undefined;
   const serialExecutions = useMemo(() => {
@@ -605,7 +481,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     return state.executions
       .filter((item) => item.node === serialNode.name)
       .sort((a, b) => a.startedAt - b.startedAt);
-  }, [serialNode, state.executions]);
+  }, [serialNode?.name, state.executions]);
   const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
 
   const serialTurns = useMemo(() => {
@@ -656,7 +532,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     return turns;
-  }, [routeType, serialNode, effectiveMessages, serialExecutions, state.graph.originalGoal]);
+  }, [routeType, serialNode?.name, effectiveMessages, serialExecutions, state.graph.originalGoal]);
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
   const isSerialWorking = Boolean(
@@ -678,37 +554,36 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const prevEdgesCountRef = useRef(edges.length);
 
   useLayoutEffect(() => {
-    if (graphRunRef.current === state.runId) return;
-    graphRunRef.current = state.runId;
+    if (graphRunRef.current === currentRunKey) return;
+    graphRunRef.current = currentRunKey;
     prevNodesCountRef.current = nodes.length;
     prevEdgesCountRef.current = edges.length;
-    if (showGraphPane && graphFlowRef.current) centerGraph(graphFlowRef.current);
-  }, [state.runId, nodes.length, edges.length, showGraphPane, centerGraph]);
+    if (showGraphPane && graphFlowRef.current) centerGraph(graphFlowRef.current, currentRunKey);
+  }, [currentRunKey, nodes.length, edges.length, showGraphPane, centerGraph]);
 
   useEffect(() => {
     if (nodes.length > 0 && nodes.length !== prevNodesCountRef.current) {
       prevNodesCountRef.current = nodes.length;
-      if (graphFlowRef.current) {
+      if (graphFlowRef.current && isPlanning) {
         void graphFlowRef.current.fitView({ padding: 0.24, duration: 400, minZoom: 0.3, maxZoom: 1.5 });
       }
     }
-  }, [nodes.length]);
+  }, [nodes.length, isPlanning]);
 
   useEffect(() => {
     if (edges.length > 0 && edges.length !== prevEdgesCountRef.current) {
       prevEdgesCountRef.current = edges.length;
-      if (graphFlowRef.current) {
+      if (graphFlowRef.current && isPlanning) {
         void graphFlowRef.current.fitView({ padding: 0.24, duration: 450, minZoom: 0.3, maxZoom: 1.5 });
       }
     }
-  }, [edges.length]);
+  }, [edges.length, isPlanning]);
 
   const prevMsgCountRef = useRef(effectiveMessages.length);
   useEffect(() => {
     if (effectiveMessages.length > prevMsgCountRef.current) {
       prevMsgCountRef.current = effectiveMessages.length;
-      isUserScrolledUpRef.current = false;
-      if (chatScrollRef.current) {
+      if (!isUserScrolledUpRef.current && chatScrollRef.current) {
         chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
       }
     } else {
@@ -716,7 +591,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, [effectiveMessages.length]);
 
-  const revealNodeConversation = useCallback(() => {
+  const revealConversation = useCallback(() => {
     const key = conversationViewKey;
     const generation = conversationGenerationRef.current;
     if (revealChatFrameRef.current !== null) cancelAnimationFrame(revealChatFrameRef.current);
@@ -726,40 +601,50 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         revealChatFrameRef.current = null;
         if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
         const el = chatScrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        if (el && !isUserScrolledUpRef.current) el.scrollTop = el.scrollHeight;
         setReadyConversationKey(key);
       });
     });
   }, [conversationViewKey]);
+  const revealNodeConversation = revealConversation;
 
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
 
-    // 进入对话视图（Node Agent 或 Planner）时直接聚焦到底部最新内容，避免从顶部生硬滑动到底部
-    suppressAutoScrollRef.current = false;
-    isUserScrolledUpRef.current = false;
-    isScrollingToBottomRef.current = false;
-    el.scrollTop = el.scrollHeight;
-    setShowScrollBottom(false);
+    const isNewView = prevViewKeyRef.current !== conversationViewKey;
+    prevViewKeyRef.current = conversationViewKey;
 
-    if (resetChatScrollFrameRef.current !== null) {
-      cancelAnimationFrame(resetChatScrollFrameRef.current);
-    }
-    resetChatScrollFrameRef.current = requestAnimationFrame(() => {
-      resetChatScrollFrameRef.current = null;
-      if (chatScrollRef.current) {
-        chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-      }
+    if (isNewView) {
+      // 进入新对话视图（Node Agent 或 Planner）时直接聚焦到底部最新内容，避免从顶部生硬滑动到底部
+      suppressAutoScrollRef.current = false;
       isUserScrolledUpRef.current = false;
+      isScrollingToBottomRef.current = false;
+      el.scrollTop = el.scrollHeight;
       setShowScrollBottom(false);
-    });
-  }, [conversationViewKey]);
+
+      if (resetChatScrollFrameRef.current !== null) {
+        cancelAnimationFrame(resetChatScrollFrameRef.current);
+      }
+      resetChatScrollFrameRef.current = requestAnimationFrame(() => {
+        resetChatScrollFrameRef.current = null;
+        if (chatScrollRef.current && !isUserScrolledUpRef.current) {
+          chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+        }
+      });
+    }
+
+    // If no execution or planning output needed to trigger onReady, reveal after layout settle
+    if (!savedPlannerIds.length && !execution && !serialExecutions.length) {
+      revealConversation();
+    }
+  }, [conversationViewKey, savedPlannerIds.length, execution, serialExecutions.length, revealConversation]);
 
   return (
     <section
-      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"}`}
+      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${isPlanning ? "planning-active" : "historical-settled"}`}
       ref={workbenchRef}
+      style={{ "--workbench-left-width": `${initialWidth}px` } as React.CSSProperties}
     >
       {/* 左侧/居中对话与日志面板 */}
       <motion.div
@@ -790,7 +675,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               className="initial-query-scroll"
               ref={chatScrollRef}
               onScroll={handleChatScroll}
-              style={execution && readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
+              style={!isPlanning && readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
             >
               <div className="chat-messages-stream">
                 {nodeTurns.map((turn) => (
@@ -943,7 +828,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               <PromptBox
                 compact
                 repository={config?.repository}
-                onSubmit={(val, options) => onSendMessage(val, options)}
+                onSubmit={handleSendMessageWithScroll}
                 placeholder={
                   !state.approved
                     ? "图规划审批启动后，可在此向选定节点发送介入指令…"
@@ -964,7 +849,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           </div>
         ) : (
           <div className="initial-query-view">
-            <div className="initial-query-scroll" ref={chatScrollRef} onScroll={handleChatScroll}>
+            <div
+              className="initial-query-scroll"
+              ref={chatScrollRef}
+              onScroll={handleChatScroll}
+              style={!isPlanning && readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
+            >
               <div className="chat-messages-stream">
                 {routeType === "serial" ? (
                   <div className="serial-turns-container" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -994,9 +884,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         {turn.isInitial && (
                           <motion.div
                             className="route-decision-pill serial"
-                            initial={{ opacity: 0, scale: 0.96 }}
+                            initial={isPlanning ? { opacity: 0, scale: 0.96 } : false}
                             animate={{ opacity: 1, scale: 1 }}
-                            transition={{ duration: 0.25, ease: "easeOut" }}
+                            transition={{ duration: isPlanning ? 0.25 : 0, ease: "easeOut" }}
                           >
                             <Compass size={13} />
                             <span>任务路线决策：单节点执行</span>
@@ -1018,6 +908,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   runId={state.runId}
                                   execution={exec}
                                   onUserResize={handleExpandableContentChange}
+                                  onInitialOutputReady={exec.id === serialExecutions[serialExecutions.length - 1]?.id ? revealConversation : undefined}
                                 />
                               </div>
 
@@ -1088,9 +979,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     {((isPlanning && routeType === "undecided") || routeType !== "undecided") && (
                       <motion.div
                         className={`route-decision-pill ${routeType}`}
-                        initial={{ opacity: 0, scale: 0.96 }}
+                        initial={isPlanning ? { opacity: 0, scale: 0.96 } : false}
                         animate={{ opacity: 1, scale: 1 }}
-                        transition={{ duration: 0.25, ease: "easeOut" }}
+                        transition={{ duration: isPlanning ? 0.25 : 0, ease: "easeOut" }}
                       >
                         {routeType === "undecided" ? (
                           <>
@@ -1114,7 +1005,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           planningIds={savedPlannerIds}
                           showUserTurns={!isPlanning}
                           skipFirstUser={state.events.some((event) => event.type === "created" && event.planning_id === savedPlannerIds[0])}
-                          onReady={() => setReadySavedPlannerKey(savedPlannerKey)}
+                          onReady={() => {
+                            setReadySavedPlannerKey(savedPlannerKey);
+                            revealConversation();
+                          }}
                           onUserResize={handleExpandableContentChange}
                         />
                       </div>
@@ -1369,7 +1263,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               <PromptBox
                 compact
                 repository={config?.repository}
-                onSubmit={(val, options) => onSendMessage(val, options)}
+                onSubmit={handleSendMessageWithScroll}
                 placeholder={
                   isPlanning
                     ? "输入补充规划或纠偏要求，发送将实时转向 (Steer)…"
@@ -1393,16 +1287,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       </motion.div>
 
       {/* 左右可调节分割器 与 右侧执行拓扑图面板 */}
-      <AnimatePresence>
+      <AnimatePresence initial={false}>
         {showGraphPane && (
           <>
             <motion.div
               key="workbench-resizer"
               className={`workbench-resizer ${isResizing ? "active" : ""}`}
-              initial={{ opacity: 0 }}
+              initial={false}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.25 }}
+              transition={{ duration: 0 }}
               onMouseDown={handleStartResize}
               onDoubleClick={handleResetResizer}
               title="按住左右拖动调节宽度，双击恢复默认"
@@ -1413,10 +1307,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             <motion.div
               key="graph-pane"
               className="graph-pane"
-              initial={{ opacity: 0, x: 40 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 40 }}
-              transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+              initial={false}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0 }}
             >
               <div className="graph-toolbar">
                 <div className="toolbar-left">
@@ -1465,7 +1359,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </svg>
 
                 <ReactFlow
-                  onInit={(instance) => centerGraph(instance)}
+                  fitView
+                  fitViewOptions={{ padding: 0.24, minZoom: 0.3, maxZoom: 1.6 }}
+                  onInit={(instance) => centerGraph(instance, currentRunKey)}
+                  style={{
+                    opacity: isGraphMountedForRun ? 1 : 0,
+                    pointerEvents: isGraphMountedForRun ? "auto" : "none",
+                  }}
                   nodes={animatedNodes}
                   edges={edges}
                   nodeTypes={nodeTypes}

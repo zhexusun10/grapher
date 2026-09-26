@@ -84,7 +84,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const heightFlushScheduledRef = useRef(false);
 
   const measure = useCallback((id: string, height: number) => {
-    if (height <= 0 || itemHeightsRef.current.get(id) === height) return;
+    if (inline || height <= 0 || itemHeightsRef.current.get(id) === height) return;
     itemHeightsRef.current.set(id, height);
     if (!heightFlushScheduledRef.current) {
       heightFlushScheduledRef.current = true;
@@ -93,12 +93,26 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
         setHeightVersion(value => value + 1);
       });
     }
-  }, []);
+  }, [inline]);
   const [containerHeight, setContainerHeight] = useState(600);
 
-  // Incrementally parse output as it arrives synchronously before paint
-  useLayoutEffect(() => {
-    if (!output) {
+  const parseAvailableOutput = useCallback((rawOutput: string): boolean => {
+    if (!rawOutput) {
+      if (lastProcessedPosRef.current > 0 || itemsRef.current.length > 0) {
+        lastProcessedPosRef.current = 0;
+        itemsRef.current = [];
+        pendingToolsRef.current.clear();
+        inTagThinkingRef.current = false;
+        seenFirstUserRef.current = false;
+        userMessageStartsRef.current.clear();
+        pendingUserStartRef.current = false;
+        assistantStartIndexRef.current = 0;
+        return true;
+      }
+      return false;
+    }
+
+    if (rawOutput.length < lastProcessedPosRef.current) {
       lastProcessedPosRef.current = 0;
       itemsRef.current = [];
       pendingToolsRef.current.clear();
@@ -107,35 +121,18 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       userMessageStartsRef.current.clear();
       pendingUserStartRef.current = false;
       assistantStartIndexRef.current = 0;
-      setItemsVersion((v) => v + 1);
-      return;
     }
 
-    // If output was cleared or replaced with a completely different shorter string
-    if (output.length < lastProcessedPosRef.current) {
-      lastProcessedPosRef.current = 0;
-      itemsRef.current = [];
-      pendingToolsRef.current.clear();
-      inTagThinkingRef.current = false;
-      seenFirstUserRef.current = false;
-      userMessageStartsRef.current.clear();
-      pendingUserStartRef.current = false;
-      assistantStartIndexRef.current = 0;
-    }
+    const unparsed = rawOutput.slice(lastProcessedPosRef.current);
+    if (!unparsed) return false;
 
-    const unparsed = output.slice(lastProcessedPosRef.current);
-    if (!unparsed) return;
-
-    // Process all complete lines, plus keep any trailing incomplete line in lastProcessedPos
     const lastNewlineIdx = unparsed.lastIndexOf("\n");
-    if (lastNewlineIdx === -1) return; // Wait for at least one complete line
+    if (lastNewlineIdx === -1) return false;
 
     const chunkToProcess = unparsed.slice(0, lastNewlineIdx + 1);
     lastProcessedPosRef.current += chunkToProcess.length;
 
     const lines = chunkToProcess.split("\n");
-    // Each parsed chunk publishes new item identities. Memoized tool/thinking
-    // cards must see streamed content and status changes, not mutated old props.
     const currentItems = itemsRef.current.map(item => ({ ...item }));
     itemsRef.current = currentItems;
     const pendingTools = new Map(currentItems
@@ -485,12 +482,25 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       }
     }
 
-    setItemsVersion((v) => v + 1);
-  }, [output, showUserTurns, skipFirstUser]);
+    return true;
+  }, [showUserTurns, skipFirstUser]);
+
+  // Synchronously parse any initial output chunk immediately on mount so frame 0 renders with items populated
+  if (output && lastProcessedPosRef.current === 0 && itemsRef.current.length === 0) {
+    parseAvailableOutput(output);
+  }
+
+  // Incrementally parse output as it arrives synchronously before paint
+  useLayoutEffect(() => {
+    const changed = parseAvailableOutput(output);
+    if (changed) {
+      setItemsVersion((v) => v + 1);
+    }
+  }, [output, parseAvailableOutput]);
 
   const items = itemsRef.current;
 
-  const touchStartYRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
 
   const syncScrollState = useCallback(() => {
     const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
@@ -498,12 +508,21 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
 
     const currentScrollTop = scrollParent.scrollTop;
     const distanceFromBottom = scrollParent.scrollHeight - currentScrollTop - scrollParent.clientHeight;
-    const isUserAwayFromBottom = distanceFromBottom > 24;
+    const prevScrollTop = lastScrollTopRef.current;
+    lastScrollTopRef.current = currentScrollTop;
+
     setScrollTop(currentScrollTop);
-    if (!isUserAwayFromBottom) {
-      isUserScrolledUpRef.current = false;
-    } else {
+
+    // If user scrolled upwards, immediately lock scrolled-up state
+    if (currentScrollTop < prevScrollTop - 1) {
       isUserScrolledUpRef.current = true;
+      return;
+    }
+
+    if (distanceFromBottom > 20) {
+      isUserScrolledUpRef.current = true;
+    } else if (distanceFromBottom <= 15) {
+      isUserScrolledUpRef.current = false;
     }
   }, []);
 
@@ -542,15 +561,6 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
         }
         if (!isUserScrolledUpRef.current && !suppressAutoFollowRef.current) {
           scrollParent.scrollTop = scrollParent.scrollHeight;
-          requestAnimationFrame(() => {
-            if (!isUserScrolledUpRef.current && !suppressAutoFollowRef.current && containerRef.current) {
-              const sp = getScrollParent(containerRef.current) || containerRef.current;
-              if (sp) {
-                sp.scrollTop = sp.scrollHeight;
-                setScrollTop(sp.scrollTop);
-              }
-            }
-          });
         }
         setScrollTop(scrollParent.scrollTop);
       }
@@ -574,21 +584,21 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     
     const onScroll = () => syncScrollState();
     const onWheel = (e: WheelEvent) => {
-      if (e.deltaY < -1) {
+      if (e.deltaY < -0.5) {
         isUserScrolledUpRef.current = true;
-      } else if (e.deltaY > 1) {
-        const dist = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
-        if (dist <= 24) {
-          isUserScrolledUpRef.current = false;
-        }
       }
     };
+    let lastTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches[0]) touchStartYRef.current = e.touches[0].clientY;
+      if (e.touches[0]) lastTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
-      if (e.touches[0] && e.touches[0].clientY - touchStartYRef.current > 2) {
-        isUserScrolledUpRef.current = true;
+      if (e.touches[0]) {
+        const curY = e.touches[0].clientY;
+        if (curY - lastTouchY > 1) {
+          isUserScrolledUpRef.current = true;
+        }
+        lastTouchY = curY;
       }
     };
 

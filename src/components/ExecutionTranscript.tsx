@@ -5,7 +5,33 @@ import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
 // In-memory cache for execution transcripts so switching between node agents or reopening them
 // immediately displays known logs on frame 0 instead of flashing empty.
-const executionTranscriptCache = new Map<string, { text: string; offset: number; complete: boolean; status?: string }>();
+export const executionTranscriptCache = new Map<string, { text: string; offset: number; complete: boolean; status?: string }>();
+
+export async function prefetchExecutionTranscript(runId: string, execution: Execution, signal?: AbortSignal): Promise<string> {
+  const cacheKey = `${runId}:${execution.id}`;
+  const cached = executionTranscriptCache.get(cacheKey);
+  if (cached && cached.complete) return cached.text;
+  if (execution.outputBytes === undefined) {
+    const text = execution.output ?? "";
+    executionTranscriptCache.set(cacheKey, { text, offset: text.length, complete: execution.status !== "running", status: execution.status });
+    return text;
+  }
+  let text = cached ? cached.text : "";
+  let offset = cached ? cached.offset : 0;
+  while (!signal?.aborted) {
+    const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, signal);
+    if (signal?.aborted) return text;
+    text += page.content;
+    offset = page.nextOffset;
+    if (page.complete) {
+      const complete = page.status !== "running";
+      const finalText = complete && text && !text.endsWith("\n") ? `${text}\n` : text;
+      executionTranscriptCache.set(cacheKey, { text: finalText, offset, complete, status: page.status });
+      return finalText;
+    }
+  }
+  return text;
+}
 
 // Only mounted conversations fetch output. Switching attempts cancels the old
 // cursor and releases its transcript; snapshots carry metadata alone.

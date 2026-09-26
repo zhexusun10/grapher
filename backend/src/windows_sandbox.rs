@@ -391,6 +391,20 @@ fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String>
     for path in [&current, &session, &engine, &agent, &temp] {
         grant_tree(path, sid, GENERIC_ALL)?;
     }
+    // The node borrows only the host Git object database. Validate its
+    // alternate against the bound source before granting read-only access;
+    // never accept an arbitrary agent-supplied alternate path.
+    if let Ok(alternate) = fs::read_to_string(current.join(".git/objects/info/alternates")) {
+        let expected = crate::workspace::repository_git(
+            &source, &["rev-parse", "--path-format=absolute", "--git-path", "objects"]
+        )?;
+        let objects = PathBuf::from(alternate.trim()).canonicalize().map_err(|e| e.to_string())?;
+        if objects != PathBuf::from(expected).canonicalize().map_err(|e| e.to_string())? {
+            return Err("Untrusted Graph object alternate".into());
+        }
+        grant_traverse(&objects, sid)?;
+        grant_tree(&objects, sid, GENERIC_READ_EXECUTE)?;
+    }
     unsafe {
         grant_access(&target, sid, GENERIC_READ_EXECUTE, 0)?;
     }

@@ -654,7 +654,8 @@ fn run_pi_with_timeout(
                     on_output(format!("[stderr] {line}\n"));
                     continue;
                 }
-                if let Ok(event) = serde_json::from_str::<Value>(&line) {
+                let mut event = serde_json::from_str::<Value>(&line).ok();
+                if let Some(event) = event.as_ref() {
                     match event["type"].as_str().unwrap_or_default() {
                         "agent_start" | "turn_start" if rpc_agent => agent_ended = None,
                         "agent_settled" if rpc_agent => agent_ended = Some(Instant::now()),
@@ -705,15 +706,16 @@ fn run_pi_with_timeout(
                         _ => {}
                     }
                 }
-                let received_line = if let Ok(mut event) = serde_json::from_str::<Value>(&line) {
-                    if let Some(object) = event.as_object_mut() {
-                        object.insert("grapherReceivedAt".into(), crate::model::now().into());
-                    }
-                    Some(serde_json::to_string(&event).map_err(|error| error.to_string())?)
+                if let Some(object) = event.as_mut().and_then(Value::as_object_mut) {
+                    object.insert("grapherReceivedAt".into(), crate::model::now().into());
+                }
+                let mut output = if let Some(event) = event {
+                    serde_json::to_string(&event).map_err(|error| error.to_string())?
                 } else {
-                    None
+                    line
                 };
-                on_output(format!("{}\n", received_line.as_deref().unwrap_or(&line)));
+                output.push('\n');
+                on_output(output);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 if child

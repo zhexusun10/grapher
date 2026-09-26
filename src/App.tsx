@@ -1,13 +1,12 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MarkerType, type Edge } from "@xyflow/react";
 import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 import {
   defaultConfig, emptyGraph, emptySnapshot,
-  type Config, type Graph, type Plan, type ProjectItem, type RepositoryInfo,
-  type Snapshot, type PlanRouteType, type TranscriptItem, type NodeState,
-  type PlanningSummary, type Execution, type PlanMode, type ChatMessage,
+  type Config, type Graph, type ProjectItem, type RepositoryInfo,
+  type Snapshot, type PlanRouteType, type TranscriptItem,
+  type PlanningSummary, type PlanMode, type ChatMessage,
   type ImageAttachment
 } from "./types";
 import { tokens } from "./tokens";
@@ -17,13 +16,18 @@ import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
 
-import { TaskNode, type WorkNode } from "./components/graph/TaskNode";
+import { TaskNode } from "./components/graph/TaskNode";
+import { useGraphElements } from "./hooks/useGraphElements";
+import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
+import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
 import { Sidebar } from "./components/layout/Sidebar";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
 import { PlanningSummaryCard } from "./components/PlanningSummaryCard";
+import { prefetchPlanningTranscript } from "./components/PlanningActivity";
+import { prefetchExecutionTranscript } from "./components/ExecutionTranscript";
 import { PublicationPanel } from "./components/PublicationPanel";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
 import { ConfirmModal, type ConfirmModalState } from "./components/modals/ConfirmModal";
@@ -31,98 +35,8 @@ import { ConfirmModal, type ConfirmModalState } from "./components/modals/Confir
 import { SettingsModal } from "./components/modals/SettingsModal";
 import { EditorModal } from "./components/modals/EditorModal";
 
-// Point 1: Fast O(N) shallow diff functions to avoid 700ms JSON.stringify serialization
-function areNodesEqual(a: Record<string, NodeState>, b: Record<string, NodeState>): boolean {
-  if (a === b) return true;
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
-  if (keysA.length !== keysB.length) return false;
-  for (const k of keysA) {
-    const na = a[k];
-    const nb = b[k];
-    if (!nb || na.status !== nb.status || na.revision !== nb.revision || na.error !== nb.error || na.head !== nb.head) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function areFeedbackCountsEqual(a?: Record<string, number>, b?: Record<string, number>): boolean {
-  if (a === b) return true;
-  if (!a || !b) return a === b;
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
-  if (keysA.length !== keysB.length) return false;
-  for (const k of keysA) {
-    if (a[k] !== b[k]) return false;
-  }
-  return true;
-}
-
-function areExecutionStreamsEqual(a: Execution[] = [], b: Execution[] = []): boolean {
-  return a.length === b.length && a.every((execution, index) => {
-    const next = b[index];
-    return execution.id === next.id && execution.status === next.status &&
-      (execution.outputBytes ?? execution.output.length) === (next.outputBytes ?? next.output.length);
-  });
-}
-
-function executionActivityVersion(executions: Execution[] = []): string {
-  return executions.map((execution) =>
-    `${execution.id}:${execution.status}:${execution.outputBytes ?? execution.output.length}`
-  ).join(",");
-}
-
-function snapshotActivityVersion(snapshot: Snapshot): string {
-  const lastSequence = snapshot.events.at(-1)?.sequence ?? 0;
-  return [
-    snapshot.phase,
-    snapshot.approved ? "approved" : "unapproved",
-    lastSequence,
-    executionActivityVersion(snapshot.executions),
-    executionActivityVersion(snapshot.mergers),
-    snapshot.publication?.status ?? "",
-  ].join("|");
-}
-
 const nodeTypes = { work: TaskNode };
 const edgeTypes = { workflow: SmoothWorkflowEdge };
-
-function computeExecutionLayers(graph: Graph, plan?: Plan | null): string[][] {
-  if (plan?.executionBatches && plan.executionBatches.length > 0) {
-    const scheduled = new Set(plan.executionBatches.flat());
-    const missing = graph.nodes.map((node) => node.name).filter((name) => !scheduled.has(name));
-    return missing.length ? [...plan.executionBatches, missing] : plan.executionBatches;
-  }
-  const nodeNames = graph.nodes.map((n) => n.name);
-  if (nodeNames.length === 0) return [];
-  const deps = graph.edges.filter(
-    (e) => !e.feedback && nodeNames.includes(e.from) && nodeNames.includes(e.to)
-  );
-  const inDegree = new Map<string, number>(nodeNames.map((n) => [n, 0]));
-  for (const edge of deps) {
-    inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
-  }
-  let ready = nodeNames.filter((n) => inDegree.get(n) === 0);
-  const visited = new Set<string>();
-  const batches: string[][] = [];
-  while (ready.length > 0) {
-    batches.push(ready);
-    const next: string[] = [];
-    for (const name of ready) {
-      visited.add(name);
-      for (const edge of deps.filter((e) => e.from === name)) {
-        const deg = (inDegree.get(edge.to) ?? 1) - 1;
-        inDegree.set(edge.to, deg);
-        if (deg === 0) next.push(edge.to);
-      }
-    }
-    ready = next;
-  }
-  const remaining = nodeNames.filter((n) => !visited.has(n));
-  if (remaining.length > 0) batches.push(remaining);
-  return batches.length > 0 ? batches : [nodeNames];
-}
 
 export default function App() {
   const [state, setState] = useState<Snapshot>(emptySnapshot);
@@ -188,6 +102,7 @@ export default function App() {
       return {};
     }
   });
+  const pendingRunLabelIdsRef = useRef(new Set<string>());
 
   const [recentlyAddedEdgeIds, setRecentlyAddedEdgeIds] = useState<Set<string>>(new Set());
   const pendingToolArgsRef = useRef<Map<string, any>>(new Map());
@@ -196,9 +111,10 @@ export default function App() {
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
   
   useEffect(() => {
-    const missing = runs.filter(id => !(id in runLabels));
+    const missing = runs.filter(id => !(id in runLabels) && !pendingRunLabelIdsRef.current.has(id));
     if (missing.length > 0) {
       missing.forEach(id => {
+        pendingRunLabelIdsRef.current.add(id);
         runtimeService.history(id).then(snapshot => {
           setRunLabels(prev => {
             if (prev[id] !== undefined) return prev; // already fetched
@@ -213,54 +129,12 @@ export default function App() {
             localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
             return updated;
           });
-        });
+        }).finally(() => pendingRunLabelIdsRef.current.delete(id));
       });
     }
   }, [runs, runLabels, runtimeService]);
-  const [activeBackendRunId, setActiveBackendRunId] = useState<string | null>(null);
-  const [activeBackendPhase, setActiveBackendPhase] = useState<string | null>(null);
-  const [runIndicators, setRunIndicators] = useState<Record<string, { unread: boolean; phase: string }>>({});
-  const runActivityVersionsRef = useRef(new Map<string, string>());
-  const viewedRunIdRef = useRef(state.runId);
-  viewedRunIdRef.current = state.runId;
-
-  const markSnapshotRead = useCallback((snapshot: Snapshot) => {
-    if (!snapshot.runId) return;
-    runActivityVersionsRef.current.set(snapshot.runId, snapshotActivityVersion(snapshot));
-    setRunIndicators((prev) => {
-      const current = prev[snapshot.runId];
-      if (current && !current.unread && current.phase === snapshot.phase) return prev;
-      return { ...prev, [snapshot.runId]: { unread: false, phase: snapshot.phase } };
-    });
-  }, []);
-
-  const clearRunUnread = useCallback((runId: string) => {
-    setRunIndicators((prev) => {
-      const current = prev[runId];
-      if (!current?.unread) return prev;
-      return { ...prev, [runId]: { ...current, unread: false } };
-    });
-  }, []);
-
-  const observeRunSnapshot = useCallback((snapshot: Snapshot) => {
-    if (!snapshot.runId) return;
-    const nextVersion = snapshotActivityVersion(snapshot);
-    const previousVersion = runActivityVersionsRef.current.get(snapshot.runId);
-    runActivityVersionsRef.current.set(snapshot.runId, nextVersion);
-    const isViewed = viewedRunIdRef.current === snapshot.runId;
-
-    setRunIndicators((prev) => {
-      const current = prev[snapshot.runId];
-      const hasNewContent = previousVersion !== undefined && previousVersion !== nextVersion;
-      const unread = isViewed ? false : Boolean(current?.unread || hasNewContent);
-      if (current?.unread === unread && current.phase === snapshot.phase) return prev;
-      return { ...prev, [snapshot.runId]: { unread, phase: snapshot.phase } };
-    });
-  }, []);
-
-  useEffect(() => {
-    markSnapshotRead(state);
-  }, [state, markSnapshotRead]);
+  const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot } = useRunIndicators(state);
+  const setBackendStatus = useSnapshotPolling(busy, setState, observeRunSnapshot);
 
   const [dataPath, setDataPath] = useState("");
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
@@ -660,8 +534,7 @@ export default function App() {
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       markSnapshotRead(data.snapshot);
-      setActiveBackendRunId(data.snapshot.runId);
-      setActiveBackendPhase(data.snapshot.phase);
+      setBackendStatus({ runId: data.snapshot.runId, phase: data.snapshot.phase });
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
       setSelected("");
@@ -1740,68 +1613,6 @@ export default function App() {
     return () => { abort.abort(); clearTimeout(timer); };
   }, [busy, isPlanning, hasCurrentPlan, config.repository, planningRecovery]);
 
-  // Point 1: Adaptive Polling Interval with Fast Equality Diffing
-  useEffect(() => {
-    if (busy) return;
-
-    // Check if background work is actively running/publishing/merging/approving
-    const isTaskActive = activeBackendRunId &&
-      ["running", "awaiting_approval", "publishing", "merging"].includes(activeBackendPhase ?? "");
-
-    // Keep execution responsive without fetching full metadata every second.
-    const pollInterval = isTaskActive ? 2500 : 3500;
-
-    let cancelled = false;
-    const abort = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      try {
-          const newSnap = await runtimeService.snapshot(abort.signal);
-          if (cancelled) return;
-          if (!newSnap || !newSnap.runId) {
-            setActiveBackendRunId(null);
-            setActiveBackendPhase(null);
-            return;
-          }
-          setActiveBackendRunId(newSnap.runId);
-          setActiveBackendPhase(newSnap.phase);
-          observeRunSnapshot(newSnap);
-
-          setState((prev) => {
-            if (prev.runId !== newSnap.runId) {
-              return prev;
-            }
-            if (
-              prev.runId === newSnap.runId &&
-              prev.phase === newSnap.phase &&
-              prev.paused === newSnap.paused &&
-              prev.approved === newSnap.approved &&
-              prev.events.length === newSnap.events.length &&
-              areExecutionStreamsEqual(prev.executions, newSnap.executions) &&
-              areExecutionStreamsEqual(prev.mergers, newSnap.mergers) &&
-              areNodesEqual(prev.nodes, newSnap.nodes) &&
-              areFeedbackCountsEqual(prev.feedbackCounts, newSnap.feedbackCounts)
-            ) {
-              return prev;
-            }
-            return newSnap;
-          });
-      } catch (err) {
-        if (!cancelled) console.warn("Snapshot poll error:", err);
-      } finally {
-        // Wait for the current response before scheduling another large snapshot.
-        if (!cancelled) timer = setTimeout(poll, pollInterval);
-      }
-    };
-    timer = setTimeout(poll, pollInterval);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      abort.abort();
-    };
-  }, [busy, activeBackendRunId, activeBackendPhase, observeRunSnapshot]);
-
   useEffect(() => {
     // Only an actual serial route may auto-start. A manually edited Graph IR
     // with a single node named "task" must still wait for explicit approval.
@@ -1847,168 +1658,7 @@ export default function App() {
     }
   }, [isPlanning]);
 
-  // Keep the same geometry for nodes and edges. Wider rows leave room for
-  // edge channels; taller layers keep adjacent-layer paths below the cards.
-  const graphLayout = useMemo(() => {
-    const layers = computeExecutionLayers(state.graph, state.plan);
-    const hasMergers = (state.mergers ?? []).some((m) => m.node.startsWith("merge:"));
-    const positions = new Map<string, { x: number; y: number; layer: number }>();
-    layers.forEach((batch, layer) => batch.forEach((name, index) => {
-      positions.set(name, {
-        x: (index - (batch.length - 1) / 2) * 300 + 160,
-        y: layer * (hasMergers ? 320 : 210) + 24,
-        layer,
-      });
-    }));
-    const xs = Array.from(positions.values(), (position) => position.x);
-    return { positions, minX: Math.min(...xs, 160), maxX: Math.max(...xs, 160) + 236 };
-  }, [state.graph, state.plan, state.mergers]);
-
-  const mergeTargets = useMemo(() => {
-    const targets = new Map<string, NonNullable<typeof state.mergers>[number]>();
-    for (const merger of state.mergers ?? []) {
-      const target = merger.node.startsWith("merge:") ? merger.node.slice(6) : "";
-      if (target && state.graph.nodes.some((node) => node.name === target)) targets.set(target, merger);
-    }
-    return targets;
-  }, [state.mergers, state.graph.nodes]);
-  // Reuse the card's existing top/bottom/side ports. Route only long edges
-  // around intermediate rows; never insert a new port or an off-card junction.
-  const edgeRouting = useMemo(() => {
-    const rowBounds = new Map<number, { min: number; max: number }>();
-    for (const position of graphLayout.positions.values()) {
-      const row = rowBounds.get(position.layer);
-      if (row) {
-        row.min = Math.min(row.min, position.x);
-        row.max = Math.max(row.max, position.x);
-      } else rowBounds.set(position.layer, { min: position.x, max: position.x });
-    }
-    const laneCount = { left: 0, right: 0 };
-    const center = (graphLayout.minX + graphLayout.maxX) / 2;
-    return new Map<string, { sourceHandle: string; targetHandle: string; routeX?: number; routeSide?: string }>(state.graph.edges.map((edge) => {
-      const from = graphLayout.positions.get(edge.from);
-      const to = graphLayout.positions.get(edge.to);
-      const side = from && to && (from.x + to.x + 236) / 2 > center ? "right" : "left";
-      const boundary = side === "left" ? "min" : "max";
-      const sideRoute = !!edge.feedback && !!from && !!to &&
-        from.x === rowBounds.get(from.layer)?.[boundary] &&
-        to.x === rowBounds.get(to.layer)?.[boundary];
-      const routed = !!edge.feedback || (!!from && !!to && to.layer - from.layer > 1);
-      const routeX = routed
-        ? side === "left" ? graphLayout.minX - 48 - laneCount.left++ * 14
-          : graphLayout.maxX + 48 + laneCount.right++ * 14
-        : undefined;
-      return [`${edge.from}-${edge.feedback ? "fb" : "dep"}-${edge.to}`, {
-        sourceHandle: sideRoute ? `${side}-source` : "bottom",
-        targetHandle: sideRoute ? `${side}-target` : "top",
-        routeX,
-        routeSide: sideRoute ? side : undefined,
-      }] as const;
-    }));
-  }, [state.graph.edges, graphLayout]);
-
-  const nodes = useMemo<WorkNode[]>(() => {
-    const taskNodes: WorkNode[] = state.graph.nodes.map((node) => {
-      const position = graphLayout.positions.get(node.name) ?? { x: 160, y: 24, layer: 0 };
-      const nodeAttempts = state.executions.filter((execution) => execution.node === node.name);
-
-      const incoming = state.graph.edges.filter((edge) => edge.to === node.name);
-      const outgoing = state.graph.edges.filter((edge) => edge.from === node.name);
-      const route = (edge: Graph["edges"][number]) =>
-        edgeRouting.get(`${edge.from}-${edge.feedback ? "fb" : "dep"}-${edge.to}`);
-      return {
-        id: node.name,
-        type: "work",
-        width: 236,
-        position: { x: position.x, y: position.y },
-        data: {
-          name: node.name,
-          task: node.task,
-          status: state.nodes[node.name]?.status ?? "waiting",
-          attempts: nodeAttempts.length,
-          hint: state.graph.edges
-            .filter((edge) => edge.to === node.name || (edge.from === node.name && edge.feedback))
-            .map((edge) => `${edge.from} → ${edge.to}: ${edge.relation}${edge.feedback ? " (feedback)" : ""}`)
-            .join("\n"),
-          reviewer: state.graph.edges.some((edge) => edge.from === node.name && edge.feedback),
-          selected: selected === node.name,
-          worktree: nodeAttempts.at(-1)?.worktree ?? "",
-          hasTop: incoming.some((edge) => route(edge)?.targetHandle === "top") || mergeTargets.has(node.name),
-          hasBottom: outgoing.some((edge) => route(edge)?.sourceHandle === "bottom"),
-          hasLeftTarget: incoming.some((edge) => route(edge)?.targetHandle === "left-target"),
-          hasLeftSource: outgoing.some((edge) => route(edge)?.sourceHandle === "left-source"),
-          hasRightTarget: incoming.some((edge) => route(edge)?.targetHandle === "right-target"),
-          hasRightSource: outgoing.some((edge) => route(edge)?.sourceHandle === "right-source"),
-        },
-      };
-    });
-    // A merger is an execution, not a planner node. Show one card per fan-in
-    // target only after a real conflict has launched the resolver.
-    return [...taskNodes, ...Array.from(mergeTargets, ([target, merger]): WorkNode => {
-      const node = taskNodes.find((item) => item.id === target)!;
-      const attempts = (state.mergers ?? []).filter((item) => item.node === `merge:${target}`).length;
-      return {
-        id: `merger:${target}`, type: "work", width: 236,
-        position: { x: node.position.x, y: node.position.y - 155 },
-        data: {
-          name: `merger · ${target}`, task: "合并上游分支冲突",
-          status: merger.status === "completed" ? "done" : merger.status === "running" ? "running" : "failed",
-          attempts, hint: `合并至 ${target}`, reviewer: false, selected: false,
-          worktree: merger.worktree, hasTop: true, hasBottom: true,
-          hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
-        },
-      };
-    })];
-  }, [state.graph, state.nodes, state.executions, state.mergers, selected, graphLayout, edgeRouting, mergeTargets]);
-
-  const edges = useMemo<Edge[]>(() => {
-    const graphEdges = state.graph.edges.map((edge) => {
-      const isFeedback = !!edge.feedback;
-      const edgeId = `${edge.from}-${isFeedback ? "fb" : "dep"}-${edge.to}`;
-      const routing = edgeRouting.get(edgeId);
-      const isNew = recentlyAddedEdgeIds.has(edgeId);
-
-      return {
-        id: edgeId,
-        source: edge.from,
-        target: !isFeedback && mergeTargets.has(edge.to) ? `merger:${edge.to}` : edge.to,
-        type: "workflow",
-        sourceHandle: routing?.sourceHandle ?? "bottom",
-        targetHandle: routing?.targetHandle ?? "top",
-        className: isNew ? "edge-entering" : undefined,
-        animated: !isFeedback && state.nodes[edge.from]?.status === "running",
-        markerEnd: isFeedback ? "url(#workflow-arrow-feedback)" : "url(#workflow-arrow-default)",
-        data: { isNew, routeX: routing?.routeX, routeSide: routing?.routeSide },
-        style: {
-          stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
-          strokeWidth: 1.5,
-          strokeDasharray: isFeedback ? "5 4" : undefined,
-        },
-        label: isFeedback
-          ? `${edge.relation || "缺陷重构反馈"} · REVISE`
-          : (edge.relation || undefined),
-        labelStyle: {
-          fontSize: 10,
-          fontWeight: 500,
-          fill: isFeedback ? tokens.graphEdgeFeedbackText : tokens.textSecondary,
-          fontFamily: isFeedback ? "monospace" : "inherit",
-        },
-        labelBgStyle: {
-          fill: isFeedback ? tokens.graphEdgeFeedbackBg : tokens.bgCanvas,
-          stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.borderDefault,
-          strokeWidth: 1,
-        },
-        labelBgPadding: [6, 3] as [number, number],
-        labelBgBorderRadius: 4,
-      };
-    });
-    return [...graphEdges, ...Array.from(mergeTargets.keys(), (target): Edge => ({
-      id: `merger:${target}->${target}`, source: `merger:${target}`, target,
-      sourceHandle: "bottom", targetHandle: "top", type: "workflow",
-      markerEnd: "url(#workflow-arrow-default)",
-      style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
-    }))];
-  }, [state.graph.edges, state.nodes, recentlyAddedEdgeIds, edgeRouting, mergeTargets]);
+  const { nodes, edges } = useGraphElements(state, selected, recentlyAddedEdgeIds);
 
   const isLandingView = state.graph.nodes.length === 0 &&
     !isPlanning &&
@@ -2038,6 +1688,31 @@ export default function App() {
           if (id !== state.runId) setPlannerStream(initialPlannerStream);
           const snapshot = await runtimeService.loadRun(id);
           const deduced = deduceRouteType(snapshot);
+
+          // Prefetch transcripts before switching state so content is ready on frame 0
+          if (deduced === "graph") {
+            const savedPlannerId = snapshot.planningId;
+            const ids = (snapshot.events || [])
+              .filter((e) => e.type === "created" || e.type === "graph_revised")
+              .map((e) => e.planning_id)
+              .filter((pid): pid is string => Boolean(pid));
+            if (savedPlannerId) ids.push(savedPlannerId);
+            const seen = new Set<string>();
+            const uniqueIds = ids.filter((pid) => {
+              if (seen.has(pid)) return false;
+              seen.add(pid);
+              return true;
+            });
+            if (uniqueIds.length > 0) {
+              await prefetchPlanningTranscript(uniqueIds).catch(() => {});
+            }
+          } else if (deduced === "serial" && snapshot.executions && snapshot.executions.length > 0) {
+            const latestExec = snapshot.executions[snapshot.executions.length - 1];
+            if (latestExec) {
+              await prefetchExecutionTranscript(id, latestExec).catch(() => {});
+            }
+          }
+
           setState(snapshot);
           markSnapshotRead(snapshot);
           setRouteType(deduced);
@@ -2105,7 +1780,7 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0, transition: { duration: 0.18 } }}
-              transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             >
               {recoveredPlanning && <section aria-label="恢复进行中的规划">
                 <p role="status">已连接正在进行的规划，活动会自动更新。</p>

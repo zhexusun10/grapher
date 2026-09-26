@@ -47,6 +47,10 @@ pub(crate) fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf
 pub struct Runtime {
     pub store: Store,
     pub state: Snapshot,
+    // Changes whenever the in-memory snapshot changes. The epoch prevents a
+    // client from reusing a version after a backend restart.
+    epoch: Uuid,
+    revision: u64,
     pub root: PathBuf,
     _lock: RuntimeLock,
 }
@@ -72,6 +76,8 @@ impl Runtime {
         let mut runtime = Self {
             store,
             state,
+            epoch: Uuid::new_v4(),
+            revision: 0,
             root: root.into(),
             _lock: lock,
         };
@@ -97,12 +103,25 @@ impl Runtime {
         Ok(runtime)
     }
 
+    pub fn snapshot_version(&self) -> String {
+        format!("{}:{}", self.epoch, self.revision)
+    }
+
+    pub fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     pub fn emit(&mut self, kind: EventKind) -> Result<(), String> {
-        self.store.append(&mut self.state, kind)
+        self.store.append(&mut self.state, kind)?;
+        self.touch();
+        Ok(())
     }
 
     pub fn emit_outputs(&mut self, events: Vec<EventKind>) -> Result<(), String> {
-        self.store.append_batch(&mut self.state, events)
+        if events.is_empty() { return Ok(()); }
+        self.store.append_batch(&mut self.state, events)?;
+        self.touch();
+        Ok(())
     }
 
     fn recover_publication(&mut self) -> Result<(), String> {
@@ -182,6 +201,7 @@ impl Runtime {
             config: current_config,
             ..Snapshot::default()
         };
+        self.touch();
         Ok(self.state.clone())
     }
 
@@ -196,6 +216,7 @@ impl Runtime {
             config: current_config,
             ..Snapshot::default()
         };
+        self.touch();
         Ok(())
     }
 
@@ -211,6 +232,7 @@ impl Runtime {
                 config: current_config,
                 ..Snapshot::default()
             };
+            self.touch();
         }
         Ok(())
     }
@@ -234,6 +256,7 @@ impl Runtime {
             .cloned()
             .collect();
         self.state = state;
+        self.touch();
         for execution in interrupted {
             self.emit(EventKind::Failed {
                 node: execution.node,
@@ -278,6 +301,7 @@ impl Runtime {
             run_id: Uuid::new_v4().to_string(),
             ..Snapshot::default()
         };
+        self.touch();
         self.emit(EventKind::Created {
             graph,
             config,

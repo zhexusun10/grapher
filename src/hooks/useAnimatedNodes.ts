@@ -14,13 +14,21 @@ export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[], gra
   const targetNodesRef = useRef<T[]>(targetNodes);
   targetNodesRef.current = targetNodes;
 
+  // Synchronously switch rendered nodes when graphId changes to avoid frame-0 mismatch or stale animations
+  if (rendered.graphId !== graphId) {
+    if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
+    animationFrameRef.current = null;
+    currentPositionsRef.current = new Map(targetNodes.map((n) => [n.id, { x: n.position.x, y: n.position.y }]));
+    setRendered({ graphId, nodes: targetNodes });
+  }
+
   useEffect(() => {
     // Node IDs are local to a run. Never interpolate a new run from the old
     // run's positions (nor display the previous run for the first frame).
     if (rendered.graphId !== graphId) {
       if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
-      currentPositionsRef.current = new Map();
+      currentPositionsRef.current = new Map(targetNodes.map((n) => [n.id, { x: n.position.x, y: n.position.y }]));
     }
     const currentPositions = currentPositionsRef.current;
     let hasMovedNodes = false;

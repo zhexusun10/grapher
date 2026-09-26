@@ -52,6 +52,7 @@ fn mount_boundaries(
     session: &Path,
     engine: &Path,
     installation: &Path,
+    borrowed_objects: Option<&Path>,
 ) -> Result<(), String> {
     masks.sort_by(|a, b| {
         a.components()
@@ -69,12 +70,15 @@ fn mount_boundaries(
     for (index, mask) in masks.iter().enumerate() {
         let empty = staging.join(index.to_string());
         fs::create_dir_all(&empty).map_err(|e| e.to_string())?;
-        for path in masks.iter().map(PathBuf::as_path).chain([current, session]) {
+        for path in masks.iter().map(PathBuf::as_path).chain([current, session]).chain(borrowed_objects) {
             if let Ok(relative) = path.strip_prefix(mask) {
                 fs::create_dir_all(empty.join(relative)).map_err(|e| e.to_string())?;
             }
         }
         command.arg("--ro-bind").arg(&empty).arg(mask);
+    }
+    if let Some(objects) = borrowed_objects {
+        command.arg("--ro-bind").arg(objects).arg(objects);
     }
     command
         .arg("--bind")
@@ -119,6 +123,7 @@ fn probe() -> Result<(), String> {
             &session,
             &engine,
             &installation,
+            None,
         )?;
         command.args(["--", "/bin/sh", "-c",
             ": <>/dev/null && test ! -e \"$1/secret\" && ! (echo bad > \"$1/secret\") 2>/dev/null && ! (echo bad > \"$4/code\") 2>/dev/null && echo ok > \"$2/write\" && echo ok > \"$3/write\"",
@@ -228,6 +233,16 @@ pub fn execution_command(
             return Err("Git or runtime directory overlaps the Linux Graph sandbox".into());
         }
     }
+    let borrowed_objects = if let Ok(alternate) = fs::read_to_string(current.join(".git/objects/info/alternates")) {
+        let expected = crate::workspace::repository_git(
+            &source, &["rev-parse", "--path-format=absolute", "--git-path", "objects"]
+        )?;
+        let objects = canonical(Path::new(alternate.trim()))?;
+        if objects != canonical(Path::new(&expected))? {
+            return Err("Untrusted Graph object alternate".into());
+        }
+        Some(objects)
+    } else { None };
     let mut command = base_command();
     mount_boundaries(
         &mut command,
@@ -236,6 +251,7 @@ pub fn execution_command(
         &session,
         &engine,
         &installation,
+        borrowed_objects.as_deref(),
     )?;
     command
         .arg("--")
@@ -304,6 +320,74 @@ mod tests {
             fs::read_to_string(source.join("secret")).unwrap(),
             "protected"
         );
+    }
+
+    #[test]
+    fn borrowed_objects_work_inside_isolation_without_exposing_source() {
+        require_supported().expect("Linux Graph requires bwrap in CI");
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let source = base.join("source");
+        let root = base.join(".grapher-worktrees");
+        let current = root.join("run/node");
+        let data = base.join("data");
+        let session = data.join("sessions/node");
+        let engine = base.join("engine");
+        let pi_dir = base.join("pi-agent");
+        for path in [&source, &session, &engine, &pi_dir] {
+            fs::create_dir_all(path).unwrap();
+        }
+        crate::workspace::git(&source, &["init", "-q"]).unwrap();
+        fs::write(source.join("file"), "original\n").unwrap();
+        let base_head = crate::workspace::snapshot_repository(&source).unwrap();
+        crate::workspace::prepare(&source, &current, &base_head, &[]).unwrap();
+        fs::write(current.join("file"), "edited\n").unwrap();
+        let command = execution_command(&source, &root, &current, &data, &session, &engine, &pi_dir).unwrap();
+        let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
+        let objects = source.join(".git/objects");
+        let output = Command::new(BWRAP)
+            .args(&args[..args.len() - 2])
+            .args(["/bin/sh", "-c",
+                "set -e; git diff | grep -q '+edited'; git status --porcelain | grep -q file; test ! -e \"$1/file\"; ! (echo bad > \"$2/forbidden\") 2>/dev/null; git add file; git -c user.name=Test -c user.email=test@example.com commit -qm test; git cat-file -e HEAD",
+                "probe"])
+            .args([&source, &objects])
+            .current_dir(&current)
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!objects.join("forbidden").exists());
+        assert_eq!(fs::read_to_string(source.join("file")).unwrap(), "original\n");
+    }
+
+    #[test]
+    fn borrowed_external_objects_work_under_masked_data() {
+        require_supported().expect("Linux Graph requires bwrap in CI");
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let source = base.join("source");
+        let root = base.join(".grapher-worktrees");
+        let current = root.join("run/node");
+        let data = base.join("data");
+        let common = data.join("git-common");
+        let session = data.join("sessions/node");
+        let engine = base.join("engine");
+        let pi_dir = base.join("agent");
+        for path in [&source, &session, &engine, &pi_dir] { fs::create_dir_all(path).unwrap(); }
+        crate::workspace::git(&source, &["init", "-q", "--separate-git-dir", common.to_str().unwrap()]).unwrap();
+        fs::write(source.join("file"), "original\n").unwrap();
+        let base_head = crate::workspace::snapshot_repository(&source).unwrap();
+        crate::workspace::prepare(&source, &current, &base_head, &[]).unwrap();
+        fs::write(current.join("file"), "edited\n").unwrap();
+        let command = execution_command(&source, &root, &current, &data, &session, &engine, &pi_dir).unwrap();
+        let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
+        let output = Command::new(BWRAP)
+            .args(&args[..args.len() - 2])
+            .args(["/bin/sh", "-c",
+                "set -e; git diff | grep -q '+edited'; test ! -e \"$1/file\"; test ! -e \"$2/HEAD\"; ! (echo bad > \"$2/objects/forbidden\") 2>/dev/null",
+                "probe"])
+            .args([&source, &common])
+            .current_dir(&current).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!common.join("objects/forbidden").exists());
     }
 
     #[test]

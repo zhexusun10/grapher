@@ -313,7 +313,102 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
     }
 }
 
+// Read-only hot paths use libgit2 rather than spawning Git for every node
+// state check. Leave mutations and uncommon porcelain states to Git CLI.
+fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
+    let supported = matches!(args,
+        ["rev-parse", "HEAD"] | ["rev-parse", "--verify", "HEAD"]
+        | ["status", "--porcelain"] | ["diff", "--name-only", "--diff-filter=U"]
+        | ["merge-base", "--is-ancestor", _, _]
+    ) || matches!(args, ["rev-parse", spec] if spec.starts_with("refs/grapher/"));
+    if !supported { return None; }
+    let repo = git2::Repository::open(cwd).ok()?;
+    // Git status/diff invoked from a subdirectory are scoped to that path;
+    // libgit2 reports repository-wide results unless a pathspec is supplied.
+    if matches!(args, ["status", "--porcelain"] | ["diff", "--name-only", "--diff-filter=U"])
+        && repo.workdir().and_then(|dir| dir.canonicalize().ok()) != cwd.canonicalize().ok()
+    {
+        return None;
+    }
+    if args[0] == "rev-parse" {
+        let (verify, spec) = match args {
+            ["rev-parse", "HEAD"] | ["rev-parse", "--verify", "HEAD"] => (true, "HEAD"),
+            ["rev-parse", spec] if spec.starts_with("refs/grapher/") => (true, *spec),
+            _ => (false, ""),
+        };
+        if verify {
+            return Some(repo.revparse_single(spec)
+                .map(|object| object.id().to_string()).map_err(|e| e.to_string()));
+        }
+    }
+    if let ["merge-base", "--is-ancestor", ancestor, descendant] = args {
+        let result = (|| -> Result<String, String> {
+            let ancestor = repo.revparse_single(ancestor).map_err(|e| e.to_string())?.id();
+            let descendant = repo.revparse_single(descendant).map_err(|e| e.to_string())?.id();
+            let contained = ancestor == descendant || repo.graph_descendant_of(descendant, ancestor)
+                .map_err(|e| e.to_string())?;
+            if contained { Ok(String::new()) } else { Err("Not an ancestor".into()) }
+        })();
+        return Some(result);
+    }
+    if args == ["status", "--porcelain"] {
+        let result = (|| -> Result<String, String> {
+            let mut options = git2::StatusOptions::new();
+            options.include_untracked(true);
+            let statuses = repo.statuses(Some(&mut options)).map_err(|e| e.to_string())?;
+            let mut lines = Vec::new();
+            for entry in statuses.iter() {
+                let status = entry.status();
+                // Preserve Git's exact output for rename/copy/conflict and
+                // other uncommon cases rather than approximating them.
+                if status.intersects(git2::Status::CONFLICTED | git2::Status::INDEX_RENAMED
+                    | git2::Status::WT_RENAMED | git2::Status::INDEX_TYPECHANGE
+                    | git2::Status::WT_TYPECHANGE) {
+                    return Err("unsupported porcelain status".into());
+                }
+                let index = if status.contains(git2::Status::INDEX_NEW) { 'A' }
+                    else if status.contains(git2::Status::INDEX_DELETED) { 'D' }
+                    else if status.contains(git2::Status::INDEX_MODIFIED) { 'M' }
+                    else { ' ' };
+                let worktree = if status.contains(git2::Status::WT_DELETED) { 'D' }
+                    else if status.contains(git2::Status::WT_MODIFIED) { 'M' }
+                    else { ' ' };
+                let path = entry.path().ok_or("Invalid Git path")?;
+                if path.chars().any(|ch| ch.is_control() || ch == '"' || ch == '\\') {
+                    return Err("Git must quote this path".into());
+                }
+                if status.contains(git2::Status::WT_NEW) {
+                    lines.push(format!("?? {path}"));
+                } else if index != ' ' || worktree != ' ' {
+                    lines.push(format!("{index}{worktree} {path}"));
+                }
+            }
+            Ok(lines.join("\n"))
+        })();
+        if result.is_ok() { return Some(result); }
+        // Use CLI on unsupported states or libgit2 errors.
+    }
+    if args == ["diff", "--name-only", "--diff-filter=U"] {
+        let result = (|| -> Result<String, String> {
+            let index = repo.index().map_err(|e| e.to_string())?;
+            let mut paths = Vec::new();
+            for conflict in index.conflicts().map_err(|e| e.to_string())? {
+                let conflict = conflict.map_err(|e| e.to_string())?;
+                if let Some(entry) = conflict.our.or(conflict.their).or(conflict.ancestor) {
+                    paths.push(String::from_utf8_lossy(&entry.path).into_owned());
+                }
+            }
+            Ok(paths.join("\n"))
+        })();
+        return Some(result);
+    }
+    None
+}
+
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    if let Some(result) = git_read(cwd, args) {
+        return result;
+    }
     let hooks_path = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let hooks_config = format!("core.hooksPath={hooks_path}");
     let output = Command::new("git")
@@ -591,68 +686,81 @@ pub fn prepare_with_merger_expected(
         )?;
         shadow
     };
-    let source_url = git_file_url(&source_git_path)?;
-
-    // Initialize standalone Git repository in node's workspace
-    git(path, &["init", "-q"])?;
-
-    // The host keeps repository and node identity in Runtime state. Do not write
-    // either physical path into the agent-visible checkout.
-
-    // Fetch the base commit from the advertised ref and check it out on branch grapher-node (full history, no --depth 1)
-    git(
-        path,
-        &[
-            "fetch",
-            "-q",
-            "--no-tags",
-            "--no-write-fetch-head",
-            &source_url,
-            &format!("+refs/grapher/heads/{base}:refs/grapher/base"),
-        ],
-    )?;
-    git(
-        path,
-        &["checkout", "-q", "-B", "grapher-node", "refs/grapher/base"],
-    )?;
-
-    // Fetch every dependency before composing. A later dependency can already
-    // contain an earlier one, including its conflict resolutions.
-    let mut parent_heads = Vec::new();
-    for parent in parents {
-        let node_refspec = format!("+refs/grapher/nodes/{parent}:refs/grapher/parents/{parent}");
-        let head_refspec = format!("+refs/grapher/heads/{parent}:refs/grapher/parents/{parent}");
-        if git(
-            path,
-            &[
-                "fetch",
-                "-q",
-                "--no-tags",
-                "--no-write-fetch-head",
-                &source_url,
-                &node_refspec,
-            ],
-        )
-        .is_err()
-        {
-            git(
-                path,
-                &[
-                    "fetch",
-                    "-q",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    &source_url,
-                    &head_refspec,
-                ],
-            )?;
-        }
-        parent_heads.push(git(
-            path,
-            &["rev-parse", &format!("refs/grapher/parents/{parent}")],
-        )?);
+    // Resolve refs in the host repository first, then borrow its object store.
+    // An alternate is read-only: node commits and refs remain local until
+    // snapshot_node explicitly imports them back into the host repository.
+    let source_args = if source_git_path == canonical_repo {
+        Vec::new()
+    } else {
+        vec!["--git-dir", source_git_path.to_str().ok_or("Invalid shadow path")?]
+    };
+    let source_git = |args: &[&str]| -> Result<String, String> {
+        let mut command = source_args.clone();
+        command.extend_from_slice(args);
+        git(&canonical_repo, &command)
+    };
+    let objects = source_git(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
+    let objects = PathBuf::from(objects).canonicalize().map_err(|e| e.to_string())?;
+    let base_head = source_git(&["rev-parse", &format!("refs/grapher/heads/{base}")])?;
+    // Alternates must use the same object ID format as their source.
+    let object_format = source_git(&["rev-parse", "--show-object-format=storage"])
+        .unwrap_or_else(|_| "sha1".into());
+    match object_format.as_str() {
+        "sha1" => { git(path, &["init", "-q"])?; }
+        "sha256" => { git(path, &["init", "-q", "--object-format=sha256"])?; }
+        _ => return Err(format!("Unsupported Git object format: {object_format}")),
     }
-    for incoming in independent_heads(path, &parent_heads)? {
+    // A source with its own alternates or promisor packs may need additional
+    // object databases (or lazy network fetches). Exposing those paths to an
+    // agent would bypass the sandbox's narrowly scoped object-store grant.
+    // Fall back to an independent fetch for these uncommon repositories.
+    let chained_objects = objects.join("info/alternates").is_file()
+        || fs::read_dir(objects.join("pack"))
+            .map(|entries| entries.filter_map(Result::ok).any(|entry| entry.path().extension().is_some_and(|ext| ext == "promisor")))
+            .unwrap_or(false);
+    let source_url = if chained_objects { Some(git_file_url(&source_git_path)?) } else { None };
+    if let Some(url) = source_url.as_deref() {
+        git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", url,
+            &format!("+refs/grapher/heads/{base}:refs/grapher/base")])?;
+    } else {
+        #[cfg(windows)]
+        let objects_for_git = {
+            let value = objects.to_str().ok_or("Invalid Git object path")?;
+            if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{unc}")
+            } else {
+                value.strip_prefix(r"\\?\").unwrap_or(value).to_string()
+            }
+        };
+        #[cfg(not(windows))]
+        let objects_for_git = objects.to_str().ok_or("Invalid Git object path")?.to_string();
+        fs::write(path.join(".git/objects/info/alternates"), format!("{objects_for_git}\n"))
+            .map_err(|e| e.to_string())?;
+        // No fetch or pack copying: pin just the needed refs in this isolated repo.
+        git(path, &["update-ref", "refs/grapher/base", &base_head])?;
+    }
+    git(path, &["checkout", "-q", "-B", "grapher-node", "refs/grapher/base"])?;
+    let mut resolved_heads = Vec::new();
+    for parent in parents {
+        let node_ref = format!("refs/grapher/nodes/{parent}");
+        let head_ref = format!("refs/grapher/heads/{parent}");
+        if let Some(url) = source_url.as_deref() {
+            let node_refspec = format!("+{node_ref}:refs/grapher/parents/{parent}");
+            let head_refspec = format!("+{head_ref}:refs/grapher/parents/{parent}");
+            if git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", url,
+                &node_refspec]).is_err()
+            {
+                git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", url,
+                    &head_refspec])?;
+            }
+        } else {
+            let head = source_git(&["rev-parse", &node_ref])
+                .or_else(|_| source_git(&["rev-parse", &head_ref]))?;
+            git(path, &["update-ref", &format!("refs/grapher/parents/{parent}"), &head])?;
+        }
+        resolved_heads.push(git(path, &["rev-parse", &format!("refs/grapher/parents/{parent}")])?);
+    }
+    for incoming in independent_heads(path, &resolved_heads)? {
         if git(
             path,
             &[

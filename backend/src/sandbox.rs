@@ -88,6 +88,17 @@ fn write_profile(
             return Err("Invalid execution session or native engine location".into());
         }
     }
+    // Only a Grapher-created alternate pointing at the bound repository's
+    // actual object database may be read. Never trust an arbitrary alternate
+    // path written by an agent when generating a profile.
+    let borrowed_objects = (|| -> Option<PathBuf> {
+        let alternate = fs::read_to_string(current.join(".git/objects/info/alternates")).ok()?;
+        let alternate = PathBuf::from(alternate.trim()).canonicalize().ok()?;
+        let expected = crate::workspace::repository_git(
+            &repository, &["rev-parse", "--path-format=absolute", "--git-path", "objects"]
+        ).ok()?;
+        (alternate == PathBuf::from(expected).canonicalize().ok()?).then_some(alternate)
+    })();
     let source_rule = if let Some((_, session, _)) = &extra {
         format!(
             "(require-all (subpath {}) (require-not (subpath {})))",
@@ -97,9 +108,22 @@ fn write_profile(
     } else {
         format!("(subpath {})", quote(&repository)?)
     };
+    let read_source_rule = if let Some(objects) = &borrowed_objects {
+        format!("(require-all {source_rule} (require-not (subpath {})))", quote(objects)?)
+    } else {
+        source_rule.clone()
+    };
+    let metadata_rule = if let Some(objects) = &borrowed_objects {
+        if objects.starts_with(&repository) {
+            format!("(require-all {read_source_rule} (require-not (literal {})) (require-not (literal {})))",
+                quote(&repository)?, quote(objects.parent().ok_or("Invalid object path")?)?)
+        } else { read_source_rule.clone() }
+    } else { read_source_rule.clone() };
     let mut text = format!(
         "(version 1)\n(allow default)\n\
-         (deny file-read* file-write* {source_rule})\n\
+         (deny file-read-data {read_source_rule})\n\
+         (deny file-read-metadata {metadata_rule})\n\
+         (deny file-write* {source_rule})\n\
          (deny file-read-data file-write*\n\
            (require-all (subpath {root}) (require-not (subpath {current}))))\n\
          (deny file-read-metadata\n\
@@ -110,18 +134,27 @@ fn write_profile(
         run = quote(current.parent().ok_or("Invalid execution path")?)?,
     );
     if let Some((data, session, engine)) = &extra {
-        text.push_str(&format!(
-            "(deny file-read* file-write* (require-all (subpath {}) (require-not (subpath {}))))\n(deny file-write* (subpath {}))\n",
-            quote(data)?, quote(session)?, quote(engine)?));
+        let data_rule = format!("(require-all (subpath {}) (require-not (subpath {})))",
+            quote(data)?, quote(session)?);
+        if let Some(objects) = borrowed_objects.as_ref().filter(|p| p.starts_with(data)) {
+            let read_rule = format!("(require-all {data_rule} (require-not (subpath {})))", quote(objects)?);
+            let mut ancestors = String::new();
+            let mut parent = objects.parent();
+            while let Some(dir) = parent.filter(|dir| dir.starts_with(data)) {
+                ancestors.push_str(&format!(" (require-not (literal {}))", quote(dir)?));
+                parent = dir.parent();
+            }
+            text.push_str(&format!("(deny file-read-data {read_rule})\n(deny file-read-metadata (require-all {read_rule}{ancestors}))\n"));
+        } else {
+            text.push_str(&format!("(deny file-read* {data_rule})\n"));
+        }
+        text.push_str(&format!("(deny file-write* {data_rule})\n(deny file-write* (subpath {}))\n", quote(engine)?));
     }
     // External shadow repositories keep Git metadata outside source; explicitly deny them.
     let shadow_dir = crate::workspace::shadow_repo_dir(&repository);
     if shadow_dir.exists() {
         if let Ok(canonical_shadow) = shadow_dir.canonicalize() {
-            text.push_str(&format!(
-                "(deny file-read* file-write* (subpath {}))\n",
-                quote(&canonical_shadow)?
-            ));
+            append_git_dir_rule(&mut text, &canonical_shadow, borrowed_objects.as_deref())?;
         }
     }
     // Source linked worktrees can keep all node snapshots in a shared Git
@@ -132,10 +165,7 @@ fn write_profile(
     ) {
         if let Ok(common) = PathBuf::from(common).canonicalize() {
             if !common.starts_with(&repository) && !common.starts_with(&current) {
-                text.push_str(&format!(
-                    "(deny file-read* file-write* (subpath {}))\n",
-                    quote(&common)?
-                ));
+                append_git_dir_rule(&mut text, &common, borrowed_objects.as_deref())?;
             }
         }
     }
@@ -162,6 +192,19 @@ fn write_profile(
         .map_err(|e| e.to_string())?;
     fs::write(path, text).map_err(|e| e.to_string())?;
     Ok(path.to_path_buf())
+}
+
+fn append_git_dir_rule(text: &mut String, git_dir: &Path, borrowed: Option<&Path>) -> Result<(), String> {
+    let rule = format!("(subpath {})", quote(git_dir)?);
+    if let Some(objects) = borrowed.filter(|objects| objects.starts_with(git_dir)) {
+        text.push_str(&format!("(deny file-read-data (require-all {rule} (require-not (subpath {}))))\n", quote(objects)?));
+        text.push_str(&format!("(deny file-read-metadata (require-all {rule} (require-not (subpath {})) (require-not (literal {}))))\n",
+            quote(objects)?, quote(git_dir)?));
+    } else {
+        text.push_str(&format!("(deny file-read* {rule})\n"));
+    }
+    text.push_str(&format!("(deny file-write* {rule})\n"));
+    Ok(())
 }
 
 pub fn supported() -> bool {
