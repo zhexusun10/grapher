@@ -79,6 +79,14 @@ fn concurrent_planner_merges_preserve_source_on_conflict() {
         "b44201e4-2c8b-4c80-b1a1-3e660a83c7b1",
     )
     .unwrap();
+    // Git may check out CRLF on Windows. Check logical content separately
+    // from the byte-for-byte preservation required when publication fails.
+    let published = fs::read(source.join("shared")).unwrap();
+    assert_eq!(
+        std::str::from_utf8(&published).unwrap().replace("\r\n", "\n"),
+        "first\n"
+    );
+    let unpublished = fs::read(second.join("shared")).unwrap();
     assert!(grapher::workspace::publish_planner(
         &source,
         &second,
@@ -87,14 +95,8 @@ fn concurrent_planner_merges_preserve_source_on_conflict() {
         "c55201e4-2c8b-4c80-b1a1-3e660a83c7b1"
     )
     .is_err());
-    assert_eq!(
-        fs::read_to_string(source.join("shared")).unwrap(),
-        "first\n"
-    );
-    assert_eq!(
-        fs::read_to_string(second.join("shared")).unwrap(),
-        "second\n"
-    );
+    assert_eq!(fs::read(source.join("shared")).unwrap(), published);
+    assert_eq!(fs::read(second.join("shared")).unwrap(), unpublished);
     assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
 }
 
