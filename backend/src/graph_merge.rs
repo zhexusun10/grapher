@@ -130,7 +130,7 @@ pub fn resolve_with_merger_for_node(
         vec![
             (
                 "GIT_DIR",
-                workspace::shadow_repo_dir(repository)
+                workspace::shadow_repo_dir(repository)?
                     .to_string_lossy()
                     .into(),
             ),

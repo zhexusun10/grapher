@@ -40,7 +40,7 @@ fn alternate_dependency_path(graph: &Graph, from: &str, to: &str) -> Option<Vec<
             previous.insert(next.clone(), Some(name.clone()));
             if next == to {
                 let mut path = vec![next];
-                while let Some(Some(parent)) = previous.get(path.last().unwrap()) {
+                while let Some(Some(parent)) = path.last().and_then(|last| previous.get(last)) {
                     path.push(parent.clone());
                 }
                 path.reverse();
@@ -82,9 +82,6 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
     };
     if final_check && graph.nodes.is_empty() {
         add("E001", "Graph must contain at least one node".into());
-    }
-    if graph.nodes.len() > 64 {
-        add("E002", "MVP supports at most 64 nodes".into());
     }
     let mut names = BTreeSet::new();
     for node in &graph.nodes {
@@ -158,7 +155,7 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
     let dependencies: Vec<_> = graph.edges.iter().filter(|edge| !edge.feedback).collect();
     let mut degrees: BTreeMap<String, usize> = names.iter().map(|name| (name.clone(), 0)).collect();
     for edge in &dependencies {
-        *degrees.get_mut(&edge.to).unwrap() += 1;
+        *degrees.entry(edge.to.clone()).or_default() += 1;
     }
     let roots: Vec<_> = degrees
         .iter()
@@ -179,7 +176,10 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         for name in &ready {
             visited.insert(name.clone());
             for edge in dependencies.iter().filter(|edge| edge.from == *name) {
-                let degree = degrees.get_mut(&edge.to).unwrap();
+                let degree = degrees.get_mut(&edge.to).ok_or_else(|| vec![Diagnostic {
+                    code: "E204".into(),
+                    message: format!("Unknown endpoint: {}", edge.to),
+                }])?;
                 *degree -= 1;
                 if *degree == 0 {
                     next.insert(edge.to.clone());

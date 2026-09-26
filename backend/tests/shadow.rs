@@ -30,7 +30,7 @@ fn shadow_git_zero_pollution_for_plain_directory() {
     );
 
     // 4. Verify that the shadow repo exists under data_dir
-    let shadow_dir = workspace::shadow_repo_dir(&plain_project);
+    let shadow_dir = workspace::shadow_repo_dir(&plain_project).unwrap();
     assert!(
         shadow_dir.exists(),
         "Shadow git repo directory should exist"

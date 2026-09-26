@@ -199,7 +199,7 @@ pub fn execution_command(
         return Err("Overlapping Linux Graph filesystem sandbox paths".into());
     }
     let mut masks = vec![source.clone(), root.clone(), data.clone()];
-    let shadow = crate::workspace::shadow_repo_dir(&source);
+    let shadow = crate::workspace::shadow_repo_dir(&source)?;
     if shadow.exists() {
         masks.push(canonical(&shadow)?);
     }

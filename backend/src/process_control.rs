@@ -86,33 +86,65 @@ pub fn track(child: &Child) -> Result<ProcessTree, String> {
     Ok(tree)
 }
 
-fn terminate_inner(inner: &ProcessTreeInner) {
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(inner.pid as i32), libc::SIGKILL);
-    }
-
-    #[cfg(windows)]
-    unsafe {
-        if inner.job != 0 {
-            let _ = TerminateJobObject(inner.job as RawHandle, 1);
+fn retry_termination(mut terminate: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    for attempt in 1..=3 {
+        match terminate() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                // Drop must not panic, including when stderr is unavailable.
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr(), "Process-tree termination attempt {attempt}/3 failed: {error}");
+                if attempt == 3 {
+                    return Err(error);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }
+    Ok(())
+}
+
+fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
+    retry_termination(|| {
+        #[cfg(unix)]
+        {
+            let pid = i32::try_from(inner.pid)
+                .ok().filter(|pid| *pid > 1)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid process group ID"))?;
+            if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
+                let error = std::io::Error::last_os_error();
+                // A previously terminated group is already clean.
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(std::io::Error::new(error.kind(), format!("kill process group {pid}: {error}")));
+                }
+            }
+        }
+        #[cfg(windows)]
+        unsafe {
+            if inner.job != 0 && TerminateJobObject(inner.job as RawHandle, 1) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    })
 }
 
 impl ProcessTree {
     pub fn terminate(&self) {
-        terminate_inner(&self.0);
+        let _ = terminate_inner(&self.0); // Failures are retried and logged.
     }
 }
 
 impl Drop for ProcessTreeInner {
     fn drop(&mut self) {
-        terminate_inner(self);
+        let _ = terminate_inner(self); // Drop cannot propagate errors.
         #[cfg(windows)]
         unsafe {
             if self.job != 0 {
-                let _ = CloseHandle(self.job as RawHandle);
+                if CloseHandle(self.job as RawHandle) == 0 {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr(), "Closing process job failed: {}", std::io::Error::last_os_error());
+                }
             }
         }
     }
@@ -302,6 +334,26 @@ fn create_job(child: &Child) -> Result<usize, String> {
 mod tests {
     use super::*;
     use std::process::Stdio;
+
+    #[test]
+    fn termination_retries_transient_errors_and_bounds_failures() {
+        let mut attempts = 0;
+        retry_termination(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            } else {
+                Ok(())
+            }
+        }).unwrap();
+        assert_eq!(attempts, 3);
+        attempts = 0;
+        assert!(retry_termination(|| {
+            attempts += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        }).is_err());
+        assert_eq!(attempts, 3);
+    }
 
     #[test]
     fn stopping_one_owner_does_not_terminate_other_run() {

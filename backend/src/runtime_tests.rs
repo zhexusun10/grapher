@@ -99,7 +99,7 @@ fn approval_captures_planner_files_before_allocating_graph_workspaces() {
             "graph"
         );
         if !standard_git {
-            fs::remove_dir_all(workspace::shadow_repo_dir(&source)).unwrap();
+            fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap();
         }
     }
 }
@@ -463,7 +463,7 @@ fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_reba
     )
     .unwrap_err()
     .contains("changed after approval"));
-    fs::remove_dir_all(workspace::shadow_repo_dir(&source)).unwrap();
+    fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap();
 }
 
 #[test]
@@ -720,7 +720,7 @@ fn viewing_another_project_does_not_change_a_valid_run_binding() {
     workspace::validate_binding(&other).unwrap();
     // Read-only status must not initialize Git or change the runtime binding.
     assert!(!other.join(".git").exists());
-    assert!(!workspace::shadow_repo_dir(&other).exists());
+    assert!(!workspace::shadow_repo_dir(&other).unwrap().exists());
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     assert_eq!(Path::new(&job.config.repository), source);

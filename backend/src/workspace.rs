@@ -31,9 +31,9 @@ pub fn data_root() -> PathBuf {
     let path = std::env::var_os("GRAPHER_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
-                .unwrap()
+                .unwrap_or(Path::new(env!("CARGO_MANIFEST_DIR")))
                 .join(".grapher")
         });
     if path.is_relative() {
@@ -63,10 +63,13 @@ pub fn is_standard_git(path: &Path) -> bool {
     false
 }
 
-pub fn shadow_repo_dir(target: &Path) -> PathBuf {
-    let canonical = target
-        .canonicalize()
-        .unwrap_or_else(|_| target.to_path_buf());
+fn canonical_workspace_path(path: &Path) -> Result<PathBuf, String> {
+    path.canonicalize()
+        .map_err(|error| format!("Cannot resolve workspace path {}: {error}", path.display()))
+}
+
+pub fn shadow_repo_dir(target: &Path) -> Result<PathBuf, String> {
+    let canonical = canonical_workspace_path(target)?;
     let mut hasher = DefaultHasher::new();
     canonical.to_string_lossy().hash(&mut hasher);
     let hash = hasher.finish();
@@ -84,16 +87,14 @@ pub fn shadow_repo_dir(target: &Path) -> PathBuf {
             }
         })
         .collect();
-    data_root()
+    Ok(data_root()
         .join("shadow_repos")
-        .join(format!("{}_{:016x}.git", safe_name, hash))
+        .join(format!("{}_{:016x}.git", safe_name, hash)))
 }
 
 pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
-    let canonical_target = target
-        .canonicalize()
-        .unwrap_or_else(|_| target.to_path_buf());
-    let shadow_dir = shadow_repo_dir(&canonical_target);
+    let canonical_target = canonical_workspace_path(target)?;
+    let shadow_dir = shadow_repo_dir(&canonical_target)?;
     if !shadow_dir.exists() {
         fs::create_dir_all(&shadow_dir).map_err(|e| e.to_string())?;
         let git_dir_str = shadow_dir.to_str().ok_or("Invalid shadow path")?;
@@ -152,7 +153,7 @@ pub fn pick_folder() -> Result<Option<PathBuf>, String> {
         "#;
         let mut output = Command::new("osascript").arg("-e").arg(script).output();
 
-        if output.is_err() || !output.as_ref().unwrap().status.success() {
+        if !matches!(&output, Ok(out) if out.status.success()) {
             let fallback_script = r#"
                 try
                     set chosenFolder to choose folder with prompt "请选择本地项目文件夹"
@@ -287,9 +288,7 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
     } else if candidate.is_dir() {
         let shadow = ensure_shadow_repo(&candidate)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
-        let path_str = candidate
-            .canonicalize()
-            .unwrap_or_else(|_| candidate.clone())
+        let path_str = canonical_workspace_path(&candidate)?
             .to_string_lossy()
             .to_string();
         let name = candidate
@@ -509,7 +508,7 @@ pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String
     if is_standard_git(&repository) {
         return git(&repository, args);
     }
-    let shadow = shadow_repo_dir(&repository);
+    let shadow = shadow_repo_dir(&repository)?;
     if !shadow.is_dir() {
         return Err(
             "Shadow repository is missing; retained node results have not been published".into(),
@@ -561,9 +560,7 @@ pub fn verify(repository: &Path) -> Result<String, String> {
                 repository.display()
             ));
         }
-        let canonical = repository
-            .canonicalize()
-            .unwrap_or_else(|_| repository.to_path_buf());
+        let canonical = canonical_workspace_path(repository)?;
         let shadow = ensure_shadow_repo(&canonical)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
@@ -830,11 +827,15 @@ pub fn prepare_with_merger_expected(
     expected_source_head: &str,
     mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
-    let canonical_repo = repository
-        .canonicalize()
-        .unwrap_or_else(|_| repository.to_path_buf());
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if canonical_path == canonical_repo {
+    let canonical_repo = canonical_workspace_path(repository)?;
+    // A new destination is allowed to be absent; existing paths (including
+    // dangling symlinks) must resolve successfully before comparing identity.
+    let canonical_path = if path.try_exists().map_err(|error| error.to_string())? || path.is_symlink() {
+        Some(canonical_workspace_path(path)?)
+    } else {
+        None
+    };
+    if canonical_path.as_ref() == Some(&canonical_repo) {
         if is_standard_git(repository) {
             return git(repository, &["rev-parse", "HEAD"]);
         } else {
@@ -853,7 +854,9 @@ pub fn prepare_with_merger_expected(
     if !is_standard_git(&canonical_repo) {
         check_shadow_source(&canonical_repo, expected_source_head)?;
     }
+
     fs::create_dir_all(path).map_err(|error| error.to_string())?;
+    canonical_workspace_path(path)?;
 
     // Determine the source Git location (either standard repository or shadow repo)
     let source_git_path = if is_standard_git(&canonical_repo) {

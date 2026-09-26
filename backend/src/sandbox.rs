@@ -6,6 +6,27 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Allow platform aliases in the trusted root (e.g. /var on macOS), but
+/// never let a writable exception traverse symlinks beneath that root.
+fn canonical_exception(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let relative = path.strip_prefix(root)
+        .map_err(|_| format!("Sandbox exception {} is outside {}", path.display(), root.display()))?;
+    let mut resolved = root.canonicalize()
+        .map_err(|e| format!("Cannot resolve sandbox root {}: {e}", root.display()))?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("Sandbox exceptions must not contain parent traversal".into());
+        };
+        resolved.push(name);
+        let metadata = fs::symlink_metadata(&resolved)
+            .map_err(|e| format!("Cannot inspect sandbox path {}: {e}", resolved.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!("Sandbox exception must use real directories: {}", resolved.display()));
+        }
+    }
+    Ok(resolved)
+}
+
 fn quote(path: &Path) -> Result<String, String> {
     let value = path.to_str().ok_or("Sandbox paths must be valid UTF-8")?;
     if value.chars().any(char::is_control) {
@@ -59,9 +80,9 @@ fn write_profile(
     if !supported() {
         return Err("Graph sandbox requires /usr/bin/sandbox-exec on macOS".into());
     }
+    let current = canonical_exception(worktree_root, current)?;
     let repository = repository.canonicalize().map_err(|e| e.to_string())?;
     let worktree_root = worktree_root.canonicalize().map_err(|e| e.to_string())?;
-    let current = current.canonicalize().map_err(|e| e.to_string())?;
     if !current.starts_with(&worktree_root)
         || current == worktree_root
         || current.starts_with(&repository)
@@ -73,7 +94,7 @@ fn write_profile(
         .map(|(data, session, engine)| -> Result<_, String> {
             Ok((
                 data.canonicalize().map_err(|e| e.to_string())?,
-                session.canonicalize().map_err(|e| e.to_string())?,
+                canonical_exception(data, session)?,
                 engine.canonicalize().map_err(|e| e.to_string())?,
             ))
         })
@@ -82,7 +103,12 @@ fn write_profile(
         if !session.starts_with(data)
             || session == data
             || current.starts_with(session)
+            || session.starts_with(&current)
             || repository.starts_with(session)
+            || session.starts_with(engine)
+            || engine.starts_with(session)
+            || engine.starts_with(&current)
+            || current.starts_with(engine)
             || engine.starts_with(&repository)
         {
             return Err("Invalid execution session or native engine location".into());
@@ -151,11 +177,11 @@ fn write_profile(
         text.push_str(&format!("(deny file-write* {data_rule})\n(deny file-write* (subpath {}))\n", quote(engine)?));
     }
     // External shadow repositories keep Git metadata outside source; explicitly deny them.
-    let shadow_dir = crate::workspace::shadow_repo_dir(&repository);
-    if shadow_dir.exists() {
-        if let Ok(canonical_shadow) = shadow_dir.canonicalize() {
-            append_git_dir_rule(&mut text, &canonical_shadow, borrowed_objects.as_deref())?;
-        }
+    let shadow_dir = crate::workspace::shadow_repo_dir(&repository)?;
+    if shadow_dir.exists() || shadow_dir.is_symlink() {
+        let canonical_shadow = shadow_dir.canonicalize()
+            .map_err(|e| format!("Cannot resolve shadow repository {}: {e}", shadow_dir.display()))?;
+        append_git_dir_rule(&mut text, &canonical_shadow, borrowed_objects.as_deref())?;
     }
     // Source linked worktrees can keep all node snapshots in a shared Git
     // directory outside the source path. Protect that database as well.
@@ -163,10 +189,9 @@ fn write_profile(
         &repository,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     ) {
-        if let Ok(common) = PathBuf::from(common).canonicalize() {
-            if !common.starts_with(&repository) && !common.starts_with(&current) {
-                append_git_dir_rule(&mut text, &common, borrowed_objects.as_deref())?;
-            }
+        let common = PathBuf::from(common).canonicalize().map_err(|e| e.to_string())?;
+        if !common.starts_with(&repository) && !common.starts_with(&current) {
+            append_git_dir_rule(&mut text, &common, borrowed_objects.as_deref())?;
         }
     }
     // Linked worktrees, separate git-dir and shadow repositories can keep the
@@ -178,13 +203,12 @@ fn write_profile(
             &current,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         ) {
-            if let Ok(common) = PathBuf::from(common).canonicalize() {
-                if !common.starts_with(&current) {
-                    text.push_str(&format!(
-                        "(deny file-read* file-write* (subpath {}))\n",
-                        quote(&common)?
-                    ));
-                }
+            let common = PathBuf::from(common).canonicalize().map_err(|e| e.to_string())?;
+            if !common.starts_with(&current) {
+                text.push_str(&format!(
+                    "(deny file-read* file-write* (subpath {}))\n",
+                    quote(&common)?
+                ));
             }
         }
     }
