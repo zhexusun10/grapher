@@ -4,13 +4,14 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 
-from benchmark.run import config_for, harbor_usage, run_goal
+from benchmark.run import config_for, harbor_usage, retain_trace, run_goal
 
 
 class FakeClient:
@@ -85,6 +86,46 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(harbor_usage(result), {"input": 20, "cache": 7, "output": 4})
         self.assertIsNone(harbor_usage({"phase": "failed"}))
 
+    def test_trace_keeps_sessions_and_sqlite_wal_but_not_shadow_repos_or_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data, logs = root / "data", root / "logs"
+            data.mkdir()
+            logs.mkdir()
+            db = sqlite3.connect(data / "events.sqlite")
+            db.execute("pragma journal_mode=WAL")
+            db.execute("create table events (payload text)")
+            db.execute("insert into events values ('one')")
+            db.commit()
+            (data / "planning" / "one" / "partition-session").mkdir(parents=True)
+            (data / "planning" / "one" / "partition.jsonl").write_text('partition')
+            (data / "planning" / "one" / "partition-session" / "turns.jsonl").write_text('turns')
+            (data / "sessions" / "node").mkdir(parents=True)
+            (data / "sessions" / "node" / "agent.jsonl").write_text('node')
+            (data / "sessions" / "node" / "jiti").mkdir()
+            (data / "sessions" / "node" / "jiti" / "compiled.mjs").write_text('cache')
+            (data / "planner-sessions" / "run").mkdir(parents=True)
+            (data / "planner-sessions" / "run" / "turns.jsonl").write_text('planner')
+            (data / "mergers" / "run").mkdir(parents=True)
+            (data / "mergers" / "run" / "output.jsonl").write_text('merger')
+            (data / "shadow_repos").mkdir()
+            (data / "shadow_repos" / "secret").write_text('no')
+            (data / "sessions" / "node" / "leak").symlink_to(data / "shadow_repos" / "secret")
+            retain_trace(data, logs)
+            db.close()
+            self.assertEqual(sqlite3.connect(logs / "trace/events.sqlite").execute(
+                "select payload from events").fetchone(), ('one',))
+            self.assertTrue((logs / "trace/planning/one/partition-session/turns.jsonl").is_file())
+            self.assertTrue((logs / "trace/planner-sessions/run/turns.jsonl").is_file())
+            self.assertTrue((logs / "trace/sessions/node/agent.jsonl").is_file())
+            self.assertTrue((logs / "trace/mergers/run/output.jsonl").is_file())
+            self.assertFalse((logs / "trace/shadow_repos").exists())
+            self.assertFalse((logs / "trace/sessions/node/leak").exists())
+            self.assertFalse((logs / "trace/sessions/node/jiti").exists())
+            manifest = json.loads((logs / "trace-manifest.json").read_text())
+            self.assertEqual(len(manifest), 6)
+            self.assertTrue(all(entry['sha256'] and entry['bytes'] > 0 for entry in manifest))
+
     def test_reject_unqualified_model(self):
         with tempfile.TemporaryDirectory() as repo:
             with self.assertRaisesRegex(ValueError, "provider/model"):
@@ -134,10 +175,16 @@ HTTPServer(('127.0.0.1',int(os.environ['GRAPHER_PORT'])),Handler).serve_forever(
             self.assertEqual((root / "published.txt").read_text(), "merged result")
             result = json.loads((root / "logs/result.json").read_text())
             self.assertEqual((result["route"], result["phase"]), ("graph", "completed"))
+            self.assertEqual(json.loads((root / "logs/snapshot.json").read_text())["runId"], "graph-run")
+            self.assertTrue((root / "logs/trace-manifest.json").exists())
             failure = subprocess.run(command, env={**os.environ, "FAKE_PUBLICATION": "failed"},
                                      capture_output=True, text=True, timeout=20)
             self.assertNotEqual(failure.returncode, 0)
             self.assertIn("without published", failure.stderr)
+            failed_result = json.loads((root / "logs/result.json").read_text())
+            self.assertEqual((failed_result["runId"], failed_result["route"]), ("graph-run", "graph"))
+            self.assertEqual(json.loads((root / "logs/snapshot.json").read_text())["runId"], "graph-run")
+            self.assertTrue((root / "logs/trace-manifest.json").exists())
 
     def test_cancel_terminates_backend_without_detached_work(self):
         backend = '''#!/usr/bin/env python3

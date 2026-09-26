@@ -6,12 +6,14 @@ This file runs INSIDE the Harbor task environment. It has no Harbor/Python deps.
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -76,6 +78,7 @@ def config_for(repository, model, thinking, max_parallel):
 class GrapherClient:
     def __init__(self, port):
         self.url = f"http://127.0.0.1:{port}/api/"
+        self.last_snapshot = None
 
     def call(self, command, data=None, timeout=30):
         body = json.dumps(data or {}).encode("utf-8")
@@ -96,6 +99,8 @@ class GrapherClient:
             raise RuntimeError(f"Grapher {command}: {detail}") from exc
         if not isinstance(reply, dict) or "result" not in reply:
             raise RuntimeError(f"Invalid Grapher {command} response: {reply!r}")
+        if command in ("plan_goal", "snapshot", "control") and isinstance(reply["result"], dict):
+            self.last_snapshot = reply["result"]
         return reply["result"]
 
 
@@ -131,6 +136,50 @@ def run_goal(client, instruction, config, timeout, poll_interval=1.0):
             raise TimeoutError(f"Grapher run {run_id} exceeded {timeout}s (phase={phase})")
         time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
         snap = client.call("snapshot", {"detail": "metadata"}, timeout=min(30, max(1, deadline - time.monotonic())))
+
+
+def retain_trace(data_dir, logs):
+    """Keep reproducible trial evidence, not the task's shadow Git repo or Pi credentials.
+
+    The backend has stopped before this is called, so SQLite's WAL can safely
+    be checkpointed via backup. Never follow symlinks created by agent code.
+    """
+    source = Path(data_dir)
+    trace = logs / "trace"
+    trace.mkdir(exist_ok=True)
+    manifest = []
+    for directory in ("planning", "planner-sessions", "sessions", "mergers"):
+        origin = source / directory
+        if not origin.is_dir() or origin.is_symlink():
+            continue
+        for base, dirs, files in os.walk(origin, followlinks=False):
+            dirs[:] = [d for d in dirs if d != "jiti" and not (Path(base) / d).is_symlink()]
+            for filename in files:
+                item = Path(base) / filename
+                if not item.is_file() or item.is_symlink():
+                    continue
+                dest = trace / item.relative_to(source)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(item, dest)
+                manifest.append(dest)
+    database = source / "events.sqlite"
+    if database.is_file() and not database.is_symlink():
+        dest = trace / "events.sqlite"
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as original, \
+             sqlite3.connect(dest) as backup:
+            original.backup(backup)
+        manifest.append(dest)
+    # Do not archive config.json, shadow_repos, runtime.lock or the private Pi
+    # directory. Hashes make it possible to detect incomplete log transfers.
+    entries = []
+    for item in sorted(manifest):
+        digest = hashlib.sha256()
+        with item.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        entries.append({"path": str(item.relative_to(logs)), "bytes": item.stat().st_size,
+                        "sha256": digest.hexdigest()})
+    (logs / "trace-manifest.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
 
 def free_port():
@@ -193,6 +242,7 @@ def main(argv=None):
                 else:
                     raise TimeoutError("Grapher backend did not start")
                 snap = run_goal(client, instruction, config, args.timeout)
+                (logs / "snapshot.json").write_text(json.dumps(snap, indent=2), encoding="utf-8")
                 (logs / "result.json").write_text(json.dumps({
                     "runId": snap["runId"], "route": snap.get("planType"),
                     "phase": snap["phase"], "model": args.model,
@@ -200,8 +250,13 @@ def main(argv=None):
                 }, indent=2), encoding="utf-8")
                 print(f"Grapher {snap['runId']} completed ({snap.get('planType')})", flush=True)
             except Exception as exc:
+                snap = client.last_snapshot or {}
+                (logs / "snapshot.json").write_text(json.dumps(snap, indent=2), encoding="utf-8")
                 (logs / "result.json").write_text(json.dumps({
-                    "phase": "failed", "model": args.model, "error": str(exc),
+                    "runId": snap.get("runId"), "route": snap.get("planType"),
+                    "phase": snap.get("phase", "failed"), "model": args.model,
+                    "planning": snap.get("planning"), "runMetrics": snap.get("runMetrics"),
+                    "error": str(exc),
                 }, indent=2), encoding="utf-8")
                 raise
             finally:
@@ -221,16 +276,10 @@ def main(argv=None):
                         else:
                             process.kill()
                         process.wait()
-                # Retain planning diagnostics on failure (the private runtime
-                # directory is deleted at the end of each trial).
-                for attempt in (Path(data_dir) / "planning").glob("*"):
-                    if attempt.is_dir():
-                        target = logs / "planning" / attempt.name
-                        target.mkdir(parents=True, exist_ok=True)
-                        for name in ("summary.json", "partition.jsonl", "planner.jsonl"):
-                            source = attempt / name
-                            if source.is_file():
-                                shutil.copy2(source, target / name)
+                # The runtime directory is deleted at the end of the trial.
+                # Fail closed if archiving fails rather than report an
+                # unauditable successful run.
+                retain_trace(data_dir, logs)
 
 
 if __name__ == "__main__":
