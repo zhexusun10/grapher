@@ -41,7 +41,12 @@ fn chained_source_alternates_fall_back_to_independent_fetch() {
     prepare(&source, &child, &base, &[]).unwrap();
     assert!(!child.join(".git/objects/info/alternates").exists());
     assert_eq!(git(&child, &["rev-parse", "HEAD"]).unwrap(), base);
-    assert_eq!(fs::read_to_string(child.join("shared")).unwrap(), "base\n");
+    assert_eq!(
+        fs::read_to_string(child.join("shared"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "base\n"
+    );
 }
 
 #[test]
