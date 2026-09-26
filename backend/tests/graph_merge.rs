@@ -1,6 +1,9 @@
 use grapher::{
     graph_merge::merge_graph,
-    workspace::{git, prepare, snapshot_node, snapshot_repository},
+    workspace::{
+        git, prepare, prepare_with_merger_expected, snapshot_node, snapshot_node_for_run,
+        snapshot_repository,
+    },
 };
 use std::{
     fs,
@@ -30,11 +33,156 @@ fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> 
 }
 
 #[test]
+fn private_planner_copies_dirty_and_ignored_files_without_modifying_source() {
+    let temp = TempDir::new().unwrap();
+    let (source, _) = repository(temp.path());
+    fs::write(source.join("shared"), "dirty\n").unwrap();
+    fs::write(source.join(".gitignore"), "ignored-dir/\n").unwrap();
+    fs::create_dir(source.join("ignored-dir")).unwrap();
+    fs::write(source.join("ignored-dir/dependency"), "local\n").unwrap();
+    fs::write(source.join("untracked"), "new\n").unwrap();
+    let before = git(&source, &["status", "--porcelain"]).unwrap();
+    let private = temp.path().join(".grapher-workspaces/run/planner");
+    grapher::workspace::prepare_planner(&source, &private).unwrap();
+    assert_eq!(
+        fs::read_to_string(private.join("shared")).unwrap(),
+        "dirty\n"
+    );
+    assert_eq!(
+        fs::read_to_string(private.join("ignored-dir/dependency")).unwrap(),
+        "local\n"
+    );
+    assert_eq!(
+        fs::read_to_string(private.join("untracked")).unwrap(),
+        "new\n"
+    );
+    assert!(private.join(".git").is_dir());
+    assert_eq!(git(&source, &["status", "--porcelain"]).unwrap(), before);
+}
+
+#[test]
+fn concurrent_planner_merges_preserve_source_on_conflict() {
+    let temp = TempDir::new().unwrap();
+    let (source, _) = repository(temp.path());
+    let root = temp.path().join(".grapher-workspaces");
+    let first = root.join("b44201e4-2c8b-4c80-b1a1-3e660a83c7b1/a");
+    let second = root.join("c55201e4-2c8b-4c80-b1a1-3e660a83c7b1/b");
+    grapher::workspace::prepare_planner(&source, &first).unwrap();
+    grapher::workspace::prepare_planner(&source, &second).unwrap();
+    fs::write(first.join("shared"), "first\n").unwrap();
+    fs::write(second.join("shared"), "second\n").unwrap();
+    grapher::workspace::publish_planner(
+        &source,
+        &first,
+        &root.join("first-preview"),
+        "b44201e4-2c8b-4c80-b1a1-3e660a83c7b1",
+        "b44201e4-2c8b-4c80-b1a1-3e660a83c7b1",
+    )
+    .unwrap();
+    assert!(grapher::workspace::publish_planner(
+        &source,
+        &second,
+        &root.join("second-preview"),
+        "c55201e4-2c8b-4c80-b1a1-3e660a83c7b1",
+        "c55201e4-2c8b-4c80-b1a1-3e660a83c7b1"
+    )
+    .is_err());
+    assert_eq!(
+        fs::read_to_string(source.join("shared")).unwrap(),
+        "first\n"
+    );
+    assert_eq!(
+        fs::read_to_string(second.join("shared")).unwrap(),
+        "second\n"
+    );
+    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+}
+
+#[test]
+fn concurrent_graph_preparation_never_uses_another_runs_base() {
+    let temp = TempDir::new().unwrap();
+    let (source, base_a) = repository(temp.path());
+    fs::write(source.join("shared"), "newer\n").unwrap();
+    let base_b = snapshot_repository(&source).unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    let source_a = source.clone();
+    let source_b = source.clone();
+    let a = std::thread::spawn(move || {
+        prepare(&source_a, &first, &base_a, &[])
+            .map(|_| fs::read_to_string(first.join("shared")).unwrap())
+    });
+    let b = std::thread::spawn(move || {
+        prepare(&source_b, &second, &base_b, &[])
+            .map(|_| fs::read_to_string(second.join("shared")).unwrap())
+    });
+    assert_eq!(a.join().unwrap().unwrap().replace("\r\n", "\n"), "base\n");
+    assert_eq!(b.join().unwrap().unwrap().replace("\r\n", "\n"), "newer\n");
+    assert!(git(&source, &["rev-parse", "refs/grapher/base"]).is_err());
+}
+
+#[test]
+fn concurrent_runs_with_identical_node_names_keep_parent_commits_isolated() {
+    let temp = TempDir::new().unwrap();
+    let (source, base) = repository(temp.path());
+    let run_a = uuid::Uuid::new_v4().to_string();
+    let run_b = uuid::Uuid::new_v4().to_string();
+    let node_a = temp.path().join("node-a");
+    prepare(&source, &node_a, &base, &[]).unwrap();
+    fs::write(node_a.join("from-a"), "a").unwrap();
+    let head_a = snapshot_node_for_run(&node_a, &source, "worker", Some(&run_a)).unwrap();
+    let node_b = temp.path().join("node-b");
+    prepare(&source, &node_b, &base, &[]).unwrap();
+    fs::write(node_b.join("from-b"), "b").unwrap();
+    let head_b = snapshot_node_for_run(&node_b, &source, "worker", Some(&run_b)).unwrap();
+    assert_eq!(
+        git(
+            &source,
+            &[
+                "rev-parse",
+                &format!("refs/grapher/runs/{run_a}/nodes/worker")
+            ]
+        )
+        .unwrap(),
+        head_a
+    );
+    assert_eq!(
+        git(
+            &source,
+            &[
+                "rev-parse",
+                &format!("refs/grapher/runs/{run_b}/nodes/worker")
+            ]
+        )
+        .unwrap(),
+        head_b
+    );
+    assert!(git(&source, &["rev-parse", "refs/grapher/nodes/worker"]).is_err());
+    let child = temp.path().join("child-a");
+    prepare_with_merger_expected(&source, &child, &base, &[head_a], &base, || {
+        Err("Unexpected conflict".into())
+    })
+    .unwrap();
+    assert!(child.join("from-a").is_file());
+    assert!(!child.join("from-b").exists());
+}
+
+#[test]
 fn chained_source_alternates_fall_back_to_independent_fetch() {
     let temp = TempDir::new().unwrap();
     let (upstream, _) = repository(temp.path());
     let source = temp.path().join("clone");
-    git(temp.path(), &["clone", "-q", "--shared", upstream.to_str().unwrap(), source.to_str().unwrap()]).unwrap();
+    git(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--shared",
+            upstream.to_str().unwrap(),
+            source.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
     assert!(source.join(".git/objects/info/alternates").is_file());
     let base = snapshot_repository(&source).unwrap();
     let child = temp.path().join("child");
@@ -62,7 +210,10 @@ fn borrowed_objects_use_source_hash_format() {
     let node = temp.path().join("node");
     prepare(&source, &node, &base, &[]).unwrap();
     assert_eq!(git(&node, &["rev-parse", "HEAD"]).unwrap(), base);
-    assert_eq!(git(&node, &["rev-parse", "--show-object-format=storage"]).unwrap(), "sha256");
+    assert_eq!(
+        git(&node, &["rev-parse", "--show-object-format=storage"]).unwrap(),
+        "sha256"
+    );
 }
 
 #[test]
@@ -74,11 +225,19 @@ fn node_reuses_source_objects_without_copying_history() {
     let child = temp.path().join("child");
     prepare(&source, &child, &base, &["parent".into()]).unwrap();
     let objects = fs::read_to_string(child.join(".git/objects/info/alternates")).unwrap();
-    assert_eq!(Path::new(objects.trim()).canonicalize().unwrap(),
-        source.join(".git/objects").canonicalize().unwrap());
-    assert_eq!(git(&child, &["rev-parse", "refs/grapher/parents/parent"]).unwrap(), head);
+    assert_eq!(
+        Path::new(objects.trim()).canonicalize().unwrap(),
+        source.join(".git/objects").canonicalize().unwrap()
+    );
+    assert_eq!(
+        git(&child, &["rev-parse", "refs/grapher/parents/parent"]).unwrap(),
+        head
+    );
     assert_eq!(fs::read_to_string(child.join("new")).unwrap(), "parent");
-    assert!(fs::read_dir(child.join(".git/objects/pack")).unwrap().next().is_none());
+    assert!(fs::read_dir(child.join(".git/objects/pack"))
+        .unwrap()
+        .next()
+        .is_none());
 }
 
 #[test]

@@ -60,6 +60,21 @@ enum EventMetadata<'a> {
     },
 }
 
+/// Durable projection only: history and transcripts remain in the event table.
+pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
+    json!({
+        "runId": state.run_id, "planType": state.plan_type,
+        "planningId": state.planning_id, "planning": state.planning,
+        "graph": state.graph, "config": state.config, "plan": state.plan, "nodes": state.nodes,
+        "executions": state.executions.iter().map(execution_metadata).collect::<Vec<_>>(),
+        "mergers": state.mergers.iter().map(execution_metadata).collect::<Vec<_>>(),
+        "publication": state.publication, "events": [], "approved": state.approved,
+        "paused": state.paused, "phase": state.phase, "base": state.base,
+        "publishedHead": state.published_head, "feedbackCounts": state.feedback_counts,
+        "runMetrics": state.run_metrics
+    })
+}
+
 pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
     let events = state.events.iter().filter_map(|event| match &event.kind {
         EventKind::Output { .. } => None,

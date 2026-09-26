@@ -3,6 +3,7 @@
 //! Unix uses a process group. Windows uses a Job Object with kill-on-close so
 //! Node, Pi, shells, and their descendants share one lifecycle boundary.
 use std::{
+    cell::RefCell,
     process::{Child, Command},
     sync::{Arc, Mutex, OnceLock, Weak},
 };
@@ -30,9 +31,24 @@ unsafe impl Sync for ProcessTreeInner {}
 #[derive(Clone)]
 pub struct ProcessTree(Arc<ProcessTreeInner>);
 
-static PROCESSES: OnceLock<Mutex<Vec<Weak<ProcessTreeInner>>>> = OnceLock::new();
+static PROCESSES: OnceLock<Mutex<Vec<(String, Weak<ProcessTreeInner>)>>> = OnceLock::new();
+thread_local! { static OWNER: RefCell<String> = const { RefCell::new(String::new()) }; }
 
-fn registry() -> &'static Mutex<Vec<Weak<ProcessTreeInner>>> {
+/// Bind process launches in this thread to an individual Run.
+pub fn with_owner<T>(run_id: &str, work: impl FnOnce() -> T) -> T {
+    struct Restore(String);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OWNER.with(|owner| *owner.borrow_mut() = std::mem::take(&mut self.0));
+        }
+    }
+    let previous =
+        OWNER.with(|owner| std::mem::replace(&mut *owner.borrow_mut(), run_id.to_owned()));
+    let _restore = Restore(previous);
+    work()
+}
+
+fn registry() -> &'static Mutex<Vec<(String, Weak<ProcessTreeInner>)>> {
     PROCESSES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
@@ -63,10 +79,10 @@ pub fn track(child: &Child) -> Result<ProcessTree, String> {
         job: create_job(child)?,
     }));
 
-    registry()
-        .lock()
-        .map_err(|error| error.to_string())?
-        .push(Arc::downgrade(&tree.0));
+    registry().lock().map_err(|error| error.to_string())?.push((
+        OWNER.with(|owner| owner.borrow().clone()),
+        Arc::downgrade(&tree.0),
+    ));
     Ok(tree)
 }
 
@@ -105,9 +121,31 @@ impl Drop for ProcessTreeInner {
 pub fn terminate_all() {
     let trees = if let Ok(mut processes) = registry().lock() {
         let mut trees = Vec::new();
-        processes.retain(|weak| {
+        processes.retain(|(_, weak)| {
             if let Some(tree) = weak.upgrade() {
                 trees.push(ProcessTree(tree));
+                true
+            } else {
+                false
+            }
+        });
+        trees
+    } else {
+        Vec::new()
+    };
+    for tree in trees {
+        tree.terminate();
+    }
+}
+
+pub fn terminate_owner(run_id: &str) {
+    let trees = if let Ok(mut processes) = registry().lock() {
+        let mut trees = Vec::new();
+        processes.retain(|(owner, weak)| {
+            if let Some(tree) = weak.upgrade() {
+                if owner == run_id {
+                    trees.push(ProcessTree(tree));
+                }
                 true
             } else {
                 false
@@ -264,6 +302,36 @@ fn create_job(child: &Child) -> Result<usize, String> {
 mod tests {
     use super::*;
     use std::process::Stdio;
+
+    #[test]
+    fn stopping_one_owner_does_not_terminate_other_run() {
+        let spawn = |owner: &str| {
+            let mut command = if cfg!(windows) {
+                let mut command = Command::new("cmd");
+                command.args(["/C", "ping 127.0.0.1 -n 10 > NUL"]);
+                command
+            } else {
+                let mut command = Command::new("sh");
+                command.args(["-c", "sleep 10"]);
+                command
+            };
+            configure_command(&mut command);
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let child = command.spawn().unwrap();
+            let tree = with_owner(owner, || track(&child).unwrap());
+            (child, tree)
+        };
+        let (mut first, _first_tree) = spawn("first-run");
+        let (mut second, second_tree) = spawn("second-run");
+        terminate_owner("first-run");
+        assert!(!first.wait().unwrap().success());
+        assert!(second.try_wait().unwrap().is_none());
+        second_tree.terminate();
+        let _ = second.wait();
+    }
 
     #[test]
     fn tracked_process_can_be_terminated() {

@@ -75,12 +75,15 @@ npm start
 
 Runtime data defaults to `.grapher/` (overridable with `GRAPHER_DATA_DIR`), including SQLite, planning records, sessions, and shadow repositories. Graph workspaces live next to the project under `<project-parent>/.grapher-worktrees/`. Despite the name, each node uses an **independent Git repository**, not a worktree. Ordinary folders use external shadow Git metadata; no `.git` is created in the user's directory. See [native execution](engine/native-execution.md) for more on paths, mapping limitations, and lifecycle.
 
+Multiple Runs can execute concurrently; opening or switching conversations does not stop background Runs. Each Run has its own state, output, processes, and model sessions. The backend does not cap concurrent Run, Planner, or node sessions. Serial and Graph both launch a separate session for every ready node; the scheduler does not enforce `maxParallel` or acquire a per-project write lock between sessions. File and Git conflicts caused by sessions writing the same project are not handled by scheduling; each execution/publication surfaces its own result. Graph nodes still use isolated workspaces. The runtime data directory remains exclusive to one backend process to preserve event-store consistency.
+
 ## Development and validation
 
 ```sh
 npm run check                 # TypeScript
 npm run build                 # UI
 npm test                      # Rust fixture tests; no paid model
+npm run test:concurrent       # HTTP multi-Run regression (requires /bin/sh)
 npm run test:pi               # pinned Pi / auth transport contract
 npm run test:native           # host-native regression (platform dependent)
 ```

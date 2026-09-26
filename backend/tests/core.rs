@@ -45,7 +45,8 @@ fn config() -> Config {
         model: String::new(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false,
+        max_feedback: 3,
+        auto_approve: false,
     }
 }
 
@@ -74,6 +75,68 @@ fn finish_wave(runtime: &mut Runtime, feedback_output: &str) {
     }
     for (from, output) in feedback_results {
         runtime.apply_feedback(&from, &output).unwrap();
+    }
+}
+
+#[test]
+fn settings_do_not_change_approved_run_or_future_jobs() {
+    let temp = TempDir::new().unwrap();
+    let mut rt = runtime(temp.path());
+    rt.approve().unwrap();
+    let original = serde_json::to_value(&rt.state).unwrap();
+    let version = rt.snapshot_version();
+    let mut next = config();
+    next.repository = "/another/project".into();
+    next.model = "another/model".into();
+    rt.save_default_config(&next).unwrap();
+    assert_eq!(serde_json::to_value(&rt.state).unwrap(), original);
+    assert_eq!(rt.snapshot_version(), version);
+    assert_eq!(serde_json::to_value(rt.store.load(&rt.state.run_id).unwrap()).unwrap(), original);
+    for job in rt.jobs().unwrap() {
+        assert_eq!(job.config.repository, config().repository);
+        assert_eq!(job.config.model, config().model);
+    }
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(temp.path().join("config.json")).unwrap()).unwrap()["model"], next.model);
+}
+
+#[test]
+fn workspace_selection_survives_restart_and_missing_load_preserves_state() {
+    let temp = TempDir::new().unwrap();
+    let mut rt = runtime(temp.path());
+    let first = rt.state.run_id.clone();
+    rt.create(graph(), config()).unwrap();
+    let second = rt.state.run_id.clone();
+    let before = serde_json::to_value(&rt.state).unwrap();
+    assert!(rt.load_run("missing").unwrap_err().contains("does not exist"));
+    assert_eq!(serde_json::to_value(&rt.state).unwrap(), before);
+    rt.load_run(&first).unwrap();
+    drop(rt);
+    let mut rt = Runtime::open(temp.path()).unwrap();
+    assert_eq!(rt.state.run_id, first);
+    rt.reset_workspace().unwrap();
+    drop(rt);
+    let mut rt = Runtime::open(temp.path()).unwrap();
+    assert!(rt.state.run_id.is_empty());
+    assert_eq!(rt.store.runs().unwrap().len(), 2);
+    rt.load_run(&second).unwrap();
+    rt.delete_run(&second).unwrap();
+    assert!(rt.load_run(&second).unwrap_err().contains("does not exist"));
+    drop(rt);
+    let rt = Runtime::open(temp.path()).unwrap();
+    assert!(rt.state.run_id.is_empty());
+}
+
+#[test]
+fn compiler_and_snapshot_share_node_identity_validation() {
+    for name in ["".into(), "a b".into(), "节点".into(), "a.b".into(), "a/../b".into(), "x".repeat(65)] {
+        let graph = Graph { nodes: vec![Node { name: name.clone(), task: "task".into() }], ..Graph::default() };
+        assert!(compile(&graph, true).unwrap_err().iter().any(|e| e.code == "E201"));
+        let error = workspace::snapshot_node(Path::new("/missing/work"), Path::new("/missing/repo"), &name).unwrap_err();
+        assert!(error.contains("Invalid node name"), "{error}");
+    }
+    for name in ["a-dep-b_9".into(), "x".repeat(64)] {
+        let graph = Graph { nodes: vec![Node { name, task: "task".into() }], ..Graph::default() };
+        compile(&graph, true).unwrap();
     }
 }
 
@@ -111,7 +174,10 @@ fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
         original_goal: "Implement and verify two branches".into(),
         nodes: ["server", "server_tests", "web", "web_tests", "acceptance"]
             .into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() })
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
             .collect(),
         edges: [
             ("server", "server_tests", false),
@@ -124,27 +190,47 @@ fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
         ]
         .into_iter()
         .map(|(from, to, feedback)| Edge {
-            from: from.into(), to: to.into(), relation: String::new(), feedback,
+            from: from.into(),
+            to: to.into(),
+            relation: String::new(),
+            feedback,
         })
         .collect(),
     };
     let diagnostics = compile(&candidate, false).unwrap_err();
-    assert_eq!(diagnostics.iter().filter(|item| item.code == "E209").count(), 2);
-    assert!(diagnostics.iter().any(|item| item.message.contains("server → server_tests → acceptance")));
-    assert!(diagnostics.iter().any(|item| item.message.contains("web → web_tests → acceptance")));
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|item| item.code == "E209")
+            .count(),
+        2
+    );
+    assert!(diagnostics
+        .iter()
+        .any(|item| item.message.contains("server → server_tests → acceptance")));
+    assert!(diagnostics
+        .iter()
+        .any(|item| item.message.contains("web → web_tests → acceptance")));
     assert!(compile_legacy(&candidate, true).is_ok());
     let mut historical = Snapshot::default();
-    grapher::model::apply(&mut historical, &Event {
-        sequence: 1, timestamp: 0,
-        kind: EventKind::Created {
-            graph: candidate.clone(), config: config(), planning_id: None, planning: None,
+    grapher::model::apply(
+        &mut historical,
+        &Event {
+            sequence: 1,
+            timestamp: 0,
+            kind: EventKind::Created {
+                graph: candidate.clone(),
+                config: config(),
+                planning_id: None,
+                planning: None,
+            },
         },
-    });
+    );
     assert_eq!(historical.graph, candidate);
     assert!(historical.plan.is_some());
-    candidate.edges.retain(|edge| {
-        !(edge.to == "acceptance" && (edge.from == "server" || edge.from == "web"))
-    });
+    candidate
+        .edges
+        .retain(|edge| !(edge.to == "acceptance" && (edge.from == "server" || edge.from == "web")));
     assert!(compile(&candidate, true).is_ok());
     assert!(candidate.edges.iter().any(|edge| edge.feedback));
 }
@@ -418,24 +504,50 @@ fn pause_drains_and_rerun_preserves_history() {
     assert_eq!(follow_up.task, "Switch to React");
     assert_eq!(follow_up.execution.session_id, job.execution.session_id);
     assert_eq!(follow_up.execution.worktree, job.execution.worktree);
-    assert_eq!(follow_up.resume_execution_id.as_deref(), Some(job.execution.id.as_str()));
+    assert_eq!(
+        follow_up.resume_execution_id.as_deref(),
+        Some(job.execution.id.as_str())
+    );
 }
 
 #[test]
 fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up() {
     let temp = TempDir::new().unwrap();
     let mut runtime = runtime(temp.path());
-    runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+    runtime
+        .emit(EventKind::Approved {
+            base: "base".into(),
+        })
+        .unwrap();
     let spec = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Steered {
-        execution_id: spec.execution.id.clone(), node: "spec".into(), instruction: "clarify".into(),
-    }).unwrap();
+    runtime
+        .emit(EventKind::Steered {
+            execution_id: spec.execution.id.clone(),
+            node: "spec".into(),
+            instruction: "clarify".into(),
+        })
+        .unwrap();
     assert_eq!(runtime.state.nodes["spec"].status, "running");
-    assert!(runtime.state.graph.nodes.iter().all(|node| runtime.state.nodes[&node.name].status != "dirty"));
-    runtime.finish(&spec.execution, Ok(("spec-head".into(), "done".into()))).unwrap();
+    assert!(runtime
+        .state
+        .graph
+        .nodes
+        .iter()
+        .all(|node| runtime.state.nodes[&node.name].status != "dirty"));
+    runtime
+        .finish(&spec.execution, Ok(("spec-head".into(), "done".into())))
+        .unwrap();
     let jobs = runtime.jobs().unwrap();
-    let frontend = jobs.iter().find(|job| job.execution.node == "frontend").unwrap();
-    runtime.finish(&frontend.execution, Ok(("frontend-head".into(), "done".into()))).unwrap();
+    let frontend = jobs
+        .iter()
+        .find(|job| job.execution.node == "frontend")
+        .unwrap();
+    runtime
+        .finish(
+            &frontend.execution,
+            Ok(("frontend-head".into(), "done".into())),
+        )
+        .unwrap();
     assert_eq!(runtime.state.nodes["backend"].status, "running");
     runtime.intervene("frontend", "new instruction").unwrap();
     assert_eq!(runtime.state.nodes["frontend"].status, "dirty");
@@ -729,7 +841,14 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
         Some(resolved_head.as_str())
     );
     assert_eq!(
-        workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/worker"]).unwrap(),
+        workspace::git(
+            &repository,
+            &[
+                "rev-parse",
+                &format!("refs/grapher/runs/{}/nodes/worker", runtime.state.run_id)
+            ]
+        )
+        .unwrap(),
         resolved_head
     );
 

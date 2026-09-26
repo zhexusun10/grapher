@@ -35,6 +35,28 @@ fn single() -> Graph {
 }
 
 #[test]
+fn every_ready_graph_node_is_scheduled_regardless_of_legacy_parallel_setting() {
+    let graph = Graph {
+        original_goal: "parallel".into(),
+        nodes: (0..12)
+            .map(|i| Node {
+                name: format!("worker{i}"),
+                task: "work".into(),
+            })
+            .collect(),
+        edges: vec![],
+    };
+    for max_parallel in [0, 1, 2, 8] {
+        let (_temp, _source, mut runtime) = setup(true, graph.clone());
+        let mut config = runtime.state.config.clone().unwrap();
+        config.max_parallel = max_parallel;
+        runtime.edit_draft_graph(graph.clone(), config).unwrap();
+        runtime.approve().unwrap();
+        assert_eq!(runtime.jobs().unwrap().len(), 12, "max_parallel={max_parallel}");
+    }
+}
+
+#[test]
 fn approval_captures_planner_files_before_allocating_graph_workspaces() {
     for standard_git in [true, false] {
         let (temp, source, mut runtime) = setup(standard_git, single());
@@ -72,7 +94,10 @@ fn approval_captures_planner_files_before_allocating_graph_workspaces() {
         let id = runtime.state.run_id.clone();
         let replay = runtime.store.load(&id).unwrap();
         assert_eq!(replay.plan_type.as_deref(), Some("graph"));
-        assert_eq!(crate::snapshot_view::snapshot_metadata(&replay).unwrap()["planType"], "graph");
+        assert_eq!(
+            crate::snapshot_view::snapshot_metadata(&replay).unwrap()["planType"],
+            "graph"
+        );
         if !standard_git {
             fs::remove_dir_all(workspace::shadow_repo_dir(&source)).unwrap();
         }
@@ -83,8 +108,19 @@ fn approval_captures_planner_files_before_allocating_graph_workspaces() {
 fn planner_revision_keeps_approval_and_unaffected_node_results() {
     let graph = Graph {
         original_goal: "test".into(),
-        nodes: ["keep", "change", "child"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
-        edges: vec![Edge { from: "change".into(), to: "child".into(), relation: "files".into(), feedback: false }],
+        nodes: ["keep", "change", "child"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "change".into(),
+            to: "child".into(),
+            relation: "files".into(),
+            feedback: false,
+        }],
     };
     let (_temp, source, mut runtime) = setup(true, graph.clone());
     runtime.approve().unwrap();
@@ -98,14 +134,27 @@ fn planner_revision_keeps_approval_and_unaffected_node_results() {
         workspace::prepare(&source, path, &job.execution.before, &runtime.parents(name)).unwrap();
         fs::write(path.join(format!("{name}.txt")), name).unwrap();
         let head = workspace::snapshot_node(path, &source, name).unwrap();
-        runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
+        runtime
+            .finish(&job.execution, Ok((head, "done".into())))
+            .unwrap();
     }
     // Both roots finished while child has not started.
     let keep_head = runtime.state.nodes["keep"].head.clone();
     let mut revised = graph;
-    revised.nodes.iter_mut().find(|node| node.name == "change").unwrap().task = "new task".into();
-    revised.nodes.push(Node { name: "added".into(), task: "new node".into() });
-    let planning = PlanningSummary { planning_id: "revision-1".into(), ..Default::default() };
+    revised
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "change")
+        .unwrap()
+        .task = "new task".into();
+    revised.nodes.push(Node {
+        name: "added".into(),
+        task: "new node".into(),
+    });
+    let planning = PlanningSummary {
+        planning_id: "revision-1".into(),
+        ..Default::default()
+    };
     runtime.revise_graph(revised, planning).unwrap();
     assert_eq!(runtime.state.run_id, run_id);
     assert_eq!(runtime.state.base, base);
@@ -120,22 +169,32 @@ fn planner_revision_keeps_approval_and_unaffected_node_results() {
     assert_eq!(replay.nodes["child"].status, "waiting");
     assert_eq!(replay.planning_id.as_deref(), Some("revision-1"));
     let jobs = runtime.jobs().unwrap();
-    assert!(jobs.iter().all(|job| job.execution.node != "keep" && job.execution.node != "child"));
+    assert!(jobs
+        .iter()
+        .all(|job| job.execution.node != "keep" && job.execution.node != "child"));
 }
 
 #[test]
 fn planning_revision_defers_publication_but_not_ready_jobs() {
     let graph = Graph {
         original_goal: "test".into(),
-        nodes: vec![Node { name: "first".into(), task: "first".into() }], edges: vec![],
+        nodes: vec![Node {
+            name: "first".into(),
+            task: "first".into(),
+        }],
+        edges: vec![],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let jobs = runtime.jobs_with_publication(false).unwrap();
     assert_eq!(jobs.len(), 1);
-    runtime.emit(EventKind::Finished {
-        execution_id: jobs[0].execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: jobs[0].execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "done".into(),
+        })
+        .unwrap();
     assert!(runtime.jobs_with_publication(false).unwrap().is_empty());
     assert_ne!(runtime.state.phase, "publishing");
     assert!(runtime.jobs_with_publication(true).unwrap().is_empty());
@@ -146,31 +205,86 @@ fn planning_revision_defers_publication_but_not_ready_jobs() {
 fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_waiting() {
     let graph = Graph {
         original_goal: "test".into(),
-        nodes: ["running", "failed", "waiting"].into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() }).collect(),
-        edges: vec![],
+        nodes: ["running", "failed", "waiting"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "running".into(),
+            to: "waiting".into(),
+            feedback: false,
+            relation: String::new(),
+        }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph.clone());
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
-    let active = jobs.iter().find(|job| job.execution.node == "running").unwrap();
-    let failed = jobs.iter().find(|job| job.execution.node == "failed").unwrap();
-    runtime.emit(EventKind::Failed {
-        node: "failed".into(), execution_id: Some(failed.execution.id.clone()), error: "failed".into(),
-    }).unwrap();
+    let active = jobs
+        .iter()
+        .find(|job| job.execution.node == "running")
+        .unwrap();
+    let failed = jobs
+        .iter()
+        .find(|job| job.execution.node == "failed")
+        .unwrap();
+    runtime
+        .emit(EventKind::Failed {
+            node: "failed".into(),
+            execution_id: Some(failed.execution.id.clone()),
+            error: "failed".into(),
+        })
+        .unwrap();
     assert_eq!(runtime.state.nodes["waiting"].status, "waiting");
     let mut revised = graph.clone();
-    revised.nodes.iter_mut().find(|node| node.name == "failed").unwrap().task = "fix".into();
-    revised.nodes.iter_mut().find(|node| node.name == "waiting").unwrap().task = "new task".into();
-    runtime.revise_graph(revised.clone(), PlanningSummary { planning_id: "live".into(), ..Default::default() }).unwrap();
+    revised
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "failed")
+        .unwrap()
+        .task = "fix".into();
+    revised
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "waiting")
+        .unwrap()
+        .task = "new task".into();
+    runtime
+        .revise_graph(
+            revised.clone(),
+            PlanningSummary {
+                planning_id: "live".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert!(!runtime.state.paused);
     assert_eq!(runtime.state.nodes["running"].status, "running");
-    assert_eq!(runtime.state.executions.iter().find(|e| e.id == active.execution.id).unwrap().status, "running");
+    assert_eq!(
+        runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.id == active.execution.id)
+            .unwrap()
+            .status,
+        "running"
+    );
     assert_eq!(runtime.state.nodes["failed"].status, "waiting");
     assert_eq!(runtime.state.nodes["waiting"].status, "waiting");
     assert_eq!(runtime.state.nodes["failed"].error, None);
-    revised.nodes.iter_mut().find(|node| node.name == "running").unwrap().task = "changed".into();
-    assert!(runtime.revise_graph(revised, PlanningSummary::default()).unwrap_err().contains("affected running"));
+    revised
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "running")
+        .unwrap()
+        .task = "changed".into();
+    assert!(runtime
+        .revise_graph(revised, PlanningSummary::default())
+        .unwrap_err()
+        .contains("affected running"));
     assert_eq!(runtime.state.nodes["running"].status, "running");
 }
 
@@ -178,27 +292,71 @@ fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_wait
 fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     let graph = Graph {
         original_goal: "test".into(),
-        nodes: ["source", "other", "consumer"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
-        edges: vec![],
+        nodes: ["source", "other", "consumer"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "other".into(),
+            to: "consumer".into(),
+            relation: "existing input".into(),
+            feedback: false,
+        }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph.clone());
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
     for job in jobs {
-        runtime.emit(EventKind::Finished { execution_id: job.execution.id, head: runtime.state.base.clone(), output: "done".into() }).unwrap();
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: job.execution.id,
+                head: runtime.state.base.clone(),
+                output: "done".into(),
+            })
+            .unwrap();
     }
     // The consumer has actually executed, so changing its input invalidates its result.
     for job in runtime.jobs().unwrap() {
-        runtime.emit(EventKind::Finished { execution_id: job.execution.id, head: runtime.state.base.clone(), output: "done".into() }).unwrap();
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: job.execution.id,
+                head: runtime.state.base.clone(),
+                output: "done".into(),
+            })
+            .unwrap();
     }
     let mut revised = graph;
-    revised.edges.push(Edge { from: "source".into(), to: "consumer".into(), relation: "new input".into(), feedback: false });
-    runtime.revise_graph(revised, PlanningSummary { planning_id: "new-edge".into(), ..Default::default() }).unwrap();
+    revised.edges.push(Edge {
+        from: "source".into(),
+        to: "consumer".into(),
+        relation: "new input".into(),
+        feedback: false,
+    });
+    runtime
+        .revise_graph(
+            revised,
+            PlanningSummary {
+                planning_id: "new-edge".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert_eq!(runtime.state.nodes["source"].status, "done");
     assert_eq!(runtime.state.nodes["other"].status, "done");
     assert_eq!(runtime.state.nodes["consumer"].status, "dirty");
     assert_eq!(runtime.state.nodes["consumer"].head, None);
-    assert_eq!(runtime.jobs().unwrap().iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["consumer"]);
+    assert_eq!(
+        runtime
+            .jobs()
+            .unwrap()
+            .iter()
+            .map(|job| job.execution.node.as_str())
+            .collect::<Vec<_>>(),
+        vec!["consumer"]
+    );
 }
 
 #[test]
@@ -212,7 +370,10 @@ fn shadow_prepare_refuses_user_edits_after_approval() {
     let error = workspace::prepare(&source, node, &base, &[]).unwrap_err();
     assert!(error.contains("changed after approval"));
     assert!(!node.exists());
-    assert_eq!(workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert_eq!(
+        workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        base
+    );
     fs::write(source.join("tracked.txt"), "original").unwrap();
     workspace::prepare(&source, node, &base, &[]).unwrap();
 }
@@ -222,10 +383,21 @@ fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_reba
     let graph = Graph {
         original_goal: "test".into(),
         nodes: vec![
-            Node { name: "parent".into(), task: "parent task".into() },
-            Node { name: "child".into(), task: "child task".into() },
+            Node {
+                name: "parent".into(),
+                task: "parent task".into(),
+            },
+            Node {
+                name: "child".into(),
+                task: "child task".into(),
+            },
         ],
-        edges: vec![Edge { from: "parent".into(), to: "child".into(), relation: "files".into(), feedback: false }],
+        edges: vec![Edge {
+            from: "parent".into(),
+            to: "child".into(),
+            relation: "files".into(),
+            feedback: false,
+        }],
     };
     let (_temp, source, mut runtime) = setup(false, graph);
     runtime.approve().unwrap();
@@ -236,15 +408,27 @@ fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_reba
         workspace::prepare(&source, path, &job.execution.before, &runtime.parents(name)).unwrap();
         fs::write(path.join(format!("{name}.txt")), name).unwrap();
         let head = workspace::snapshot_node(path, &source, name).unwrap();
-        runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
+        runtime
+            .finish(&job.execution, Ok((head, "done".into())))
+            .unwrap();
     }
     runtime.jobs().unwrap();
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || Err("merge conflict".into())).unwrap();
-    runtime.emit(EventKind::PublicationCompleted { head: published.clone() }).unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("merge conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted {
+            head: published.clone(),
+        })
+        .unwrap();
     assert_ne!(published, base);
     fs::write(source.join("tracked.txt"), "external edit").unwrap();
-    assert!(runtime.rerun("parent").unwrap_err().contains("changed after approval"));
+    assert!(runtime
+        .rerun("parent")
+        .unwrap_err()
+        .contains("changed after approval"));
     assert_eq!(runtime.state.nodes["parent"].status, "done");
     fs::write(source.join("tracked.txt"), "original").unwrap();
     runtime.rerun("parent").unwrap();
@@ -258,10 +442,27 @@ fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_reba
     assert_eq!(job.execution.node, "parent");
     assert_eq!(job.expected_source_head, published);
     let path = Path::new(&job.execution.worktree);
-    workspace::prepare_with_merger_expected(&source, path, &job.execution.before, &[], &job.expected_source_head, || Err("merge conflict".into())).unwrap();
+    workspace::prepare_with_merger_expected(
+        &source,
+        path,
+        &job.execution.before,
+        &[],
+        &job.expected_source_head,
+        || Err("merge conflict".into()),
+    )
+    .unwrap();
     fs::write(source.join("tracked.txt"), "external edit").unwrap();
     let next = source.parent().unwrap().join("another-worktree");
-    assert!(workspace::prepare_with_merger_expected(&source, &next, &base, &[], &job.expected_source_head, || Err("merge conflict".into())).unwrap_err().contains("changed after approval"));
+    assert!(workspace::prepare_with_merger_expected(
+        &source,
+        &next,
+        &base,
+        &[],
+        &job.expected_source_head,
+        || Err("merge conflict".into())
+    )
+    .unwrap_err()
+    .contains("changed after approval"));
     fs::remove_dir_all(workspace::shadow_repo_dir(&source)).unwrap();
 }
 
@@ -333,7 +534,11 @@ fn fan_in_conflict_invokes_merger_and_preserves_both_parents() {
         let target = source.parent().unwrap().join("fan-in");
         let mut calls = 0;
         let head = workspace::prepare_with_merger(
-            &source, &target, &base, &["left".into(), "right".into()], || {
+            &source,
+            &target,
+            &base,
+            &["left".into(), "right".into()],
+            || {
                 calls += 1;
                 assert!(workspace::git(&target, &["rev-parse", "MERGE_HEAD"]).is_ok());
                 fs::write(target.join("tracked.txt"), "left and right\n").unwrap();
@@ -341,12 +546,25 @@ fn fan_in_conflict_invokes_merger_and_preserves_both_parents() {
                 workspace::git(&target, &["commit", "--no-edit"]).unwrap();
                 Ok(())
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(calls, 1);
         for name in ["left", "right"] {
-            workspace::git(&target, &["merge-base", "--is-ancestor", &format!("refs/grapher/parents/{name}"), &head]).unwrap();
+            workspace::git(
+                &target,
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    &format!("refs/grapher/parents/{name}"),
+                    &head,
+                ],
+            )
+            .unwrap();
         }
-        assert_eq!(fs::read_to_string(target.join("tracked.txt")).unwrap(), "left and right\n");
+        assert_eq!(
+            fs::read_to_string(target.join("tracked.txt")).unwrap(),
+            "left and right\n"
+        );
     }
 }
 
@@ -362,13 +580,19 @@ fn failed_fan_in_merger_preserves_conflict_for_manual_resolution() {
         workspace::snapshot_node(&path, &source, name).unwrap();
     }
     let target = source.parent().unwrap().join("conflicted");
-    let error = workspace::prepare_with_merger(&source, &target, &base, &["a".into(), "b".into()], || {
-        Err("resolver unavailable".into())
-    }).unwrap_err();
+    let error =
+        workspace::prepare_with_merger(&source, &target, &base, &["a".into(), "b".into()], || {
+            Err("resolver unavailable".into())
+        })
+        .unwrap_err();
     assert!(error.starts_with("Workspace composition blocked"));
     assert!(error.contains("resolver unavailable"));
     assert!(workspace::git(&target, &["rev-parse", "MERGE_HEAD"]).is_ok());
-    assert!(!workspace::git(&target, &["diff", "--name-only", "--diff-filter=U"]).unwrap().is_empty());
+    assert!(
+        !workspace::git(&target, &["diff", "--name-only", "--diff-filter=U"])
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -378,9 +602,18 @@ fn node_merger_events_do_not_enter_publication_phase() {
     let mut merger = runtime.jobs().unwrap().remove(0).execution;
     merger.id = Uuid::new_v4().to_string();
     merger.node = "merge:task".into();
-    runtime.emit(EventKind::MergerStarted { execution: merger.clone() }).unwrap();
+    runtime
+        .emit(EventKind::MergerStarted {
+            execution: merger.clone(),
+        })
+        .unwrap();
     assert_eq!(runtime.state.phase, "running");
-    runtime.emit(EventKind::MergerFinished { execution_id: merger.id, head: runtime.state.base.clone() }).unwrap();
+    runtime
+        .emit(EventKind::MergerFinished {
+            execution_id: merger.id,
+            head: runtime.state.base.clone(),
+        })
+        .unwrap();
     assert_eq!(runtime.state.phase, "running");
     assert!(runtime.state.publication.is_none());
 }
@@ -394,7 +627,13 @@ fn reset_cleans_only_its_run_worktrees() {
     fs::create_dir_all(path).unwrap();
     let other = temp.path().join(".grapher-worktrees").join("other-run");
     fs::create_dir_all(&other).unwrap();
-    runtime.emit(EventKind::Failed { node: job.execution.node, execution_id: Some(job.execution.id), error: "test".into() }).unwrap();
+    runtime
+        .emit(EventKind::Failed {
+            node: job.execution.node,
+            execution_id: Some(job.execution.id),
+            error: "test".into(),
+        })
+        .unwrap();
     runtime.reset_workspace().unwrap();
     assert!(!path.exists());
     assert!(other.exists());
@@ -420,8 +659,14 @@ fn moved_binding_blocks_approval_without_migrating_or_snapshotting() {
     assert!(runtime.approve().unwrap_err().contains("项目绑定已失效"));
     assert!(!runtime.state.approved);
     assert!(runtime.state.executions.is_empty());
-    assert_eq!(workspace::git(&moved, &["rev-parse", "HEAD"]).unwrap(), before);
-    assert_eq!(fs::read_to_string(moved.join("planner.txt")).unwrap(), "retain planner work");
+    assert_eq!(
+        workspace::git(&moved, &["rev-parse", "HEAD"]).unwrap(),
+        before
+    );
+    assert_eq!(
+        fs::read_to_string(moved.join("planner.txt")).unwrap(),
+        "retain planner work"
+    );
     assert!(!source.exists());
 }
 
@@ -435,14 +680,35 @@ fn moved_binding_blocks_scheduling_resume_intervention_and_publication() {
     runtime.pause(true).unwrap();
     assert!(runtime.pause(false).unwrap_err().contains("项目绑定已失效"));
     assert!(runtime.state.paused);
-    assert!(runtime.rerun("task").unwrap_err().contains("项目绑定已失效"));
-    assert!(runtime.resolved("task").unwrap_err().contains("项目绑定已失效"));
-    runtime.emit(EventKind::PublicationStarted { repository: source.to_string_lossy().into(), heads: vec![runtime.state.base.clone()] }).unwrap();
-    runtime.emit(EventKind::PublicationFailed { error: "interrupted".into() }).unwrap();
-    assert!(runtime.retry_publication().unwrap_err().contains("项目绑定已失效"));
+    assert!(runtime
+        .rerun("task")
+        .unwrap_err()
+        .contains("项目绑定已失效"));
+    assert!(runtime
+        .resolved("task")
+        .unwrap_err()
+        .contains("项目绑定已失效"));
+    runtime
+        .emit(EventKind::PublicationStarted {
+            repository: source.to_string_lossy().into(),
+            heads: vec![runtime.state.base.clone()],
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::PublicationFailed {
+            error: "interrupted".into(),
+        })
+        .unwrap();
+    assert!(runtime
+        .retry_publication()
+        .unwrap_err()
+        .contains("项目绑定已失效"));
     assert_eq!(runtime.state.phase, "publication_failed");
-    assert!(crate::graph_merge::merge_graph(&source, &[], || panic!("must not launch merger"))
-        .unwrap_err().contains("项目绑定已失效"));
+    assert!(
+        crate::graph_merge::merge_graph(&source, &[], || panic!("must not launch merger"))
+            .unwrap_err()
+            .contains("项目绑定已失效")
+    );
     assert!(!source.exists());
 }
 

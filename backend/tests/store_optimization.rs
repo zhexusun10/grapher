@@ -38,7 +38,7 @@ fn migrates_planning_ids_and_uses_exact_index() {
 }
 
 #[test]
-fn checkpoint_replays_only_tail_and_is_removed_with_run() {
+fn checkpoint_restores_history_from_events_and_is_removed_with_run() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");
     let store = Store::open(&path).unwrap();
@@ -50,12 +50,13 @@ fn checkpoint_replays_only_tail_and_is_removed_with_run() {
     let db = Connection::open(&path).unwrap();
     let checkpoint: i64 = db.query_row("SELECT sequence FROM checkpoints WHERE run_id='run'", [], |r| r.get(0)).unwrap();
     assert_eq!(checkpoint, state.events[127].sequence);
-    // The immutable prefix is recovered from the checkpoint, not deserialized again.
-    db.execute("UPDATE events SET payload='not json' WHERE sequence=?1", [state.events[1].sequence]).unwrap();
+    let payload: String = db.query_row("SELECT payload FROM checkpoints WHERE run_id='run'", [], |r| r.get(0)).unwrap();
+    let projection: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(projection["events"], serde_json::json!([]));
     let loaded = store.load("run").unwrap();
     assert_eq!(loaded.events.len(), 131);
     assert_eq!(loaded.events.last().unwrap().sequence, state.events.last().unwrap().sequence);
     store.delete_run("run").unwrap();
-    assert!(store.load("run").unwrap().events.is_empty());
+    assert!(store.load("run").unwrap_err().contains("does not exist"));
     assert!(db.query_row("SELECT sequence FROM checkpoints WHERE run_id='run'", [], |r| r.get::<_, i64>(0)).is_err());
 }

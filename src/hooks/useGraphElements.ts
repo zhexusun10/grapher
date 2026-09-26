@@ -4,6 +4,29 @@ import type { Graph, Plan, Snapshot } from "../types";
 import { tokens } from "../tokens";
 import type { WorkNode } from "../components/graph/TaskNode";
 
+export function graphEdgeId(edge: Pick<Graph["edges"][number], "from" | "to" | "feedback">): string {
+  return JSON.stringify([edge.from, edge.feedback ? "fb" : "dep", edge.to]);
+}
+
+export function indexGraphInputs(graph: Graph, executions: Snapshot["executions"]) {
+  const incoming = new Map<string, Graph["edges"]>();
+  const outgoing = new Map<string, Graph["edges"]>();
+  const hints = new Map<string, Graph["edges"]>();
+  const attempts = new Map<string, Snapshot["executions"]>();
+  const add = <T,>(map: Map<string, T[]>, key: string, value: T) => {
+    const items = map.get(key);
+    if (items) items.push(value); else map.set(key, [value]);
+  };
+  for (const edge of graph.edges) {
+    add(incoming, edge.to, edge);
+    add(outgoing, edge.from, edge);
+    add(hints, edge.to, edge);
+    if (edge.feedback && edge.from !== edge.to) add(hints, edge.from, edge);
+  }
+  for (const execution of executions) add(attempts, execution.node, execution);
+  return { incoming, outgoing, hints, attempts };
+}
+
 export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string[][] {
   if (plan?.executionBatches && plan.executionBatches.length > 0) {
     const scheduled = new Set(plan.executionBatches.flat());
@@ -12,9 +35,15 @@ export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string
   }
   const nodeNames = graph.nodes.map((n) => n.name);
   if (nodeNames.length === 0) return [];
+  const names = new Set(nodeNames);
   const deps = graph.edges.filter(
-    (e) => !e.feedback && nodeNames.includes(e.from) && nodeNames.includes(e.to)
+    (e) => !e.feedback && names.has(e.from) && names.has(e.to)
   );
+  const children = new Map<string, string[]>();
+  for (const edge of deps) {
+    const targets = children.get(edge.from);
+    if (targets) targets.push(edge.to); else children.set(edge.from, [edge.to]);
+  }
   const inDegree = new Map<string, number>(nodeNames.map((n) => [n, 0]));
   for (const edge of deps) {
     inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
@@ -27,10 +56,10 @@ export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string
     const next: string[] = [];
     for (const name of ready) {
       visited.add(name);
-      for (const edge of deps.filter((e) => e.from === name)) {
-        const deg = (inDegree.get(edge.to) ?? 1) - 1;
-        inDegree.set(edge.to, deg);
-        if (deg === 0) next.push(edge.to);
+      for (const target of children.get(name) ?? []) {
+        const deg = (inDegree.get(target) ?? 1) - 1;
+        inDegree.set(target, deg);
+        if (deg === 0) next.push(target);
       }
     }
     ready = next;
@@ -61,9 +90,10 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
 
   const mergeTargets = useMemo(() => {
     const targets = new Map<string, NonNullable<Snapshot["mergers"]>[number]>();
+    const names = new Set(state.graph.nodes.map((node) => node.name));
     for (const merger of state.mergers ?? []) {
       const target = merger.node.startsWith("merge:") ? merger.node.slice(6) : "";
-      if (target && state.graph.nodes.some((node) => node.name === target)) targets.set(target, merger);
+      if (target && names.has(target)) targets.set(target, merger);
     }
     return targets;
   }, [state.mergers, state.graph.nodes]);
@@ -93,7 +123,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         ? side === "left" ? graphLayout.minX - 48 - laneCount.left++ * 14
           : graphLayout.maxX + 48 + laneCount.right++ * 14
         : undefined;
-      return [`${edge.from}-${edge.feedback ? "fb" : "dep"}-${edge.to}`, {
+      return [graphEdgeId(edge), {
         sourceHandle: sideRoute ? `${side}-source` : "bottom",
         targetHandle: sideRoute ? `${side}-target` : "top",
         routeX,
@@ -102,14 +132,20 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     }));
   }, [state.graph.edges, graphLayout]);
 
+  const indexes = useMemo(() => indexGraphInputs(state.graph, state.executions), [state.graph, state.executions]);
+  const mergerAttempts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const merger of state.mergers ?? []) counts.set(merger.node, (counts.get(merger.node) ?? 0) + 1);
+    return counts;
+  }, [state.mergers]);
+
   const nodes = useMemo<WorkNode[]>(() => {
     const taskNodes: WorkNode[] = state.graph.nodes.map((node) => {
       const position = graphLayout.positions.get(node.name) ?? { x: 160, y: 24, layer: 0 };
-      const nodeAttempts = state.executions.filter((execution) => execution.node === node.name);
-      const incoming = state.graph.edges.filter((edge) => edge.to === node.name);
-      const outgoing = state.graph.edges.filter((edge) => edge.from === node.name);
-      const route = (edge: Graph["edges"][number]) =>
-        edgeRouting.get(`${edge.from}-${edge.feedback ? "fb" : "dep"}-${edge.to}`);
+      const nodeAttempts = indexes.attempts.get(node.name) ?? [];
+      const incoming = indexes.incoming.get(node.name) ?? [];
+      const outgoing = indexes.outgoing.get(node.name) ?? [];
+      const route = (edge: Graph["edges"][number]) => edgeRouting.get(graphEdgeId(edge));
       return {
         id: node.name,
         type: "work",
@@ -120,11 +156,10 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
           task: node.task,
           status: state.nodes[node.name]?.status ?? "waiting",
           attempts: nodeAttempts.length,
-          hint: state.graph.edges
-            .filter((edge) => edge.to === node.name || (edge.from === node.name && edge.feedback))
+          hint: (indexes.hints.get(node.name) ?? [])
             .map((edge) => `${edge.from} → ${edge.to}: ${edge.relation}${edge.feedback ? " (feedback)" : ""}`)
             .join("\n"),
-          reviewer: state.graph.edges.some((edge) => edge.from === node.name && edge.feedback),
+          reviewer: outgoing.some((edge) => edge.feedback),
           selected: selected === node.name,
           worktree: nodeAttempts.at(-1)?.worktree ?? "",
           hasTop: incoming.some((edge) => route(edge)?.targetHandle === "top") || mergeTargets.has(node.name),
@@ -138,9 +173,10 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     });
     // A merger is an execution, not a planner node. Show one card per fan-in
     // target only after a real conflict has launched the resolver.
+    const taskNodesById = new Map(taskNodes.map((node) => [node.id, node]));
     return [...taskNodes, ...Array.from(mergeTargets, ([target, merger]): WorkNode => {
-      const node = taskNodes.find((item) => item.id === target)!;
-      const attempts = (state.mergers ?? []).filter((item) => item.node === `merge:${target}`).length;
+      const node = taskNodesById.get(target)!;
+      const attempts = mergerAttempts.get(`merge:${target}`) ?? 0;
       return {
         id: `merger:${target}`, type: "work", width: 236,
         position: { x: node.position.x, y: node.position.y - 155 },
@@ -153,12 +189,12 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         },
       };
     })];
-  }, [state.graph, state.nodes, state.executions, state.mergers, selected, graphLayout, edgeRouting, mergeTargets]);
+  }, [state.graph, state.nodes, indexes, mergerAttempts, selected, graphLayout, edgeRouting, mergeTargets]);
 
   const edges = useMemo<Edge[]>(() => {
     const graphEdges = state.graph.edges.map((edge) => {
       const isFeedback = !!edge.feedback;
-      const edgeId = `${edge.from}-${isFeedback ? "fb" : "dep"}-${edge.to}`;
+      const edgeId = graphEdgeId(edge);
       const routing = edgeRouting.get(edgeId);
       const isNew = recentlyAddedEdgeIds.has(edgeId);
       return {

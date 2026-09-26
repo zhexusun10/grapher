@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock, Weak,
     },
     thread,
 };
@@ -24,6 +24,111 @@ pub struct Service {
     driving: AtomicBool,
     planning: AtomicBool,
     extension: PathBuf,
+}
+
+// Keep only weak references: active workers own their service; idle runs can
+// always be reconstructed from the shared event store on demand.
+static RUN_SERVICES: OnceLock<
+    Mutex<std::collections::HashMap<PathBuf, std::collections::HashMap<String, Weak<Service>>>>,
+> = OnceLock::new();
+static SOURCE_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
+    OnceLock::new();
+static CANCELLED_PLANNING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+struct PlanningCancellationGuard(String);
+impl PlanningCancellationGuard {
+    fn finish(&mut self, planning: &AtomicBool) {
+        if let Ok(mut cancelled) = CANCELLED_PLANNING.get_or_init(Default::default).lock() {
+            planning.store(false, Ordering::SeqCst);
+            cancelled.remove(&self.0);
+            self.0.clear();
+        } else {
+            planning.store(false, Ordering::SeqCst);
+        }
+    }
+}
+impl Drop for PlanningCancellationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut cancelled) = CANCELLED_PLANNING.get_or_init(Default::default).lock() {
+            cancelled.remove(&self.0);
+        }
+    }
+}
+fn check_planning_cancelled(run_id: &str) -> Result<(), String> {
+    if !run_id.is_empty()
+        && CANCELLED_PLANNING
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|e| e.to_string())?
+            .contains(run_id)
+    {
+        return Err("Planning was stopped for this Run".into());
+    }
+    Ok(())
+}
+
+fn source_lock(repository: &std::path::Path) -> Result<Arc<Mutex<()>>, String> {
+    let key = repository.canonicalize().map_err(|e| e.to_string())?;
+    let mut locks = SOURCE_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|e| e.to_string())?;
+    locks.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+fn service_for_run(
+    primary: &Arc<Service>,
+    run_id: &str,
+    create: bool,
+) -> Result<Arc<Service>, String> {
+    let runtime = primary.runtime.lock().map_err(|e| e.to_string())?;
+    if runtime.state.run_id == run_id {
+        return Ok(primary.clone());
+    }
+    let root = runtime.root.clone();
+    let registry = RUN_SERVICES.get_or_init(Default::default);
+    let mut registry = registry.lock().map_err(|e| e.to_string())?;
+    let runs = registry.entry(root).or_default();
+    runs.retain(|_, weak| weak.strong_count() > 0);
+    // A new planning request starts in a provisional service. Its durable Run
+    // ID is assigned when the plan is committed, so resolve by the runtime's
+    // current identity rather than relying only on the provisional map key.
+    if let Some(service) = runs.values().filter_map(Weak::upgrade).find(|service| {
+        service
+            .runtime
+            .lock()
+            .is_ok_and(|runtime| runtime.state.run_id == run_id)
+    }) {
+        runs.insert(run_id.to_owned(), Arc::downgrade(&service));
+        return Ok(service);
+    }
+    if let Some(service) = runs.get(run_id).and_then(Weak::upgrade) {
+        return Ok(service);
+    }
+    let exists = runtime.store.contains_run(run_id)?;
+    if !create && !exists {
+        return Err("Run not found".into());
+    }
+    // Creating a provisional planner is explicit; loading an unknown durable
+    // run must never silently create an empty snapshot.
+    let mut child_runtime = runtime.open_run(if exists { run_id } else { "" })?;
+    if !exists {
+        child_runtime.state.run_id = run_id.to_owned();
+    }
+    let child = Arc::new(Service {
+        runtime: Mutex::new(child_runtime),
+        driving: AtomicBool::new(false),
+        planning: AtomicBool::new(false),
+        extension: primary.extension.clone(),
+    });
+    runs.insert(run_id.to_owned(), Arc::downgrade(&child));
+    Ok(child)
 }
 
 // Worker logs flow through one bounded-batch event writer rather than each
@@ -48,13 +153,21 @@ fn persist_outputs(service: Arc<Service>, rx: std::sync::mpsc::Receiver<OutputMe
                 Some(OutputMessage::Flush(reply)) => barrier = Some(reply),
                 None => break,
             }
-            if barrier.is_some() || events.len() == 64 { break; }
+            if barrier.is_some() || events.len() == 64 {
+                break;
+            }
             next = rx.try_recv().ok();
         }
         if failure.is_none() && !events.is_empty() {
-            failure = service.runtime.lock().map_err(|e| e.to_string())
-                .and_then(|mut runtime| runtime.emit_outputs(events)).err();
-            if let Some(error) = &failure { eprintln!("Cannot persist Pi output: {error}"); }
+            failure = service
+                .runtime
+                .lock()
+                .map_err(|e| e.to_string())
+                .and_then(|mut runtime| runtime.emit_outputs(events))
+                .err();
+            if let Some(error) = &failure {
+                eprintln!("Cannot persist Pi output: {error}");
+            }
         }
         if let Some(reply) = barrier {
             let _ = reply.send(failure.clone().map_or(Ok(()), Err));
@@ -145,8 +258,9 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
             None
         }
     };
-    let mut config = active_config
-        .or(saved_config_on_disk)
+    // Settings describe the next run; the current run keeps its event-backed config.
+    let mut config = saved_config_on_disk
+        .or(active_config)
         .or_else(|| {
             let mut cfg = runtime.state.config.clone()?;
             if !cfg.model.is_empty() && !cfg.model.contains('/') {
@@ -161,8 +275,9 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
                 .unwrap_or_default(),
             model: String::new(),
             thinking_level: "medium".into(),
-            max_parallel: 4,
-            max_feedback: 3, auto_approve: false,
+            max_parallel: 0,
+            max_feedback: 3,
+            auto_approve: false,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -289,13 +404,9 @@ fn save_graph(
 
 fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
     config.max_feedback = 3;
-    let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-    let config_path = runtime.root.join("config.json");
-    if let Ok(bytes) = serde_json::to_vec_pretty(&config) {
-        let _ = fs::write(&config_path, bytes);
-    }
-    runtime.state.config = Some(config.clone());
-    runtime.touch();
+    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(runtime.root.join("config.json"), bytes).map_err(|e| e.to_string())?;
     drop(runtime);
     bootstrap(service, false)
 }
@@ -406,10 +517,13 @@ pub fn validate_planning_preflight(config: &Config, mode: Option<&str>) -> Resul
                 "version": 1,
                 "operation": "catalog",
                 "refresh": false
-            })).ok()
+            }))
+            .ok()
         }
         #[cfg(feature = "fixture")]
-        { None }
+        {
+            None
+        }
     })
 }
 
@@ -426,11 +540,21 @@ fn validate_planning_models_preflight(
 
     if need_partitioner {
         let partitioner_cfg = PiModelConfig::resolve(PiRole::Partitioner, config);
-        validate_role_model_preflight(PiRole::Partitioner, &partitioner_cfg.model, &catalog, &fetch_catalog)?;
+        validate_role_model_preflight(
+            PiRole::Partitioner,
+            &partitioner_cfg.model,
+            &catalog,
+            &fetch_catalog,
+        )?;
     }
     if need_planner {
         let planner_cfg = PiModelConfig::resolve(PiRole::Planner, config);
-        validate_role_model_preflight(PiRole::Planner, &planner_cfg.model, &catalog, &fetch_catalog)?;
+        validate_role_model_preflight(
+            PiRole::Planner,
+            &planner_cfg.model,
+            &catalog,
+            &fetch_catalog,
+        )?;
     }
     Ok(())
 }
@@ -469,9 +593,19 @@ fn validate_role_model_preflight(
     {
         let catalog = _catalog.get_or_init(_fetch_catalog);
         if let Some(resp) = catalog {
-            if let Some(providers) = resp.get("result").and_then(|r| r.get("providers")).and_then(|p| p.as_array()) {
-                if let Some(prov) = providers.iter().find(|p| p.get("id").and_then(|i| i.as_str()) == Some(provider_id)) {
-                    let is_configured = prov.get("configured").and_then(|c| c.as_bool()).unwrap_or(false);
+            if let Some(providers) = resp
+                .get("result")
+                .and_then(|r| r.get("providers"))
+                .and_then(|p| p.as_array())
+            {
+                if let Some(prov) = providers
+                    .iter()
+                    .find(|p| p.get("id").and_then(|i| i.as_str()) == Some(provider_id))
+                {
+                    let is_configured = prov
+                        .get("configured")
+                        .and_then(|c| c.as_bool())
+                        .unwrap_or(false);
                     if !is_configured {
                         return Err(format!(
                             "Pre-flight check failed: Provider '{}' for model '{}' is not authenticated. Please configure API credentials or log in before starting planning.",
@@ -491,23 +625,39 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
     const TABLE: [i8; 256] = {
         let mut t = [-1i8; 256];
         let mut i = 0usize;
-        while i < 26 { t[(b'A' + i as u8) as usize] = i as i8; i += 1; }
+        while i < 26 {
+            t[(b'A' + i as u8) as usize] = i as i8;
+            i += 1;
+        }
         let mut i = 0usize;
-        while i < 26 { t[(b'a' + i as u8) as usize] = (26 + i) as i8; i += 1; }
+        while i < 26 {
+            t[(b'a' + i as u8) as usize] = (26 + i) as i8;
+            i += 1;
+        }
         let mut i = 0usize;
-        while i < 10 { t[(b'0' + i as u8) as usize] = (52 + i) as i8; i += 1; }
+        while i < 10 {
+            t[(b'0' + i as u8) as usize] = (52 + i) as i8;
+            i += 1;
+        }
         t[b'+' as usize] = 62;
         t[b'/' as usize] = 63;
         t
     };
-    let clean: Vec<u8> = input.bytes().filter(|&b| !b.is_ascii_whitespace()).collect();
+    let clean: Vec<u8> = input
+        .bytes()
+        .filter(|&b| !b.is_ascii_whitespace())
+        .collect();
     let mut out = Vec::with_capacity(clean.len() * 3 / 4);
     let mut buf = 0u32;
     let mut bits = 0u32;
     for &b in &clean {
-        if b == b'=' { break; }
+        if b == b'=' {
+            break;
+        }
         let val = TABLE[b as usize];
-        if val < 0 { continue; }
+        if val < 0 {
+            continue;
+        }
         buf = (buf << 6) | (val as u32);
         bits += 6;
         if bits >= 8 {
@@ -528,9 +678,15 @@ fn planner_node_status(snapshot: &Snapshot) -> String {
     text
 }
 
-fn planner_followup_prompt(instruction: &str, revision_run_id: Option<&str>, snapshot: &Snapshot) -> String {
-    if revision_run_id == Some(snapshot.run_id.as_str()) && snapshot.approved
-        && snapshot.plan_type.as_deref() == Some("graph") {
+fn planner_followup_prompt(
+    instruction: &str,
+    revision_run_id: Option<&str>,
+    snapshot: &Snapshot,
+) -> String {
+    if revision_run_id == Some(snapshot.run_id.as_str())
+        && snapshot.approved
+        && snapshot.plan_type.as_deref() == Some("graph")
+    {
         format!("{}\n{}", planner_node_status(snapshot), instruction)
     } else {
         instruction.to_string()
@@ -544,47 +700,90 @@ fn planner_followup_prompt(instruction: &str, revision_run_id: Option<&str>, sna
 fn stored_planner_session_id(
     directory: &std::path::Path,
     repository: &std::path::Path,
+    workspace: &std::path::Path,
     expected: &str,
 ) -> Result<Option<String>, String> {
-    if !directory.is_dir() { return Ok(None); }
-    let repository = repository.canonicalize().map_err(|error| error.to_string())?;
+    if !directory.is_dir() {
+        return Ok(None);
+    }
+    let repository = repository
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let mut ids = std::collections::BTreeSet::new();
     let mut found_file = false;
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
-        if entry.path().extension().is_none_or(|ext| ext != "jsonl") ||
-            !entry.file_type().map_err(|error| error.to_string())?.is_file() { continue; }
+        if entry.path().extension().is_none_or(|ext| ext != "jsonl")
+            || !entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_file()
+        {
+            continue;
+        }
         found_file = true;
         // Pi's first JSONL entry is the session header. A corrupt or foreign
         // session must not silently start a second conversation.
         let mut header = String::new();
         BufReader::new(fs::File::open(entry.path()).map_err(|error| error.to_string())?)
-            .take(8192).read_line(&mut header).map_err(|error| error.to_string())?;
+            .take(8192)
+            .read_line(&mut header)
+            .map_err(|error| error.to_string())?;
         let value: serde_json::Value = serde_json::from_str(&header)
             .map_err(|_| "Invalid Planner session header".to_string())?;
-        let id = value.get("id").and_then(|id| id.as_str()).ok_or("Missing Planner session ID")?;
-        let cwd = value.get("cwd").and_then(|cwd| cwd.as_str()).ok_or("Missing Planner session repository")?;
+        let id = value
+            .get("id")
+            .and_then(|id| id.as_str())
+            .ok_or("Missing Planner session ID")?;
+        let cwd = value
+            .get("cwd")
+            .and_then(|cwd| cwd.as_str())
+            .ok_or("Missing Planner session repository")?;
         if value.get("type").and_then(|kind| kind.as_str()) != Some("session")
             || Uuid::parse_str(id).is_err()
-            || std::path::Path::new(cwd).canonicalize().ok().as_deref() != Some(repository.as_path()) {
+            || !matches!(std::path::Path::new(cwd).canonicalize().ok().as_deref(), Some(path) if path == repository || path == workspace)
+        {
             return Err("Planner session belongs to another repository or is invalid".into());
         }
         ids.insert(id.to_string());
     }
-    if !found_file { return Ok(None); }
-    if ids.contains(expected) { return Ok(Some(expected.to_string())); }
-    if ids.len() == 1 { return Ok(ids.into_iter().next()); } // Legacy session with a random Pi ID.
+    if !found_file {
+        return Ok(None);
+    }
+    if ids.contains(expected) {
+        return Ok(Some(expected.to_string()));
+    }
+    if ids.len() == 1 {
+        return Ok(ids.into_iter().next());
+    } // Legacy session with a random Pi ID.
     Err("Multiple Planner conversations found for one run; cannot select one safely".into())
 }
 
+#[cfg(all(test, feature = "fixture"))]
 fn planner_session_directory(
     root: &std::path::Path,
     attempt: &std::path::Path,
     repository: &std::path::Path,
     revision: Option<&Snapshot>,
 ) -> Result<(PathBuf, String), String> {
+    planner_session_directory_for_workspace(root, attempt, repository, repository, revision)
+}
+
+fn planner_session_directory_for_workspace(
+    root: &std::path::Path,
+    attempt: &std::path::Path,
+    repository: &std::path::Path,
+    workspace: &std::path::Path,
+    revision: Option<&Snapshot>,
+) -> Result<(PathBuf, String), String> {
     let Some(snapshot) = revision else {
-        let id = attempt.file_name().and_then(|name| name.to_str()).ok_or("Invalid planning identity")?;
+        let id = attempt
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Invalid planning identity")?;
         return Ok((attempt.join("planner-session"), id.to_string()));
     };
     if Uuid::parse_str(&snapshot.run_id).is_err() {
@@ -595,18 +794,27 @@ fn planner_session_directory(
     let mut prior_planner_attempt = false;
     for event in &snapshot.events {
         let id = match &event.kind {
-            EventKind::Created { planning_id: Some(id), .. } | EventKind::GraphRevised { planning_id: id, .. } => id,
+            EventKind::Created {
+                planning_id: Some(id),
+                ..
+            }
+            | EventKind::GraphRevised {
+                planning_id: id, ..
+            } => id,
             _ => continue,
         };
-        if Uuid::parse_str(id).is_err() { continue; }
+        if Uuid::parse_str(id).is_err() {
+            continue;
+        }
         prior_planner_attempt = true;
         let session = root.join("planning").join(id).join("planner-session");
-        if let Some(pi_id) = stored_planner_session_id(&session, repository, id)? {
+        if let Some(pi_id) = stored_planner_session_id(&session, repository, workspace, id)? {
             return Ok((session, pi_id));
         }
     }
     let session = root.join("planner-sessions").join(&snapshot.run_id);
-    if let Some(id) = stored_planner_session_id(&session, repository, &snapshot.run_id)? {
+    if let Some(id) = stored_planner_session_id(&session, repository, workspace, &snapshot.run_id)?
+    {
         return Ok((session, id));
     }
     // A committed Planner turn with a missing session cannot safely start a
@@ -658,292 +866,416 @@ fn plan_goal_internal(
     let service = service.clone();
     let cleanup = service.clone();
     let mut resume_after = false;
-    let result = (|| {
-        let original_graph = if let Some(ref run_id) = revision_run_id {
-            if mode != Some("graph") {
-                return Err(("Graph revisions require graph mode".into(), None));
+    let owner = match service.runtime.lock() {
+        Ok(runtime) => runtime.state.run_id.clone(),
+        Err(error) => {
+            cleanup.planning.store(false, Ordering::SeqCst);
+            return Err((error.to_string(), None));
+        }
+    };
+    let mut cancellation_guard = PlanningCancellationGuard(owner.clone());
+    let result = crate::process_control::with_owner(&owner, || {
+        (|| {
+            let original_graph = if let Some(ref run_id) = revision_run_id {
+                if mode != Some("graph") {
+                    return Err(("Graph revisions require graph mode".into(), None));
+                }
+                let runtime = service
+                    .runtime
+                    .lock()
+                    .map_err(|error| (error.to_string(), None))?;
+                if runtime.state.run_id != *run_id
+                    || runtime.state.plan_type.as_deref() != Some("graph")
+                    || runtime.state.config.as_ref().map(|c| c.repository.as_str())
+                        != Some(config.repository.as_str())
+                    || matches!(
+                        runtime.state.phase.as_str(),
+                        "publishing" | "merging" | "publication_failed"
+                    )
+                {
+                    return Err(("Graph is no longer available for revision".into(), None));
+                }
+                Some(runtime.state.graph.clone())
+            } else {
+                None
+            };
+            let service = service.clone();
+            let planning_start = std::time::Instant::now();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let root = service
+                .runtime
+                .lock()
+                .map_err(|error| (error.to_string(), None))?
+                .root
+                .clone();
+            let repository = PathBuf::from(&config.repository);
+            let repo_str = repository.to_string_lossy().to_string();
+            crate::workspace::validate_binding(&repository).map_err(|e| (e, None))?;
+            let lock = source_lock(&repository).map_err(|e| (e, None))?;
+            {
+                let _source_guard = lock.lock().map_err(|e| (e.to_string(), None))?;
+                crate::workspace::verify(&repository).map_err(|error| (error, None))?;
             }
-            let runtime = service.runtime.lock().map_err(|error| (error.to_string(), None))?;
-            if runtime.state.run_id != *run_id
-                || runtime.state.plan_type.as_deref() != Some("graph")
-                || runtime.state.config.as_ref().map(|c| c.repository.as_str()) != Some(config.repository.as_str())
-                || matches!(runtime.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
-                return Err(("Graph is no longer available for revision".into(), None));
-            }
-            Some(runtime.state.graph.clone())
-        } else { None };
-        let service = service.clone();
-        let planning_start = std::time::Instant::now();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let root = service
-            .runtime
-            .lock()
-            .map_err(|error| (error.to_string(), None))?
-            .root
-            .clone();
-        let repository = PathBuf::from(&config.repository);
-        let repo_str = repository.to_string_lossy().to_string();
-        crate::workspace::verify(&repository).map_err(|error| (error, None))?;
-        validate_planning_preflight(&config, mode).map_err(|error| (error, None))?;
-        let planning_id = Uuid::new_v4().to_string();
-        let directory = root.join("planning").join(&planning_id);
-        fs::create_dir_all(&directory).map_err(|error| (error.to_string(), None))?;
-        fs::write(
-            directory.join("request.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "goal": goal, "config": config, "mode": mode, "revisionRunId": revision_run_id
-            }))
-            .map_err(|e| (e.to_string(), None))?,
-        )
-        .map_err(|e| (e.to_string(), None))?;
-        // Publish identity before launching Pi; a browser connection does not own planning.
-        let running = PlanningSummary {
-            planning_id: planning_id.clone(),
-            status: Some("running".into()),
-            created_at: Some(now_ms),
-            repository: Some(repo_str.clone()),
-            roles: ["partition", "planner"]
-                .into_iter()
-                .map(|role| (role.to_string(), PlanningRoleMetrics::default()))
-                .collect(),
-            ..Default::default()
-        };
-        write_planning_summary(&directory, &running).map_err(|error| (error, None))?;
-        let mut image_file_args: Vec<String> = Vec::new();
-        if let Some(ref imgs) = images {
-            if !imgs.is_empty() {
-                let attach_dir = directory.join("attachments");
-                let _ = fs::create_dir_all(&attach_dir);
-                for (idx, img) in imgs.iter().enumerate() {
-                    let file_path = planning_attachment_path(&attach_dir, idx, img);
-                    if let Some(bytes) = decode_base64(&img.data) {
-                        if fs::write(&file_path, bytes).is_ok() {
-                            if let Ok(canon) = file_path.canonicalize() {
-                                image_file_args.push(format!("@{}", canon.to_string_lossy()));
-                            } else {
-                                image_file_args.push(format!("@{}", file_path.to_string_lossy()));
+            check_planning_cancelled(&owner).map_err(|e| (e, None))?;
+            validate_planning_preflight(&config, mode).map_err(|error| (error, None))?;
+            let planning_id = Uuid::new_v4().to_string();
+            let directory = root.join("planning").join(&planning_id);
+            fs::create_dir_all(&directory).map_err(|error| (error.to_string(), None))?;
+            fs::write(
+                directory.join("request.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "goal": goal, "config": config, "mode": mode, "revisionRunId": revision_run_id
+                }))
+                .map_err(|e| (e.to_string(), None))?,
+            )
+            .map_err(|e| (e.to_string(), None))?;
+            // Publish identity before launching Pi; a browser connection does not own planning.
+            let running = PlanningSummary {
+                planning_id: planning_id.clone(),
+                status: Some("running".into()),
+                created_at: Some(now_ms),
+                repository: Some(repo_str.clone()),
+                roles: ["partition", "planner"]
+                    .into_iter()
+                    .map(|role| (role.to_string(), PlanningRoleMetrics::default()))
+                    .collect(),
+                ..Default::default()
+            };
+            write_planning_summary(&directory, &running).map_err(|error| (error, None))?;
+            let mut image_file_args: Vec<String> = Vec::new();
+            if let Some(ref imgs) = images {
+                if !imgs.is_empty() {
+                    let attach_dir = directory.join("attachments");
+                    let _ = fs::create_dir_all(&attach_dir);
+                    for (idx, img) in imgs.iter().enumerate() {
+                        let file_path = planning_attachment_path(&attach_dir, idx, img);
+                        if let Some(bytes) = decode_base64(&img.data) {
+                            if fs::write(&file_path, bytes).is_ok() {
+                                if let Ok(canon) = file_path.canonicalize() {
+                                    image_file_args.push(format!("@{}", canon.to_string_lossy()));
+                                } else {
+                                    image_file_args
+                                        .push(format!("@{}", file_path.to_string_lossy()));
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        let plan_outcome = (|| -> Result<Snapshot, String> {
-            let route_path = directory.join("route.json");
-            let (route, partition_metrics) = match mode {
-                Some("serial") => {
-                    let route = Route {
-                        plan_type: "serial".into(),
-                    };
-                    fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
-                        .map_err(|error| error.to_string())?;
-                    on_route(&route);
-                    (route, PlanningRoleMetrics::default())
-                }
-                Some("graph") => {
-                    let route = Route {
-                        plan_type: "graph".into(),
-                    };
-                    fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
-                        .map_err(|error| error.to_string())?;
-                    on_route(&route);
-                    (route, PlanningRoleMetrics::default())
-                }
-                _ => {
-                    let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
-                        .unwrap_or_else(|_| PARTITIONER_PROMPT.trim().to_string());
-                    let task = goal.clone();
-                    let partitioner_model_cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
-                    let partitioner_config = partitioner_model_cfg.effective_config(&config);
-                    let mut partitioner_extra_args = vec!["--no-tools", "--no-context-files"];
-                    if let Some(thinking) = &partitioner_model_cfg.thinking {
-                        partitioner_extra_args.push("--thinking");
-                        partitioner_extra_args.push(thinking.as_str());
+            let plan_outcome = (|| -> Result<Snapshot, String> {
+                let route_path = directory.join("route.json");
+                let (route, partition_metrics) = match mode {
+                    Some("serial") => {
+                        let route = Route {
+                            plan_type: "serial".into(),
+                        };
+                        fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
+                            .map_err(|error| error.to_string())?;
+                        on_route(&route);
+                        (route, PlanningRoleMetrics::default())
                     }
-                    for arg in &image_file_args {
-                        partitioner_extra_args.push(arg.as_str());
+                    Some("graph") => {
+                        let route = Route {
+                            plan_type: "graph".into(),
+                        };
+                        fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
+                            .map_err(|error| error.to_string())?;
+                        on_route(&route);
+                        (route, PlanningRoleMetrics::default())
                     }
-                    let mut log = String::new();
-                    let mut partition_log =
-                        fs::File::create(directory.join("partition.jsonl")).map_err(|e| e.to_string())?;
-                    let mut log_error = None;
-                    let partition_start = std::time::Instant::now();
-                    let partition_result = run_pi(
-                        PiRequest {
-                            role: PiRole::Partitioner,
-                            config: &partitioner_config,
-                            cwd: &repository,
-                            task: &task,
-                            session_dir: &directory.join("partition-session"),
-                            extension: None,
-                            tools: Some(""),
-                            session_id: None,
-                            extra_args: partitioner_extra_args,
-                            environment: vec![
-                                ("GRAPHER_MODE", "partition".into()),
-                                ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
-                            ],
-                            system_prompt: Some(&partitioner_system_prompt),
-                            images: None,
-                        },
-                        |text| {
-                            if let Err(error) = partition_log.write_all(text.as_bytes()) {
-                                log_error = Some(error.to_string());
-                            }
-                            log.push_str(&text);
-                            on_partitioner_line(&text);
-                        },
-                    );
-                    let partition_wall_sec = partition_start.elapsed().as_secs_f64();
-                    if let Some(error) = log_error {
-                        return Err(format!("Cannot persist planning output: {error}"));
-                    }
-                    let mut partition_metrics =
-                        parse_planning_role_metrics(&partitioner_config.model, &log);
-                    if partition_metrics.duration_seconds == 0.0 {
-                        partition_metrics.duration_seconds = partition_wall_sec;
-                    }
-                    // A failed engine call is not a routing decision. In particular, do not
-                    // turn authentication/provider failures into an auto-approved serial run.
-                    let output =
-                        partition_result.map_err(|error| format!("Partitioner failed: {error}"))?;
-                    let route = parse_route_decision(&output);
-                    fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
-                        .map_err(|error| error.to_string())?;
-                    on_route(&route);
-                    eprintln!(
+                    _ => {
+                        let partitioner_system_prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
+                            .unwrap_or_else(|_| PARTITIONER_PROMPT.trim().to_string());
+                        let task = goal.clone();
+                        let partitioner_model_cfg =
+                            PiModelConfig::resolve(PiRole::Partitioner, &config);
+                        let partitioner_config = partitioner_model_cfg.effective_config(&config);
+                        let mut partitioner_extra_args = vec!["--no-tools", "--no-context-files"];
+                        if let Some(thinking) = &partitioner_model_cfg.thinking {
+                            partitioner_extra_args.push("--thinking");
+                            partitioner_extra_args.push(thinking.as_str());
+                        }
+                        for arg in &image_file_args {
+                            partitioner_extra_args.push(arg.as_str());
+                        }
+                        let mut log = String::new();
+                        let mut partition_log = fs::File::create(directory.join("partition.jsonl"))
+                            .map_err(|e| e.to_string())?;
+                        let mut log_error = None;
+                        let partition_start = std::time::Instant::now();
+                        let partition_result = run_pi(
+                            PiRequest {
+                                role: PiRole::Partitioner,
+                                config: &partitioner_config,
+                                cwd: &repository,
+                                task: &task,
+                                session_dir: &directory.join("partition-session"),
+                                extension: None,
+                                tools: Some(""),
+                                session_id: None,
+                                extra_args: partitioner_extra_args,
+                                environment: vec![
+                                    ("GRAPHER_MODE", "partition".into()),
+                                    ("GRAPHER_GRAPH_PATH", route_path.to_string_lossy().into()),
+                                ],
+                                system_prompt: Some(&partitioner_system_prompt),
+                                images: None,
+                            },
+                            |text| {
+                                if let Err(error) = partition_log.write_all(text.as_bytes()) {
+                                    log_error = Some(error.to_string());
+                                }
+                                log.push_str(&text);
+                                on_partitioner_line(&text);
+                            },
+                        );
+                        let partition_wall_sec = partition_start.elapsed().as_secs_f64();
+                        if let Some(error) = log_error {
+                            return Err(format!("Cannot persist planning output: {error}"));
+                        }
+                        let mut partition_metrics =
+                            parse_planning_role_metrics(&partitioner_config.model, &log);
+                        if partition_metrics.duration_seconds == 0.0 {
+                            partition_metrics.duration_seconds = partition_wall_sec;
+                        }
+                        // A failed engine call is not a routing decision. In particular, do not
+                        // turn authentication/provider failures into an auto-approved serial run.
+                        let output = partition_result
+                            .map_err(|error| format!("Partitioner failed: {error}"))?;
+                        let route = parse_route_decision(&output);
+                        fs::write(&route_path, serde_json::to_string_pretty(&route).unwrap())
+                            .map_err(|error| error.to_string())?;
+                        on_route(&route);
+                        eprintln!(
                         "[Grapher] [Router] Goal routed as '{}' in {:.2}s (tokens: in={}, out={})",
                         route.plan_type, partition_metrics.duration_seconds, partition_metrics.usage.input, partition_metrics.usage.output
                     );
-                    (route, partition_metrics)
+                        (route, partition_metrics)
+                    }
+                };
+                // Do not spend Planner tokens on a Graph that cannot run in this
+                // environment (e.g. a Harbor container without user namespaces).
+                #[cfg(not(feature = "fixture"))]
+                if route.plan_type == "graph" {
+                    crate::native::require_graph_execution()?;
                 }
-            };
-            // Do not spend Planner tokens on a Graph that cannot run in this
-            // environment (e.g. a Harbor container without user namespaces).
-            #[cfg(not(feature = "fixture"))]
-            if route.plan_type == "graph" {
-                crate::native::require_graph_execution()?;
-            }
-            let mut planner_metrics = None;
-            let graph = match route.plan_type.as_str() {
-                "serial" => Graph {
-                    original_goal: goal.clone(),
-                    nodes: vec![Node {
-                        name: "task".into(),
-                        task: goal.clone(),
-                    }],
-                    edges: Vec::new(),
-                },
-                "graph" => {
-                    let graph_path = directory.join("graph.json");
-                    fs::write(
-                        &graph_path,
-                        serde_json::to_string(&original_graph.clone().unwrap_or_else(|| Graph {
-                            original_goal: goal.clone(),
-                            ..Graph::default()
-                        }))
-                        .unwrap(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                    let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
-                    let planner_config = planner_model_cfg.effective_config(&config);
-                    let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
-                        .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
-                    // Append dynamic state only to the new user turn, never to
-                    // the shared system prompt or previous Planner turns.
-                    let task = {
-                        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                        planner_followup_prompt(&goal, revision_run_id.as_deref(), &runtime.state)
-                    };
-                    let mut planner_extra_args = Vec::new();
-                    if let Some(thinking) = &planner_model_cfg.thinking {
-                        planner_extra_args.push("--thinking");
-                        planner_extra_args.push(thinking.as_str());
-                    }
-                    for arg in &image_file_args {
-                        planner_extra_args.push(arg.as_str());
-                    }
-                    let (planner_session_dir, planner_session_id) = {
-                        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                        planner_session_directory(
-                            &root, &directory, &repository,
-                            original_graph.as_ref().map(|_| &runtime.state),
-                        )?
-                    };
-                    let mut log = String::new();
-                    // Each attempt retains its own stream/metrics for recovery;
-                    // only Pi's private conversation directory is shared.
-                    let mut planner_log = fs::File::create(directory.join("planner.jsonl"))
-                        .map_err(|e| e.to_string())?;
-                    let mut log_error = None;
-                    let planner_start = std::time::Instant::now();
-                    let planner_result = run_pi(
-                        PiRequest {
-                            role: PiRole::Planner,
-                            config: &planner_config,
-                            cwd: &repository,
-                            task: &task,
-                            session_dir: &planner_session_dir,
-                            extension: Some(&service.extension),
-                            tools: Some("node,edge,read,bash"),
-                            session_id: Some(&planner_session_id),
-                            extra_args: planner_extra_args,
-                            environment: vec![
-                                ("GRAPHER_MODE", "planner".into()),
-                                ("GRAPHER_PLANNER_RUN_ID", revision_run_id.clone().unwrap_or_default()),
-                                ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
-                                (
-                                    "GRAPHER_COMPILER_PATH",
-                                    std::env::current_exe()
-                                        .map_err(|error| error.to_string())?
-                                        .to_string_lossy()
-                                        .into(),
-                                ),
-                            ],
-                            system_prompt: Some(&planner_system_prompt),
-                            images: None,
-                        },
-                        |text| {
-                            if let Err(error) = planner_log.write_all(text.as_bytes()) {
-                                log_error = Some(error.to_string());
+                let mut planner_metrics = None;
+                let graph = match route.plan_type.as_str() {
+                    "serial" => Graph {
+                        original_goal: goal.clone(),
+                        nodes: vec![Node {
+                            name: "task".into(),
+                            task: goal.clone(),
+                        }],
+                        edges: Vec::new(),
+                    },
+                    "graph" => {
+                        // Persist a private checkout across revisions of this Run.
+                        // The source is locked only for the initial filesystem copy
+                        // and the final merge, not for Pi's model/tool session.
+                        let workspace_file = directory.join("planner-workspace");
+                        let previous_workspace = {
+                            let runtime =
+                                service.runtime.lock().map_err(|error| error.to_string())?;
+                            runtime.state.planning_id.as_ref().and_then(|id| {
+                                fs::read_to_string(
+                                    root.join("planning").join(id).join("planner-workspace"),
+                                )
+                                .ok()
+                            })
+                        };
+                        let workspaces = repository
+                            .parent()
+                            .ok_or("Invalid source directory")?
+                            .join(".grapher-workspaces");
+                        let workspace_root = workspaces.join(if owner.is_empty() {
+                            &planning_id
+                        } else {
+                            &owner
+                        });
+                        let planner_workspace = previous_workspace
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| workspace_root.join(&planning_id));
+                        let workspace_root = planner_workspace
+                            .parent()
+                            .ok_or("Invalid private Planner workspace")?
+                            .to_path_buf();
+                        if planner_workspace.exists() {
+                            let canonical = planner_workspace
+                                .canonicalize()
+                                .map_err(|e| e.to_string())?;
+                            let root = workspace_root.canonicalize().map_err(|e| e.to_string())?;
+                            if canonical.parent() != Some(root.as_path())
+                                || root.parent()
+                                    != Some(
+                                        workspaces
+                                            .canonicalize()
+                                            .map_err(|e| e.to_string())?
+                                            .as_path(),
+                                    )
+                                || !root
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .is_some_and(|name| Uuid::parse_str(name).is_ok())
+                                || !canonical.join(".git").is_dir()
+                            {
+                                return Err("Invalid private Planner workspace".into());
                             }
-                            log.push_str(&text);
-                            on_planner_line(&text);
-                        },
-                    );
-                    let planner_wall_sec = planner_start.elapsed().as_secs_f64();
-                    if let Some(error) = log_error {
-                        return Err(format!("Cannot persist planning output: {error}"));
+                        } else {
+                            let _source_guard = lock.lock().map_err(|e| e.to_string())?;
+                            check_planning_cancelled(&owner)?;
+                            crate::workspace::prepare_planner(&repository, &planner_workspace)?;
+                        }
+                        fs::write(
+                            &workspace_file,
+                            planner_workspace.to_string_lossy().as_bytes(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
+                        let planner_config = planner_model_cfg.effective_config(&config);
+                        let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
+                            .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
+                        // Append dynamic state only to the new user turn, never to
+                        // the shared system prompt or previous Planner turns.
+                        let task = {
+                            let runtime =
+                                service.runtime.lock().map_err(|error| error.to_string())?;
+                            planner_followup_prompt(
+                                &goal,
+                                revision_run_id.as_deref(),
+                                &runtime.state,
+                            )
+                        };
+                        let mut planner_extra_args = Vec::new();
+                        if let Some(thinking) = &planner_model_cfg.thinking {
+                            planner_extra_args.push("--thinking");
+                            planner_extra_args.push(thinking.as_str());
+                        }
+                        for arg in &image_file_args {
+                            planner_extra_args.push(arg.as_str());
+                        }
+                        let (planner_session_dir, planner_session_id) = {
+                            let runtime =
+                                service.runtime.lock().map_err(|error| error.to_string())?;
+                            planner_session_directory_for_workspace(
+                                &root,
+                                &directory,
+                                &repository,
+                                &planner_workspace,
+                                original_graph.as_ref().map(|_| &runtime.state),
+                            )?
+                        };
+                        // Private Planner sandboxes can only access their session
+                        // directory in Grapher's data tree. Keep the graph tool's
+                        // mutable file there, then persist an attempt copy below.
+                        fs::create_dir_all(&planner_session_dir).map_err(|e| e.to_string())?;
+                        let graph_path =
+                            planner_session_dir.join(format!("graph-{planning_id}.json"));
+                        fs::write(
+                            &graph_path,
+                            serde_json::to_vec(&original_graph.clone().unwrap_or_else(|| Graph {
+                                original_goal: goal.clone(),
+                                ..Graph::default()
+                            }))
+                            .map_err(|e| e.to_string())?,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let mut log = String::new();
+                        // Each attempt retains its own stream/metrics for recovery;
+                        // only Pi's private conversation directory is shared.
+                        let mut planner_log = fs::File::create(directory.join("planner.jsonl"))
+                            .map_err(|e| e.to_string())?;
+                        let mut log_error = None;
+                        check_planning_cancelled(&owner)?;
+                        let planner_start = std::time::Instant::now();
+                        let planner_result = run_pi(
+                            PiRequest {
+                                role: PiRole::Planner,
+                                config: &planner_config,
+                                cwd: &planner_workspace,
+                                task: &task,
+                                session_dir: &planner_session_dir,
+                                extension: Some(&service.extension),
+                                tools: Some("node,edge,read,bash"),
+                                session_id: Some(&planner_session_id),
+                                extra_args: planner_extra_args,
+                                environment: vec![
+                                    ("GRAPHER_MODE", "planner".into()),
+                                    (
+                                        "GRAPHER_PLANNER_RUN_ID",
+                                        revision_run_id.clone().unwrap_or_default(),
+                                    ),
+                                    ("GRAPHER_ACTIVE_RUN_ID", owner.clone()),
+                                    ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
+                                    (
+                                        "GRAPHER_COMPILER_PATH",
+                                        std::env::current_exe()
+                                            .map_err(|error| error.to_string())?
+                                            .to_string_lossy()
+                                            .into(),
+                                    ),
+                                ],
+                                system_prompt: Some(&planner_system_prompt),
+                                images: None,
+                            },
+                            |text| {
+                                if let Err(error) = planner_log.write_all(text.as_bytes()) {
+                                    log_error = Some(error.to_string());
+                                }
+                                log.push_str(&text);
+                                on_planner_line(&text);
+                            },
+                        );
+                        let planner_wall_sec = planner_start.elapsed().as_secs_f64();
+                        if let Some(error) = log_error {
+                            return Err(format!("Cannot persist planning output: {error}"));
+                        }
+                        let mut m = parse_planning_role_metrics(&planner_config.model, &log);
+                        if m.duration_seconds == 0.0 {
+                            m.duration_seconds = planner_wall_sec;
+                        }
+                        planner_metrics = Some(m);
+                        fs::copy(&graph_path, directory.join("graph.json"))
+                            .map_err(|e| e.to_string())?;
+                        planner_result?;
+                        {
+                            let _source_guard = lock.lock().map_err(|e| e.to_string())?;
+                            check_planning_cancelled(&owner)?;
+                            crate::workspace::publish_planner(
+                                &repository,
+                                &planner_workspace,
+                                &workspace_root.join(format!("{planning_id}-preview")),
+                                if owner.is_empty() {
+                                    &planning_id
+                                } else {
+                                    &owner
+                                },
+                                &planning_id,
+                            )?;
+                        }
+                        serde_json::from_str(
+                            &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
+                        )
+                        .map_err(|error| error.to_string())?
                     }
-                    let mut m = parse_planning_role_metrics(&planner_config.model, &log);
-                    if m.duration_seconds == 0.0 {
-                        m.duration_seconds = planner_wall_sec;
-                    }
-                    planner_metrics = Some(m);
-                    planner_result?;
-                    serde_json::from_str(
-                        &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
-                    )
-                    .map_err(|error| error.to_string())?
+                    _ => return Err("Partitioner returned an invalid route".into()),
+                };
+                let total_planning_duration = planning_start.elapsed().as_secs_f64();
+                let model_duration = partition_metrics.duration_seconds
+                    + planner_metrics
+                        .as_ref()
+                        .map(|p| p.duration_seconds)
+                        .unwrap_or(0.0);
+                let mut roles = std::collections::BTreeMap::new();
+                roles.insert("partition".to_string(), partition_metrics);
+                if let Some(m) = planner_metrics {
+                    roles.insert("planner".to_string(), m);
                 }
-                _ => return Err("Partitioner returned an invalid route".into()),
-            };
-            let total_planning_duration = planning_start.elapsed().as_secs_f64();
-            let model_duration = partition_metrics.duration_seconds
-                + planner_metrics
-                    .as_ref()
-                    .map(|p| p.duration_seconds)
-                    .unwrap_or(0.0);
-            let mut roles = std::collections::BTreeMap::new();
-            roles.insert("partition".to_string(), partition_metrics);
-            if let Some(m) = planner_metrics {
-                roles.insert("planner".to_string(), m);
-            }
-            if let Some(m) = roles.get("planner") {
-                eprintln!(
+                if let Some(m) = roles.get("planner") {
+                    eprintln!(
                     "[Grapher] [Planner] Plan compiled: {} nodes, {} edges in {:.2}s (tokens: {}, tools: {}, errors: {})",
                     graph.nodes.len(),
                     graph.edges.len(),
@@ -952,126 +1284,171 @@ fn plan_goal_internal(
                     m.tools,
                     m.tool_errors
                 );
-            }
+                }
 
-            let summary = PlanningSummary {
-                planning_id: planning_id.clone(),
-                roles,
-                total_planning_duration,
-                model_duration,
-                status: Some("success".to_string()),
-                error: None,
-                created_at: Some(now_ms),
-                repository: Some(repo_str.clone()),
-            };
-
-            let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-            if let Some(ref run_id) = revision_run_id {
-                if runtime.state.run_id != *run_id {
-                    return Err("Run changed during graph revision".into());
-                }
-                if runtime.state.approved {
-                    // Validate before any pause. Unaffected executions keep running;
-                    // only when an affected job is in flight do we stop scheduling
-                    // new work and wait for that job to finish before invalidation.
-                    compiler::compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
-                    loop {
-                        let affected = runtime.revision_affected(&graph);
-                        let busy = runtime.state.executions.iter().any(|execution|
-                            execution.status == "running" && affected.contains(&execution.node));
-                        if !busy { break; }
-                        if !runtime.state.paused {
-                            runtime.pause(true)?;
-                            resume_after = true;
-                        }
-                        drop(runtime);
-                        thread::sleep(std::time::Duration::from_millis(50));
-                        runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                        if runtime.state.run_id != *run_id { return Err("Run changed during graph revision".into()); }
-                    }
-                    runtime.revise_graph(graph, summary.clone())?;
-                } else {
-                    runtime.update_draft_graph(graph, planning_id.clone(), summary.clone())?;
-                }
-            } else {
-                runtime.create_with_planning(graph, config.clone(), Some(planning_id.clone()), Some(summary.clone()))?;
-                runtime.set_route(&route.plan_type)?;
-            }
-            if (route.plan_type == "serial" && revision_run_id.is_none())
-                || (route.plan_type == "graph" && config.auto_approve && !runtime.state.approved) {
-                runtime.approve()?;
-            }
-            let snapshot = runtime.state.clone();
-            drop(runtime);
-            write_planning_summary(&directory, &summary)?;
-            if snapshot.approved && (route.plan_type == "serial" || config.auto_approve) {
-                drive(service.clone());
-            }
-            Ok(snapshot)
-        })();
-        match plan_outcome {
-            Ok(snapshot) => Ok(snapshot),
-            Err(err) => {
-                let mut roles: std::collections::BTreeMap<String, PlanningRoleMetrics> =
-                    Default::default();
-                let mut model_duration = 0.0;
-                let partition_file = directory.join("partition.jsonl");
-                if partition_file.exists() {
-                    if let Ok(content) = fs::read_to_string(&partition_file) {
-                        let partitioner_model_cfg =
-                            PiModelConfig::resolve(PiRole::Partitioner, &config);
-                        let partitioner_config = partitioner_model_cfg.effective_config(&config);
-                        let m = parse_planning_role_metrics(&partitioner_config.model, &content);
-                        model_duration += m.duration_seconds;
-                        roles.insert("partition".into(), m);
-                    }
-                }
-                let planner_file = directory.join("planner.jsonl");
-                if planner_file.exists() {
-                    if let Ok(content) = fs::read_to_string(&planner_file) {
-                        let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
-                        let planner_config = planner_model_cfg.effective_config(&config);
-                        let m = parse_planning_role_metrics(&planner_config.model, &content);
-                        model_duration += m.duration_seconds;
-                        roles.insert("planner".into(), m);
-                    }
-                }
-                let failure_summary = PlanningSummary {
+                let summary = PlanningSummary {
                     planning_id: planning_id.clone(),
                     roles,
-                    total_planning_duration: planning_start.elapsed().as_secs_f64(),
+                    total_planning_duration,
                     model_duration,
-                    status: Some("failed".to_string()),
-                    error: Some(err.clone()),
+                    status: Some("success".to_string()),
+                    error: None,
                     created_at: Some(now_ms),
                     repository: Some(repo_str.clone()),
                 };
-                if let Err(error) = write_planning_summary(&directory, &failure_summary) {
-                    eprintln!("Cannot persist planning failure: {error}");
+
+                if let Some(ref run_id) = revision_run_id {
+                    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                    if runtime.state.run_id != *run_id {
+                        return Err("Run changed during graph revision".into());
+                    }
+                    if runtime.state.approved {
+                        compiler::compile(&graph, true)
+                            .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+                        loop {
+                            let affected = runtime.revision_affected(&graph);
+                            let busy = runtime.state.executions.iter().any(|execution| {
+                                execution.status == "running" && affected.contains(&execution.node)
+                            });
+                            if !busy {
+                                break;
+                            }
+                            if !runtime.state.paused {
+                                runtime.pause(true)?;
+                                resume_after = true;
+                            }
+                            drop(runtime);
+                            thread::sleep(std::time::Duration::from_millis(50));
+                            runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                            if runtime.state.run_id != *run_id {
+                                return Err("Run changed during graph revision".into());
+                            }
+                        }
+                    }
                 }
-                Err((err, Some(failure_summary)))
+                let _source_guard = if route.plan_type == "serial" || config.auto_approve {
+                    Some(lock.lock().map_err(|e| e.to_string())?)
+                } else {
+                    None
+                };
+                let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                check_planning_cancelled(&owner)?;
+                if let Some(ref run_id) = revision_run_id {
+                    if runtime.state.run_id != *run_id {
+                        return Err("Run changed during graph revision".into());
+                    }
+                    if runtime.state.approved {
+                        runtime.revise_graph(graph, summary.clone())?;
+                    } else {
+                        runtime.update_draft_graph(graph, planning_id.clone(), summary.clone())?;
+                    }
+                } else {
+                    runtime.create_with_planning(
+                        graph,
+                        config.clone(),
+                        Some(planning_id.clone()),
+                        Some(summary.clone()),
+                    )?;
+                    runtime.set_route(&route.plan_type)?;
+                }
+                if (route.plan_type == "serial" && revision_run_id.is_none())
+                    || (route.plan_type == "graph"
+                        && config.auto_approve
+                        && !runtime.state.approved)
+                {
+                    runtime.approve()?;
+                }
+                let snapshot = runtime.state.clone();
+                drop(runtime);
+                write_planning_summary(&directory, &summary)?;
+                if snapshot.approved && (route.plan_type == "serial" || config.auto_approve) {
+                    drive(service.clone());
+                }
+                Ok(snapshot)
+            })();
+            match plan_outcome {
+                Ok(snapshot) => Ok(snapshot),
+                Err(err) => {
+                    let mut roles: std::collections::BTreeMap<String, PlanningRoleMetrics> =
+                        Default::default();
+                    let mut model_duration = 0.0;
+                    let partition_file = directory.join("partition.jsonl");
+                    if partition_file.exists() {
+                        if let Ok(content) = fs::read_to_string(&partition_file) {
+                            let partitioner_model_cfg =
+                                PiModelConfig::resolve(PiRole::Partitioner, &config);
+                            let partitioner_config =
+                                partitioner_model_cfg.effective_config(&config);
+                            let m =
+                                parse_planning_role_metrics(&partitioner_config.model, &content);
+                            model_duration += m.duration_seconds;
+                            roles.insert("partition".into(), m);
+                        }
+                    }
+                    let planner_file = directory.join("planner.jsonl");
+                    if planner_file.exists() {
+                        if let Ok(content) = fs::read_to_string(&planner_file) {
+                            let planner_model_cfg =
+                                PiModelConfig::resolve(PiRole::Planner, &config);
+                            let planner_config = planner_model_cfg.effective_config(&config);
+                            let m = parse_planning_role_metrics(&planner_config.model, &content);
+                            model_duration += m.duration_seconds;
+                            roles.insert("planner".into(), m);
+                        }
+                    }
+                    let failure_summary = PlanningSummary {
+                        planning_id: planning_id.clone(),
+                        roles,
+                        total_planning_duration: planning_start.elapsed().as_secs_f64(),
+                        model_duration,
+                        status: Some("failed".to_string()),
+                        error: Some(err.clone()),
+                        created_at: Some(now_ms),
+                        repository: Some(repo_str.clone()),
+                    };
+                    if let Err(error) = write_planning_summary(&directory, &failure_summary) {
+                        eprintln!("Cannot persist planning failure: {error}");
+                    }
+                    Err((err, Some(failure_summary)))
+                }
             }
-        }
-    })();
-    cleanup.planning.store(false, Ordering::SeqCst);
-    if resume_after {
+        })()
+    });
+    let cancelled = check_planning_cancelled(&owner).is_err();
+    if resume_after && !cancelled {
         if let Ok(mut runtime) = service.runtime.lock() {
-            if runtime.state.approved && runtime.state.paused && runtime.state.phase == "paused" {
+            if check_planning_cancelled(&owner).is_ok()
+                && runtime.state.approved
+                && runtime.state.paused
+                && runtime.state.phase == "paused"
+            {
                 let _ = runtime.pause(false);
             }
         }
     }
-    if revision_run_id.is_some() && service.runtime.lock().map(|runtime| {
-        runtime.state.phase == "running" && !runtime.state.paused
-    }).unwrap_or(false) {
+    if !cancelled
+        && revision_run_id.is_some()
+        && service
+            .runtime
+            .lock()
+            .map(|runtime| runtime.state.phase == "running" && !runtime.state.paused)
+            .unwrap_or(false)
+    {
         drive(service.clone());
     }
+    cancellation_guard.finish(&cleanup.planning);
     // A temporary pause is already undone; return that state rather than the
     // snapshot captured while the affected workers were being drained.
     result.map(|snapshot| {
         if resume_after {
-            service.runtime.lock().map(|runtime| runtime.state.clone()).unwrap_or(snapshot)
-        } else { snapshot }
+            service
+                .runtime
+                .lock()
+                .map(|runtime| runtime.state.clone())
+                .unwrap_or(snapshot)
+        } else {
+            snapshot
+        }
     })
 }
 
@@ -1128,6 +1505,11 @@ fn drive(service: Arc<Service>) {
     if service.driving.swap(true, Ordering::SeqCst) {
         return;
     }
+    let run_id = service
+        .runtime
+        .lock()
+        .map(|runtime| runtime.state.run_id.clone())
+        .unwrap_or_default();
     thread::spawn(move || {
         let (output_tx, output_rx) = std::sync::mpsc::sync_channel(256);
         let writer_service = service.clone();
@@ -1176,10 +1558,12 @@ fn drive(service: Arc<Service>) {
                     };
                     if let Some((config, query, publication)) = publication {
                         let repository = PathBuf::from(&publication.repository);
-                        let result = crate::graph_merge::merge_graph(
-                            &repository,
-                            &publication.heads,
-                            || {
+                        // Publication/model sessions are deliberately not guarded by
+                        // a per-project lock. Concurrent Runs are allowed to reach
+                        // Git publication; any resulting repository conflict is left
+                        // for the existing publication state to expose.
+                        let result = crate::process_control::with_owner(&run_id, || {
+                            crate::graph_merge::merge_graph(&repository, &publication.heads, || {
                                 let attempt = service
                                     .runtime
                                     .lock()
@@ -1202,17 +1586,19 @@ fn drive(service: Arc<Service>) {
                                             .emit(event)
                                     },
                                 )
-                            },
-                        );
+                            })
+                        });
                         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                         match result {
                             Ok(head) => {
-                                eprintln!("[Grapher] [Publication] Completed! Published HEAD: {head}");
+                                eprintln!(
+                                    "[Grapher] [Publication] Completed! Published HEAD: {head}"
+                                );
                                 runtime.emit(EventKind::PublicationCompleted { head })?;
                                 if let Err(error) = runtime.cleanup_worktrees() {
                                     eprintln!("Cannot clean completed run worktrees: {error}");
                                 }
-                            },
+                            }
                             Err(error) => {
                                 eprintln!("[Grapher] [Publication] Failed: {error}");
                                 runtime.emit(EventKind::PublicationFailed { error })?;
@@ -1231,39 +1617,61 @@ fn drive(service: Arc<Service>) {
                         "[Grapher] [Execution] Started node '{}' (id: {}, attempt: {})",
                         job.execution.node, job.execution.id, job.execution.attempt
                     );
+                    let run_id = run_id.clone();
                     thread::spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            perform_with_merger(
-                                &job,
-                                &root,
-                                &parents,
-                                |text| {
-                                    let _ = output_tx.send(OutputMessage::Text {
-                                        execution_id: job.execution.id.clone(), text,
-                                    });
-                                },
-                                |head| {
-                                    service
-                                        .runtime
-                                        .lock()
-                                        .map_err(|error| error.to_string())?
-                                        .emit(EventKind::Prepared {
+                            // Every model session is independent. Serial mode selects
+                            // the source checkout, but it does not serialize sessions
+                            // from different Runs or attempt to reconcile their writes.
+                            crate::process_control::with_owner(&run_id, || {
+                                perform_with_merger(
+                                    &job,
+                                    &root,
+                                    &parents,
+                                    |text| {
+                                        let _ = output_tx.send(OutputMessage::Text {
                                             execution_id: job.execution.id.clone(),
-                                            head,
-                                        })
-                                },
-                                |event| {
-                                    service.runtime.lock().map_err(|e| e.to_string())?.emit(event)
-                                },
-                            )
+                                            text,
+                                        });
+                                    },
+                                    |head| {
+                                        service
+                                            .runtime
+                                            .lock()
+                                            .map_err(|error| error.to_string())?
+                                            .emit(EventKind::Prepared {
+                                                execution_id: job.execution.id.clone(),
+                                                head,
+                                            })
+                                    },
+                                    |event| {
+                                        service
+                                            .runtime
+                                            .lock()
+                                            .map_err(|e| e.to_string())?
+                                            .emit(event)
+                                    },
+                                )
+                            })
                         }))
                         .unwrap_or_else(|_| Err("Execution worker panicked".into()));
                         let (reply, ack) = std::sync::mpsc::channel();
-                        let flushed = output_tx.send(OutputMessage::Flush(reply))
-                            .map_err(|_| "Output writer stopped before execution finished".to_string())
-                            .and_then(|_| ack.recv().map_err(|_| "Output writer stopped before flushing".to_string()))
+                        let flushed = output_tx
+                            .send(OutputMessage::Flush(reply))
+                            .map_err(|_| {
+                                "Output writer stopped before execution finished".to_string()
+                            })
+                            .and_then(|_| {
+                                ack.recv().map_err(|_| {
+                                    "Output writer stopped before flushing".to_string()
+                                })
+                            })
                             .and_then(|result| result);
-                        let result = if let Err(error) = flushed { Err(error) } else { result };
+                        let result = if let Err(error) = flushed {
+                            Err(error)
+                        } else {
+                            result
+                        };
                         let result = service
                             .runtime
                             .lock()
@@ -1293,7 +1701,9 @@ fn drive(service: Arc<Service>) {
             Ok(())
         })();
         drop(output_tx);
-        if writer.join().is_err() { eprintln!("Output writer panicked"); }
+        if writer.join().is_err() {
+            eprintln!("Output writer panicked");
+        }
         if let Ok(runtime) = service.runtime.lock() {
             if let Some(m) = &runtime.state.run_metrics {
                 eprintln!(
@@ -1343,34 +1753,64 @@ fn control(
     images: Option<Vec<crate::model::ImageAttachment>>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
+    // A viewed historical Run is not necessarily the backend's active Run.
+    // Never apply controls (especially stop) to a different conversation.
+    if let Some(expected) = &run_id {
+        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        if runtime.state.run_id != *expected {
+            return Err("Run changed; reload this conversation before controlling it".into());
+        }
+    }
     if action == "steer_planner" {
         let instruction = instruction.ok_or("Enter a planning message")?;
-        if instruction.trim().is_empty() { return Err("Enter a planning message".into()); }
+        if instruction.trim().is_empty() {
+            return Err("Enter a planning message".into());
+        }
         if !service.planning.load(Ordering::SeqCst) {
             return Err("Planner is no longer accepting messages".into());
         }
-        let active_run_id = crate::engine::planner_revision_run_id()?;
+        let active_run_id = if let Some(ref id) = run_id {
+            crate::engine::planner_revision_run_id_for_run(id)?
+        } else {
+            crate::engine::planner_revision_run_id()?
+        };
         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-        if run_id.as_ref().is_some_and(|id| active_run_id.as_ref() != Some(id))
-            || active_run_id.as_ref().is_some_and(|id| id != &runtime.state.run_id) {
+        if active_run_id
+            .as_ref()
+            .is_some_and(|id| id != &runtime.state.run_id)
+        {
             return Err("Run changed while steering Planner".into());
         }
-        let message = planner_followup_prompt(instruction.trim(), active_run_id.as_deref(), &runtime.state);
+        let message =
+            planner_followup_prompt(instruction.trim(), active_run_id.as_deref(), &runtime.state);
         let snapshot = runtime.state.clone();
         drop(runtime);
-        crate::engine::steer_planner(&message, images)?;
+        if let Some(id) = run_id {
+            crate::engine::steer_planner_for_run(&id, &message, images)?;
+        } else {
+            crate::engine::steer_planner(&message, images)?;
+        }
         return Ok(snapshot);
     }
     if action == "steer" {
         let node = node.ok_or("Select a node to steer")?;
         let instruction = instruction.ok_or("Enter a steering message")?;
-        if instruction.trim().is_empty() { return Err("Enter a steering message".into()); }
+        if instruction.trim().is_empty() {
+            return Err("Enter a steering message".into());
+        }
         let execution_id = execution_id.ok_or("Missing execution identity")?;
         {
             let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
             if run_id.as_deref() != Some(runtime.state.run_id.as_str())
-                || !runtime.state.executions.iter().any(|e| e.id == execution_id && e.node == node && e.status == "running") {
-                return Err("Node execution is no longer running; send a new instruction instead".into());
+                || !runtime
+                    .state
+                    .executions
+                    .iter()
+                    .any(|e| e.id == execution_id && e.node == node && e.status == "running")
+            {
+                return Err(
+                    "Node execution is no longer running; send a new instruction instead".into(),
+                );
             }
         }
         crate::engine::steer(&execution_id, instruction.trim(), images)?;
@@ -1378,27 +1818,63 @@ fn control(
         if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
             return Err("Run changed while steering".into());
         }
-        runtime.emit(EventKind::Steered { execution_id, node, instruction: instruction.trim().into() })?;
+        runtime.emit(EventKind::Steered {
+            execution_id,
+            node,
+            instruction: instruction.trim().into(),
+        })?;
         return Ok(runtime.state.clone());
     }
     if matches!(action.as_str(), "stop" | "cancel") {
-        crate::engine::terminate_all();
         let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        let active_id = runtime.state.run_id.clone();
+        if service.planning.load(Ordering::SeqCst) && !active_id.is_empty() {
+            CANCELLED_PLANNING
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|e| e.to_string())?
+                .insert(active_id.clone());
+        }
         if runtime.state.approved {
             let _ = runtime.pause(true);
         }
-        return Ok(runtime.state.clone());
+        let snapshot = runtime.state.clone();
+        drop(runtime);
+        crate::engine::terminate_run(&active_id);
+        return Ok(snapshot);
     }
     if service.planning.load(Ordering::SeqCst) {
         return Err("Wait for planning to finish".into());
     }
-    if matches!(
-        action.as_str(),
-        "resolve" | "retry_publication"
-    ) && service.driving.load(Ordering::SeqCst)
+    if matches!(action.as_str(), "resolve" | "retry_publication")
+        && service.driving.load(Ordering::SeqCst)
     {
-        return Err("Wait for active executions to finish before resolving or retrying publication".into());
+        return Err(
+            "Wait for active executions to finish before resolving or retrying publication".into(),
+        );
     }
+    let approval_lock = if action == "approve" {
+        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        if runtime.state.phase == "awaiting_approval" {
+            let repository = runtime
+                .state
+                .config
+                .as_ref()
+                .ok_or("Missing config")?
+                .repository
+                .clone();
+            crate::workspace::validate_binding(std::path::Path::new(&repository))?;
+            Some(source_lock(std::path::Path::new(&repository))?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let _approval_guard = approval_lock
+        .as_ref()
+        .map(|lock| lock.lock().map_err(|e| e.to_string()))
+        .transpose()?;
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     match action.as_str() {
         "retry_publication" => runtime.retry_publication()?,
@@ -1448,6 +1924,25 @@ fn clear_history(service: &Arc<Service>) -> Result<(), String> {
     if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
         return Err("Wait for the current operation to finish".into());
     }
+    let root = service
+        .runtime
+        .lock()
+        .map_err(|e| e.to_string())?
+        .root
+        .clone();
+    if let Some(registry) = RUN_SERVICES.get() {
+        let registry = registry.lock().map_err(|e| e.to_string())?;
+        if let Some(runs) = registry.get(&root) {
+            for child in runs.values().filter_map(Weak::upgrade) {
+                if child.driving.load(Ordering::SeqCst)
+                    || child.planning.load(Ordering::SeqCst)
+                    || child.runtime.lock().map_err(|e| e.to_string())?.active()
+                {
+                    return Err("Cannot clear history while another Run is active".into());
+                }
+            }
+        }
+    }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     runtime.clear_history()
 }
@@ -1460,7 +1955,11 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     runtime.delete_run(&run_id)
 }
 
-fn planning_attachment_path(dir: &std::path::Path, index: usize, image: &ImageAttachment) -> PathBuf {
+fn planning_attachment_path(
+    dir: &std::path::Path,
+    index: usize,
+    image: &ImageAttachment,
+) -> PathBuf {
     let ext = match image.mime_type.as_str() {
         "image/jpeg" | "image/jpg" => "jpg",
         "image/png" => "png",
@@ -1747,10 +2246,7 @@ fn parse_skill_markdown(path: &std::path::Path) -> Option<(String, String)> {
     Some((skill_name, skill_desc))
 }
 
-fn resolve_repo_path(
-    service: &Arc<Service>,
-    repository_param: Option<String>,
-) -> PathBuf {
+fn resolve_repo_path(service: &Arc<Service>, repository_param: Option<String>) -> PathBuf {
     if let Some(repo) = repository_param.filter(|s| !s.trim().is_empty()) {
         return PathBuf::from(repo);
     }
@@ -1818,7 +2314,8 @@ fn is_excluded_project_path(rel_path: &str) -> bool {
     for (idx, part) in rel_path.split('/').enumerate() {
         if part.starts_with('.') {
             let is_root_file = idx == 0 && !rel_path.contains('/');
-            let is_allowed_dotfile = part == ".gitignore" || part == ".gitmodules" || part.starts_with(".env");
+            let is_allowed_dotfile =
+                part == ".gitignore" || part == ".gitmodules" || part.starts_with(".env");
             if !(is_root_file && is_allowed_dotfile) {
                 return true;
             }
@@ -1852,7 +2349,12 @@ fn collect_files_from_dir(dir: &std::path::Path) -> Vec<String> {
     }
 
     if files.is_empty() {
-        fn walk(walk_dir: &std::path::Path, base: &std::path::Path, files: &mut Vec<String>, limit: usize) {
+        fn walk(
+            walk_dir: &std::path::Path,
+            base: &std::path::Path,
+            files: &mut Vec<String>,
+            limit: usize,
+        ) {
             if files.len() >= limit {
                 return;
             }
@@ -1930,7 +2432,10 @@ fn list_skills(
         search_dirs.push((agent_dir.join("skills"), "global"));
     }
     if let Some(ref home) = home_dir {
-        search_dirs.push((home.join(".grapher").join("pi-agent").join("skills"), "global"));
+        search_dirs.push((
+            home.join(".grapher").join("pi-agent").join("skills"),
+            "global",
+        ));
         search_dirs.push((home.join(".pi").join("agent").join("skills"), "global"));
         search_dirs.push((home.join(".agents").join("skills"), "global"));
         search_dirs.push((home.join(".pi").join("skills"), "global"));
@@ -1972,7 +2477,10 @@ fn list_skills(
                 } else if path.is_file() {
                     // Pi 规范：~/.pi/agent/skills 与 ~/.pi/skills 支持直接根级单文件技能
                     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if file_name.ends_with(".md") && file_name != "README.md" && file_name != "AGENTS.md" {
+                    if file_name.ends_with(".md")
+                        && file_name != "README.md"
+                        && file_name != "AGENTS.md"
+                    {
                         if let Some((name, desc)) = parse_skill_markdown(&path) {
                             if !seen_names.contains(&name) {
                                 seen_names.insert(name.clone());
@@ -2034,8 +2542,13 @@ pub fn dispatch(
             serde_json::to_value(&runtime.state).map_err(|e| e.to_string())?
         };
         if compact {
-            if let Some(events) = value.get_mut("events").and_then(serde_json::Value::as_array_mut) {
-                events.retain(|event| event.get("type").and_then(serde_json::Value::as_str) != Some("output"));
+            if let Some(events) = value
+                .get_mut("events")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                events.retain(|event| {
+                    event.get("type").and_then(serde_json::Value::as_str) != Some("output")
+                });
             }
         }
         return Ok(serde_json::json!({ "version": version, "snapshot": value }));
@@ -2053,17 +2566,26 @@ pub fn dispatch(
         let state = match command {
             "load_run" => Some(load_run(argument(&body, "runId")?, service)?),
             "save_graph" => Some(save_graph(
-                argument(&body, "graph")?, argument(&body, "config")?,
-                argument(&body, "runId")?, service,
+                argument(&body, "graph")?,
+                argument(&body, "config")?,
+                argument(&body, "runId")?,
+                service,
             )?),
             "plan_goal" => Some(plan_goal(
-                argument(&body, "goal")?, argument(&body, "config")?,
-                argument(&body, "mode").ok(), argument(&body, "images").ok(), service,
+                argument(&body, "goal")?,
+                argument(&body, "config")?,
+                argument(&body, "mode").ok(),
+                argument(&body, "images").ok(),
+                service,
             )?),
             "control" => Some(control(
-                argument(&body, "action")?, argument(&body, "node")?,
-                argument(&body, "instruction")?, argument(&body, "runId")?,
-                argument(&body, "executionId")?, argument(&body, "images").ok(), service,
+                argument(&body, "action")?,
+                argument(&body, "node")?,
+                argument(&body, "instruction")?,
+                argument(&body, "runId")?,
+                argument(&body, "executionId")?,
+                argument(&body, "images").ok(),
+                service,
             )?),
             "reset_workspace" => Some(reset_workspace(service)?),
             _ => None,
@@ -2143,7 +2665,9 @@ pub fn dispatch(
         "repository_status" => {
             let repository: String = argument(&body, "repository")?;
             let error = crate::workspace::validate_binding(std::path::Path::new(&repository)).err();
-            Ok(serde_json::json!({ "repository": repository, "valid": error.is_none(), "error": error }))
+            Ok(
+                serde_json::json!({ "repository": repository, "valid": error.is_none(), "error": error }),
+            )
         }
         "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),
         "pick_repository" => to_value(crate::workspace::pick_repository()?),
@@ -2222,6 +2746,84 @@ impl std::io::Read for SseStreamReceiver {
     }
 }
 
+fn active_planning_service(primary: &Arc<Service>) -> Result<Arc<Service>, String> {
+    let root = primary
+        .runtime
+        .lock()
+        .map_err(|e| e.to_string())?
+        .root
+        .clone();
+    let registry = RUN_SERVICES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut planners = registry
+        .get(&root)
+        .into_iter()
+        .flat_map(|runs| runs.values())
+        .filter_map(Weak::upgrade)
+        .filter(|child| child.planning.load(Ordering::SeqCst));
+    let first = if primary.planning.load(Ordering::SeqCst) {
+        Some(primary.clone())
+    } else {
+        planners.next()
+    };
+    let first = first.ok_or("No active Planner for this conversation")?;
+    if planners.next().is_some() {
+        return Err("Multiple Planners are running; provide a Run ID".into());
+    }
+    Ok(first)
+}
+
+fn latest_service(primary: &Arc<Service>) -> Result<Arc<Service>, String> {
+    let runtime = primary.runtime.lock().map_err(|e| e.to_string())?;
+    let latest = runtime.store.selected_run()?;
+    drop(runtime);
+    if let Some(id) = latest {
+        service_for_run(primary, &id, false)
+    } else {
+        Ok(primary.clone())
+    }
+}
+
+fn api_service(
+    primary: &Arc<Service>,
+    command: &str,
+    body: &serde_json::Value,
+) -> Result<Arc<Service>, String> {
+    match command {
+        "snapshot"
+        | "snapshot_if_changed"
+        | "load_run"
+        | "control"
+        | "save_graph"
+        | "delete_run"
+        | "get_execution_output" => {
+            if let Some(run_id) = body.get("runId").and_then(serde_json::Value::as_str) {
+                service_for_run(primary, run_id, false)
+            } else if command == "save_graph" {
+                service_for_run(primary, &Uuid::new_v4().to_string(), true)
+            } else if command == "control"
+                && matches!(
+                    body.get("action").and_then(serde_json::Value::as_str),
+                    Some("stop" | "cancel" | "steer_planner")
+                )
+            {
+                active_planning_service(primary)
+            } else if matches!(
+                command,
+                "snapshot" | "snapshot_if_changed" | "control" | "load_run"
+            ) {
+                latest_service(primary)
+            } else {
+                Ok(primary.clone())
+            }
+        }
+        "plan_goal" => service_for_run(primary, &Uuid::new_v4().to_string(), true),
+        _ => Ok(primary.clone()),
+    }
+}
+
 fn send_sse_event(tx: &std::sync::mpsc::Sender<Vec<u8>>, event: &str, data: &serde_json::Value) {
     let payload = format!("event: {event}\ndata: {}\n\n", data);
     let _ = tx.send(payload.into_bytes());
@@ -2230,15 +2832,13 @@ fn send_sse_event(tx: &std::sync::mpsc::Sender<Vec<u8>>, event: &str, data: &ser
 // Host is not an authentication mechanism, but an exact loopback authority
 // check prevents DNS rebinding from using a remote hostname to reach this API.
 fn is_trusted_host(host: &str, backend_port: u16) -> bool {
-    host == format!("127.0.0.1:{backend_port}")
-        || host == format!("localhost:{backend_port}")
+    host == format!("127.0.0.1:{backend_port}") || host == format!("localhost:{backend_port}")
 }
 
 fn is_trusted_origin(origin: &str, backend_port: u16) -> bool {
     let local = ["localhost", "127.0.0.1"];
     if local.iter().any(|host| {
-        origin == format!("http://{host}:{backend_port}")
-            || origin == format!("http://{host}:1420")
+        origin == format!("http://{host}:{backend_port}") || origin == format!("http://{host}:1420")
     }) {
         return true;
     }
@@ -2250,11 +2850,14 @@ fn is_trusted_origin(origin: &str, backend_port: u16) -> bool {
 fn origin_matches_allowlist(origin: &str, allowed: &str) -> bool {
     allowed.split(',').any(|entry| {
         let entry = entry.trim();
-        let authority = entry.strip_prefix("http://")
+        let authority = entry
+            .strip_prefix("http://")
             .or_else(|| entry.strip_prefix("https://"));
         authority.is_some_and(|host| {
             !host.is_empty()
-                && !host.chars().any(|c| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@'))
+                && !host
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@'))
                 && entry == origin
         })
     })
@@ -2352,7 +2955,7 @@ pub fn run() -> Result<(), String> {
     }
     for request in server.incoming_requests() {
         match tx.try_send(request) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(std::sync::mpsc::TrySendError::Full(request)) => {
                 let _ = request.respond(Response::from_string("Server busy").with_status_code(503));
             }
@@ -2362,262 +2965,319 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn handle_http_request(mut request: tiny_http::Request, service: &Arc<Service>, web_root: &std::path::Path, port: u16) {
+fn handle_http_request(
+    mut request: tiny_http::Request,
+    service: &Arc<Service>,
+    web_root: &std::path::Path,
+    port: u16,
+) {
     use tiny_http::{Header, Response};
-            let req_origin = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Origin"))
-                .map(|h| h.value.as_str().to_string());
-            let hosts: Vec<_> = request.headers().iter().filter(|h| h.field.equiv("Host")).collect();
-            let origins: Vec<_> = request.headers().iter().filter(|h| h.field.equiv("Origin")).collect();
-            let trusted = hosts.len() == 1
-                && is_trusted_host(hosts[0].value.as_str(), port)
-                && origins.len() <= 1
-                && origins.iter().all(|h| is_trusted_origin(h.value.as_str(), port));
-            if !trusted {
-                let _ = request
-                    .respond(Response::from_string("Untrusted origin").with_status_code(403));
-                return;
-            }
-            if request.method() == &tiny_http::Method::Options {
-                let mut response = Response::empty(204)
-                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"POST, OPTIONS"[..]).unwrap())
-                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type"[..]).unwrap());
-                if let Some(ref origin) = req_origin {
-                    response = response.with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], origin.as_bytes()).unwrap());
-                }
-                let _ = request.respond(response);
-                return;
-            }
-            let url = request.url().split('?').next().unwrap_or("/").to_string();
-            if let Some(command) = url.strip_prefix("/api/") {
-                // JSON-only POST + exact Host/Origin checks limit browser access.
-                // This is still an unauthenticated, trusted-user local API.
-                let is_json = request.headers().iter().any(|h| {
-                    h.field.equiv("Content-Type")
-                        && h.value.as_str().split(';').next() == Some("application/json")
-                });
-                if request.method() != &tiny_http::Method::Post || !is_json {
-                    let _ = request
-                        .respond(Response::from_string("JSON POST required").with_status_code(415));
-                    return;
-                }
+    let req_origin = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Origin"))
+        .map(|h| h.value.as_str().to_string());
+    let hosts: Vec<_> = request
+        .headers()
+        .iter()
+        .filter(|h| h.field.equiv("Host"))
+        .collect();
+    let origins: Vec<_> = request
+        .headers()
+        .iter()
+        .filter(|h| h.field.equiv("Origin"))
+        .collect();
+    let trusted = hosts.len() == 1
+        && is_trusted_host(hosts[0].value.as_str(), port)
+        && origins.len() <= 1
+        && origins
+            .iter()
+            .all(|h| is_trusted_origin(h.value.as_str(), port));
+    if !trusted {
+        let _ = request.respond(Response::from_string("Untrusted origin").with_status_code(403));
+        return;
+    }
+    if request.method() == &tiny_http::Method::Options {
+        let mut response = Response::empty(204)
+            .with_header(
+                tiny_http::Header::from_bytes(
+                    &b"Access-Control-Allow-Methods"[..],
+                    &b"POST, OPTIONS"[..],
+                )
+                .unwrap(),
+            )
+            .with_header(
+                tiny_http::Header::from_bytes(
+                    &b"Access-Control-Allow-Headers"[..],
+                    &b"Content-Type"[..],
+                )
+                .unwrap(),
+            );
+        if let Some(ref origin) = req_origin {
+            response = response.with_header(
+                tiny_http::Header::from_bytes(
+                    &b"Access-Control-Allow-Origin"[..],
+                    origin.as_bytes(),
+                )
+                .unwrap(),
+            );
+        }
+        let _ = request.respond(response);
+        return;
+    }
+    let url = request.url().split('?').next().unwrap_or("/").to_string();
+    if let Some(command) = url.strip_prefix("/api/") {
+        // JSON-only POST + exact Host/Origin checks limit browser access.
+        // This is still an unauthenticated, trusted-user local API.
+        let is_json = request.headers().iter().any(|h| {
+            h.field.equiv("Content-Type")
+                && h.value.as_str().split(';').next() == Some("application/json")
+        });
+        if request.method() != &tiny_http::Method::Post || !is_json {
+            let _ =
+                request.respond(Response::from_string("JSON POST required").with_status_code(415));
+            return;
+        }
 
-                if command == "plan_goal_stream" {
-                    let mut input = String::new();
-                    let body_res = std::io::Read::read_to_string(
-                        &mut request.as_reader().take(10 * 1024 * 1024 + 1),
-                        &mut input,
-                    )
-                    .map_err(|e| e.to_string())
-                    .and_then(|_| {
-                        serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string())
-                    });
+        if command == "plan_goal_stream" {
+            let mut input = String::new();
+            let body_res = std::io::Read::read_to_string(
+                &mut request.as_reader().take(10 * 1024 * 1024 + 1),
+                &mut input,
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|_| {
+                serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string())
+            });
 
-                    let (goal, config, plan_mode, images, revision_run_id): (String, Config, Option<String>, Option<Vec<crate::model::ImageAttachment>>, Option<String>) = match body_res.and_then(|body| {
-                        let goal: String = argument(&body, "goal")?;
-                        let config: Config = argument(&body, "config")?;
-                        let mode: Option<String> = argument(&body, "mode").ok();
-                        let images: Option<Vec<crate::model::ImageAttachment>> = argument(&body, "images").ok();
-                        let revision_run_id: Option<String> = argument(&body, "revisionRunId").ok();
-                        Ok((goal, config, mode, images, revision_run_id))
-                    }) {
-                        Ok(tuple) => tuple,
-                        Err(err) => {
-                            let mut resp = Response::from_string(
-                                serde_json::json!({"error": err}).to_string(),
-                            )
+            let (goal, config, plan_mode, images, revision_run_id): (
+                String,
+                Config,
+                Option<String>,
+                Option<Vec<crate::model::ImageAttachment>>,
+                Option<String>,
+            ) = match body_res.and_then(|body| {
+                let goal: String = argument(&body, "goal")?;
+                let config: Config = argument(&body, "config")?;
+                let mode: Option<String> = argument(&body, "mode").ok();
+                let images: Option<Vec<crate::model::ImageAttachment>> =
+                    argument(&body, "images").ok();
+                let revision_run_id: Option<String> = argument(&body, "revisionRunId").ok();
+                Ok((goal, config, mode, images, revision_run_id))
+            }) {
+                Ok(tuple) => tuple,
+                Err(err) => {
+                    let mut resp =
+                        Response::from_string(serde_json::json!({"error": err}).to_string())
                             .with_status_code(400)
                             .with_header(
                                 Header::from_bytes("Content-Type", "application/json").unwrap(),
                             );
-                            if let Some(ref origin) = req_origin {
-                                if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
-                                    resp = resp.with_header(hdr);
-                                }
-                            }
-                            let _ = request.respond(resp);
-                            return;
-                        }
-                    };
-
-                    if let Err(err) = validate_planning_preflight(&config, plan_mode.as_deref()) {
-                        let mut resp = Response::from_string(
-                            serde_json::json!({"error": err}).to_string(),
-                        )
-                        .with_status_code(400)
-                        .with_header(
-                            Header::from_bytes("Content-Type", "application/json").unwrap(),
-                        );
-                        if let Some(ref origin) = req_origin {
-                            if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
-                                resp = resp.with_header(hdr);
-                            }
-                        }
-                        let _ = request.respond(resp);
-                        return;
-                    }
-
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let service_clone = service.clone();
-
-                    thread::spawn(move || {
-                        let tx_part = tx.clone();
-                        let tx_route = tx.clone();
-                        let tx_plan = tx.clone();
-                        let result = plan_goal_internal(
-                            goal,
-                            config,
-                            plan_mode.as_deref(),
-                            images,
-                            revision_run_id,
-                            &service_clone,
-                            |line| {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
-                                {
-                                    send_sse_event(
-                                        &tx_part,
-                                        "partitioner",
-                                        &serde_json::json!({ "raw": line, "event": parsed }),
-                                    );
-                                } else {
-                                    send_sse_event(
-                                        &tx_part,
-                                        "partitioner",
-                                        &serde_json::json!({ "raw": line }),
-                                    );
-                                }
-                            },
-                            |route| {
-                                send_sse_event(
-                                    &tx_route,
-                                    "route_decision",
-                                    &serde_json::json!({ "planType": route.plan_type }),
-                                );
-                            },
-                            |line| {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
-                                {
-                                    send_sse_event(
-                                        &tx_plan,
-                                        "planner",
-                                        &serde_json::json!({ "raw": line, "event": parsed }),
-                                    );
-                                } else {
-                                    send_sse_event(
-                                        &tx_plan,
-                                        "planner",
-                                        &serde_json::json!({ "raw": line }),
-                                    );
-                                }
-                            },
-                        );
-
-                        match result {
-                            Ok(snapshot) => {
-                                send_sse_event(
-                                    &tx,
-                                    "complete",
-                                    &serde_json::json!({ "snapshot": snapshot }),
-                                );
-                            }
-                            Err((err, summary)) => {
-                                let mut err_payload = serde_json::json!({ "error": err });
-                                if let Some(s) = summary {
-                                    err_payload["planningId"] = serde_json::json!(s.planning_id);
-                                    err_payload["summary"] = serde_json::json!(s);
-                                }
-                                send_sse_event(&tx, "error", &err_payload);
-                            }
-                        }
-                        let _ = tx.send(Vec::new());
-                    });
-
-                    let stream = SseStreamReceiver {
-                        rx,
-                        current: Vec::new(),
-                        pos: 0,
-                    };
-                    let mut response = Response::empty(200)
-                        .with_data(stream, None)
-                        .with_header(
-                            Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
-                        )
-                        .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
-                        .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
-                        .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
                     if let Some(ref origin) = req_origin {
-                        if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
-                            response = response.with_header(hdr);
+                        if let Ok(hdr) =
+                            Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
+                        {
+                            resp = resp.with_header(hdr);
                         }
                     }
-                    let _ = request.respond(response);
+                    let _ = request.respond(resp);
                     return;
                 }
+            };
 
-                let mut input = String::new();
-                let result = std::io::Read::read_to_string(
-                    &mut request.as_reader().take(10 * 1024 * 1024 + 1),
-                    &mut input,
-                )
-                .map_err(|e| e.to_string())
-                .and_then(|_| {
-                    if input.len() > 10 * 1024 * 1024 {
-                        return Err("Request too large".into());
-                    }
-                    let body = serde_json::from_str(&input).map_err(|e| e.to_string())?;
-                    dispatch(&service, command, body)
-                });
-                let (status, body) = match result {
-                    Ok(value) => (200, serde_json::json!({"result": value})),
-                    Err(error) => (400, serde_json::json!({"error": error})),
-                };
-                let mut response = Response::from_string(body.to_string())
-                        .with_status_code(status)
-                        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
-                        .with_header(
-                            Header::from_bytes("Content-Type", "application/json").unwrap(),
-                        );
+            if let Err(err) = validate_planning_preflight(&config, plan_mode.as_deref()) {
+                let mut resp = Response::from_string(serde_json::json!({"error": err}).to_string())
+                    .with_status_code(400)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
                 if let Some(ref origin) = req_origin {
-                    if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
-                        response = response.with_header(hdr);
+                    if let Ok(hdr) =
+                        Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
+                    {
+                        resp = resp.with_header(hdr);
                     }
                 }
-                let _ = request.respond(response);
-            } else {
-                let relative = url.trim_start_matches('/');
-                if relative.split('/').any(|part| part == "..") {
-                    let _ = request.respond(Response::empty(404));
+                let _ = request.respond(resp);
+                return;
+            }
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let service_clone = match revision_run_id.as_deref() {
+                Some(run_id) => service_for_run(service, run_id, false),
+                None => service_for_run(service, &Uuid::new_v4().to_string(), true),
+            };
+            let service_clone = match service_clone {
+                Ok(service) => service,
+                Err(error) => {
+                    let _ = request.respond(
+                        Response::from_string(serde_json::json!({"error": error}).to_string())
+                            .with_status_code(400)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            ),
+                    );
                     return;
                 }
-                let path = web_root.join(if relative.is_empty() {
-                    "index.html"
-                } else {
-                    relative
-                });
-                let mime = match path.extension().and_then(|s| s.to_str()) {
-                    Some("html") => "text/html; charset=utf-8",
-                    Some("js") => "text/javascript",
-                    Some("css") => "text/css",
-                    Some("svg") => "image/svg+xml",
-                    _ => "application/octet-stream",
-                };
-                match fs::read(path) {
-                    Ok(bytes) => {
-                        let _ =
-                            request
-                                .respond(Response::from_data(bytes).with_header(
-                                    Header::from_bytes("Content-Type", mime).unwrap(),
-                                ));
-                    }
-                    Err(_) => {
-                        let _ = request.respond(
-                            Response::from_string("Run npm run build to build the frontend")
-                                .with_status_code(404),
+            };
+
+            if let Ok(runtime) = service_clone.runtime.lock() {
+                send_sse_event(
+                    &tx,
+                    "run_started",
+                    &serde_json::json!({"runId": runtime.state.run_id}),
+                );
+            }
+            thread::spawn(move || {
+                let tx_part = tx.clone();
+                let tx_route = tx.clone();
+                let tx_plan = tx.clone();
+                let result = plan_goal_internal(
+                    goal,
+                    config,
+                    plan_mode.as_deref(),
+                    images,
+                    revision_run_id,
+                    &service_clone,
+                    |line| {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                            send_sse_event(
+                                &tx_part,
+                                "partitioner",
+                                &serde_json::json!({ "raw": line, "event": parsed }),
+                            );
+                        } else {
+                            send_sse_event(
+                                &tx_part,
+                                "partitioner",
+                                &serde_json::json!({ "raw": line }),
+                            );
+                        }
+                    },
+                    |route| {
+                        send_sse_event(
+                            &tx_route,
+                            "route_decision",
+                            &serde_json::json!({ "planType": route.plan_type }),
+                        );
+                    },
+                    |line| {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                            send_sse_event(
+                                &tx_plan,
+                                "planner",
+                                &serde_json::json!({ "raw": line, "event": parsed }),
+                            );
+                        } else {
+                            send_sse_event(
+                                &tx_plan,
+                                "planner",
+                                &serde_json::json!({ "raw": line }),
+                            );
+                        }
+                    },
+                );
+
+                match result {
+                    Ok(snapshot) => {
+                        send_sse_event(
+                            &tx,
+                            "complete",
+                            &serde_json::json!({ "snapshot": snapshot }),
                         );
                     }
+                    Err((err, summary)) => {
+                        let mut err_payload = serde_json::json!({ "error": err });
+                        if let Some(s) = summary {
+                            err_payload["planningId"] = serde_json::json!(s.planning_id);
+                            err_payload["summary"] = serde_json::json!(s);
+                        }
+                        send_sse_event(&tx, "error", &err_payload);
+                    }
+                }
+                let _ = tx.send(Vec::new());
+            });
+
+            let stream = SseStreamReceiver {
+                rx,
+                current: Vec::new(),
+                pos: 0,
+            };
+            let mut response = Response::empty(200)
+                .with_data(stream, None)
+                .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
+                .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
+                .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
+                .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
+            if let Some(ref origin) = req_origin {
+                if let Ok(hdr) =
+                    Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
+                {
+                    response = response.with_header(hdr);
                 }
             }
-}
+            let _ = request.respond(response);
+            return;
+        }
 
+        let mut input = String::new();
+        let result = std::io::Read::read_to_string(
+            &mut request.as_reader().take(10 * 1024 * 1024 + 1),
+            &mut input,
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|_| {
+            if input.len() > 10 * 1024 * 1024 {
+                return Err("Request too large".into());
+            }
+            let body: serde_json::Value =
+                serde_json::from_str(&input).map_err(|e| e.to_string())?;
+            let scoped = api_service(service, command, &body)?;
+            dispatch(&scoped, command, body)
+        });
+        let (status, body) = match result {
+            Ok(value) => (200, serde_json::json!({"result": value})),
+            Err(error) => (400, serde_json::json!({"error": error})),
+        };
+        let mut response = Response::from_string(body.to_string())
+            .with_status_code(status)
+            .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+        if let Some(ref origin) = req_origin {
+            if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
+                response = response.with_header(hdr);
+            }
+        }
+        let _ = request.respond(response);
+    } else {
+        let relative = url.trim_start_matches('/');
+        if relative.split('/').any(|part| part == "..") {
+            let _ = request.respond(Response::empty(404));
+            return;
+        }
+        let path = web_root.join(if relative.is_empty() {
+            "index.html"
+        } else {
+            relative
+        });
+        let mime = match path.extension().and_then(|s| s.to_str()) {
+            Some("html") => "text/html; charset=utf-8",
+            Some("js") => "text/javascript",
+            Some("css") => "text/css",
+            Some("svg") => "image/svg+xml",
+            _ => "application/octet-stream",
+        };
+        match fs::read(path) {
+            Ok(bytes) => {
+                let _ = request.respond(
+                    Response::from_data(bytes)
+                        .with_header(Header::from_bytes("Content-Type", mime).unwrap()),
+                );
+            }
+            Err(_) => {
+                let _ = request.respond(
+                    Response::from_string("Run npm run build to build the frontend")
+                        .with_status_code(404),
+                );
+            }
+        }
+    }
+}

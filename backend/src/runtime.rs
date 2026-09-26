@@ -10,12 +10,15 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Job {
     pub execution: Execution,
+    pub run_id: String,
+    pub parent_heads: Vec<String>,
     pub config: Config,
     pub task: String,
     pub resume_execution_id: Option<String>,
@@ -52,17 +55,17 @@ pub struct Runtime {
     epoch: Uuid,
     revision: u64,
     pub root: PathBuf,
-    _lock: RuntimeLock,
+    _lock: Arc<RuntimeLock>,
 }
 
 impl Runtime {
     pub fn open(root: &Path) -> Result<Self, String> {
         fs::create_dir_all(root).map_err(|error| error.to_string())?;
-        let lock = acquire(root)?;
+        let lock = Arc::new(acquire(root)?);
         let store = Store::open(&root.join("events.sqlite"))?;
         #[allow(unused_mut)]
-        let mut state = if let Some(run) = store.runs()?.first() {
-            store.load(run)?
+        let mut state = if let Some(run) = store.selected_run()? {
+            store.load(&run)?
         } else {
             Snapshot::default()
         };
@@ -95,12 +98,68 @@ impl Runtime {
         if runtime.state.approved
             && !matches!(
                 runtime.state.phase.as_str(),
-                "completed" | "needs_attention" | "publication_failed"
+                "completed" | "needs_attention" | "publication_failed" | "paused"
             )
         {
             runtime.emit(EventKind::Paused { paused: true })?;
         }
         Ok(runtime)
+    }
+
+    /// A run-scoped runtime has its own projection and scheduler but shares the
+    /// database and the single-process data-directory lease with its parent.
+    pub fn open_run(&self, run_id: &str) -> Result<Self, String> {
+        let store = Store::open(&self.root.join("events.sqlite"))?;
+        #[allow(unused_mut)]
+        let mut state = if run_id.is_empty() {
+            Snapshot::default()
+        } else {
+            store.load(run_id)?
+        };
+        #[cfg(feature = "fixture")]
+        if let Some(config) = state.config.as_mut() {
+            if !known_engine(&config.engine) {
+                config.engine = "pi".into();
+            }
+        }
+        let mut runtime = Self {
+            store,
+            state,
+            epoch: Uuid::new_v4(),
+            revision: 0,
+            root: self.root.clone(),
+            _lock: self._lock.clone(),
+        };
+        let interrupted: Vec<_> = runtime
+            .state
+            .executions
+            .iter()
+            .filter(|execution| execution.status == "running")
+            .cloned()
+            .collect();
+        for execution in interrupted {
+            runtime.emit(EventKind::Failed {
+                node: execution.node,
+                execution_id: Some(execution.id),
+                error: "Application stopped during this execution. Inspect and rerun.".into(),
+            })?;
+        }
+        runtime.recover_publication()?;
+        if runtime.state.approved
+            && !matches!(
+                runtime.state.phase.as_str(),
+                "completed" | "needs_attention" | "publication_failed" | "paused"
+            )
+        {
+            runtime.emit(EventKind::Paused { paused: true })?;
+        }
+        Ok(runtime)
+    }
+
+    /// Defaults for future runs are deliberately separate from the event projection.
+    pub fn save_default_config(&self, config: &Config) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
+        fs::write(self.root.join("config.json"), bytes).map_err(|e| e.to_string())
     }
 
     pub fn snapshot_version(&self) -> String {
@@ -118,7 +177,9 @@ impl Runtime {
     }
 
     pub fn emit_outputs(&mut self, events: Vec<EventKind>) -> Result<(), String> {
-        if events.is_empty() { return Ok(()); }
+        if events.is_empty() {
+            return Ok(());
+        }
         self.store.append_batch(&mut self.state, events)?;
         self.touch();
         Ok(())
@@ -133,14 +194,19 @@ impl Runtime {
             .map(|e| e.id.clone())
             .collect();
         for execution_id in interrupted {
-            let publication_merge = self.state.mergers.iter().any(|e| e.id == execution_id && e.node == "merger");
+            let publication_merge = self
+                .state
+                .mergers
+                .iter()
+                .any(|e| e.id == execution_id && e.node == "merger");
             self.emit(EventKind::MergerFailed {
                 execution_id,
                 error: if publication_merge {
                     "Merger interrupted; inspect the merge and retry publication."
                 } else {
                     "Merger interrupted; inspect the node worktree and rerun or resolve it."
-                }.into(),
+                }
+                .into(),
             })?;
         }
         if matches!(self.state.phase.as_str(), "publishing" | "merging") {
@@ -180,13 +246,49 @@ impl Runtime {
         if self.is_serial() || Uuid::parse_str(&self.state.run_id).is_err() {
             return Ok(());
         }
-        let Some(config) = &self.state.config else { return Ok(()); };
+        let Some(config) = &self.state.config else {
+            return Ok(());
+        };
         let repository = Path::new(&config.repository);
-        if !repository.is_absolute() { return Ok(()); }
-        let Some(parent) = repository.parent() else { return Ok(()); };
+        if !repository.is_absolute() {
+            return Ok(());
+        }
+        let Some(parent) = repository.parent() else {
+            return Ok(());
+        };
         let dir = parent.join(".grapher-worktrees").join(&self.state.run_id);
         if dir.is_dir() && !dir.is_symlink() {
             fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let workspaces = parent.join(".grapher-workspaces");
+        let mut owners = vec![self.state.run_id.clone()];
+        // The original primary Run may have allocated its UUID after planning.
+        // Its private checkout is named by the first planning attempt instead.
+        if let Some(planning_id) = &self.state.planning_id {
+            if let Ok(path) = fs::read_to_string(
+                self.root
+                    .join("planning")
+                    .join(planning_id)
+                    .join("planner-workspace"),
+            ) {
+                if let Some(owner) = Path::new(&path)
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                {
+                    if Uuid::parse_str(owner).is_ok()
+                        && Path::new(&path).parent() == Some(workspaces.join(owner).as_path())
+                    {
+                        owners.push(owner.to_owned());
+                    }
+                }
+            }
+        }
+        for owner in owners {
+            let path = workspaces.join(owner);
+            if path.is_dir() && !path.is_symlink() && !workspaces.is_symlink() {
+                fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+            }
         }
         Ok(())
     }
@@ -196,6 +298,7 @@ impl Runtime {
             return Err("Pause and wait for the current executions to finish first".into());
         }
         self.cleanup_worktrees()?;
+        self.store.select_run(None)?;
         let current_config = self.state.config.clone();
         self.state = Snapshot {
             config: current_config,
@@ -224,7 +327,9 @@ impl Runtime {
         if self.state.run_id == run_id && self.active() {
             return Err("Cannot delete the currently running execution".into());
         }
-        if self.state.run_id == run_id { self.cleanup_worktrees()?; }
+        if self.state.run_id == run_id {
+            self.cleanup_worktrees()?;
+        }
         self.store.delete_run(run_id)?;
         if self.state.run_id == run_id {
             let current_config = self.state.config.clone();
@@ -255,6 +360,7 @@ impl Runtime {
             .filter(|execution| execution.status == "running")
             .cloned()
             .collect();
+        self.store.select_run(Some(run_id))?;
         self.state = state;
         self.touch();
         for execution in interrupted {
@@ -290,15 +396,18 @@ impl Runtime {
         }
         let mut config = config;
         config.max_feedback = config.max_feedback.min(3);
-        if !(1..=8).contains(&config.max_parallel) {
-            return Err("Concurrency must be 1–8; feedback limit is capped at 3".into());
-        }
+        // max_parallel = 0 means no artificial per-Run worker cap.
         #[cfg(feature = "fixture")]
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
             return Err("Test process command is required".into());
         }
+        let run_id = if self.state.events.is_empty() && !self.state.run_id.is_empty() {
+            self.state.run_id.clone()
+        } else {
+            Uuid::new_v4().to_string()
+        };
         self.state = Snapshot {
-            run_id: Uuid::new_v4().to_string(),
+            run_id,
             ..Snapshot::default()
         };
         self.touch();
@@ -307,15 +416,15 @@ impl Runtime {
             config,
             planning_id,
             planning,
-        })
+        })?;
+        self.store.select_run(Some(&self.state.run_id))
     }
 
     pub fn set_route(&mut self, plan_type: &str) -> Result<(), String> {
         if self.state.phase != "awaiting_approval"
             || !matches!(plan_type, "serial" | "graph")
             || (plan_type == "serial"
-                && !(self.state.graph.nodes.len() == 1
-                    && self.state.graph.nodes[0].name == "task"))
+                && !(self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task"))
         {
             return Err("Invalid execution route or routing phase".into());
         }
@@ -323,7 +432,9 @@ impl Runtime {
         if plan_type == "graph" {
             crate::native::require_graph_execution()?;
         }
-        self.emit(EventKind::Routed { plan_type: plan_type.into() })
+        self.emit(EventKind::Routed {
+            plan_type: plan_type.into(),
+        })
     }
 
     fn is_serial(&self) -> bool {
@@ -351,8 +462,10 @@ impl Runtime {
     }
 
     pub fn edit_draft_graph(&mut self, graph: Graph, mut config: Config) -> Result<(), String> {
-        if self.state.run_id.is_empty() || self.state.approved
-            || !matches!(self.state.phase.as_str(), "rejected" | "awaiting_approval") {
+        if self.state.run_id.is_empty()
+            || self.state.approved
+            || !matches!(self.state.phase.as_str(), "rejected" | "awaiting_approval")
+        {
             return Err("Only an unapproved graph draft can be edited in place".into());
         }
         let previous = self.state.config.as_ref().ok_or("Missing config")?;
@@ -360,15 +473,14 @@ impl Runtime {
             return Err("Cannot move a draft to another repository".into());
         }
         resolve_repository(&self.root, &config)?;
-        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        compile(&graph, true)
+            .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
         #[cfg(feature = "fixture")]
         if !known_engine(&config.engine) {
             return Err("Unknown test actuator".into());
         }
         config.max_feedback = config.max_feedback.min(3);
-        if !(1..=8).contains(&config.max_parallel) {
-            return Err("Concurrency must be 1–8; feedback limit is capped at 3".into());
-        }
+        // max_parallel = 0 means no artificial per-Run worker cap.
         #[cfg(not(feature = "fixture"))]
         crate::native::require_graph_execution()?;
         self.emit(EventKind::DraftEdited { graph, config })
@@ -383,8 +495,12 @@ impl Runtime {
         if self.state.approved {
             return self.revise_graph(graph, planning);
         }
-        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
-        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
+        compile(&graph, true)
+            .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
         self.emit(EventKind::GraphRevised {
             graph,
             planning_id,
@@ -398,20 +514,34 @@ impl Runtime {
     pub fn revision_affected(&self, graph: &Graph) -> BTreeSet<String> {
         let previous = &self.state.graph;
         let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
-        let mut affected: BTreeSet<String> = previous.nodes.iter()
+        let mut affected: BTreeSet<String> = previous
+            .nodes
+            .iter()
             .filter(|node| !names.contains(node.name.as_str()))
-            .map(|node| node.name.clone()).collect();
+            .map(|node| node.name.clone())
+            .collect();
         for node in &graph.nodes {
-            let Some(old) = previous.nodes.iter().find(|old| old.name == node.name) else { continue };
+            let Some(old) = previous.nodes.iter().find(|old| old.name == node.name) else {
+                continue;
+            };
             let inputs = |g: &Graph| {
-                g.edges.iter().filter(|edge| edge.to == node.name && !edge.feedback)
-                    .map(|edge| edge.from.clone()).collect::<BTreeSet<_>>()
+                g.edges
+                    .iter()
+                    .filter(|edge| edge.to == node.name && !edge.feedback)
+                    .map(|edge| edge.from.clone())
+                    .collect::<BTreeSet<_>>()
             };
             let reviews = |g: &Graph| {
-                g.edges.iter().filter(|edge| edge.from == node.name && edge.feedback)
-                    .map(|edge| edge.to.clone()).collect::<BTreeSet<_>>()
+                g.edges
+                    .iter()
+                    .filter(|edge| edge.from == node.name && edge.feedback)
+                    .map(|edge| edge.to.clone())
+                    .collect::<BTreeSet<_>>()
             };
-            if old.task != node.task || inputs(previous) != inputs(graph) || reviews(previous) != reviews(graph) {
+            if old.task != node.task
+                || inputs(previous) != inputs(graph)
+                || reviews(previous) != reviews(graph)
+            {
                 affected.extend(downstream(graph, &node.name));
             }
         }
@@ -421,26 +551,52 @@ impl Runtime {
     /// Apply a planner revision without discarding unrelated work. The caller
     /// must wait for any affected in-flight execution before replacing the graph.
     pub fn revise_graph(&mut self, graph: Graph, planning: PlanningSummary) -> Result<(), String> {
-        if !self.state.approved || self.is_serial()
-            || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
-            return Err("Wait for active executions/publication before revising the approved graph".into());
+        if !self.state.approved
+            || self.is_serial()
+            || matches!(
+                self.state.phase.as_str(),
+                "publishing" | "merging" | "publication_failed"
+            )
+        {
+            return Err(
+                "Wait for active executions/publication before revising the approved graph".into(),
+            );
         }
-        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
-        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
+        compile(&graph, true)
+            .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
         let previous = &self.state.graph;
         let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
-        if self.state.published_head.is_some() && previous.nodes.iter().any(|node| !names.contains(node.name.as_str()) && self.state.nodes[&node.name].status == "done") {
+        if self.state.published_head.is_some()
+            && previous.nodes.iter().any(|node| {
+                !names.contains(node.name.as_str()) && self.state.nodes[&node.name].status == "done"
+            })
+        {
             return Err("Cannot remove already published nodes from this run".into());
         }
         let affected = self.revision_affected(&graph);
-        if self.state.executions.iter().any(|execution| execution.status == "running" && affected.contains(&execution.node)) {
+        if self
+            .state
+            .executions
+            .iter()
+            .any(|execution| execution.status == "running" && affected.contains(&execution.node))
+        {
             return Err("Wait for affected running nodes before revising the graph".into());
         }
         // New consumers of changed nodes must also be invalidated; all others
         // retain their heads, revisions, execution history and worktrees.
-        let invalidated: Vec<_> = affected.into_iter().filter(|name| names.contains(name.as_str())).collect();
+        let invalidated: Vec<_> = affected
+            .into_iter()
+            .filter(|name| names.contains(name.as_str()))
+            .collect();
         self.emit(EventKind::GraphRevised {
-            graph, planning_id: planning.planning_id.clone(), planning, invalidated,
+            graph,
+            planning_id: planning.planning_id.clone(),
+            planning,
+            invalidated,
         })
     }
 
@@ -455,7 +611,10 @@ impl Runtime {
             return Err("Approve the graph first".into());
         }
         if !paused {
-            resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+            resolve_repository(
+                &self.root,
+                self.state.config.as_ref().ok_or("Missing config")?,
+            )?;
         }
         self.emit(EventKind::Paused { paused })
     }
@@ -464,7 +623,12 @@ impl Runtime {
         if instruction.trim().is_empty() {
             return Err("Enter an instruction for the node".into());
         }
-        if !self.state.executions.iter().any(|execution| execution.node == node && execution.after.is_some()) {
+        if !self
+            .state
+            .executions
+            .iter()
+            .any(|execution| execution.node == node && execution.after.is_some())
+        {
             return Err("No completed node session to continue; revise the plan instead".into());
         }
         self.invalidate_node(node, instruction.trim())
@@ -475,7 +639,10 @@ impl Runtime {
     }
 
     fn invalidate_node(&mut self, node: &str, instruction: &str) -> Result<(), String> {
-        if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+        if matches!(
+            self.state.phase.as_str(),
+            "publishing" | "merging" | "publication_failed"
+        ) {
             return Err("Resolve or retry publication before changing node results".into());
         }
         if !self.state.approved {
@@ -485,12 +652,26 @@ impl Runtime {
             return Err("Select a node to rerun".into());
         }
         let affected = downstream(&self.state.graph, node);
-        if self.state.executions.iter().any(|execution| execution.status == "running" && affected.contains(&execution.node)) {
+        if self
+            .state
+            .executions
+            .iter()
+            .any(|execution| execution.status == "running" && affected.contains(&execution.node))
+        {
             return Err("Steer a running node directly; wait for running downstream nodes before rerunning their inputs".into());
         }
-        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let repository = resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
         if !self.is_serial() && !workspace::is_standard_git(&repository) {
-            workspace::check_shadow_source(&repository, self.state.published_head.as_deref().unwrap_or(&self.state.base))?;
+            workspace::check_shadow_source(
+                &repository,
+                self.state
+                    .published_head
+                    .as_deref()
+                    .unwrap_or(&self.state.base),
+            )?;
         }
         self.emit(EventKind::Invalidated {
             nodes: affected.into_iter().collect(),
@@ -501,7 +682,10 @@ impl Runtime {
     }
 
     pub fn resolved(&mut self, node: &str) -> Result<(), String> {
-        resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
         if self.active()
             || self.state.nodes.get(node).map(|node| node.status.as_str()) != Some("blocked")
         {
@@ -524,7 +708,8 @@ impl Runtime {
         let config = self.state.config.as_ref().ok_or("Missing config")?;
         let repository = resolve_repository(&self.root, config)?;
         workspace::verify_prepared_ancestor(path, &execution.before)?;
-        let head = workspace::snapshot_node(path, &repository, node)?;
+        let head =
+            workspace::snapshot_node_for_run(path, &repository, node, Some(&self.state.run_id))?;
         self.emit(EventKind::Finished {
             execution_id: execution.id,
             head,
@@ -556,13 +741,10 @@ impl Runtime {
         if !self.is_serial() {
             crate::native::require_graph_execution()?;
         }
-        let running = self
-            .state
-            .nodes
-            .values()
-            .filter(|node| node.status == "running")
-            .count();
-        let available = config.max_parallel.saturating_sub(running);
+        // Model sessions are intentionally unbounded. `max_parallel` remains in
+        // the persisted config for backwards compatibility, but it is no longer
+        // a scheduler gate: every ready node gets its own execution session.
+        let available = usize::MAX;
         loop {
             let blocked: Vec<_> = self
                 .state
@@ -622,16 +804,25 @@ impl Runtime {
                 .clone()
                 .unwrap_or(self.state.base.clone());
             let resume = if self.state.nodes[&node.name].human_instruction {
-                Some(self.state.executions.iter().rev()
-                    .find(|execution| execution.node == node.name && execution.after.is_some())
-                    .ok_or("No completed node session to continue")?)
+                Some(
+                    self.state
+                        .executions
+                        .iter()
+                        .rev()
+                        .find(|execution| execution.node == node.name && execution.after.is_some())
+                        .ok_or("No completed node session to continue")?,
+                )
             } else {
                 None
             };
-            let resume_execution_id = resume.map(|previous| self.state.executions.iter()
-                .find(|execution| execution.session_id == previous.session_id)
-                .map(|execution| execution.id.clone())
-                .unwrap_or_else(|| previous.id.clone()));
+            let resume_execution_id = resume.map(|previous| {
+                self.state
+                    .executions
+                    .iter()
+                    .find(|execution| execution.session_id == previous.session_id)
+                    .map(|execution| execution.id.clone())
+                    .unwrap_or_else(|| previous.id.clone())
+            });
             let execution = Execution {
                 id: id.clone(),
                 node: node.name.clone(),
@@ -643,7 +834,9 @@ impl Runtime {
                     .filter(|execution| execution.node == node.name)
                     .count()
                     + 1,
-                session_id: resume.map(|previous| previous.session_id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string()),
+                session_id: resume
+                    .map(|previous| previous.session_id.clone())
+                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
                 worktree: if let Some(previous) = resume {
                     previous.worktree.clone()
                 } else if self.is_serial() {
@@ -689,19 +882,36 @@ impl Runtime {
                 .edges
                 .iter()
                 .any(|edge| edge.feedback && edge.from == node.name);
+            let parent_heads = self
+                .parents(&node.name)
+                .iter()
+                .map(|parent| {
+                    self.state.nodes[parent]
+                        .head
+                        .clone()
+                        .ok_or("Ready node has no completed parent head")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             self.emit(EventKind::Started {
                 execution: execution.clone(),
             })?;
             jobs.push(Job {
                 execution,
+                run_id: self.state.run_id.clone(),
+                parent_heads,
                 config: config.clone(),
                 task,
                 resume_execution_id,
                 feedback_source,
-                expected_source_head: self.state.published_head.clone().unwrap_or_else(|| self.state.base.clone()),
+                expected_source_head: self
+                    .state
+                    .published_head
+                    .clone()
+                    .unwrap_or_else(|| self.state.base.clone()),
             });
         }
-        if allow_publication && jobs.is_empty()
+        if allow_publication
+            && jobs.is_empty()
             && !self.active()
             && !matches!(self.state.phase.as_str(), "completed" | "needs_attention")
         {
@@ -710,7 +920,12 @@ impl Runtime {
                     if !plan.terminals.is_empty() {
                         plan.terminals.clone()
                     } else {
-                        self.state.graph.nodes.iter().map(|node| node.name.clone()).collect()
+                        self.state
+                            .graph
+                            .nodes
+                            .iter()
+                            .map(|node| node.name.clone())
+                            .collect()
                     }
                 } else {
                     let dependencies: Vec<_> = self
@@ -729,7 +944,12 @@ impl Runtime {
                         .map(|node| node.name.clone())
                         .collect();
                     if terms.is_empty() {
-                        self.state.graph.nodes.iter().map(|node| node.name.clone()).collect()
+                        self.state
+                            .graph
+                            .nodes
+                            .iter()
+                            .map(|node| node.name.clone())
+                            .collect()
                     } else {
                         terms
                     }
@@ -801,14 +1021,23 @@ impl Runtime {
                     head: head.clone(),
                     output: format!("{raw}\n── Final response ──\n{output}\n"),
                 })?;
-                if let Some(exec) = self.state.executions.iter().chain(&self.state.mergers).find(|item| item.id == execution.id) {
+                if let Some(exec) = self
+                    .state
+                    .executions
+                    .iter()
+                    .chain(&self.state.mergers)
+                    .find(|item| item.id == execution.id)
+                {
                     if let Some(m) = &exec.metrics {
                         eprintln!(
                             "[Grapher] [Execution] Node '{}' finished in {:.2}s (head: {}, tokens: in={}, out={}, tools: {}, errors: {})",
                             exec.node, m.duration_seconds, head, m.usage.input, m.usage.output, m.tools, m.tool_errors
                         );
                     } else {
-                        eprintln!("[Grapher] [Execution] Node '{}' finished (head: {})", exec.node, head);
+                        eprintln!(
+                            "[Grapher] [Execution] Node '{}' finished (head: {})",
+                            exec.node, head
+                        );
                     }
                 }
                 Ok(if feedback_source {
@@ -818,7 +1047,10 @@ impl Runtime {
                 })
             }
             Err(error) => {
-                eprintln!("[Grapher] [Execution] Node '{}' failed: {error}", execution.node);
+                eprintln!(
+                    "[Grapher] [Execution] Node '{}' failed: {error}",
+                    execution.node
+                );
                 self.emit(EventKind::Failed {
                     node: execution.node.clone(),
                     execution_id: Some(execution.id.clone()),
@@ -903,7 +1135,9 @@ pub fn perform(
     on_output: impl FnMut(String),
     on_prepared: impl FnMut(String) -> Result<(), String>,
 ) -> Result<(String, String), String> {
-    perform_with_merger(job, root, parents, on_output, on_prepared, |_| Err("Merger event sink is unavailable".into()))
+    perform_with_merger(job, root, parents, on_output, on_prepared, |_| {
+        Err("Merger event sink is unavailable".into())
+    })
 }
 
 pub fn perform_with_merger(
@@ -920,18 +1154,30 @@ pub fn perform_with_merger(
     if path != repository {
         crate::native::require_graph_execution()?;
     }
-    let before = workspace::prepare_with_merger_expected(&repository, path, &job.execution.before, parents, &job.expected_source_head, || {
-        let attempt = job.execution.attempt;
-        crate::graph_merge::resolve_with_merger_for_node(
-            path,
-            &job.task,
-            &job.config,
-            root,
-            attempt,
-            &format!("merge:{}", job.execution.node),
-            &mut on_merger_event,
-        )
-    })?;
+    let parent_refs = if job.parent_heads.is_empty() {
+        parents
+    } else {
+        &job.parent_heads
+    };
+    let before = workspace::prepare_with_merger_expected(
+        &repository,
+        path,
+        &job.execution.before,
+        parent_refs,
+        &job.expected_source_head,
+        || {
+            let attempt = job.execution.attempt;
+            crate::graph_merge::resolve_with_merger_for_node(
+                path,
+                &job.task,
+                &job.config,
+                root,
+                attempt,
+                &format!("merge:{}", job.execution.node),
+                &mut on_merger_event,
+            )
+        },
+    )?;
     on_prepared(before.clone())?;
     let output = engine::execute(
         &job.config,
@@ -945,6 +1191,11 @@ pub fn perform_with_merger(
     if path != repository {
         workspace::verify_prepared_ancestor(path, &before)?;
     }
-    let head = workspace::snapshot_execution(path, &repository, &job.execution.node)?;
+    let head = workspace::snapshot_execution_for_run(
+        path,
+        &repository,
+        &job.execution.node,
+        Some(&job.run_id),
+    )?;
     Ok((head, output))
 }

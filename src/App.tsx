@@ -17,7 +17,7 @@ import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
 
 import { TaskNode } from "./components/graph/TaskNode";
-import { useGraphElements } from "./hooks/useGraphElements";
+import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
@@ -86,6 +86,8 @@ export default function App() {
   const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const foregroundGeneration = useRef(0);
+  const busyOperations = useRef(0);
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
     try {
       const saved = localStorage.getItem("grapher_workspace_runs");
@@ -134,11 +136,14 @@ export default function App() {
     }
   }, [runs, runLabels, runtimeService]);
   const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot } = useRunIndicators(state);
-  const setBackendStatus = useSnapshotPolling(busy, setState, observeRunSnapshot);
+  const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, runs, state.runId, state.phase);
 
   const [dataPath, setDataPath] = useState("");
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
+  // Recover an orphaned Planner only on initial load, not after the user
+  // intentionally opens a different Conversation in this repository.
+  const [autoRecoverPlanning, setAutoRecoverPlanning] = useState(true);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
   const [failedPlanning, setFailedPlanning] = useState<PlanningSummary | null>(null);
   const [planningRecovery] = useState(() => createPlanningRecovery(runtimeService, summary => {
@@ -237,14 +242,21 @@ export default function App() {
   const [plannerStream, setPlannerStream] = useState(initialPlannerStream);
 
   const run = async (work: () => Promise<void>) => {
+    const generation = foregroundGeneration.current;
+    busyOperations.current += 1;
     setBusy(true);
     setError("");
     try {
       await work();
     } catch (err) {
-      setError(err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err));
+      if (generation === foregroundGeneration.current) {
+        setError(err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err));
+      }
     } finally {
-      setBusy(false);
+      if (generation === foregroundGeneration.current) {
+        busyOperations.current -= 1;
+        setBusy(busyOperations.current > 0);
+      }
     }
   };
 
@@ -254,7 +266,7 @@ export default function App() {
     }
     const defaultNode = selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
     const targetNode = extra.node !== undefined ? extra.node : defaultNode;
-    const payload: Record<string, unknown> = { ...extra };
+    const payload: Record<string, unknown> = { runId: state.runId, ...extra };
     if (targetNode !== undefined) {
       payload.node = targetNode;
     }
@@ -379,9 +391,9 @@ export default function App() {
       run(async () => {
         try {
           await requireRepository(state.config?.repository || config.repository);
-          const snap = await runtimeService.control("intervene", { node: targetNodeName, instruction: text });
+          const snap = await runtimeService.control("intervene", { node: targetNodeName, instruction: text, runId: state.runId });
           setState(snap);
-          if (snap.paused) setState(await runtimeService.control("resume"));
+          if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
         } catch (error) {
           setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
           throw error;
@@ -509,19 +521,23 @@ export default function App() {
       void runtimeService.saveConfig(nextConfigObj).catch(() => {});
     }
 
-    if (storedWorkspaceRuns === null) {
-      if (data.runs && data.runs.length > 0 && activeRepo) {
-        const initial = { [activeRepo]: data.runs };
-        setWorkspaceRuns(initial);
-        try {
-          localStorage.setItem("grapher_workspace_runs", JSON.stringify(initial));
-        } catch {}
-      }
-    } else {
-      setWorkspaceRuns(storedWorkspaceRuns);
+    // Local browser indexes can lag another tab or a restarted backend.
+    // Reconcile persisted Runs by their actual repository, not the currently
+    // selected project (which may differ for concurrent conversations).
+    const indexedRuns = { ...(storedWorkspaceRuns || {}) };
+    const indexedIds = new Set(Object.values(indexedRuns).flat());
+    const missingIds = (data.runs || []).filter((id) => !indexedIds.has(id));
+    const missingSnapshots = await Promise.all(missingIds.map((id) => runtimeService.history(id).catch(() => null)));
+    if (!planningRecovery.current(scope)) return;
+    for (const snapshot of missingSnapshots) {
+      if (!snapshot?.runId || !snapshot.config?.repository) continue;
+      const repo = snapshot.config.repository;
+      indexedRuns[repo] = [...(indexedRuns[repo] || []), snapshot.runId];
     }
+    setWorkspaceRuns(indexedRuns);
+    try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch {}
 
-    const currentRuns = (storedWorkspaceRuns ? (storedWorkspaceRuns[activeRepo] || []) : null) ?? (data.runs || []);
+    const currentRuns = indexedRuns[activeRepo] || [];
     const isActivelyRunning = Boolean(
       data.snapshot.runId &&
       data.snapshot.phase === "running" &&
@@ -539,13 +555,8 @@ export default function App() {
       setGoal(data.snapshot.graph.originalGoal);
       setSelected("");
     } else {
-      // 每次打开项目前端，不载入最新对话，而是载入最新 workspace 文件夹的初始页面
-      try {
-        const resetSnap = await runtimeService.resetWorkspace();
-        setState(resetSnap);
-      } catch {
-        setState(emptySnapshot);
-      }
+      // Opening the UI must not reset or delete another Run's checkout.
+      setState(emptySnapshot);
       setRouteType("undecided");
       setGoal("");
       setSelected("");
@@ -558,12 +569,26 @@ export default function App() {
     }
   }, [planningRecovery]);
 
+  const detachForeground = (repository: string) => {
+    foregroundGeneration.current += 1;
+    busyOperations.current = 0;
+    setBusy(false);
+    const scope = planningRecovery.begin(repository);
+    // A detached SSE request continues on the backend, but cannot replace the
+    // newly selected view or leave its old busy/planning flags behind.
+    planningAbortControllerRef.current = null;
+    setIsPlanning(false);
+    setRecoveredPlanning(null);
+    setAutoRecoverPlanning(false);
+    return scope;
+  };
+
   const handleOpenProject = () => run(async () => {
-    const pending = planningRecovery.begin(config.repository);
+    const pending = planningRecovery.capture(config.repository);
     const info = await runtimeService.pickRepository();
     if (!planningRecovery.current(pending)) return;
     if (info) {
-      const scope = planningRecovery.begin(info.path);
+      const scope = detachForeground(info.path);
       setRepoInfo(info);
       setConfig((prev) => ({ ...prev, repository: info.path }));
       const item: ProjectItem = {
@@ -582,13 +607,8 @@ export default function App() {
         } catch {}
         return next;
       });
-      let nextSnapshot = emptySnapshot;
-      try {
-        nextSnapshot = await runtimeService.resetWorkspace();
-        setState(nextSnapshot);
-      } catch {
-        setState(emptySnapshot);
-      }
+      const nextSnapshot = emptySnapshot;
+      setState(nextSnapshot);
       setRouteType("undecided");
       setPlannerStream(initialPlannerStream);
       setGoal("");
@@ -600,73 +620,65 @@ export default function App() {
     }
   });
 
-  const handleSelectProject = (proj: ProjectItem) => run(async () => {
+  const handleSelectProject = (proj: ProjectItem) => {
     if (config.repository === proj.path) return;
-    const scope = planningRecovery.begin(proj.path);
-    setPlannerStream(initialPlannerStream);
-    const info = await runtimeService.detectRepository(proj.path);
-    if (!planningRecovery.current(scope)) return;
-    if (info) {
-      setRepoInfo(info);
-      setConfig((prev) => ({ ...prev, repository: info.path }));
-      setProjects((prev) => {
-        const next = prev.map((p) =>
-          p.path === info.path
-            ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
-            : p
-        );
+    const scope = detachForeground(proj.path);
+    return run(async () => {
+      setPlannerStream(initialPlannerStream);
+      const info = await runtimeService.detectRepository(proj.path);
+      if (!planningRecovery.current(scope)) return;
+      if (info) {
+        setRepoInfo(info);
+        setConfig((prev) => ({ ...prev, repository: info.path }));
+        setProjects((prev) => {
+          const next = prev.map((p) =>
+            p.path === info.path
+              ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
+              : p
+          );
+          try {
+            localStorage.setItem("grapher_projects", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+      } else {
+        setRepoInfo(null);
+        setConfig((prev) => ({ ...prev, repository: proj.path }));
+      }
+      const projRuns = workspaceRuns[proj.path] || [];
+      let loadedSnapshot: Snapshot = emptySnapshot;
+      if (projRuns.length > 0) {
         try {
-          localStorage.setItem("grapher_projects", JSON.stringify(next));
-        } catch {}
-        return next;
-      });
-    } else {
-      setRepoInfo(null);
-      setConfig((prev) => ({ ...prev, repository: proj.path }));
-    }
-    const projRuns = workspaceRuns[proj.path] || [];
-    let loadedSnapshot: Snapshot = emptySnapshot;
-    if (projRuns.length > 0) {
-      try {
-        const snapshot = await runtimeService.loadRun(projRuns[0]);
-        const deduced = deduceRouteType(snapshot);
-        setState(snapshot);
-        setRouteType(deduced);
-        setGoal(snapshot.graph.originalGoal || "");
-        resetSessionMessages();
-        setSelected("");
-        loadedSnapshot = snapshot;
-      } catch {
-        try {
-          const snapshot = await runtimeService.resetWorkspace();
+          const snapshot = await runtimeService.snapshotForRun(projRuns[0]);
+          if (!planningRecovery.current(scope)) return;
+          const deduced = deduceRouteType(snapshot);
           setState(snapshot);
+          setRouteType(deduced);
+          setGoal(snapshot.graph.originalGoal || "");
+          resetSessionMessages();
+          setSelected("");
           loadedSnapshot = snapshot;
         } catch {
+          if (!planningRecovery.current(scope)) return;
           setState(emptySnapshot);
           loadedSnapshot = emptySnapshot;
+          setRouteType("undecided");
+          setPlannerStream(initialPlannerStream);
+          setGoal("");
+          resetSessionMessages();
         }
+      } else {
+        setState(emptySnapshot);
+        loadedSnapshot = emptySnapshot;
         setRouteType("undecided");
         setPlannerStream(initialPlannerStream);
         setGoal("");
         resetSessionMessages();
       }
-    } else {
-      try {
-        const snapshot = await runtimeService.resetWorkspace();
-        setState(snapshot);
-        loadedSnapshot = snapshot;
-      } catch {
-        setState(emptySnapshot);
-        loadedSnapshot = emptySnapshot;
-      }
-      setRouteType("undecided");
-      setPlannerStream(initialPlannerStream);
-      setGoal("");
-      resetSessionMessages();
-    }
-    setError("");
-    void planningRecovery.restore(scope, loadedSnapshot);
-  });
+      setError("");
+      void planningRecovery.restore(scope, loadedSnapshot);
+    });
+  };
 
   const handleRemoveWorkspaceConfirm = (project: ProjectItem) => {
     setConfirmModal({
@@ -703,7 +715,6 @@ export default function App() {
             setSelected("");
             resetSessionMessages();
             setRouteType("undecided");
-            void runtimeService.resetWorkspace().catch(() => {});
           }
         }
       },
@@ -734,7 +745,7 @@ export default function App() {
       const remainingRuns = (workspaceRuns[currentRepoPath] || []).filter((id) => id !== runIdToDelete);
       if (remainingRuns.length > 0) {
         try {
-          const snapshot = await runtimeService.loadRun(remainingRuns[0]);
+          const snapshot = await runtimeService.snapshotForRun(remainingRuns[0]);
           setState(snapshot);
           setRouteType(deduceRouteType(snapshot));
           setGoal(snapshot.graph.originalGoal || "");
@@ -745,12 +756,7 @@ export default function App() {
           setSelected("");
         }
       } else {
-        try {
-          const snapshot = await runtimeService.resetWorkspace();
-          setState(snapshot);
-        } catch {
-          setState(emptySnapshot);
-        }
+        setState(emptySnapshot);
         setGoal("");
         setSelected("");
         resetSessionMessages();
@@ -827,25 +833,22 @@ export default function App() {
         setGoal("");
         setSelected("");
         setRouteType("undecided");
-        void runtimeService.resetWorkspace().catch(() => {});
       }),
     });
   };
 
-  const handleResetWorkspace = () => run(async () => {
+  // A new conversation is only a view change. The backend may still be
+  // executing the previous Run; never reset or terminate it from this button.
+  const handleNewConversation = () => {
+    detachForeground(config.repository);
     resetSessionMessages();
-    try {
-      const snapshot = await runtimeService.resetWorkspace();
-      setState(snapshot);
-    } catch {
-      setState(emptySnapshot);
-    }
+    setState(emptySnapshot);
     setRouteType("undecided");
     setPlannerStream(initialPlannerStream);
     setGoal("");
     setSelected("");
     setError("");
-  });
+  };
 
   const handleDetectRepository = (customPath?: string) => run(async () => {
     const info = await runtimeService.detectRepository(customPath || null);
@@ -966,6 +969,9 @@ export default function App() {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return;
     if (config.repository) await requireRepository(config.repository);
+    if (isPlanning) {
+      throw new Error("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。");
+    }
     const isContinuing = Boolean(revisionRunId || (routeType === "graph" && state.graph.nodes.length > 0 && state.runId));
     const effectiveRevisionRunId = revisionRunId || (isContinuing ? state.runId : undefined);
     // Tool edits are provisional until the backend atomically commits the
@@ -1040,6 +1046,7 @@ export default function App() {
       }));
     }
     const scope = planningRecovery.begin(config.repository);
+    let abortController: AbortController | null = null;
     try {
       if (!config.repository) {
         setModal("settings");
@@ -1073,15 +1080,24 @@ export default function App() {
       let partInTag = false;
       let planInTag = false;
 
-      const abortController = new AbortController();
+      abortController = new AbortController();
       planningAbortControllerRef.current = abortController;
 
       const snapshot = await runtimeService.planGoalStream(
         targetGoal,
         config,
         (event) => {
-        if (!planningRecovery.current(scope)) return;
-        if (event.type === "partitioner") {
+        if (!planningRecovery.current(scope)) {
+          // Detached planning still creates a real Run. Keep it in the sidebar
+          // without replacing the newly opened conversation.
+          if (event.type === "complete" && event.snapshot?.runId) {
+            recordRunToWorkspace(event.snapshot.runId);
+          }
+          return;
+        }
+        if (event.type === "run_started") {
+          if (event.runId) setPlannerStream((prev) => ({ ...prev, runId: event.runId! }));
+        } else if (event.type === "partitioner") {
           const pEvent = event.event;
           if (pEvent?.type === "message_update") {
             const aEvent = pEvent.assistantMessageEvent;
@@ -1411,7 +1427,7 @@ export default function App() {
                           relation: e.relation || "",
                           feedback: Boolean(e.feedback),
                         });
-                        addedIds.push(`${e.from}-${e.feedback ? "fb" : "dep"}-${e.to}`);
+                        addedIds.push(graphEdgeId(e));
                       }
                     }
                     return {
@@ -1548,8 +1564,10 @@ export default function App() {
         stage: "error",
       }));
     } finally {
-      planningAbortControllerRef.current = null;
-      setIsPlanning(false);
+      if (abortController && planningAbortControllerRef.current === abortController) {
+        planningAbortControllerRef.current = null;
+      }
+      if (planningRecovery.current(scope)) setIsPlanning(false);
     }
   });
 
@@ -1563,7 +1581,7 @@ export default function App() {
   // submitting the goal again. Every response is scoped to this repository.
   useEffect(() => {
     setRecoveredPlanning(null);
-    if (busy || isPlanning || hasCurrentPlan || !config.repository) return;
+    if (!autoRecoverPlanning || busy || isPlanning || hasCurrentPlan || !config.repository) return;
     const repository = config.repository;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
@@ -1611,7 +1629,7 @@ export default function App() {
     };
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, [busy, isPlanning, hasCurrentPlan, config.repository, planningRecovery]);
+  }, [autoRecoverPlanning, busy, isPlanning, hasCurrentPlan, config.repository, planningRecovery]);
 
   useEffect(() => {
     // Only an actual serial route may auto-start. A manually edited Graph IR
@@ -1644,7 +1662,8 @@ export default function App() {
       planningAbortControllerRef.current = null;
     }
     try {
-      await runtimeService.control("stop");
+      const runId = state.runId || plannerStream.runId;
+      await runtimeService.control("stop", runId ? { runId } : {});
     } catch (e) {
       console.warn("Stop command failed:", e);
     }
@@ -1656,7 +1675,7 @@ export default function App() {
         stage: "error",
       }));
     }
-  }, [isPlanning]);
+  }, [isPlanning, state.runId, plannerStream.runId]);
 
   const { nodes, edges } = useGraphElements(state, selected, recentlyAddedEdgeIds);
 
@@ -1683,45 +1702,51 @@ export default function App() {
         runLabels={runLabels}
         currentRunId={state.runId}
         runIndicators={runIndicators}
-        onLoadRun={(id) => run(async () => {
-          clearRunUnread(id);
-          if (id !== state.runId) setPlannerStream(initialPlannerStream);
-          const snapshot = await runtimeService.loadRun(id);
-          const deduced = deduceRouteType(snapshot);
+        onLoadRun={(id) => {
+          if (id !== state.runId || isPlanning || recoveredPlanning) detachForeground(config.repository);
+          const generation = foregroundGeneration.current;
+          run(async () => {
+            clearRunUnread(id);
+            if (id !== state.runId) setPlannerStream(initialPlannerStream);
+            // Read the selected Run without replacing any other Run's scheduler.
+            const snapshot = await runtimeService.snapshotForRun(id);
+            const deduced = deduceRouteType(snapshot);
 
-          // Prefetch transcripts before switching state so content is ready on frame 0
-          if (deduced === "graph") {
-            const savedPlannerId = snapshot.planningId;
-            const ids = (snapshot.events || [])
-              .filter((e) => e.type === "created" || e.type === "graph_revised")
-              .map((e) => e.planning_id)
-              .filter((pid): pid is string => Boolean(pid));
-            if (savedPlannerId) ids.push(savedPlannerId);
-            const seen = new Set<string>();
-            const uniqueIds = ids.filter((pid) => {
-              if (seen.has(pid)) return false;
-              seen.add(pid);
-              return true;
-            });
-            if (uniqueIds.length > 0) {
-              await prefetchPlanningTranscript(uniqueIds).catch(() => {});
+            // Prefetch transcripts before switching state so content is ready on frame 0
+            if (deduced === "graph") {
+              const savedPlannerId = snapshot.planningId;
+              const ids = (snapshot.events || [])
+                .filter((e) => e.type === "created" || e.type === "graph_revised")
+                .map((e) => e.planning_id)
+                .filter((pid): pid is string => Boolean(pid));
+              if (savedPlannerId) ids.push(savedPlannerId);
+              const seen = new Set<string>();
+              const uniqueIds = ids.filter((pid) => {
+                if (seen.has(pid)) return false;
+                seen.add(pid);
+                return true;
+              });
+              if (uniqueIds.length > 0) {
+                await prefetchPlanningTranscript(uniqueIds).catch(() => {});
+              }
+            } else if (deduced === "serial" && snapshot.executions && snapshot.executions.length > 0) {
+              const latestExec = snapshot.executions[snapshot.executions.length - 1];
+              if (latestExec) {
+                await prefetchExecutionTranscript(id, latestExec).catch(() => {});
+              }
             }
-          } else if (deduced === "serial" && snapshot.executions && snapshot.executions.length > 0) {
-            const latestExec = snapshot.executions[snapshot.executions.length - 1];
-            if (latestExec) {
-              await prefetchExecutionTranscript(id, latestExec).catch(() => {});
-            }
-          }
 
-          setState(snapshot);
-          markSnapshotRead(snapshot);
-          setRouteType(deduced);
-          setGoal(snapshot.graph.originalGoal || "");
-          if (id !== state.runId) resetSessionMessages();
-          setSelected("");
-        })}
+            if (generation !== foregroundGeneration.current) return;
+            setState(snapshot);
+            markSnapshotRead(snapshot);
+            setRouteType(deduced);
+            setGoal(snapshot.graph.originalGoal || "");
+            if (id !== state.runId) resetSessionMessages();
+            setSelected("");
+          });
+        }}
         onDeleteRun={handleDeleteRunConfirm}
-        onResetWorkspace={handleResetWorkspace}
+        onNewConversation={handleNewConversation}
         onOpenSettings={() => setModal("settings")}
         isSettingsOpen={modal === "settings"}
       />

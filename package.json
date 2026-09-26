@@ -21,6 +21,7 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test:frontend": "node --import ./pi/node_modules/tsx/dist/loader.mjs --test scripts/graph-elements.test.ts",
+    "test:concurrent": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --no-default-features --features fixture --bin grapher && node scripts/concurrent-runs.test.mjs",
     "test": "node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture",
     "frontend": "vite --host 127.0.0.1",
     "backend": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher",

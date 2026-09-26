@@ -15,7 +15,7 @@ interface SidebarProps {
   runIndicators: Record<string, { unread: boolean; phase: string }>;
   onLoadRun: (runId: string) => void;
   onDeleteRun: (runId: string) => void;
-  onResetWorkspace: () => void;
+  onNewConversation: () => void;
   onOpenSettings: () => void;
   isSettingsOpen: boolean;
   runLabels?: Record<string, string>;
@@ -34,7 +34,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   runIndicators,
   onLoadRun,
   onDeleteRun,
-  onResetWorkspace,
+  onNewConversation,
   onOpenSettings,
   isSettingsOpen,
   runLabels = {},
@@ -151,9 +151,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <button
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
-            title="新建空白工作区"
-            aria-label="新建空白工作区"
-            onClick={onResetWorkspace}
+            title="新建对话（不停止后台运行）"
+            aria-label="新建对话"
+            onClick={onNewConversation}
           >
             <Plus size={18} />
           </button>
@@ -163,8 +163,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       <div className="runs-list">
         {runs.length > 0 ? (
           runs.map((id, index) => {
-            const isThisRunActive = activeBackendRunId === id && ["running", "awaiting_approval", "publishing", "merging"].includes(activeBackendPhase ?? "");
             const indicator = runIndicators[id];
+            const isThisRunActive = ["running", "awaiting_approval", "publishing", "merging"].includes(indicator?.phase ?? (activeBackendRunId === id ? activeBackendPhase ?? "" : ""));
             const isUnread = Boolean(indicator?.unread && currentRunId !== id);
             const needsUnreadApproval = isUnread && indicator.phase === "awaiting_approval";
             let displayLabel = `Graph ${id.slice(0, 8)}`;

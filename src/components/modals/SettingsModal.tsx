@@ -20,17 +20,6 @@ interface SettingsModalProps {
   onSaveConfig: (autoApprove: boolean) => void;
 }
 
-const PARALLEL_STEPS = [
-  { value: 1, tag: "串行" },
-  { value: 2 },
-  { value: 3 },
-  { value: 4, tag: "推荐" },
-  { value: 5 },
-  { value: 6 },
-  { value: 7 },
-  { value: 8, tag: "极限" },
-];
-
 export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   isOpen,
   onClose,
@@ -115,39 +104,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div className="settings-control-row">
                   <div className="settings-control-label">
-                    <span>并发任务上限</span>
-                    <span className="settings-control-badge">{config.maxParallel ?? 4} 并发</span>
+                    <span>模型 Session 并发</span>
+                    <span className="settings-control-badge">不限制</span>
                   </div>
-                  <div className="settings-slider-wrapper">
-                    <input
-                      type="range"
-                      min={1}
-                      max={8}
-                      step={1}
-                      value={config.maxParallel ?? 4}
-                      onChange={(e) => setConfig((prev) => ({ ...prev, maxParallel: Number(e.target.value) }))}
-                      className="settings-range-slider"
-                      aria-label="并发任务上限"
-                    />
-                    <div className="settings-slider-ticks-track">
-                      {PARALLEL_STEPS.map((step) => {
-                        const isSelected = (config.maxParallel ?? 4) === step.value;
-                        return (
-                          <button
-                            key={step.value}
-                            type="button"
-                            className={`settings-slider-tick-item ${isSelected ? "active" : ""}`}
-                            style={{ left: `calc(8px + (100% - 16px) * ${(step.value - 1) / 7})` }}
-                            onClick={() => setConfig((prev) => ({ ...prev, maxParallel: step.value }))}
-                            title={`设置为 ${step.value} 并发${step.tag ? ` (${step.tag})` : ""}`}
-                          >
-                            <span className="tick-number">{step.value}</span>
-                            {step.tag && <span className="tick-tag">{step.tag}</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <p className="section-desc" style={{ margin: 0 }}>
+                    Serial 和 Graph 都不会按 Run 或 Session 限制并发；每个模型 Session 独立启动，冲突不在调度层处理。
+                  </p>
                 </div>
               </div>
             </div>

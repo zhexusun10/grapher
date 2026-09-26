@@ -39,15 +39,16 @@ export const runtimeService = {
   repositoryStatus: (repository: string, signal?: AbortSignal) =>
     request<{ repository: string; valid: boolean; error: string | null }>("repository_status", { repository }, signal),
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
-  snapshotIfChanged: (version: string | null, signal?: AbortSignal) =>
-    request<{ version: string; snapshot: Snapshot | null }>("snapshot_if_changed", { version }, signal),
+  snapshotForRun: (runId: string, signal?: AbortSignal) => request<Snapshot>("snapshot", { runId }, signal),
+  snapshotIfChanged: (version: string | null, signal?: AbortSignal, runId?: string) =>
+    request<{ version: string; snapshot: Snapshot | null }>("snapshot_if_changed", { version, ...(runId ? { runId } : {}) }, signal),
   history: (runId: string) => request<Snapshot>("history", { runId }),
   loadRun: async (runId: string) => {
     try {
       return await request<Snapshot>("load_run", { runId });
     } catch {
       try {
-        const snap = await request<Snapshot>("snapshot");
+        const snap = await request<Snapshot>("snapshot", { runId });
         if (snap && snap.runId === runId) {
           return snap;
         }
@@ -120,6 +121,8 @@ export const runtimeService = {
             if (eventType === "complete") {
               finalSnapshot = dataObj.snapshot || dataObj;
               onEvent({ type: "complete", snapshot: finalSnapshot! });
+            } else if (eventType === "run_started") {
+              onEvent({ type: "run_started", runId: dataObj.runId });
             } else if (eventType === "route_decision") {
               onEvent({ type: "route_decision", planType: dataObj.planType });
             } else if (eventType === "partitioner") {

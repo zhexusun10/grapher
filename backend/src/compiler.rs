@@ -52,6 +52,16 @@ fn alternate_dependency_path(graph: &Graph, from: &str, to: &str) -> Option<Vec<
     None
 }
 
+/// Node names also become Git snapshot refs; keep the contract shared.
+pub fn validate_node_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 64
+        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+    {
+        return Err(format!("Invalid node name {name:?}: use 1–64 ASCII letters, digits, '_' or '-'."));
+    }
+    Ok(())
+}
+
 pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>> {
     compile_with_policy(graph, final_check, true)
 }
@@ -78,30 +88,8 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
     }
     let mut names = BTreeSet::new();
     for node in &graph.nodes {
-        if node.name.is_empty() || node.name.len() > 128 {
-            let reason = if node.name.is_empty() {
-                "name is empty".to_string()
-            } else {
-                format!("name is too long ({} characters, max 128)", node.name.len())
-            };
-            add(
-                "E201",
-                format!("Invalid node name {:?}: {}.", node.name, reason),
-            );
-        }
-        // Check for filesystem-unsafe characters across platforms
-        let unsafe_chars: Vec<char> = node.name.chars()
-            .filter(|c| matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\0'))
-            .collect();
-        if !unsafe_chars.is_empty() {
-            add(
-                "E201",
-                format!(
-                    "Invalid node name {:?}: contains filesystem-unsafe characters: {}. These characters cannot be used: / \\ < > : \" | ? * (null byte)",
-                    node.name,
-                    unsafe_chars.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ")
-                ),
-            );
+        if let Err(message) = validate_node_name(&node.name) {
+            add("E201", message);
         }
         if !names.insert(node.name.clone()) {
             add("E202", format!("Duplicate node: {}", node.name));

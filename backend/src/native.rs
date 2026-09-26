@@ -12,7 +12,9 @@ static RUNTIME: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 pub fn require_graph_execution() -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    { return crate::linux_sandbox::require_supported(); }
+    {
+        return crate::linux_sandbox::require_supported();
+    }
     #[cfg(not(target_os = "linux"))]
     {
         if !crate::sandbox::supported() {
@@ -65,11 +67,20 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         .canonicalize()
         .map_err(|e| format!("Invalid execution directory: {e}"))?;
     if cwd != repository {
-        if role != PiRole::NodeAgent {
-            return Err("Planner/Partitioner/Merger must use the bound source directory".into());
+        if !matches!(role, PiRole::NodeAgent | PiRole::Planner) {
+            return Err("Partitioner/Merger must use the bound source directory".into());
         }
         if cwd.starts_with(&repository) || repository.starts_with(&cwd) {
             return Err("Graph workspace must not overlap the source directory".into());
+        }
+        if role == PiRole::Planner
+            && cwd
+                .parent()
+                .and_then(Path::parent)
+                .and_then(|root| root.file_name())
+                != Some(std::ffi::OsStr::new(".grapher-workspaces"))
+        {
+            return Err("Planner requires a private planning workspace".into());
         }
         if !cwd.join(".git").is_dir()
             || !cwd
@@ -82,7 +93,11 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         }
         require_graph_execution()?;
     }
-    if !cfg!(target_os = "macos") && !cfg!(target_os = "windows") && !cfg!(target_os = "linux") && cwd != repository {
+    if !cfg!(target_os = "macos")
+        && !cfg!(target_os = "windows")
+        && !cfg!(target_os = "linux")
+        && cwd != repository
+    {
         return Err("Private Graph workspaces are unavailable on this host".into());
     }
     Ok(())
@@ -158,7 +173,10 @@ pub fn execution_command(
             .arg("--grapher-windows-sandbox-helper")
             .current_dir(&current)
             .env("GRAPHER_WINDOWS_SANDBOX_TARGET", resolve_program("node")?)
-            .env("GRAPHER_WINDOWS_SANDBOX_PREFIX", engine.join("engine/entrypoint.mjs"))
+            .env(
+                "GRAPHER_WINDOWS_SANDBOX_PREFIX",
+                engine.join("engine/entrypoint.mjs"),
+            )
             .env("GRAPHER_WINDOWS_SANDBOX_CURRENT", &current)
             .env("GRAPHER_WINDOWS_SANDBOX_SESSION", session)
             .env("GRAPHER_WINDOWS_SANDBOX_DATA", data)
@@ -171,13 +189,22 @@ pub fn execution_command(
     {
         let pi_dir = agent_dir()?;
         crate::linux_sandbox::execution_command(
-            &source, worktree_root, &current, data, session, &engine, &pi_dir,
+            &source,
+            worktree_root,
+            &current,
+            data,
+            session,
+            &engine,
+            &pi_dir,
         )
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (source, worktree_root, data, session, engine);
-        Err("Native Graph execution is not available without a validated host filesystem sandbox".into())
+        Err(
+            "Native Graph execution is not available without a validated host filesystem sandbox"
+                .into(),
+        )
     }
 }
 
@@ -294,6 +321,11 @@ mod tests {
             .unwrap_err()
             .contains("private Git"));
         assert!(validate_workspace(PiRole::Planner, &source, &node).is_err());
+        let private = temp.path().join(".grapher-workspaces/run/planner");
+        fs::create_dir_all(&private).unwrap();
+        crate::workspace::git(&private, &["init", "-q"]).unwrap();
+        assert!(validate_workspace(PiRole::Planner, &source, &private).is_ok());
+        assert!(validate_workspace(PiRole::Partitioner, &source, &private).is_err());
         #[cfg(unix)]
         {
             let alias = temp.path().join("alias");
@@ -303,6 +335,78 @@ mod tests {
                 .contains("private Git"));
             assert!(validate_workspace(PiRole::Planner, &source, &alias).is_err());
         }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn private_planner_can_write_its_graph_but_not_the_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let source = base.join("source");
+        let workspace = base.join(".grapher-workspaces/run/planner");
+        let data = base.join("data");
+        let session = data.join("planner-session");
+        for path in [&source, &workspace, &session] {
+            fs::create_dir_all(path).unwrap();
+        }
+        crate::workspace::git(&workspace, &["init", "-q"]).unwrap();
+        crate::workspace::git(&source, &["init", "-q"]).unwrap();
+        fs::write(source.join("marker"), "original").unwrap();
+        let graph_path = session.join("graph.json");
+        let probe = base.join("planner-probe.ts");
+        fs::write(
+            &probe,
+            r#"import * as fs from 'node:fs';
+export default function () {
+  fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH!, 'graph');
+  fs.writeFileSync('private-output', 'private');
+  try { fs.writeFileSync(process.env.GRAPHER_ORIGINAL_ROOT + '/marker', 'bad'); }
+  catch { fs.writeFileSync('source-blocked', 'yes'); return; }
+  throw new Error('Planner was allowed to overwrite source');
+}
+"#,
+        )
+        .unwrap();
+        let mut command =
+            execution_command(PiRole::Planner, &source, &workspace, &data, &session).unwrap();
+        let output = command
+            .args([
+                "--mode",
+                "json",
+                "--print",
+                "--no-session",
+                "--no-skills",
+                "--no-extensions",
+                "--extension",
+            ])
+            .arg(&probe)
+            .arg("--session-dir")
+            .arg(&session)
+            .env("GRAPHER_MODE", "planner")
+            .env("GRAPHER_GRAPH_PATH", &graph_path)
+            .env("GRAPHER_ORIGINAL_ROOT", &source)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_to_string(&graph_path).unwrap(), "graph");
+        assert_eq!(
+            fs::read_to_string(workspace.join("private-output")).unwrap(),
+            "private"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("source-blocked")).unwrap(),
+            "yes"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("marker")).unwrap(),
+            "original"
+        );
     }
 
     #[test]

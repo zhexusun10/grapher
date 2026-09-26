@@ -198,7 +198,9 @@ pub fn pick_folder() -> Result<Option<PathBuf>, String> {
             .output()
             .map_err(|error| format!("Windows folder picker is unavailable: {error}"))?;
         if !output.status.success() {
-            return Err("Windows folder picker failed; use the absolute path prompt instead".into());
+            return Err(
+                "Windows folder picker failed; use the absolute path prompt instead".into(),
+            );
         }
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
         Ok((!path.is_empty()).then(|| PathBuf::from(path)))
@@ -316,17 +318,24 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
 // Read-only hot paths use libgit2 rather than spawning Git for every node
 // state check. Leave mutations and uncommon porcelain states to Git CLI.
 fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
-    let supported = matches!(args,
-        ["rev-parse", "HEAD"] | ["rev-parse", "--verify", "HEAD"]
-        | ["status", "--porcelain"] | ["diff", "--name-only", "--diff-filter=U"]
-        | ["merge-base", "--is-ancestor", _, _]
+    let supported = matches!(
+        args,
+        ["rev-parse", "HEAD"]
+            | ["rev-parse", "--verify", "HEAD"]
+            | ["status", "--porcelain"]
+            | ["diff", "--name-only", "--diff-filter=U"]
+            | ["merge-base", "--is-ancestor", _, _]
     ) || matches!(args, ["rev-parse", spec] if spec.starts_with("refs/grapher/"));
-    if !supported { return None; }
+    if !supported {
+        return None;
+    }
     let repo = git2::Repository::open(cwd).ok()?;
     // Git status/diff invoked from a subdirectory are scoped to that path;
     // libgit2 reports repository-wide results unless a pathspec is supplied.
-    if matches!(args, ["status", "--porcelain"] | ["diff", "--name-only", "--diff-filter=U"])
-        && repo.workdir().and_then(|dir| dir.canonicalize().ok()) != cwd.canonicalize().ok()
+    if matches!(
+        args,
+        ["status", "--porcelain"] | ["diff", "--name-only", "--diff-filter=U"]
+    ) && repo.workdir().and_then(|dir| dir.canonicalize().ok()) != cwd.canonicalize().ok()
     {
         return None;
     }
@@ -337,17 +346,32 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
             _ => (false, ""),
         };
         if verify {
-            return Some(repo.revparse_single(spec)
-                .map(|object| object.id().to_string()).map_err(|e| e.to_string()));
+            return Some(
+                repo.revparse_single(spec)
+                    .map(|object| object.id().to_string())
+                    .map_err(|e| e.to_string()),
+            );
         }
     }
     if let ["merge-base", "--is-ancestor", ancestor, descendant] = args {
         let result = (|| -> Result<String, String> {
-            let ancestor = repo.revparse_single(ancestor).map_err(|e| e.to_string())?.id();
-            let descendant = repo.revparse_single(descendant).map_err(|e| e.to_string())?.id();
-            let contained = ancestor == descendant || repo.graph_descendant_of(descendant, ancestor)
-                .map_err(|e| e.to_string())?;
-            if contained { Ok(String::new()) } else { Err("Not an ancestor".into()) }
+            let ancestor = repo
+                .revparse_single(ancestor)
+                .map_err(|e| e.to_string())?
+                .id();
+            let descendant = repo
+                .revparse_single(descendant)
+                .map_err(|e| e.to_string())?
+                .id();
+            let contained = ancestor == descendant
+                || repo
+                    .graph_descendant_of(descendant, ancestor)
+                    .map_err(|e| e.to_string())?;
+            if contained {
+                Ok(String::new())
+            } else {
+                Err("Not an ancestor".into())
+            }
         })();
         return Some(result);
     }
@@ -355,26 +379,44 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
         let result = (|| -> Result<String, String> {
             let mut options = git2::StatusOptions::new();
             options.include_untracked(true);
-            let statuses = repo.statuses(Some(&mut options)).map_err(|e| e.to_string())?;
+            let statuses = repo
+                .statuses(Some(&mut options))
+                .map_err(|e| e.to_string())?;
             let mut lines = Vec::new();
             for entry in statuses.iter() {
                 let status = entry.status();
                 // Preserve Git's exact output for rename/copy/conflict and
                 // other uncommon cases rather than approximating them.
-                if status.intersects(git2::Status::CONFLICTED | git2::Status::INDEX_RENAMED
-                    | git2::Status::WT_RENAMED | git2::Status::INDEX_TYPECHANGE
-                    | git2::Status::WT_TYPECHANGE) {
+                if status.intersects(
+                    git2::Status::CONFLICTED
+                        | git2::Status::INDEX_RENAMED
+                        | git2::Status::WT_RENAMED
+                        | git2::Status::INDEX_TYPECHANGE
+                        | git2::Status::WT_TYPECHANGE,
+                ) {
                     return Err("unsupported porcelain status".into());
                 }
-                let index = if status.contains(git2::Status::INDEX_NEW) { 'A' }
-                    else if status.contains(git2::Status::INDEX_DELETED) { 'D' }
-                    else if status.contains(git2::Status::INDEX_MODIFIED) { 'M' }
-                    else { ' ' };
-                let worktree = if status.contains(git2::Status::WT_DELETED) { 'D' }
-                    else if status.contains(git2::Status::WT_MODIFIED) { 'M' }
-                    else { ' ' };
+                let index = if status.contains(git2::Status::INDEX_NEW) {
+                    'A'
+                } else if status.contains(git2::Status::INDEX_DELETED) {
+                    'D'
+                } else if status.contains(git2::Status::INDEX_MODIFIED) {
+                    'M'
+                } else {
+                    ' '
+                };
+                let worktree = if status.contains(git2::Status::WT_DELETED) {
+                    'D'
+                } else if status.contains(git2::Status::WT_MODIFIED) {
+                    'M'
+                } else {
+                    ' '
+                };
                 let path = entry.path().ok_or("Invalid Git path")?;
-                if path.chars().any(|ch| ch.is_control() || ch == '"' || ch == '\\') {
+                if path
+                    .chars()
+                    .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
+                {
                     return Err("Git must quote this path".into());
                 }
                 if status.contains(git2::Status::WT_NEW) {
@@ -385,7 +427,9 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
             }
             Ok(lines.join("\n"))
         })();
-        if result.is_ok() { return Some(result); }
+        if result.is_ok() {
+            return Some(result);
+        }
         // Use CLI on unsupported states or libgit2 errors.
     }
     if args == ["diff", "--name-only", "--diff-filter=U"] {
@@ -412,7 +456,16 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let hooks_path = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let hooks_config = format!("core.hooksPath={hooks_path}");
     let output = Command::new("git")
-        .args(["-c", hooks_config.as_str(), "-c", "commit.gpgsign=false", "-c", "user.name=Grapher", "-c", "user.email=runtime@grapher.local"])
+        .args([
+            "-c",
+            hooks_config.as_str(),
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=Grapher",
+            "-c",
+            "user.email=runtime@grapher.local",
+        ])
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -482,7 +535,10 @@ pub fn validate_binding(repository: &Path) -> Result<(), String> {
         ));
     }
     fs::read_dir(repository).map_err(|error| {
-        format!("项目绑定不可访问：{}：{error}。请重新选择目录建立新绑定。", repository.display())
+        format!(
+            "项目绑定不可访问：{}：{error}。请重新选择目录建立新绑定。",
+            repository.display()
+        )
     })?;
     Ok(())
 }
@@ -553,6 +609,158 @@ pub fn verify(repository: &Path) -> Result<String, String> {
             &["--git-dir", git_dir_str, "rev-parse", "--verify", "HEAD"],
         )
     }
+}
+
+fn copy_planner_files(source: &Path, target: &Path, excluded_data: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_name() == std::ffi::OsStr::new(".git") {
+            continue;
+        }
+        let original = entry.path();
+        if original == excluded_data {
+            continue;
+        }
+        let copied = target.join(entry.file_name());
+        let meta = fs::symlink_metadata(&original).map_err(|e| e.to_string())?;
+        if copied.exists() || copied.is_symlink() {
+            if copied.is_dir() && !copied.is_symlink() && !meta.is_dir() {
+                fs::remove_dir_all(&copied).map_err(|e| e.to_string())?;
+            } else if (!copied.is_dir() || copied.is_symlink()) && meta.is_dir() {
+                fs::remove_file(&copied).map_err(|e| e.to_string())?;
+            }
+        }
+        if meta.is_dir() {
+            fs::create_dir_all(&copied).map_err(|e| e.to_string())?;
+            copy_planner_files(&original, &copied, excluded_data)?;
+        } else {
+            if copied.exists() || copied.is_symlink() {
+                fs::remove_file(&copied).map_err(|e| e.to_string())?;
+            }
+            if meta.file_type().is_symlink() {
+                let link = fs::read_link(&original).map_err(|e| e.to_string())?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(link, &copied).map_err(|e| e.to_string())?;
+                #[cfg(windows)]
+                {
+                    let _ = link;
+                    fs::copy(&original, &copied).map_err(|e| e.to_string())?;
+                }
+            } else if meta.is_file() {
+                fs::copy(&original, &copied).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("Unsupported source entry: {}", original.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Snapshot the source into a private Planner checkout. The source lock is held
+/// only while taking this copy, never while Pi is running. Include ignored
+/// project files (e.g. dependencies), but never Git internals or Grapher data.
+pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
+    let base = verify(repository)?;
+    prepare(repository, path, &base, &[])?;
+    if is_standard_git(repository) {
+        let files = git(
+            repository,
+            &[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+        )?;
+        for name in files.split('\0').filter(|name| !name.is_empty()) {
+            let relative = Path::new(name);
+            if !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err("Unsafe path in source Git index".into());
+            }
+            let original = repository.join(relative);
+            let copied = path.join(relative);
+            if let Ok(meta) = fs::symlink_metadata(&original) {
+                if let Some(parent) = copied.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                if copied.exists() || copied.is_symlink() {
+                    if copied.is_dir() && !copied.is_symlink() {
+                        fs::remove_dir_all(&copied)
+                    } else {
+                        fs::remove_file(&copied)
+                    }
+                    .map_err(|e| e.to_string())?;
+                }
+                if meta.file_type().is_symlink() {
+                    let target = fs::read_link(&original).map_err(|e| e.to_string())?;
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(target, &copied).map_err(|e| e.to_string())?;
+                    #[cfg(windows)]
+                    {
+                        let _ = target;
+                        fs::copy(&original, &copied).map_err(|e| e.to_string())?;
+                    }
+                } else if meta.is_file() {
+                    fs::copy(&original, &copied).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("Unsupported source entry: {}", original.display()));
+                }
+            } else if copied.exists() || copied.is_symlink() {
+                if copied.is_dir() && !copied.is_symlink() {
+                    fs::remove_dir_all(&copied)
+                } else {
+                    fs::remove_file(&copied)
+                }
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    copy_planner_files(repository, path, &data_root())?;
+    // The input commit becomes the immutable parent for this Planner's edits.
+    snapshot_repository(path)?;
+    Ok(())
+}
+
+/// Merge one Planner's private changes under the project's short publication
+/// lock. A dry run prevents ordinary merge conflicts from dirtying the source.
+pub fn publish_planner(
+    repository: &Path,
+    planner: &Path,
+    preview: &Path,
+    run_id: &str,
+    planning_id: &str,
+) -> Result<(), String> {
+    let source_head = snapshot_repository(repository)?;
+    let head = snapshot_node_for_run(
+        planner,
+        repository,
+        &format!("planner-{planning_id}"),
+        Some(run_id),
+    )?;
+    if git(
+        planner,
+        &["merge-base", "--is-ancestor", &head, &source_head],
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    prepare(repository, preview, &source_head, &[head.clone()]).map_err(|error| {
+        format!(
+            "Planner changes conflict with the source; the private workspace is retained: {error}"
+        )
+    })?;
+    crate::graph_merge::merge_graph(repository, &[head], || {
+        Err(
+            "Planner merge conflicted after preflight; resolve the source merge before retrying"
+                .into(),
+        )
+    })?;
+    Ok(())
 }
 
 pub fn prepare(
@@ -649,41 +857,49 @@ pub fn prepare_with_merger_expected(
 
     // Determine the source Git location (either standard repository or shadow repo)
     let source_git_path = if is_standard_git(&canonical_repo) {
-        // Ensure base commit has advertised refs in refs/grapher/heads/ and refs/grapher/base
-        git(
-            &canonical_repo,
-            &["update-ref", &format!("refs/grapher/heads/{base}"), base],
-        )?;
-        git(&canonical_repo, &["update-ref", "refs/grapher/base", base])?;
+        // A commit-addressed pin cannot be redirected by another Run's base.
+        let pin = format!("refs/grapher/heads/{base}");
+        if git(&canonical_repo, &["rev-parse", &pin]).ok().as_deref() != Some(base) {
+            if let Err(error) = git(&canonical_repo, &["update-ref", &pin, base]) {
+                if git(&canonical_repo, &["rev-parse", &pin]).ok().as_deref() != Some(base) {
+                    return Err(error);
+                }
+            }
+        }
         canonical_repo.clone()
     } else {
         let shadow = ensure_shadow_repo(&canonical_repo)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical_repo.to_str().ok_or("Invalid target path")?;
-        git(
+        let pin = format!("refs/grapher/heads/{base}");
+        let existing = git(
             &canonical_repo,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "update-ref",
-                &format!("refs/grapher/heads/{base}"),
-                base,
-            ],
-        )?;
-        git(
-            &canonical_repo,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "update-ref",
-                "refs/grapher/base",
-                base,
-            ],
-        )?;
+            &["--git-dir", git_dir_str, "rev-parse", &pin],
+        );
+        if existing.as_deref() != Ok(base) {
+            if let Err(error) = git(
+                &canonical_repo,
+                &[
+                    "--git-dir",
+                    git_dir_str,
+                    "--work-tree",
+                    work_tree_str,
+                    "update-ref",
+                    &pin,
+                    base,
+                ],
+            ) {
+                if git(
+                    &canonical_repo,
+                    &["--git-dir", git_dir_str, "rev-parse", &pin],
+                )
+                .as_deref()
+                    != Ok(base)
+                {
+                    return Err(error);
+                }
+            }
+        }
         shadow
     };
     // Resolve refs in the host repository first, then borrow its object store.
@@ -692,22 +908,36 @@ pub fn prepare_with_merger_expected(
     let source_args = if source_git_path == canonical_repo {
         Vec::new()
     } else {
-        vec!["--git-dir", source_git_path.to_str().ok_or("Invalid shadow path")?]
+        vec![
+            "--git-dir",
+            source_git_path.to_str().ok_or("Invalid shadow path")?,
+        ]
     };
     let source_git = |args: &[&str]| -> Result<String, String> {
         let mut command = source_args.clone();
         command.extend_from_slice(args);
         git(&canonical_repo, &command)
     };
-    let objects = source_git(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
-    let objects = PathBuf::from(objects).canonicalize().map_err(|e| e.to_string())?;
+    let objects = source_git(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "objects",
+    ])?;
+    let objects = PathBuf::from(objects)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
     let base_head = source_git(&["rev-parse", &format!("refs/grapher/heads/{base}")])?;
     // Alternates must use the same object ID format as their source.
     let object_format = source_git(&["rev-parse", "--show-object-format=storage"])
         .unwrap_or_else(|_| "sha1".into());
     match object_format.as_str() {
-        "sha1" => { git(path, &["init", "-q"])?; }
-        "sha256" => { git(path, &["init", "-q", "--object-format=sha256"])?; }
+        "sha1" => {
+            git(path, &["init", "-q"])?;
+        }
+        "sha256" => {
+            git(path, &["init", "-q", "--object-format=sha256"])?;
+        }
         _ => return Err(format!("Unsupported Git object format: {object_format}")),
     }
     // A source with its own alternates or promisor packs may need additional
@@ -716,12 +946,32 @@ pub fn prepare_with_merger_expected(
     // Fall back to an independent fetch for these uncommon repositories.
     let chained_objects = objects.join("info/alternates").is_file()
         || fs::read_dir(objects.join("pack"))
-            .map(|entries| entries.filter_map(Result::ok).any(|entry| entry.path().extension().is_some_and(|ext| ext == "promisor")))
+            .map(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|ext| ext == "promisor")
+                })
+            })
             .unwrap_or(false);
-    let source_url = if chained_objects { Some(git_file_url(&source_git_path)?) } else { None };
+    let source_url = if chained_objects {
+        Some(git_file_url(&source_git_path)?)
+    } else {
+        None
+    };
     if let Some(url) = source_url.as_deref() {
-        git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", url,
-            &format!("+refs/grapher/heads/{base}:refs/grapher/base")])?;
+        git(
+            path,
+            &[
+                "fetch",
+                "-q",
+                "--no-tags",
+                "--no-write-fetch-head",
+                url,
+                &format!("+refs/grapher/heads/{base}:refs/grapher/base"),
+            ],
+        )?;
     } else {
         #[cfg(windows)]
         let objects_for_git = {
@@ -733,13 +983,22 @@ pub fn prepare_with_merger_expected(
             }
         };
         #[cfg(not(windows))]
-        let objects_for_git = objects.to_str().ok_or("Invalid Git object path")?.to_string();
-        fs::write(path.join(".git/objects/info/alternates"), format!("{objects_for_git}\n"))
-            .map_err(|e| e.to_string())?;
+        let objects_for_git = objects
+            .to_str()
+            .ok_or("Invalid Git object path")?
+            .to_string();
+        fs::write(
+            path.join(".git/objects/info/alternates"),
+            format!("{objects_for_git}\n"),
+        )
+        .map_err(|e| e.to_string())?;
         // No fetch or pack copying: pin just the needed refs in this isolated repo.
         git(path, &["update-ref", "refs/grapher/base", &base_head])?;
     }
-    git(path, &["checkout", "-q", "-B", "grapher-node", "refs/grapher/base"])?;
+    git(
+        path,
+        &["checkout", "-q", "-B", "grapher-node", "refs/grapher/base"],
+    )?;
     let mut resolved_heads = Vec::new();
     for parent in parents {
         let node_ref = format!("refs/grapher/nodes/{parent}");
@@ -747,47 +1006,61 @@ pub fn prepare_with_merger_expected(
         if let Some(url) = source_url.as_deref() {
             let node_refspec = format!("+{node_ref}:refs/grapher/parents/{parent}");
             let head_refspec = format!("+{head_ref}:refs/grapher/parents/{parent}");
-            if git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", url,
-                &node_refspec]).is_err()
+            if git(
+                path,
+                &[
+                    "fetch",
+                    "-q",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    url,
+                    &node_refspec,
+                ],
+            )
+            .is_err()
             {
-                git(path, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", url,
-                    &head_refspec])?;
+                git(
+                    path,
+                    &[
+                        "fetch",
+                        "-q",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        url,
+                        &head_refspec,
+                    ],
+                )?;
             }
         } else {
             let head = source_git(&["rev-parse", &node_ref])
                 .or_else(|_| source_git(&["rev-parse", &head_ref]))?;
-            git(path, &["update-ref", &format!("refs/grapher/parents/{parent}"), &head])?;
+            git(
+                path,
+                &[
+                    "update-ref",
+                    &format!("refs/grapher/parents/{parent}"),
+                    &head,
+                ],
+            )?;
         }
-        resolved_heads.push(git(path, &["rev-parse", &format!("refs/grapher/parents/{parent}")])?);
+        resolved_heads.push(git(
+            path,
+            &["rev-parse", &format!("refs/grapher/parents/{parent}")],
+        )?);
     }
     for incoming in independent_heads(path, &resolved_heads)? {
-        if git(
-            path,
-            &[
-                "merge-base",
-                "--is-ancestor",
-                &incoming,
-                "HEAD",
-            ],
-        )
-        .is_ok()
-        {
+        if git(path, &["merge-base", "--is-ancestor", &incoming, "HEAD"]).is_ok() {
             continue;
         }
-        if let Err(error) = git(
-            path,
-            &[
-                "merge",
-                "--no-edit",
-                "--no-ff",
-                &incoming,
-            ],
-        ) {
+        if let Err(error) = git(path, &["merge", "--no-edit", "--no-ff", &incoming]) {
             let pending = git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).ok();
             if pending.is_none()
                 || git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
             {
-                return Err(format!("Workspace composition failed at {}: {error}", path.display()));
+                return Err(format!(
+                    "Workspace composition failed at {}: {error}",
+                    path.display()
+                ));
             }
             if let Err(merger_error) = resolve() {
                 return Err(format!("Workspace composition blocked at {}. Resolve and commit the merge in this worktree, then use 'Use resolved workspace'.\nMerger: {merger_error}", path.display()));
@@ -807,7 +1080,10 @@ pub fn prepare_with_merger_expected(
 /// Keep only commits not contained in another input, preserving input order.
 /// Callers supply resolved commit IDs, not movable refs. Use actual Git history
 /// rather than graph reachability: an agent may have rewritten its history.
-pub(crate) fn independent_heads(repository: &Path, heads: &[String]) -> Result<Vec<String>, String> {
+pub(crate) fn independent_heads(
+    repository: &Path,
+    heads: &[String],
+) -> Result<Vec<String>, String> {
     if heads.len() < 2 {
         return Ok(heads.to_vec());
     }
@@ -837,6 +1113,19 @@ pub fn verify_prepared_ancestor(path: &Path, prepared_head: &str) -> Result<(), 
 /// Snapshot an isolated node and import its commit into the host repository.
 /// Repository identity stays in the host Runtime rather than the agent checkout.
 pub fn snapshot_node(path: &Path, repository: &Path, node_id: &str) -> Result<String, String> {
+    snapshot_node_for_run(path, repository, node_id, None)
+}
+
+pub fn snapshot_node_for_run(
+    path: &Path,
+    repository: &Path,
+    node_id: &str,
+    run_id: Option<&str>,
+) -> Result<String, String> {
+    crate::compiler::validate_node_name(node_id)?;
+    if let Some(id) = run_id {
+        uuid::Uuid::parse_str(id).map_err(|_| "Invalid Run ID for node snapshot")?;
+    }
     let canonical_repo = repository
         .canonicalize()
         .map_err(|error| error.to_string())?;
@@ -846,14 +1135,6 @@ pub fn snapshot_node(path: &Path, repository: &Path, node_id: &str) -> Result<St
         || canonical_repo.starts_with(&canonical_path)
     {
         return Err("Node snapshot requires a non-overlapping isolated workspace".into());
-    }
-    if node_id.is_empty()
-        || node_id.len() > 64
-        || !node_id.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '_' || character == '-'
-        })
-    {
-        return Err("Invalid node identity for snapshot ref".into());
     }
     if !git(&canonical_path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
         return Err("Unresolved merge conflicts remain".into());
@@ -872,29 +1153,51 @@ pub fn snapshot_node(path: &Path, repository: &Path, node_id: &str) -> Result<St
     )?;
 
     let path_url = git_file_url(&canonical_path)?;
-    let head_refspec = format!("+refs/heads/grapher-node:refs/grapher/heads/{head}");
-    let node_refspec = format!("+refs/heads/grapher-node:refs/grapher/nodes/{node_id}");
-    let fetch_args = [
-        "fetch",
-        "-q",
-        "--no-tags",
-        "--no-write-fetch-head",
-        &path_url,
-        &head_refspec,
-        &node_refspec,
-    ];
-
-    if is_standard_git(&canonical_repo) {
-        git(&canonical_repo, &fetch_args)?;
+    let head_ref = format!("refs/grapher/heads/{head}");
+    let head_refspec = format!("+refs/heads/grapher-node:{head_ref}");
+    let node_ref = if let Some(id) = run_id {
+        format!("refs/grapher/runs/{id}/nodes/{node_id}")
+    } else {
+        format!("refs/grapher/nodes/{node_id}")
+    };
+    let node_refspec = format!("+refs/heads/grapher-node:{node_ref}");
+    let source_args = if is_standard_git(&canonical_repo) {
+        Vec::new()
     } else {
         let shadow = ensure_shadow_repo(&canonical_repo)?;
-        let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
-        let work_tree_str = canonical_repo.to_str().ok_or("Invalid repository path")?;
-        let mut shadow_args = vec!["--git-dir", git_dir_str, "--work-tree", work_tree_str];
-        shadow_args.extend(fetch_args);
-        git(&canonical_repo, &shadow_args)?;
+        vec![
+            "--git-dir".to_string(),
+            shadow.to_string_lossy().into_owned(),
+            "--work-tree".to_string(),
+            canonical_repo.to_string_lossy().into_owned(),
+        ]
+    };
+    // The commit-addressed pin may already be written by a sibling Run.
+    // Concurrent fetches of that same ref can race at Git's ref lock. Retry
+    // with just this Run's private node ref once the shared pin is present.
+    for attempt in 0..4 {
+        let mut check = source_args.iter().map(String::as_str).collect::<Vec<_>>();
+        check.extend(["rev-parse", &head_ref]);
+        let pinned = git(&canonical_repo, &check).ok().as_deref() == Some(head.as_str());
+        let mut args = source_args.iter().map(String::as_str).collect::<Vec<_>>();
+        args.extend([
+            "fetch",
+            "-q",
+            "--no-tags",
+            "--no-write-fetch-head",
+            &path_url,
+        ]);
+        if !pinned {
+            args.push(&head_refspec);
+        }
+        args.push(&node_refspec);
+        match git(&canonical_repo, &args) {
+            Ok(_) => return Ok(head),
+            Err(error) if attempt == 3 => return Err(error),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
     }
-    Ok(head)
+    unreachable!()
 }
 
 /// Snapshot the user-owned Serial workspace. Graph workspaces must use
@@ -957,6 +1260,15 @@ pub fn snapshot_repository(path: &Path) -> Result<String, String> {
 /// Choose the Serial source/shadow or Graph isolated-node snapshot contract
 /// from canonical workspace identity.
 pub fn snapshot_execution(path: &Path, repository: &Path, node_id: &str) -> Result<String, String> {
+    snapshot_execution_for_run(path, repository, node_id, None)
+}
+
+pub fn snapshot_execution_for_run(
+    path: &Path,
+    repository: &Path,
+    node_id: &str,
+    run_id: Option<&str>,
+) -> Result<String, String> {
     let canonical_repo = repository
         .canonicalize()
         .map_err(|error| error.to_string())?;
@@ -964,6 +1276,6 @@ pub fn snapshot_execution(path: &Path, repository: &Path, node_id: &str) -> Resu
     if canonical_path == canonical_repo {
         snapshot_repository(&canonical_path)
     } else {
-        snapshot_node(&canonical_path, &canonical_repo, node_id)
+        snapshot_node_for_run(&canonical_path, &canonical_repo, node_id, run_id)
     }
 }
