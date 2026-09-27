@@ -100,7 +100,7 @@ export function calculatePausedTime(state?: Snapshot, now: number = Date.now()):
   return totalPausedMs / 1000;
 }
 
-export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
+export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.memo(({
   planning,
   state,
   defaultExpanded = false,
@@ -354,4 +354,4 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = ({
 
     </div>
   );
-};
+});

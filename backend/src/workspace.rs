@@ -5,7 +5,22 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
+
+static HOST_REF_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
+    OnceLock::new();
+
+fn host_ref_lock(repository: &Path) -> Result<Arc<Mutex<()>>, String> {
+    let mut locks = HOST_REF_LOCKS.get_or_init(Default::default).lock().map_err(|e| e.to_string())?;
+    locks.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(lock) = locks.get(repository).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(repository.to_path_buf(), Arc::downgrade(&lock));
+    Ok(lock)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,13 +51,17 @@ pub fn data_root() -> PathBuf {
                 .unwrap_or(Path::new(env!("CARGO_MANIFEST_DIR")))
                 .join(".grapher")
         });
-    if path.is_relative() {
+    let path = if path.is_relative() {
         std::env::current_dir()
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
     } else {
         path
-    }
+    };
+    // The server canonicalizes this directory after creating it. Other
+    // callers (notably the execution sandbox) must resolve the same root,
+    // including configured relative paths and platform aliases.
+    path.canonicalize().unwrap_or(path)
 }
 
 pub fn is_standard_git(path: &Path) -> bool {
@@ -825,8 +844,23 @@ pub fn prepare_with_merger_expected(
     base: &str,
     parents: &[String],
     expected_source_head: &str,
+    resolve: impl FnMut() -> Result<(), String>,
+) -> Result<String, String> {
+    prepare_with_merger_expected_for_run(repository, path, base, parents, expected_source_head, None, resolve)
+}
+
+pub(crate) fn prepare_with_merger_expected_for_run(
+    repository: &Path,
+    path: &Path,
+    base: &str,
+    parents: &[String],
+    expected_source_head: &str,
+    run_id: Option<&str>,
     mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
+    if let Some(id) = run_id {
+        uuid::Uuid::parse_str(id).map_err(|_| "Invalid Run ID for parent snapshot")?;
+    }
     let canonical_repo = canonical_workspace_path(repository)?;
     // A new destination is allowed to be absent; existing paths (including
     // dangling symlinks) must resolve successfully before comparing identity.
@@ -859,6 +893,8 @@ pub fn prepare_with_merger_expected(
     canonical_workspace_path(path)?;
 
     // Determine the source Git location (either standard repository or shadow repo)
+    let lock = host_ref_lock(&canonical_repo)?;
+    let guard = lock.lock().map_err(|error| error.to_string())?;
     let source_git_path = if is_standard_git(&canonical_repo) {
         // A commit-addressed pin cannot be redirected by another Run's base.
         let pin = format!("refs/grapher/heads/{base}");
@@ -905,6 +941,7 @@ pub fn prepare_with_merger_expected(
         }
         shadow
     };
+    drop(guard);
     // Resolve refs in the host repository first, then borrow its object store.
     // An alternate is read-only: node commits and refs remain local until
     // snapshot_node explicitly imports them back into the host repository.
@@ -1004,12 +1041,23 @@ pub fn prepare_with_merger_expected(
     )?;
     let mut resolved_heads = Vec::new();
     for parent in parents {
-        let node_ref = format!("refs/grapher/nodes/{parent}");
-        let head_ref = format!("refs/grapher/heads/{parent}");
+        // Runtime parents are commit IDs and use immutable pins. Named
+        // parents resolve against this Run's refs, or legacy unscoped refs
+        // when using the public prepare() API.
+        let is_head = matches!(parent.len(), 40 | 64) && parent.bytes().all(|b| b.is_ascii_hexdigit());
+        if !is_head {
+            crate::compiler::validate_node_name(parent)?;
+        }
+        let parent_ref = if is_head {
+            format!("refs/grapher/heads/{parent}")
+        } else if let Some(id) = run_id {
+            format!("refs/grapher/runs/{id}/nodes/{parent}")
+        } else {
+            format!("refs/grapher/nodes/{parent}")
+        };
         if let Some(url) = source_url.as_deref() {
-            let node_refspec = format!("+{node_ref}:refs/grapher/parents/{parent}");
-            let head_refspec = format!("+{head_ref}:refs/grapher/parents/{parent}");
-            if git(
+            let head_refspec = format!("+{parent_ref}:refs/grapher/parents/{parent}");
+            git(
                 path,
                 &[
                     "fetch",
@@ -1017,26 +1065,11 @@ pub fn prepare_with_merger_expected(
                     "--no-tags",
                     "--no-write-fetch-head",
                     url,
-                    &node_refspec,
+                    &head_refspec,
                 ],
-            )
-            .is_err()
-            {
-                git(
-                    path,
-                    &[
-                        "fetch",
-                        "-q",
-                        "--no-tags",
-                        "--no-write-fetch-head",
-                        url,
-                        &head_refspec,
-                    ],
-                )?;
-            }
+            )?;
         } else {
-            let head = source_git(&["rev-parse", &node_ref])
-                .or_else(|_| source_git(&["rev-parse", &head_ref]))?;
+            let head = source_git(&["rev-parse", &parent_ref])?;
             git(
                 path,
                 &[
@@ -1175,9 +1208,12 @@ pub fn snapshot_node_for_run(
             canonical_repo.to_string_lossy().into_owned(),
         ]
     };
-    // The commit-addressed pin may already be written by a sibling Run.
-    // Concurrent fetches of that same ref can race at Git's ref lock. Retry
-    // with just this Run's private node ref once the shared pin is present.
+    // Serialize host ref writes for this repository, not node execution or
+    // writes to other repositories. Git's packed-refs lock can outlive a
+    // short retry window even when each worker writes a different node ref.
+    let lock = host_ref_lock(&canonical_repo)?;
+    let _guard = lock.lock().map_err(|error| error.to_string())?;
+    // External Git processes may still contend, so retain bounded retries.
     for attempt in 0..4 {
         let mut check = source_args.iter().map(String::as_str).collect::<Vec<_>>();
         check.extend(["rev-parse", &head_ref]);

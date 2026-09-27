@@ -396,7 +396,7 @@ impl Runtime {
         }
         let mut config = config;
         config.max_feedback = config.max_feedback.min(3);
-        // max_parallel = 0 means no artificial per-Run worker cap.
+        // max_parallel = 0 uses the default node worker limit.
         #[cfg(feature = "fixture")]
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
             return Err("Test process command is required".into());
@@ -480,7 +480,7 @@ impl Runtime {
             return Err("Unknown test actuator".into());
         }
         config.max_feedback = config.max_feedback.min(3);
-        // max_parallel = 0 means no artificial per-Run worker cap.
+        // max_parallel = 0 uses the default node worker limit.
         #[cfg(not(feature = "fixture"))]
         crate::native::require_graph_execution()?;
         self.emit(EventKind::DraftEdited { graph, config })
@@ -710,12 +710,39 @@ impl Runtime {
         workspace::verify_prepared_ancestor(path, &execution.before)?;
         let head =
             workspace::snapshot_node_for_run(path, &repository, node, Some(&self.state.run_id))?;
-        self.emit(EventKind::Finished {
+        // This was a preparation failure, not a completed node task. Commit
+        // the resolved inputs without emitting a fictitious Finished event.
+        self.emit(EventKind::WorkspaceResolved {
             execution_id: execution.id,
             head,
-            output: "Human-resolved workspace. Pi task will run in a fresh execution.".into(),
-        })?;
-        self.rerun(node)
+            nodes: downstream(&self.state.graph, node).into_iter().collect(),
+        })
+    }
+
+    /// A feedback verdict can only invalidate the target and its dependency
+    /// descendants. A shared ancestor's other branches are safe to schedule.
+    fn feedback_scope(&self, source: &str) -> BTreeSet<String> {
+        self.state.graph.edges.iter()
+            .filter(|edge| edge.feedback && edge.from == source)
+            .flat_map(|edge| downstream(&self.state.graph, &edge.to))
+            .collect()
+    }
+
+    fn feedback_scope_has_running(&self, source: &str) -> bool {
+        self.feedback_scope(source).iter().any(|name| {
+            self.state.nodes.get(name).is_some_and(|state| state.status == "running")
+        })
+    }
+
+    fn busy_feedback_nodes(&self) -> BTreeSet<String> {
+        self.state.graph.edges.iter().filter(|edge| edge.feedback)
+            .filter(|edge| self.feedback_scope_has_running(&edge.from))
+            .flat_map(|edge| self.feedback_scope(&edge.from))
+            .collect()
+    }
+
+    pub fn feedback_source_busy(&self, source: &str) -> bool {
+        self.feedback_scope_has_running(source)
     }
 
     pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
@@ -725,11 +752,12 @@ impl Runtime {
     /// During a live Planner revision, schedule ready nodes but defer publishing
     /// or settling until the new graph has been committed (or planning failed).
     pub fn jobs_with_publication(&mut self, allow_publication: bool) -> Result<Vec<Job>, String> {
-        if !self.state.approved || self.state.paused
-            || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed" | "completed")
-            // Feedback may invalidate ancestors and their consumers. Drain the current
-            // wave before applying revisions; ordinary DAGs can fill idle slots.
-            || (self.active() && self.state.graph.edges.iter().any(|edge| edge.feedback))
+        if !self.state.approved
+            || self.state.paused
+            || matches!(
+                self.state.phase.as_str(),
+                "publishing" | "merging" | "publication_failed" | "completed"
+            )
         {
             return Ok(Vec::new());
         }
@@ -741,10 +769,27 @@ impl Runtime {
         if !self.is_serial() {
             crate::native::require_graph_execution()?;
         }
-        // Model sessions are intentionally unbounded. `max_parallel` remains in
-        // the persisted config for backwards compatibility, but it is no longer
-        // a scheduler gate: every ready node gets its own execution session.
-        let available = usize::MAX;
+        // Only Graph nodes share this Run's worker slots. There is no cap on
+        // concurrent Runs, Planners, or sessions belonging to different Runs.
+        // Serial has exactly one node and is not subject to a Graph worker cap.
+        const MAX_GRAPH_NODE_WORKERS: usize = 8;
+        let running = self
+            .state
+            .nodes
+            .values()
+            .filter(|state| state.status == "running")
+            .count();
+        let available = if self.is_serial() {
+            1usize.saturating_sub(running)
+        } else {
+            let limit = if config.max_parallel == 0 {
+                MAX_GRAPH_NODE_WORKERS
+            } else {
+                config.max_parallel.min(MAX_GRAPH_NODE_WORKERS)
+            };
+            limit.saturating_sub(running)
+        };
+        let busy_feedback = self.busy_feedback_nodes();
         loop {
             let blocked: Vec<_> = self
                 .state
@@ -752,17 +797,19 @@ impl Runtime {
                 .nodes
                 .iter()
                 .filter(|node| {
-                    matches!(
-                        self.state.nodes[&node.name].status.as_str(),
-                        "waiting" | "dirty"
-                    ) && self.state.graph.edges.iter().any(|edge| {
-                        !edge.feedback
-                            && edge.to == node.name
-                            && matches!(
-                                self.state.nodes[&edge.from].status.as_str(),
-                                "failed" | "blocked"
-                            )
-                    })
+                    !busy_feedback.contains(&node.name)
+                        && matches!(
+                            self.state.nodes[&node.name].status.as_str(),
+                            "waiting" | "dirty"
+                        )
+                        && self.state.graph.edges.iter().any(|edge| {
+                            !edge.feedback
+                                && edge.to == node.name
+                                && matches!(
+                                    self.state.nodes[&edge.from].status.as_str(),
+                                    "failed" | "blocked"
+                                )
+                        })
                 })
                 .map(|node| node.name.clone())
                 .collect();
@@ -782,16 +829,18 @@ impl Runtime {
             .nodes
             .iter()
             .filter(|node| {
-                matches!(
-                    self.state.nodes[&node.name].status.as_str(),
-                    "waiting" | "dirty"
-                ) && self
-                    .state
-                    .graph
-                    .edges
-                    .iter()
-                    .filter(|edge| !edge.feedback && edge.to == node.name)
-                    .all(|edge| self.state.nodes[&edge.from].status == "done")
+                !busy_feedback.contains(&node.name)
+                    && matches!(
+                        self.state.nodes[&node.name].status.as_str(),
+                        "waiting" | "dirty"
+                    )
+                    && self
+                        .state
+                        .graph
+                        .edges
+                        .iter()
+                        .filter(|edge| !edge.feedback && edge.to == node.name)
+                        .all(|edge| self.state.nodes[&edge.from].status == "done")
             })
             .take(available)
             .cloned()
@@ -1159,12 +1208,13 @@ pub fn perform_with_merger(
     } else {
         &job.parent_heads
     };
-    let before = workspace::prepare_with_merger_expected(
+    let before = workspace::prepare_with_merger_expected_for_run(
         &repository,
         path,
         &job.execution.before,
         parent_refs,
         &job.expected_source_head,
+        Some(&job.run_id),
         || {
             let attempt = job.execution.attempt;
             crate::graph_merge::resolve_with_merger_for_node(

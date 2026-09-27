@@ -1,4 +1,3 @@
-
 use super::*;
 
 #[test]
@@ -46,6 +45,7 @@ fn unscoped_planner_control_routes_only_to_active_planning_run() {
     let primary = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(temp.path()).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -69,6 +69,7 @@ fn stale_conversation_cannot_stop_active_run() {
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(temp.path()).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -100,6 +101,7 @@ fn buffered_output_flushes_before_finish_and_replays() {
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -255,6 +257,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -444,6 +447,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         Arc::new(Service {
             runtime: Mutex::new(Runtime::open(&root).unwrap()),
             driving: AtomicBool::new(false),
+            drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
             planning: AtomicBool::new(false),
             extension: temp.path().join("unused.ts"),
         })
@@ -565,6 +569,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -653,6 +658,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(true),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -730,6 +736,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -819,6 +826,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -883,6 +891,7 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -980,6 +989,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -1022,6 +1032,7 @@ fn partitioner_failure_does_not_create_or_approve_a_run() {
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -1079,6 +1090,7 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
     let primary = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -1191,6 +1203,7 @@ fn same_project_planners_run_together_and_merge_disjoint_files() {
     let primary = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -1260,6 +1273,7 @@ fn independent_repositories_can_plan_concurrently() {
     let primary = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -1338,6 +1352,7 @@ fn independent_runs_execute_concurrently_without_replacing_old_session() {
     let primary = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(root).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: root.join("unused.ts"),
     });
@@ -1582,6 +1597,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: root.join("unused.ts"),
     });
@@ -1594,11 +1610,27 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         }
         thread::sleep(std::time::Duration::from_millis(20));
     };
+    // The driver is waiting on the slow worker. A new API event must still
+    // dispatch the rerun without waiting for that worker to finish.
+    if observed.nodes["after_fast"].status == "done" {
+        control("rerun".into(), Some("z_fast".into()), None, None, None, None, &service).unwrap();
+    }
+    let rerun_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let rerun_observed = loop {
+        let state = service.runtime.lock().unwrap().state.clone();
+        if state.executions.iter().filter(|e| e.node == "z_fast" && e.status == "completed").count() == 2
+            || std::time::Instant::now() > rerun_deadline {
+            break state;
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
+    };
     // Always release and drain before assertions, even on a regression.
     fs::write(&release, "release").unwrap();
     while service.driving.load(Ordering::SeqCst) {
         thread::sleep(std::time::Duration::from_millis(20));
     }
+    assert_eq!(rerun_observed.executions.iter().filter(|e| e.node == "z_fast" && e.status == "completed").count(), 2);
+    assert_eq!(rerun_observed.nodes["a_slow"].status, "running");
     assert_eq!(observed.nodes["z_fast"].status, "done");
     assert_eq!(observed.nodes["a_slow"].status, "running");
     assert_eq!(observed.nodes["after_fast"].status, "done");
@@ -1649,6 +1681,7 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused"),
     });
@@ -1735,27 +1768,29 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
 
 #[cfg(feature = "fixture")]
 #[test]
-fn feedback_graph_drains_siblings_before_invalidating_and_never_runs_stale_consumer() {
+fn feedback_drains_its_component_but_not_unrelated_siblings_or_stale_consumers() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
     let repository = crate::fixture::repository(root).unwrap();
     let release = root.join("release-slow");
+    let release_related = root.join("release-related");
     let script = root.join("worker.sh");
     fs::write(&script, format!(r#"cat >/dev/null
 case "$PWD" in
   *slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > slow.txt ;;
+  *related-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > related.txt ;;
   *review-*) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<REVISE>"}}]}}}}'; exit 0 ;;
   *consumer-*) echo invalid > stale.txt ;;
   *) echo done > owner.txt ;;
 esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
-"#, release.display())).unwrap();
+"#, release.display(), release_related.display())).unwrap();
     let mut runtime = Runtime::open(root).unwrap();
     runtime
         .create(
             Graph {
                 original_goal: "Feedback barrier".into(),
-                nodes: ["owner", "slow", "review", "consumer"]
+                nodes: ["owner", "slow", "related", "review", "consumer"]
                     .into_iter()
                     .map(|name| Node {
                         name: name.into(),
@@ -1764,6 +1799,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     .collect(),
                 edges: [
                     ("owner", "review", false),
+                    ("owner", "related", false),
                     ("review", "owner", true),
                     ("review", "consumer", false),
                 ]
@@ -1793,25 +1829,60 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: root.join("unused"),
     });
     drive(service.clone());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let observed = loop {
+    let before_release = loop {
         let state = service.runtime.lock().unwrap().state.clone();
-        if state.nodes["owner"].status == "done" || std::time::Instant::now() > deadline {
+        if state
+            .executions
+            .iter()
+            .any(|e| e.node == "review" && e.status == "completed")
+            || std::time::Instant::now() > deadline
+        {
             break state;
         }
         thread::sleep(std::time::Duration::from_millis(20));
     };
+    assert_eq!(before_release.nodes["related"].status, "running");
+    assert_eq!(
+        before_release.feedback_counts.get("review->owner"),
+        None,
+        "feedback must wait for affected running nodes"
+    );
+    fs::write(&release_related, "release").unwrap();
+    let observed = loop {
+        let state = service.runtime.lock().unwrap().state.clone();
+        if state
+            .feedback_counts
+            .get("review->owner")
+            .copied()
+            .unwrap_or(0)
+            >= 1
+            || std::time::Instant::now() > deadline
+        {
+            break state;
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(observed.nodes["slow"].status, "running");
+    assert!(
+        observed
+            .feedback_counts
+            .get("review->owner")
+            .copied()
+            .unwrap_or(0)
+            >= 1,
+        "unrelated sibling delayed feedback"
+    );
     fs::write(&release, "release").unwrap();
     while service.driving.load(Ordering::SeqCst) {
         assert!(std::time::Instant::now() < deadline);
         thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert_eq!(observed.nodes["slow"].status, "running");
-    assert_eq!(observed.nodes["review"].status, "waiting");
     let runtime = service.runtime.lock().unwrap();
     assert_eq!(
         runtime
@@ -2091,6 +2162,7 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("ext.ts"),
     });
@@ -2160,6 +2232,7 @@ fn completed_graph_is_published_by_driver() {
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused-extension.ts"),
     });
@@ -2257,6 +2330,7 @@ fn list_files_and_list_skills_dispatch() {
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root).unwrap()),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
@@ -2381,6 +2455,7 @@ fn save_config_updates_bootstrap_and_persists() {
     let service = Arc::new(Service {
         runtime: std::sync::Mutex::new(runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
         planning: AtomicBool::new(false),
         extension: temp_dir.path().to_path_buf(),
     });
@@ -2417,12 +2492,27 @@ fn save_config_updates_bootstrap_and_persists() {
     // binding, model, projection version, or durable event history.
     let (before, version) = {
         let mut runtime = service.runtime.lock().unwrap();
-        runtime.create(Graph {
-            nodes: vec![Node { name: "task".into(), task: "test".into() }],
-            ..Graph::default()
-        }, initial.config.clone()).unwrap();
-        runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
-        (serde_json::to_value(&runtime.state).unwrap(), runtime.snapshot_version())
+        runtime
+            .create(
+                Graph {
+                    nodes: vec![Node {
+                        name: "task".into(),
+                        task: "test".into(),
+                    }],
+                    ..Graph::default()
+                },
+                initial.config.clone(),
+            )
+            .unwrap();
+        runtime
+            .emit(EventKind::Approved {
+                base: "base".into(),
+            })
+            .unwrap();
+        (
+            serde_json::to_value(&runtime.state).unwrap(),
+            runtime.snapshot_version(),
+        )
     };
     service.driving.store(true, Ordering::SeqCst);
     let updated = save_config(new_config.clone(), &service).unwrap();
@@ -2431,7 +2521,10 @@ fn save_config_updates_bootstrap_and_persists() {
     {
         let runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.snapshot_version(), version);
-        assert_eq!(serde_json::to_value(runtime.store.load(&runtime.state.run_id).unwrap()).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(runtime.store.load(&runtime.state.run_id).unwrap()).unwrap(),
+            before
+        );
     }
     assert_eq!(updated.config.model, "openai/gpt-4o");
     assert_eq!(updated.config.thinking_level, "high");

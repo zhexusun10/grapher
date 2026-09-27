@@ -43,7 +43,7 @@ function getScrollParent(node: HTMLElement | null): HTMLElement | null {
 }
 
 
-export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
+export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React.memo(({
   output,
   className = "",
   emptyText = "工作区就绪，等待节点指令输出…",
@@ -501,6 +501,18 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
   const items = itemsRef.current;
 
   const lastScrollTopRef = useRef(0);
+  const prevItemsVersionRef = useRef(itemsVersion);
+
+  const getTranscriptRelativeScroll = useCallback((): number => {
+    const el = containerRef.current;
+    if (!el) return 0;
+    const scrollParent = getScrollParent(el) || el;
+    if (el === scrollParent) return scrollParent.scrollTop;
+    const elRect = el.getBoundingClientRect();
+    const parentRect = scrollParent.getBoundingClientRect();
+    const topInParent = elRect.top - parentRect.top + scrollParent.scrollTop;
+    return Math.max(0, scrollParent.scrollTop - topInParent);
+  }, []);
 
   const syncScrollState = useCallback(() => {
     const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
@@ -513,16 +525,20 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
 
     setScrollTop(currentScrollTop);
 
+    // If near bottom, definitely lock to bottom state (prevent elastic bounce from locking scrolled-up)
+    if (distanceFromBottom <= 20) {
+      isUserScrolledUpRef.current = false;
+      return;
+    }
+
     // If user scrolled upwards, immediately lock scrolled-up state
     if (currentScrollTop < prevScrollTop - 1) {
       isUserScrolledUpRef.current = true;
       return;
     }
 
-    if (distanceFromBottom > 20) {
+    if (distanceFromBottom > 24) {
       isUserScrolledUpRef.current = true;
-    } else if (distanceFromBottom <= 15) {
-      isUserScrolledUpRef.current = false;
     }
   }, []);
 
@@ -559,7 +575,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
         if (scrollParent.clientHeight && scrollParent.clientHeight !== containerHeight) {
           setContainerHeight(scrollParent.clientHeight);
         }
-        if (!isUserScrolledUpRef.current && !suppressAutoFollowRef.current) {
+        const hasNewItems = itemsVersion !== prevItemsVersionRef.current;
+        prevItemsVersionRef.current = itemsVersion;
+        // Only auto-scroll to bottom if new items were actually added, not on simple height recalculation
+        if (hasNewItems && !isUserScrolledUpRef.current && !suppressAutoFollowRef.current) {
           scrollParent.scrollTop = scrollParent.scrollHeight;
         }
         setScrollTop(scrollParent.scrollTop);
@@ -584,7 +603,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     
     const onScroll = () => syncScrollState();
     const onWheel = (e: WheelEvent) => {
-      if (e.deltaY < -0.5) {
+      const distanceFromBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
+      if (e.deltaY < -0.5 && distanceFromBottom > 20) {
         isUserScrolledUpRef.current = true;
       }
     };
@@ -595,10 +615,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     const onTouchMove = (e: TouchEvent) => {
       if (e.touches[0]) {
         const curY = e.touches[0].clientY;
-        if (curY - lastTouchY > 1) {
+        const delta = curY - lastTouchY;
+        lastTouchY = curY;
+        const distanceFromBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
+        if (delta > 1 && distanceFromBottom > 20) {
           isUserScrolledUpRef.current = true;
         }
-        lastTouchY = curY;
       }
     };
 
@@ -639,7 +661,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
     const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
     if (scrollParent && prev.length > 1 && offsets.length > 1) {
       // Find which row is at the current scroll position using the OLD offsets
-      const viewportTopRow = rowAt(prev, scrollParent.scrollTop);
+      const relativeTop = getTranscriptRelativeScroll();
+      const viewportTopRow = rowAt(prev, relativeTop);
       // Compute how much the offset of that row shifted
       if (viewportTopRow < offsets.length - 1 && viewportTopRow < prev.length - 1) {
         const delta = offsets[viewportTopRow] - prev[viewportTopRow];
@@ -649,11 +672,13 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       }
     }
     prevOffsetsRef.current = offsets;
-  }, [offsets]);
+  }, [offsets, getTranscriptRelativeScroll]);
 
+  const relativeScrollTop = getTranscriptRelativeScroll();
+  const maxScrollTop = Math.max(0, totalOffsetsHeight - containerHeight);
   const targetScrollTop = isUserScrolledUpRef.current
-    ? scrollTop
-    : Math.max(0, totalOffsetsHeight - containerHeight);
+    ? Math.min(relativeScrollTop, maxScrollTop)
+    : maxScrollTop;
   const { visibleItems, paddingTop, paddingBottom } = useMemo(() => {
     const range = isVirtual ? visibleRows(offsets, targetScrollTop, containerHeight, 30)
       : { start: 0, end: totalCount, paddingTop: 0, paddingBottom: 0 };
@@ -669,49 +694,65 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = ({
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
         <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
-          {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{(() => {
-            if (item.type === "tool_call") {
+          {visibleItems.map(item => {
+            const rowContent = (() => {
+              if (item.type === "tool_call") {
+                return (
+                  <div key={item.id} className="transcript-row tool-row">
+                    <ToolCallCard item={item} expanded={expandedRows.current.get(item.id)}
+                      onExpandedChange={(expanded, card) => handleExpandedChange(item.id, expanded, card)} />
+                  </div>
+                );
+              }
+
+              if (item.type === "thinking") {
+                return (
+                  <div key={item.id} className="transcript-row thinking-row">
+                    <ThinkingCard item={item} isStreaming={item.status === "running"}
+                      expanded={expandedRows.current.get(item.id)}
+                      onExpandedChange={expanded => handleExpandedChange(item.id, expanded)} />
+                  </div>
+                );
+              }
+
+              if (item.type === "system") {
+                return (
+                  <div
+                    key={item.id}
+                    className={`transcript-row system-row ${item.isError ? "error" : ""}`}
+                  >
+                    <span className="system-pill">{item.content}</span>
+                  </div>
+                );
+              }
+
               return (
-                <div key={item.id} className="transcript-row tool-row">
-                  <ToolCallCard item={item} expanded={expandedRows.current.get(item.id)}
-                    onExpandedChange={(expanded, card) => handleExpandedChange(item.id, expanded, card)} />
+                <div key={item.id} className={`transcript-row text-row ${item.role || "assistant"}`}>
+                  <div className="transcript-message-bubble">
+                    <MarkdownRenderer content={item.content || ""} isStreaming={true} />
+                  </div>
                 </div>
               );
-            }
+            })();
 
-            if (item.type === "thinking") {
+            if (inline) {
               return (
-                <div key={item.id} className="transcript-row thinking-row">
-                  <ThinkingCard item={item} isStreaming={item.status === "running"}
-                    expanded={expandedRows.current.get(item.id)}
-                    onExpandedChange={expanded => handleExpandedChange(item.id, expanded)} />
-                </div>
-              );
-            }
-
-            if (item.type === "system") {
-              return (
-                <div
-                  key={item.id}
-                  className={`transcript-row system-row ${item.isError ? "error" : ""}`}
-                >
-                  <span className="system-pill">{item.content}</span>
+                <div key={item.id} data-transcript-id={item.id} style={{ display: "flow-root" }}>
+                  {rowContent}
                 </div>
               );
             }
 
             return (
-              <div key={item.id} className={`transcript-row text-row ${item.role || "assistant"}`}>
-                <div className="transcript-message-bubble">
-                  <MarkdownRenderer content={item.content || ""} isStreaming={true} />
-                </div>
-              </div>
+              <MeasuredRow key={item.id} id={item.id} measure={measure}>
+                {rowContent}
+              </MeasuredRow>
             );
-          })()}</MeasuredRow>)}
+          })}
         </div>
       </div>
     </div>
   );
-};
+});
 
 export default VirtualizedTranscript;

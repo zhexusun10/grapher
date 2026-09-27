@@ -1,6 +1,6 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
-import { ArrowUp, Pencil, X } from "lucide-react";
-import type { ImageAttachment } from "../../types";
+import { ArrowUp, ChevronLeft, ChevronRight, Pencil, X } from "lucide-react";
+import type { ChatMessageVersion, ImageAttachment } from "../../types";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 
@@ -12,7 +12,20 @@ export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: 
 );
 StreamingAssistantBubble.displayName = "StreamingAssistantBubble";
 
-export function EditableUserBubble({ text, images, editing, draft, onDraftChange, onEdit, onCancel, onSend, disabled }: {
+export function EditableUserBubble({
+  text,
+  images,
+  editing,
+  draft,
+  onDraftChange,
+  onEdit,
+  onCancel,
+  onSend,
+  disabled,
+  versions,
+  currentVersionIndex,
+  onSwitchVersion,
+}: {
   text: string;
   images?: ImageAttachment[];
   editing: boolean;
@@ -20,14 +33,21 @@ export function EditableUserBubble({ text, images, editing, draft, onDraftChange
   onDraftChange: (value: string) => void;
   onEdit?: () => void;
   onCancel: () => void;
-  onSend: (value: string) => boolean | void | Promise<boolean>;
+  onSend: (value: string) => boolean | void | Promise<boolean | void>;
   disabled?: boolean;
+  versions?: ChatMessageVersion[];
+  currentVersionIndex?: number;
+  onSwitchVersion?: (targetIndex: number) => void;
 }) {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [editSize, setEditSize] = useState<{ width: number; height: number } | null>(null);
+  const [initialSize, setInitialSize] = useState<{ width: number; height: number } | null>(null);
+
   useLayoutEffect(() => {
-    if (!editing) return;
+    if (!editing) {
+      setInitialSize(null);
+      return;
+    }
     const textarea = textareaRef.current;
     if (textarea) {
       textarea.focus();
@@ -35,32 +55,97 @@ export function EditableUserBubble({ text, images, editing, draft, onDraftChange
       textarea.setSelectionRange(end, end);
     }
   }, [editing]);
+
   const submit = () => {
     const value = draft.trim();
     if (value && !disabled) onSend(value);
   };
+
   const beginEdit = () => {
     if (bubbleRef.current) {
       const { width, height } = bubbleRef.current.getBoundingClientRect();
-      setEditSize({ width, height });
+      setInitialSize({ width, height });
     }
     onEdit?.();
   };
+
+  const isShorter = draft.trim().length < text.trim().length;
+
   return (
     <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}`}>
       <div className="chat-bubble-body">
         {editing ? (
           <div className="chat-bubble-actions">
-            <button type="button" className="chat-bubble-action-btn" onClick={onCancel} title="取消修改" aria-label="取消修改"><X size={14} /></button>
-            <button type="button" className="chat-bubble-action-btn send" onClick={submit} disabled={disabled || !draft.trim()} title="发送修改" aria-label="发送修改"><ArrowUp size={14} /></button>
+            <button
+              type="button"
+              className="chat-bubble-action-btn"
+              onClick={onCancel}
+              title="取消修改 (Esc)"
+              aria-label="取消修改"
+            >
+              <X size={14} />
+            </button>
+            <button
+              type="button"
+              className="chat-bubble-action-btn send"
+              onClick={submit}
+              disabled={disabled || !draft.trim()}
+              title="回退并重试 (Enter)"
+              aria-label="回退并重试"
+            >
+              <ArrowUp size={14} />
+            </button>
           </div>
-        ) : onEdit ? (
-          <button type="button" className="chat-message-edit-btn" onClick={beginEdit} disabled={disabled} title="修改" aria-label="修改"><Pencil size={14} /></button>
-        ) : null}
+        ) : (
+          <div className="chat-bubble-left-tools">
+            {versions && versions.length > 1 && currentVersionIndex !== undefined && onSwitchVersion ? (
+              <div className="chat-branch-pager">
+                <button
+                  type="button"
+                  className="chat-branch-pager-btn"
+                  disabled={currentVersionIndex <= 0 || disabled}
+                  onClick={() => onSwitchVersion(currentVersionIndex - 1)}
+                  title="上一个版本"
+                  aria-label="上一个版本"
+                >
+                  <ChevronLeft size={11} />
+                </button>
+                <span className="chat-branch-pager-text">
+                  {currentVersionIndex + 1}/{versions.length}
+                </span>
+                <button
+                  type="button"
+                  className="chat-branch-pager-btn"
+                  disabled={currentVersionIndex >= versions.length - 1 || disabled}
+                  onClick={() => onSwitchVersion(currentVersionIndex + 1)}
+                  title="下一个版本"
+                  aria-label="下一个版本"
+                >
+                  <ChevronRight size={11} />
+                </button>
+              </div>
+            ) : null}
+            {onEdit ? (
+              <button
+                type="button"
+                className="chat-message-edit-btn"
+                onClick={beginEdit}
+                disabled={disabled}
+                title="修改消息并回退重试"
+                aria-label="修改消息并回退重试"
+              >
+                <Pencil size={14} />
+              </button>
+            ) : null}
+          </div>
+        )}
         <div
           ref={bubbleRef}
           className={`chat-bubble-user${editing ? " editing" : ""}`}
-          style={editing && editSize ? { width: editSize.width, height: editSize.height } : undefined}
+          style={editing && initialSize && !isShorter ? {
+            minWidth: `${Math.min(initialSize.width, 360)}px`,
+            minHeight: `${initialSize.height}px`,
+          } : undefined}
         >
           {images && images.length > 0 && (
             <div className="chat-user-images-preview">
@@ -76,20 +161,31 @@ export function EditableUserBubble({ text, images, editing, draft, onDraftChange
             </div>
           )}
           {editing ? (
-            <textarea
-              ref={textareaRef}
-              className="chat-bubble-edit-textarea"
-              aria-label="修改消息内容"
-              value={draft}
-              onChange={(event) => onDraftChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") { event.stopPropagation(); onCancel(); }
-                if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) {
-                  event.preventDefault(); submit();
-                }
-              }}
-              rows={1}
-            />
+            <div className="chat-bubble-edit-grid">
+              <span className="chat-bubble-edit-mirror" aria-hidden="true">
+                {draft ? (draft.endsWith("\n") ? `${draft} ` : draft) : " "}
+              </span>
+              <textarea
+                ref={textareaRef}
+                className="chat-bubble-edit-textarea"
+                aria-label="修改消息内容"
+                value={draft}
+                onChange={(event) => onDraftChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.stopPropagation();
+                    onCancel();
+                  } else if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    submit();
+                  } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    submit();
+                  }
+                }}
+                rows={1}
+              />
+            </div>
           ) : text}
         </div>
       </div>

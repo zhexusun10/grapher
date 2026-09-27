@@ -42,6 +42,8 @@ interface GraphWorkbenchProps {
   plannerStream: any;
   recoveredPlanningId?: string;
   onSendMessage: (val: string, options?: PromptBoxSubmitOptions) => boolean | void | Promise<boolean>;
+  onEditMessageSubmit?: (msg: ChatMessage, newText: string) => boolean | void | Promise<boolean | void>;
+  onSwitchMessageVersion?: (msg: ChatMessage, targetIndex: number) => void;
   onRequestConfirmation: (config: ConfirmModalState) => void;
   followUpQueue?: Array<{ id: string; text: string; node?: string; timestamp: number }>;
   onCancelFollowUp?: (id: string) => void;
@@ -84,6 +86,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   isPlanning,
   plannerStream,
   onSendMessage,
+  onEditMessageSubmit,
+  onSwitchMessageVersion,
   onRequestConfirmation,
   followUpQueue,
   onCancelFollowUp,
@@ -232,7 +236,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const isScrollingToBottomRef = useRef(false);
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
-  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const scrollBottomBtnRef = useRef<HTMLButtonElement>(null);
+  const setScrollBottomVisible = useCallback((visible: boolean) => {
+    const btn = scrollBottomBtnRef.current;
+    if (btn) {
+      if (visible) {
+        btn.classList.add("visible");
+      } else {
+        btn.classList.remove("visible");
+      }
+    }
+  }, []);
   const currentRunKey = state.runId || state.graph.originalGoal || "initial";
   const graphRunRef = useRef(currentRunKey);
   const [readyGraphRunKey, setReadyGraphRunKey] = useState("");
@@ -269,54 +283,53 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     const isScrollingUp = scrollTop < prevScrollTop - 1;
 
+    // When near bottom, definitely lock to bottom state (prevent elastic bounce from locking scrolled-up)
+    if (distanceFromBottom <= 20) {
+      isScrollingToBottomRef.current = false;
+      isUserScrolledUpRef.current = false;
+      setScrollBottomVisible(false);
+      return;
+    }
+
     if (isScrollingToBottomRef.current) {
       if (isScrollingUp) {
         isScrollingToBottomRef.current = false;
         isUserScrolledUpRef.current = true;
-        setShowScrollBottom(distanceFromBottom > 24);
-        return;
-      }
-      if (distanceFromBottom <= 15) {
-        isScrollingToBottomRef.current = false;
-        isUserScrolledUpRef.current = false;
-        setShowScrollBottom(false);
+        setScrollBottomVisible(distanceFromBottom > 24);
       }
       return;
     }
 
     if (isScrollingUp) {
       isUserScrolledUpRef.current = true;
-      setShowScrollBottom(distanceFromBottom > 24);
+      setScrollBottomVisible(distanceFromBottom > 24);
       return;
     }
 
-    if (distanceFromBottom > 20) {
+    if (distanceFromBottom > 24) {
       isUserScrolledUpRef.current = true;
-      setShowScrollBottom(distanceFromBottom > 24);
-    } else if (distanceFromBottom <= 15) {
-      isUserScrolledUpRef.current = false;
-      setShowScrollBottom(false);
+      setScrollBottomVisible(true);
     }
-  }, []);
+  }, [setScrollBottomVisible]);
 
   const scrollToBottom = useCallback(() => {
     isUserScrolledUpRef.current = false;
     isScrollingToBottomRef.current = true;
-    setShowScrollBottom(false);
+    setScrollBottomVisible(false);
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTo({
         top: chatScrollRef.current.scrollHeight,
         behavior: "smooth",
       });
     }
-  }, []);
+  }, [setScrollBottomVisible]);
 
   const handleSendMessageWithScroll = useCallback((val: string, options?: PromptBoxSubmitOptions) => {
     isUserScrolledUpRef.current = false;
     isScrollingToBottomRef.current = true;
-    setShowScrollBottom(false);
+    setScrollBottomVisible(false);
     return onSendMessage(val, options);
-  }, [onSendMessage]);
+  }, [onSendMessage, setScrollBottomVisible]);
 
   // Listen to wheel and touch gestures on chat scroll container to immediately lock auto-scroll upon upward scrolling
   useEffect(() => {
@@ -324,7 +337,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      if (e.deltaY < -0.5) {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (e.deltaY < -0.5 && distanceFromBottom > 20) {
         isScrollingToBottomRef.current = false;
         isUserScrolledUpRef.current = true;
       }
@@ -339,7 +353,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         const curY = e.touches[0].clientY;
         const delta = curY - lastTouchY;
         lastTouchY = curY;
-        if (delta > 1) {
+        const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (delta > 1 && distanceFromBottom > 20) {
           isScrollingToBottomRef.current = false;
           isUserScrolledUpRef.current = true;
         }
@@ -621,7 +636,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       isUserScrolledUpRef.current = false;
       isScrollingToBottomRef.current = false;
       el.scrollTop = el.scrollHeight;
-      setShowScrollBottom(false);
+      setScrollBottomVisible(false);
 
       if (resetChatScrollFrameRef.current !== null) {
         cancelAnimationFrame(resetChatScrollFrameRef.current);
@@ -638,7 +653,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!savedPlannerIds.length && !execution && !serialExecutions.length) {
       revealConversation();
     }
-  }, [conversationViewKey, savedPlannerIds.length, execution, serialExecutions.length, revealConversation]);
+  }, [conversationViewKey, savedPlannerIds.length, execution, serialExecutions.length, revealConversation, setScrollBottomVisible]);
 
   return (
     <section
@@ -724,8 +739,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}
                           onEdit={onEditMessage ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
                           onCancel={() => onCancelEditMessage?.()}
-                          onSend={onSendMessage}
+                          onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
                           disabled={locked}
+                          versions={turn.userMessage.versions}
+                          currentVersionIndex={turn.userMessage.currentVersionIndex}
+                          onSwitchVersion={(idx) => onSwitchMessageVersion?.(turn.userMessage!, idx)}
                         />
                       </div>
                     ) : null}
@@ -791,22 +809,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
               </div>
             </div>
-            {showScrollBottom && (
-              <button
-                type="button"
-                className="scroll-to-bottom-btn"
-                onClick={scrollToBottom}
-                title="回到底部最新输出"
-              >
-                <ArrowDown size={14} />
-                <span>最新</span>
-              </button>
-            )}
+            <button
+              ref={scrollBottomBtnRef}
+              type="button"
+              className="scroll-to-bottom-btn"
+              onClick={scrollToBottom}
+              title="回到底部最新输出"
+            >
+              <ArrowDown size={14} />
+              <span>最新</span>
+            </button>
             <motion.div
               className="pane-bottom-chat"
               initial={{ opacity: 0, y: 16 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 0.48, ease: [0.16, 1, 0.3, 1] }}
             >
               {followUpQueue && followUpQueue.length > 0 && (
                 <div className="followup-queue-banner">
@@ -863,9 +880,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         {turn.userMessage && (
                           <motion.div
                             className="chat-message-row user"
-                            initial={false}
+                            initial={isPlanning && turn.isInitial ? { opacity: 0, y: 16, scale: 0.98 } : false}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
-                            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                            transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
                           >
                             <EditableUserBubble
                               text={turn.userMessage.text.trim()}
@@ -875,8 +892,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               onDraftChange={onEditPrefillTextChange ?? (() => {})}
                               onEdit={onEditMessage ? () => onEditMessage(turn.userMessage!) : undefined}
                               onCancel={() => onCancelEditMessage?.()}
-                              onSend={onSendMessage}
+                              onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
                               disabled={locked && !isPlanning}
+                              versions={turn.userMessage.versions}
+                              currentVersionIndex={turn.userMessage.currentVersionIndex}
+                              onSwitchVersion={(idx) => onSwitchMessageVersion?.(turn.userMessage!, idx)}
                             />
                           </motion.div>
                         )}
@@ -893,49 +913,40 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           </motion.div>
                         )}
 
-                        {turn.executions.length > 0 ? (
-                          turn.executions.map((exec) => (
-                            <motion.div
-                              key={exec.id}
-                              className="serial-execution-panel"
-                              initial={false}
-                              animate={{ opacity: 1, y: 0 }}
-                              transition={{ duration: 0.3 }}
-                            >
-                              <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                                <ExecutionTranscript
-                                  key={exec.id}
-                                  runId={state.runId}
-                                  execution={exec}
-                                  onUserResize={handleExpandableContentChange}
-                                  onInitialOutputReady={exec.id === serialExecutions[serialExecutions.length - 1]?.id ? revealConversation : undefined}
-                                />
-                              </div>
-
-                              <details className="workspace-details" style={{ marginTop: 12 }}>
-                                <summary><FolderGit2 size={12} />工作区与会话信息</summary>
-                                <p>工作目录: {exec.worktree}</p>
-                                <p>会话实例: {exec.sessionId}</p>
-                                {(() => {
-                                  if (exec.pid) return <p>进程 PID: {exec.pid}</p>;
-                                  const pidMatch = exec.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
-                                                   exec.output.match(/"pid":(\d+)/);
-                                  return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
-                                })()}
-                                <p>Commit Before: {exec.before || "HEAD"}</p>
-                                <p>Commit After: {exec.after ?? "pending"}</p>
-                                <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
-                              </details>
-                            </motion.div>
-                          ))
-                        ) : (
-                          turnIdx === 0 && (
-                            <div className="stream-card-hint" style={{ padding: "8px 0", marginTop: 6 }}>
-                              <Workflow size={14} className="spin" style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
-                              独立沙箱正在推进中，正在启动 Pi 实例执行任务...
+                        {turn.executions.map((exec) => (
+                          <motion.div
+                            key={exec.id}
+                            className="serial-execution-panel"
+                            initial={false}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.3 }}
+                          >
+                            <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                              <ExecutionTranscript
+                                key={exec.id}
+                                runId={state.runId}
+                                execution={exec}
+                                onUserResize={handleExpandableContentChange}
+                                onInitialOutputReady={exec.id === serialExecutions[serialExecutions.length - 1]?.id ? revealConversation : undefined}
+                              />
                             </div>
-                          )
-                        )}
+
+                            <details className="workspace-details" style={{ marginTop: 12 }}>
+                              <summary><FolderGit2 size={12} />工作区与会话信息</summary>
+                              <p>工作目录: {exec.worktree}</p>
+                              <p>会话实例: {exec.sessionId}</p>
+                              {(() => {
+                                if (exec.pid) return <p>进程 PID: {exec.pid}</p>;
+                                const pidMatch = exec.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
+                                                 exec.output.match(/"pid":(\d+)/);
+                                return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
+                              })()}
+                              <p>Commit Before: {exec.before || "HEAD"}</p>
+                              <p>Commit After: {exec.after ?? "pending"}</p>
+                              <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
+                            </details>
+                          </motion.div>
+                        ))}
                       </React.Fragment>
                     ))}
 
@@ -951,9 +962,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <motion.div
                         key={effectiveMessages[0].id}
                         className={`chat-message-row ${effectiveMessages[0].role}`}
-                        initial={false}
+                        initial={isPlanning ? { opacity: 0, y: 16, scale: 0.98 } : false}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
-                        transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                        transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
                       >
                         {effectiveMessages[0].role === "user" ? (
                           <EditableUserBubble
@@ -964,8 +975,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             onDraftChange={onEditPrefillTextChange ?? (() => {})}
                             onEdit={onEditMessage ? () => onEditMessage(effectiveMessages[0]) : undefined}
                             onCancel={() => onCancelEditMessage?.()}
-                            onSend={onSendMessage}
+                            onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(effectiveMessages[0], value) : onSendMessage(value)}
                             disabled={locked && !isPlanning}
+                            versions={effectiveMessages[0].versions}
+                            currentVersionIndex={effectiveMessages[0].currentVersionIndex}
+                            onSwitchVersion={(idx) => onSwitchMessageVersion?.(effectiveMessages[0], idx)}
                           />
                         ) : (
                           <div className={`chat-bubble-${effectiveMessages[0].role} chat-message-${effectiveMessages[0].role}`}>
@@ -979,9 +993,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     {((isPlanning && routeType === "undecided") || routeType !== "undecided") && (
                       <motion.div
                         className={`route-decision-pill ${routeType}`}
-                        initial={isPlanning ? { opacity: 0, scale: 0.96 } : false}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ duration: isPlanning ? 0.25 : 0, ease: "easeOut" }}
+                        initial={isPlanning ? { opacity: 0, scale: 0.96, y: 10 } : false}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        transition={{ duration: isPlanning ? 0.42 : 0, ease: [0.16, 1, 0.3, 1] }}
                       >
                         {routeType === "undecided" ? (
                           <>
@@ -1030,8 +1044,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}
                           onEdit={onEditMessage ? () => onEditMessage(msg) : undefined}
                           onCancel={() => onCancelEditMessage?.()}
-                          onSend={onSendMessage}
+                          onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(msg, value) : onSendMessage(value)}
                           disabled={locked && !isPlanning}
+                          versions={msg.versions}
+                          currentVersionIndex={msg.currentVersionIndex}
+                          onSwitchVersion={(idx) => onSwitchMessageVersion?.(msg, idx)}
                         />
                       </div>
                     ))}
@@ -1057,7 +1074,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   onDraftChange={onEditPrefillTextChange ?? (() => {})}
                                   onEdit={onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: item.content || "" }) : undefined}
                                   onCancel={() => onCancelEditMessage?.()}
-                                  onSend={onSendMessage}
+                                  onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit({ id: item.id, parentId: null, role: "user", text: item.content || "" }, value) : onSendMessage(value)}
                                   disabled={locked && !isPlanning}
                                 />
                               </motion.div>
@@ -1143,7 +1160,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               {/* 输出期间暂时隐藏摘要，停止后再展示当前结果 */}
               {failedPlanning && !isPlanning && (
                 <motion.div
-                  initial={{ opacity: 0, y: 10 }}
+                  className="planning-summary-card-wrapper"
+                  initial={false}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 >
@@ -1159,7 +1177,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               {/* 当前 Run 的规划阶段摘要（仅在多节点图模式下且当前 Run 自身拥有有效规划时展示） */}
               {!isPlanning && routeType === "graph" && state.planning && (!failedPlanning || state.planning.planningId !== failedPlanning.planningId) && (
                 <motion.div
-                  initial={{ opacity: 0, y: 10 }}
+                  className="planning-summary-card-wrapper"
+                  initial={false}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 >
@@ -1175,7 +1194,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               {!isPlanning && routeType === "graph" && state.graph.nodes.length > 0 && (
                 <motion.div
                   className="plan-summary-card"
-                  initial={{ opacity: 0, y: 14 }}
+                  initial={false}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.38, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
                 >
@@ -1226,22 +1245,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </motion.div>
               )}
             </div>
-            {showScrollBottom && (
-              <button
-                type="button"
-                className="scroll-to-bottom-btn"
-                onClick={scrollToBottom}
-                title="回到底部最新输出"
-              >
-                <ArrowDown size={14} />
-                <span>最新</span>
-              </button>
-            )}
+            <button
+              ref={scrollBottomBtnRef}
+              type="button"
+              className="scroll-to-bottom-btn"
+              onClick={scrollToBottom}
+              title="回到底部最新输出"
+            >
+              <ArrowDown size={14} />
+              <span>最新</span>
+            </button>
             <motion.div
               className="pane-bottom-chat"
-              initial={{ opacity: 0, y: 16 }}
+              initial={isPlanning ? { opacity: 0, y: 22 } : false}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 0.48, ease: [0.16, 1, 0.3, 1] }}
             >
               {followUpQueue && followUpQueue.length > 0 && (
                 <div className="followup-queue-banner">

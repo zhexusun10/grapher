@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock, Weak,
+        Arc, Condvar, Mutex, OnceLock, Weak,
     },
     thread,
 };
@@ -22,6 +22,7 @@ use uuid::Uuid;
 pub struct Service {
     runtime: Mutex<Runtime>,
     driving: AtomicBool,
+    drive_signal: (Mutex<u64>, Condvar),
     planning: AtomicBool,
     extension: PathBuf,
 }
@@ -124,6 +125,7 @@ fn service_for_run(
     let child = Arc::new(Service {
         runtime: Mutex::new(child_runtime),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
         planning: AtomicBool::new(false),
         extension: primary.extension.clone(),
     });
@@ -408,6 +410,8 @@ fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, 
     let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(runtime.root.join("config.json"), bytes).map_err(|e| e.to_string())?;
     drop(runtime);
+    #[cfg(not(feature = "fixture"))]
+    crate::engine::warm_partitioner(config);
     bootstrap(service, false)
 }
 
@@ -1503,6 +1507,11 @@ fn plan_goal(
 
 fn drive(service: Arc<Service>) {
     if service.driving.swap(true, Ordering::SeqCst) {
+        // Wake the active driver even if its current workers are long-running.
+        if let Ok(mut generation) = service.drive_signal.0.lock() {
+            *generation += 1;
+            service.drive_signal.1.notify_one();
+        }
         return;
     }
     let run_id = service
@@ -1510,24 +1519,48 @@ fn drive(service: Arc<Service>) {
         .lock()
         .map(|runtime| runtime.state.run_id.clone())
         .unwrap_or_default();
-    thread::spawn(move || {
+    let drive_service = service.clone();
+    if let Err(error) = thread::Builder::new().name("grapher-drive".into()).spawn(move || {
         let (output_tx, output_rx) = std::sync::mpsc::sync_channel(256);
         let writer_service = service.clone();
-        let writer = thread::spawn(move || persist_outputs(writer_service, output_rx));
+        let writer = match thread::Builder::new().name("grapher-output".into())
+            .spawn(move || persist_outputs(writer_service, output_rx)) {
+            Ok(writer) => writer,
+            Err(error) => {
+                eprintln!("Cannot start output writer: {error}");
+                if let Ok(mut runtime) = service.runtime.lock() {
+                    let _ = runtime.emit(EventKind::Paused { paused: true });
+                }
+                service.driving.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
         let result = (|| -> Result<(), String> {
             let (completed_tx, completed_rx) = std::sync::mpsc::channel();
             let mut in_flight = 0usize;
-            let mut feedback_results = Vec::new();
+            let mut feedback_results: Vec<(String, String)> = Vec::new();
             loop {
+                let observed = *service.drive_signal.0.lock().map_err(|e| e.to_string())?;
+                // Apply a completed review before exposing its descendants to
+                // the scheduler. Otherwise a consumer can start in the gap
+                // between the last sibling finishing and feedback invalidation.
+                if !feedback_results.is_empty() {
+                    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                    let mut pending = Vec::new();
+                    for (from, output) in feedback_results.drain(..) {
+                        if runtime.feedback_source_busy(&from) {
+                            pending.push((from, output));
+                        } else if runtime.state.nodes.get(&from).is_some_and(|node| node.status == "done") {
+                            runtime.apply_feedback(&from, &output)?;
+                        }
+                    }
+                    feedback_results = pending;
+                }
                 let (jobs, root, parents) = {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                    let feedback_barrier =
-                        in_flight > 0 && runtime.state.graph.edges.iter().any(|edge| edge.feedback);
-                    let jobs = if feedback_barrier {
-                        Vec::new()
-                    } else {
-                        runtime.jobs_with_publication(!service.planning.load(Ordering::SeqCst))?
-                    };
+                    // Only nodes that a pending feedback verdict could invalidate
+                    // must drain. Independent branches may fill available slots.
+                    let jobs = runtime.jobs_with_publication(!service.planning.load(Ordering::SeqCst))?;
                     let parents: Vec<_> = jobs
                         .iter()
                         .map(|job| runtime.parents(&job.execution.node))
@@ -1607,8 +1640,9 @@ fn drive(service: Arc<Service>) {
                     }
                     break;
                 }
-                in_flight += jobs.len();
                 for (job, parents) in jobs.into_iter().zip(parents) {
+                    let execution = job.execution.clone();
+                    let spawn_service = service.clone();
                     let service = service.clone();
                     let root = root.clone();
                     let completed_tx = completed_tx.clone();
@@ -1618,7 +1652,7 @@ fn drive(service: Arc<Service>) {
                         job.execution.node, job.execution.id, job.execution.attempt
                     );
                     let run_id = run_id.clone();
-                    thread::spawn(move || {
+                    let spawned = thread::Builder::new().name("grapher-node".into()).spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             // Every model session is independent. Serial mode selects
                             // the source checkout, but it does not serialize sessions
@@ -1678,22 +1712,44 @@ fn drive(service: Arc<Service>) {
                             .map_err(|error| error.to_string())
                             .and_then(|mut runtime| runtime.finish(&job.execution, result));
                         let _ = completed_tx.send(result);
+                        if let Ok(mut generation) = service.drive_signal.0.lock() {
+                            *generation += 1;
+                            service.drive_signal.1.notify_one();
+                        }
                     });
-                }
-                if in_flight > 0 {
-                    let completed = completed_rx
-                        .recv()
-                        .map_err(|_| "Execution channel closed")?;
-                    in_flight -= 1;
-                    if let Some(feedback) = completed? {
-                        feedback_results.push(feedback);
+                    match spawned {
+                        Ok(_) => in_flight += 1,
+                        Err(error) => {
+                            // Started was persisted when the batch was scheduled.
+                            // Fail this node explicitly rather than leaving it running
+                            // or losing the entire drive loop to a spawn panic.
+                            spawn_service.runtime.lock().map_err(|e| e.to_string())?
+                                .finish(&execution, Err(format!("Cannot start node worker: {error}")))?;
+                        }
                     }
                 }
-                if in_flight == 0 {
-                    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                    for (from, output) in feedback_results.drain(..) {
-                        if runtime.state.nodes[&from].status == "done" {
-                            runtime.apply_feedback(&from, &output)?;
+                if in_flight > 0 {
+                    // Hold the signal mutex while checking the queue: neither
+                    // a completion nor a control event can be lost before wait.
+                    let generation = service.drive_signal.0.lock().map_err(|e| e.to_string())?;
+                    match completed_rx.try_recv() {
+                        Ok(completed) => {
+                            drop(generation);
+                            in_flight -= 1;
+                            if let Some(feedback) = completed? {
+                                feedback_results.push(feedback);
+                            }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            if *generation != observed {
+                                // A control event arrived while scheduling.
+                                continue;
+                            }
+                            drop(service.drive_signal.1.wait(generation).map_err(|e| e.to_string())?);
+                            continue;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            return Err("Execution channel closed".into());
                         }
                     }
                 }
@@ -1741,7 +1797,13 @@ fn drive(service: Arc<Service>) {
         if resume {
             drive(service.clone());
         }
-    });
+    }) {
+        eprintln!("Cannot start Run driver: {error}");
+        if let Ok(mut runtime) = drive_service.runtime.lock() {
+            let _ = runtime.emit(EventKind::Paused { paused: true });
+        }
+        drive_service.driving.store(false, Ordering::SeqCst);
+    }
 }
 
 fn control(
@@ -2595,7 +2657,23 @@ pub fn dispatch(
         }
     }
     let result = match command {
-        "provider_auth" => to_value(crate::provider_auth::request(body)?),
+        "provider_auth" => {
+            #[cfg(not(feature = "fixture"))]
+            let operation = body["operation"].as_str().map(str::to_owned);
+            let result = crate::provider_auth::request(body)?;
+            #[cfg(not(feature = "fixture"))]
+            if operation.as_deref() == Some("logout")
+                || (operation.as_deref() == Some("poll") && result["status"] == "complete")
+            {
+                crate::engine::invalidate_warm_partitioner();
+                if operation.as_deref() == Some("poll") {
+                    if let Ok(bootstrap) = bootstrap(service, false) {
+                        crate::engine::warm_partitioner(bootstrap.config);
+                    }
+                }
+            }
+            to_value(result)
+        },
         "bootstrap" => to_value(bootstrap(service, metadata)?),
         "snapshot" => to_value(snapshot(service)?),
         "history" => to_value(history(argument(&body, "runId")?, service)?),
@@ -2866,22 +2944,31 @@ fn origin_matches_allowlist(origin: &str, allowed: &str) -> bool {
 pub fn run() -> Result<(), String> {
     use tiny_http::{Response, Server};
     load_env_file();
-    let root = std::env::var_os("GRAPHER_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.grapher"));
+    let root = crate::workspace::data_root();
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    // Planning/session paths must use the same real root as the execution
+    // sandbox. In particular, CARGO_MANIFEST_DIR/../.grapher is not a
+    // lexical child of the canonical .grapher directory.
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
     let extension = root.join("grapher-planner.ts");
     fs::write(&extension, include_str!("../resources/planner.ts"))
         .map_err(|error| error.to_string())?;
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root)?),
         driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
         planning: AtomicBool::new(false),
         extension,
     });
     #[cfg(not(feature = "fixture"))]
     crate::native::check_retired_leases(&root)?;
     recover_plannings(&root)?;
+    // Start the selected repository's no-tools RPC Partitioner while dev is
+    // starting the frontend, rather than on the first Auto planning request.
+    #[cfg(not(feature = "fixture"))]
+    if let Ok(bootstrap) = bootstrap(&service, false) {
+        crate::engine::warm_partitioner(bootstrap.config);
+    }
     let port: u16 = std::env::var("GRAPHER_PORT")
         .unwrap_or_else(|_| "1421".into())
         .parse()
@@ -2915,6 +3002,8 @@ pub fn run() -> Result<(), String> {
             true
         };
         if stop {
+            #[cfg(not(feature = "fixture"))]
+            crate::engine::stop_partition_prewarm();
             if let Ok(mut runtime) = shutdown_service.runtime.lock() {
                 if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
                     let _ = runtime.emit(EventKind::PublicationFailed {

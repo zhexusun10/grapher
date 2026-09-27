@@ -16,6 +16,164 @@ use std::{
 
 #[cfg(feature = "fixture")]
 use std::process::Command;
+#[cfg(not(feature = "fixture"))]
+use std::{process::Child, sync::atomic::{AtomicBool, Ordering}};
+
+#[cfg(not(feature = "fixture"))]
+struct WarmPartitioner {
+    child: Child,
+    tree: process_control::ProcessTree,
+    session_dir: PathBuf,
+    key: (PathBuf, String, String, String),
+}
+
+#[cfg(not(feature = "fixture"))]
+static WARM_PARTITIONER: OnceLock<Mutex<Option<WarmPartitioner>>> = OnceLock::new();
+#[cfg(not(feature = "fixture"))]
+static PREWARM_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(not(feature = "fixture"))]
+fn partitioner_key(config: &Config) -> Result<(PathBuf, String, String, String), String> {
+    let model = PiModelConfig::resolve(PiRole::Partitioner, config);
+    let repo = Path::new(&config.repository)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
+        .unwrap_or_else(|_| include_str!("../resources/prompts/partitioner.md").trim().to_string());
+    let prompt = if Path::new(&prompt).is_file() {
+        fs::read_to_string(&prompt).map_err(|e| e.to_string())?
+    } else {
+        prompt
+    };
+    Ok((
+        repo,
+        model.model,
+        model.thinking.unwrap_or_else(|| "off".into()),
+        prompt,
+    ))
+}
+
+/// Start a single idle, no-tools RPC Partitioner for the selected repository.
+/// The worker never receives a goal until a matching planning request claims
+/// it; mismatched configurations continue through the normal cold path.
+#[cfg(not(feature = "fixture"))]
+pub fn warm_partitioner(config: Config) {
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
+        || config.repository.trim().is_empty()
+        || PiModelConfig::resolve(PiRole::Partitioner, &config).model.trim().is_empty()
+    {
+        return;
+    }
+    thread::spawn(move || {
+        if let Err(error) = start_warm_partitioner(&config) {
+            eprintln!("[Grapher] Partitioner prewarm unavailable: {error}");
+        }
+    });
+}
+
+#[cfg(not(feature = "fixture"))]
+fn start_warm_partitioner(config: &Config) -> Result<(), String> {
+    start_warm_partitioner_at(config, &crate::workspace::data_root())
+}
+
+#[cfg(not(feature = "fixture"))]
+fn start_warm_partitioner_at(config: &Config, data: &Path) -> Result<(), String> {
+    crate::workspace::validate_binding(Path::new(&config.repository))?;
+    let key = partitioner_key(config)?;
+    let pool = WARM_PARTITIONER.get_or_init(Default::default);
+    let mut slot = pool.lock().map_err(|e| e.to_string())?;
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    if slot.as_mut().is_some_and(|worker| {
+        worker.key == key && worker.child.try_wait().ok().flatten().is_none()
+    }) {
+        return Ok(());
+    }
+    if let Some(mut old) = slot.take() {
+        old.tree.terminate();
+        let _ = old.child.wait();
+        let _ = fs::remove_dir_all(old.session_dir);
+    }
+    let session_dir = data.join("partition-workers")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
+    let prompt_path = session_dir.join("system-prompt.md");
+    fs::write(&prompt_path, &key.3).map_err(|e| e.to_string())?;
+    let mut command = crate::native::command(PiRole::Partitioner, &key.0, &key.0)?;
+    command.args([
+        "--mode", "rpc", "--no-prompt-templates", "--no-themes", "--no-extensions",
+        "--no-skills", "--no-approve", "--no-tools", "--no-context-files",
+        "--model", &key.1, "--thinking", &key.2,
+        "--system-prompt", prompt_path.to_str().ok_or("Invalid Partitioner prompt path")?,
+        "--session-dir", session_dir.to_str().ok_or("Invalid Partitioner session path")?,
+    ]);
+    command
+        .env_remove("PI_MODEL")
+        .env_remove("PI_THINKING")
+        .env_remove("PI_PROVIDER")
+        .env_remove("PI_REASONING_LEVEL")
+        .env_remove("PI_SESSION_ID")
+        .env_remove("PI_SESSION_FILE")
+        .env("GRAPHER_MODE", "partition")
+        .env("GRAPHER_EXECUTION_KIND", "source")
+        .env("GRAPHER_SOURCE_ALIAS", &key.0)
+        .env("GRAPHER_WORKSPACE_ROOT", &key.0)
+        .env("GRAPHER_ORIGINAL_ROOT", &key.0);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    process_control::configure_command(&mut command);
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let tree = process_control::track(&child).map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        error
+    })?;
+    *slot = Some(WarmPartitioner {
+        child,
+        tree,
+        session_dir,
+        key,
+    });
+    Ok(())
+}
+
+#[cfg(not(feature = "fixture"))]
+pub fn stop_partition_prewarm() {
+    PREWARM_SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    invalidate_warm_partitioner();
+}
+
+#[cfg(not(feature = "fixture"))]
+pub fn invalidate_warm_partitioner() {
+    if let Some(pool) = WARM_PARTITIONER.get() {
+        if let Ok(mut slot) = pool.lock() {
+            if let Some(mut old) = slot.take() {
+                old.tree.terminate();
+                let _ = old.child.wait();
+                let _ = fs::remove_dir_all(old.session_dir);
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "fixture"))]
+fn claim_warm_partitioner(config: &Config) -> Option<WarmPartitioner> {
+    let key = partitioner_key(config).ok()?;
+    let pool = WARM_PARTITIONER.get()?;
+    let mut slot = pool.lock().ok()?;
+    if slot.as_ref()?.key != key {
+        return None;
+    }
+    if slot.as_mut()?.child.try_wait().ok().flatten().is_some() {
+        return None;
+    }
+    let worker = slot.take()?;
+    if process_control::assign_to_current_owner(&worker.tree).is_err() {
+        *slot = Some(worker);
+        return None;
+    }
+    Some(worker)
+}
 
 #[derive(Clone)]
 struct NodeRpc {
@@ -414,23 +572,8 @@ pub struct PiRequest<'request> {
 }
 
 pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<String, String> {
-    if request.role == PiRole::NodeAgent {
-        return run_pi_with_timeout(request, on_output, None);
-    }
-    let variable = request
-        .role
-        .model_env_var()
-        .replace("_MODEL", "_TIMEOUT_SECONDS");
-    let seconds = match std::env::var(&variable) {
-        Ok(value) => value
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| format!("{variable} must be a positive integer"))?,
-        Err(std::env::VarError::NotPresent) => 900,
-        Err(error) => return Err(format!("Invalid {variable}: {error}")),
-    };
-    run_pi_with_timeout(request, on_output, Some(Duration::from_secs(seconds)))
+    // All roles run until completion or explicit cancellation.
+    run_pi_with_timeout(request, on_output, None)
 }
 
 fn run_pi_with_timeout(
@@ -462,7 +605,11 @@ fn run_pi_with_timeout(
     };
     // Fixture tests opt in with an explicit marker; existing print-mode fixtures
     // retain their original protocol.
-    let rpc_agent = (request.role == PiRole::NodeAgent || request.role == PiRole::Planner)
+    // RPC's stdin-EOF shutdown exits promptly after agent_settled. Print mode
+    // can keep Node's provider handles alive for seconds after the route text.
+    let rpc_agent = (request.role == PiRole::NodeAgent
+        || request.role == PiRole::Planner
+        || request.role == PiRole::Partitioner)
         && (!cfg!(feature = "fixture")
             || request
                 .environment
@@ -599,18 +746,51 @@ fn run_pi_with_timeout(
         .stderr(Stdio::piped());
     process_control::configure_command(&mut command);
     let started = Instant::now();
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
-    let process_tree = process_control::track(&child).map_err(|error| {
-        let _ = child.kill();
-        let _ = child.wait();
-        error
-    })?;
+    #[cfg(not(feature = "fixture"))]
+    let warm_compatible = request.role == PiRole::Partitioner
+        && request.tools == Some("")
+        && request.extension.is_none()
+        && request.session_id.is_none()
+        && request.images.is_none_or(<[_]>::is_empty)
+        // In particular, @image attachments require the per-request CLI args.
+        && request.extra_args.iter().all(|arg| matches!(
+            *arg, "--no-tools" | "--no-context-files" | "--thinking" | "off" | "low" | "minimal"
+        ))
+        && request.environment.iter().all(|(key, _)| {
+            matches!(*key, "GRAPHER_MODE" | "GRAPHER_GRAPH_PATH")
+        });
+    #[cfg(not(feature = "fixture"))]
+    let warm = warm_compatible.then(|| claim_warm_partitioner(config)).flatten();
+    #[cfg(not(feature = "fixture"))]
+    let warm_session = warm.as_ref().map(|worker| worker.session_dir.clone());
+    #[cfg(not(feature = "fixture"))]
+    let (mut child, process_tree) = if let Some(worker) = warm {
+        (worker.child, worker.tree)
+    } else {
+        let mut child = command.spawn()
+            .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
+        let tree = process_control::track(&child).map_err(|error| {
+            let _ = child.kill(); let _ = child.wait(); error
+        })?;
+        (child, tree)
+    };
+    #[cfg(feature = "fixture")]
+    let (mut child, process_tree) = {
+        let mut child = command.spawn()
+            .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
+        let tree = process_control::track(&child).map_err(|error| {
+            let _ = child.kill(); let _ = child.wait(); error
+        })?;
+        (child, tree)
+    };
     let _guard = ProcessGuard(process_tree.clone());
+    #[cfg(not(feature = "fixture"))]
+    let prewarmed = warm_session.is_some();
+    #[cfg(feature = "fixture")]
+    let prewarmed = false;
     on_output(format!(
         "{}\n",
-        serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "timestamp":crate::model::now()})
+        serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "prewarmed":prewarmed, "timestamp":crate::model::now()})
     ));
     let mut stdin = child.stdin.take().ok_or("Pi stdin unavailable")?;
     let (input_sender, input_receiver) = mpsc::channel();
@@ -637,6 +817,8 @@ fn run_pi_with_timeout(
                 request.session_dir.to_string_lossy().into_owned()
             });
             format!("planner:{identity}")
+        } else if request.role == PiRole::Partitioner {
+            format!("partition:{}", request.session_dir.display())
         } else {
             request
                 .environment
@@ -736,9 +918,14 @@ fn run_pi_with_timeout(
     let mut timed_out = false;
     let mut agent_ended = None::<Instant>;
     loop {
-        // Leave a brief handoff window for a concurrent steer arriving at the
-        // end of a turn. RPC prompt starts another turn if Pi is already idle.
-        if rpc_agent && agent_ended.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
+        // Planners/nodes need a steer handoff window. The Partitioner has no
+        // follow-up commands, so close RPC stdin as soon as its turn settles.
+        let handoff = if request.role == PiRole::Partitioner {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(500)
+        };
+        if rpc_agent && agent_ended.is_some_and(|t| t.elapsed() > handoff) {
             let pending_empty = rpc_pending
                 .as_ref()
                 .is_some_and(|p| p.lock().is_ok_and(|p| p.is_empty()));
@@ -878,12 +1065,39 @@ fn run_pi_with_timeout(
     drop(rpc_guard);
     drop(rpc_sender);
     let status = child.wait().map_err(|error| error.to_string())?;
+    #[cfg(not(feature = "fixture"))]
+    let copied_session = if let Some(warm_dir) = warm_session {
+        // Keep the per-attempt Pi conversation alongside partition.jsonl even
+        // when its process was started before the planning ID existed.
+        let copied = (|| -> Result<(), String> {
+            for entry in fs::read_dir(&warm_dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+                    fs::copy(entry.path(), request.session_dir.join(entry.file_name()))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        })();
+        if copied.is_ok() {
+            let _ = fs::remove_dir_all(&warm_dir);
+        }
+        copied
+    } else {
+        Ok(())
+    };
+    #[cfg(not(feature = "fixture"))]
+    if request.role == PiRole::Partitioner {
+        warm_partitioner(config.clone());
+    }
     // ProcessGuard clears the process group. Detached descendants are not
     // guaranteed to be covered; tasks must finish background work before returning.
     on_output(format!(
         "{}\n",
         serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success() && !timed_out && input_error.is_none(), "timedOut":timed_out, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
     ));
+    #[cfg(not(feature = "fixture"))]
+    copied_session?;
     if timed_out {
         return Err(format!(
             "{phase} timed out after {} seconds",
@@ -982,6 +1196,90 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(not(feature = "fixture"))]
+    #[test]
+    fn prestarted_partitioner_is_claimed_by_matching_repository_and_exits_on_eof() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let config = Config {
+            repository: repository.to_string_lossy().into(),
+            model: "openai-codex/gpt-6-sol".into(),
+            thinking_level: "high".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+        };
+        start_warm_partitioner_at(&config, temp.path()).unwrap();
+        let mut other = config.clone();
+        other.model = "other/model".into();
+        assert!(claim_warm_partitioner(&other).is_none());
+        let mut worker = process_control::with_owner("prewarm-test", || claim_warm_partitioner(&config))
+            .expect("matching idle worker");
+        assert!(claim_warm_partitioner(&config).is_none());
+        let mut stdin = worker.child.stdin.take().unwrap();
+        writeln!(stdin, "{}", serde_json::json!({"id":"probe", "type":"get_state"})).unwrap();
+        stdin.flush().unwrap();
+        let mut stdout = BufReader::new(worker.child.stdout.take().unwrap());
+        let response = (&mut stdout).lines().map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .find(|event| event["id"] == "probe").unwrap();
+        assert_eq!(response["success"], true);
+        assert_eq!(response["data"]["thinkingLevel"], "off");
+        drop(stdin);
+        use std::io::Read;
+        let mut tail = String::new();
+        stdout.read_to_string(&mut tail).unwrap();
+        let status = worker.child.wait().unwrap();
+        let mut stderr = String::new();
+        worker.child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+        assert!(status.success(), "{status}: {stderr}");
+        let _ = fs::remove_dir_all(worker.session_dir);
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn partitioner_rpc_closes_after_final_turn_without_waiting_for_print_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("partition_rpc.py");
+        fs::write(&script, r#"import json, sys
+assert '--mode' in sys.argv and sys.argv[sys.argv.index('--mode')+1] == 'rpc'
+request = json.loads(sys.stdin.readline())
+assert request['type'] == 'prompt'
+print(json.dumps({'type':'response','id':request['id'],'success':True}), flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'graph'}]}}), flush=True)
+print(json.dumps({'type':'agent_settled'}), flush=True)
+sys.stdin.read() # RPC shutdown is requested by closing stdin.
+"#).unwrap();
+        let config = Config {
+            engine: "pi".into(),
+            pi_command: "python3".into(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+        };
+        let mut events = String::new();
+        let result = run_pi(PiRequest {
+            role: PiRole::Partitioner,
+            config: &config,
+            cwd: temp.path(),
+            task: "test",
+            session_dir: &temp.path().join("partition-session"),
+            extension: None,
+            tools: Some(""),
+            session_id: None,
+            extra_args: vec![],
+            environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
+            system_prompt: None,
+            images: None,
+        }, |line| events.push_str(&line));
+        assert_eq!(result.unwrap(), "graph");
+        assert!(events.contains("grapher_process_exited"));
+    }
 
     #[cfg(feature = "fixture")]
     #[test]
@@ -1383,7 +1681,7 @@ sys.stdin.read()
 
     #[cfg(feature = "fixture")]
     #[test]
-    fn node_agent_ignores_legacy_deadline() {
+    fn node_agent_has_no_deadline_even_if_timeout_env_is_set() {
         let _guard = ENV_LOCK.lock().unwrap();
         let variable = PiRole::NodeAgent
             .model_env_var()
@@ -1423,6 +1721,51 @@ sys.stdin.read()
             None => std::env::remove_var(&variable),
         }
         assert_eq!(result.unwrap(), "done");
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn other_roles_ignore_legacy_timeout_environment() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            engine: "pi".into(),
+            pi_command: "/bin/sh".into(),
+            pi_args: vec!["-c".into(), "echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+        };
+        for role in [PiRole::Partitioner, PiRole::Planner, PiRole::Merger] {
+            let variable = role.model_env_var().replace("_MODEL", "_TIMEOUT_SECONDS");
+            let original = std::env::var_os(&variable);
+            std::env::set_var(&variable, "invalid");
+            let result = run_pi(
+                PiRequest {
+                    role,
+                    config: &config,
+                    cwd: temp.path(),
+                    task: "test",
+                    session_dir: &temp.path().join(role.name()),
+                    extension: None,
+                    tools: None,
+                    session_id: None,
+                    extra_args: vec![],
+                    environment: vec![],
+                    system_prompt: None,
+                    images: None,
+                },
+                |_| {},
+            );
+            match original {
+                Some(value) => std::env::set_var(&variable, value),
+                None => std::env::remove_var(&variable),
+            }
+            assert_eq!(result.unwrap(), "done", "{role:?}");
+        }
     }
 
     #[test]

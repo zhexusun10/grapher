@@ -143,7 +143,7 @@ function getLanguageForExt(fileName: string): string {
 
 const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string; title: string }> = [
   { id: "auto", label: "Auto", title: "智能路由：由 Partitioner 评估任务并自动选择单 Agent 或拓扑图架构" },
-  { id: "serial", label: "Serial", title: "单 Agent：跳过 Partitioner，直接启动单 Agent 独立沙箱执行" },
+  { id: "serial", label: "Serial", title: "单 Agent：跳过 Partitioner，直接启动单 Agent 执行" },
   { id: "graph", label: "Graph", title: "拓扑图：跳过 Partitioner，直接启动 Planner 规划生成协作拓扑图" },
 ];
 

@@ -276,6 +276,12 @@ pub enum EventKind {
         node: String,
         error: String,
     },
+    /// Human committed a conflicted preparation; the node task has not run.
+    WorkspaceResolved {
+        execution_id: String,
+        head: String,
+        nodes: Vec<String>,
+    },
     Invalidated {
         nodes: Vec<String>,
         target: String,
@@ -676,6 +682,28 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.status = "blocked".into();
             node.error = Some(error.clone());
         }
+        EventKind::WorkspaceResolved { execution_id, head, nodes } => {
+            let execution = state.executions.iter_mut().find(|item| item.id == *execution_id).unwrap();
+            execution.status = "resolved".into();
+            execution.completed_at = Some(event.timestamp);
+            let target = execution.node.clone();
+            state.publication = None;
+            for name in nodes {
+                let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
+                let node = state.nodes.get_mut(name).unwrap();
+                let unstarted = name != &target &&
+                    (node.status == "waiting" || (node.status == "blocked" && never_executed));
+                node.status = if unstarted { "waiting" } else { "dirty" }.into();
+                node.error = None;
+                node.head = if *name == target { Some(head.clone()) } else { None };
+                if !unstarted { node.revision += 1; }
+                if *name == target {
+                    node.instruction.clear();
+                    node.human_instruction = false;
+                }
+            }
+            state.phase = if state.paused { "paused" } else { "running" }.into();
+        }
         EventKind::Invalidated {
             nodes,
             target,
@@ -689,7 +717,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 let unstarted = node.status == "waiting" || (node.status == "blocked" && never_executed);
                 node.status = if unstarted { "waiting" } else { "dirty" }.into();
                 node.error = None;
-                if name != target {
+                // A manual rerun starts from the original inputs. Only a
+                // follow-up intervention continues from the previous result.
+                if name != target || (*human && instruction.is_empty()) {
                     node.head = None;
                 }
                 if *human && !unstarted {

@@ -150,6 +150,14 @@ export interface ImageAttachment {
   name?: string;
 }
 
+export interface ChatMessageVersion {
+  id: string;
+  text: string;
+  images?: ImageAttachment[];
+  timestamp: number;
+  subsequentEntries?: ChatMessage[];
+}
+
 export interface ChatMessage {
   id: string;
   parentId?: string | null;
@@ -159,6 +167,8 @@ export interface ChatMessage {
   timestamp?: number;
   runId?: string;
   node?: string;
+  versions?: ChatMessageVersion[];
+  currentVersionIndex?: number;
 }
 
 export interface PlanStreamEvent {

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState, memo } from "react";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
@@ -31,7 +31,7 @@ export async function prefetchPlanningTranscript(planningIds: string[], signal?:
   return text;
 }
 
-export function PlanningActivity({ planningIds, onReady, showUserTurns = false, skipFirstUser = false, onUserResize }: {
+export const PlanningActivity = memo(function PlanningActivity({ planningIds, onReady, showUserTurns = false, skipFirstUser = false, onUserResize }: {
   planningIds: string[];
   onReady?: () => void;
   showUserTurns?: boolean;
@@ -131,4 +131,4 @@ export function PlanningActivity({ planningIds, onReady, showUserTurns = false, 
         showUserTurns={showUserTurns} skipFirstUser={skipFirstUser} onUserResize={onUserResize} />
     </div>}
   </section>;
-}
+});

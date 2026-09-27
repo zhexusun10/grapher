@@ -35,7 +35,7 @@ fn single() -> Graph {
 }
 
 #[test]
-fn every_ready_graph_node_is_scheduled_regardless_of_legacy_parallel_setting() {
+fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
     let graph = Graph {
         original_goal: "parallel".into(),
         nodes: (0..12)
@@ -46,14 +46,165 @@ fn every_ready_graph_node_is_scheduled_regardless_of_legacy_parallel_setting() {
             .collect(),
         edges: vec![],
     };
-    for max_parallel in [0, 1, 2, 8] {
+    for (max_parallel, limit) in [(0, 8), (1, 1), (2, 2), (8, 8), (100, 8)] {
         let (_temp, _source, mut runtime) = setup(true, graph.clone());
         let mut config = runtime.state.config.clone().unwrap();
         config.max_parallel = max_parallel;
         runtime.edit_draft_graph(graph.clone(), config).unwrap();
         runtime.approve().unwrap();
-        assert_eq!(runtime.jobs().unwrap().len(), 12, "max_parallel={max_parallel}");
+        let mut jobs = runtime.jobs().unwrap();
+        assert_eq!(jobs.len(), limit, "max_parallel={max_parallel}");
+        assert!(runtime.jobs().unwrap().is_empty());
+        let first = jobs.remove(0);
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: first.execution.id,
+                head: runtime.state.base.clone(),
+                output: "done".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.jobs().unwrap().len(),
+            1,
+            "max_parallel={max_parallel}"
+        );
     }
+}
+
+#[test]
+fn feedback_scope_does_not_block_a_shared_ancestors_other_branch() {
+    let graph = Graph {
+        original_goal: "feedback and independent work".into(),
+        nodes: ["root", "owner", "review", "related", "fast", "after_fast"]
+            .into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() })
+            .collect(),
+        edges: [
+            ("root", "owner", false),
+            ("root", "fast", false),
+            ("owner", "review", false),
+            ("owner", "related", false),
+            ("review", "owner", true),
+            ("fast", "after_fast", false),
+        ]
+        .into_iter()
+        .map(|(from, to, feedback)| Edge {
+            from: from.into(), to: to.into(), feedback, relation: String::new(),
+        }).collect(),
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let root = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: root.execution.id, head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    let first = runtime.jobs().unwrap();
+    assert_eq!(first.len(), 2);
+    assert!(runtime.feedback_source_busy("review"));
+    let fast = first.iter().find(|job| job.execution.node == "fast").unwrap();
+    runtime.emit(EventKind::Finished {
+        execution_id: fast.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    assert_eq!(runtime.jobs().unwrap().iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["after_fast"]);
+    assert_eq!(runtime.state.nodes["owner"].status, "running");
+    assert_eq!(runtime.state.nodes["related"].status, "waiting");
+}
+
+
+#[test]
+fn named_parents_resolve_against_their_own_run_refs() {
+    let (temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let other_run = Uuid::new_v4().to_string();
+    for (id, content) in [(&runtime.state.run_id, "first"), (&other_run, "second")] {
+        let path = temp.path().join(content);
+        workspace::prepare(&source, &path, &runtime.state.base, &[]).unwrap();
+        fs::write(path.join("tracked.txt"), content).unwrap();
+        workspace::snapshot_node_for_run(&path, &source, "task", Some(id)).unwrap();
+    }
+    let target = temp.path().join("named-parent");
+    workspace::prepare_with_merger_expected_for_run(
+        &source, &target, &runtime.state.base, &["task".into()], &runtime.state.base,
+        Some(&runtime.state.run_id), || Err("unexpected conflict".into()),
+    ).unwrap();
+    assert_eq!(fs::read_to_string(target.join("tracked.txt")).unwrap(), "first");
+}
+
+#[test]
+fn parallel_snapshots_of_one_host_repository_do_not_race_ref_locks() {
+    let (temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let mut paths = Vec::new();
+    for i in 0..8 {
+        let path = temp.path().join(format!("worker{i}"));
+        workspace::prepare(&source, &path, &runtime.state.base, &[]).unwrap();
+        fs::write(path.join(format!("worker{i}.txt")), format!("{i}")).unwrap();
+        paths.push(path);
+    }
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = paths.iter().enumerate().map(|(i, path)| {
+            let source = &source;
+            let run_id = &run_id;
+            scope.spawn(move || workspace::snapshot_node_for_run(path, source, &format!("worker{i}"), Some(run_id)))
+        }).collect();
+        for (i, worker) in workers.into_iter().enumerate() {
+            let head = worker.join().unwrap().unwrap();
+            assert_eq!(workspace::git(&source, &["rev-parse", &format!("refs/grapher/runs/{run_id}/nodes/worker{i}")]).unwrap(), head);
+        }
+    });
+}
+
+#[test]
+fn rerun_starts_from_clean_inputs_but_intervention_continues_the_result() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    let path = Path::new(&first.execution.worktree);
+    workspace::prepare(&source, path, &first.execution.before, &[]).unwrap();
+    fs::write(path.join("tracked.txt"), "first result").unwrap();
+    let head = workspace::snapshot_node_for_run(path, &source, "task", Some(&runtime.state.run_id)).unwrap();
+    runtime.emit(EventKind::Finished {
+        execution_id: first.execution.id, head: head.clone(), output: "done".into(),
+    }).unwrap();
+    runtime.rerun("task").unwrap();
+    assert_eq!(runtime.state.nodes["task"].head, None);
+    let again = runtime.jobs().unwrap().remove(0);
+    assert_eq!(again.execution.before, runtime.state.base);
+    assert_ne!(again.execution.worktree, path.to_string_lossy());
+    workspace::prepare(&source, Path::new(&again.execution.worktree), &again.execution.before, &[]).unwrap();
+    assert_eq!(fs::read_to_string(Path::new(&again.execution.worktree).join("tracked.txt")).unwrap(), "original");
+    runtime.emit(EventKind::Finished {
+        execution_id: again.execution.id, head: head.clone(), output: "done".into(),
+    }).unwrap();
+    runtime.intervene("task", "continue").unwrap();
+    let followup = runtime.jobs().unwrap().remove(0);
+    assert_eq!(followup.execution.before, head);
+}
+
+#[test]
+fn resolved_preparation_is_not_a_completed_node_execution() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    let path = Path::new(&first.execution.worktree);
+    workspace::prepare(&source, path, &first.execution.before, &[]).unwrap();
+    fs::write(path.join("tracked.txt"), "human merged inputs").unwrap();
+    workspace::snapshot_repository(path).unwrap();
+    runtime.emit(EventKind::Failed {
+        node: "task".into(), execution_id: Some(first.execution.id.clone()),
+        error: "Workspace composition blocked".into(),
+    }).unwrap();
+    runtime.emit(EventKind::Blocked { node: "task".into(), error: "Resolve".into() }).unwrap();
+    runtime.resolved("task").unwrap();
+    assert_eq!(runtime.state.executions[0].status, "resolved");
+    assert_eq!(runtime.state.executions[0].after, None);
+    assert_eq!(runtime.state.nodes["task"].status, "dirty");
+    let head = runtime.state.nodes["task"].head.clone().unwrap();
+    let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(replayed.executions[0].status, "resolved");
+    assert_eq!(replayed.nodes["task"].status, "dirty");
+    assert_eq!(runtime.jobs().unwrap().remove(0).execution.before, head);
 }
 
 #[test]

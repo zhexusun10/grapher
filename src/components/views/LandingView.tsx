@@ -28,18 +28,25 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
 }) => {
   return (
     <motion.div
-      key="landing-screen"
       className="landing-screen"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
       exit={{
         opacity: 0,
-        transition: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
+        y: -16,
+        transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] },
       }}
-      transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+      transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
     >
       <div className="landing-center-content">
-        <div className="landing-title-container">
+        <motion.div
+          className="landing-title-container"
+          exit={{
+            opacity: 0,
+            y: -14,
+            transition: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
+          }}
+        >
           <motion.p
             className="landing-title"
             initial={{ opacity: 0 }}
@@ -64,8 +71,16 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
           >
             The Most Elegant Multi-Agent Architecture Ever
           </motion.p>
-        </div>
-        <div style={{ width: "100%", position: "relative" }}>
+        </motion.div>
+        <motion.div
+          style={{ width: "100%", position: "relative" }}
+          exit={{
+            opacity: 0,
+            scale: 0.98,
+            y: -6,
+            transition: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
+          }}
+        >
           <PromptBox
             repository={repository}
             value={goal}
@@ -78,7 +93,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
             onPlanModeChange={onPlanModeChange}
             placeholder=""
           />
-        </div>
+        </motion.div>
       </div>
     </motion.div>
   );

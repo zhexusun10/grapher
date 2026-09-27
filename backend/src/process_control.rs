@@ -86,6 +86,19 @@ pub fn track(child: &Child) -> Result<ProcessTree, String> {
     Ok(tree)
 }
 
+/// A prestarted Partitioner becomes owned by the Run only when its prompt is
+/// accepted. Cancellation then kills it just like a normally spawned agent.
+pub fn assign_to_current_owner(tree: &ProcessTree) -> Result<(), String> {
+    let owner = OWNER.with(|owner| owner.borrow().clone());
+    let mut processes = registry().lock().map_err(|error| error.to_string())?;
+    let entry = processes
+        .iter_mut()
+        .find(|(_, weak)| weak.ptr_eq(&Arc::downgrade(&tree.0)))
+        .ok_or("Prestarted process is no longer tracked")?;
+    entry.0 = owner;
+    Ok(())
+}
+
 fn retry_termination(mut terminate: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
     for attempt in 1..=3 {
         match terminate() {
@@ -383,6 +396,29 @@ mod tests {
         assert!(second.try_wait().unwrap().is_none());
         second_tree.terminate();
         let _ = second.wait();
+    }
+
+    #[test]
+    fn claimed_prestarted_process_is_cancelled_with_its_run() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping 127.0.0.1 -n 10 > NUL"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 10"]);
+            command
+        };
+        configure_command(&mut command);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let tree = track(&child).unwrap();
+        with_owner("claimed-run", || assign_to_current_owner(&tree)).unwrap();
+        terminate_owner("claimed-run");
+        assert!(!child.wait().unwrap().success());
     }
 
     #[test]
