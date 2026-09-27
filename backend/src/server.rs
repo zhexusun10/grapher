@@ -1560,7 +1560,14 @@ fn drive(service: Arc<Service>) {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                     // Only nodes that a pending feedback verdict could invalidate
                     // must drain. Independent branches may fill available slots.
-                    let jobs = runtime.jobs_with_publication(!service.planning.load(Ordering::SeqCst))?;
+                    let pending_sources: Vec<_> = feedback_results
+                        .iter()
+                        .map(|(from, _)| from.as_str())
+                        .collect();
+                    let jobs = runtime.jobs_with_pending_feedback(
+                        !service.planning.load(Ordering::SeqCst),
+                        &pending_sources,
+                    )?;
                     let parents: Vec<_> = jobs
                         .iter()
                         .map(|job| runtime.parents(&job.execution.node))
@@ -1706,12 +1713,10 @@ fn drive(service: Arc<Service>) {
                         } else {
                             result
                         };
-                        let result = service
-                            .runtime
-                            .lock()
-                            .map_err(|error| error.to_string())
-                            .and_then(|mut runtime| runtime.finish(&job.execution, result));
-                        let _ = completed_tx.send(result);
+                        // Finish in the driver: the review's Finished event and
+                        // its pending feedback barrier must be observed together
+                        // before the next scheduler pass.
+                        let _ = completed_tx.send((job.execution, result));
                         if let Ok(mut generation) = service.drive_signal.0.lock() {
                             *generation += 1;
                             service.drive_signal.1.notify_one();
@@ -1733,10 +1738,15 @@ fn drive(service: Arc<Service>) {
                     // a completion nor a control event can be lost before wait.
                     let generation = service.drive_signal.0.lock().map_err(|e| e.to_string())?;
                     match completed_rx.try_recv() {
-                        Ok(completed) => {
+                        Ok((execution, result)) => {
                             drop(generation);
                             in_flight -= 1;
-                            if let Some(feedback) = completed? {
+                            let feedback = service
+                                .runtime
+                                .lock()
+                                .map_err(|e| e.to_string())?
+                                .finish(&execution, result)?;
+                            if let Some(feedback) = feedback {
                                 feedback_results.push(feedback);
                             }
                         }

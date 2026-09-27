@@ -467,10 +467,48 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
     None
 }
 
+#[cfg(windows)]
+fn git_cli_path(value: &str) -> String {
+    // Git for Windows cannot open Win32 extended-length paths supplied as
+    // --git-dir/--work-tree, even though Rust's canonicalize() returns them.
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        value.strip_prefix(r"\\?\").unwrap_or(value).to_string()
+    }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn git_cli_path_handles_windows_extended_paths() {
+    assert_eq!(
+        git_cli_path(r"\\?\D:\project\shadow.git"),
+        r"D:\project\shadow.git"
+    );
+    assert_eq!(
+        git_cli_path(r"\\?\UNC\server\share\repo"),
+        r"\\server\share\repo"
+    );
+}
+
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     if let Some(result) = git_read(cwd, args) {
         return result;
     }
+    #[cfg(windows)]
+    let cli_args: Vec<String> = args
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            if i > 0 && matches!(args[i - 1], "--git-dir" | "--work-tree") {
+                git_cli_path(arg)
+            } else {
+                (*arg).to_string()
+            }
+        })
+        .collect();
+    #[cfg(not(windows))]
+    let cli_args = args;
     let hooks_path = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let hooks_config = format!("core.hooksPath={hooks_path}");
     let output = Command::new("git")
@@ -484,7 +522,7 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
             "-c",
             "user.email=runtime@grapher.local",
         ])
-        .args(args)
+        .args(cli_args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()

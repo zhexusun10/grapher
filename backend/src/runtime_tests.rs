@@ -112,6 +112,53 @@ fn feedback_scope_does_not_block_a_shared_ancestors_other_branch() {
 
 
 #[test]
+fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
+    let graph = Graph {
+        original_goal: "pending review".into(),
+        nodes: ["owner", "related", "review", "consumer", "other", "after_other"]
+            .into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() })
+            .collect(),
+        edges: [
+            ("owner", "related", false),
+            ("owner", "review", false),
+            ("review", "owner", true),
+            ("review", "consumer", false),
+            ("other", "after_other", false),
+        ]
+        .into_iter()
+        .map(|(from, to, feedback)| Edge {
+            from: from.into(), to: to.into(), feedback, relation: String::new(),
+        })
+        .collect(),
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph.clone());
+    let mut config = runtime.state.config.clone().unwrap();
+    config.max_parallel = 4;
+    runtime.edit_draft_graph(graph, config).unwrap();
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap();
+    let owner = first.iter().find(|job| job.execution.node == "owner").unwrap();
+    runtime.emit(EventKind::Finished {
+        execution_id: owner.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    let next = runtime.jobs().unwrap();
+    let review = next.iter().find(|job| job.execution.node == "review").unwrap();
+    runtime.emit(EventKind::Finished {
+        execution_id: review.execution.id.clone(), head: runtime.state.base.clone(), output: "<REVISE>".into(),
+    }).unwrap();
+    assert!(runtime.feedback_source_busy("review"));
+    let other = first.iter().find(|job| job.execution.node == "other").unwrap();
+    runtime.emit(EventKind::Finished {
+        execution_id: other.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    let jobs = runtime.jobs_with_pending_feedback(true, &["review"]).unwrap();
+    assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["after_other"]);
+    assert_eq!(runtime.state.nodes["consumer"].status, "waiting");
+    assert_eq!(runtime.state.phase, "running");
+}
+
+#[test]
 fn named_parents_resolve_against_their_own_run_refs() {
     let (temp, source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();

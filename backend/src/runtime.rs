@@ -752,6 +752,14 @@ impl Runtime {
     /// During a live Planner revision, schedule ready nodes but defer publishing
     /// or settling until the new graph has been committed (or planning failed).
     pub fn jobs_with_publication(&mut self, allow_publication: bool) -> Result<Vec<Job>, String> {
+        self.jobs_with_pending_feedback(allow_publication, &[])
+    }
+
+    pub(crate) fn jobs_with_pending_feedback(
+        &mut self,
+        allow_publication: bool,
+        pending_sources: &[&str],
+    ) -> Result<Vec<Job>, String> {
         if !self.state.approved
             || self.state.paused
             || matches!(
@@ -789,7 +797,14 @@ impl Runtime {
             };
             limit.saturating_sub(running)
         };
-        let busy_feedback = self.busy_feedback_nodes();
+        let mut busy_feedback = self.busy_feedback_nodes();
+        // A completed review may still be waiting for its affected running
+        // branch to drain. Its consumers must not start on the stale verdict.
+        // This is distinct from the feedback target's scope: a consumer of
+        // the review is not necessarily downstream of that target.
+        for source in pending_sources {
+            busy_feedback.extend(downstream(&self.state.graph, source));
+        }
         loop {
             let blocked: Vec<_> = self
                 .state
@@ -960,6 +975,7 @@ impl Runtime {
             });
         }
         if allow_publication
+            && pending_sources.is_empty()
             && jobs.is_empty()
             && !self.active()
             && !matches!(self.state.phase.as_str(), "completed" | "needs_attention")
