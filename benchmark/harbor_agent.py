@@ -21,9 +21,10 @@ from benchmark.run import harbor_usage
 class GrapherOptions(InstalledAgentOptions):
     version: None = Field(default=None, description="Derived from Grapher's build identity")
     grapher_root: str = Field(default="/installed-agent/grapher", description="Prepared Grapher checkout in the task environment")
-    thinking: Literal["off", "minimal", "low", "medium", "high", "xhigh"] = "medium"
+    thinking: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] = "medium"
     max_parallel: int = Field(default=4, ge=1, le=8)
-    timeout_sec: int = Field(default=3600, ge=1, description="End-to-end Grapher trial timeout in seconds")
+    timeout_sec: int = Field(default=28800, ge=1, description="End-to-end Grapher trial timeout in seconds (TB4 task limit: 28800)")
+    bootstrap_debian_tools: bool = Field(default=False, description="Install missing git/python3/bubblewrap before timing on Debian-based task images; requires root and apt-get")
 
 
 class GrapherAgent(BaseInstalledAgent):
@@ -52,6 +53,23 @@ class GrapherAgent(BaseInstalledAgent):
             raise ValueError("grapher_root must be an absolute path in the task environment")
         qroot = shlex.quote(root)
         binary = shlex.quote(f"{root}/backend/target/release/grapher")
+        if self.options.bootstrap_debian_tools:
+            # Only opt in for task images lacking the benchmark toolchain.
+            # Do not install/compile inside a timed agent run. Fail on images
+            # that cannot be prepared rather than mis-score environment errors.
+            await self.exec_as_agent(
+                environment,
+                command=("if ! command -v git >/dev/null || "
+                         "! command -v python3 >/dev/null || "
+                         "! test -x /usr/bin/bwrap; then "
+                         "test \"$(id -u)\" = 0 && command -v apt-get && "
+                         "apt-get update -qq && "
+                         "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
+                         "git python3 bubblewrap ca-certificates; fi"),
+                timeout_sec=600,
+            )
+        # Node 22 can be supplied by a read-only, pinned benchmark toolchain
+        # mount on task images that do not ship it themselves.
         checks = [
             f"test -x {binary}",
             f"test -f {qroot}/pi/node_modules/tsx/dist/cli.mjs",
@@ -68,7 +86,7 @@ class GrapherAgent(BaseInstalledAgent):
             f'test "$({binary} --build-identity)" = "$(git -C {qroot} rev-parse HEAD)"',
         ]
         # Never build a global/unpinned Pi or accept a dirty/stale backend.
-        await self.exec_as_agent(environment, command=" && ".join(checks))
+        await self.exec_as_agent(environment, command="PATH=/installed-agent/grapher-tools/bin:$PATH; " + " && ".join(checks))
         await environment.upload_file(Path(__file__).with_name("run.py"),
                                       "/installed-agent/grapher-harbor-run.py")
 
@@ -99,7 +117,7 @@ class GrapherAgent(BaseInstalledAgent):
         # Harbor passes --agent-env into exec; model_connection also forwards
         # provider credentials without putting them on the command line.
         await self.exec_as_agent(
-            environment, command=" ".join(map(shlex.quote, parts)),
+            environment, command="PATH=/installed-agent/grapher-tools/bin:$PATH; " + " ".join(map(shlex.quote, parts)),
             env=self.model_connection.env,
             timeout_sec=self.options.timeout_sec + 60,
         )

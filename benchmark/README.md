@@ -2,11 +2,11 @@
 
 `benchmark.harbor_agent:GrapherAgent` 是 Harbor 的 **custom installed agent**，无需将 Harbor 源码复制到本仓库。Harbor 进程需能从 `PYTHONPATH` 导入此模块；`benchmark/run.py` 会被上传并在每个 Harbor task 环境内运行。使用 Harbor 0.23.0（已在独立 checkout `31668af15560fb50a9d0584816d12726036656cf` 上验证 Python 3.12 自定义 agent 接口）。测试：`python3 -m unittest discover -s benchmark -p 'test_*.py'`（无 Harbor 时会跳过 import-path 接口测试；真正的 Linux/Harbor 容器验收另见下文）。
 
-## Linux Graph 前提（影响成绩）
+## Linux Graph 隔离环境要求
 
 Linux Graph 节点使用 **bubblewrap (bwrap)** 创建每实例 user/mount/PID namespace：只回挂当前私有 Git 仓库与当前 session；源目录、其他工作区及 Grapher 数据库由空的只读挂载遮蔽，引擎副本及原始 Grapher 安装目录只读，保留任务容器网络供模型认证使用，并显式回挂容器自身的 `/dev`（否则嵌套挂载可能使 Git/Pi 无法打开 `/dev/null`）。**Harbor 的外层任务容器不等于节点隔离**。请在任务镜像内安装 `/usr/bin/bwrap`（bubblewrap），并确保容器安全策略允许非特权 user/mount/PID namespace 和 bind/proc mount；适配器安装和 Grapher Graph preflight 会执行真实 bwrap 探测（包括 `/dev/null` 读写），失败即停止，不会强制 Serial 或使用 fixture 绕过边界。某些默认 Docker/云环境会禁用 user namespace，必须调整任务环境策略（不是把 Grapher 图节点改为无隔离）。
 
-**验收状态：** 当前主机是 Apple Silicon macOS，但已通过 Colima 的真实 Linux VM 运行当前 commit `a7e7a35b2973b4e1589ed8997ecd6e21fa43b6d1`：`linux_sandbox` 5 项隔离测试、双节点原生 Pi 测试、Harbor 0.23.0 `--install-only`，以及 Harbor Docker task 中的 Auto→Graph→Planner→bwrap 节点→发布→verifier 全链路均通过。该 Harbor 烟测使用本地协议 mock，不代表真实模型的语义质量；直接使用当前 `ANTHROPIC_API_KEY` 的真实模型试跑返回 401 `API key is invalid`，因此尚无真实模型成绩。Colima 的 Docker task 需要允许嵌套 namespace（本机 overlay 使用 `SYS_ADMIN`、`seccomp=unconfined`、`apparmor=unconfined`、`systempaths=unconfined`）；这是一项本地 Linux VM/容器策略前提，不应当作通用多租户安全配置。目标 Harbor 镜像仍需按其实际安全策略复现；未通过隔离预检的 trial 属于环境不兼容，不是模型语义失败。
+**验收状态：** 当前主机是 Apple Silicon macOS，通过 Colima 的真实 Linux VM（配置 `tb4-compose.yaml` 授予命名空间权限）运行：`linux_sandbox` 5 项隔离测试、双节点原生 Pi 测试、Harbor 0.23.0 `--install-only`，以及 Harbor Docker task 中的 Auto→Graph→Planner→bwrap 节点→发布→verifier 全链路均已打通，并已通过真实模型完成端到端冒烟验证。Colima 的 Docker task 需要允许嵌套 namespace（本机 overlay 使用 `SYS_ADMIN`、`seccomp=unconfined`、`apparmor=unconfined`、`systempaths=unconfined`）；这是一项本地 Linux VM/容器策略前提，不应当作通用多租户安全配置。目标 Harbor 镜像仍需按其实际安全策略复现。
 
 ## 准备环境
 
@@ -20,10 +20,16 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" harbor run \
   -a benchmark.harbor_agent:GrapherAgent \
   -m anthropic/claude-sonnet-4-5 \
   --agent-env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-  --ak thinking=medium --ak max_parallel=4 --ak timeout_sec=3600
+  --ak thinking=medium --ak max_parallel=4 --ak timeout_sec=28800
 ```
 
 按模型替换 `-m` 和认证变量；模型名必须是锁定 Pi 内置的 `provider/model`。服务商自定义 endpoint 需经 Harbor `--agent-env` 显式传对应 base URL/认证；benchmark 模式禁止从宿主 `~/.pi/agent/models.json` 或安装目录 `.env` 偷偷继承自定义模型/端点（未经安装适配的全新 provider 不在支持范围）。Harbor 的 trial 超时需大于 `timeout_sec`（另留安装、启动和日志同步时间）。
+
+## Terminal-Bench 4.0 本机运行记录
+
+`benchmark/tb4.py` 是本机 Harbor 0.23.0 的可重复启动器。TB4 66 题的原始 `agent.timeout_sec` 均为 **28800 秒**，正式运行器及适配器默认值均应使用 28800（Harbor 外层超时额外预留清理时间）。此前 `/Users/jerry/.local/share/grapher-tb4/results/2026-09-28__16-58-06/` 误设为 3600 秒，已于第二题执行期间取消，**仅保留作诊断，不可并入标准时限成绩**；原始 job lock、超时 trial trace 和取消日志保持不变。`benchmark/tb4.py`：`python3.12 -m benchmark.tb4 smoke` 用 **真实** `terminal-bench/terminal-bench@4.0.0`（66 个任务）中的 `bun-sourcemap-leak` 做端到端验收；确认 `agent/result.json`、verifier 结果和 `trace-manifest.json` 全部可读且文件哈希正确后，运行 `python3.12 -m benchmark.tb4 all` 才启动全量（单任务并发、单次尝试、不重试）。记录分别位于 `~/.local/share/grapher-tb4/{smoke,results}/`，每次调用的 `invocation-*.json` 记录固定模型、`thinking=max`、Harbor / Grapher / TB4 的固定 commit、镜像策略、适配器和工具 SHA、预算和参数（**不包含密钥**）；Harbor `lock.json` 记录每个 task 的实际不可变 digest，试验目录保留 verifier、终态和 Pi 逐轮 trace。失败 trial 必须计入总成绩，不能排除环境异常后仍称全量成绩。
+
+ARM64 Colima **不能**在 Harbor 提供的预编译 AMD64 任务镜像（QEMU）中使用嵌套 user namespace；启动器指定 `--force-build` 本机构建任务的 ARM64 镜像，`benchmark/tb4-compose.yaml` 为任务容器授予本机命名空间权限。安装时对缺少 `git` / `python3` / `bwrap` 的 Debian 任务镜像用 `--ak bootstrap_debian_tools=true` 在**计时前**安装；非 Debian、非 root 或 ARM64 不能构建的任务会显式失败，而不是悄悄放弃隔离。Node 22.19 二进制及编译好的 Grapher 只从之前经审计的固定镜像提取，分别以只读宿主目录 `/Users/jerry/.local/share/grapher-tb4/{toolchain,installed}` 挂入，不包含宿主 `.env` 或 Pi auth。密钥由启动器从 `~/.pi/agent/auth.json` 读入进程环境，仅按 Harbor 的 ModelConnectionSpec 传给 agent，不出现在命令行或持久化配置；切勿把 `invocation` 记录当作可获取密钥的方式。Grapher 的二进制内嵌 SHA 是 `a7e7a35b2973b4e1589ed8997ecd6e21fa43b6d1`（与当前工作区的后续 UI 提交不同），固定 Pi 是 `d5629e20489ccf770ed90b5a33941cb3b7ef24d0`。TB4 上游 Git tag `v4.0.0` 是 `452bf305c6daa62fc59061d22133a7cbc7c1572e`，**但上游 Git tag 的 `tasks/dataset.toml` digest 与 Harbor Hub 实际发布的 `@4.0.0` 包 digest 不相同**，不能使用 Git tag 的任务哈希替代成绩对应的 Harbor job `lock.json` 哈希。例如 `bun-sourcemap-leak` 上游清单为 `ac0b0f77...`，实际 Hub 锁为 `e55ae542...`。其他 harness 对比时必须使用**同一** TB4 task digests、构建架构、工具/权限、预算、模型端点、并发和重试策略；本机容器策略不是通用安全建议。
 
 ## 可比性与终态
 

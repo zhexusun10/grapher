@@ -23,7 +23,7 @@ else:
 @unittest.skipUnless(GrapherAgent is not None, "Harbor Python 3.12 is not installed")
 class HarborAgentTests(unittest.TestCase):
     def test_options_and_version_cannot_mislabel_binary(self):
-        GrapherAgent.preflight({"timeout_sec": 120, "max_parallel": 2})
+        GrapherAgent.preflight({"timeout_sec": 120, "max_parallel": 2, "thinking": "max"})
         with self.assertRaises(ValueError):
             GrapherAgent.preflight({"max_parallel": 9})
         with self.assertRaises(ValueError):
@@ -31,6 +31,7 @@ class HarborAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             agent = GrapherAgent(logs_dir=Path(directory), model_name="openai/fixed-model")
             self.assertEqual(agent.name(), "grapher")
+            self.assertEqual(agent.options.timeout_sec, 28800)
             self.assertIn("--build-identity", agent.get_version_command())
             with self.assertRaises(ValueError):
                 GrapherAgent(logs_dir=Path(directory), model_name="openai/fixed-model", version="fake")
@@ -47,13 +48,14 @@ class HarborAgentTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             agent = GrapherAgent(logs_dir=Path(directory), model_name="openai/fixed-model",
-                                 extra_env={"OPENAI_API_KEY": "not-a-real-key"})
+                                 thinking="max", extra_env={"OPENAI_API_KEY": "not-a-real-key"})
             agent.exec_as_agent = AsyncMock(return_value=SimpleNamespace(stdout="/task/project\n"))
             env = Environment()
             asyncio.run(agent.install(env))
             self.assertIn("grapher-harbor-run.py", env.uploads[0][0])
             preflight = agent.exec_as_agent.await_args.kwargs["command"]
             self.assertIn("--build-identity", preflight)
+            self.assertIn("PATH=/installed-agent/grapher-tools/bin:$PATH", preflight)
             self.assertIn("--unshare-user", preflight)
             self.assertIn("--dev-bind /dev /dev", preflight)
             self.assertIn("<>/dev/null", preflight)
@@ -64,11 +66,32 @@ class HarborAgentTests(unittest.TestCase):
             command = agent.exec_as_agent.await_args.kwargs["command"]
             self.assertIn("--repository /task/project", command)
             self.assertIn("--model openai/fixed-model", command)
+            self.assertIn("--thinking max", command)
+            self.assertIn("--timeout 28800", command)
+            self.assertIn("PATH=/installed-agent/grapher-tools/bin:$PATH", command)
             self.assertNotIn("Original Harbor instruction", command)
-            self.assertEqual(agent.exec_as_agent.await_args.kwargs["timeout_sec"], 3660)
+            self.assertEqual(agent.exec_as_agent.await_args.kwargs["timeout_sec"], 28860)
             self.assertNotIn("not-a-real-key", command)
             self.assertEqual(agent.exec_as_agent.await_args.kwargs["env"]["OPENAI_API_KEY"],
                              "not-a-real-key")
+
+    def test_optional_debian_bootstrap_is_not_part_of_timed_run(self):
+        class Environment:
+            default_user = None
+
+            async def upload_file(self, _source, _target):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = GrapherAgent(logs_dir=Path(directory), model_name="deepseek/deepseek-flash",
+                                 bootstrap_debian_tools=True)
+            agent.exec_as_agent = AsyncMock(return_value=SimpleNamespace(stdout="/app\n"))
+            asyncio.run(agent.install(Environment()))
+            self.assertIn("apt-get install", agent.exec_as_agent.await_args_list[0].kwargs["command"])
+            self.assertIn("--build-identity", agent.exec_as_agent.await_args_list[1].kwargs["command"])
+            agent.exec_as_agent.reset_mock()
+            asyncio.run(agent.run("task", Environment(), AgentContext()))
+            self.assertNotIn("apt-get", agent.exec_as_agent.await_args.kwargs["command"])
 
     def test_metrics_are_loaded_after_harbor_sync(self):
         with tempfile.TemporaryDirectory() as directory:

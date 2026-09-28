@@ -182,6 +182,45 @@ def retain_trace(data_dir, logs):
     (logs / "trace-manifest.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
 
+def observed_trace_usage(logs):
+    """Count completed Pi assistant replies, including when a run times out.
+
+    Backend runMetrics only settles finished nodes. Keep these independent,
+    explicitly partial observations for auditing; never substitute them for a
+    successful run's official metrics or imply an in-flight reply was billed 0.
+    """
+    keys = ("input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens")
+    usage = dict.fromkeys(keys, 0)
+    messages = 0
+    invalid_lines = 0
+    for file in (logs / "trace").rglob("*.jsonl"):
+        if file.is_symlink() or not file.is_file():
+            continue
+        with file.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    invalid_lines += 1
+                    continue
+                if record.get("type") != "message":
+                    continue
+                message = record.get("message") or {}
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                buckets = message.get("usage")
+                if not isinstance(buckets, dict):
+                    continue
+                messages += 1
+                for key in keys:
+                    value = buckets.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        usage[key] += value
+    return {"assistantMessages": messages, "usage": usage,
+            "invalidJsonlLines": invalid_lines,
+            "note": "Completed Pi assistant replies only; excludes in-flight usage."}
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -196,7 +235,7 @@ def main(argv=None):
     parser.add_argument("--model", required=True)
     parser.add_argument("--thinking", default="medium")
     parser.add_argument("--max-parallel", type=int, default=4)
-    parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument("--timeout", type=int, default=28800)
     parser.add_argument("--logs", required=True)
     args = parser.parse_args(argv)
     logs = Path(args.logs)
@@ -280,6 +319,14 @@ def main(argv=None):
                 # Fail closed if archiving fails rather than report an
                 # unauditable successful run.
                 retain_trace(data_dir, logs)
+                result_path = logs / "result.json"
+                if result_path.is_file():
+                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                    observed = observed_trace_usage(logs)
+                    observed["completeness"] = ("complete" if result.get("phase") == "completed"
+                                                 and not result.get("error") else "partial")
+                    result["observedTraceUsage"] = observed
+                    result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

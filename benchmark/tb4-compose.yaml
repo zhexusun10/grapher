@@ -1,0 +1,10 @@
+# Grapher Graph nodes require nested Linux user/mount/PID namespaces.
+# Local single-user Colima benchmark only; NOT a secure multi-tenant policy.
+services:
+  main:
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined

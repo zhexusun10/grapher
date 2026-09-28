@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 
-from benchmark.run import config_for, harbor_usage, retain_trace, run_goal
+from benchmark.run import config_for, harbor_usage, observed_trace_usage, retain_trace, run_goal
 
 
 class FakeClient:
@@ -78,6 +78,29 @@ class AdapterTests(unittest.TestCase):
         other["runId"] = "two"
         with self.assertRaisesRegex(RuntimeError, "switched runs"):
             run_goal(FakeClient(state("running"), [other]), "task", {}, 1, 0)
+
+    def test_partial_trace_usage_survives_unfinished_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            session = root / "trace/sessions/node/session.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(''.join([
+                json.dumps({"type": "message", "message": {"role": "assistant",
+                            "usage": {"input": 2, "output": 3, "cacheRead": 7}}}) + '\n',
+                json.dumps({"type": "message", "message": {"role": "assistant",
+                            "usage": {"input": 4, "output": 8, "reasoning": 6}}}) + '\n',
+                '{"type":"message","message":\n',  # interrupted final record
+            ]))
+            (root / "trace/planning/first").mkdir(parents=True)
+            (root / "trace/planning/first/partition.jsonl").write_text(
+                json.dumps({"type": "message_end", "message": {"role": "assistant",
+                            "usage": {"input": 1000}}}) + '\n')
+            data = observed_trace_usage(root)
+            self.assertEqual(data["assistantMessages"], 2)
+            self.assertEqual(data["invalidJsonlLines"], 1)
+            self.assertEqual(data["usage"]["input"], 6)
+            self.assertEqual(data["usage"]["cacheRead"], 7)
+            self.assertEqual(data["usage"]["reasoning"], 6)
 
     def test_usage_includes_cached_tokens_in_harbor_input(self):
         result = {"runMetrics": {"totalUsage": {
@@ -175,6 +198,7 @@ HTTPServer(('127.0.0.1',int(os.environ['GRAPHER_PORT'])),Handler).serve_forever(
             self.assertEqual((root / "published.txt").read_text(), "merged result")
             result = json.loads((root / "logs/result.json").read_text())
             self.assertEqual((result["route"], result["phase"]), ("graph", "completed"))
+            self.assertEqual(result["observedTraceUsage"]["completeness"], "complete")
             self.assertEqual(json.loads((root / "logs/snapshot.json").read_text())["runId"], "graph-run")
             self.assertTrue((root / "logs/trace-manifest.json").exists())
             failure = subprocess.run(command, env={**os.environ, "FAKE_PUBLICATION": "failed"},
@@ -183,6 +207,7 @@ HTTPServer(('127.0.0.1',int(os.environ['GRAPHER_PORT'])),Handler).serve_forever(
             self.assertIn("without published", failure.stderr)
             failed_result = json.loads((root / "logs/result.json").read_text())
             self.assertEqual((failed_result["runId"], failed_result["route"]), ("graph-run", "graph"))
+            self.assertEqual(failed_result["observedTraceUsage"]["completeness"], "partial")
             self.assertEqual(json.loads((root / "logs/snapshot.json").read_text())["runId"], "graph-run")
             self.assertTrue((root / "logs/trace-manifest.json").exists())
 
