@@ -26,6 +26,28 @@ test('editing a completed turn hides the abandoned node branch but preserves ear
   assert.equal(state.events.length, 5, 'old durable history remains intact');
 });
 
+test('selecting an existing branch does not append another version', () => {
+  const state: Snapshot = {
+    ...emptySnapshot,
+    events: [
+      { sequence: 1, timestamp: 10, type: 'invalidated', target: 'task', instruction: 'original' },
+      { sequence: 2, timestamp: 20, type: 'conversation_edited', target: 'task', instruction: 'replacement', old_instruction: 'original', from_event_sequence: 1 },
+      { sequence: 3, timestamp: 30, type: 'conversation_edited', target: 'task', instruction: 'original', old_instruction: 'replacement', from_event_sequence: 1, selected_version: 0 },
+    ],
+  };
+  const selected = state.events[2];
+  assert.deepEqual(versionsForEdit(state, selected).map(version => version.text), ['original', 'replacement']);
+  assert.equal(selected.selected_version, 0);
+
+  const continued: GraphEvent = {
+    sequence: 4, timestamp: 40, type: 'conversation_edited', target: 'task', instruction: 'continued',
+    old_instruction: 'original', from_event_sequence: 3,
+  };
+  const continuedState = { ...state, events: [...state.events, continued] };
+  assert.deepEqual(versionsForEdit(continuedState, continued).map(version => version.text), ['original', 'continued']);
+});
+
+
 test('message versions survive reload and nested edits', () => {
   const state: Snapshot = {
     ...emptySnapshot,

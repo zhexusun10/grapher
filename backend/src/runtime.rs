@@ -681,11 +681,19 @@ impl Runtime {
         &mut self, node: &str, execution_id: &str, old_text: &str,
         instruction: &str, images: Option<Vec<ImageAttachment>>,
     ) -> Result<(), String> {
+        self.edit_node_message_with_version(node, execution_id, old_text, instruction, images, None)
+    }
+
+    pub fn edit_node_message_with_version(
+        &mut self, node: &str, execution_id: &str, old_text: &str,
+        instruction: &str, images: Option<Vec<ImageAttachment>>,
+        selected_version: Option<usize>,
+    ) -> Result<(), String> {
         if instruction.trim().is_empty() { return Err("Enter a replacement message".into()); }
         self.validate_invalidation(node, false)?;
         let anchor = self.state.executions.iter().find(|execution| execution.id == execution_id
             && execution.node == node && execution.completed_at.is_some()
-            && !self.state.superseded_execution_ids.contains(&execution.id))
+            && (selected_version.is_some() || !self.state.superseded_execution_ids.contains(&execution.id)))
             .ok_or("Select an active completed message to edit")?.clone();
         let start = self.state.events.iter().position(|event| matches!(
             &event.kind, EventKind::Started { execution } if execution.id == execution_id
@@ -699,7 +707,7 @@ impl Runtime {
             execution.session_id == anchor.session_id && execution.node == node
         ).ok_or("Missing Pi session origin")?.id.clone();
         let branch = crate::session_branch::branch_before_user(
-            &self.root.join("sessions").join(first_id), &anchor.session_id,
+            &self.root.join("sessions").join(&first_id), &anchor.session_id,
             Path::new(&anchor.worktree), old_text,
             anchor.started_at, anchor.completed_at.ok_or("Execution is not settled")?,
         )?;
@@ -708,9 +716,8 @@ impl Runtime {
             instruction: instruction.trim().into(), images,
             from_execution_id: execution_id.into(), from_event_sequence,
             old_instruction: old_text.into(),
-            first_turn: self.state.executions.iter().find(|execution|
-                execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)
-            ).is_some_and(|execution| execution.id == anchor.id),
+            first_turn: anchor.id == first_id,
+            selected_version,
         }) {
             return Err(match branch.rollback() {
                 Ok(()) => error,

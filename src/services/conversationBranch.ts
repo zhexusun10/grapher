@@ -17,12 +17,24 @@ export function activeNodeConversationEvents(state: Snapshot, node: string): Gra
   }));
 }
 
+export function versionIndexForEdit(state: Snapshot, edit: GraphEvent, versions = versionsForEdit(state, edit)): number {
+  return edit.selected_version ?? versions.length - 1;
+}
+
 export function versionsForEdit(state: Snapshot, edit: GraphEvent): ChatMessageVersion[] {
   const versions: ChatMessageVersion[] = [];
   let cursor: GraphEvent | undefined = edit;
   const visited = new Set<number>();
   while (cursor?.type === "conversation_edited" && !visited.has(cursor.sequence)) {
     visited.add(cursor.sequence);
+    if (cursor.selected_version !== undefined) {
+      const previous = state.events.slice().reverse().find(event =>
+        event.sequence < cursor!.sequence && event.type === "conversation_edited" &&
+        event.target === cursor!.target && event.selected_version === undefined);
+      const base = previous ? versionsForEdit(state, previous) : [];
+      const branchEnd = versions.length === 0 ? base.length : cursor.selected_version + 1;
+      return [...base.slice(0, branchEnd), ...versions];
+    }
     const nextExecution = state.events.find(event => event.type === "started" &&
       event.sequence > cursor!.sequence && event.execution?.node === cursor!.target)?.execution?.id;
     versions.unshift({ id: `v${cursor.sequence}`, text: cursor.instruction ?? "", images: cursor.images,

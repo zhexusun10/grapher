@@ -1995,7 +1995,8 @@ fn control(
 }
 
 fn edit_planner(
-    run_id: String, old_text: String, instruction: String, service: &Arc<Service>,
+    run_id: String, old_text: String, instruction: String,
+    selected_version: Option<usize>, service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     if service.planning.load(Ordering::SeqCst) {
         return Err("Wait for the current Planner turn to finish before editing history".into());
@@ -2033,9 +2034,11 @@ fn edit_planner(
     let branch = crate::session_branch::branch_before_planner_user(
         &session_dir, &session_id, std::path::Path::new(&cwd), old_text.trim(),
     )?;
-    let first_turn = old_text.trim() == state.graph.original_goal.trim();
+    let mut first_turn = old_text.trim() == state.graph.original_goal.trim();
+    if selected_version == Some(0) { first_turn = true; }
     if let Err(error) = runtime.emit(EventKind::PlannerConversationEdited {
         old_instruction: old_text.trim().into(), instruction: instruction.trim().into(), first_turn,
+        selected_version,
     }) {
         return Err(match branch.rollback() { Ok(()) => error, Err(rollback) => format!("{error}; {rollback}") });
     }
@@ -2045,14 +2048,14 @@ fn edit_planner(
 fn edit_node(
     node: String, execution_id: String, old_text: String, instruction: String,
     run_id: String, images: Option<Vec<crate::model::ImageAttachment>>,
-    service: &Arc<Service>,
+    selected_version: Option<usize>, service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     if service.planning.load(Ordering::SeqCst) {
         return Err("Wait for planning to finish before editing a node conversation".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     if runtime.state.run_id != run_id { return Err("Run changed while editing a message".into()); }
-    runtime.edit_node_message(&node, &execution_id, &old_text, &instruction, images)?;
+    runtime.edit_node_message_with_version(&node, &execution_id, &old_text, &instruction, images, selected_version)?;
     let snapshot = runtime.state.clone();
     drop(runtime);
     drive(service.clone());
@@ -2778,12 +2781,13 @@ pub fn dispatch(
             )?),
             "edit_planner" => Some(edit_planner(
                 argument(&body, "runId")?, argument(&body, "oldText")?,
-                argument(&body, "instruction")?, service,
+                argument(&body, "instruction")?, argument(&body, "versionIndex").ok(), service,
             )?),
             "edit_node" => Some(edit_node(
                 argument(&body, "node")?, argument(&body, "executionId")?,
                 argument(&body, "oldText")?, argument(&body, "instruction")?,
-                argument(&body, "runId")?, argument(&body, "images").ok(), service,
+                argument(&body, "runId")?, argument(&body, "images").ok(),
+                argument(&body, "versionIndex").ok(), service,
             )?),
             "reset_workspace" => Some(reset_workspace(service)?),
             _ => None,
@@ -2879,12 +2883,13 @@ pub fn dispatch(
         )?),
         "edit_planner" => to_value(edit_planner(
             argument(&body, "runId")?, argument(&body, "oldText")?,
-            argument(&body, "instruction")?, service,
+            argument(&body, "instruction")?, argument(&body, "versionIndex").ok(), service,
         )?),
         "edit_node" => to_value(edit_node(
             argument(&body, "node")?, argument(&body, "executionId")?,
             argument(&body, "oldText")?, argument(&body, "instruction")?,
-            argument(&body, "runId")?, argument(&body, "images").ok(), service,
+            argument(&body, "runId")?, argument(&body, "images").ok(),
+            argument(&body, "versionIndex").ok(), service,
         )?),
         "repository_status" => {
             let repository: String = argument(&body, "repository")?;

@@ -758,6 +758,13 @@ pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
                         let _ = target;
                         fs::copy(&original, &copied).map_err(|e| e.to_string())?;
                     }
+                } else if meta.is_dir() {
+                    // A Git submodule is stored in the index as a gitlink, but
+                    // is a directory in the working tree. Its contents will
+                    // be copied by copy_planner_files below; treating the
+                    // directory as an unsupported regular file breaks Planner
+                    // startup on projects containing a checked-out submodule.
+                    continue;
                 } else if meta.is_file() {
                     fs::copy(&original, &copied).map_err(|e| e.to_string())?;
                 } else {

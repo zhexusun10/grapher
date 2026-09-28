@@ -1642,7 +1642,7 @@ export default function App() {
     }
   });
 
-  const handleEditMessageSubmit = useCallback(async (targetMsg: ChatMessage, newText: string) => {
+  const handleEditMessageSubmit = useCallback(async (targetMsg: ChatMessage, newText: string, selectedVersion?: number) => {
     const cleanText = newText.trim();
     if (!cleanText) return;
     if (repositoryBlocked) {
@@ -1668,6 +1668,69 @@ export default function App() {
     if (isPlanning || recoveredPlanning?.status === "running") {
       setError("请先停止或等待正在运行的 Planner 完成，再修改历史消息。");
       return false;
+    }
+
+    // Choosing an existing version activates that Pi tree branch. It must not
+    // be represented as another user edit, otherwise 2/2 would become 3/3.
+    if (selectedVersion !== undefined) {
+      const selectedVersionData = targetMsg.versions?.[selectedVersion];
+      if (!selectedVersionData || selectedVersion < 0 || selectedVersion >= (targetMsg.versions?.length ?? 0)) {
+        setError("无法定位要切换的对话版本，请重新加载对话后重试。");
+        return false;
+      }
+      const selectedText = selectedVersionData.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
+      if (!selectedText) return false;
+      const selectedExecution = selectedVersionData.executionId
+        ? state.executions.find(item => item.id === selectedVersionData.executionId)
+        : undefined;
+      const selectedNode = state.graph.nodes.find((item) => item.name === selected);
+      const selectedNodeName = targetMsg.node || (selectedNode ? selectedNode.name : (
+        routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined
+      ));
+      const selectedMessage = {
+        ...targetMsg,
+        text: selectedText,
+        images: selectedVersionData.images,
+        currentVersionIndex: selectedVersion,
+      };
+      try {
+        await requireRepository(state.config?.repository || config.repository);
+        if (!selectedNodeName) {
+          if (routeType !== "graph" || !state.runId) throw new Error("当前没有可回退的 Planner 会话。");
+          const snap = await runtimeService.editPlanner({ runId: state.runId,
+            oldText: selectedText, instruction: selectedText, versionIndex: selectedVersion });
+          setState(snap);
+          setSessionEntries([selectedMessage]);
+          setGoal(selectedText);
+          await handlePlanGoal(selectedText, { images: selectedVersionData.images }, "graph", state.runId, false, selectedMessage);
+          return true;
+        }
+        if (!selectedExecution || selectedExecution.node !== selectedNodeName ||
+            !["completed", "failed"].includes(selectedExecution.status)) {
+          throw new Error("无法定位这条消息对应的已结束 Pi 会话。请等待当前执行结束，或重新加载对话后重试。");
+        }
+        const snap = await runtimeService.editNode({
+          runId: state.runId, node: selectedNodeName, executionId: selectedExecution.id,
+          oldText: selectedText, instruction: selectedText, images: selectedVersionData.images,
+          versionIndex: selectedVersion,
+        });
+        setState(snap);
+        if (isInitialGoal) setGoal(selectedText);
+        setSessionEntries(prev => {
+          const index = prev.findIndex(entry => entry.id === targetMsg.id);
+          if (index < 0) return [selectedMessage];
+          const next = [...prev];
+          next[index] = selectedMessage;
+          return next.slice(0, index + 1);
+        });
+        setEditingMessage(null);
+        setEditPrefillText("");
+        if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
+        return true;
+      } catch (error) {
+        setError(String(error));
+        return false;
+      }
     }
 
     if (isInitialGoal && routeType === "graph" && state.runId && state.planningId) {
@@ -1918,7 +1981,7 @@ export default function App() {
     if (!version || index === message.currentVersionIndex) return;
     const execution = version.executionId ? state.executions.find(item => item.id === version.executionId) : undefined;
     void handleEditMessageSubmit({ ...message, images: version.images,
-      executionId: execution?.id ?? message.executionId }, version.text);
+      executionId: execution?.id ?? message.executionId }, version.text, index);
   }, [handleEditMessageSubmit]);
 
   useEffect(() => {
@@ -2192,6 +2255,7 @@ export default function App() {
                     goal={goal}
                     active={active}
                     locked={locked}
+                    pendingRequest={busy}
                     publishing={publishing}
                     publicationFailed={publicationFailed}
                     nodes={nodes}

@@ -61,6 +61,38 @@ fn private_planner_copies_dirty_and_ignored_files_without_modifying_source() {
 }
 
 #[test]
+fn private_planner_accepts_checked_out_gitlink_directories() {
+    let temp = TempDir::new().unwrap();
+    let (source, _) = repository(temp.path());
+
+    // A checked-out submodule is a directory on disk but a gitlink (mode
+    // 160000) in the parent repository's index. This is the shape that used
+    // to make prepare_planner report "Unsupported source entry".
+    let submodule = source.join("pi");
+    fs::create_dir(&submodule).unwrap();
+    git(&submodule, &["init"]).unwrap();
+    fs::write(submodule.join("entry.txt"), "submodule\n").unwrap();
+    let submodule_head = snapshot_repository(&submodule).unwrap();
+    git(
+        &source,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{submodule_head},pi"),
+        ],
+    )
+    .unwrap();
+
+    let private = temp.path().join(".grapher-workspaces/run/planner");
+    grapher::workspace::prepare_planner(&source, &private).unwrap();
+    assert_eq!(
+        fs::read_to_string(private.join("pi/entry.txt")).unwrap(),
+        "submodule\n"
+    );
+}
+
+#[test]
 fn concurrent_planner_merges_preserve_source_on_conflict() {
     let temp = TempDir::new().unwrap();
     let (source, _) = repository(temp.path());

@@ -316,6 +316,8 @@ pub enum EventKind {
         from_event_sequence: i64,
         old_instruction: String,
         first_turn: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_version: Option<usize>,
     },
     /// The Planner shares a Pi session across revisions. Preserve the old
     /// branch while replaying a replacement turn in the same Run.
@@ -323,6 +325,8 @@ pub enum EventKind {
         old_instruction: String,
         instruction: String,
         first_turn: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_version: Option<usize>,
     },
     Feedback {
         from: String,

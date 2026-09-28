@@ -49,12 +49,16 @@ export function useSnapshotPolling(
       } catch (err) {
         if (!cancelled) console.warn("Snapshot poll error:", err);
       } finally {
-        if (!cancelled) timer = setTimeout(poll, 2500);
+        if (!cancelled) {
+          const hasLiveRun = [...runIdsRef.current, backendStatusRef.current.runId].some((id) =>
+            id && ["running", "publishing", "merging"].includes(phases.current.get(id) ?? ""));
+          timer = setTimeout(poll, hasLiveRun ? 750 : 2500);
+        }
       }
     };
-    timer = setTimeout(poll, 2500);
+    timer = setTimeout(poll, ["running", "publishing", "merging"].includes(viewedPhase) ? 750 : 2500);
     return () => { cancelled = true; clearTimeout(timer); abort.abort(); };
-  }, [observeSnapshot, setSnapshot]);
+  }, [observeSnapshot, setSnapshot, viewedPhase]);
 
   return setBackendStatus;
 }
