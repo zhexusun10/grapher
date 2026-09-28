@@ -1207,6 +1207,17 @@ impl Runtime {
                     head: head.clone(),
                     output: format!("{raw}\n── Final response ──\n{output}\n"),
                 })?;
+                #[cfg(not(feature = "fixture"))]
+                if self.is_serial() && !self.state.paused && !self.state.stop_requested {
+                    if let (Some(config), Some(origin)) = (
+                        self.state.config.clone(),
+                        self.state.executions.iter().find(|item|
+                            item.node == execution.node && item.session_id == execution.session_id),
+                    ) {
+                        engine::warm_node(config, PathBuf::from(&execution.worktree),
+                            self.root.join("sessions").join(&origin.id), execution.session_id.clone());
+                    }
+                }
                 if let Some(exec) = self
                     .state
                     .executions

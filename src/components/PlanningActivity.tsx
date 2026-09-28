@@ -158,7 +158,7 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
     {error && <p role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>重试</button></p>}
     {!loading && !error && !output && <p>没有可用的规划输出。</p>}
     {output && <div className="planning-activity-output">
-      <VirtualizedTranscript key={`${key}:${showUserTurns}:${skipFirstUser}`} output={activeOutput} inline
+      <VirtualizedTranscript key={`${key}:${showUserTurns}:${skipFirstUser}:${editKey}`} output={activeOutput} inline
         showUserTurns={showUserTurns} skipFirstUser={skipFirstUser} onUserResize={onUserResize}
         onEditUser={onEditUser} />
     </div>}

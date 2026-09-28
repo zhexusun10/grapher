@@ -1661,7 +1661,10 @@ export default function App() {
       return;
     }
 
-    const isInitialGoal = targetMsg.id === "msg-initial-goal" || (!targetMsg.node && (
+    const isPlannerHistoryInitial = routeType === "graph" && !targetMsg.node &&
+      targetMsg.id.startsWith("planner-history-") &&
+      targetMsg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === state.graph.originalGoal.trim();
+    const isInitialGoal = targetMsg.id === "msg-initial-goal" || isPlannerHistoryInitial || (!targetMsg.node && (
       (sessionEntries.length > 0 && sessionEntries[0].id === targetMsg.id) ||
       effectiveMessages[0]?.id === targetMsg.id
     ));
@@ -1775,7 +1778,10 @@ export default function App() {
           runId: state.runId, oldText: cleanExisting, instruction: cleanText,
         });
         setState(snap);
-        setSessionEntries([...previous, updatedPlannerMessage]);
+        // Planner history is rendered from the durable Pi transcript. Keep only
+        // the local prefix here; inserting a historical follow-up as the first
+        // effective message would place it above the route decision card.
+        setSessionEntries(previous);
         await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updatedPlannerMessage);
         return true;
       } catch (error) { setError(String(error)); return false; }

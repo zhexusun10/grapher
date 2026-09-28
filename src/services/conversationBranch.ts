@@ -17,6 +17,11 @@ export function activeNodeConversationEvents(state: Snapshot, node: string): Gra
   }));
 }
 
+export function executionIdForEdit(state: Snapshot, edit: GraphEvent): string | undefined {
+  return state.events.find(event => event.type === "started" && event.sequence > edit.sequence &&
+    event.execution?.node === edit.target)?.execution?.id;
+}
+
 export function versionIndexForEdit(state: Snapshot, edit: GraphEvent, versions = versionsForEdit(state, edit)): number {
   return edit.selected_version ?? versions.length - 1;
 }
@@ -35,8 +40,7 @@ export function versionsForEdit(state: Snapshot, edit: GraphEvent): ChatMessageV
       const branchEnd = versions.length === 0 ? base.length : cursor.selected_version + 1;
       return [...base.slice(0, branchEnd), ...versions];
     }
-    const nextExecution = state.events.find(event => event.type === "started" &&
-      event.sequence > cursor!.sequence && event.execution?.node === cursor!.target)?.execution?.id;
+    const nextExecution = executionIdForEdit(state, cursor);
     versions.unshift({ id: `v${cursor.sequence}`, text: cursor.instruction ?? "", images: cursor.images,
       timestamp: cursor.timestamp, executionId: nextExecution });
     const parent: GraphEvent | undefined = state.events.find(e => e.sequence === cursor?.from_event_sequence);

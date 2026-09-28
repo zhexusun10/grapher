@@ -374,6 +374,8 @@ fn load_run(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> 
         return Err("Wait for the current operation to finish before switching runs".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    #[cfg(not(feature = "fixture"))]
+    crate::engine::invalidate_warm_node();
     runtime.load_run(&run_id)
 }
 
@@ -411,7 +413,10 @@ fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, 
     fs::write(runtime.root.join("config.json"), bytes).map_err(|e| e.to_string())?;
     drop(runtime);
     #[cfg(not(feature = "fixture"))]
-    crate::engine::warm_partitioner(config);
+    {
+        crate::engine::invalidate_warm_node();
+        crate::engine::warm_partitioner(config);
+    }
     bootstrap(service, false)
 }
 
@@ -2055,6 +2060,8 @@ fn edit_node(
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     if runtime.state.run_id != run_id { return Err("Run changed while editing a message".into()); }
+    #[cfg(not(feature = "fixture"))]
+    crate::engine::invalidate_warm_node();
     runtime.edit_node_message_with_version(&node, &execution_id, &old_text, &instruction, images, selected_version)?;
     let snapshot = runtime.state.clone();
     drop(runtime);
@@ -2073,6 +2080,8 @@ fn reset_workspace(service: &Arc<Service>) -> Result<Snapshot, String> {
         return Err("Wait for the current operation to finish".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    #[cfg(not(feature = "fixture"))]
+    crate::engine::invalidate_warm_node();
     runtime.reset_workspace()
 }
 
@@ -2100,6 +2109,8 @@ fn clear_history(service: &Arc<Service>) -> Result<(), String> {
         }
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    #[cfg(not(feature = "fixture"))]
+    crate::engine::invalidate_warm_node();
     runtime.clear_history()
 }
 

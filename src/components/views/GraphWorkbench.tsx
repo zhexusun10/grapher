@@ -15,7 +15,7 @@ import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-inp
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
-import { activeNodeConversationEvents, activeNodeExecutions, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
+import { activeNodeConversationEvents, activeNodeExecutions, executionIdForEdit, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
 import { isNodeWorking } from "../../lib/nodeWorking";
 import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
@@ -310,7 +310,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [initialTaskEdit, state.events]);
   const nodeMessages = useMemo(() => {
     if (!selectedNode) return [];
-    const local = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === selectedNode.name && msg.runId === state.runId);
+    const localMessages = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === selectedNode.name && msg.runId === state.runId);
+    const latestEdit = [...state.events].reverse().find((event) =>
+      event.type === "conversation_edited" && event.target === selectedNode.name && event.nodes?.includes(selectedNode.name));
+    const local = latestEdit?.old_instruction
+      ? (() => {
+          const index = localMessages.findIndex((msg) =>
+            msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === latestEdit.old_instruction);
+          return index >= 0 ? localMessages.slice(0, index) : localMessages;
+        })()
+      : localMessages;
     const localRemaining = [...local];
     const recorded = activeNodeConversationEvents(state, selectedNode.name).filter((event) =>
       ((event.type === "invalidated" && event.human) || (event.type === "conversation_edited" && !event.first_turn)) && event.target === selectedNode.name && !!event.instruction ||
@@ -325,12 +334,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
       text: event.instruction || "", images: event.images, node: selectedNode.name, runId: state.runId,
-      executionId: event.execution_id ?? event.from_execution_id,
+      executionId: event.type === "conversation_edited" ? executionIdForEdit(state, event) :
+        (event.execution_id ?? event.from_execution_id),
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
       delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
     }));
-    return [...recorded, ...local];
+    return [...recorded, ...localRemaining];
   }, [selectedNode?.name, effectiveMessages, state.runId, state.events]);
   const attempts = useMemo(() => selectedNode
     ? [...activeNodeExecutions(state, selectedNode.name),
@@ -771,7 +781,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       executions: Execution[];
     }> = [];
 
-    const messages: ChatMessage[] = effectiveMessages.length > 0 ? [...effectiveMessages] : (
+    let messages: ChatMessage[] = effectiveMessages.length > 0 ? [...effectiveMessages] : (
       state.graph.originalGoal ? [{
         id: "msg-initial-goal",
         parentId: null,
@@ -779,6 +789,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         text: state.graph.originalGoal,
       }] : []
     );
+    const latestEdit = [...state.events].reverse().find((event) =>
+      event.type === "conversation_edited" && event.target === serialNode.name && event.nodes?.includes(serialNode.name));
+    if (latestEdit?.old_instruction) {
+      const oldIndex = messages.findIndex((msg) =>
+        msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === latestEdit.old_instruction);
+      if (oldIndex >= 0) {
+        messages = messages.slice(0, latestEdit.first_turn ? oldIndex + 1 : oldIndex);
+        if (latestEdit.first_turn && messages[0]) {
+          messages[0] = { ...messages[0], text: serialNode.task };
+        }
+      }
+    }
     const localRemaining = messages.filter((msg) => msg.node === serialNode.name);
     const recorded = activeNodeConversationEvents(state, serialNode.name).filter((event) =>
       (event.type === "node_messaged" && event.node === serialNode.name) ||
@@ -793,6 +815,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       text: event.instruction || "", images: event.images, node: serialNode.name, runId: state.runId,
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
+      executionId: event.type === "conversation_edited" ? executionIdForEdit(state, event) :
+        (event.execution_id ?? event.from_execution_id),
       delivery: event.type === "node_messaged" ? "node_messaged" : undefined,
     }));
     // A fresh browser session may have only a recorded follow-up, not the

@@ -17,7 +17,7 @@ use std::{
 #[cfg(feature = "fixture")]
 use std::process::Command;
 #[cfg(not(feature = "fixture"))]
-use std::{process::Child, sync::atomic::{AtomicBool, Ordering}};
+use std::{hash::{Hash, Hasher}, process::Child, sync::atomic::{AtomicBool, Ordering}};
 
 #[cfg(not(feature = "fixture"))]
 struct WarmPartitioner {
@@ -28,7 +28,17 @@ struct WarmPartitioner {
 }
 
 #[cfg(not(feature = "fixture"))]
+struct WarmNode {
+    child: Child,
+    tree: process_control::ProcessTree,
+    key: (PathBuf, PathBuf, String, String, String),
+    session_hash: u64,
+}
+
+#[cfg(not(feature = "fixture"))]
 static WARM_PARTITIONER: OnceLock<Mutex<Option<WarmPartitioner>>> = OnceLock::new();
+#[cfg(not(feature = "fixture"))]
+static WARM_NODE: OnceLock<Mutex<Option<WarmNode>>> = OnceLock::new();
 #[cfg(not(feature = "fixture"))]
 static PREWARM_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
@@ -141,6 +151,7 @@ fn start_warm_partitioner_at(config: &Config, data: &Path) -> Result<(), String>
 pub fn stop_partition_prewarm() {
     PREWARM_SHUTTING_DOWN.store(true, Ordering::SeqCst);
     invalidate_warm_partitioner();
+    invalidate_warm_node();
 }
 
 #[cfg(not(feature = "fixture"))]
@@ -165,6 +176,118 @@ fn claim_warm_partitioner(config: &Config) -> Option<WarmPartitioner> {
         return None;
     }
     if slot.as_mut()?.child.try_wait().ok().flatten().is_some() {
+        return None;
+    }
+    let worker = slot.take()?;
+    if process_control::assign_to_current_owner(&worker.tree).is_err() {
+        *slot = Some(worker);
+        return None;
+    }
+    Some(worker)
+}
+
+#[cfg(not(feature = "fixture"))]
+fn node_key(
+    config: &Config, cwd: &Path, session_dir: &Path, session_id: &str,
+) -> Result<((PathBuf, PathBuf, String, String, String), u64), String> {
+    let repo = Path::new(&config.repository).canonicalize().map_err(|e| e.to_string())?;
+    let cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
+    if cwd != repo { return Err("Only source-checkout nodes can be prewarmed".into()); }
+    let session_dir = session_dir.canonicalize().map_err(|e| e.to_string())?;
+    let suffix = format!("_{session_id}.jsonl");
+    let files: Vec<_> = fs::read_dir(&session_dir).map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(&suffix))
+        .collect();
+    if files.len() != 1 { return Err("Node session file is missing or ambiguous".into()); }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    fs::read(files[0].path()).map_err(|e| e.to_string())?.hash(&mut hasher);
+    let model = PiModelConfig::resolve(PiRole::NodeAgent, config);
+    Ok(((cwd, session_dir, session_id.into(), model.model,
+        model.thinking.unwrap_or_default()), hasher.finish()))
+}
+
+/// Keep one idle RPC node for the next turn of a completed serial conversation.
+#[cfg(not(feature = "fixture"))]
+pub fn warm_node(config: Config, cwd: PathBuf, session_dir: PathBuf, session_id: String) {
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) { return; }
+    thread::spawn(move || {
+        if let Err(error) = start_warm_node(&config, &cwd, &session_dir, &session_id) {
+            eprintln!("[Grapher] Node prewarm unavailable: {error}");
+        }
+    });
+}
+
+#[cfg(not(feature = "fixture"))]
+fn start_warm_node(
+    config: &Config, cwd: &Path, session_dir: &Path, session_id: &str,
+) -> Result<(), String> {
+    crate::workspace::validate_binding(Path::new(&config.repository))?;
+    let (key, session_hash) = node_key(config, cwd, session_dir, session_id)?;
+    let pool = WARM_NODE.get_or_init(Default::default);
+    let mut slot = pool.lock().map_err(|e| e.to_string())?;
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) { return Ok(()); }
+    if slot.as_mut().is_some_and(|worker| worker.key == key
+        && worker.session_hash == session_hash
+        && worker.child.try_wait().ok().flatten().is_none()) {
+        return Ok(());
+    }
+    if let Some(mut old) = slot.take() {
+        old.tree.terminate();
+        let _ = old.child.wait();
+    }
+    let mut command = crate::native::command(PiRole::NodeAgent, &key.0, &key.0)?;
+    command.args([
+        "--mode", "rpc", "--no-prompt-templates", "--no-themes", "--approve",
+        "--model", &key.3, "--session-id", &key.2,
+        "--session-dir", key.1.to_str().ok_or("Invalid node session path")?,
+    ]);
+    if !key.4.is_empty() { command.args(["--thinking", &key.4]); }
+    command
+        .env_remove("PI_MODEL")
+        .env_remove("PI_THINKING")
+        .env_remove("PI_PROVIDER")
+        .env_remove("PI_REASONING_LEVEL")
+        .env_remove("PI_SESSION_ID")
+        .env_remove("PI_SESSION_FILE")
+        .env("GRAPHER_MODE", "node")
+        .env("GRAPHER_EXECUTION_KIND", "source")
+        .env("GRAPHER_SOURCE_ALIAS", &key.0)
+        .env("GRAPHER_WORKSPACE_ROOT", &key.0)
+        .env("GRAPHER_ORIGINAL_ROOT", &key.0);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    process_control::configure_command(&mut command);
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let tree = process_control::track(&child).map_err(|error| {
+        let _ = child.kill(); let _ = child.wait(); error
+    })?;
+    *slot = Some(WarmNode { child, tree, key, session_hash });
+    Ok(())
+}
+
+#[cfg(not(feature = "fixture"))]
+pub fn invalidate_warm_node() {
+    if let Some(pool) = WARM_NODE.get() {
+        if let Ok(mut slot) = pool.lock() {
+            if let Some(mut old) = slot.take() {
+                old.tree.terminate();
+                let _ = old.child.wait();
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "fixture"))]
+fn claim_warm_node(config: &Config, cwd: &Path, session_dir: &Path, session_id: &str) -> Option<WarmNode> {
+    let (key, hash) = node_key(config, cwd, session_dir, session_id).ok()?;
+    let pool = WARM_NODE.get()?;
+    let mut slot = pool.lock().ok()?;
+    let worker = slot.as_mut()?;
+    if worker.key != key { return None; }
+    if worker.session_hash != hash || worker.child.try_wait().ok().flatten().is_some() {
+        let mut old = slot.take()?;
+        old.tree.terminate();
+        let _ = old.child.wait();
         return None;
     }
     let worker = slot.take()?;
@@ -783,9 +906,23 @@ fn run_pi_with_timeout(
     #[cfg(not(feature = "fixture"))]
     let warm = warm_compatible.then(|| claim_warm_partitioner(config)).flatten();
     #[cfg(not(feature = "fixture"))]
+    let warm_node = (request.role == PiRole::NodeAgent
+        && request.extension.is_none() && request.tools.is_none()
+        && request.system_prompt.is_none()
+        && request.session_id.is_some()
+        && request.extra_args.iter().all(|arg| matches!(
+            *arg, "--thinking" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        )))
+        .then(|| claim_warm_node(config, request.cwd, request.session_dir, request.session_id.unwrap()))
+        .flatten();
+    #[cfg(not(feature = "fixture"))]
+    let prewarmed = warm.is_some() || warm_node.is_some();
+    #[cfg(not(feature = "fixture"))]
     let warm_session = warm.as_ref().map(|worker| worker.session_dir.clone());
     #[cfg(not(feature = "fixture"))]
-    let (mut child, process_tree) = if let Some(worker) = warm {
+    let (mut child, process_tree) = if let Some(worker) = warm_node {
+        (worker.child, worker.tree)
+    } else if let Some(worker) = warm {
         (worker.child, worker.tree)
     } else {
         let mut child = command.spawn()
@@ -805,8 +942,6 @@ fn run_pi_with_timeout(
         (child, tree)
     };
     let _guard = ProcessGuard(process_tree.clone());
-    #[cfg(not(feature = "fixture"))]
-    let prewarmed = warm_session.is_some();
     #[cfg(feature = "fixture")]
     let prewarmed = false;
     on_output(format!(

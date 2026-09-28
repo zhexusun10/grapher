@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activeNodeConversationEvents, activeNodeExecutions, versionsForEdit } from '../src/services/conversationBranch.ts';
-import { emptySnapshot, type Snapshot } from '../src/types.ts';
+import { activeNodeConversationEvents, activeNodeExecutions, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
+import { emptySnapshot, type GraphEvent, type Snapshot } from '../src/types.ts';
 
 test('editing a completed turn hides the abandoned node branch but preserves earlier turns', () => {
   const state: Snapshot = {
@@ -26,6 +26,16 @@ test('editing a completed turn hides the abandoned node branch but preserves ear
   assert.equal(state.events.length, 5, 'old durable history remains intact');
 });
 
+test('edited messages point at the new active execution, not the superseded anchor', () => {
+  const state: Snapshot = {
+    ...emptySnapshot,
+    events: [
+      { sequence: 1, timestamp: 10, type: 'conversation_edited', target: 'task', nodes: ['task'], instruction: 'replacement', from_execution_id: 'old' },
+      { sequence: 2, timestamp: 20, type: 'started', execution: { id: 'new', node: 'task' } as never },
+    ],
+  };
+  assert.equal(executionIdForEdit(state, state.events[0]), 'new');
+});
 test('selecting an existing branch does not append another version', () => {
   const state: Snapshot = {
     ...emptySnapshot,
@@ -46,7 +56,6 @@ test('selecting an existing branch does not append another version', () => {
   const continuedState = { ...state, events: [...state.events, continued] };
   assert.deepEqual(versionsForEdit(continuedState, continued).map(version => version.text), ['original', 'continued']);
 });
-
 
 test('message versions survive reload and nested edits', () => {
   const state: Snapshot = {
