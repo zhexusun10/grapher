@@ -662,7 +662,13 @@ impl Runtime {
         {
             return Err("No completed node session to continue; revise the plan instead".into());
         }
-        self.invalidate_node(node, instruction.trim(), images)
+        // A conversation follow-up concerns this node's Pi session only.
+        // Explicit reruns and Planner graph revisions retain their own dependency policy.
+        self.validate_invalidation(node, false)?;
+        self.emit(EventKind::Invalidated {
+            nodes: vec![node.into()], target: node.into(),
+            instruction: instruction.trim().into(), human: true, images,
+        })
     }
 
     pub fn rerun(&mut self, node: &str) -> Result<(), String> {
@@ -670,15 +676,15 @@ impl Runtime {
     }
 
     /// Re-edit a settled Pi user turn, keeping the abandoned conversation as
-    /// another branch in Pi's session file. A graph edit invalidates descendants.
+    /// another branch in Pi's session file. Only the edited conversation is rerun.
     pub fn edit_node_message(
         &mut self, node: &str, execution_id: &str, old_text: &str,
         instruction: &str, images: Option<Vec<ImageAttachment>>,
     ) -> Result<(), String> {
         if instruction.trim().is_empty() { return Err("Enter a replacement message".into()); }
-        let affected = self.validate_invalidation(node)?;
+        self.validate_invalidation(node, false)?;
         let anchor = self.state.executions.iter().find(|execution| execution.id == execution_id
-            && execution.node == node && execution.after.is_some()
+            && execution.node == node && execution.completed_at.is_some()
             && !self.state.superseded_execution_ids.contains(&execution.id))
             .ok_or("Select an active completed message to edit")?.clone();
         let start = self.state.events.iter().position(|event| matches!(
@@ -698,7 +704,7 @@ impl Runtime {
             anchor.started_at, anchor.completed_at.ok_or("Execution is not settled")?,
         )?;
         if let Err(error) = self.emit(EventKind::ConversationEdited {
-            nodes: affected.into_iter().collect(), target: node.into(),
+            nodes: vec![node.into()], target: node.into(),
             instruction: instruction.trim().into(), images,
             from_execution_id: execution_id.into(), from_event_sequence,
             old_instruction: old_text.into(),
@@ -714,13 +720,14 @@ impl Runtime {
         Ok(())
     }
 
-    fn validate_invalidation(&self, node: &str) -> Result<BTreeSet<String>, String> {
+    fn validate_invalidation(&self, node: &str, include_downstream: bool) -> Result<BTreeSet<String>, String> {
         if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
             return Err("Resolve or retry publication before changing node results".into());
         }
         if !self.state.approved { return Err("Approve the graph before updating a node".into()); }
         if !self.state.nodes.contains_key(node) { return Err("Select a node to rerun".into()); }
-        let affected = downstream(&self.state.graph, node);
+        let affected = if include_downstream { downstream(&self.state.graph, node) }
+            else { BTreeSet::from([node.to_owned()]) };
         if self.state.executions.iter().any(|execution| execution.status == "running"
             && affected.contains(&execution.node)) {
             return Err("Wait for running downstream nodes before editing their inputs".into());
@@ -977,7 +984,7 @@ impl Runtime {
                         .executions
                         .iter()
                         .rev()
-                        .find(|execution| execution.node == node.name && execution.after.is_some()
+                        .find(|execution| execution.node == node.name && execution.completed_at.is_some()
                             && anchor.is_none_or(|id| execution.id == id))
                         .ok_or("No completed node session to continue")?,
                 )
@@ -1219,6 +1226,11 @@ impl Runtime {
                 })
             }
             Err(error) => {
+                // Stop kills Pi's process tree; its nonzero exit code is a
+                // consequence of the user's action, not a model failure.
+                let error = if self.state.stop_requested && error.starts_with("Pi exited with ") {
+                    "用户已停止本次执行；可以修改消息或重新运行。".to_string()
+                } else { error };
                 eprintln!(
                     "[Grapher] [Execution] Node '{}' failed: {error}",
                     execution.node

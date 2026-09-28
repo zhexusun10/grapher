@@ -20,7 +20,7 @@ import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTranscript } from "../ExecutionTranscript";
-import { planningTranscriptCache } from "../PlanningActivity";
+import { planningTranscriptCache, activePlannerOutput } from "../PlanningActivity";
 import { plannerUserTurns } from "../../services/plannerUserTurns";
 import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
@@ -320,7 +320,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
       text: event.instruction || "", images: event.images, node: selectedNode.name, runId: state.runId,
-      executionId: event.execution_id,
+      executionId: event.execution_id ?? event.from_execution_id,
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionsForEdit(state, event).length - 1 : undefined,
       delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
@@ -413,15 +413,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         plannerStream.representedPlanningIds?.includes(id));
     });
   }, [routeType, isPlanning, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.runId, plannerStream.isContinuation, plannerStream.items, plannerStream.representedPlanningIds]);
+  const plannerEdits = useMemo(() => state.events.flatMap((event, index) => {
+    if (event.type !== "planner_conversation_edited") return [];
+    const nextPlanningId = state.events.slice(index + 1).find(item =>
+      item.type === "graph_revised" && item.planning_id)?.planning_id;
+    return [{ old_instruction: event.old_instruction, nextPlanningId }];
+  }), [state.events]);
   const savedPlannerKey = savedPlannerIds.join(":");
   const [readySavedPlannerKey, setReadySavedPlannerKey] = useState("");
   const savedPlannerOutput = planningTranscriptCache.get(savedPlannerKey)?.text ?? "";
   const persistedUserTurns = useMemo(() => {
     if (effectiveMessages.length <= 1) return [];
-    const turns = plannerUserTurns(savedPlannerOutput);
+    const turns = plannerUserTurns(activePlannerOutput(savedPlannerOutput, plannerEdits));
     if (turns[0] === effectiveMessages[0]?.text.trim()) turns.shift();
     return turns;
-  }, [savedPlannerOutput, effectiveMessages.length, effectiveMessages[0]?.text]);
+  }, [savedPlannerOutput, plannerEdits, effectiveMessages.length, effectiveMessages[0]?.text]);
   const remainingPersistedTurns = new Map<string, number>();
   for (const text of persistedUserTurns) {
     remainingPersistedTurns.set(text, (remainingPersistedTurns.get(text) ?? 0) + 1);
@@ -1016,8 +1022,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             const version = initialTaskVersions?.[index];
                             const first = attempts[0];
                             if (version && first && onEditMessageSubmit) {
-                              void onEditMessageSubmit({ id: `task-${selectedNode.name}`, role: "user", text: selectedNode.task,
-                                node: selectedNode.name, executionId: first.id, runId: state.runId }, version.text);
+                              void onEditMessageSubmit({ id: `task-${selectedNode.name}`, role: "user", text: version.text,
+                                node: selectedNode.name, executionId: version.executionId ?? first.id, runId: state.runId }, version.text);
                             }
                           }}
                           editing={editingTaskNode === selectedNode.name}
@@ -1066,7 +1072,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           editing={editingMessage?.id === turn.userMessage.id}
                           draft={editPrefillText ?? ""}
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                          onEdit={onEditMessage ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
+                          onEdit={onEditMessage && turn.userMessage.delivery !== "node_messaged" ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
                           onCancel={() => onCancelEditMessage?.()}
                           onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
                           disabled={locked}
@@ -1232,7 +1238,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               editing={editingMessage?.id === turn.userMessage.id}
                               draft={editPrefillText ?? ""}
                               onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                              onEdit={onEditMessage ? () => onEditMessage(turn.userMessage!) : undefined}
+                              onEdit={onEditMessage && turn.userMessage.delivery !== "node_messaged" ? () => onEditMessage(turn.userMessage!) : undefined}
                               onCancel={() => onCancelEditMessage?.()}
                               onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
                               disabled={locked && !isPlanning}
@@ -1381,6 +1387,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             revealConversation();
                           }}
                           onUserResize={handleExpandableContentChange}
+                          edits={plannerEdits}
+                          onEditUser={onEditMessageSubmit ? (text, replacement) =>
+                            onEditMessageSubmit({ id: `planner-history-${text}`, role: "user", parentId: null,
+                              text, runId: state.runId }, replacement) : undefined}
                         />
                       </div>
                     )}

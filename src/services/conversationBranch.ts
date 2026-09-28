@@ -23,12 +23,15 @@ export function versionsForEdit(state: Snapshot, edit: GraphEvent): ChatMessageV
   const visited = new Set<number>();
   while (cursor?.type === "conversation_edited" && !visited.has(cursor.sequence)) {
     visited.add(cursor.sequence);
-    versions.unshift({ id: `v${cursor.sequence}`, text: cursor.instruction ?? "", images: cursor.images, timestamp: cursor.timestamp });
+    const nextExecution = state.events.find(event => event.type === "started" &&
+      event.sequence > cursor!.sequence && event.execution?.node === cursor!.target)?.execution?.id;
+    versions.unshift({ id: `v${cursor.sequence}`, text: cursor.instruction ?? "", images: cursor.images,
+      timestamp: cursor.timestamp, executionId: nextExecution });
     const parent: GraphEvent | undefined = state.events.find(e => e.sequence === cursor?.from_event_sequence);
     if (parent?.type === "conversation_edited") cursor = parent;
     else {
       versions.unshift({ id: `v${parent?.sequence ?? cursor.sequence}-before`, text: cursor.old_instruction ?? "",
-        images: parent?.images, timestamp: parent?.timestamp ?? cursor.timestamp });
+        images: parent?.images, timestamp: parent?.timestamp ?? cursor.timestamp, executionId: cursor.from_execution_id });
       break;
     }
   }

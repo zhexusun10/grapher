@@ -362,6 +362,20 @@ fn editing_an_earlier_serial_turn_branches_pi_and_supersedes_later_executions() 
 }
 
 #[test]
+fn only_an_explicit_stop_hides_pis_forced_exit_code() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.pause(true).unwrap();
+    runtime.emit(EventKind::StopRequested).unwrap();
+    runtime.finish(&job.execution, Err("Pi exited with exit code: 1: ".into())).unwrap();
+    assert!(!runtime.state.nodes["task"].error.as_deref().unwrap().contains("exit code"));
+    runtime.pause(false).unwrap();
+    assert!(!runtime.state.stop_requested);
+}
+
+#[test]
 fn editing_serial_initial_turn_updates_goal_without_replacing_the_run() {
     let (_temp, source, mut runtime) = setup(true, single());
     runtime.set_route("serial").unwrap();
@@ -389,7 +403,7 @@ fn editing_serial_initial_turn_updates_goal_without_replacing_the_run() {
 }
 
 #[test]
-fn editing_graph_node_uses_earlier_checkpoint_and_invalidates_descendants() {
+fn editing_graph_node_uses_earlier_checkpoint_without_rerunning_descendants() {
     let graph = Graph {
         original_goal: "graph".into(),
         nodes: ["parent", "child"].into_iter().map(|name| Node {
@@ -412,10 +426,7 @@ fn editing_graph_node_uses_earlier_checkpoint_and_invalidates_descendants() {
     runtime.emit(EventKind::Finished {
         execution_id: later.execution.id.clone(), head: runtime.state.base.clone(), output: "later".into(),
     }).unwrap();
-    let later_child = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: later_child.execution.id.clone(), head: runtime.state.base.clone(), output: "child".into(),
-    }).unwrap();
+    assert_eq!(runtime.state.nodes["child"].status, "done", "a follow-up does not restart its child");
     let session_dir = runtime.root.join("sessions").join(&first.execution.id);
     fs::create_dir_all(&session_dir).unwrap();
     fs::create_dir_all(&first.execution.worktree).unwrap();
@@ -429,11 +440,10 @@ fn editing_graph_node_uses_earlier_checkpoint_and_invalidates_descendants() {
     runtime.edit_node_message("parent", &first.execution.id, "parent", "edited parent", None).unwrap();
     assert_eq!(runtime.state.graph.nodes[0].task, "edited parent");
     assert_eq!(runtime.state.nodes["parent"].head.as_deref(), Some(first.execution.before.as_str()));
-    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert_eq!(runtime.state.nodes["child"].status, "done");
     assert!(runtime.state.superseded_execution_ids.contains(&first.execution.id));
-    assert!(runtime.state.superseded_execution_ids.contains(&child.execution.id));
+    assert!(!runtime.state.superseded_execution_ids.contains(&child.execution.id));
     assert!(runtime.state.superseded_execution_ids.contains(&later.execution.id));
-    assert!(runtime.state.superseded_execution_ids.contains(&later_child.execution.id));
     let new_job = runtime.jobs().unwrap().remove(0);
     assert_eq!(new_job.execution.worktree, first.execution.worktree);
     assert_eq!(new_job.execution.before, first.execution.before);
@@ -441,7 +451,7 @@ fn editing_graph_node_uses_earlier_checkpoint_and_invalidates_descendants() {
 }
 
 #[test]
-fn graph_followup_invalidates_downstream_but_preserves_unaffected_results() {
+fn graph_followup_only_continues_the_target_conversation() {
     let graph = Graph {
         original_goal: "graph".into(),
         nodes: ["parent", "child", "independent"].into_iter().map(|name| Node {
@@ -463,7 +473,7 @@ fn graph_followup_invalidates_downstream_but_preserves_unaffected_results() {
     }).unwrap();
     runtime.intervene("parent", "continue parent").unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "dirty");
-    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert_eq!(runtime.state.nodes["child"].status, "done");
     assert_eq!(runtime.state.nodes["independent"].status, "done");
     let next = runtime.jobs().unwrap().remove(0);
     assert_eq!(next.execution.node, "parent");

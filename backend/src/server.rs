@@ -1244,7 +1244,9 @@ fn plan_goal_internal(
                         planner_metrics = Some(m);
                         fs::copy(&graph_path, directory.join("graph.json"))
                             .map_err(|e| e.to_string())?;
-                        planner_result?;
+                        planner_result.map_err(|error| {
+                            check_planning_cancelled(&owner).err().unwrap_or(error)
+                        })?;
                         {
                             let _source_guard = lock.lock().map_err(|e| e.to_string())?;
                             check_planning_cancelled(&owner)?;
@@ -1922,6 +1924,7 @@ fn control(
         if runtime.state.approved {
             let _ = runtime.pause(true);
         }
+        runtime.emit(EventKind::StopRequested)?;
         let snapshot = runtime.state.clone();
         drop(runtime);
         crate::engine::terminate_run(&active_id);
@@ -1989,6 +1992,54 @@ fn control(
         drive(service.clone());
     }
     Ok(snapshot)
+}
+
+fn edit_planner(
+    run_id: String, old_text: String, instruction: String, service: &Arc<Service>,
+) -> Result<Snapshot, String> {
+    if service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the current Planner turn to finish before editing history".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    let state = &runtime.state;
+    if state.run_id != run_id || state.plan_type.as_deref() != Some("graph") {
+        return Err("Select the active Graph Planner conversation".into());
+    }
+    if matches!(state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+        return Err("Wait for publication before editing the Planner".into());
+    }
+    if instruction.trim().is_empty() || old_text.trim().is_empty() {
+        return Err("Enter a Planner message".into());
+    }
+    let repository = PathBuf::from(&state.config.as_ref().ok_or("Missing config")?.repository);
+    crate::workspace::validate_binding(&repository)?;
+    let first = state.events.iter().find_map(|event| match &event.kind {
+        EventKind::Created { planning_id: Some(id), .. } | EventKind::GraphRevised { planning_id: id, .. } => Some(id.clone()),
+        _ => None,
+    }).ok_or("No persisted Planner conversation")?;
+    let attempt = runtime.root.join("planning").join(&first);
+    let workspace = fs::read_to_string(attempt.join("planner-workspace"))
+        .map(PathBuf::from).unwrap_or_else(|_| repository.clone());
+    let (session_dir, session_id) = planner_session_directory_for_workspace(
+        &runtime.root, &attempt, &repository, &workspace, Some(state),
+    )?;
+    let file = fs::read_dir(&session_dir).map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().ends_with(&format!("_{session_id}.jsonl")))
+        .ok_or("Planner Pi session is missing")?.path();
+    let header = fs::read_to_string(&file).map_err(|error| error.to_string())?;
+    let cwd = serde_json::from_str::<serde_json::Value>(header.lines().next().ok_or("Empty Planner session")?)
+        .map_err(|error| error.to_string())?["cwd"].as_str().ok_or("Missing Planner cwd")?.to_string();
+    let branch = crate::session_branch::branch_before_planner_user(
+        &session_dir, &session_id, std::path::Path::new(&cwd), old_text.trim(),
+    )?;
+    let first_turn = old_text.trim() == state.graph.original_goal.trim();
+    if let Err(error) = runtime.emit(EventKind::PlannerConversationEdited {
+        old_instruction: old_text.trim().into(), instruction: instruction.trim().into(), first_turn,
+    }) {
+        return Err(match branch.rollback() { Ok(()) => error, Err(rollback) => format!("{error}; {rollback}") });
+    }
+    Ok(runtime.state.clone())
 }
 
 fn edit_node(
@@ -2725,6 +2776,10 @@ pub fn dispatch(
                 argument(&body, "images").ok(),
                 service,
             )?),
+            "edit_planner" => Some(edit_planner(
+                argument(&body, "runId")?, argument(&body, "oldText")?,
+                argument(&body, "instruction")?, service,
+            )?),
             "edit_node" => Some(edit_node(
                 argument(&body, "node")?, argument(&body, "executionId")?,
                 argument(&body, "oldText")?, argument(&body, "instruction")?,
@@ -2821,6 +2876,10 @@ pub fn dispatch(
             argument(&body, "executionId")?,
             argument(&body, "images").ok(),
             service,
+        )?),
+        "edit_planner" => to_value(edit_planner(
+            argument(&body, "runId")?, argument(&body, "oldText")?,
+            argument(&body, "instruction")?, service,
         )?),
         "edit_node" => to_value(edit_node(
             argument(&body, "node")?, argument(&body, "executionId")?,
@@ -2962,6 +3021,7 @@ fn api_service(
         | "load_run"
         | "control"
         | "edit_node"
+        | "edit_planner"
         | "save_graph"
         | "delete_run"
         | "get_execution_output"

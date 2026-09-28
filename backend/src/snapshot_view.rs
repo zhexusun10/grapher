@@ -70,7 +70,7 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "mergers": state.mergers.iter().map(execution_metadata).collect::<Vec<_>>(),
         "supersededExecutionIds": state.superseded_execution_ids,
         "publication": state.publication, "events": [], "approved": state.approved,
-        "paused": state.paused, "phase": state.phase, "base": state.base,
+        "paused": state.paused, "stopRequested": state.stop_requested, "phase": state.phase, "base": state.base,
         "publishedHead": state.published_head, "feedbackCounts": state.feedback_counts,
         "runMetrics": state.run_metrics
     })

@@ -167,6 +167,8 @@ export const runtimeService = {
   getPlanning: (planningId: string, signal?: AbortSignal) => request<PlanningSummary>("get_planning", { planningId }, signal),
   listPlannings: (repository?: string, signal?: AbortSignal) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}, signal),
   control: (action: string, extra?: Record<string, unknown>) => request<Snapshot>("control", { action, ...extra }),
+  editPlanner: (input: { runId: string; oldText: string; instruction: string }) =>
+    request<Snapshot>("edit_planner", input),
   editNode: (input: { runId: string; node: string; executionId: string; oldText: string; instruction: string; images?: import("../types").ImageAttachment[] }) =>
     request<Snapshot>("edit_node", input),
   detectRepository: (path?: string | null) => request<RepositoryInfo | null>("detect_repository", { path: path || null }),

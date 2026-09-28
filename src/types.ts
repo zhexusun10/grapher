@@ -83,6 +83,7 @@ export interface Snapshot {
   events: GraphEvent[];
   approved: boolean;
   paused: boolean;
+  stopRequested?: boolean;
   phase: string;
   base: string;
   feedbackCounts: Record<string, number>;
@@ -156,6 +157,7 @@ export interface ChatMessageVersion {
   text: string;
   images?: ImageAttachment[];
   timestamp: number;
+  executionId?: string;
   subsequentEntries?: ChatMessage[];
 }
 

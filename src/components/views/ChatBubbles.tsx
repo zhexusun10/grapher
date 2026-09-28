@@ -60,6 +60,8 @@ export function EditableUserBubble({
 }) {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composingRef = useRef(false);
+  const compositionEndedAtRef = useRef(0);
   const [initialSize, setInitialSize] = useState<{ width: number; height: number } | null>(null);
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -101,9 +103,22 @@ export function EditableUserBubble({
     }
     const textarea = textareaRef.current;
     if (textarea) {
-      textarea.focus();
-      const end = textarea.value.length;
-      textarea.setSelectionRange(end, end);
+      textarea.style.height = "auto";
+      const scrollH = textarea.scrollHeight;
+      if (scrollH > 0) {
+        textarea.style.height = `${scrollH}px`;
+      }
+    }
+  }, [editing, draft]);
+
+  useLayoutEffect(() => {
+    if (editing) {
+      const textarea = textareaRef.current;
+      if (textarea) {
+        textarea.focus();
+        const end = textarea.value.length;
+        textarea.setSelectionRange(end, end);
+      }
     }
   }, [editing]);
 
@@ -121,9 +136,10 @@ export function EditableUserBubble({
   };
 
   const isShorter = draft.trim().length < text.trim().length;
+  const isLongDraft = draft.trim().length > 40 || draft.includes("\n") || (initialSize ? initialSize.width > 420 : false);
 
   return (
-    <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}`}>
+    <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}${editing && isLongDraft ? " expanded" : ""}`}>
       <div className="chat-bubble-body">
         {editing ? (
           <div className="chat-bubble-actions">
@@ -201,9 +217,9 @@ export function EditableUserBubble({
         )}
         <div
           ref={bubbleRef}
-          className={`chat-bubble-user${editing ? " editing" : ""}`}
-          style={editing && initialSize && !isShorter ? {
-            minWidth: `${Math.min(initialSize.width, 360)}px`,
+          className={`chat-bubble-user${editing ? " editing" : ""}${editing && isLongDraft ? " expanded" : ""}`}
+          style={editing && initialSize && !isShorter && !isLongDraft ? {
+            minWidth: `${initialSize.width}px`,
             minHeight: `${initialSize.height}px`,
           } : undefined}
         >
@@ -231,14 +247,37 @@ export function EditableUserBubble({
                 aria-label="修改消息内容"
                 value={draft}
                 onChange={(event) => onDraftChange(event.target.value)}
+                onCompositionStart={() => {
+                  composingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  composingRef.current = false;
+                  compositionEndedAtRef.current = Date.now();
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
                     event.stopPropagation();
                     onCancel();
-                  } else if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  } else if (event.key === "Enter" && !event.shiftKey) {
+                    if (
+                      event.nativeEvent.isComposing ||
+                      composingRef.current ||
+                      event.keyCode === 229 ||
+                      Date.now() - compositionEndedAtRef.current < 50
+                    ) {
+                      return;
+                    }
                     event.preventDefault();
                     submit();
-                  } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) {
+                  } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                    if (
+                      event.nativeEvent.isComposing ||
+                      composingRef.current ||
+                      event.keyCode === 229 ||
+                      Date.now() - compositionEndedAtRef.current < 50
+                    ) {
+                      return;
+                    }
                     event.preventDefault();
                     submit();
                   }

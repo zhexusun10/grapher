@@ -75,6 +75,55 @@ fn done_node_message_control_does_not_wait_for_planner_or_start_driver() {
 
 #[cfg(feature = "fixture")]
 #[test]
+fn edit_planner_api_branches_the_same_run_and_keeps_the_previous_turn() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path().join("runtime");
+    let repository = crate::fixture::repository(temp.path()).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut runtime = Runtime::open(&root).unwrap();
+    runtime.create_with_planning(Graph {
+        original_goal: "original".into(), nodes: vec![Node { name: "task".into(), task: "old".into() }], edges: vec![],
+    }, serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "mock/model", "engine": "fixture", "maxParallel": 1, "maxFeedback": 0,
+    })).unwrap(), Some(id.clone()), None).unwrap();
+    runtime.set_route("graph").unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let session = root.join("planning").join(&id).join("planner-session");
+    fs::create_dir_all(&session).unwrap();
+    let private = temp.path().join("private-planner-workspace");
+    fs::create_dir_all(&private).unwrap();
+    fs::write(root.join("planning").join(&id).join("planner-workspace"), private.to_string_lossy().as_bytes()).unwrap();
+    let path = session.join(format!("session_{id}.jsonl"));
+    fs::write(&path, [
+        serde_json::json!({"type":"session", "id":id, "cwd":private}),
+        serde_json::json!({"type":"message", "id":"first", "parentId":null,
+          "message":{"role":"user", "content":"User query:\n\noriginal", "timestamp":1}}),
+        serde_json::json!({"type":"message", "id":"answer", "parentId":"first",
+          "message":{"role":"assistant", "content":[]}}),
+    ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+    });
+    let result = dispatch(&service, "edit_planner", serde_json::json!({
+        "runId":run_id, "oldText":"original", "instruction":"replacement", "compact":true, "detail":"metadata",
+    })).unwrap();
+    assert_eq!(result["runId"], run_id);
+    assert_eq!(result["graph"]["originalGoal"], "replacement");
+    assert!(fs::read_to_string(&path).unwrap().contains("grapher-edit"));
+    assert!(fs::read_to_string(&path).unwrap().contains("User query:"));
+    assert_eq!(result["events"].as_array().unwrap().last().unwrap()["type"], "planner_conversation_edited");
+    drop(service);
+    let restored = Runtime::open(&root).unwrap();
+    assert_eq!(restored.state.run_id, run_id);
+    assert_eq!(restored.state.graph.original_goal, "replacement");
+    assert!(restored.state.events.iter().any(|event|
+        matches!(event.kind, EventKind::PlannerConversationEdited { .. })));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
 fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path().join("runtime");

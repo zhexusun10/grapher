@@ -5,6 +5,7 @@ import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { Terminal } from "lucide-react";
+import { EditableUserBubble } from "./views/ChatBubbles";
 
 interface VirtualizedTranscriptProps {
   output: string;
@@ -19,6 +20,7 @@ interface VirtualizedTranscriptProps {
   compact?: boolean;
   showUserTurns?: boolean;
   skipFirstUser?: boolean;
+  onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -54,7 +56,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   compact = false,
   showUserTurns = false,
   skipFirstUser = false,
+  onEditUser,
 }) => {
+  const [editingUser, setEditingUser] = useState<string | null>(null);
+  const [userDraft, setUserDraft] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
   const expandedRows = useRef(new Map<string, boolean>());
   const isUserScrolledUpRef = useRef(false);
@@ -728,6 +733,16 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                 );
               }
 
+              if (item.role === "user" && onEditUser) {
+                return <div key={item.id} className="transcript-row text-row user">
+                  <EditableUserBubble text={item.content || ""} editing={editingUser === item.id}
+                    draft={userDraft} onDraftChange={setUserDraft}
+                    onEdit={() => { setEditingUser(item.id); setUserDraft(item.content || ""); }}
+                    onCancel={() => setEditingUser(null)}
+                    onSend={(text) => { void Promise.resolve(onEditUser(item.content || "", text))
+                      .then((accepted) => { if (accepted !== false) setEditingUser(null); }); }} />
+                </div>;
+              }
               return (
                 <div key={item.id} className={`transcript-row text-row ${item.role || "assistant"}`}>
                   <div className="transcript-message-bubble">

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, memo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
@@ -10,6 +10,7 @@ export async function prefetchPlanningTranscript(planningIds: string[], signal?:
   if (cached && cached.complete) return cached.text;
   let text = "";
   for (const planningId of planningIds) {
+    text += `${JSON.stringify({ type: "grapher_planning_source", planningId })}\n`;
     let currentOffset = 0;
     while (!signal?.aborted) {
       const page = await runtimeService.getPlanningOutput(planningId, "planner", currentOffset, signal);
@@ -31,12 +32,37 @@ export async function prefetchPlanningTranscript(planningIds: string[], signal?:
   return text;
 }
 
-export const PlanningActivity = memo(function PlanningActivity({ planningIds, onReady, showUserTurns = false, skipFirstUser = false, onUserResize }: {
+export function activePlannerOutput(output: string, edits: Array<{ old_instruction?: string; nextPlanningId?: string }>): string {
+  let active = output;
+  for (const edit of edits) {
+    if (!edit.old_instruction) continue;
+    const lines = active.split("\n");
+    const start = lines.findIndex((line) => {
+      try {
+        const event = JSON.parse(line);
+        if (event.type !== "message_start" && event.type !== "message_end") return false;
+        if (event.message?.role !== "user") return false;
+        const text = (event.message.content || []).filter((part: { type: string }) => part.type === "text")
+          .map((part: { text: string }) => part.text).join("\n");
+        return text === edit.old_instruction || text.endsWith(`\n${edit.old_instruction}`);
+      } catch { return false; }
+    });
+    if (start < 0) continue;
+    const resume = edit.nextPlanningId ? lines.findIndex((line, index) => index > start &&
+      line.includes(`"type":"grapher_planning_source"`) && line.includes(`"planningId":"${edit.nextPlanningId}"`)) : -1;
+    active = [...lines.slice(0, start), ...(resume >= 0 ? lines.slice(resume) : [])].join("\n");
+  }
+  return active;
+}
+
+export const PlanningActivity = memo(function PlanningActivity({ planningIds, onReady, showUserTurns = false, skipFirstUser = false, onUserResize, onEditUser, edits = [] }: {
   planningIds: string[];
   onReady?: () => void;
   showUserTurns?: boolean;
   skipFirstUser?: boolean;
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
+  onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
+  edits?: Array<{ old_instruction?: string; nextPlanningId?: string }>;
 }) {
   const key = planningIds.join(":");
   const cached = planningTranscriptCache.get(key);
@@ -47,6 +73,8 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
     content: cached ? cached.text : "",
   }));
   const output = record.id === key ? record.content : "";
+  const editKey = JSON.stringify(edits);
+  const activeOutput = useMemo(() => activePlannerOutput(output, edits), [output, editKey]);
   const [loading, setLoading] = useState(() => !cached);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -84,6 +112,7 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
         for (const planningId of planningIds) {
           let offset = 0;
           if (text && !text.endsWith("\n")) text += "\n";
+          text += `${JSON.stringify({ type: "grapher_planning_source", planningId })}\n`;
           while (!abort.signal.aborted) {
             const page = await runtimeService.getPlanningOutput(planningId, "planner", offset, abort.signal);
             if (abort.signal.aborted) return;
@@ -129,8 +158,9 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
     {error && <p role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>重试</button></p>}
     {!loading && !error && !output && <p>没有可用的规划输出。</p>}
     {output && <div className="planning-activity-output">
-      <VirtualizedTranscript key={`${key}:${showUserTurns}:${skipFirstUser}`} output={output} inline
-        showUserTurns={showUserTurns} skipFirstUser={skipFirstUser} onUserResize={onUserResize} />
+      <VirtualizedTranscript key={`${key}:${showUserTurns}:${skipFirstUser}`} output={activeOutput} inline
+        showUserTurns={showUserTurns} skipFirstUser={skipFirstUser} onUserResize={onUserResize}
+        onEditUser={onEditUser} />
     </div>}
   </section>;
 });

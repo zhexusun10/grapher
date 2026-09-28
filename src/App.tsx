@@ -323,8 +323,8 @@ export default function App() {
       return newMsg;
     };
 
-    // Pi cannot steer a finished process. Continue its persisted session in
-    // a new execution; for Graph, downstream results are invalidated as needed.
+    // A completed node continues its own persisted Pi session. In Graph mode
+    // only this node is rerun; downstream results remain valid.
     if (targetNodeName && state.nodes[targetNodeName]?.status === "done") {
       const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg);
       run(async () => {
@@ -1002,7 +1002,8 @@ export default function App() {
     options?: { displayText?: string; rawText?: string; files?: File[]; images?: ImageAttachment[] },
     mode?: PlanMode,
     revisionRunId?: string,
-    forceFresh?: boolean
+    forceFresh?: boolean,
+    editedMessage?: ChatMessage
   ) => run(async () => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return;
@@ -1026,7 +1027,8 @@ export default function App() {
     setSelected("");
     const parentId = !isContinuing ? null : (sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null);
     const newMsg: ChatMessage = {
-      id: `msg-${Date.now()}`,
+      ...editedMessage,
+      id: editedMessage?.id || `msg-${Date.now()}`,
       parentId,
       role: "user",
       text: options?.displayText || targetGoal,
@@ -1034,7 +1036,9 @@ export default function App() {
       timestamp: Date.now(),
       runId: effectiveRevisionRunId,
     };
-    if (!isContinuing) {
+    if (editedMessage) {
+      // The replacement is already in the truncated local branch.
+    } else if (!isContinuing) {
       setSessionEntries((prev) => {
         if (prev.length > 0 && prev[0].versions) {
           return [{
@@ -1084,7 +1088,7 @@ export default function App() {
         stage: "planning",
         isContinuation: true,
         items: [
-          ...prev.items,
+          ...(editedMessage ? [] : prev.items),
           {
             id: newMsg.id,
             type: "text",
@@ -1661,14 +1665,57 @@ export default function App() {
       (sessionEntries.length > 0 && sessionEntries[0].id === targetMsg.id) ||
       effectiveMessages[0]?.id === targetMsg.id
     ));
-    if ((isPlanning || recoveredPlanning?.status === "running") && !isInitialGoal) {
-      setError("请等待正在运行的 Planner 完成后再修改历史消息。");
-      return;
+    if (isPlanning || recoveredPlanning?.status === "running") {
+      setError("请先停止或等待正在运行的 Planner 完成，再修改历史消息。");
+      return false;
     }
-    if (isInitialGoal && planningAbortControllerRef.current) {
-      planningAbortControllerRef.current.abort();
-      planningAbortControllerRef.current = null;
-      setIsPlanning(false);
+
+    if (isInitialGoal && routeType === "graph" && state.runId && state.planningId) {
+      try {
+        await requireRepository(state.config?.repository || config.repository);
+        const snap = await runtimeService.editPlanner({
+          runId: state.runId, oldText: cleanExisting, instruction: cleanText,
+        });
+        setState(snap);
+        const updated: ChatMessage = { ...targetMsg, text: cleanText, runId: state.runId,
+          versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, timestamp: Date.now() }]),
+            { id: `v${Date.now()}`, text: cleanText, timestamp: Date.now() }],
+          currentVersionIndex: (targetMsg.versions?.length ?? 1),
+        };
+        setSessionEntries([updated]);
+        setGoal(cleanText);
+        await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updated);
+        return true;
+      } catch (error) { setError(String(error)); return false; }
+    }
+    if (!isInitialGoal && routeType === "graph" && state.runId && state.planningId && !targetMsg.node) {
+      const msgIdx = sessionEntries.findIndex((entry) => entry.id === targetMsg.id);
+      const textIdx = msgIdx >= 0 ? msgIdx : sessionEntries.findIndex((entry) =>
+        entry.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === cleanExisting);
+      const current = textIdx >= 0 ? sessionEntries[textIdx] : targetMsg;
+      const previous = textIdx >= 0
+        ? sessionEntries.slice(0, textIdx)
+        : (sessionEntries[0] ? [sessionEntries[0]] : []);
+      const previousEntry = previous[previous.length - 1];
+      const versions = [
+        ...(current.versions ?? [{ id: "v1", text: current.text, images: current.images, timestamp: current.timestamp || Date.now() }]),
+        { id: `v${Date.now()}`, text: cleanText, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
+      ];
+      const updatedPlannerMessage: ChatMessage = {
+        ...current, id: current.id || targetMsg.id, parentId: previousEntry?.id ?? null,
+        text: cleanText, images: targetMsg.images, runId: state.runId,
+        timestamp: Date.now(), versions, currentVersionIndex: versions.length - 1,
+      };
+      try {
+        await requireRepository(state.config?.repository || config.repository);
+        const snap = await runtimeService.editPlanner({
+          runId: state.runId, oldText: cleanExisting, instruction: cleanText,
+        });
+        setState(snap);
+        setSessionEntries([...previous, updatedPlannerMessage]);
+        await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updatedPlannerMessage);
+        return true;
+      } catch (error) { setError(String(error)); return false; }
     }
 
     if (isInitialGoal) {
@@ -1678,8 +1725,8 @@ export default function App() {
         const node = state.graph.nodes[0].name;
         const first = state.executions.find((execution) => execution.node === node &&
           !state.supersededExecutionIds?.includes(execution.id));
-        if (!first || first.status !== "completed") {
-          setError("请等待 Serial 任务完成后再修改初始消息。");
+        if (!first || !["completed", "failed"].includes(first.status)) {
+          setError("请等待当前执行结束后再修改初始消息。");
           return;
         }
         await run(async () => {
@@ -1810,14 +1857,26 @@ export default function App() {
     ));
 
     if (!targetNodeName) {
-      setError("规划器的历史消息不能在当前 Run 中回退；请修改初始目标以创建新的规划运行。");
-      return;
+      if (routeType !== "graph" || !state.runId) {
+        setError("当前没有可回退的 Planner 会话。");
+        return false;
+      }
+      try {
+        await requireRepository(state.config?.repository || config.repository);
+        const snap = await runtimeService.editPlanner({ runId: state.runId,
+          oldText: cleanExisting, instruction: cleanText });
+        setState(snap);
+        setSessionEntries(rolledBackEntries);
+        await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updatedMsg);
+        return true;
+      } catch (error) { setError(String(error)); return false; }
     }
     {
       const execution = state.executions.find((item) => item.id === targetMsg.executionId);
-      if (!execution || execution.node !== targetNodeName || execution.status !== "completed" ||
+      if (!execution || execution.node !== targetNodeName ||
+          !["completed", "failed"].includes(execution.status) ||
           state.supersededExecutionIds?.includes(execution.id)) {
-        setError("只能修改当前分支中已完成的对话；请等待执行结束后重试。");
+        setError("无法定位这条消息对应的已结束 Pi 会话。请等待当前执行结束，或重新加载对话后重试。");
         return;
       }
       let accepted = false;
@@ -1857,7 +1916,9 @@ export default function App() {
   const handleSwitchMessageVersion = useCallback((message: ChatMessage, index: number) => {
     const version = message.versions?.[index];
     if (!version || index === message.currentVersionIndex) return;
-    void handleEditMessageSubmit({ ...message, images: version.images }, version.text);
+    const execution = version.executionId ? state.executions.find(item => item.id === version.executionId) : undefined;
+    void handleEditMessageSubmit({ ...message, images: version.images,
+      executionId: execution?.id ?? message.executionId }, version.text);
   }, [handleEditMessageSubmit]);
 
   useEffect(() => {

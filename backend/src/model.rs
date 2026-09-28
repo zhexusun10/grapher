@@ -251,6 +251,7 @@ pub enum EventKind {
     Paused {
         paused: bool,
     },
+    StopRequested,
     Rejected,
     Started {
         execution: Execution,
@@ -314,6 +315,13 @@ pub enum EventKind {
         from_execution_id: String,
         from_event_sequence: i64,
         old_instruction: String,
+        first_turn: bool,
+    },
+    /// The Planner shares a Pi session across revisions. Preserve the old
+    /// branch while replaying a replacement turn in the same Run.
+    PlannerConversationEdited {
+        old_instruction: String,
+        instruction: String,
         first_turn: bool,
     },
     Feedback {
@@ -391,6 +399,8 @@ pub struct Snapshot {
     pub events: Vec<Event>,
     pub approved: bool,
     pub paused: bool,
+    #[serde(default)]
+    pub stop_requested: bool,
     pub phase: String,
     pub base: String,
     /// Last successfully published source HEAD, distinct from the graph's approval base.
@@ -588,6 +598,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = "running".into();
         }
         EventKind::GraphRevised { graph, planning_id, planning, invalidated } => {
+            state.stop_requested = false;
             let changed = state.graph != *graph;
             state.graph = graph.clone();
             state.plan = crate::compiler::compile_legacy(graph, true).ok();
@@ -634,8 +645,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = "awaiting_approval".into();
             // Planning identity and conversation history stay with this Run.
         }
+        EventKind::StopRequested => { state.stop_requested = true; }
         EventKind::Paused { paused } => {
             state.paused = *paused;
+            if !paused { state.stop_requested = false; }
             state.phase = if *paused { "paused" } else { "running" }.into();
         }
         EventKind::Rejected => {
@@ -747,6 +760,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             human,
             images,
         } => {
+            state.stop_requested = false;
             state.publication = None;
             for name in nodes {
                 let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
@@ -779,6 +793,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::ConversationEdited {
             nodes, target, instruction, images, from_execution_id, first_turn, ..
         } => {
+            state.stop_requested = false;
             let anchor = state.executions.iter().find(|execution| execution.id == *from_execution_id)
                 .expect("validated edit anchor").clone();
             for execution in &state.executions {
@@ -817,6 +832,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }
             }
             state.phase = if state.paused { "paused" } else { "running" }.into();
+        }
+        EventKind::PlannerConversationEdited { instruction, first_turn, .. } => {
+            state.stop_requested = false;
+            if *first_turn { state.graph.original_goal = instruction.clone(); }
         }
         EventKind::Feedback { from, to, accepted } => {
             if !accepted {

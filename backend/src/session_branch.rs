@@ -33,6 +33,19 @@ pub fn branch_before_user(
     session_dir: &Path, session_id: &str, cwd: &Path,
     old_text: &str, started_at: u64, completed_at: u64,
 ) -> Result<PreparedBranch, String> {
+    branch_before_user_matching(session_dir, session_id, cwd, old_text, started_at, completed_at, false)
+}
+
+pub fn branch_before_planner_user(
+    session_dir: &Path, session_id: &str, cwd: &Path, old_text: &str,
+) -> Result<PreparedBranch, String> {
+    branch_before_user_matching(session_dir, session_id, cwd, old_text, 0, u64::MAX, true)
+}
+
+fn branch_before_user_matching(
+    session_dir: &Path, session_id: &str, cwd: &Path,
+    old_text: &str, started_at: u64, completed_at: u64, planner: bool,
+) -> Result<PreparedBranch, String> {
     Uuid::parse_str(session_id).map_err(|_| "Invalid Pi session identity")?;
     let suffix = format!("_{session_id}.jsonl");
     let files: Vec<_> = fs::read_dir(session_dir).map_err(|error| error.to_string())?
@@ -63,7 +76,11 @@ pub fn branch_before_user(
     while let Some(id) = cursor {
         if !visited.insert(id) { return Err("Pi session contains a cycle".into()); }
         let entry = entries.get(id).ok_or("Pi session contains a missing parent")?;
-        if user_text(entry).as_deref() == Some(old_text) {
+        let content = user_text(entry);
+        let matches = content.as_deref().is_some_and(|text| text == old_text ||
+            (planner && text.ends_with(&format!("\n{old_text}")) &&
+                (text.starts_with("Current graph node status:\n") || text.starts_with("User query:\n"))));
+        if matches {
             let time = entry.get("message").and_then(|message| message.get("timestamp"))
                 .and_then(Value::as_u64).unwrap_or(0);
             if time >= started_at && time <= completed_at {
@@ -101,6 +118,25 @@ pub fn branch_before_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn planner_turn_with_dynamic_status_can_branch_without_matching_a_node_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4().to_string();
+        let path = dir.path().join(format!("test_{id}.jsonl"));
+        fs::write(&path, [
+            json!({"type":"session", "id":id, "cwd":dir.path()}),
+            json!({"type":"message", "id":"root", "parentId":null,
+                "message":{"role":"user", "content":"original", "timestamp":1}}),
+            json!({"type":"message", "id":"next", "parentId":"root",
+                "message":{"role":"user", "content":"Current graph node status:\n- task: done\n\nlater", "timestamp":2}}),
+        ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+        let branch = branch_before_planner_user(dir.path(), &id, dir.path(), "later").unwrap();
+        let value: Value = serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap()).unwrap();
+        assert_eq!(value["parentId"], "root");
+        branch.rollback().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 3);
+    }
+
     #[test]
     fn editing_a_turn_branches_without_deleting_the_abandoned_path() {
         let dir = tempfile::tempdir().unwrap();

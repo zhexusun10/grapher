@@ -586,6 +586,16 @@
 
 .chat-user-message-card-wrapper.inline-editing {
   max-width: calc(100% - 68px);
+  transition: width 0.16s ease, max-width 0.16s ease;
+}
+
+.chat-user-message-card-wrapper.inline-editing.expanded {
+  width: 100%;
+  max-width: min(calc(100% - 68px), 820px);
+}
+
+.chat-user-message-card-wrapper.inline-editing.expanded .chat-bubble-body {
+  width: 100%;
 }
 
 .chat-bubble-body {
@@ -767,6 +777,12 @@
   background: var(--bg-surface, #F8FAFC);
   border-color: var(--brand-default, #2563EB);
   box-shadow: 0 0 0 1px var(--brand-default, #2563EB), 0 4px 12px rgba(37, 99, 235, 0.08);
+  transition: width 0.16s ease;
+}
+
+.chat-bubble-user.editing.expanded {
+  width: 100%;
+  min-width: min(100%, 460px);
 }
 
 /* 用户气泡内图片附件预览 */
@@ -819,11 +835,11 @@
   font-family: inherit;
   font-size: inherit;
   line-height: inherit;
+  letter-spacing: inherit;
   padding: 0;
   margin: 0;
   border: 0;
   pointer-events: none;
-  max-height: 480px;
   overflow: hidden;
 }
 
@@ -842,12 +858,29 @@
   font-family: inherit;
   font-size: inherit;
   line-height: inherit;
+  letter-spacing: inherit;
   resize: none;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: break-word;
-  max-height: 480px;
-  overflow-y: auto;
+  overflow: hidden !important;
+  field-sizing: content;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.chat-bubble-edit-textarea::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+.chat-bubble-edit-textarea::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 /* The inline editor uses the bubble itself as its focus affordance. */
