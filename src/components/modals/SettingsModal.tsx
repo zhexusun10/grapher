@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { Settings2, RotateCcw, Terminal, Check, X, Copy, Sliders, GitBranch } from "lucide-react";
+import { Settings2, RotateCcw, Terminal, Check, X, Copy, GitBranch } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
 import { ProviderSettings } from "../ProviderSettings";
 
@@ -95,25 +95,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               />
             </div>
 
-            {/* Section 2: 并发控制 */}
-            <div className="settings-card">
-              <div className="settings-card-title">
-                <Sliders size={16} />
-                <h4>并发控制</h4>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <div className="settings-control-row">
-                  <div className="settings-control-label">
-                    <span>模型 Session 并发</span>
-                    <span className="settings-control-badge">不限制</span>
-                  </div>
-                  <p className="section-desc" style={{ margin: 0 }}>
-                    Serial 和 Graph 都不会按 Run 或 Session 限制并发；每个模型 Session 独立启动，冲突不在调度层处理。
-                  </p>
-                </div>
-              </div>
-            </div>
-
+            {/* Section 2: 图纸审批 */}
             <div className="settings-card">
               <div className="settings-card-title">
                 <GitBranch size={16} />

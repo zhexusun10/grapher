@@ -1,6 +1,9 @@
 import { spawn, execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
+import { ensureDependencies, findCargoExecutable } from "./ensure-deps.mjs";
+
+await ensureDependencies();
 
 const cargoBin = join(homedir(), ".cargo", "bin");
 if (!(process.env.PATH ?? "").split(delimiter).includes(cargoBin)) {
@@ -131,7 +134,7 @@ function childOptions() {
 }
 
 console.log(`[dev] Starting backend (cargo run --manifest-path backend/Cargo.toml --bin grapher)...`);
-const backend = spawn("cargo", ["run", "--manifest-path", "backend/Cargo.toml", "--bin", "grapher"], childOptions());
+const backend = spawn(findCargoExecutable() ?? "cargo", ["run", "--manifest-path", "backend/Cargo.toml", "--bin", "grapher"], childOptions());
 children.push(backend);
 
 backend.on("error", (error) => {
