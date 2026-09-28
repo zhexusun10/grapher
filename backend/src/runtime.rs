@@ -628,7 +628,9 @@ impl Runtime {
         instruction: &str,
         images: Option<Vec<ImageAttachment>>,
     ) -> Result<(), String> {
-        if !self.state.approved || self.state.nodes.get(node).map(|n| n.status.as_str()) != Some("done") {
+        if !self.state.approved
+            || self.state.nodes.get(node).map(|n| n.status.as_str()) != Some("done")
+        {
             return Err("Select a completed node to message".into());
         }
         if instruction.trim().is_empty() {
@@ -666,8 +668,11 @@ impl Runtime {
         // Explicit reruns and Planner graph revisions retain their own dependency policy.
         self.validate_invalidation(node, false)?;
         self.emit(EventKind::Invalidated {
-            nodes: vec![node.into()], target: node.into(),
-            instruction: instruction.trim().into(), human: true, images,
+            nodes: vec![node.into()],
+            target: node.into(),
+            instruction: instruction.trim().into(),
+            human: true,
+            images,
         })
     }
 
@@ -678,43 +683,92 @@ impl Runtime {
     /// Re-edit a settled Pi user turn, keeping the abandoned conversation as
     /// another branch in Pi's session file. Only the edited conversation is rerun.
     pub fn edit_node_message(
-        &mut self, node: &str, execution_id: &str, old_text: &str,
-        instruction: &str, images: Option<Vec<ImageAttachment>>,
+        &mut self,
+        node: &str,
+        execution_id: &str,
+        old_text: &str,
+        instruction: &str,
+        images: Option<Vec<ImageAttachment>>,
     ) -> Result<(), String> {
         self.edit_node_message_with_version(node, execution_id, old_text, instruction, images, None)
     }
 
     pub fn edit_node_message_with_version(
-        &mut self, node: &str, execution_id: &str, old_text: &str,
-        instruction: &str, images: Option<Vec<ImageAttachment>>,
+        &mut self,
+        node: &str,
+        execution_id: &str,
+        old_text: &str,
+        instruction: &str,
+        images: Option<Vec<ImageAttachment>>,
         selected_version: Option<usize>,
     ) -> Result<(), String> {
-        if instruction.trim().is_empty() { return Err("Enter a replacement message".into()); }
+        if instruction.trim().is_empty() {
+            return Err("Enter a replacement message".into());
+        }
         self.validate_invalidation(node, false)?;
-        let anchor = self.state.executions.iter().find(|execution| execution.id == execution_id
-            && execution.node == node && execution.completed_at.is_some()
-            && (selected_version.is_some() || !self.state.superseded_execution_ids.contains(&execution.id)))
-            .ok_or("Select an active completed message to edit")?.clone();
-        let start = self.state.events.iter().position(|event| matches!(
+        let anchor = self
+            .state
+            .executions
+            .iter()
+            .find(|execution| {
+                execution.id == execution_id
+                    && execution.node == node
+                    && execution.completed_at.is_some()
+                    && (selected_version.is_some()
+                        || !self.state.superseded_execution_ids.contains(&execution.id))
+            })
+            .ok_or("Select an active completed message to edit")?
+            .clone();
+        let start = self
+            .state
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
             &event.kind, EventKind::Started { execution } if execution.id == execution_id
-        )).ok_or("Missing execution start")?;
-        let from_event_sequence = self.state.events[..start].iter().rev().find_map(|event| match &event.kind {
-            EventKind::Invalidated { target, human: true, .. } | EventKind::ConversationEdited { target, .. }
-                if target == node => Some(event.sequence),
+                )
+            })
+            .ok_or("Missing execution start")?;
+        let from_event_sequence = self.state.events[..start]
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::Invalidated {
+                    target,
+                    human: true,
+                    ..
+                }
+                | EventKind::ConversationEdited { target, .. }
+                    if target == node =>
+                {
+                    Some(event.sequence)
+                }
             _ => None,
-        }).unwrap_or(self.state.events[start].sequence);
-        let first_id = self.state.executions.iter().find(|execution|
-            execution.session_id == anchor.session_id && execution.node == node
-        ).ok_or("Missing Pi session origin")?.id.clone();
+            })
+            .unwrap_or(self.state.events[start].sequence);
+        let first_id = self
+            .state
+            .executions
+            .iter()
+            .find(|execution| execution.session_id == anchor.session_id && execution.node == node)
+            .ok_or("Missing Pi session origin")?
+            .id
+            .clone();
         let branch = crate::session_branch::branch_before_user(
-            &self.root.join("sessions").join(&first_id), &anchor.session_id,
-            Path::new(&anchor.worktree), old_text,
-            anchor.started_at, anchor.completed_at.ok_or("Execution is not settled")?,
+            &self.root.join("sessions").join(&first_id),
+            &anchor.session_id,
+            Path::new(&anchor.worktree),
+            old_text,
+            anchor.started_at,
+            anchor.completed_at.ok_or("Execution is not settled")?,
         )?;
         if let Err(error) = self.emit(EventKind::ConversationEdited {
-            nodes: vec![node.into()], target: node.into(),
-            instruction: instruction.trim().into(), images,
-            from_execution_id: execution_id.into(), from_event_sequence,
+            nodes: vec![node.into()],
+            target: node.into(),
+            instruction: instruction.trim().into(),
+            images,
+            from_execution_id: execution_id.into(),
+            from_event_sequence,
             old_instruction: old_text.into(),
             first_turn: anchor.id == first_id,
             selected_version,
@@ -727,24 +781,48 @@ impl Runtime {
         Ok(())
     }
 
-    fn validate_invalidation(&self, node: &str, include_downstream: bool) -> Result<BTreeSet<String>, String> {
-        if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+    fn validate_invalidation(
+        &self,
+        node: &str,
+        include_downstream: bool,
+    ) -> Result<BTreeSet<String>, String> {
+        if matches!(
+            self.state.phase.as_str(),
+            "publishing" | "merging" | "publication_failed"
+        ) {
             return Err("Resolve or retry publication before changing node results".into());
         }
-        if !self.state.approved { return Err("Approve the graph before updating a node".into()); }
-        if !self.state.nodes.contains_key(node) { return Err("Select a node to rerun".into()); }
-        let affected = if include_downstream { downstream(&self.state.graph, node) }
-            else { BTreeSet::from([node.to_owned()]) };
-        if self.state.executions.iter().any(|execution| execution.status == "running"
-            && affected.contains(&execution.node)) {
+        if !self.state.approved {
+            return Err("Approve the graph before updating a node".into());
+        }
+        if !self.state.nodes.contains_key(node) {
+            return Err("Select a node to rerun".into());
+        }
+        let affected = if include_downstream {
+            downstream(&self.state.graph, node)
+        } else {
+            BTreeSet::from([node.to_owned()])
+        };
+        if self
+            .state
+            .executions
+            .iter()
+            .any(|execution| execution.status == "running" && affected.contains(&execution.node))
+        {
             return Err("Wait for running downstream nodes before editing their inputs".into());
         }
         let repository = resolve_repository(
-            &self.root, self.state.config.as_ref().ok_or("Missing config")?,
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
         )?;
         if !self.is_serial() && !workspace::is_standard_git(&repository) {
-            workspace::check_shadow_source(&repository,
-                self.state.published_head.as_deref().unwrap_or(&self.state.base))?;
+            workspace::check_shadow_source(
+                &repository,
+                self.state
+                    .published_head
+                    .as_deref()
+                    .unwrap_or(&self.state.base),
+            )?;
         }
         Ok(affected)
     }
@@ -839,7 +917,10 @@ impl Runtime {
     /// A feedback verdict can only invalidate the target and its dependency
     /// descendants. A shared ancestor's other branches are safe to schedule.
     fn feedback_scope(&self, source: &str) -> BTreeSet<String> {
-        self.state.graph.edges.iter()
+        self.state
+            .graph
+            .edges
+            .iter()
             .filter(|edge| edge.feedback && edge.from == source)
             .flat_map(|edge| downstream(&self.state.graph, &edge.to))
             .collect()
@@ -847,12 +928,19 @@ impl Runtime {
 
     fn feedback_scope_has_running(&self, source: &str) -> bool {
         self.feedback_scope(source).iter().any(|name| {
-            self.state.nodes.get(name).is_some_and(|state| state.status == "running")
+            self.state
+                .nodes
+                .get(name)
+                .is_some_and(|state| state.status == "running")
         })
     }
 
     fn busy_feedback_nodes(&self) -> BTreeSet<String> {
-        self.state.graph.edges.iter().filter(|edge| edge.feedback)
+        self.state
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| edge.feedback)
             .filter(|edge| self.feedback_scope_has_running(&edge.from))
             .flat_map(|edge| self.feedback_scope(&edge.from))
             .collect()
@@ -991,8 +1079,11 @@ impl Runtime {
                         .executions
                         .iter()
                         .rev()
-                        .find(|execution| execution.node == node.name && execution.completed_at.is_some()
-                            && anchor.is_none_or(|id| execution.id == id))
+                        .find(|execution| {
+                            execution.node == node.name
+                                && execution.completed_at.is_some()
+                                && anchor.is_none_or(|id| execution.id == id)
+                        })
                         .ok_or("No completed node session to continue")?,
                 )
             } else {
@@ -1162,6 +1253,49 @@ impl Runtime {
         Ok(jobs)
     }
 
+    #[cfg(not(feature = "fixture"))]
+    pub fn warm_completed_serial_node(&self) {
+        #[cfg(not(test))]
+        {
+            if !self.is_serial()
+                || self.state.paused
+                || self.state.stop_requested
+                || self
+                    .state
+                    .nodes
+                    .get("task")
+                    .is_none_or(|node| node.status != "done")
+            {
+                return;
+            }
+            let Some(execution) = self
+                .state
+                .executions
+                .iter()
+                .rev()
+                .find(|item| item.node == "task" && item.status == "completed")
+            else {
+                return;
+            };
+            let Some(origin) = self
+                .state
+                .executions
+                .iter()
+                .find(|item| item.node == "task" && item.session_id == execution.session_id)
+            else {
+                return;
+            };
+            if let Some(config) = self.state.config.clone() {
+                engine::warm_node(
+                    config,
+                    PathBuf::from(&execution.worktree),
+                    self.root.join("sessions").join(&origin.id),
+                    execution.session_id.clone(),
+                );
+            }
+        }
+    }
+
     pub fn parents(&self, node: &str) -> Vec<String> {
         self.state
             .graph
@@ -1208,16 +1342,7 @@ impl Runtime {
                     output: format!("{raw}\n── Final response ──\n{output}\n"),
                 })?;
                 #[cfg(not(feature = "fixture"))]
-                if self.is_serial() && !self.state.paused && !self.state.stop_requested {
-                    if let (Some(config), Some(origin)) = (
-                        self.state.config.clone(),
-                        self.state.executions.iter().find(|item|
-                            item.node == execution.node && item.session_id == execution.session_id),
-                    ) {
-                        engine::warm_node(config, PathBuf::from(&execution.worktree),
-                            self.root.join("sessions").join(&origin.id), execution.session_id.clone());
-                    }
-                }
+                self.warm_completed_serial_node();
                 if let Some(exec) = self
                     .state
                     .executions
@@ -1248,7 +1373,9 @@ impl Runtime {
                 // consequence of the user's action, not a model failure.
                 let error = if self.state.stop_requested && error.starts_with("Pi exited with ") {
                     "用户已停止本次执行；可以修改消息或重新运行。".to_string()
-                } else { error };
+                } else {
+                    error
+                };
                 eprintln!(
                     "[Grapher] [Execution] Node '{}' failed: {error}",
                     execution.node

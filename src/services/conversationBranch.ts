@@ -17,9 +17,32 @@ export function activeNodeConversationEvents(state: Snapshot, node: string): Gra
   }));
 }
 
+export function executionIdForMessage(state: Snapshot, event: GraphEvent): string | undefined {
+  if (event.execution_id) return event.execution_id;
+  const node = event.target ?? event.node;
+  if (!node) return undefined;
+  return state.events.find(item => item.type === "started" && item.sequence > event.sequence &&
+    item.execution?.node === node)?.execution?.id;
+}
+
+export function executionIdForVersion(state: Snapshot, node: string, text: string): string | undefined {
+  const clean = text.replace(/^\[@[^\]]+\]\s*/, "").trim();
+  const edited = state.events.slice().reverse().find(event =>
+    event.type === "conversation_edited" && event.target === node &&
+    event.instruction?.trim() === clean);
+  if (edited) return executionIdForMessage(state, edited);
+  const previous = state.events.slice().reverse().find(event =>
+    event.type === "conversation_edited" && event.target === node &&
+    event.old_instruction?.trim() === clean);
+  if (previous?.from_execution_id) return previous.from_execution_id;
+  const invalidated = state.events.slice().reverse().find(event =>
+    event.type === "invalidated" && event.target === node &&
+    event.instruction?.trim() === clean);
+  return invalidated ? executionIdForMessage(state, invalidated) : undefined;
+}
+
 export function executionIdForEdit(state: Snapshot, edit: GraphEvent): string | undefined {
-  return state.events.find(event => event.type === "started" && event.sequence > edit.sequence &&
-    event.execution?.node === edit.target)?.execution?.id;
+  return executionIdForMessage(state, edit);
 }
 
 export function versionIndexForEdit(state: Snapshot, edit: GraphEvent, versions = versionsForEdit(state, edit)): number {

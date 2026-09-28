@@ -17,7 +17,11 @@ use std::{
 #[cfg(feature = "fixture")]
 use std::process::Command;
 #[cfg(not(feature = "fixture"))]
-use std::{hash::{Hash, Hasher}, process::Child, sync::atomic::{AtomicBool, Ordering}};
+use std::{
+    hash::{Hash, Hasher},
+    process::Child,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 #[cfg(not(feature = "fixture"))]
 struct WarmPartitioner {
@@ -31,14 +35,17 @@ struct WarmPartitioner {
 struct WarmNode {
     child: Child,
     tree: process_control::ProcessTree,
-    key: (PathBuf, PathBuf, String, String, String),
+    key: (PathBuf, PathBuf, String, String, String, String),
     session_hash: u64,
+    startup_output: Vec<String>,
 }
 
 #[cfg(not(feature = "fixture"))]
 static WARM_PARTITIONER: OnceLock<Mutex<Option<WarmPartitioner>>> = OnceLock::new();
 #[cfg(not(feature = "fixture"))]
 static WARM_NODE: OnceLock<Mutex<Option<WarmNode>>> = OnceLock::new();
+#[cfg(not(feature = "fixture"))]
+static NODE_WARM_GENERATION: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(feature = "fixture"))]
 static PREWARM_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
@@ -48,8 +55,11 @@ fn partitioner_key(config: &Config) -> Result<(PathBuf, String, String, String),
     let repo = Path::new(&config.repository)
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    let prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT")
-        .unwrap_or_else(|_| include_str!("../resources/prompts/partitioner.md").trim().to_string());
+    let prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT").unwrap_or_else(|_| {
+        include_str!("../resources/prompts/partitioner.md")
+            .trim()
+            .to_string()
+    });
     let prompt = if Path::new(&prompt).is_file() {
         fs::read_to_string(&prompt).map_err(|e| e.to_string())?
     } else {
@@ -70,7 +80,10 @@ fn partitioner_key(config: &Config) -> Result<(PathBuf, String, String, String),
 pub fn warm_partitioner(config: Config) {
     if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
         || config.repository.trim().is_empty()
-        || PiModelConfig::resolve(PiRole::Partitioner, &config).model.trim().is_empty()
+        || PiModelConfig::resolve(PiRole::Partitioner, &config)
+            .model
+            .trim()
+            .is_empty()
     {
         return;
     }
@@ -95,9 +108,10 @@ fn start_warm_partitioner_at(config: &Config, data: &Path) -> Result<(), String>
     if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) {
         return Ok(());
     }
-    if slot.as_mut().is_some_and(|worker| {
-        worker.key == key && worker.child.try_wait().ok().flatten().is_none()
-    }) {
+    if slot
+        .as_mut()
+        .is_some_and(|worker| worker.key == key && worker.child.try_wait().ok().flatten().is_none())
+    {
         return Ok(());
     }
     if let Some(mut old) = slot.take() {
@@ -105,18 +119,35 @@ fn start_warm_partitioner_at(config: &Config, data: &Path) -> Result<(), String>
         let _ = old.child.wait();
         let _ = fs::remove_dir_all(old.session_dir);
     }
-    let session_dir = data.join("partition-workers")
+    let session_dir = data
+        .join("partition-workers")
         .join(uuid::Uuid::new_v4().to_string());
     fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
     let prompt_path = session_dir.join("system-prompt.md");
     fs::write(&prompt_path, &key.3).map_err(|e| e.to_string())?;
     let mut command = crate::native::command(PiRole::Partitioner, &key.0, &key.0)?;
     command.args([
-        "--mode", "rpc", "--no-prompt-templates", "--no-themes", "--no-extensions",
-        "--no-skills", "--no-approve", "--no-tools", "--no-context-files",
-        "--model", &key.1, "--thinking", &key.2,
-        "--system-prompt", prompt_path.to_str().ok_or("Invalid Partitioner prompt path")?,
-        "--session-dir", session_dir.to_str().ok_or("Invalid Partitioner session path")?,
+        "--mode",
+        "rpc",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-extensions",
+        "--no-skills",
+        "--no-approve",
+        "--no-tools",
+        "--no-context-files",
+        "--model",
+        &key.1,
+        "--thinking",
+        &key.2,
+        "--system-prompt",
+        prompt_path
+            .to_str()
+            .ok_or("Invalid Partitioner prompt path")?,
+        "--session-dir",
+        session_dir
+            .to_str()
+            .ok_or("Invalid Partitioner session path")?,
     ]);
     command
         .env_remove("PI_MODEL")
@@ -130,7 +161,10 @@ fn start_warm_partitioner_at(config: &Config, data: &Path) -> Result<(), String>
         .env("GRAPHER_SOURCE_ALIAS", &key.0)
         .env("GRAPHER_WORKSPACE_ROOT", &key.0)
         .env("GRAPHER_ORIGINAL_ROOT", &key.0);
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     process_control::configure_command(&mut command);
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     let tree = process_control::track(&child).map_err(|error| {
@@ -187,32 +221,101 @@ fn claim_warm_partitioner(config: &Config) -> Option<WarmPartitioner> {
 }
 
 #[cfg(not(feature = "fixture"))]
-fn node_key(
-    config: &Config, cwd: &Path, session_dir: &Path, session_id: &str,
-) -> Result<((PathBuf, PathBuf, String, String, String), u64), String> {
-    let repo = Path::new(&config.repository).canonicalize().map_err(|e| e.to_string())?;
-    let cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
-    if cwd != repo { return Err("Only source-checkout nodes can be prewarmed".into()); }
-    let session_dir = session_dir.canonicalize().map_err(|e| e.to_string())?;
+fn node_session_file(session_dir: &Path, session_id: &str) -> Result<PathBuf, String> {
     let suffix = format!("_{session_id}.jsonl");
-    let files: Vec<_> = fs::read_dir(&session_dir).map_err(|e| e.to_string())?
+    let files: Vec<_> = fs::read_dir(session_dir)
+        .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(&suffix))
         .collect();
-    if files.len() != 1 { return Err("Node session file is missing or ambiguous".into()); }
+    if files.len() != 1 {
+        return Err("Node session file is missing or ambiguous".into());
+    }
+    Ok(files[0].path())
+}
+
+#[cfg(not(feature = "fixture"))]
+fn session_hash(bytes: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    fs::read(files[0].path()).map_err(|e| e.to_string())?.hash(&mut hasher);
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(not(feature = "fixture"))]
+fn startup_session_hash(
+    before: &[u8],
+    after: &[u8],
+    model: &str,
+    thinking: &str,
+) -> Result<u64, String> {
+    let appended = after
+        .strip_prefix(before)
+        .ok_or("Node session changed during prewarm")?;
+    let changes: Vec<Value> = appended
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    let (provider, model_id) = model.split_once('/').unwrap_or(("", model));
+    if changes.len() > 2
+        || changes
+            .iter()
+            .enumerate()
+            .any(|(index, event)| match index {
+                0 => {
+                    event["type"] != "model_change"
+                        || event["provider"] != provider
+                        || event["modelId"] != model_id
+                }
+                1 => event["type"] != "thinking_level_change" || event["thinkingLevel"] != thinking,
+                _ => true,
+            })
+    {
+        return Err("Node session had unexpected changes during prewarm".into());
+    }
+    Ok(session_hash(after))
+}
+
+#[cfg(not(feature = "fixture"))]
+fn node_key(
+    config: &Config,
+    cwd: &Path,
+    session_dir: &Path,
+    session_id: &str,
+) -> Result<((PathBuf, PathBuf, String, String, String, String), u64), String> {
+    let repo = Path::new(&config.repository)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
+    if cwd != repo {
+        return Err("Only source-checkout nodes can be prewarmed".into());
+    }
+    let session_dir = session_dir.canonicalize().map_err(|e| e.to_string())?;
+    let bytes =
+        fs::read(node_session_file(&session_dir, session_id)?).map_err(|e| e.to_string())?;
     let model = PiModelConfig::resolve(PiRole::NodeAgent, config);
-    Ok(((cwd, session_dir, session_id.into(), model.model,
-        model.thinking.unwrap_or_default()), hasher.finish()))
+    Ok((
+        (
+            cwd,
+            session_dir,
+            session_id.into(),
+            model.model,
+            model.thinking.unwrap_or_default(),
+            config.repository.clone(),
+        ),
+        session_hash(&bytes),
+    ))
 }
 
 /// Keep one idle RPC node for the next turn of a completed serial conversation.
 #[cfg(not(feature = "fixture"))]
 pub fn warm_node(config: Config, cwd: PathBuf, session_dir: PathBuf, session_id: String) {
-    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) { return; }
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return;
+    }
+    let generation = NODE_WARM_GENERATION.load(Ordering::SeqCst);
     thread::spawn(move || {
-        if let Err(error) = start_warm_node(&config, &cwd, &session_dir, &session_id) {
+        if let Err(error) = start_warm_node(&config, &cwd, &session_dir, &session_id, generation) {
             eprintln!("[Grapher] Node prewarm unavailable: {error}");
         }
     });
@@ -220,29 +323,56 @@ pub fn warm_node(config: Config, cwd: PathBuf, session_dir: PathBuf, session_id:
 
 #[cfg(not(feature = "fixture"))]
 fn start_warm_node(
-    config: &Config, cwd: &Path, session_dir: &Path, session_id: &str,
+    config: &Config,
+    cwd: &Path,
+    session_dir: &Path,
+    session_id: &str,
+    generation: u64,
 ) -> Result<(), String> {
     crate::workspace::validate_binding(Path::new(&config.repository))?;
-    let (key, session_hash) = node_key(config, cwd, session_dir, session_id)?;
+    let (key, initial_hash) = node_key(config, cwd, session_dir, session_id)?;
+    let session_file = node_session_file(&key.1, session_id)?;
+    let before = fs::read(&session_file).map_err(|e| e.to_string())?;
+    if session_hash(&before) != initial_hash {
+        return Ok(());
+    }
     let pool = WARM_NODE.get_or_init(Default::default);
     let mut slot = pool.lock().map_err(|e| e.to_string())?;
-    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) { return Ok(()); }
-    if slot.as_mut().is_some_and(|worker| worker.key == key
-        && worker.session_hash == session_hash
-        && worker.child.try_wait().ok().flatten().is_none()) {
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
+        || generation != NODE_WARM_GENERATION.load(Ordering::SeqCst)
+    {
+        return Ok(());
+    }
+    if slot.as_mut().is_some_and(|worker| {
+        worker.key == key
+            && worker.session_hash == initial_hash
+            && worker.child.try_wait().ok().flatten().is_none()
+    }) {
         return Ok(());
     }
     if let Some(mut old) = slot.take() {
         old.tree.terminate();
         let _ = old.child.wait();
     }
+    drop(slot);
     let mut command = crate::native::command(PiRole::NodeAgent, &key.0, &key.0)?;
     command.args([
-        "--mode", "rpc", "--no-prompt-templates", "--no-themes", "--approve",
-        "--model", &key.3, "--session-id", &key.2,
-        "--session-dir", key.1.to_str().ok_or("Invalid node session path")?,
+        "--mode",
+        "rpc",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--approve",
+        "--session-id",
+        &key.2,
+        "--session-dir",
+        key.1.to_str().ok_or("Invalid node session path")?,
     ]);
-    if !key.4.is_empty() { command.args(["--thinking", &key.4]); }
+    if !key.3.is_empty() {
+        command.args(["--model", &key.3]);
+    }
+    if !key.4.is_empty() {
+        command.args(["--thinking", &key.4]);
+    }
     command
         .env_remove("PI_MODEL")
         .env_remove("PI_THINKING")
@@ -252,21 +382,116 @@ fn start_warm_node(
         .env_remove("PI_SESSION_FILE")
         .env("GRAPHER_MODE", "node")
         .env("GRAPHER_EXECUTION_KIND", "source")
-        .env("GRAPHER_SOURCE_ALIAS", &key.0)
+        .env("GRAPHER_SOURCE_ALIAS", &key.5)
         .env("GRAPHER_WORKSPACE_ROOT", &key.0)
         .env("GRAPHER_ORIGINAL_ROOT", &key.0);
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     process_control::configure_command(&mut command);
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     let tree = process_control::track(&child).map_err(|error| {
-        let _ = child.kill(); let _ = child.wait(); error
+        let _ = child.kill();
+        let _ = child.wait();
+        error
     })?;
-    *slot = Some(WarmNode { child, tree, key, session_hash });
+    let probe = uuid::Uuid::new_v4().to_string();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Prewarmed node stdout unavailable")?;
+    let (tx, rx) = mpsc::channel();
+    let probe_id = probe.clone();
+    thread::spawn(move || {
+        let mut reader = BufReader::with_capacity(1, stdout);
+        let mut startup_output = Vec::new();
+        let ready = loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break Err("Prewarmed node exited before RPC was ready".to_string()),
+                Err(error) => break Err(error.to_string()),
+                Ok(_) => {}
+            }
+            if let Ok(event) = serde_json::from_str::<Value>(&line) {
+                if event["id"] == probe_id {
+                    break if event["success"] == true {
+                        Ok(())
+                    } else {
+                        Err(format!("Prewarmed node rejected get_state: {event}"))
+                    };
+                }
+            }
+            startup_output.push(line);
+        };
+        let _ = tx.send((ready, reader.into_inner(), startup_output));
+    });
+    let ready = (|| -> Result<Vec<String>, String> {
+        writeln!(
+            child
+                .stdin
+                .as_mut()
+                .ok_or("Prewarmed node stdin unavailable")?,
+            "{}",
+            serde_json::json!({"id": probe, "type": "get_state"})
+        )
+        .map_err(|e| e.to_string())?;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .flush()
+            .map_err(|e| e.to_string())?;
+        let (result, stdout, startup_output) = rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|e| format!("Prewarmed node readiness timed out: {e}"))?;
+        child.stdout = Some(stdout);
+        result?;
+        Ok(startup_output)
+    })();
+    let startup_output = match ready {
+        Ok(output) => output,
+        Err(error) => {
+            tree.terminate();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let ready_hash = fs::read(&session_file)
+        .map_err(|e| e.to_string())
+        .and_then(|after| startup_session_hash(&before, &after, &key.3, &key.4));
+    let session_hash = match ready_hash {
+        Ok(hash) => hash,
+        Err(error) => {
+            tree.terminate();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let pool = WARM_NODE.get_or_init(Default::default);
+    let mut slot = pool.lock().map_err(|e| e.to_string())?;
+    if generation != NODE_WARM_GENERATION.load(Ordering::SeqCst) {
+        tree.terminate();
+        let _ = child.wait();
+        return Ok(());
+    }
+    if let Some(mut old) = slot.take() {
+        old.tree.terminate();
+        let _ = old.child.wait();
+    }
+    *slot = Some(WarmNode {
+        child,
+        tree,
+        key,
+        session_hash,
+        startup_output,
+    });
     Ok(())
 }
 
 #[cfg(not(feature = "fixture"))]
 pub fn invalidate_warm_node() {
+    NODE_WARM_GENERATION.fetch_add(1, Ordering::SeqCst);
     if let Some(pool) = WARM_NODE.get() {
         if let Ok(mut slot) = pool.lock() {
             if let Some(mut old) = slot.take() {
@@ -278,12 +503,19 @@ pub fn invalidate_warm_node() {
 }
 
 #[cfg(not(feature = "fixture"))]
-fn claim_warm_node(config: &Config, cwd: &Path, session_dir: &Path, session_id: &str) -> Option<WarmNode> {
+fn claim_warm_node(
+    config: &Config,
+    cwd: &Path,
+    session_dir: &Path,
+    session_id: &str,
+) -> Option<WarmNode> {
     let (key, hash) = node_key(config, cwd, session_dir, session_id).ok()?;
     let pool = WARM_NODE.get()?;
     let mut slot = pool.lock().ok()?;
     let worker = slot.as_mut()?;
-    if worker.key != key { return None; }
+    if worker.key != key {
+        return None;
+    }
     if worker.session_hash != hash || worker.child.try_wait().ok().flatten().is_some() {
         let mut old = slot.take()?;
         old.tree.terminate();
@@ -726,16 +958,24 @@ fn run_pi_with_timeout(
         let executable = if config.pi_command == "/bin/sh" {
             // Fixture shell scripts need Git for Windows' sh.exe. The POSIX
             // /bin/sh path is not a Windows executable path, even in Git Bash.
-            let output = Command::new("git").arg("--exec-path").output()
+            let output = Command::new("git")
+                .arg("--exec-path")
+                .output()
                 .map_err(|error| format!("Cannot locate Git for Windows shell: {error}"))?;
             if !output.status.success() {
                 return Err("Cannot locate Git for Windows shell".into());
             }
             let exec_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-            let root = exec_dir.ancestors().nth(3).ok_or("Invalid Git for Windows install path")?;
+            let root = exec_dir
+                .ancestors()
+                .nth(3)
+                .ok_or("Invalid Git for Windows install path")?;
             let shell = root.join("bin/sh.exe");
             if !shell.is_file() {
-                return Err(format!("Git for Windows shell is missing: {}", shell.display()));
+                return Err(format!(
+                    "Git for Windows shell is missing: {}",
+                    shell.display()
+                ));
             }
             shell
         } else {
@@ -904,17 +1144,39 @@ fn run_pi_with_timeout(
             matches!(*key, "GRAPHER_MODE" | "GRAPHER_GRAPH_PATH")
         });
     #[cfg(not(feature = "fixture"))]
-    let warm = warm_compatible.then(|| claim_warm_partitioner(config)).flatten();
+    let warm = warm_compatible
+        .then(|| claim_warm_partitioner(config))
+        .flatten();
     #[cfg(not(feature = "fixture"))]
     let warm_node = (request.role == PiRole::NodeAgent
-        && request.extension.is_none() && request.tools.is_none()
+        && request.extension.is_none()
+        && request.tools.is_none()
         && request.system_prompt.is_none()
         && request.session_id.is_some()
-        && request.extra_args.iter().all(|arg| matches!(
-            *arg, "--thinking" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-        )))
-        .then(|| claim_warm_node(config, request.cwd, request.session_dir, request.session_id.unwrap()))
+        && request.extra_args.iter().all(|arg| {
+            matches!(
+                *arg,
+                "--thinking" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            )
+        }))
+    .then(|| {
+        claim_warm_node(
+            config,
+            request.cwd,
+            request.session_dir,
+            request.session_id.unwrap(),
+        )
+    })
         .flatten();
+    #[cfg(not(feature = "fixture"))]
+    if request.role == PiRole::NodeAgent {
+        invalidate_warm_node();
+    }
+    #[cfg(not(feature = "fixture"))]
+    let warm_startup_output = warm_node
+        .as_ref()
+        .map(|worker| worker.startup_output.clone())
+        .unwrap_or_default();
     #[cfg(not(feature = "fixture"))]
     let prewarmed = warm.is_some() || warm_node.is_some();
     #[cfg(not(feature = "fixture"))]
@@ -925,19 +1187,25 @@ fn run_pi_with_timeout(
     } else if let Some(worker) = warm {
         (worker.child, worker.tree)
     } else {
-        let mut child = command.spawn()
+        let mut child = command
+            .spawn()
             .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
         let tree = process_control::track(&child).map_err(|error| {
-            let _ = child.kill(); let _ = child.wait(); error
+            let _ = child.kill();
+            let _ = child.wait();
+            error
         })?;
         (child, tree)
     };
     #[cfg(feature = "fixture")]
     let (mut child, process_tree) = {
-        let mut child = command.spawn()
+        let mut child = command
+            .spawn()
             .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
         let tree = process_control::track(&child).map_err(|error| {
-            let _ = child.kill(); let _ = child.wait(); error
+            let _ = child.kill();
+            let _ = child.wait();
+            error
         })?;
         (child, tree)
     };
@@ -948,6 +1216,10 @@ fn run_pi_with_timeout(
         "{}\n",
         serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "prewarmed":prewarmed, "timestamp":crate::model::now()})
     ));
+    #[cfg(not(feature = "fixture"))]
+    for line in warm_startup_output {
+        on_output(line);
+    }
     let mut stdin = child.stdin.take().ok_or("Pi stdin unavailable")?;
     let (input_sender, input_receiver) = mpsc::channel();
     let mut rpc_sender = None;
@@ -969,9 +1241,9 @@ fn run_pi_with_timeout(
             // Manual Graph revisions keep their session at planner-sessions/<runId>;
             // its parent name is shared by every Run. Use the Run ID, or the
             // full session path when called without one (e.g. fixture tests).
-            let identity = run_id.clone().unwrap_or_else(|| {
-                request.session_dir.to_string_lossy().into_owned()
-            });
+            let identity = run_id
+                .clone()
+                .unwrap_or_else(|| request.session_dir.to_string_lossy().into_owned());
             format!("planner:{identity}")
         } else if request.role == PiRole::Partitioner {
             format!("partition:{}", request.session_dir.display())
@@ -1359,7 +1631,11 @@ mod tests {
         #[cfg(windows)]
         {
             // Windows' python3.exe on PATH may be the Microsoft Store alias.
-            for (program, launcher_args) in [("py", &["-3"][..]), ("python", &[][..]), ("python3", &[][..])] {
+            for (program, launcher_args) in [
+                ("py", &["-3"][..]),
+                ("python", &[][..]),
+                ("python3", &[][..]),
+            ] {
                 if let Ok(output) = std::process::Command::new(program)
                     .args(launcher_args)
                     .args(["-c", "import sys; print(sys.executable)"])
@@ -1374,7 +1650,9 @@ mod tests {
             panic!("Python 3 is required to run Pi fixture tests on Windows");
         }
         #[cfg(not(windows))]
-        { "python3".into() }
+        {
+            "python3".into()
+        }
     }
 
     #[cfg(not(feature = "fixture"))]
@@ -1395,15 +1673,24 @@ mod tests {
         let mut other = config.clone();
         other.model = "other/model".into();
         assert!(claim_warm_partitioner(&other).is_none());
-        let mut worker = process_control::with_owner("prewarm-test", || claim_warm_partitioner(&config))
+        let mut worker =
+            process_control::with_owner("prewarm-test", || claim_warm_partitioner(&config))
             .expect("matching idle worker");
         assert!(claim_warm_partitioner(&config).is_none());
         let mut stdin = worker.child.stdin.take().unwrap();
-        writeln!(stdin, "{}", serde_json::json!({"id":"probe", "type":"get_state"})).unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"id":"probe", "type":"get_state"})
+        )
+        .unwrap();
         stdin.flush().unwrap();
         let mut stdout = BufReader::new(worker.child.stdout.take().unwrap());
-        let response = (&mut stdout).lines().map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
-            .find(|event| event["id"] == "probe").unwrap();
+        let response = (&mut stdout)
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .find(|event| event["id"] == "probe")
+            .unwrap();
         assert_eq!(response["success"], true);
         assert_eq!(response["data"]["thinkingLevel"], "off");
         drop(stdin);
@@ -1412,9 +1699,99 @@ mod tests {
         stdout.read_to_string(&mut tail).unwrap();
         let status = worker.child.wait().unwrap();
         let mut stderr = String::new();
-        worker.child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+        worker
+            .child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
         assert!(status.success(), "{status}: {stderr}");
         let _ = fs::remove_dir_all(worker.session_dir);
+    }
+
+    #[cfg(not(feature = "fixture"))]
+    #[test]
+    #[ignore = "requires an isolated real Pi process and warm-node slot"]
+    fn serial_node_prewarm_reuses_session_and_rejects_modified_history() {
+        use std::io::Read;
+        let temp = tempfile::tempdir().unwrap();
+        invalidate_warm_node();
+        let repository = temp.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let session_dir = temp.path().join("sessions");
+        fs::create_dir(&session_dir).unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_file = session_dir.join(format!("2026-01-01T00-00-00-000Z_{session_id}.jsonl"));
+        fs::write(&session_file, format!("{}\n{}\n{}\n",
+            serde_json::json!({
+                "type": "session", "version": 3, "id": session_id,
+                "timestamp": "2026-01-01T00:00:00.000Z", "cwd": repository,
+            }),
+            serde_json::json!({"type":"model_change", "id":"model-1", "parentId":null,
+                "timestamp":"2026-01-01T00:00:01.000Z", "provider":"openai-codex", "modelId":"gpt-6-sol"}),
+            serde_json::json!({"type":"thinking_level_change", "id":"thinking-1", "parentId":"model-1",
+                "timestamp":"2026-01-01T00:00:02.000Z", "thinkingLevel":"high"}),
+        )).unwrap();
+        let config = Config {
+            repository: repository.to_string_lossy().into(),
+            model: "openai-codex/gpt-6-sol".into(),
+            thinking_level: "high".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+        };
+        let generation = NODE_WARM_GENERATION.load(Ordering::SeqCst);
+        start_warm_node(&config, &repository, &session_dir, &session_id, generation).unwrap();
+        let mut other = config.clone();
+        other.model = "other/model".into();
+        assert!(claim_warm_node(&other, &repository, &session_dir, &session_id).is_none());
+        let mut worker = process_control::with_owner("warm-node-test", || {
+            claim_warm_node(&config, &repository, &session_dir, &session_id)
+        })
+        .unwrap();
+        let mut stdin = worker.child.stdin.take().unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"id":"probe", "type":"get_state"})
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        let mut stdout = BufReader::new(worker.child.stdout.take().unwrap());
+        let response = (&mut stdout)
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .find(|event| event["id"] == "probe")
+            .unwrap();
+        assert_eq!(response["success"], true);
+        drop(stdin);
+        stdout.read_to_string(&mut String::new()).unwrap();
+        let status = worker.child.wait().unwrap();
+        let mut stderr = String::new();
+        worker
+            .child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(status.success(), "{status}: {stderr}");
+
+        start_warm_node(&config, &repository, &session_dir, &session_id, generation).unwrap();
+        fs::write(
+            &session_file,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "session", "version": 3, "id": session_id,
+                    "timestamp": "2026-01-02T00:00:00.000Z", "cwd": repository,
+                })
+            ),
+        )
+        .unwrap();
+        assert!(claim_warm_node(&config, &repository, &session_dir, &session_id).is_none());
+        invalidate_warm_node();
     }
 
     #[cfg(feature = "fixture")]
@@ -1443,7 +1820,8 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
             auto_approve: false,
         };
         let mut events = String::new();
-        let result = run_pi(PiRequest {
+        let result = run_pi(
+            PiRequest {
             role: PiRole::Partitioner,
             config: &config,
             cwd: temp.path(),
@@ -1456,7 +1834,9 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
             environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
             system_prompt: None,
             images: None,
-        }, |line| events.push_str(&line));
+            },
+            |line| events.push_str(&line),
+        );
         assert_eq!(result.unwrap(), "graph");
         assert!(events.contains("grapher_process_exited"));
     }
@@ -1574,7 +1954,8 @@ sys.stdin.read()
                 let session = if manual_revision {
                     root.join("planner-sessions").join(run_id)
                 } else {
-                    root.join(format!("planning-{run_id}")).join("planner-session")
+                    root.join(format!("planning-{run_id}"))
+                        .join("planner-session")
                 };
                 let ready = ready_tx.clone();
                 workers.push(thread::spawn(move || {

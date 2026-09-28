@@ -12,6 +12,7 @@ try {
   const options = {
     recursive: true,
     mode: constants.COPYFILE_FICLONE,
+    dereference: process.platform === 'win32',
     verbatimSymlinks: process.platform !== 'win32',
   };
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
@@ -22,6 +23,11 @@ try {
   // tsx resolves the module format of execution-cli.ts from the nearest
   // package.json. Preserve the installation's ESM boundary in the copy.
   cpSync(join(root, 'package.json'), join(destination, 'package.json'));
+  if (process.platform === 'win32') {
+    // AppContainer cannot safely add an ACL to Node under Program Files.
+    // Run the sandbox from this Grapher-owned copy instead.
+    cpSync(process.execPath, join(destination, 'node.exe'), { mode: constants.COPYFILE_FICLONE });
+  }
   mkdirSync(join(destination, 'scripts'));
   for (const name of ['pi-baseline.mjs', 'cargo.mjs']) cpSync(join(root, 'scripts', name), join(destination, 'scripts', name));
   // Populate the clone index without checking out over the installed dependencies.

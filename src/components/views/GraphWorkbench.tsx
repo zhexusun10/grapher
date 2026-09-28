@@ -15,7 +15,7 @@ import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-inp
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
-import { activeNodeConversationEvents, activeNodeExecutions, executionIdForEdit, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
+import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
 import { isNodeWorking } from "../../lib/nodeWorking";
 import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
@@ -334,8 +334,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
       text: event.instruction || "", images: event.images, node: selectedNode.name, runId: state.runId,
-      executionId: event.type === "conversation_edited" ? executionIdForEdit(state, event) :
-        (event.execution_id ?? event.from_execution_id),
+      executionId: executionIdForMessage(state, event),
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
       delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
@@ -815,8 +814,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       text: event.instruction || "", images: event.images, node: serialNode.name, runId: state.runId,
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
-      executionId: event.type === "conversation_edited" ? executionIdForEdit(state, event) :
-        (event.execution_id ?? event.from_execution_id),
+      executionId: executionIdForMessage(state, event),
       delivery: event.type === "node_messaged" ? "node_messaged" : undefined,
     }));
     // A fresh browser session may have only a recorded follow-up, not the

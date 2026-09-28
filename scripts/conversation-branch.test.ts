@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activeNodeConversationEvents, activeNodeExecutions, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
+import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, executionIdForVersion, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
 import { emptySnapshot, type GraphEvent, type Snapshot } from '../src/types.ts';
 
 test('editing a completed turn hides the abandoned node branch but preserves earlier turns', () => {
@@ -35,6 +35,19 @@ test('edited messages point at the new active execution, not the superseded anch
     ],
   };
   assert.equal(executionIdForEdit(state, state.events[0]), 'new');
+});
+test('version lookup can recover a superseded branch anchor', () => {
+  const state: Snapshot = {
+    ...emptySnapshot,
+    events: [
+      { sequence: 1, timestamp: 10, type: 'invalidated', target: 'task', instruction: 'original' },
+      { sequence: 2, timestamp: 20, type: 'started', execution: { id: 'old', node: 'task' } as never },
+      { sequence: 3, timestamp: 30, type: 'conversation_edited', target: 'task', nodes: ['task'], instruction: 'replacement', old_instruction: 'original', from_execution_id: 'old' },
+      { sequence: 4, timestamp: 40, type: 'started', execution: { id: 'new', node: 'task' } as never },
+    ],
+  };
+  assert.equal(executionIdForMessage(state, state.events[2]), 'new');
+  assert.equal(executionIdForVersion(state, 'task', 'original'), 'old');
 });
 test('selecting an existing branch does not append another version', () => {
   const state: Snapshot = {

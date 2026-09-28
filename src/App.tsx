@@ -15,6 +15,7 @@ import { providerAuth } from "./services/providerAuth";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
+import { executionIdForMessage, executionIdForVersion } from "./services/conversationBranch";
 
 import { TaskNode } from "./components/graph/TaskNode";
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
@@ -1683,13 +1684,15 @@ export default function App() {
       }
       const selectedText = selectedVersionData.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
       if (!selectedText) return false;
-      const selectedExecution = selectedVersionData.executionId
-        ? state.executions.find(item => item.id === selectedVersionData.executionId)
-        : undefined;
       const selectedNode = state.graph.nodes.find((item) => item.name === selected);
       const selectedNodeName = targetMsg.node || (selectedNode ? selectedNode.name : (
         routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined
       ));
+      const selectedExecutionId = selectedVersionData.executionId ||
+        (selectedNodeName ? executionIdForVersion(state, selectedNodeName, selectedText) : undefined);
+      const selectedExecution = selectedExecutionId
+        ? state.executions.find(item => item.id === selectedExecutionId)
+        : undefined;
       const selectedMessage = {
         ...targetMsg,
         text: selectedText,
@@ -1941,7 +1944,15 @@ export default function App() {
       } catch (error) { setError(String(error)); return false; }
     }
     {
-      const execution = state.executions.find((item) => item.id === targetMsg.executionId);
+      const eventSequence = targetMsg.id.startsWith("event-")
+        ? Number(targetMsg.id.slice("event-".length)) : NaN;
+      const sourceEvent = Number.isInteger(eventSequence)
+        ? state.events.find((event) => event.sequence === eventSequence)
+        : undefined;
+      const resolvedExecutionId = sourceEvent
+        ? executionIdForMessage(state, sourceEvent) ?? targetMsg.executionId
+        : targetMsg.executionId ?? executionIdForVersion(state, targetNodeName, cleanExisting);
+      const execution = state.executions.find((item) => item.id === resolvedExecutionId);
       if (!execution || execution.node !== targetNodeName ||
           !["completed", "failed"].includes(execution.status) ||
           state.supersededExecutionIds?.includes(execution.id)) {

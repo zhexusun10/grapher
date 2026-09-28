@@ -40,17 +40,25 @@ fn prepared_runtime() -> Result<PathBuf, String> {
     let output = Command::new("node")
         .arg(installation_root().join("scripts/prepare-native-runtime.mjs"))
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| format!("Cannot start native runtime preparation with Node: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "Cannot prepare native Pi runtime: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "Cannot prepare native Pi runtime (exit {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let root = PathBuf::from(String::from_utf8(output.stdout).map_err(|e| e.to_string())?);
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let raw_root = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+    let root = PathBuf::from(raw_root.trim());
+    let root = root.canonicalize().map_err(|error| {
+        format!("Cannot resolve prepared native runtime {}: {error}", root.display())
+    })?;
     if !root.join("engine/entrypoint.mjs").is_file() {
-        return Err("Incomplete native runtime".into());
+        return Err("Incomplete native runtime: engine entrypoint is missing".into());
+    }
+    #[cfg(windows)]
+    if !root.join("node.exe").is_file() {
+        return Err("Incomplete native runtime: bundled Node executable is missing".into());
     }
     *cached = Some(root.clone());
     Ok(root)
@@ -172,7 +180,10 @@ pub fn execution_command(
         command
             .arg("--grapher-windows-sandbox-helper")
             .current_dir(&current)
-            .env("GRAPHER_WINDOWS_SANDBOX_TARGET", resolve_program("node")?)
+            .env(
+                "GRAPHER_WINDOWS_SANDBOX_TARGET",
+                engine.join("node.exe"),
+            )
             .env(
                 "GRAPHER_WINDOWS_SANDBOX_PREFIX",
                 engine.join("engine/entrypoint.mjs"),
@@ -206,29 +217,6 @@ pub fn execution_command(
                 .into(),
         )
     }
-}
-
-#[cfg(windows)]
-fn resolve_program(program: &str) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(program);
-    if candidate.is_absolute() && candidate.is_file() {
-        return Ok(candidate);
-    }
-    let path = std::env::var_os("PATH").ok_or("PATH is required")?;
-    for directory in std::env::split_paths(&path) {
-        let direct = directory.join(program);
-        if direct.is_file() {
-            return Ok(direct);
-        }
-        #[cfg(windows)]
-        if direct.extension().is_none() {
-            let exe = directory.join(format!("{program}.exe"));
-            if exe.is_file() {
-                return Ok(exe);
-            }
-        }
-    }
-    Err(format!("Cannot resolve {program} from PATH"))
 }
 
 /// Shared upstream-owned credentials/config; this is not a directory mapping.

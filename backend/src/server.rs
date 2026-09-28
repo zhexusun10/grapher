@@ -376,7 +376,10 @@ fn load_run(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> 
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
-    runtime.load_run(&run_id)
+    let snapshot = runtime.load_run(&run_id)?;
+    #[cfg(not(feature = "fixture"))]
+    runtime.warm_completed_serial_node();
+    Ok(snapshot)
 }
 
 fn compile_graph(graph: Graph) -> Result<Plan, Vec<compiler::Diagnostic>> {
@@ -2000,8 +2003,11 @@ fn control(
 }
 
 fn edit_planner(
-    run_id: String, old_text: String, instruction: String,
-    selected_version: Option<usize>, service: &Arc<Service>,
+    run_id: String,
+    old_text: String,
+    instruction: String,
+    selected_version: Option<usize>,
+    service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     if service.planning.load(Ordering::SeqCst) {
         return Err("Wait for the current Planner turn to finish before editing history".into());
@@ -2011,7 +2017,10 @@ fn edit_planner(
     if state.run_id != run_id || state.plan_type.as_deref() != Some("graph") {
         return Err("Select the active Graph Planner conversation".into());
     }
-    if matches!(state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+    if matches!(
+        state.phase.as_str(),
+        "publishing" | "merging" | "publication_failed"
+    ) {
         return Err("Wait for publication before editing the Planner".into());
     }
     if instruction.trim().is_empty() || old_text.trim().is_empty() {
@@ -2019,50 +2028,101 @@ fn edit_planner(
     }
     let repository = PathBuf::from(&state.config.as_ref().ok_or("Missing config")?.repository);
     crate::workspace::validate_binding(&repository)?;
-    let first = state.events.iter().find_map(|event| match &event.kind {
-        EventKind::Created { planning_id: Some(id), .. } | EventKind::GraphRevised { planning_id: id, .. } => Some(id.clone()),
+    let first = state
+        .events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Created {
+                planning_id: Some(id),
+                ..
+            }
+            | EventKind::GraphRevised {
+                planning_id: id, ..
+            } => Some(id.clone()),
         _ => None,
-    }).ok_or("No persisted Planner conversation")?;
+        })
+        .ok_or("No persisted Planner conversation")?;
     let attempt = runtime.root.join("planning").join(&first);
     let workspace = fs::read_to_string(attempt.join("planner-workspace"))
-        .map(PathBuf::from).unwrap_or_else(|_| repository.clone());
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repository.clone());
     let (session_dir, session_id) = planner_session_directory_for_workspace(
-        &runtime.root, &attempt, &repository, &workspace, Some(state),
+        &runtime.root,
+        &attempt,
+        &repository,
+        &workspace,
+        Some(state),
     )?;
-    let file = fs::read_dir(&session_dir).map_err(|error| error.to_string())?
+    let file = fs::read_dir(&session_dir)
+        .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
-        .find(|entry| entry.file_name().to_string_lossy().ends_with(&format!("_{session_id}.jsonl")))
-        .ok_or("Planner Pi session is missing")?.path();
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(&format!("_{session_id}.jsonl"))
+        })
+        .ok_or("Planner Pi session is missing")?
+        .path();
     let header = fs::read_to_string(&file).map_err(|error| error.to_string())?;
-    let cwd = serde_json::from_str::<serde_json::Value>(header.lines().next().ok_or("Empty Planner session")?)
-        .map_err(|error| error.to_string())?["cwd"].as_str().ok_or("Missing Planner cwd")?.to_string();
+    let cwd = serde_json::from_str::<serde_json::Value>(
+        header.lines().next().ok_or("Empty Planner session")?,
+    )
+    .map_err(|error| error.to_string())?["cwd"]
+        .as_str()
+        .ok_or("Missing Planner cwd")?
+        .to_string();
     let branch = crate::session_branch::branch_before_planner_user(
-        &session_dir, &session_id, std::path::Path::new(&cwd), old_text.trim(),
+        &session_dir,
+        &session_id,
+        std::path::Path::new(&cwd),
+        old_text.trim(),
     )?;
     let mut first_turn = old_text.trim() == state.graph.original_goal.trim();
-    if selected_version == Some(0) { first_turn = true; }
+    if selected_version == Some(0) {
+        first_turn = true;
+    }
     if let Err(error) = runtime.emit(EventKind::PlannerConversationEdited {
-        old_instruction: old_text.trim().into(), instruction: instruction.trim().into(), first_turn,
+        old_instruction: old_text.trim().into(),
+        instruction: instruction.trim().into(),
+        first_turn,
         selected_version,
     }) {
-        return Err(match branch.rollback() { Ok(()) => error, Err(rollback) => format!("{error}; {rollback}") });
+        return Err(match branch.rollback() {
+            Ok(()) => error,
+            Err(rollback) => format!("{error}; {rollback}"),
+        });
     }
     Ok(runtime.state.clone())
 }
 
 fn edit_node(
-    node: String, execution_id: String, old_text: String, instruction: String,
-    run_id: String, images: Option<Vec<crate::model::ImageAttachment>>,
-    selected_version: Option<usize>, service: &Arc<Service>,
+    node: String,
+    execution_id: String,
+    old_text: String,
+    instruction: String,
+    run_id: String,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+    selected_version: Option<usize>,
+    service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     if service.planning.load(Ordering::SeqCst) {
         return Err("Wait for planning to finish before editing a node conversation".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-    if runtime.state.run_id != run_id { return Err("Run changed while editing a message".into()); }
+    if runtime.state.run_id != run_id {
+        return Err("Run changed while editing a message".into());
+    }
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
-    runtime.edit_node_message_with_version(&node, &execution_id, &old_text, &instruction, images, selected_version)?;
+    runtime.edit_node_message_with_version(
+        &node,
+        &execution_id,
+        &old_text,
+        &instruction,
+        images,
+        selected_version,
+    )?;
     let snapshot = runtime.state.clone();
     drop(runtime);
     drive(service.clone());
@@ -2119,6 +2179,8 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
         return Err("Wait for the current operation to finish".into());
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    #[cfg(not(feature = "fixture"))]
+    crate::engine::invalidate_warm_node();
     runtime.delete_run(&run_id)
 }
 
@@ -2331,12 +2393,17 @@ fn get_run_execution_outputs(
     };
     // One historical snapshot read for the entire conversation instead of
     // re-reading it once per execution (and once per 256 KiB page).
-    let outputs: Vec<_> = state.executions.iter().chain(&state.mergers)
+    let outputs: Vec<_> = state
+        .executions
+        .iter()
+        .chain(&state.mergers)
         .filter(|exec| exec.status != "running")
-        .map(|exec| serde_json::json!({
+        .map(|exec| {
+            serde_json::json!({
             "executionId": exec.id, "content": exec.output,
             "totalBytes": exec.output.len(), "status": exec.status,
-        }))
+            })
+        })
         .collect();
     Ok(serde_json::json!({ "runId": run_id, "outputs": outputs }))
 }
@@ -2364,7 +2431,10 @@ fn get_execution_output(
     // than reloading the entire historical snapshot for every 256 KiB page.
     // Keep bounded pages for actively running agents.
     if body.get("full").and_then(serde_json::Value::as_bool) == Some(true) {
-        let completed = state.executions.iter().chain(&state.mergers)
+        let completed = state
+            .executions
+            .iter()
+            .chain(&state.mergers)
             .find(|exec| exec.id == execution_id)
             .is_some_and(|exec| exec.status != "running");
         if completed {
@@ -2791,14 +2861,21 @@ pub fn dispatch(
                 service,
             )?),
             "edit_planner" => Some(edit_planner(
-                argument(&body, "runId")?, argument(&body, "oldText")?,
-                argument(&body, "instruction")?, argument(&body, "versionIndex").ok(), service,
+                argument(&body, "runId")?,
+                argument(&body, "oldText")?,
+                argument(&body, "instruction")?,
+                argument(&body, "versionIndex").ok(),
+                service,
             )?),
             "edit_node" => Some(edit_node(
-                argument(&body, "node")?, argument(&body, "executionId")?,
-                argument(&body, "oldText")?, argument(&body, "instruction")?,
-                argument(&body, "runId")?, argument(&body, "images").ok(),
-                argument(&body, "versionIndex").ok(), service,
+                argument(&body, "node")?,
+                argument(&body, "executionId")?,
+                argument(&body, "oldText")?,
+                argument(&body, "instruction")?,
+                argument(&body, "runId")?,
+                argument(&body, "images").ok(),
+                argument(&body, "versionIndex").ok(),
+                service,
             )?),
             "reset_workspace" => Some(reset_workspace(service)?),
             _ => None,
@@ -2824,7 +2901,7 @@ pub fn dispatch(
                 }
             }
             to_value(result)
-        },
+        }
         "bootstrap" => to_value(bootstrap(service, metadata)?),
         "snapshot" => to_value(snapshot(service)?),
         "history" => to_value(history(argument(&body, "runId")?, service)?),
@@ -2893,14 +2970,21 @@ pub fn dispatch(
             service,
         )?),
         "edit_planner" => to_value(edit_planner(
-            argument(&body, "runId")?, argument(&body, "oldText")?,
-            argument(&body, "instruction")?, argument(&body, "versionIndex").ok(), service,
+            argument(&body, "runId")?,
+            argument(&body, "oldText")?,
+            argument(&body, "instruction")?,
+            argument(&body, "versionIndex").ok(),
+            service,
         )?),
         "edit_node" => to_value(edit_node(
-            argument(&body, "node")?, argument(&body, "executionId")?,
-            argument(&body, "oldText")?, argument(&body, "instruction")?,
-            argument(&body, "runId")?, argument(&body, "images").ok(),
-            argument(&body, "versionIndex").ok(), service,
+            argument(&body, "node")?,
+            argument(&body, "executionId")?,
+            argument(&body, "oldText")?,
+            argument(&body, "instruction")?,
+            argument(&body, "runId")?,
+            argument(&body, "images").ok(),
+            argument(&body, "versionIndex").ok(),
+            service,
         )?),
         "repository_status" => {
             let repository: String = argument(&body, "repository")?;
@@ -3133,6 +3217,9 @@ pub fn run() -> Result<(), String> {
     #[cfg(not(feature = "fixture"))]
     if let Ok(bootstrap) = bootstrap(&service, false) {
         crate::engine::warm_partitioner(bootstrap.config);
+        if let Ok(runtime) = service.runtime.lock() {
+            runtime.warm_completed_serial_node();
+        }
     }
     let port: u16 = std::env::var("GRAPHER_PORT")
         .unwrap_or_else(|_| "1421".into())
