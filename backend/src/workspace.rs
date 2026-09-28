@@ -665,6 +665,42 @@ pub fn verify(repository: &Path) -> Result<String, String> {
     }
 }
 
+#[cfg(windows)]
+fn copy_planner_symlink(
+    original: &Path,
+    copied: &Path,
+    excluded_data: &Path,
+) -> Result<(), String> {
+    let resolved = original.canonicalize().map_err(|error| {
+        format!(
+            "Cannot resolve Planner symlink {}: {error}",
+            original.display()
+        )
+    })?;
+    let metadata = fs::metadata(&resolved).map_err(|error| {
+        format!(
+            "Cannot inspect Planner symlink target {}: {error}",
+            resolved.display()
+        )
+    })?;
+    if metadata.is_dir() {
+        fs::create_dir_all(copied).map_err(|error| {
+            format!("Cannot create copied Planner symlink directory {}: {error}", copied.display())
+        })?;
+        copy_planner_files(&resolved, copied, excluded_data)
+    } else if metadata.is_file() {
+        fs::copy(&resolved, copied).map_err(|error| {
+            format!("Cannot copy Planner symlink target {}: {error}", resolved.display())
+        })?;
+        Ok(())
+    } else {
+        Err(format!(
+            "Unsupported Planner symlink target: {}",
+            resolved.display()
+        ))
+    }
+}
+
 fn copy_planner_files(source: &Path, target: &Path, excluded_data: &Path) -> Result<(), String> {
     for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -692,14 +728,13 @@ fn copy_planner_files(source: &Path, target: &Path, excluded_data: &Path) -> Res
                 fs::remove_file(&copied).map_err(|e| e.to_string())?;
             }
             if meta.file_type().is_symlink() {
-                let link = fs::read_link(&original).map_err(|e| e.to_string())?;
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(link, &copied).map_err(|e| e.to_string())?;
-                #[cfg(windows)]
                 {
-                    let _ = link;
-                    fs::copy(&original, &copied).map_err(|e| e.to_string())?;
+                    let link = fs::read_link(&original).map_err(|e| e.to_string())?;
+                    std::os::unix::fs::symlink(link, &copied).map_err(|e| e.to_string())?;
                 }
+                #[cfg(windows)]
+                copy_planner_symlink(&original, &copied, excluded_data)?;
             } else if meta.is_file() {
                 fs::copy(&original, &copied).map_err(|e| e.to_string())?;
             } else {
@@ -750,14 +785,14 @@ pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                 }
                 if meta.file_type().is_symlink() {
-                    let target = fs::read_link(&original).map_err(|e| e.to_string())?;
                     #[cfg(unix)]
-                    std::os::unix::fs::symlink(target, &copied).map_err(|e| e.to_string())?;
-                    #[cfg(windows)]
                     {
-                        let _ = target;
-                        fs::copy(&original, &copied).map_err(|e| e.to_string())?;
+                        let target = fs::read_link(&original).map_err(|e| e.to_string())?;
+                        std::os::unix::fs::symlink(target, &copied)
+                            .map_err(|e| e.to_string())?;
                     }
+                    #[cfg(windows)]
+                    copy_planner_symlink(&original, &copied, &data_root())?;
                 } else if meta.is_dir() {
                     // A Git submodule is stored in the index as a gitlink, but
                     // is a directory in the working tree. Its contents will
