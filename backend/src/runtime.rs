@@ -669,6 +669,72 @@ impl Runtime {
         self.invalidate_node(node, "", None)
     }
 
+    /// Re-edit a settled Pi user turn, keeping the abandoned conversation as
+    /// another branch in Pi's session file. A graph edit invalidates descendants.
+    pub fn edit_node_message(
+        &mut self, node: &str, execution_id: &str, old_text: &str,
+        instruction: &str, images: Option<Vec<ImageAttachment>>,
+    ) -> Result<(), String> {
+        if instruction.trim().is_empty() { return Err("Enter a replacement message".into()); }
+        let affected = self.validate_invalidation(node)?;
+        let anchor = self.state.executions.iter().find(|execution| execution.id == execution_id
+            && execution.node == node && execution.after.is_some()
+            && !self.state.superseded_execution_ids.contains(&execution.id))
+            .ok_or("Select an active completed message to edit")?.clone();
+        let start = self.state.events.iter().position(|event| matches!(
+            &event.kind, EventKind::Started { execution } if execution.id == execution_id
+        )).ok_or("Missing execution start")?;
+        let from_event_sequence = self.state.events[..start].iter().rev().find_map(|event| match &event.kind {
+            EventKind::Invalidated { target, human: true, .. } | EventKind::ConversationEdited { target, .. }
+                if target == node => Some(event.sequence),
+            _ => None,
+        }).unwrap_or(self.state.events[start].sequence);
+        let first_id = self.state.executions.iter().find(|execution|
+            execution.session_id == anchor.session_id && execution.node == node
+        ).ok_or("Missing Pi session origin")?.id.clone();
+        let branch = crate::session_branch::branch_before_user(
+            &self.root.join("sessions").join(first_id), &anchor.session_id,
+            Path::new(&anchor.worktree), old_text,
+            anchor.started_at, anchor.completed_at.ok_or("Execution is not settled")?,
+        )?;
+        if let Err(error) = self.emit(EventKind::ConversationEdited {
+            nodes: affected.into_iter().collect(), target: node.into(),
+            instruction: instruction.trim().into(), images,
+            from_execution_id: execution_id.into(), from_event_sequence,
+            old_instruction: old_text.into(),
+            first_turn: self.state.executions.iter().find(|execution|
+                execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)
+            ).is_some_and(|execution| execution.id == anchor.id),
+        }) {
+            return Err(match branch.rollback() {
+                Ok(()) => error,
+                Err(rollback) => format!("{error}; {rollback}"),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_invalidation(&self, node: &str) -> Result<BTreeSet<String>, String> {
+        if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+            return Err("Resolve or retry publication before changing node results".into());
+        }
+        if !self.state.approved { return Err("Approve the graph before updating a node".into()); }
+        if !self.state.nodes.contains_key(node) { return Err("Select a node to rerun".into()); }
+        let affected = downstream(&self.state.graph, node);
+        if self.state.executions.iter().any(|execution| execution.status == "running"
+            && affected.contains(&execution.node)) {
+            return Err("Wait for running downstream nodes before editing their inputs".into());
+        }
+        let repository = resolve_repository(
+            &self.root, self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
+        if !self.is_serial() && !workspace::is_standard_git(&repository) {
+            workspace::check_shadow_source(&repository,
+                self.state.published_head.as_deref().unwrap_or(&self.state.base))?;
+        }
+        Ok(affected)
+    }
+
     fn invalidate_node(
         &mut self,
         node: &str,
@@ -905,12 +971,14 @@ impl Runtime {
                 .clone()
                 .unwrap_or(self.state.base.clone());
             let resume = if self.state.nodes[&node.name].human_instruction {
+                let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
                 Some(
                     self.state
                         .executions
                         .iter()
                         .rev()
-                        .find(|execution| execution.node == node.name && execution.after.is_some())
+                        .find(|execution| execution.node == node.name && execution.after.is_some()
+                            && anchor.is_none_or(|id| execution.id == id))
                         .ok_or("No completed node session to continue")?,
                 )
             } else {

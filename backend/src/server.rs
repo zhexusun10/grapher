@@ -1991,6 +1991,23 @@ fn control(
     Ok(snapshot)
 }
 
+fn edit_node(
+    node: String, execution_id: String, old_text: String, instruction: String,
+    run_id: String, images: Option<Vec<crate::model::ImageAttachment>>,
+    service: &Arc<Service>,
+) -> Result<Snapshot, String> {
+    if service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for planning to finish before editing a node conversation".into());
+    }
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    if runtime.state.run_id != run_id { return Err("Run changed while editing a message".into()); }
+    runtime.edit_node_message(&node, &execution_id, &old_text, &instruction, images)?;
+    let snapshot = runtime.state.clone();
+    drop(runtime);
+    drive(service.clone());
+    Ok(snapshot)
+}
+
 fn detect_repository(
     path: Option<String>,
 ) -> Result<Option<crate::workspace::RepositoryInfo>, String> {
@@ -2708,6 +2725,11 @@ pub fn dispatch(
                 argument(&body, "images").ok(),
                 service,
             )?),
+            "edit_node" => Some(edit_node(
+                argument(&body, "node")?, argument(&body, "executionId")?,
+                argument(&body, "oldText")?, argument(&body, "instruction")?,
+                argument(&body, "runId")?, argument(&body, "images").ok(), service,
+            )?),
             "reset_workspace" => Some(reset_workspace(service)?),
             _ => None,
         };
@@ -2799,6 +2821,11 @@ pub fn dispatch(
             argument(&body, "executionId")?,
             argument(&body, "images").ok(),
             service,
+        )?),
+        "edit_node" => to_value(edit_node(
+            argument(&body, "node")?, argument(&body, "executionId")?,
+            argument(&body, "oldText")?, argument(&body, "instruction")?,
+            argument(&body, "runId")?, argument(&body, "images").ok(), service,
         )?),
         "repository_status" => {
             let repository: String = argument(&body, "repository")?;
@@ -2934,6 +2961,7 @@ fn api_service(
         | "snapshot_if_changed"
         | "load_run"
         | "control"
+        | "edit_node"
         | "save_graph"
         | "delete_run"
         | "get_execution_output"

@@ -15,6 +15,8 @@ interface VirtualizedTranscriptProps {
   // They must render in document flow rather than virtualizing against that
   // scroll area's unrelated coordinates.
   inline?: boolean;
+  // Execution transcripts grow with their parent conversation instead of reserving a viewport.
+  compact?: boolean;
   showUserTurns?: boolean;
   skipFirstUser?: boolean;
 }
@@ -49,6 +51,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   emptyText = "工作区就绪，等待节点指令输出…",
   onUserResize,
   inline = false,
+  compact = false,
   showUserTurns = false,
   skipFirstUser = false,
 }) => {
@@ -685,11 +688,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   }, [items, offsets, isVirtual, targetScrollTop, containerHeight, totalCount]);
 
   return (
-    <div className={`virtualized-transcript-container ${inline ? "transcript-inline" : ""} ${className}`}>
+    <div className={`virtualized-transcript-container ${inline ? "transcript-inline" : ""} ${compact ? "transcript-compact" : ""} ${className}`}>
       <div
         ref={containerRef}
         className="transcript-scroll-area"
-        style={{ overflowAnchor: "none", minHeight: inline ? 0 : 200 }}
+        style={{ overflowAnchor: "none", minHeight: inline || compact ? 0 : 200 }}
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
         <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>

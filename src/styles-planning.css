@@ -836,6 +836,12 @@
   overflow: hidden;
 }
 
+.virtualized-transcript-container.transcript-compact {
+  flex: none;
+  height: auto;
+  min-height: 0;
+}
+
 .transcript-scroll-area {
   padding: 4px 0;
   display: flex;

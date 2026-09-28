@@ -304,7 +304,7 @@ export default function App() {
     const displayMsg = options?.displayText || text;
     const parentId = sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null;
 
-    const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"]) => {
+    const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"], executionId?: string) => {
       const newMsg: ChatMessage = {
         id: `msg-${Date.now()}`,
         parentId,
@@ -315,6 +315,7 @@ export default function App() {
         runId: isPlanning && !targetNodeName ? (plannerStream.runId || state.runId) : state.runId,
         node: targetNodeName,
         delivery,
+        executionId,
       };
       setSessionEntries((prev) => [...prev, newMsg]);
       setEditingMessage(null);
@@ -352,7 +353,7 @@ export default function App() {
       const execution = targetNodeName && [...state.executions].reverse()
         .find((item) => item.node === targetNodeName && item.status === "running");
       if (execution) {
-        const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`, "steered");
+        const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`, "steered", execution.id);
         run(async () => {
           try {
             await runtimeService.control("steer", {
@@ -400,7 +401,7 @@ export default function App() {
       const execution = [...state.executions].reverse().find((item) => item.node === targetNodeName && item.status === "running");
       if (execution) {
         const displayLabel = targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
-        const message = recordMessage(`${displayLabel}${displayMsg}`, "steered");
+        const message = recordMessage(`${displayLabel}${displayMsg}`, "steered", execution.id);
         run(async () => {
           try {
             await requireRepository(state.config?.repository || config.repository);
@@ -1637,46 +1638,6 @@ export default function App() {
     }
   });
 
-  const handleSwitchMessageVersion = useCallback((targetMsg: ChatMessage, targetIndex: number) => {
-    setSessionEntries((prev) => {
-      const isInitial = targetMsg.id === "msg-initial-goal" || (prev.length > 0 && prev[0].id === targetMsg.id);
-      const msgIdx = isInitial ? 0 : prev.findIndex((e) => e.id === targetMsg.id);
-      if (msgIdx === -1) return prev;
-
-      const current = prev[msgIdx];
-      const versions = current.versions;
-      if (!versions || targetIndex < 0 || targetIndex >= versions.length) return prev;
-
-      const leavingVersionIndex = current.currentVersionIndex ?? 0;
-      const currentSubsequent = prev.slice(msgIdx + 1);
-
-      const updatedVersions = [...versions];
-      updatedVersions[leavingVersionIndex] = {
-        ...updatedVersions[leavingVersionIndex],
-        subsequentEntries: currentSubsequent,
-      };
-
-      const targetVersion = updatedVersions[targetIndex];
-      const updatedMsg: ChatMessage = {
-        ...current,
-        text: targetVersion.text,
-        images: targetVersion.images,
-        versions: updatedVersions,
-        currentVersionIndex: targetIndex,
-      };
-
-      if (isInitial) {
-        setGoal(targetVersion.text);
-      }
-
-      return [
-        ...prev.slice(0, msgIdx),
-        updatedMsg,
-        ...(targetVersion.subsequentEntries || []),
-      ];
-    });
-  }, []);
-
   const handleEditMessageSubmit = useCallback(async (targetMsg: ChatMessage, newText: string) => {
     const cleanText = newText.trim();
     if (!cleanText) return;
@@ -1696,18 +1657,50 @@ export default function App() {
       return;
     }
 
-    if (planningAbortControllerRef.current) {
+    const isInitialGoal = targetMsg.id === "msg-initial-goal" || (!targetMsg.node && (
+      (sessionEntries.length > 0 && sessionEntries[0].id === targetMsg.id) ||
+      effectiveMessages[0]?.id === targetMsg.id
+    ));
+    if ((isPlanning || recoveredPlanning?.status === "running") && !isInitialGoal) {
+      setError("请等待正在运行的 Planner 完成后再修改历史消息。");
+      return;
+    }
+    if (isInitialGoal && planningAbortControllerRef.current) {
       planningAbortControllerRef.current.abort();
       planningAbortControllerRef.current = null;
       setIsPlanning(false);
     }
 
-    const isInitialGoal = targetMsg.id === "msg-initial-goal" || (!targetMsg.node && (
-      (sessionEntries.length > 0 && sessionEntries[0].id === targetMsg.id) ||
-      effectiveMessages[0]?.id === targetMsg.id
-    ));
-
     if (isInitialGoal) {
+      // Serial's initial prompt is a Pi user turn too: branch before it in the
+      // existing Run instead of pretending a new unrelated Run is a tree edit.
+      if (routeType === "serial" && state.approved && state.graph.nodes.length > 0) {
+        const node = state.graph.nodes[0].name;
+        const first = state.executions.find((execution) => execution.node === node &&
+          !state.supersededExecutionIds?.includes(execution.id));
+        if (!first || first.status !== "completed") {
+          setError("请等待 Serial 任务完成后再修改初始消息。");
+          return;
+        }
+        await run(async () => {
+          await requireRepository(state.config?.repository || config.repository);
+          const snap = await runtimeService.editNode({
+            runId: state.runId, node, executionId: first.id,
+            oldText: state.graph.originalGoal, instruction: cleanText, images: targetMsg.images,
+          });
+          setState(snap);
+          setGoal(cleanText);
+          setSessionEntries([{ ...targetMsg, id: "msg-initial-goal", node: undefined, text: cleanText,
+            versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, images: targetMsg.images, timestamp: Date.now() }]),
+              { id: `v${Date.now()}`, text: cleanText, images: targetMsg.images, timestamp: Date.now() }],
+            currentVersionIndex: (targetMsg.versions?.length ?? 1),
+          }]);
+          setEditingMessage(null);
+          setEditPrefillText("");
+          if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
+        });
+        return;
+      }
       setEditingMessage(null);
       setEditPrefillText("");
 
@@ -1796,93 +1789,49 @@ export default function App() {
       };
       rolledBackEntries = [...prevEntries, updatedMsg];
     } else {
+      const versions = [
+        ...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, images: targetMsg.images, timestamp: targetMsg.timestamp || Date.now() }]),
+        { id: `v${Date.now()}`, text: cleanText, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
+      ];
       updatedMsg = {
         ...targetMsg,
         delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? undefined : targetMsg.delivery,
         text: cleanText,
         timestamp: Date.now(),
+        versions,
+        currentVersionIndex: versions.length - 1,
       };
       rolledBackEntries = [...sessionEntries, updatedMsg];
     }
-
-    setSessionEntries(rolledBackEntries);
-    setEditingMessage(null);
-    setEditPrefillText("");
-
-    setPlannerStream((prev) => {
-      const itemIdx = prev.items.findIndex((item) => item.id === targetMsg.id);
-      if (itemIdx !== -1) {
-        return {
-          ...prev,
-          items: prev.items.slice(0, itemIdx + 1).map((item) =>
-            item.id === targetMsg.id ? { ...item, content: cleanText } : item
-          ),
-        };
-      }
-      return prev;
-    });
 
     const selectedNode = state.graph.nodes.find((item) => item.name === selected);
     const targetNodeName = targetMsg.node || (selectedNode ? selectedNode.name : (
       routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined
     ));
 
-    if (targetNodeName) {
-      run(async () => {
-        try {
-          const runningExecution = [...state.executions].reverse().find((e) => e.node === targetNodeName && e.status === "running");
-          if (state.nodes[targetNodeName]?.status === "done") {
-            await requireRepository(state.config?.repository || config.repository);
-            const snap = await runtimeService.control("intervene", {
-              runId: state.runId,
-              node: targetNodeName,
-              instruction: cleanText,
-              images: targetMsg.images,
-            });
-            setState(snap);
-            if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
-          } else if (runningExecution) {
-            await requireRepository(state.config?.repository || config.repository);
-            const snap = await runtimeService.control("steer", {
-              runId: state.runId,
-              executionId: runningExecution.id,
-              node: targetNodeName,
-              instruction: cleanText,
-              images: targetMsg.images,
-            });
-            setState(snap);
-          } else {
-            await requireRepository(state.config?.repository || config.repository);
-            const snap = await runtimeService.control("intervene", {
-              node: targetNodeName,
-              instruction: cleanText,
-              images: targetMsg.images,
-              runId: state.runId,
-            });
-            setState(snap);
-            if (snap.paused) {
-              setState(await runtimeService.control("resume", { runId: state.runId }));
-            }
-          }
-        } catch (error) {
-          throw error;
-        }
-      });
-    } else {
-      const isPlannerContinuation = (routeType === "graph" || state.graph.nodes.length > 0) && !!state.runId;
-      if (isPlanning || recoveredPlanning?.status === "running") {
-        run(async () => {
-          await runtimeService.control("steer_planner", {
-            runId: plannerStream.runId || undefined,
-            instruction: cleanText,
-            images: targetMsg.images,
-          });
-        });
-      } else if (isPlannerContinuation) {
-        handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId);
-      } else {
-        handlePlanGoal(cleanText, { images: targetMsg.images });
+    if (!targetNodeName) {
+      setError("规划器的历史消息不能在当前 Run 中回退；请修改初始目标以创建新的规划运行。");
+      return;
+    }
+    {
+      const execution = state.executions.find((item) => item.id === targetMsg.executionId);
+      if (!execution || execution.node !== targetNodeName || execution.status !== "completed" ||
+          state.supersededExecutionIds?.includes(execution.id)) {
+        setError("只能修改当前分支中已完成的对话；请等待执行结束后重试。");
+        return;
       }
+      await run(async () => {
+        await requireRepository(state.config?.repository || config.repository);
+        const snap = await runtimeService.editNode({
+          runId: state.runId, node: targetNodeName, executionId: execution.id,
+          oldText: cleanExisting, instruction: cleanText, images: targetMsg.images,
+        });
+        setState(snap);
+        setSessionEntries(rolledBackEntries);
+        setEditingMessage(null);
+        setEditPrefillText("");
+        if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
+      });
     }
   }, [
     repositoryBlocked,
@@ -1901,6 +1850,12 @@ export default function App() {
     requireRepository,
     run,
   ]);
+
+  const handleSwitchMessageVersion = useCallback((message: ChatMessage, index: number) => {
+    const version = message.versions?.[index];
+    if (!version || index === message.currentVersionIndex) return;
+    void handleEditMessageSubmit({ ...message, images: version.images }, version.text);
+  }, [handleEditMessageSubmit]);
 
   useEffect(() => {
     load().catch((err) => setError(String(err)));

@@ -15,6 +15,7 @@ import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-inp
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
+import { activeNodeConversationEvents, activeNodeExecutions, versionsForEdit } from "../../services/conversationBranch";
 import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
@@ -300,7 +301,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!selectedNode) return [];
     const local = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === selectedNode.name && msg.runId === state.runId);
     const localRemaining = [...local];
-    const recorded = state.events.filter((event) => (event.type === "invalidated" && event.human && event.target === selectedNode.name && !!event.instruction) ||
+    const recorded = activeNodeConversationEvents(state, selectedNode.name).filter((event) =>
+      ((event.type === "invalidated" && event.human) || event.type === "conversation_edited") && event.target === selectedNode.name && !!event.instruction ||
       ((event.type === "steered" || event.type === "node_messaged") && event.node === selectedNode.name)
     ).reverse().filter((event) => {
       // Match each optimistic turn to at most one durable event, from newest
@@ -312,15 +314,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
       text: event.instruction || "", images: event.images, node: selectedNode.name, runId: state.runId,
+      executionId: event.execution_id,
+      versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
+      currentVersionIndex: event.type === "conversation_edited" ? versionsForEdit(state, event).length - 1 : undefined,
       delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
     }));
     return [...recorded, ...local];
   }, [selectedNode?.name, effectiveMessages, state.runId, state.events]);
   const attempts = useMemo(() => selectedNode
-    ? [...state.executions.filter((item) => item.node === selectedNode.name),
+    ? [...activeNodeExecutions(state, selectedNode.name),
        ...(state.mergers ?? []).filter((item) => item.node === `merge:${selectedNode.name}`)]
         .sort((a, b) => a.startedAt - b.startedAt)
-    : [], [selectedNode?.name, state.executions, state.mergers]);
+    : [], [selectedNode?.name, state.executions, state.supersededExecutionIds, state.mergers]);
   const execution: Execution | undefined = attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
   const isSelectedNodeWorking = Boolean(
     execution
@@ -352,7 +357,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       turns.push({
         id: msg.id,
         isInitial: false,
-        userMessage: msg,
+        userMessage: { ...msg, executionId: msg.executionId ?? execs[0]?.id },
         executions: execs,
       });
     });
@@ -369,6 +374,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     return turns;
   }, [selectedNode?.name, selectedNode?.task, attempts, nodeMessages]);
 
+  // A steer adds a user turn to the running execution without creating a new
+  // execution panel. Keep its status after that turn, not above it in the old panel.
+  const nodeWorkingAfterMessage = nodeTurns.length > 1 && nodeTurns[nodeTurns.length - 1].executions.length === 0;
   const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}:${execution?.id || ""}`;
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   // Live SSE is ephemeral. After reload or run selection, replay the durable
@@ -736,10 +744,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const serialNodeState = serialNode ? state.nodes[serialNode.name] : undefined;
   const serialExecutions = useMemo(() => {
     if (!serialNode) return [];
-    return state.executions
-      .filter((item) => item.node === serialNode.name)
+    return activeNodeExecutions(state, serialNode.name)
       .sort((a, b) => a.startedAt - b.startedAt);
-  }, [serialNode?.name, state.executions]);
+  }, [serialNode?.name, state.executions, state.supersededExecutionIds]);
   const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
 
   const serialTurns = useMemo(() => {
@@ -760,9 +767,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }] : []
     );
     const localRemaining = messages.filter((msg) => msg.node === serialNode.name);
-    const recorded = state.events.filter((event) =>
+    const recorded = activeNodeConversationEvents(state, serialNode.name).filter((event) =>
       (event.type === "node_messaged" && event.node === serialNode.name) ||
-      (event.type === "invalidated" && event.human && event.target === serialNode.name && !!event.instruction)
+      ((event.type === "invalidated" && event.human || (event.type === "conversation_edited" && !event.first_turn)) && event.target === serialNode.name && !!event.instruction)
     ).reverse().filter((event) => {
       const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction);
       if (idx < 0) return true;
@@ -771,6 +778,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
       text: event.instruction || "", images: event.images, node: serialNode.name, runId: state.runId,
+      versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
+      currentVersionIndex: event.type === "conversation_edited" ? versionsForEdit(state, event).length - 1 : undefined,
       delivery: event.type === "node_messaged" ? "node_messaged" : undefined,
     }));
     // A fresh browser session may have only a recorded follow-up, not the
@@ -779,6 +788,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       messages.unshift({ id: "msg-initial-goal", role: "user", text: state.graph.originalGoal });
     }
     if (messages.length === 0) return [];
+    const initialEdit = [...state.events].reverse().find((event) =>
+      event.type === "conversation_edited" && event.target === serialNode.name && event.first_turn);
+    if (initialEdit && !messages[0].versions) {
+      const versions = versionsForEdit(state, initialEdit);
+      messages[0] = { ...messages[0], versions, currentVersionIndex: versions.length - 1 };
+    }
     messages.splice(1, 0, ...recorded);
 
     turns.push({
@@ -794,7 +809,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       if (!msg.delivery) execIndex++;
       turns.push({
         id: msg.id,
-        userMessage: msg,
+        userMessage: { ...msg, executionId: msg.executionId ?? execs[0]?.id },
         isInitial: false,
         executions: execs,
       });
@@ -818,6 +833,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       ? serialExecution.status === "running" && serialExecution.completedAt == null
       : serialNodeState?.status === "running"
   );
+  const serialWorkingAfterMessage = serialTurns.length > 1 && serialTurns[serialTurns.length - 1].executions.length === 0;
   const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialWorking) : isPlanning;
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
   // A session switch keeps ReactFlow mounted; refit after the new nodes arrive.
@@ -988,6 +1004,26 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <div className="chat-message-row user">
                         <EditableUserBubble
                           text={turn.taskText || selectedNode.task}
+                          versions={(() => {
+                            const edit = [...state.events].reverse().find(event => event.type === "conversation_edited" &&
+                              event.target === selectedNode.name && event.first_turn);
+                            return edit ? versionsForEdit(state, edit) : undefined;
+                          })()}
+                          currentVersionIndex={(() => {
+                            const edit = [...state.events].reverse().find(event => event.type === "conversation_edited" &&
+                              event.target === selectedNode.name && event.first_turn);
+                            return edit ? versionsForEdit(state, edit).length - 1 : undefined;
+                          })()}
+                          onSwitchVersion={(index) => {
+                            const edit = [...state.events].reverse().find(event => event.type === "conversation_edited" &&
+                              event.target === selectedNode.name && event.first_turn);
+                            const version = edit && versionsForEdit(state, edit)[index];
+                            const first = attempts[0];
+                            if (version && first && onEditMessageSubmit) {
+                              void onEditMessageSubmit({ id: `task-${selectedNode.name}`, role: "user", text: selectedNode.task,
+                                node: selectedNode.name, executionId: first.id, runId: state.runId }, version.text);
+                            }
+                          }}
                           editing={editingTaskNode === selectedNode.name}
                           draft={taskDraft}
                           onDraftChange={setTaskDraft}
@@ -1006,13 +1042,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               setEditingTaskNode("");
                             };
                             if (state.approved) {
-                              onRequestConfirmation({
-                                title: "修改 Task？",
-                                message: "修改 Task 将创建新的待审批运行，当前运行不会继续。",
-                                confirmText: "确认修改",
-                                danger: true,
-                                onConfirm: saveTask,
-                              });
+                              const first = attempts[0];
+                              if (first && onEditMessageSubmit) {
+                                void Promise.resolve(onEditMessageSubmit({
+                                  id: `task-${selectedNode.name}`, role: "user", text: selectedNode.task,
+                                  node: selectedNode.name, executionId: first.id, runId: state.runId,
+                                }, value)).then(() => setEditingTaskNode(""));
+                              } else {
+                                onRequestConfirmation({
+                                  title: "修改未执行的 Task？",
+                                  message: "此节点尚无 Pi 对话可分支，将创建新的待审批运行。",
+                                  confirmText: "确认修改",
+                                  danger: true,
+                                  onConfirm: saveTask,
+                                });
+                              }
                               return false;
                             }
                             saveTask();
@@ -1039,7 +1083,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     {turn.executions.map((exec) => {
                       const isLatestAttempt = exec.id === execution?.id;
-                      const showWorking = isSelectedNodeWorking && isLatestAttempt;
+                      const showWorking = isSelectedNodeWorking && isLatestAttempt && !nodeWorkingAfterMessage;
 
                       return (
                         <motion.div
@@ -1083,6 +1127,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   </React.Fragment>
                 ))}
 
+                {isSelectedNodeWorking && (attempts.length === 0 || nodeWorkingAfterMessage) && (
+                  <div className="working-indicator" role="status" aria-live="polite">
+                    <span className="working-indicator-dot" />
+                    Working…
+                  </div>
+                )}
+
                 {selectedState?.error && (
                   <div className="node-error" style={{ marginTop: 12 }}>
                     {selectedState.error}
@@ -1096,13 +1147,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         Use resolved workspace
                       </button>
                     )}
-                  </div>
-                )}
-
-                {isSelectedNodeWorking && attempts.length === 0 && (
-                  <div className="working-indicator" role="status" aria-live="polite">
-                    <span className="working-indicator-dot" />
-                    Working…
                   </div>
                 )}
               </div>
@@ -1217,7 +1261,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                         {turn.executions.map((exec) => {
                           const isLatestSerial = exec.id === serialExecutions[serialExecutions.length - 1]?.id;
-                          const showWorking = isSerialWorking && isLatestSerial;
+                          const showWorking = isSerialWorking && isLatestSerial && !serialWorkingAfterMessage;
 
                           return (
                             <motion.div
@@ -1261,6 +1305,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       </React.Fragment>
                     ))}
 
+                    {isSerialWorking && serialExecutions.length > 0 && serialWorkingAfterMessage && (
+                      <div className="working-indicator" role="status" aria-live="polite">
+                        <span className="working-indicator-dot" />
+                        Working…
+                      </div>
+                    )}
                     {serialNodeState?.error && (
                       <div className="node-error" style={{ marginTop: 12 }}>
                         {serialNodeState.error}

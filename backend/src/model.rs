@@ -196,6 +196,8 @@ pub struct NodeState {
     pub instruction: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_images: Option<Vec<ImageAttachment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_execution_id: Option<String>,
     #[serde(default)]
     pub human_instruction: bool,
     pub error: Option<String>,
@@ -209,6 +211,7 @@ impl Default for NodeState {
             head: None,
             instruction: String::new(),
             instruction_images: None,
+            edit_execution_id: None,
             human_instruction: false,
             error: None,
         }
@@ -300,6 +303,19 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<Vec<ImageAttachment>>,
     },
+    /// Move Pi's active leaf before an earlier user turn. Old executions and
+    /// transcript entries remain durable but no longer belong to this branch.
+    ConversationEdited {
+        nodes: Vec<String>,
+        target: String,
+        instruction: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageAttachment>>,
+        from_execution_id: String,
+        from_event_sequence: i64,
+        old_instruction: String,
+        first_turn: bool,
+    },
     Feedback {
         from: String,
         to: String,
@@ -366,6 +382,8 @@ pub struct Snapshot {
     pub plan: Option<Plan>,
     pub nodes: BTreeMap<String, NodeState>,
     pub executions: Vec<Execution>,
+    #[serde(default)]
+    pub superseded_execution_ids: Vec<String>,
     #[serde(default)]
     pub mergers: Vec<Execution>,
     #[serde(default)]
@@ -591,6 +609,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.error = None;
                 node.instruction.clear();
                 node.instruction_images = None;
+                node.edit_execution_id = None;
                 node.human_instruction = false;
                 if node.status == "dirty" { node.revision += 1; }
             }
@@ -625,6 +644,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::Started { execution } => {
             let node = state.nodes.get_mut(&execution.node).unwrap();
+            node.edit_execution_id = None;
             node.status = "running".into();
             node.error = None;
             state.executions.push(execution.clone());
@@ -714,6 +734,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if *name == target {
                     node.instruction.clear();
                     node.instruction_images = None;
+                    node.edit_execution_id = None;
                     node.human_instruction = false;
                 }
             }
@@ -748,9 +769,52 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 // accumulating prompt suffixes across fresh executions.
                 target_node.instruction = instruction.clone();
                 target_node.instruction_images = images.clone();
+                target_node.edit_execution_id = None;
                 target_node.human_instruction = !instruction.is_empty();
             } else {
                 target_node.instruction.push_str(&format!("\n{instruction}"));
+            }
+            state.phase = if state.paused { "paused" } else { "running" }.into();
+        }
+        EventKind::ConversationEdited {
+            nodes, target, instruction, images, from_execution_id, first_turn, ..
+        } => {
+            let anchor = state.executions.iter().find(|execution| execution.id == *from_execution_id)
+                .expect("validated edit anchor").clone();
+            for execution in &state.executions {
+                if nodes.contains(&execution.node) && execution.started_at >= anchor.started_at
+                    && !state.superseded_execution_ids.contains(&execution.id)
+                {
+                    state.superseded_execution_ids.push(execution.id.clone());
+                }
+            }
+            state.publication = None;
+            if *first_turn {
+                if state.plan_type.as_deref() == Some("serial") {
+                    state.graph.original_goal = instruction.clone();
+                }
+                if let Some(node) = state.graph.nodes.iter_mut().find(|node| node.name == *target) {
+                    node.task = instruction.clone();
+                }
+            }
+            for name in nodes {
+                let node = state.nodes.get_mut(name).expect("validated edit scope");
+                node.status = "dirty".into();
+                node.error = None;
+                node.revision += 1;
+                if name == target {
+                    node.head = Some(anchor.before.clone());
+                    node.instruction = instruction.clone();
+                    node.instruction_images = images.clone();
+                    node.human_instruction = true;
+                    node.edit_execution_id = Some(from_execution_id.clone());
+                } else {
+                    node.head = None;
+                    node.instruction.clear();
+                    node.instruction_images = None;
+                    node.edit_execution_id = None;
+                    node.human_instruction = false;
+                }
             }
             state.phase = if state.paused { "paused" } else { "running" }.into();
         }

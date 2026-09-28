@@ -10,6 +10,7 @@ pub mod model;
 pub mod process_control;
 pub mod provider_auth;
 pub mod runtime;
+pub mod session_branch;
 pub mod runtime_lock;
 pub mod sandbox;
 pub mod server;

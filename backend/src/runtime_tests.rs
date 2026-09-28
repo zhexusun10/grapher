@@ -313,6 +313,134 @@ fn serial_followup_resumes_completed_pi_session_with_images_after_settlement() {
 }
 
 #[test]
+fn editing_an_earlier_serial_turn_branches_pi_and_supersedes_later_executions() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(),
+    }).unwrap();
+    runtime.intervene("task", "second").unwrap();
+    let second = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: second.execution.id.clone(), head: runtime.state.base.clone(), output: "second".into(),
+    }).unwrap();
+    runtime.intervene("task", "third").unwrap();
+    let third = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: third.execution.id.clone(), head: runtime.state.base.clone(), output: "third".into(),
+    }).unwrap();
+    let session_dir = runtime.root.join("sessions").join(&first.execution.id);
+    fs::create_dir_all(&session_dir).unwrap();
+    let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
+    let entries = [
+        serde_json::json!({"type":"session", "id":first.execution.session_id, "cwd":source}),
+        serde_json::json!({"type":"message", "id":"root", "parentId":null, "message":{"role":"system", "content":"system"}}),
+        serde_json::json!({"type":"message", "id":"one", "parentId":"root", "message":{"role":"user", "content":"self-contained task", "timestamp":first.execution.started_at}}),
+        serde_json::json!({"type":"message", "id":"answer1", "parentId":"one", "message":{"role":"assistant", "content":[]}}),
+        serde_json::json!({"type":"message", "id":"two", "parentId":"answer1", "message":{"role":"user", "content":"second", "timestamp":second.execution.started_at}}),
+        serde_json::json!({"type":"message", "id":"answer2", "parentId":"two", "message":{"role":"assistant", "content":[]}}),
+        serde_json::json!({"type":"message", "id":"three", "parentId":"answer2", "message":{"role":"user", "content":"third", "timestamp":third.execution.started_at}}),
+    ];
+    fs::write(&file, entries.iter().map(|e| format!("{e}\n")).collect::<String>()).unwrap();
+    let before = fs::read(&file).unwrap();
+    assert!(runtime.edit_node_message("task", &second.execution.id, "wrong", "edited", None).is_err());
+    assert_eq!(fs::read(&file).unwrap(), before);
+    runtime.edit_node_message("task", &second.execution.id, "second", "edited second", None).unwrap();
+    let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(replayed.superseded_execution_ids.len(), 2);
+    assert_eq!(replayed.nodes["task"].edit_execution_id.as_deref(), Some(second.execution.id.as_str()));
+    let marker: serde_json::Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
+    assert_eq!(marker["parentId"], "answer1");
+    let edited = runtime.jobs().unwrap().remove(0);
+    assert_eq!(edited.task, "edited second");
+    assert_eq!(edited.execution.session_id, first.execution.session_id);
+    assert_eq!(edited.resume_execution_id.as_deref(), Some(first.execution.id.as_str()));
+    assert_eq!(edited.execution.before, second.execution.before);
+    assert!(!runtime.state.superseded_execution_ids.contains(&edited.execution.id));
+}
+
+#[test]
+fn editing_serial_initial_turn_updates_goal_without_replacing_the_run() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    let session_dir = runtime.root.join("sessions").join(&first.execution.id);
+    fs::create_dir_all(&session_dir).unwrap();
+    let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
+    fs::write(&file, [
+        serde_json::json!({"type":"session", "id":first.execution.session_id, "cwd":source}),
+        serde_json::json!({"type":"message", "id":"root", "parentId":null, "message":{"role":"system", "content":"system"}}),
+        serde_json::json!({"type":"message", "id":"first", "parentId":"root", "message":{"role":"user", "content":"self-contained task", "timestamp":first.execution.started_at}}),
+    ].iter().map(|e| format!("{e}\n")).collect::<String>()).unwrap();
+    let run_id = runtime.state.run_id.clone();
+    runtime.edit_node_message("task", &first.execution.id, "self-contained task", "new goal", None).unwrap();
+    assert_eq!(runtime.state.run_id, run_id);
+    assert_eq!(runtime.state.graph.original_goal, "new goal");
+    assert_eq!(runtime.state.graph.nodes[0].task, "new goal");
+    let next = runtime.jobs().unwrap().remove(0);
+    assert_eq!(next.task, "new goal");
+    assert_eq!(next.execution.session_id, first.execution.session_id);
+}
+
+#[test]
+fn editing_graph_node_uses_earlier_checkpoint_and_invalidates_descendants() {
+    let graph = Graph {
+        original_goal: "graph".into(),
+        nodes: ["parent", "child"].into_iter().map(|name| Node {
+            name: name.into(), task: name.into(),
+        }).collect(),
+        edges: vec![Edge { from: "parent".into(), to: "child".into(), relation: String::new(), feedback: false }],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(),
+    }).unwrap();
+    let child = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: child.execution.id.clone(), head: runtime.state.base.clone(), output: "child".into(),
+    }).unwrap();
+    runtime.intervene("parent", "later").unwrap();
+    let later = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: later.execution.id.clone(), head: runtime.state.base.clone(), output: "later".into(),
+    }).unwrap();
+    let later_child = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: later_child.execution.id.clone(), head: runtime.state.base.clone(), output: "child".into(),
+    }).unwrap();
+    let session_dir = runtime.root.join("sessions").join(&first.execution.id);
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::create_dir_all(&first.execution.worktree).unwrap();
+    let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
+    fs::write(&file, [
+        serde_json::json!({"type":"session", "id":first.execution.session_id, "cwd":first.execution.worktree}),
+        serde_json::json!({"type":"message", "id":"start", "parentId":null, "message":{"role":"user", "content":"parent", "timestamp":first.execution.started_at}}),
+        serde_json::json!({"type":"message", "id":"answer", "parentId":"start", "message":{"role":"assistant", "content":[]}}),
+        serde_json::json!({"type":"message", "id":"next", "parentId":"answer", "message":{"role":"user", "content":"later", "timestamp":later.execution.started_at}}),
+    ].iter().map(|e| format!("{e}\n")).collect::<String>()).unwrap();
+    runtime.edit_node_message("parent", &first.execution.id, "parent", "edited parent", None).unwrap();
+    assert_eq!(runtime.state.graph.nodes[0].task, "edited parent");
+    assert_eq!(runtime.state.nodes["parent"].head.as_deref(), Some(first.execution.before.as_str()));
+    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert!(runtime.state.superseded_execution_ids.contains(&first.execution.id));
+    assert!(runtime.state.superseded_execution_ids.contains(&child.execution.id));
+    assert!(runtime.state.superseded_execution_ids.contains(&later.execution.id));
+    assert!(runtime.state.superseded_execution_ids.contains(&later_child.execution.id));
+    let new_job = runtime.jobs().unwrap().remove(0);
+    assert_eq!(new_job.execution.worktree, first.execution.worktree);
+    assert_eq!(new_job.execution.before, first.execution.before);
+    assert_eq!(new_job.task, "edited parent");
+}
+
+#[test]
 fn graph_followup_invalidates_downstream_but_preserves_unaffected_results() {
     let graph = Graph {
         original_goal: "graph".into(),

@@ -219,7 +219,8 @@ export function ExecutionTranscript({
   return <>
     {error && <p role="alert">{error} <button onClick={() => setRetry(value => value + 1)}>重试</button></p>}
     <VirtualizedTranscript key={`${runId}:${execution.id}:${retry}`}
-      emptyText={emptyText}
+      compact
+      emptyText={execution.status === "running" ? "" : emptyText}
       onUserResize={onUserResize}
       output={displayedText} />
   </>;

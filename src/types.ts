@@ -27,7 +27,7 @@ export interface RunMetrics {
 }
 
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null }
-export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; from?: string; to?: string; accepted?: boolean; error?: string; execution?: Execution; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; human?: boolean; planning_id?: string }
+export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; error?: string; execution?: Execution; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; from_execution_id?: string; from_event_sequence?: number; old_instruction?: string; first_turn?: boolean; human?: boolean; planning_id?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
   input: number;
@@ -77,6 +77,7 @@ export interface Snapshot {
   plan: Plan | null;
   nodes: Record<string, NodeState>;
   executions: Execution[];
+  supersededExecutionIds?: string[];
   mergers?: Execution[];
   publication?: Publication | null;
   events: GraphEvent[];
@@ -167,6 +168,7 @@ export interface ChatMessage {
   timestamp?: number;
   runId?: string;
   node?: string;
+  executionId?: string;
   delivery?: "node_messaged" | "steered";
   versions?: ChatMessageVersion[];
   currentVersionIndex?: number;
