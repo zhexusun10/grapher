@@ -73,6 +73,55 @@ fn done_node_message_control_does_not_wait_for_planner_or_start_driver() {
     assert!(!service.driving.load(Ordering::SeqCst));
 }
 
+#[cfg(feature = "fixture")]
+#[test]
+fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path().join("runtime");
+    let repository = crate::fixture::repository(temp.path()).unwrap();
+    let mut runtime = Runtime::open(&root).unwrap();
+    runtime.create(Graph {
+        original_goal: "original".into(),
+        nodes: vec![Node { name: "task".into(), task: "original".into() }], edges: vec![],
+    }, serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "mock/model", "engine": "fixture",
+        "maxParallel": 1, "maxFeedback": 0,
+    })).unwrap()).unwrap();
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    runtime.jobs().unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let dir = root.join("sessions").join(&job.execution.id);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("test_{}.jsonl", job.execution.session_id));
+    fs::write(&path, [
+        serde_json::json!({"type":"session", "id":job.execution.session_id, "cwd":job.execution.worktree}),
+        serde_json::json!({"type":"message", "id":"one", "parentId":null,
+            "message":{"role":"user", "content":"original", "timestamp":job.execution.started_at}}),
+    ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+    });
+    let reply = dispatch(&service, "edit_node", serde_json::json!({
+        "node":"task", "executionId":job.execution.id, "oldText":"original",
+        "instruction":"replacement", "runId":run_id, "compact":true, "detail":"metadata",
+    })).unwrap();
+    assert_eq!(reply["graph"]["originalGoal"], "replacement");
+    assert_eq!(reply["supersededExecutionIds"].as_array().unwrap().len(), 1);
+    assert!(fs::read_to_string(&path).unwrap().contains("grapher-edit"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while service.driving.load(Ordering::SeqCst) {
+        assert!(std::time::Instant::now() < deadline, "edit driver did not settle");
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn unscoped_planner_control_routes_only_to_active_planning_run() {
     let temp = tempfile::TempDir::new().unwrap();

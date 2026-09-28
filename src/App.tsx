@@ -1820,6 +1820,7 @@ export default function App() {
         setError("只能修改当前分支中已完成的对话；请等待执行结束后重试。");
         return;
       }
+      let accepted = false;
       await run(async () => {
         await requireRepository(state.config?.repository || config.repository);
         const snap = await runtimeService.editNode({
@@ -1830,8 +1831,10 @@ export default function App() {
         setSessionEntries(rolledBackEntries);
         setEditingMessage(null);
         setEditPrefillText("");
+        accepted = true;
         if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
       });
+      return accepted;
     }
   }, [
     repositoryBlocked,

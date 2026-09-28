@@ -297,12 +297,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [selected, state.runId]);
   const selectedNode = state.graph.nodes.find((item) => item.name === selected);
   const selectedState = selectedNode ? state.nodes[selectedNode.name] : undefined;
+  const initialTaskVersions = useMemo(() => {
+    if (!selectedNode) return undefined;
+    const edit = [...state.events].reverse().find(event => event.type === "conversation_edited" &&
+      event.target === selectedNode.name && event.first_turn);
+    return edit ? versionsForEdit(state, edit) : undefined;
+  }, [selectedNode?.name, state.events]);
   const nodeMessages = useMemo(() => {
     if (!selectedNode) return [];
     const local = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === selectedNode.name && msg.runId === state.runId);
     const localRemaining = [...local];
     const recorded = activeNodeConversationEvents(state, selectedNode.name).filter((event) =>
-      ((event.type === "invalidated" && event.human) || event.type === "conversation_edited") && event.target === selectedNode.name && !!event.instruction ||
+      ((event.type === "invalidated" && event.human) || (event.type === "conversation_edited" && !event.first_turn)) && event.target === selectedNode.name && !!event.instruction ||
       ((event.type === "steered" || event.type === "node_messaged") && event.node === selectedNode.name)
     ).reverse().filter((event) => {
       // Match each optimistic turn to at most one durable event, from newest
@@ -357,7 +363,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       turns.push({
         id: msg.id,
         isInitial: false,
-        userMessage: { ...msg, executionId: msg.executionId ?? execs[0]?.id },
+        userMessage: { ...msg, executionId: execs[0]?.id ?? msg.executionId },
         executions: execs,
       });
     });
@@ -809,7 +815,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       if (!msg.delivery) execIndex++;
       turns.push({
         id: msg.id,
-        userMessage: { ...msg, executionId: msg.executionId ?? execs[0]?.id },
+        userMessage: { ...msg, executionId: execs[0]?.id ?? msg.executionId },
         isInitial: false,
         executions: execs,
       });
@@ -1004,20 +1010,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <div className="chat-message-row user">
                         <EditableUserBubble
                           text={turn.taskText || selectedNode.task}
-                          versions={(() => {
-                            const edit = [...state.events].reverse().find(event => event.type === "conversation_edited" &&
-                              event.target === selectedNode.name && event.first_turn);
-                            return edit ? versionsForEdit(state, edit) : undefined;
-                          })()}
-                          currentVersionIndex={(() => {
-                            const edit = [...state.events].reverse().find(event => event.type === "conversation_edited" &&
-                              event.target === selectedNode.name && event.first_turn);
-                            return edit ? versionsForEdit(state, edit).length - 1 : undefined;
-                          })()}
+                          versions={initialTaskVersions}
+                          currentVersionIndex={initialTaskVersions ? initialTaskVersions.length - 1 : undefined}
                           onSwitchVersion={(index) => {
-                            const edit = [...state.events].reverse().find(event => event.type === "conversation_edited" &&
-                              event.target === selectedNode.name && event.first_turn);
-                            const version = edit && versionsForEdit(state, edit)[index];
+                            const version = initialTaskVersions?.[index];
                             const first = attempts[0];
                             if (version && first && onEditMessageSubmit) {
                               void onEditMessageSubmit({ id: `task-${selectedNode.name}`, role: "user", text: selectedNode.task,
@@ -1027,13 +1023,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           editing={editingTaskNode === selectedNode.name}
                           draft={taskDraft}
                           onDraftChange={setTaskDraft}
-                          onEdit={!active ? () => {
+                          onEdit={!active && (!state.approved || selectedState?.status === "done" || selectedState?.status === "failed") ? () => {
                             onCancelEditMessage?.();
                             setEditingTaskNode(selectedNode.name);
                             setTaskDraft(selectedNode.task);
                           } : undefined}
                           onCancel={() => setEditingTaskNode("")}
-                          disabled={locked || active || taskDraft.trim() === selectedNode.task}
+                          disabled={locked || active || (state.approved && selectedState?.status === "dirty") || taskDraft.trim() === selectedNode.task}
                           onSend={(value) => {
                             const saveTask = () => {
                               onSave({ ...state.graph, nodes: state.graph.nodes.map((node) =>
@@ -1047,7 +1043,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                 void Promise.resolve(onEditMessageSubmit({
                                   id: `task-${selectedNode.name}`, role: "user", text: selectedNode.task,
                                   node: selectedNode.name, executionId: first.id, runId: state.runId,
-                                }, value)).then(() => setEditingTaskNode(""));
+                                }, value)).then((accepted) => { if (accepted !== false) setEditingTaskNode(""); });
                               } else {
                                 onRequestConfirmation({
                                   title: "修改未执行的 Task？",

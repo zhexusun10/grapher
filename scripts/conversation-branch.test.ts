@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activeNodeConversationEvents, activeNodeExecutions } from '../src/services/conversationBranch.ts';
+import { activeNodeConversationEvents, activeNodeExecutions, versionsForEdit } from '../src/services/conversationBranch.ts';
 import { emptySnapshot, type Snapshot } from '../src/types.ts';
 
 test('editing a completed turn hides the abandoned node branch but preserves earlier turns', () => {
@@ -24,4 +24,17 @@ test('editing a completed turn hides the abandoned node branch but preserves ear
   assert.deepEqual(activeNodeExecutions(state, 'task').map(e => e.id), ['first', 'edited']);
   assert.deepEqual(activeNodeConversationEvents(state, 'task').filter(e => !!e.instruction).map(e => e.instruction), ['replacement']);
   assert.equal(state.events.length, 5, 'old durable history remains intact');
+});
+
+test('message versions survive reload and nested edits', () => {
+  const state: Snapshot = {
+    ...emptySnapshot,
+    events: [
+      { sequence: 1, timestamp: 10, type: 'invalidated', target: 'task', instruction: 'original' },
+      { sequence: 2, timestamp: 20, type: 'conversation_edited', target: 'task', instruction: 'replacement', old_instruction: 'original', from_event_sequence: 1 },
+      { sequence: 3, timestamp: 30, type: 'conversation_edited', target: 'task', instruction: 'third', old_instruction: 'replacement', from_event_sequence: 2 },
+    ],
+  };
+  assert.deepEqual(versionsForEdit(state, state.events[2]).map(version => version.text),
+    ['original', 'replacement', 'third']);
 });
