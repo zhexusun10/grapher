@@ -599,7 +599,28 @@ fn run_pi_with_timeout(
     // Process substitution is exclusively a test capability.
     #[cfg(feature = "fixture")]
     let mut command = {
-        let mut command = Command::new(&config.pi_command);
+        #[cfg(windows)]
+        let executable = if config.pi_command == "/bin/sh" {
+            // Fixture shell scripts need Git for Windows' sh.exe. The POSIX
+            // /bin/sh path is not a Windows executable path, even in Git Bash.
+            let output = Command::new("git").arg("--exec-path").output()
+                .map_err(|error| format!("Cannot locate Git for Windows shell: {error}"))?;
+            if !output.status.success() {
+                return Err("Cannot locate Git for Windows shell".into());
+            }
+            let exec_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            let root = exec_dir.ancestors().nth(3).ok_or("Invalid Git for Windows install path")?;
+            let shell = root.join("bin/sh.exe");
+            if !shell.is_file() {
+                return Err(format!("Git for Windows shell is missing: {}", shell.display()));
+            }
+            shell
+        } else {
+            PathBuf::from(&config.pi_command)
+        };
+        #[cfg(not(windows))]
+        let executable = &config.pi_command;
+        let mut command = Command::new(executable);
         command.args(&config.pi_args);
         command
     };
@@ -1128,6 +1149,7 @@ pub fn execute(
     task: &str,
     feedback_source: bool,
     resume_execution_id: Option<&str>,
+    images: Option<&[crate::model::ImageAttachment]>,
     root: &Path,
     on_output: impl FnMut(String),
 ) -> Result<String, String> {
@@ -1176,7 +1198,7 @@ pub fn execute(
                 ("GRAPHER_NODE_EXECUTION_ID", execution.id.clone()),
             ],
             system_prompt: None,
-            images: None,
+            images,
         },
         on_output,
     )
@@ -1196,6 +1218,29 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "fixture")]
+    fn test_python() -> String {
+        #[cfg(windows)]
+        {
+            // Windows' python3.exe on PATH may be the Microsoft Store alias.
+            for (program, launcher_args) in [("py", &["-3"][..]), ("python", &[][..]), ("python3", &[][..])] {
+                if let Ok(output) = std::process::Command::new(program)
+                    .args(launcher_args)
+                    .args(["-c", "import sys; print(sys.executable)"])
+                    .env("PYTHONIOENCODING", "utf-8")
+                    .output()
+                {
+                    if output.status.success() {
+                        return String::from_utf8_lossy(&output.stdout).trim().into();
+                    }
+                }
+            }
+            panic!("Python 3 is required to run Pi fixture tests on Windows");
+        }
+        #[cfg(not(windows))]
+        { "python3".into() }
+    }
 
     #[cfg(not(feature = "fixture"))]
     #[test]
@@ -1253,7 +1298,7 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
 "#).unwrap();
         let config = Config {
             engine: "pi".into(),
-            pi_command: "python3".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
@@ -1303,7 +1348,7 @@ sys.stdin.read()
 "#).unwrap();
         let config = Config {
             engine: "pi".into(),
-            pi_command: "python3".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
@@ -1373,7 +1418,7 @@ sys.stdin.read()
 "#).unwrap();
         let config = Config {
             engine: "pi".into(),
-            pi_command: "python3".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
@@ -1462,7 +1507,7 @@ sys.stdin.read()
 "#).unwrap();
         let config = Config {
             engine: "pi".into(),
-            pi_command: "python3".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
@@ -1533,7 +1578,7 @@ sys.stdin.read()
 "#).unwrap();
         let config = Config {
             engine: "pi".into(),
-            pi_command: "python3".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
@@ -1599,7 +1644,7 @@ sys.stdin.read()
 "#).unwrap();
         let config = Config {
             engine: "pi".into(),
-            pi_command: "python3".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),

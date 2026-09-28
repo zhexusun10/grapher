@@ -76,14 +76,6 @@
   background: #ffffff;
 }
 
-.prompt-box-suggestions-list::-webkit-scrollbar {
-  width: 5px;
-}
-
-.prompt-box-suggestions-list::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 9999px;
-}
 
 .prompt-box-suggestion-item {
   display: flex;
@@ -1412,11 +1404,8 @@
   bottom: 0;
   left: 0;
   right: 0;
-  padding: 10px 14px 14px;
-  background: color-mix(in srgb, var(--bg-surface) 40%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-top: 1px solid color-mix(in srgb, var(--border-default) 28%, transparent);
+  padding: 10px 18px 14px;
+  background: transparent;
   flex-shrink: 0;
   z-index: 18;
   display: flex;

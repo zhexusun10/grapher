@@ -329,18 +329,12 @@ fn grant_tree_inner(
 }
 
 fn grant_traverse(path: &Path, sid: windows_sys::Win32::Security::PSID) -> Result<(), String> {
-    let mut current = path.to_path_buf();
-    while current.parent().is_some() {
-        unsafe {
-            grant_access(&current, sid, FILE_TRAVERSE | FILE_READ_ATTRIBUTES, 0)?;
-        }
-        let next = current.parent().unwrap().to_path_buf();
-        if next == current {
-            break;
-        }
-        current = next;
-    }
-    Ok(())
+    // Only grant the explicitly selected root. Windows' traverse privilege
+    // permits walking its ancestors without read access; changing ACLs on a
+    // user's profile, C:\\Users or the drive root is both unsafe and may fail.
+    // If an ancestor explicitly denies traversal, opening the allowed root
+    // fails closed rather than widening access above the sandbox boundary.
+    unsafe { grant_access(path, sid, FILE_TRAVERSE | FILE_READ_ATTRIBUTES, 0) }
 }
 
 fn resolve_path(value: &str) -> PathBuf {

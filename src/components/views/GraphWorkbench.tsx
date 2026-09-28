@@ -300,7 +300,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!selectedNode) return [];
     const local = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === selectedNode.name && msg.runId === state.runId);
     const localRemaining = [...local];
-    const recorded = state.events.filter((event) => (event.type === "invalidated" && event.human && event.target === selectedNode.name) ||
+    const recorded = state.events.filter((event) => (event.type === "invalidated" && event.human && event.target === selectedNode.name && !!event.instruction) ||
       ((event.type === "steered" || event.type === "node_messaged") && event.node === selectedNode.name)
     ).reverse().filter((event) => {
       // Match each optimistic turn to at most one durable event, from newest
@@ -760,7 +760,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }] : []
     );
     const localRemaining = messages.filter((msg) => msg.node === serialNode.name);
-    const recorded = state.events.filter((event) => event.type === "node_messaged" && event.node === serialNode.name
+    const recorded = state.events.filter((event) =>
+      (event.type === "node_messaged" && event.node === serialNode.name) ||
+      (event.type === "invalidated" && event.human && event.target === serialNode.name && !!event.instruction)
     ).reverse().filter((event) => {
       const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction);
       if (idx < 0) return true;
@@ -769,10 +771,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
       text: event.instruction || "", images: event.images, node: serialNode.name, runId: state.runId,
-      delivery: "node_messaged",
+      delivery: event.type === "node_messaged" ? "node_messaged" : undefined,
     }));
-    // A fresh browser session may have only a node message, not the original
-    // prompt in local state. Keep the initial task paired with its execution.
+    // A fresh browser session may have only a recorded follow-up, not the
+    // original prompt in local state. Keep the initial task paired with its execution.
     if (messages[0]?.node === serialNode.name && state.graph.originalGoal) {
       messages.unshift({ id: "msg-initial-goal", role: "user", text: state.graph.originalGoal });
     }
@@ -1142,7 +1144,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
               <PromptBox
-                compact
                 repository={config?.repository}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={
@@ -1593,7 +1594,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
               <PromptBox
-                compact
                 repository={config?.repository}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={

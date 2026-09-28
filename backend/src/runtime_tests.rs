@@ -286,6 +286,64 @@ fn rerun_starts_from_clean_inputs_but_intervention_continues_the_result() {
 }
 
 #[test]
+fn serial_followup_resumes_completed_pi_session_with_images_after_settlement() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    runtime.jobs().unwrap(); // settle the run
+    assert_eq!(runtime.state.phase, "completed");
+
+    let images = vec![ImageAttachment {
+        r#type: "image".into(), mime_type: "image/png".into(), data: "aGVsbG8=".into(), name: None,
+    }];
+    runtime.intervene_with_images("task", "next turn", Some(images.clone())).unwrap();
+    assert_eq!(runtime.state.phase, "running");
+    let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(serde_json::to_value(&replayed.nodes["task"].instruction_images).unwrap(), serde_json::to_value(&images).unwrap());
+    let next = runtime.jobs().unwrap().remove(0);
+    assert_eq!(next.task, "next turn");
+    assert_eq!(serde_json::to_value(&next.images).unwrap(), serde_json::to_value(&images).unwrap());
+    assert_eq!(next.resume_execution_id, Some(first.execution.id));
+    assert_eq!(next.execution.session_id, first.execution.session_id);
+    assert_eq!(next.execution.worktree, first.execution.worktree);
+}
+
+#[test]
+fn graph_followup_invalidates_downstream_but_preserves_unaffected_results() {
+    let graph = Graph {
+        original_goal: "graph".into(),
+        nodes: ["parent", "child", "independent"].into_iter().map(|name| Node {
+            name: name.into(), task: name.into(),
+        }).collect(),
+        edges: vec![Edge { from: "parent".into(), to: "child".into(), relation: String::new(), feedback: false }],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap();
+    for job in &first {
+        runtime.emit(EventKind::Finished {
+            execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+        }).unwrap();
+    }
+    let child = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: child.execution.id, head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    runtime.intervene("parent", "continue parent").unwrap();
+    assert_eq!(runtime.state.nodes["parent"].status, "dirty");
+    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert_eq!(runtime.state.nodes["independent"].status, "done");
+    let next = runtime.jobs().unwrap().remove(0);
+    assert_eq!(next.execution.node, "parent");
+    assert_eq!(next.task, "continue parent");
+    assert!(next.resume_execution_id.is_some());
+}
+
+#[test]
 fn resolved_preparation_is_not_a_completed_node_execution() {
     let (_temp, source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();

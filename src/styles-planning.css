@@ -41,6 +41,13 @@
 .pane-bottom-chat .prompt-box-container {
   max-width: 680px;
   width: 100%;
+  background: var(--bg-canvas);
+}
+
+.pane-bottom-chat .prompt-box-container:hover,
+.pane-bottom-chat .prompt-box-container:focus,
+.pane-bottom-chat .prompt-box-container:focus-within {
+  background: var(--bg-canvas) !important;
 }
 
 .conversation-pane.split {
@@ -914,8 +921,8 @@
 
 .scroll-to-bottom-btn {
   position: absolute;
-  bottom: calc(var(--composer-height, 110px) + 10px);
-  right: 18px;
+  bottom: calc(var(--composer-height, 110px) + 12px);
+  right: 20px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -933,6 +940,11 @@
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
+}
+
+.conversation-pane.full-width .scroll-to-bottom-btn {
+  left: min(calc(100% - 90px), calc(50% + 430px + 14px));
+  right: auto;
 }
 
 .scroll-to-bottom-btn.visible {

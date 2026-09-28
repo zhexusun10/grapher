@@ -23,6 +23,17 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420,
     strictPort: true,
+    watch: {
+      ignored: [
+        "**/backend/**",
+        "**/target/**",
+        "**/.grapher/**",
+        "**/.pi/**",
+        "**/engine/**",
+        "**/pi/**",
+        "**/.agents/**",
+      ],
+    },
     proxy: {
       "/api": {
         target: `http://127.0.0.1:${process.env.GRAPHER_PORT || "1421"}`,

@@ -322,16 +322,18 @@ export default function App() {
       return newMsg;
     };
 
-    // A finished node has no live Pi RPC to steer. Keep the directed message
-    // in the Run history; do not invalidate it or any of its descendants.
+    // Pi cannot steer a finished process. Continue its persisted session in
+    // a new execution; for Graph, downstream results are invalidated as needed.
     if (targetNodeName && state.nodes[targetNodeName]?.status === "done") {
-      const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg, "node_messaged");
+      const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg);
       run(async () => {
         try {
-          const snap = await runtimeService.control("message_node", {
+          await requireRepository(state.config?.repository || config.repository);
+          const snap = await runtimeService.control("intervene", {
             runId: state.runId, node: targetNodeName, instruction: text, images: options?.images,
           });
           setState(snap);
+          if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
         } catch (error) {
           setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
           throw error;
@@ -422,7 +424,7 @@ export default function App() {
       run(async () => {
         try {
           await requireRepository(state.config?.repository || config.repository);
-          const snap = await runtimeService.control("intervene", { node: targetNodeName, instruction: text, runId: state.runId });
+          const snap = await runtimeService.control("intervene", { node: targetNodeName, instruction: text, images: options?.images, runId: state.runId });
           setState(snap);
           if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
         } catch (error) {
@@ -1785,7 +1787,7 @@ export default function App() {
 
       updatedMsg = {
         ...current,
-        delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? "node_messaged" : current.delivery,
+        delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? undefined : current.delivery,
         text: cleanText,
         timestamp: Date.now(),
         parentId,
@@ -1796,7 +1798,7 @@ export default function App() {
     } else {
       updatedMsg = {
         ...targetMsg,
-        delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? "node_messaged" : targetMsg.delivery,
+        delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? undefined : targetMsg.delivery,
         text: cleanText,
         timestamp: Date.now(),
       };
@@ -1830,13 +1832,15 @@ export default function App() {
         try {
           const runningExecution = [...state.executions].reverse().find((e) => e.node === targetNodeName && e.status === "running");
           if (state.nodes[targetNodeName]?.status === "done") {
-            const snap = await runtimeService.control("message_node", {
+            await requireRepository(state.config?.repository || config.repository);
+            const snap = await runtimeService.control("intervene", {
               runId: state.runId,
               node: targetNodeName,
               instruction: cleanText,
               images: targetMsg.images,
             });
             setState(snap);
+            if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
           } else if (runningExecution) {
             await requireRepository(state.config?.repository || config.repository);
             const snap = await runtimeService.control("steer", {
@@ -1852,6 +1856,7 @@ export default function App() {
             const snap = await runtimeService.control("intervene", {
               node: targetNodeName,
               instruction: cleanText,
+              images: targetMsg.images,
               runId: state.runId,
             });
             setState(snap);

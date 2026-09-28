@@ -194,6 +194,8 @@ pub struct NodeState {
     pub revision: usize,
     pub head: Option<String>,
     pub instruction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_images: Option<Vec<ImageAttachment>>,
     #[serde(default)]
     pub human_instruction: bool,
     pub error: Option<String>,
@@ -206,6 +208,7 @@ impl Default for NodeState {
             revision: 1,
             head: None,
             instruction: String::new(),
+            instruction_images: None,
             human_instruction: false,
             error: None,
         }
@@ -294,6 +297,8 @@ pub enum EventKind {
         target: String,
         instruction: String,
         human: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageAttachment>>,
     },
     Feedback {
         from: String,
@@ -585,6 +590,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.head = None;
                 node.error = None;
                 node.instruction.clear();
+                node.instruction_images = None;
                 node.human_instruction = false;
                 if node.status == "dirty" { node.revision += 1; }
             }
@@ -662,6 +668,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if let Some(node) = state.nodes.get_mut(&execution.node) {
                     node.status = "done".into();
                     node.head = Some(head.clone());
+                    node.instruction_images = None;
                 }
             }
         }
@@ -706,6 +713,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if !unstarted { node.revision += 1; }
                 if *name == target {
                     node.instruction.clear();
+                    node.instruction_images = None;
                     node.human_instruction = false;
                 }
             }
@@ -716,6 +724,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             target,
             instruction,
             human,
+            images,
         } => {
             state.publication = None;
             for name in nodes {
@@ -738,6 +747,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 // A new user follow-up replaces previous instructions rather than
                 // accumulating prompt suffixes across fresh executions.
                 target_node.instruction = instruction.clone();
+                target_node.instruction_images = images.clone();
                 target_node.human_instruction = !instruction.is_empty();
             } else {
                 target_node.instruction.push_str(&format!("\n{instruction}"));

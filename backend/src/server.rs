@@ -1971,9 +1971,10 @@ fn control(
             }
             runtime.emit(EventKind::Rejected)?;
         }
-        "intervene" => runtime.intervene(
+        "intervene" => runtime.intervene_with_images(
             node.as_deref().unwrap_or_default(),
             instruction.as_deref().unwrap_or_default(),
+            images,
         )?,
         "rerun" => runtime.rerun(node.as_deref().unwrap_or_default())?,
         "resolve" => runtime.resolved(node.as_deref().unwrap_or_default())?,

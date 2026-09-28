@@ -365,11 +365,9 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
     fs::create_dir_all(&expected).unwrap();
     fs::write(
         expected.join("turns.jsonl"),
-        format!(
-            "{{\"type\":\"session\",\"id\":\"{}\",\"cwd\":\"{}\"}}\n",
-            runtime.state.run_id,
-            repo.display(),
-        ),
+        format!("{}\n", serde_json::json!({
+            "type": "session", "id": runtime.state.run_id, "cwd": repo,
+        })),
     )
     .unwrap();
     assert_eq!(
@@ -424,10 +422,9 @@ fn legacy_planner_session_keeps_its_original_pi_identity() {
     fs::create_dir_all(&session).unwrap();
     fs::write(
         session.join("legacy.jsonl"),
-        format!(
-            "{{\"type\":\"session\",\"id\":\"{legacy}\",\"cwd\":\"{}\"}}\n",
-            repo.display(),
-        ),
+        format!("{}\n", serde_json::json!({
+            "type": "session", "id": legacy, "cwd": repo,
+        })),
     )
     .unwrap();
     let attempt = root.join("planning").join(Uuid::new_v4().to_string());
@@ -461,7 +458,9 @@ if [ -f "$session/turns.jsonl" ]; then
   printf '%s' '{"originalGoal":"initial","nodes":[{"name":"first","task":"first"},{"name":"next","task":"next"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 else
   printf '%s' '{"originalGoal":"initial","nodes":[{"name":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
-  printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$PWD" > "$session/turns.jsonl"
+  cwd="$PWD"
+  if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
+  printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$cwd" > "$session/turns.jsonl"
 fi
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
 "#).unwrap();

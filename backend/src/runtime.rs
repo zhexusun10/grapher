@@ -21,6 +21,7 @@ pub struct Job {
     pub parent_heads: Vec<String>,
     pub config: Config,
     pub task: String,
+    pub images: Option<Vec<ImageAttachment>>,
     pub resume_execution_id: Option<String>,
     pub feedback_source: bool,
     pub expected_source_head: String,
@@ -641,6 +642,15 @@ impl Runtime {
     }
 
     pub fn intervene(&mut self, node: &str, instruction: &str) -> Result<(), String> {
+        self.intervene_with_images(node, instruction, None)
+    }
+
+    pub fn intervene_with_images(
+        &mut self,
+        node: &str,
+        instruction: &str,
+        images: Option<Vec<ImageAttachment>>,
+    ) -> Result<(), String> {
         if instruction.trim().is_empty() {
             return Err("Enter an instruction for the node".into());
         }
@@ -652,14 +662,19 @@ impl Runtime {
         {
             return Err("No completed node session to continue; revise the plan instead".into());
         }
-        self.invalidate_node(node, instruction.trim())
+        self.invalidate_node(node, instruction.trim(), images)
     }
 
     pub fn rerun(&mut self, node: &str) -> Result<(), String> {
-        self.invalidate_node(node, "")
+        self.invalidate_node(node, "", None)
     }
 
-    fn invalidate_node(&mut self, node: &str, instruction: &str) -> Result<(), String> {
+    fn invalidate_node(
+        &mut self,
+        node: &str,
+        instruction: &str,
+        images: Option<Vec<ImageAttachment>>,
+    ) -> Result<(), String> {
         if matches!(
             self.state.phase.as_str(),
             "publishing" | "merging" | "publication_failed"
@@ -699,6 +714,7 @@ impl Runtime {
             target: node.into(),
             instruction: instruction.into(),
             human: true,
+            images,
         })
     }
 
@@ -961,6 +977,7 @@ impl Runtime {
             } else {
                 format!("{}\n{}", node.task, state.instruction)
             };
+            let images = state.instruction_images.clone();
             let feedback_source = self
                 .state
                 .graph
@@ -986,6 +1003,7 @@ impl Runtime {
                 parent_heads,
                 config: config.clone(),
                 task,
+                images,
                 resume_execution_id,
                 feedback_source,
                 expected_source_head: self
@@ -1203,6 +1221,7 @@ impl Runtime {
                     target: edge.to,
                     instruction: format!("Feedback from {from}:\n{output}"),
                     human: false,
+                    images: None,
                 })?;
             }
         }
@@ -1272,6 +1291,7 @@ pub fn perform_with_merger(
         &job.task,
         job.feedback_source,
         job.resume_execution_id.as_deref(),
+        job.images.as_deref(),
         root,
         on_output,
     )?;
