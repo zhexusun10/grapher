@@ -40,6 +40,40 @@ fn reopening_a_paused_run_does_not_append_pause_events() {
 }
 
 #[test]
+fn done_node_message_control_does_not_wait_for_planner_or_start_driver() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    runtime.state.run_id = Uuid::new_v4().to_string();
+    runtime.emit(EventKind::Created {
+        graph: Graph { original_goal: "test".into(), nodes: vec![Node {
+            name: "task".into(), task: "test".into(),
+        }], edges: vec![] },
+        config: serde_json::from_value(serde_json::json!({
+            "repository": temp.path(), "model": "test", "maxParallel": 1,
+        })).unwrap(),
+        planning_id: None, planning: None,
+    }).unwrap();
+    runtime.emit(EventKind::Approved { base: String::new() }).unwrap();
+    runtime.state.nodes.get_mut("task").unwrap().status = "done".into();
+    let run_id = runtime.state.run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(true),
+        extension: temp.path().join("unused.ts"),
+    });
+    let snap = control("message_node".into(), Some("task".into()), Some("hi".into()),
+        Some(run_id.clone()), None, None, &service).unwrap();
+    assert_eq!(snap.nodes["task"].status, "done");
+    assert!(snap.executions.is_empty());
+    assert!(matches!(snap.events.last().unwrap().kind, EventKind::NodeMessaged { .. }));
+    assert!(control("message_node".into(), Some("task".into()), Some("wrong run".into()),
+        Some("old-run".into()), None, None, &service).is_err());
+    assert!(!service.driving.load(Ordering::SeqCst));
+}
+
+#[test]
 fn unscoped_planner_control_routes_only_to_active_planning_run() {
     let temp = tempfile::TempDir::new().unwrap();
     let primary = Arc::new(Service {
@@ -1755,6 +1789,23 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         }
     }
     assert_eq!(restored, text);
+    let running_page = get_execution_output(
+        &serde_json::json!({"runId":"large-run", "executionId":"large", "full":true}),
+        &service,
+    ).unwrap();
+    assert!(running_page["content"].as_str().unwrap().len() <= 256 * 1024);
+    service.runtime.lock().unwrap().state.executions[0].status = "done".into();
+    let full = get_execution_output(
+        &serde_json::json!({"runId":"large-run", "executionId":"large", "full":true}),
+        &service,
+    ).unwrap();
+    assert_eq!(full["content"], text);
+    assert_eq!(full["complete"], true);
+    let all = get_run_execution_outputs(
+        &serde_json::json!({"runId":"large-run"}), &service,
+    ).unwrap();
+    assert_eq!(all["outputs"][0]["executionId"], "large");
+    assert_eq!(all["outputs"][0]["content"], text);
     assert!(get_execution_output(
         &serde_json::json!({"runId":"large-run", "executionId":"large", "offset":256*1024}),
         &service

@@ -25,9 +25,7 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
-import { PlanningSummaryCard } from "./components/PlanningSummaryCard";
-import { prefetchPlanningTranscript } from "./components/PlanningActivity";
-import { prefetchExecutionTranscript } from "./components/ExecutionTranscript";
+import { prefetchRunExecutionTranscripts } from "./components/ExecutionTranscript";
 import { PublicationPanel } from "./components/PublicationPanel";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
 import { ConfirmModal, type ConfirmModalState } from "./components/modals/ConfirmModal";
@@ -87,6 +85,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const foregroundGeneration = useRef(0);
+  const historyPrefetchRef = useRef<AbortController | null>(null);
+  useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
     try {
@@ -167,6 +167,9 @@ export default function App() {
 
   // 每个运行的消息按发送顺序显示；修改旧消息也作为新的跟进指令追加。
   const [sessionEntries, setSessionEntries] = useState<ChatMessage[]>([]);
+  // Keep optimistic turns scoped to their Run while navigating away. Planner
+  // steer turns may not have reached the durable JSONL when the user goes home.
+  const messagesByRunRef = useRef(new Map<string, ChatMessage[]>());
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [editPrefillText, setEditPrefillText] = useState<string>("");
   const planningAbortControllerRef = useRef<AbortController | null>(null);
@@ -298,15 +301,10 @@ export default function App() {
         ? (state.graph.nodes[0]?.name || "task")
         : undefined);
 
-    if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
-      setError("发布期间不能介入节点，请等待发布结束或处理发布失败。");
-      return false;
-    }
-
     const displayMsg = options?.displayText || text;
     const parentId = sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null;
 
-    const recordMessage = (textToRecord: string) => {
+    const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"]) => {
       const newMsg: ChatMessage = {
         id: `msg-${Date.now()}`,
         parentId,
@@ -314,8 +312,9 @@ export default function App() {
         text: textToRecord,
         images: options?.images,
         timestamp: Date.now(),
-        runId: state.runId,
+        runId: isPlanning && !targetNodeName ? (plannerStream.runId || state.runId) : state.runId,
         node: targetNodeName,
+        delivery,
       };
       setSessionEntries((prev) => [...prev, newMsg]);
       setEditingMessage(null);
@@ -323,12 +322,35 @@ export default function App() {
       return newMsg;
     };
 
+    // A finished node has no live Pi RPC to steer. Keep the directed message
+    // in the Run history; do not invalidate it or any of its descendants.
+    if (targetNodeName && state.nodes[targetNodeName]?.status === "done") {
+      const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg, "node_messaged");
+      run(async () => {
+        try {
+          const snap = await runtimeService.control("message_node", {
+            runId: state.runId, node: targetNodeName, instruction: text, images: options?.images,
+          });
+          setState(snap);
+        } catch (error) {
+          setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
+          throw error;
+        }
+      });
+      return;
+    }
+
+    if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
+      setError("发布期间不能介入节点，请等待发布结束或处理发布失败。");
+      return false;
+    }
+
     if (isPlanning || recoveredPlanning?.status === "running") {
       // A node conversation still steers that node, even while Planner is active.
       const execution = targetNodeName && [...state.executions].reverse()
         .find((item) => item.node === targetNodeName && item.status === "running");
       if (execution) {
-        const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`);
+        const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`, "steered");
         run(async () => {
           try {
             await runtimeService.control("steer", {
@@ -361,6 +383,9 @@ export default function App() {
             runId: plannerStream.runId || undefined, instruction: text, images: options?.images,
           });
         } catch (error) {
+          const runId = message.runId;
+          if (runId) messagesByRunRef.current.set(runId,
+            (messagesByRunRef.current.get(runId) ?? []).filter((entry) => entry.id !== message.id));
           setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
           setPlannerStream((prev) => ({ ...prev, items: prev.items.filter((item) => item.id !== message.id) }));
           throw error;
@@ -373,7 +398,7 @@ export default function App() {
       const execution = [...state.executions].reverse().find((item) => item.node === targetNodeName && item.status === "running");
       if (execution) {
         const displayLabel = targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
-        const message = recordMessage(`${displayLabel}${displayMsg}`);
+        const message = recordMessage(`${displayLabel}${displayMsg}`, "steered");
         run(async () => {
           try {
             await requireRepository(state.config?.repository || config.repository);
@@ -576,6 +601,9 @@ export default function App() {
   }, [planningRecovery]);
 
   const detachForeground = (repository: string) => {
+    const runId = plannerStream.runId || state.runId;
+    if (runId && sessionEntries.length) messagesByRunRef.current.set(runId, sessionEntries);
+    historyPrefetchRef.current?.abort();
     foregroundGeneration.current += 1;
     busyOperations.current = 0;
     setBusy(false);
@@ -1672,10 +1700,10 @@ export default function App() {
       setIsPlanning(false);
     }
 
-    const isInitialGoal =
-      targetMsg.id === "msg-initial-goal" ||
+    const isInitialGoal = targetMsg.id === "msg-initial-goal" || (!targetMsg.node && (
       (sessionEntries.length > 0 && sessionEntries[0].id === targetMsg.id) ||
-      effectiveMessages[0]?.id === targetMsg.id;
+      effectiveMessages[0]?.id === targetMsg.id
+    ));
 
     if (isInitialGoal) {
       setEditingMessage(null);
@@ -1757,6 +1785,7 @@ export default function App() {
 
       updatedMsg = {
         ...current,
+        delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? "node_messaged" : current.delivery,
         text: cleanText,
         timestamp: Date.now(),
         parentId,
@@ -1767,6 +1796,7 @@ export default function App() {
     } else {
       updatedMsg = {
         ...targetMsg,
+        delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? "node_messaged" : targetMsg.delivery,
         text: cleanText,
         timestamp: Date.now(),
       };
@@ -1798,9 +1828,17 @@ export default function App() {
     if (targetNodeName) {
       run(async () => {
         try {
-          await requireRepository(state.config?.repository || config.repository);
           const runningExecution = [...state.executions].reverse().find((e) => e.node === targetNodeName && e.status === "running");
-          if (runningExecution) {
+          if (state.nodes[targetNodeName]?.status === "done") {
+            const snap = await runtimeService.control("message_node", {
+              runId: state.runId,
+              node: targetNodeName,
+              instruction: cleanText,
+              images: targetMsg.images,
+            });
+            setState(snap);
+          } else if (runningExecution) {
+            await requireRepository(state.config?.repository || config.repository);
             const snap = await runtimeService.control("steer", {
               runId: state.runId,
               executionId: runningExecution.id,
@@ -1810,6 +1848,7 @@ export default function App() {
             });
             setState(snap);
           } else {
+            await requireRepository(state.config?.repository || config.repository);
             const snap = await runtimeService.control("intervene", {
               node: targetNodeName,
               instruction: cleanText,
@@ -1985,45 +2024,42 @@ export default function App() {
             runIndicators={runIndicators}
             onLoadRun={(id) => {
               if (id !== state.runId || isPlanning || recoveredPlanning) detachForeground(config.repository);
+              historyPrefetchRef.current?.abort();
+              const controller = new AbortController();
+              historyPrefetchRef.current = controller;
               const generation = foregroundGeneration.current;
               run(async () => {
                 clearRunUnread(id);
                 if (id !== state.runId) setPlannerStream(initialPlannerStream);
-                // Read the selected Run without replacing any other Run's scheduler.
-                const snapshot = await runtimeService.snapshotForRun(id);
-                const deduced = deduceRouteType(snapshot);
-
-                // Prefetch transcripts before switching state so content is ready on frame 0
-                if (deduced === "graph") {
-                  const savedPlannerId = snapshot.planningId;
-                  const ids = (snapshot.events || [])
-                    .filter((e) => e.type === "created" || e.type === "graph_revised")
-                    .map((e) => e.planning_id)
-                    .filter((pid): pid is string => Boolean(pid));
-                  if (savedPlannerId) ids.push(savedPlannerId);
-                  const seen = new Set<string>();
-                  const uniqueIds = ids.filter((pid) => {
-                    if (seen.has(pid)) return false;
-                    seen.add(pid);
-                    return true;
-                  });
-                  if (uniqueIds.length > 0) {
-                    await prefetchPlanningTranscript(uniqueIds).catch(() => { });
-                  }
-                } else if (deduced === "serial" && snapshot.executions && snapshot.executions.length > 0) {
-                  const latestExec = snapshot.executions[snapshot.executions.length - 1];
-                  if (latestExec) {
-                    await prefetchExecutionTranscript(id, latestExec).catch(() => { });
-                  }
+                // Show the conversation as soon as its snapshot arrives. Loading
+                // planner output or node logs must never block opening the card.
+                let snapshot: Snapshot;
+                try {
+                  snapshot = await runtimeService.snapshotForRun(id, controller.signal);
+                } catch (error) {
+                  if (controller.signal.aborted) return;
+                  throw error;
                 }
-
-                if (generation !== foregroundGeneration.current) return;
+                if (controller.signal.aborted || generation !== foregroundGeneration.current) return;
+                const deduced = deduceRouteType(snapshot);
                 setState(snapshot);
                 markSnapshotRead(snapshot);
                 setRouteType(deduced);
                 setGoal(snapshot.graph.originalGoal || "");
-                if (id !== state.runId) resetSessionMessages();
+                if (id !== state.runId) {
+                  setSessionEntries(messagesByRunRef.current.get(id) ?? []);
+                  setEditingMessage(null);
+                  setEditPrefillText("");
+                }
                 setSelected("");
+
+                // Load the settled node histories in one background request.
+                // The backend reads the Run only once and mounted nodes share
+                // this request; live executions continue to stream separately.
+                const executions = [...snapshot.executions, ...(snapshot.mergers ?? [])];
+                void prefetchRunExecutionTranscripts(id, executions, controller.signal).catch(() => {
+                  // Mounted transcripts can retry independently on failure.
+                });
               });
             }}
             onDeleteRun={handleDeleteRunConfirm}
@@ -2090,7 +2126,6 @@ export default function App() {
                 >
                   {recoveredPlanning && <section aria-label="恢复进行中的规划" className="recovered-planning-section">
                     <p role="status">已连接正在进行的规划，活动会自动更新。</p>
-                    <PlanningSummaryCard planning={recoveredPlanning} />
                   </section>}
                   <PublicationPanel
                     key={state.runId}

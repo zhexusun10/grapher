@@ -76,7 +76,7 @@
   border-radius: 20px;
   font-size: 12.5px;
   font-weight: 500;
-  margin: 8px 0 12px;
+  margin: 2px 0 0;
   width: fit-content;
   user-select: none;
   cursor: default;
@@ -174,15 +174,10 @@
   box-sizing: border-box;
   border-radius: 8px;
   border: 1px solid rgba(139, 92, 246, 0.22);
-  border-left: 3px solid #8b5cf6;
   background: rgba(139, 92, 246, 0.035);
   overflow: hidden;
   margin: 6px 0;
   transition: border-color 0.2s ease, background 0.2s ease;
-}
-
-.thinking-card:hover {
-  border-color: rgba(139, 92, 246, 0.35);
 }
 
 .thinking-card.streaming {
@@ -203,11 +198,6 @@
   user-select: none;
   background: rgba(139, 92, 246, 0.04);
   font-size: 12.5px;
-  transition: background 0.15s ease;
-}
-
-.thinking-card-header:hover {
-  background: rgba(139, 92, 246, 0.08);
 }
 
 .thinking-header-left {
@@ -909,6 +899,17 @@
 
 .transcript-message-bubble .markdown-content code:not(pre code) {
   font-size: 13px;
+}
+
+.conversation-history-loading {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+  pointer-events: none;
 }
 
 .scroll-to-bottom-btn {

@@ -258,6 +258,13 @@ pub enum EventKind {
         node: String,
         instruction: String,
     },
+    /// A message addressed to a finished node. It does not start an execution.
+    NodeMessaged {
+        node: String,
+        instruction: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageAttachment>>,
+    },
     Output {
         execution_id: String,
         text: String,
@@ -616,7 +623,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.error = None;
             state.executions.push(execution.clone());
         }
-        EventKind::Steered { .. } => {}
+        EventKind::Steered { .. } | EventKind::NodeMessaged { .. } => {}
         EventKind::Output { execution_id, text } => {
             if let Some(execution) = state
                 .executions

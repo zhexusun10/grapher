@@ -1,11 +1,14 @@
-import { useState } from "react";
-import { X } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { X, Loader2 } from "lucide-react";
 import type { Execution, Publication } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
 import "./PublicationPanel.css";
 
-const labels = { publishing: "正在合并回写", merging: "merger 正在修复冲突", completed: "已写回工作文件夹", failed: "回写失败，需要处理" };
+const labels = { publishing: "正在写回工作文件夹", merging: "merger 正在修复冲突", completed: "已写回工作文件夹", failed: "回写失败，需要处理" };
 const executionLabels: Record<string, string> = { running: "执行中", completed: "已完成", failed: "失败" };
+
+// Global set to remember dismissed publication results across run switches
+const dismissedPublicationResults = new Set<string>();
 
 export function PublicationPanel({ runId = "", publication, mergers, busy, onRetry }: {
   runId?: string;
@@ -14,16 +17,59 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [attemptId, setAttemptId] = useState("");
   const [dismissedResult, setDismissedResult] = useState("");
+
+  // Record if this run was ALREADY completed at the moment this card was opened / mounted.
+  // When opening an already completed conversation card, this prevents the completed banner from popping up.
+  const wasCompletedOnMount = useRef(publication?.status === "completed");
+
   const execution = mergers.find(e => e.id === attemptId) ?? mergers.at(-1);
   if (!publication) return null;
+
   const resultId = `${runId}:${publication.head}:${publication.completedAt}`;
-  if (publication.status === "completed" && dismissedResult === resultId) return null;
+
+  // If this run was already completed when opened, or has been dismissed, suppress the completed banner
+  if (publication.status === "completed") {
+    if (wasCompletedOnMount.current || dismissedResult === resultId || dismissedPublicationResults.has(resultId)) {
+      return null;
+    }
+  }
+
+  // Auto-dismiss completed banner after 6 seconds when completing live in the foreground
+  useEffect(() => {
+    if (publication.status === "completed" && !wasCompletedOnMount.current) {
+      const timer = setTimeout(() => {
+        dismissedPublicationResults.add(resultId);
+        setDismissedResult(resultId);
+      }, 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [publication.status, resultId]);
+
+  const handleDismiss = () => {
+    dismissedPublicationResults.add(resultId);
+    setDismissedResult(resultId);
+  };
+
   return <section className={`publication-panel ${publication.status}`} aria-label="Graph 结果回写">
     <div className="publication-heading">
-      <strong role="status" aria-live="polite">{labels[publication.status]}</strong>
+      <strong role="status" aria-live="polite">
+        {(publication.status === "publishing" || publication.status === "merging") && (
+          <Loader2 size={15} className="spin publication-spinner" />
+        )}
+        {labels[publication.status]}
+      </strong>
       <span title="每个终点节点的提交已包含其上游依赖的结果">{publication.heads.length} 个终点结果（含上游变更）</span>
       {publication.status === "failed" && <button type="button" className="secondary" disabled={busy} onClick={onRetry}>重试回写</button>}
-      {publication.status === "completed" && <button type="button" className="publication-close" aria-label="关闭回写结果" onClick={() => setDismissedResult(resultId)}><X size={16} /></button>}
+      {publication.status === "completed" && (
+        <button
+          type="button"
+          className="publication-close"
+          aria-label="关闭回写结果"
+          onClick={handleDismiss}
+        >
+          <X size={16} />
+        </button>
+      )}
     </div>
     <p className="publication-target">目标目录：<code>{publication.repository}</code></p>
     {publication.status !== "completed" && publication.status !== "failed" && <p>节点执行已结束。正在写入最终结果，请等待回写完成后再修改目标目录。</p>}

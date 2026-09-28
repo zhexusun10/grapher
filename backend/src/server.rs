@@ -3,7 +3,7 @@ use crate::{
     engine::{parse_route_decision, run_pi, PiModelConfig, PiRequest, PiRole},
     model::*,
     runtime::{perform_with_merger, Runtime},
-    snapshot_view::{execution_page, snapshot_metadata},
+    snapshot_view::{execution_page, execution_page_with_limit, snapshot_metadata},
 };
 use serde::Serialize;
 use std::{
@@ -1864,6 +1864,18 @@ fn control(
         }
         return Ok(snapshot);
     }
+    if action == "message_node" {
+        let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
+            return Err("Run changed while messaging node".into());
+        }
+        runtime.message_done_node(
+            node.as_deref().unwrap_or_default(),
+            instruction.as_deref().unwrap_or_default(),
+            images,
+        )?;
+        return Ok(runtime.state.clone());
+    }
     if action == "steer" {
         let node = node.ok_or("Select a node to steer")?;
         let instruction = instruction.ok_or("Enter a steering message")?;
@@ -2221,6 +2233,31 @@ fn argument<T: serde::de::DeserializeOwned>(
         .map_err(|error| format!("Invalid {key}: {error}"))
 }
 
+fn get_run_execution_outputs(
+    body: &serde_json::Value,
+    service: &Arc<Service>,
+) -> Result<serde_json::Value, String> {
+    let run_id: String = argument(body, "runId")?;
+    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+    let historical;
+    let state = if runtime.state.run_id == run_id {
+        &runtime.state
+    } else {
+        historical = runtime.store.load(&run_id)?;
+        &historical
+    };
+    // One historical snapshot read for the entire conversation instead of
+    // re-reading it once per execution (and once per 256 KiB page).
+    let outputs: Vec<_> = state.executions.iter().chain(&state.mergers)
+        .filter(|exec| exec.status != "running")
+        .map(|exec| serde_json::json!({
+            "executionId": exec.id, "content": exec.output,
+            "totalBytes": exec.output.len(), "status": exec.status,
+        }))
+        .collect();
+    Ok(serde_json::json!({ "runId": run_id, "outputs": outputs }))
+}
+
 fn get_execution_output(
     body: &serde_json::Value,
     service: &Arc<Service>,
@@ -2240,6 +2277,17 @@ fn get_execution_output(
         historical = runtime.store.load(&run_id)?;
         &historical
     };
+    // Completed transcripts are immutable. Send them in one response rather
+    // than reloading the entire historical snapshot for every 256 KiB page.
+    // Keep bounded pages for actively running agents.
+    if body.get("full").and_then(serde_json::Value::as_bool) == Some(true) {
+        let completed = state.executions.iter().chain(&state.mergers)
+            .find(|exec| exec.id == execution_id)
+            .is_some_and(|exec| exec.status != "running");
+        if completed {
+            return execution_page_with_limit(state, &execution_id, offset, usize::MAX);
+        }
+    }
     execution_page(state, &execution_id, offset)
 }
 
@@ -2707,6 +2755,7 @@ pub fn dispatch(
             service,
         )?),
         "get_execution_output" => return get_execution_output(&body, service),
+        "get_run_execution_outputs" => return get_run_execution_outputs(&body, service),
         "get_planning_snapshot" => {
             let id: String = argument(&body, "planningId")?;
             let repository: String = argument(&body, "repository")?;
@@ -2886,7 +2935,8 @@ fn api_service(
         | "control"
         | "save_graph"
         | "delete_run"
-        | "get_execution_output" => {
+        | "get_execution_output"
+        | "get_run_execution_outputs" => {
             if let Some(run_id) = body.get("runId").and_then(serde_json::Value::as_str) {
                 service_for_run(primary, run_id, false)
             } else if command == "save_graph" {

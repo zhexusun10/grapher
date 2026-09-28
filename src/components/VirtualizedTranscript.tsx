@@ -537,9 +537,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       return;
     }
 
-    if (distanceFromBottom > 24) {
-      isUserScrolledUpRef.current = true;
-    }
+    // A growing transcript can leave the scroll position behind temporarily.
+    // Only actual upward movement (or a wheel/touch gesture) disables follow.
   }, []);
 
   const handleExpandedChange = useCallback((id: string, expanded: boolean, card?: HTMLElement) => {
@@ -690,7 +689,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       <div
         ref={containerRef}
         className="transcript-scroll-area"
-        style={{ overflowAnchor: "none", minHeight: 200 }}
+        style={{ overflowAnchor: "none", minHeight: inline ? 0 : 200 }}
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
         <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>

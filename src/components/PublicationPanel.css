@@ -1,16 +1,151 @@
-.publication-panel { margin: 10px auto; max-width: 860px; width: calc(100% - 36px); box-sizing: border-box; padding: 12px 16px; border: 1px solid #c5d4eb; border-radius: 10px; background: #f3f7fc; flex-shrink: 0; max-height: 55vh; overflow: auto; font-size: 13px; }
-.publication-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.publication-heading span { color: #526277; }
-.publication-panel p { margin: 8px 0; overflow-wrap: anywhere; }
-.publication-panel.completed { position: absolute; z-index: 30; top: 12px; left: 50%; transform: translateX(-50%); width: max-content; max-width: min(860px, calc(100% - 36px)); margin: 0; border-color: #99c8a7; background: #f1faf4; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.15); }
-.publication-panel.completed .publication-heading { flex-wrap: nowrap; }
-.publication-panel.completed .publication-heading span { min-width: 0; }
-.publication-close { margin-left: auto; flex-shrink: 0; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #526277; cursor: pointer; }
-.publication-close:hover { background: #dceee2; color: #1d5731; }
-.publication-panel.failed { border-color: #e4b6a3; background: #fff5f0; }
-.publication-error { color: #a02e17; white-space: pre-wrap; }
-.publication-mergers summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
-.publication-mergers select { max-width: 100%; padding: 6px; }
-.publication-transcript { height: 280px; display: flex; flex-direction: column; background: white; border-radius: 8px; overflow-y: auto; }
-.phase-tag.publishing, .phase-tag.merging { color: #254a83; background: #e7effd; }
-.phase-tag.publication_failed { color: #a02e17; background: #fff0e8; }
+.publication-panel {
+  position: absolute;
+  z-index: 30;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(860px, calc(100% - 36px));
+  margin: 0;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border: 1px solid #c5d4eb;
+  border-radius: 10px;
+  background: #f3f7fc;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.15);
+  flex-shrink: 0;
+  max-height: 55vh;
+  overflow: auto;
+  font-size: 13px;
+  animation: publication-slide-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+@keyframes publication-slide-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.publication-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+
+.publication-heading strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.publication-heading span {
+  color: #526277;
+  min-width: 0;
+}
+
+.publication-spinner {
+  flex-shrink: 0;
+  color: #2563eb;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.publication-panel p {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+
+.publication-panel.publishing {
+  border-color: #b6cdfc;
+  background: #f3f7fc;
+}
+
+.publication-panel.merging {
+  border-color: #d1b8eb;
+  background: #f8f4fd;
+}
+
+.publication-panel.merging .publication-spinner {
+  color: #7c3aed;
+}
+
+.publication-panel.completed {
+  border-color: #99c8a7;
+  background: #f1faf4;
+}
+
+.publication-close {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #526277;
+  cursor: pointer;
+}
+
+.publication-close:hover {
+  background: #dceee2;
+  color: #1d5731;
+}
+
+.publication-panel.failed {
+  border-color: #e4b6a3;
+  background: #fff5f0;
+}
+
+.publication-error {
+  color: #a02e17;
+  white-space: pre-wrap;
+}
+
+.publication-mergers summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 8px 0;
+}
+
+.publication-mergers select {
+  max-width: 100%;
+  padding: 6px;
+}
+
+.publication-transcript {
+  height: 280px;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  border-radius: 8px;
+  overflow-y: auto;
+}
+
+.phase-tag.publishing, .phase-tag.merging {
+  color: #254a83;
+  background: #e7effd;
+}
+
+.phase-tag.publication_failed {
+  color: #a02e17;
+  background: #fff0e8;
+}
+

@@ -1,8 +1,27 @@
-import React, { useLayoutEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronLeft, ChevronRight, Pencil, X } from "lucide-react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, Copy, Pencil, X } from "lucide-react";
 import type { ChatMessageVersion, ImageAttachment } from "../../types";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
+
+function copyFallback(text: string, onSuccess: () => void) {
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const successful = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    if (successful) onSuccess();
+  } catch (err) {
+    console.error("Failed to copy", err);
+  }
+}
 
 export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean }> = React.memo(
   ({ content, isStreaming }) => {
@@ -42,6 +61,38 @@ export function EditableUserBubble({
   const bubbleRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [initialSize, setInitialSize] = useState<{ width: number; height: number } | null>(null);
+  const [copied, setCopied] = useState(false);
+  const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!text) return;
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current);
+    }
+    const onSuccess = () => {
+      setCopied(true);
+      copyTimeoutRef.current = setTimeout(() => {
+        setCopied(false);
+      }, 1500);
+    };
+
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(onSuccess).catch(() => {
+        copyFallback(text, onSuccess);
+      });
+    } else {
+      copyFallback(text, onSuccess);
+    }
+  };
 
   useLayoutEffect(() => {
     if (!editing) {
@@ -125,6 +176,15 @@ export function EditableUserBubble({
                 </button>
               </div>
             ) : null}
+            <button
+              type="button"
+              className={`chat-message-copy-btn${copied ? " copied" : ""}`}
+              onClick={handleCopy}
+              title={copied ? "已复制" : "复制消息"}
+              aria-label={copied ? "已复制" : "复制消息"}
+            >
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+            </button>
             {onEdit ? (
               <button
                 type="button"

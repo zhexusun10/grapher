@@ -153,9 +153,12 @@ export const runtimeService = {
     }
     return finalSnapshot;
   },
-  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal) =>
+  getRunExecutionOutputs: (runId: string, signal?: AbortSignal) =>
+    request<{ runId: string; outputs: Array<{ executionId: string; content: string; totalBytes: number; status: string }> }>(
+      "get_run_execution_outputs", { runId }, signal),
+  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false) =>
     request<{ runId: string; executionId: string; content: string; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
-      "get_execution_output", { runId, executionId, offset }, signal),
+      "get_execution_output", { runId, executionId, offset, full }, signal),
   getPlanningSnapshot: (planningId: string, repository: string, signal?: AbortSignal) =>
     request<Snapshot>("get_planning_snapshot", { planningId, repository }, signal),
   getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal) =>

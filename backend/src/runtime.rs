@@ -619,6 +619,27 @@ impl Runtime {
         self.emit(EventKind::Paused { paused })
     }
 
+    /// Record a turn addressed to a completed node without changing its result
+    /// or scheduling another execution. The finished Pi process cannot be steered.
+    pub fn message_done_node(
+        &mut self,
+        node: &str,
+        instruction: &str,
+        images: Option<Vec<ImageAttachment>>,
+    ) -> Result<(), String> {
+        if !self.state.approved || self.state.nodes.get(node).map(|n| n.status.as_str()) != Some("done") {
+            return Err("Select a completed node to message".into());
+        }
+        if instruction.trim().is_empty() {
+            return Err("Enter a message for the node".into());
+        }
+        self.emit(EventKind::NodeMessaged {
+            node: node.into(),
+            instruction: instruction.trim().into(),
+            images,
+        })
+    }
+
     pub fn intervene(&mut self, node: &str, instruction: &str) -> Result<(), String> {
         if instruction.trim().is_empty() {
             return Err("Enter an instruction for the node".into());

@@ -145,6 +145,15 @@ pub fn execution_page(
     execution_id: &str,
     offset: usize,
 ) -> Result<Value, String> {
+    execution_page_with_limit(state, execution_id, offset, 256 * 1024)
+}
+
+pub fn execution_page_with_limit(
+    state: &Snapshot,
+    execution_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Value, String> {
     let execution = state
         .executions
         .iter()
@@ -155,7 +164,7 @@ pub fn execution_page(
     if offset > text.len() || !text.is_char_boundary(offset) {
         return Err("Invalid output offset".into());
     }
-    let mut end = offset.saturating_add(256 * 1024).min(text.len());
+    let mut end = offset.saturating_add(limit).min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }

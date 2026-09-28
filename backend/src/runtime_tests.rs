@@ -203,6 +203,62 @@ fn parallel_snapshots_of_one_host_repository_do_not_race_ref_locks() {
 }
 
 #[test]
+fn messaging_done_node_preserves_its_result_and_running_downstream() {
+    let graph = Graph {
+        original_goal: "message".into(),
+        nodes: ["parent", "child"].into_iter().map(|name| Node {
+            name: name.into(), task: name.into(),
+        }).collect(),
+        edges: vec![Edge {
+            from: "parent".into(), to: "child".into(), relation: String::new(), feedback: false,
+        }],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let parent = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: parent.execution.id, head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    let child = runtime.jobs().unwrap().remove(0);
+    let before = runtime.state.nodes.clone();
+    let executions = runtime.state.executions.len();
+    let images = Some(vec![ImageAttachment {
+        r#type: "image".into(), mime_type: "image/png".into(), data: "abc".into(), name: None,
+    }]);
+    runtime.message_done_node("parent", "  new instruction  ", images.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&runtime.state.nodes).unwrap(), serde_json::to_value(before).unwrap());
+    assert_eq!(runtime.state.executions.len(), executions);
+    assert_eq!(runtime.state.nodes["child"].status, "running");
+    assert!(runtime.jobs().unwrap().is_empty());
+    let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert!(matches!(replayed.events.last().unwrap().kind, EventKind::NodeMessaged {
+        ref node, ref instruction, images: ref saved,
+    } if node == "parent" && instruction == "new instruction" &&
+        serde_json::to_value(saved).unwrap() == serde_json::to_value(&images).unwrap()));
+    assert!(runtime.message_done_node("child", "no", None).is_err());
+    assert!(runtime.message_done_node("parent", "   ", None).is_err());
+    assert_eq!(runtime.state.executions.last().unwrap().id, child.execution.id);
+}
+
+#[test]
+fn message_after_run_completed_keeps_it_completed() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: job.execution.id, head: runtime.state.base.clone(), output: "done".into(),
+    }).unwrap();
+    runtime.emit(EventKind::Settled).unwrap();
+    let head = runtime.state.nodes["task"].head.clone();
+    runtime.message_done_node("task", "hello", None).unwrap();
+    assert_eq!(runtime.state.phase, "completed");
+    assert_eq!(runtime.state.nodes["task"].head, head);
+    assert_eq!(runtime.state.nodes["task"].status, "done");
+    assert_eq!(runtime.state.executions.len(), 1);
+    assert!(runtime.jobs().unwrap().is_empty());
+}
+
+#[test]
 fn rerun_starts_from_clean_inputs_but_intervention_continues_the_result() {
     let (_temp, source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();

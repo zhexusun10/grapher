@@ -556,13 +556,14 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent-primary, #7c8cff);
-  animation: workingPulse 1.2s ease-in-out infinite;
+  background: var(--accent-running, #06b6d4);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
+  animation: workingPulse 1.4s ease-in-out infinite;
 }
 
 @keyframes workingPulse {
-  0%, 100% { opacity: .35; transform: scale(.85); }
-  50% { opacity: 1; transform: scale(1); }
+  0%, 100% { opacity: .4; transform: scale(.85); box-shadow: 0 0 3px rgba(6, 182, 212, 0.3); }
+  50% { opacity: 1; transform: scale(1.15); box-shadow: 0 0 10px rgba(6, 182, 212, 0.7); }
 }
 
 /* 虚拟列表负责屏幕外卸载；不要再叠加 content-visibility，避免快速滚动时出现延迟绘制闪烁。 */
@@ -666,6 +667,7 @@
   align-items: center;
 }
 
+.chat-message-copy-btn,
 .chat-message-edit-btn,
 .chat-bubble-action-btn {
   opacity: 0;
@@ -680,16 +682,25 @@
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: opacity 0.18s ease, transform 0.18s ease, background 0.15s ease, color 0.15s ease;
+  transition: opacity 0.18s ease, transform 0.18s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   flex-shrink: 0;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
+.chat-user-message-card-wrapper:hover .chat-message-copy-btn:not(:disabled),
+.chat-user-message-card-wrapper:focus-within .chat-message-copy-btn:not(:disabled),
 .chat-user-message-card-wrapper:hover .chat-message-edit-btn:not(:disabled),
-.chat-user-message-card-wrapper:focus-within .chat-message-edit-btn:not(:disabled) {
+.chat-user-message-card-wrapper:focus-within .chat-message-edit-btn:not(:disabled),
+.chat-message-copy-btn.copied {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);
+}
+
+.chat-message-copy-btn.copied {
+  background: var(--status-success-subtle, #ECFDF5);
+  border-color: var(--status-success-border, #A7F3D0);
+  color: var(--status-success, #10B981);
 }
 
 .chat-bubble-action-btn {
@@ -708,11 +719,19 @@
   cursor: not-allowed;
 }
 
+.chat-message-copy-btn:hover:not(:disabled),
 .chat-message-edit-btn:hover:not(:disabled),
 .chat-bubble-action-btn:hover:not(:disabled) {
   background: var(--brand-subtle, #EFF6FF);
   border-color: var(--brand-border, #BFDBFE);
   color: var(--brand-default, #2563EB);
+  transform: scale(1.08);
+}
+
+.chat-message-copy-btn.copied:hover {
+  background: var(--status-success-subtle, #ECFDF5);
+  border-color: var(--status-success-border, #A7F3D0);
+  color: var(--status-success, #10B981);
   transform: scale(1.08);
 }
 
@@ -722,6 +741,7 @@
   color: white;
 }
 
+.chat-message-copy-btn:active,
 .chat-message-edit-btn:active,
 .chat-bubble-action-btn:active:not(:disabled) {
   transform: scale(0.95);
@@ -899,7 +919,7 @@
   display: flex;
   flex-direction: column;
   width: 100%;
-  margin-top: 8px;
+  margin-top: 0;
   background: transparent;
   border: none;
   padding: 0;
@@ -912,7 +932,7 @@
 }
 
 .route-decision-pill.serial+.serial-execution-panel {
-  margin-top: -12px;
+  margin-top: 0;
 }
 
 /* 执行拓扑概览卡片 */
@@ -1155,9 +1175,9 @@
 }
 
 .planning-activity {
-  border-top: 1px solid var(--border-subtle);
-  padding-top: 10px;
-  margin-top: 10px;
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
 }
 
 .planning-activity-tabs {
@@ -1181,6 +1201,7 @@
 
 .planning-activity-output .transcript-inline .transcript-scroll-area {
   display: block;
+  min-height: 0 !important;
 }
 
 .planning-stats-grid {
@@ -1392,10 +1413,10 @@
   left: 0;
   right: 0;
   padding: 10px 14px 14px;
-  background: color-mix(in srgb, var(--bg-surface) 75%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 40%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border-top: 1px solid color-mix(in srgb, var(--border-default) 40%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border-default) 28%, transparent);
   flex-shrink: 0;
   z-index: 18;
   display: flex;
@@ -2495,22 +2516,102 @@
 }
 
 .workspace-details {
-  padding: 12px 0;
-  font-size: 9px;
+  padding: 8px 0 6px;
+  font-size: 11px;
   color: var(--text-secondary);
   overflow-wrap: anywhere;
 }
 
-.workspace-details summary {
-  cursor: pointer;
+.workspace-details summary,
+.workspace-details-summary {
+  cursor: default;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  list-style: none;
+  user-select: none;
+  min-height: 24px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workspace-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-details-summary-left {
+  display: flex;
+  align-items: center;
+}
+
+.workspace-details-summary-left .working-indicator {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.workspace-details-trigger {
+  margin-left: auto;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-secondary);
+  user-select: none;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: none;
+  border: none;
+  font-family: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.workspace-details-trigger:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover, rgba(255, 255, 255, 0.05));
+}
+
+.workspace-details-chevron {
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  opacity: 0.65;
+}
+
+.workspace-details-chevron.open,
+.workspace-details[open] .workspace-details-chevron {
+  transform: rotate(90deg);
+}
+
+.workspace-details-animator {
+  overflow: hidden;
+  will-change: height, opacity;
+}
+
+.workspace-details-body {
+  padding-top: 6px;
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 .workspace-details p {
-  padding-top: 8px;
+  margin: 0;
+  padding-top: 4px;
   line-height: 1.6;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+}
+
+.workspace-details .details-tip {
+  font-family: inherit;
+  font-size: 10.5px;
+  color: var(--text-tertiary, #888);
+  font-style: italic;
+  padding-top: 6px;
 }
 
 .node-error {

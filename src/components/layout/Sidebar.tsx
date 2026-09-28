@@ -185,12 +185,17 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                 }}
                 title={labelText ? `${labelText}\n\n快照: ${id}\n(右键可复制 ID 或删除)` : `快照: ${id}\n(右键可复制 ID 或删除)`}
               >
-                {isUnread && (
+                {isThisRunActive ? (
+                  <span
+                    className="run-dot running-pulse"
+                    title="正在运行中"
+                  />
+                ) : isUnread ? (
                   <span
                     className={`run-dot ${needsUnreadApproval ? "approval-pulse" : ""}`}
                     title={needsUnreadApproval ? "有待审批的未读更新" : "有未读更新"}
                   />
-                )}
+                ) : null}
                 <span className="run-title-text">
                   {displayLabel}
                 </span>

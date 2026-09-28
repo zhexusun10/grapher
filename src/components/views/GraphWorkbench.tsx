@@ -1,8 +1,9 @@
 import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
 import {
-  Code2, ArrowLeft, Terminal, FolderGit2, GitBranch, RotateCcw,
-  Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2
+  Code2, ArrowLeft, Terminal, FolderGit2, GitBranch,
+  Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
+  AlertCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -18,7 +19,8 @@ import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTranscript } from "../ExecutionTranscript";
-import { PlanningSummaryCard } from "../PlanningSummaryCard";
+import { planningTranscriptCache } from "../PlanningActivity";
+import { plannerUserTurns } from "../../services/plannerUserTurns";
 import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
@@ -67,6 +69,181 @@ interface GraphWorkbenchProps {
   tokens: any;
   failedPlanning?: PlanningSummary | null;
 }
+
+interface WorkspaceDetailsPanelProps {
+  showWorking?: boolean;
+  children: React.ReactNode;
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+  onBeforeToggle?: () => void;
+  onAfterToggle?: () => void;
+}
+
+const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
+  showWorking,
+  children,
+  scrollContainerRef,
+  onBeforeToggle,
+  onAfterToggle,
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const animatorRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const rafIdRef = useRef<number | null>(null);
+  const lastScrollDeltaRef = useRef<number>(0);
+  const interruptedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    return () => {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
+    };
+  }, []);
+
+  const handleToggle = useCallback(() => {
+    const nextOpen = !isOpen;
+    const animator = animatorRef.current;
+    const content = contentRef.current;
+    const panel = panelRef.current;
+
+    if (!animator || !content || !panel) {
+      setIsOpen(nextOpen);
+      return;
+    }
+
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+
+    const container =
+      scrollContainerRef?.current ||
+      (panel.closest(".initial-query-scroll") as HTMLElement | null);
+
+    onBeforeToggle?.();
+
+    const startHeight = animator.offsetHeight;
+    const measuredHeight = Math.max(content.offsetHeight, content.scrollHeight, animator.scrollHeight);
+    const targetHeight = nextOpen ? (measuredHeight > 0 ? measuredHeight : 120) : 0;
+
+    const startScrollTop = container ? container.scrollTop : 0;
+    let scrollDelta = 0;
+    interruptedRef.current = false;
+
+    if (container) {
+      const containerRect = container.getBoundingClientRect();
+      const paneView = container.closest(".initial-query-view") || container.parentElement;
+      const composerEl = paneView?.querySelector(".pane-bottom-chat") as HTMLElement | null;
+      const composerRect = composerEl ? composerEl.getBoundingClientRect() : null;
+      const visibleBottom = composerRect ? composerRect.top - 12 : containerRect.bottom - 12;
+
+      if (nextOpen) {
+        const panelRect = panel.getBoundingClientRect();
+        const futurePanelBottom = panelRect.bottom + targetHeight;
+        if (futurePanelBottom > visibleBottom) {
+          scrollDelta = futurePanelBottom - visibleBottom;
+        }
+        lastScrollDeltaRef.current = scrollDelta;
+      } else {
+        if (lastScrollDeltaRef.current > 0) {
+          scrollDelta = -Math.min(lastScrollDeltaRef.current, container.scrollTop);
+        } else {
+          const panelRect = panel.getBoundingClientRect();
+          if (panelRect.bottom >= visibleBottom - 24) {
+            scrollDelta = -Math.min(startHeight, container.scrollTop);
+          }
+        }
+        lastScrollDeltaRef.current = 0;
+      }
+
+      const onUserScroll = () => {
+        interruptedRef.current = true;
+      };
+      container.addEventListener("wheel", onUserScroll, { passive: true, once: true });
+      container.addEventListener("touchmove", onUserScroll, { passive: true, once: true });
+    }
+
+    setIsOpen(nextOpen);
+
+    const duration = 280;
+    const startTime = performance.now();
+
+    const tick = (now: number) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(1, elapsed / duration);
+      // ease-out cubic
+      const ease = 1 - Math.pow(1 - progress, 3);
+
+      const currentH = startHeight + (targetHeight - startHeight) * ease;
+      const currentOp = nextOpen ? ease : 1 - ease;
+
+      animator.style.height = `${currentH}px`;
+      animator.style.opacity = `${currentOp}`;
+
+      if (container && scrollDelta !== 0 && !interruptedRef.current) {
+        container.scrollTop = startScrollTop + scrollDelta * ease;
+      }
+
+      if (progress < 1) {
+        rafIdRef.current = requestAnimationFrame(tick);
+      } else {
+        rafIdRef.current = null;
+        if (nextOpen) {
+          animator.style.height = "auto";
+          animator.style.opacity = "1";
+        } else {
+          animator.style.height = "0px";
+          animator.style.opacity = "0";
+        }
+        onAfterToggle?.();
+      }
+    };
+
+    rafIdRef.current = requestAnimationFrame(tick);
+  }, [isOpen, onBeforeToggle, onAfterToggle, scrollContainerRef]);
+
+  return (
+    <div ref={panelRef} className={`workspace-details ${isOpen ? "open" : ""}`} style={{ marginTop: 12 }}>
+      <div className="workspace-details-summary">
+        <div className="workspace-details-summary-left">
+          {showWorking && (
+            <div className="working-indicator" role="status" aria-live="polite">
+              <span className="working-indicator-dot" />
+              Working…
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          className="workspace-details-trigger"
+          onClick={handleToggle}
+          aria-expanded={isOpen}
+        >
+          <FolderGit2 size={12} />
+          <span>工作区与会话信息</span>
+          <ChevronRight size={11} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} />
+        </button>
+      </div>
+
+      <div
+        ref={animatorRef}
+        className="workspace-details-animator"
+        style={{
+          overflow: "hidden",
+          height: 0,
+          opacity: 0,
+        }}
+        aria-hidden={!isOpen}
+      >
+        <div ref={contentRef} className="workspace-details-body">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   state,
@@ -122,12 +299,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const nodeMessages = useMemo(() => {
     if (!selectedNode) return [];
     const local = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === selectedNode.name && msg.runId === state.runId);
-    const recorded = state.events.filter((event) => ((event.type === "invalidated" && event.human && event.target === selectedNode.name) ||
-      (event.type === "steered" && event.node === selectedNode.name)) &&
-      !local.some((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction)
-    ).map((event): ChatMessage => ({
+    const localRemaining = [...local];
+    const recorded = state.events.filter((event) => (event.type === "invalidated" && event.human && event.target === selectedNode.name) ||
+      ((event.type === "steered" || event.type === "node_messaged") && event.node === selectedNode.name)
+    ).reverse().filter((event) => {
+      // Match each optimistic turn to at most one durable event, from newest
+      // to oldest, so repeated identical messages do not disappear.
+      const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction);
+      if (idx < 0) return true;
+      localRemaining.splice(idx, 1);
+      return false;
+    }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
-      text: event.instruction || "", node: selectedNode.name, runId: state.runId,
+      text: event.instruction || "", images: event.images, node: selectedNode.name, runId: state.runId,
+      delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
     }));
     return [...recorded, ...local];
   }, [selectedNode?.name, effectiveMessages, state.runId, state.events]);
@@ -160,9 +345,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       executions: attempts.length > 0 ? [attempts[0]] : [],
     });
 
-    nodeMessages.forEach((msg, idx) => {
-      const execIndex = idx + 1;
-      const execs = execIndex < attempts.length ? [attempts[execIndex]] : [];
+    let execIndex = 1;
+    nodeMessages.forEach((msg) => {
+      const execs = msg.delivery ? [] : execIndex < attempts.length ? [attempts[execIndex]] : [];
+      if (!msg.delivery) execIndex++;
       turns.push({
         id: msg.id,
         isInitial: false,
@@ -171,7 +357,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       });
     });
 
-    if (attempts.length > nodeMessages.length + 1) {
+    if (attempts.length > 1) {
       const assigned = new Set(turns.flatMap((t) => t.executions.map((e) => e.id)));
       const unassigned = attempts.filter((e) => !assigned.has(e.id));
       if (unassigned.length > 0) {
@@ -215,6 +401,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [routeType, isPlanning, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.runId, plannerStream.isContinuation, plannerStream.items, plannerStream.representedPlanningIds]);
   const savedPlannerKey = savedPlannerIds.join(":");
   const [readySavedPlannerKey, setReadySavedPlannerKey] = useState("");
+  const savedPlannerOutput = planningTranscriptCache.get(savedPlannerKey)?.text ?? "";
+  const persistedUserTurns = useMemo(() => {
+    if (effectiveMessages.length <= 1) return [];
+    const turns = plannerUserTurns(savedPlannerOutput);
+    if (turns[0] === effectiveMessages[0]?.text.trim()) turns.shift();
+    return turns;
+  }, [savedPlannerOutput, effectiveMessages.length, effectiveMessages[0]?.text]);
+  const remainingPersistedTurns = new Map<string, number>();
+  for (const text of persistedUserTurns) {
+    remainingPersistedTurns.set(text, (remainingPersistedTurns.get(text) ?? 0) + 1);
+  }
   const useSavedPlanner = savedPlannerIds.length > 0 &&
     (!isPlanning || !showLivePlanner || readySavedPlannerKey === savedPlannerKey);
   const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
@@ -234,6 +431,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const activeConversationViewRef = useRef(conversationViewKey);
   const conversationGenerationRef = useRef(0);
   const isScrollingToBottomRef = useRef(false);
+  const isPreparingConversationRef = useRef(false);
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
   const scrollBottomBtnRef = useRef<HTMLButtonElement>(null);
@@ -275,9 +473,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const handleChatScroll = useCallback(() => {
     if (!chatScrollRef.current) return;
-    if (suppressAutoScrollRef.current) return;
+    if (suppressAutoScrollRef.current || isPreparingConversationRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    const showLatest = distanceFromBottom > clientHeight / 2;
     const prevScrollTop = lastScrollTopRef.current;
     lastScrollTopRef.current = scrollTop;
 
@@ -295,21 +494,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       if (isScrollingUp) {
         isScrollingToBottomRef.current = false;
         isUserScrolledUpRef.current = true;
-        setScrollBottomVisible(distanceFromBottom > 24);
+        setScrollBottomVisible(showLatest);
       }
       return;
     }
 
     if (isScrollingUp) {
       isUserScrolledUpRef.current = true;
-      setScrollBottomVisible(distanceFromBottom > 24);
+      setScrollBottomVisible(showLatest);
       return;
     }
 
-    if (distanceFromBottom > 24) {
-      isUserScrolledUpRef.current = true;
-      setScrollBottomVisible(true);
-    }
+    // A resize or a newly mounted transcript can change the distance without
+    // any user scroll. Do not mistake that for an intentional scroll-up.
+    setScrollBottomVisible(isUserScrolledUpRef.current && showLatest);
   }, [setScrollBottomVisible]);
 
   const scrollToBottom = useCallback(() => {
@@ -417,16 +615,27 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const view = chatScrollRef.current?.parentElement;
     const composer = view?.querySelector<HTMLElement>(".pane-bottom-chat");
     if (!view || !composer) return;
-    const update = () => view.style.setProperty("--composer-height", `${composer.getBoundingClientRect().height}px`);
+    const update = () => {
+      view.style.setProperty("--composer-height", `${composer.getBoundingClientRect().height}px`);
+      // The composer is overlaid; changing its height changes the scroll area's
+      // bottom padding without resizing the observed transcript content.
+      const scroll = chatScrollRef.current;
+      if (scroll && !isUserScrolledUpRef.current && !isScrollingToBottomRef.current) {
+        scroll.scrollTop = scroll.scrollHeight;
+        lastScrollTopRef.current = scroll.scrollTop;
+        setScrollBottomVisible(false);
+      }
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(composer);
     return () => observer.disconnect();
-  }, [conversationViewKey]);
+  }, [conversationViewKey, setScrollBottomVisible]);
 
   useEffect(() => () => {
     expandedCardObserverRef.current?.disconnect();
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
+    if (workspaceDetailsTimerRef.current !== null) clearTimeout(workspaceDetailsTimerRef.current);
     if (resumeAutoScrollFrameRef.current !== null) {
       cancelAnimationFrame(resumeAutoScrollFrameRef.current);
     }
@@ -441,6 +650,39 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, []);
 
+  const workspaceDetailsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleWorkspaceDetailsBeforeToggle = useCallback(() => {
+    suppressAutoScrollRef.current = true;
+    if (chatScrollRef.current) {
+      prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+    }
+    if (workspaceDetailsTimerRef.current !== null) {
+      clearTimeout(workspaceDetailsTimerRef.current);
+    }
+    // Safety fallback in case animation is somehow abruptly interrupted
+    workspaceDetailsTimerRef.current = setTimeout(() => {
+      workspaceDetailsTimerRef.current = null;
+      suppressAutoScrollRef.current = false;
+      if (chatScrollRef.current) {
+        prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+      }
+      handleChatScroll();
+    }, 450);
+  }, [handleChatScroll]);
+
+  const handleWorkspaceDetailsAfterToggle = useCallback(() => {
+    if (workspaceDetailsTimerRef.current !== null) {
+      clearTimeout(workspaceDetailsTimerRef.current);
+      workspaceDetailsTimerRef.current = null;
+    }
+    suppressAutoScrollRef.current = false;
+    if (chatScrollRef.current) {
+      prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+    }
+    handleChatScroll();
+  }, [handleChatScroll]);
+
   // Ensure scroll button visibility is evaluated immediately on render and on size changes
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
@@ -449,13 +691,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     handleChatScroll(); // initial check
 
     const observer = new ResizeObserver(() => {
-      if (suppressAutoScrollRef.current) return;
       const el = chatScrollRef.current;
       if (!el) return;
 
       const currentScrollHeight = el.scrollHeight;
       const heightGrew = currentScrollHeight > prevScrollHeightRef.current + 2;
       prevScrollHeightRef.current = currentScrollHeight;
+
+      if (suppressAutoScrollRef.current || isPreparingConversationRef.current) return;
 
       // Auto-scroll to bottom ONLY when content actually grows, unless user scrolled up or smooth-scrolling to bottom
       if (heightGrew && !isUserScrolledUpRef.current && !isScrollingToBottomRef.current) {
@@ -474,7 +717,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   // Auto-scroll to bottom when new messages or streaming content arrives
   useLayoutEffect(() => {
-    if (!isUserScrolledUpRef.current && chatScrollRef.current) {
+    if (!isUserScrolledUpRef.current && !isPreparingConversationRef.current && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
   }, [
@@ -508,7 +751,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       executions: Execution[];
     }> = [];
 
-    const messages = effectiveMessages.length > 0 ? effectiveMessages : (
+    const messages: ChatMessage[] = effectiveMessages.length > 0 ? [...effectiveMessages] : (
       state.graph.originalGoal ? [{
         id: "msg-initial-goal",
         parentId: null,
@@ -516,8 +759,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         text: state.graph.originalGoal,
       }] : []
     );
-
+    const localRemaining = messages.filter((msg) => msg.node === serialNode.name);
+    const recorded = state.events.filter((event) => event.type === "node_messaged" && event.node === serialNode.name
+    ).reverse().filter((event) => {
+      const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction);
+      if (idx < 0) return true;
+      localRemaining.splice(idx, 1);
+      return false;
+    }).reverse().map((event): ChatMessage => ({
+      id: `event-${event.sequence}`, parentId: null, role: "user",
+      text: event.instruction || "", images: event.images, node: serialNode.name, runId: state.runId,
+      delivery: "node_messaged",
+    }));
+    // A fresh browser session may have only a node message, not the original
+    // prompt in local state. Keep the initial task paired with its execution.
+    if (messages[0]?.node === serialNode.name && state.graph.originalGoal) {
+      messages.unshift({ id: "msg-initial-goal", role: "user", text: state.graph.originalGoal });
+    }
     if (messages.length === 0) return [];
+    messages.splice(1, 0, ...recorded);
 
     turns.push({
       id: messages[0].id,
@@ -526,9 +786,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       executions: serialExecutions.length > 0 ? [serialExecutions[0]] : [],
     });
 
-    messages.slice(1).forEach((msg, idx) => {
-      const execIndex = idx + 1;
-      const execs = execIndex < serialExecutions.length ? [serialExecutions[execIndex]] : [];
+    let execIndex = 1;
+    messages.slice(1).forEach((msg) => {
+      const execs = msg.delivery ? [] : execIndex < serialExecutions.length ? [serialExecutions[execIndex]] : [];
+      if (!msg.delivery) execIndex++;
       turns.push({
         id: msg.id,
         userMessage: msg,
@@ -537,7 +798,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       });
     });
 
-    if (serialExecutions.length > messages.length) {
+    if (serialExecutions.length > 1) {
       const assigned = new Set(turns.flatMap((t) => t.executions.map((e) => e.id)));
       const unassigned = serialExecutions.filter((e) => !assigned.has(e.id));
       if (unassigned.length > 0) {
@@ -547,7 +808,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     return turns;
-  }, [routeType, serialNode?.name, effectiveMessages, serialExecutions, state.graph.originalGoal]);
+  }, [routeType, serialNode?.name, effectiveMessages, serialExecutions, state.graph.originalGoal, state.runId, state.events]);
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
   const isSerialWorking = Boolean(
@@ -609,6 +870,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const revealConversation = useCallback(() => {
     const key = conversationViewKey;
     const generation = conversationGenerationRef.current;
+    if (activeConversationViewRef.current !== key) return;
     if (revealChatFrameRef.current !== null) cancelAnimationFrame(revealChatFrameRef.current);
     // Let the transcript parse and measure its rows before the first visible frame.
     revealChatFrameRef.current = requestAnimationFrame(() => {
@@ -616,13 +878,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         revealChatFrameRef.current = null;
         if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
         const el = chatScrollRef.current;
-        if (el && !isUserScrolledUpRef.current) el.scrollTop = el.scrollHeight;
+        if (el && !isUserScrolledUpRef.current) {
+          el.scrollTop = el.scrollHeight;
+          lastScrollTopRef.current = el.scrollTop;
+        }
+        isPreparingConversationRef.current = false;
+        setScrollBottomVisible(false);
         setReadyConversationKey(key);
       });
     });
   }, [conversationViewKey]);
-  const revealNodeConversation = revealConversation;
-
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -633,9 +898,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (isNewView) {
       // 进入新对话视图（Node Agent 或 Planner）时直接聚焦到底部最新内容，避免从顶部生硬滑动到底部
       suppressAutoScrollRef.current = false;
+      isPreparingConversationRef.current = true;
       isUserScrolledUpRef.current = false;
       isScrollingToBottomRef.current = false;
       el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
+      prevScrollHeightRef.current = el.scrollHeight;
       setScrollBottomVisible(false);
 
       if (resetChatScrollFrameRef.current !== null) {
@@ -645,15 +913,34 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         resetChatScrollFrameRef.current = null;
         if (chatScrollRef.current && !isUserScrolledUpRef.current) {
           chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+          lastScrollTopRef.current = chatScrollRef.current.scrollTop;
         }
       });
     }
 
     // If no execution or planning output needed to trigger onReady, reveal after layout settle
-    if (!savedPlannerIds.length && !execution && !serialExecutions.length) {
+    const needsExecutionReady = selectedNode && routeType === "graph"
+      ? Boolean(execution)
+      : (routeType === "serial"
+          ? Boolean(serialExecutions.length)
+          : (savedPlannerIds.length > 0 && useSavedPlanner && effectiveMessages.length <= 1));
+
+    if (readyConversationKey !== conversationViewKey && !needsExecutionReady) {
       revealConversation();
     }
-  }, [conversationViewKey, savedPlannerIds.length, execution, serialExecutions.length, revealConversation, setScrollBottomVisible]);
+  }, [
+    conversationViewKey,
+    readyConversationKey,
+    selectedNode,
+    routeType,
+    execution,
+    savedPlannerIds.length,
+    useSavedPlanner,
+    effectiveMessages.length,
+    serialExecutions.length,
+    revealConversation,
+    setScrollBottomVisible,
+  ]);
 
   return (
     <section
@@ -690,7 +977,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               className="initial-query-scroll"
               ref={chatScrollRef}
               onScroll={handleChatScroll}
-              style={!isPlanning && readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
+              style={readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
             >
               <div className="chat-messages-stream">
                 {nodeTurns.map((turn) => (
@@ -748,40 +1035,49 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       </div>
                     ) : null}
 
-                    {turn.executions.map((exec) => (
-                      <motion.div
-                        key={exec.id}
-                        className="serial-execution-panel"
-                        initial={false}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.3 }}
-                      >
-                        <div className="session-label">
-                          <strong>Pi Session</strong>
-                          <span className={`status-badge ${exec.status}`}>
-                            {statusText[exec.status as Status] ?? exec.status}
-                          </span>
-                          <ExecutionTiming execution={exec} />
-                        </div>
-                        <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                          <ExecutionTranscript
-                            key={exec.id}
-                            runId={state.runId}
-                            execution={exec}
-                            onUserResize={handleExpandableContentChange}
-                            onInitialOutputReady={exec.id === execution?.id ? revealNodeConversation : undefined}
-                          />
-                        </div>
-                        <details className="workspace-details" style={{ marginTop: 12 }}>
-                          <summary><FolderGit2 size={12} />工作区与会话信息</summary>
-                          <p>Worktree: {exec.worktree}</p>
-                          <p>Session ID: {exec.sessionId}</p>
-                          <p>Commit Before: {exec.before}</p>
-                          <p>Commit After: {exec.after ?? "pending"}</p>
-                          <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
-                        </details>
-                      </motion.div>
-                    ))}
+                    {turn.executions.map((exec) => {
+                      const isLatestAttempt = exec.id === execution?.id;
+                      const showWorking = isSelectedNodeWorking && isLatestAttempt;
+
+                      return (
+                        <motion.div
+                          key={exec.id}
+                          className="serial-execution-panel"
+                          initial={false}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.3 }}
+                        >
+                          <div className="session-label">
+                            <strong>Pi Session</strong>
+                            <span className={`status-badge ${exec.status}`}>
+                              {statusText[exec.status as Status] ?? exec.status}
+                            </span>
+                            <ExecutionTiming execution={exec} />
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                            <ExecutionTranscript
+                              key={exec.id}
+                              runId={state.runId}
+                              execution={exec}
+                              onUserResize={handleExpandableContentChange}
+                              onInitialOutputReady={exec.id === execution?.id ? revealConversation : undefined}
+                            />
+                          </div>
+                          <WorkspaceDetailsPanel
+                            showWorking={showWorking}
+                            scrollContainerRef={chatScrollRef}
+                            onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
+                            onAfterToggle={handleWorkspaceDetailsAfterToggle}
+                          >
+                            <p>Worktree: {exec.worktree}</p>
+                            <p>Session ID: {exec.sessionId}</p>
+                            <p>Commit Before: {exec.before}</p>
+                            <p>Commit After: {exec.after ?? "pending"}</p>
+                            <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
+                          </WorkspaceDetailsPanel>
+                        </motion.div>
+                      );
+                    })}
                   </React.Fragment>
                 ))}
 
@@ -801,7 +1097,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   </div>
                 )}
 
-                {isSelectedNodeWorking && (
+                {isSelectedNodeWorking && attempts.length === 0 && (
                   <div className="working-indicator" role="status" aria-live="polite">
                     <span className="working-indicator-dot" />
                     Working…
@@ -809,6 +1105,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
               </div>
             </div>
+            {execution && readyConversationKey !== conversationViewKey && (
+              <div className="conversation-history-loading" role="status">正在加载历史记录…</div>
+            )}
             <button
               ref={scrollBottomBtnRef}
               type="button"
@@ -851,6 +1150,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     ? "图规划审批启动后，可在此向选定节点发送介入指令…"
                     : isSelectedNodeWorking
                     ? `向 @${selectedNode.name} 实时发送 Steer（当前工具调用后生效）…`
+                    : selectedState?.status === "done"
+                    ? `向 @${selectedNode.name} 留言（仅记录，不重新执行）…`
                     : `向 @${selectedNode.name} 发送介入指令…`
                 }
                 isExecuting={isSelectedNodeWorking}
@@ -913,40 +1214,49 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           </motion.div>
                         )}
 
-                        {turn.executions.map((exec) => (
-                          <motion.div
-                            key={exec.id}
-                            className="serial-execution-panel"
-                            initial={false}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.3 }}
-                          >
-                            <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                              <ExecutionTranscript
-                                key={exec.id}
-                                runId={state.runId}
-                                execution={exec}
-                                onUserResize={handleExpandableContentChange}
-                                onInitialOutputReady={exec.id === serialExecutions[serialExecutions.length - 1]?.id ? revealConversation : undefined}
-                              />
-                            </div>
+                        {turn.executions.map((exec) => {
+                          const isLatestSerial = exec.id === serialExecutions[serialExecutions.length - 1]?.id;
+                          const showWorking = isSerialWorking && isLatestSerial;
 
-                            <details className="workspace-details" style={{ marginTop: 12 }}>
-                              <summary><FolderGit2 size={12} />工作区与会话信息</summary>
-                              <p>工作目录: {exec.worktree}</p>
-                              <p>会话实例: {exec.sessionId}</p>
-                              {(() => {
-                                if (exec.pid) return <p>进程 PID: {exec.pid}</p>;
-                                const pidMatch = exec.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
-                                                 exec.output.match(/"pid":(\d+)/);
-                                return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
-                              })()}
-                              <p>Commit Before: {exec.before || "HEAD"}</p>
-                              <p>Commit After: {exec.after ?? "pending"}</p>
-                              <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
-                            </details>
-                          </motion.div>
-                        ))}
+                          return (
+                            <motion.div
+                              key={exec.id}
+                              className="serial-execution-panel"
+                              initial={false}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ duration: 0.3 }}
+                            >
+                              <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                                <ExecutionTranscript
+                                  key={exec.id}
+                                  runId={state.runId}
+                                  execution={exec}
+                                  onUserResize={handleExpandableContentChange}
+                                  onInitialOutputReady={exec.id === serialExecutions[serialExecutions.length - 1]?.id ? revealConversation : undefined}
+                                />
+                              </div>
+
+                              <WorkspaceDetailsPanel
+                                showWorking={showWorking}
+                                scrollContainerRef={chatScrollRef}
+                                onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
+                                onAfterToggle={handleWorkspaceDetailsAfterToggle}
+                              >
+                                <p>工作目录: {exec.worktree}</p>
+                                <p>会话实例: {exec.sessionId}</p>
+                                {(() => {
+                                  if (exec.pid) return <p>进程 PID: {exec.pid}</p>;
+                                  const pidMatch = exec.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
+                                                   exec.output.match(/"pid":(\d+)/);
+                                  return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
+                                })()}
+                                <p>Commit Before: {exec.before || "HEAD"}</p>
+                                <p>Commit After: {exec.after ?? "pending"}</p>
+                                <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
+                              </WorkspaceDetailsPanel>
+                            </motion.div>
+                          );
+                        })}
                       </React.Fragment>
                     ))}
 
@@ -1029,12 +1339,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
 
                     {/* 保留当前对话中的跟进消息；实时流已有同一消息时不重复渲染。 */}
-                    {effectiveMessages.slice(1).filter((msg) =>
-                      // Persisted Planner turns already contain user follow-ups
-                      // in their correct chronological position.
-                      (isPlanning || !useSavedPlanner) && (!renderLivePlanner ||
-                        !plannerStream.items?.some((item: TranscriptItem) => item.role === "user" && item.id === msg.id))
-                    ).map((msg) => (
+                    {effectiveMessages.slice(1).filter((msg) => {
+                      if (renderLivePlanner && plannerStream.items?.some((item: TranscriptItem) =>
+                        item.role === "user" && item.id === msg.id)) return false;
+                      // Keep an acknowledged steer visible across navigation
+                      // until its completed turn actually appears in JSONL.
+                      if (useSavedPlanner && !isPlanning) {
+                        const text = msg.text.trim();
+                        const count = remainingPersistedTurns.get(text) ?? 0;
+                        if (count > 0) {
+                          remainingPersistedTurns.set(text, count - 1);
+                          return false;
+                        }
+                      }
+                      return true;
+                    }).map((msg) => (
                       <div className="chat-message-row user" key={msg.id}>
                         <EditableUserBubble
                           text={msg.text.trim()}
@@ -1055,7 +1374,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     {/* Planner 顺序流式记录：严格按实际发生时序呈现用户追加消息、工具调用、思维链与输出文字 */}
                     {renderLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         {plannerStream.items.map((item: TranscriptItem, idx: number) => {
                           const isLast = idx === plannerStream.items.length - 1;
                           if (item.role === "user") {
@@ -1123,7 +1442,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       </div>
                     ) : (
                       renderLivePlanner && (plannerStream.plannerThinking || smoothPlannerText) && (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                           {plannerStream.plannerThinking && (
                             <ThinkingCard
                               content={plannerStream.plannerThinking}
@@ -1149,7 +1468,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
                   </>
                 )}
-                {isMainViewWorking && (
+                {isMainViewWorking && !(routeType === "serial" && serialExecutions.length > 0 && isSerialWorking) && (
                   <div className="working-indicator" role="status" aria-live="polite">
                     <span className="working-indicator-dot" />
                     Working…
@@ -1157,38 +1476,30 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
               </div>
 
-              {/* 输出期间暂时隐藏摘要，停止后再展示当前结果 */}
-              {failedPlanning && !isPlanning && (
-                <motion.div
-                  className="planning-summary-card-wrapper"
-                  initial={false}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+              {/* 规划失败提示 */}
+              {failedPlanning && !isPlanning && (failedPlanning.error || failedPlanning.status === "failed") && (
+                <div
+                  className="planning-error-notice"
+                  style={{
+                    margin: "10px auto",
+                    maxWidth: 860,
+                    width: "calc(100% - 36px)",
+                    boxSizing: "border-box",
+                    padding: "8px 12px",
+                    background: "#ffffff",
+                    borderRadius: 6,
+                    color: "#b91c1c",
+                    fontSize: 12,
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 6,
+                    border: "1px solid #fca5a5",
+                    boxShadow: "0 1px 4px rgba(239, 68, 68, 0.08)",
+                  }}
                 >
-                  <PlanningSummaryCard
-                    key={failedPlanning.planningId}
-                    planning={failedPlanning}
-                    state={undefined}
-                    defaultExpanded={false}
-                  />
-                </motion.div>
-              )}
-
-              {/* 当前 Run 的规划阶段摘要（仅在多节点图模式下且当前 Run 自身拥有有效规划时展示） */}
-              {!isPlanning && routeType === "graph" && state.planning && (!failedPlanning || state.planning.planningId !== failedPlanning.planningId) && (
-                <motion.div
-                  className="planning-summary-card-wrapper"
-                  initial={false}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-                >
-                  <PlanningSummaryCard
-                    key={state.planning.planningId}
-                    planning={state.planning}
-                    state={state}
-                    defaultExpanded={false}
-                  />
-                </motion.div>
+                  <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1, color: "#ef4444" }} />
+                  <span>规划未通过：{failedPlanning.error || "规划阶段异常中断"}</span>
+                </div>
               )}
 
               {!isPlanning && routeType === "graph" && state.graph.nodes.length > 0 && (
@@ -1245,6 +1556,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </motion.div>
               )}
             </div>
+            {routeType === "serial" && serialExecutions.length > 0 && readyConversationKey !== conversationViewKey && (
+              <div className="conversation-history-loading" role="status">正在加载历史记录…</div>
+            )}
             <button
               ref={scrollBottomBtnRef}
               type="button"
@@ -1459,14 +1773,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         </>
                       ) : state.approved ? (
                         <>
-                          <button
-                            type="button"
-                            className="secondary"
-                            disabled={locked || active || !selected}
-                            onClick={() => onControl("rerun")}
-                          >
-                            <RotateCcw size={13} />重跑选定节点
-                          </button>
                           <button
                             type="button"
                             className="primary"

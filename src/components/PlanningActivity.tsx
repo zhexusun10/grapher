@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, memo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, memo } from "react";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
@@ -40,6 +40,8 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
 }) {
   const key = planningIds.join(":");
   const cached = planningTranscriptCache.get(key);
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
   const [record, setRecord] = useState(() => ({
     id: key,
     content: cached ? cached.text : "",
@@ -51,16 +53,16 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
 
   useLayoutEffect(() => {
     if (cached?.complete) {
-      onReady?.();
+      onReadyRef.current?.();
     }
-  }, [cached?.complete, onReady]);
+  }, [cached?.complete]);
 
   useEffect(() => {
     const cachedEntry = planningTranscriptCache.get(key);
     if (cachedEntry?.complete) {
       setRecord({ id: key, content: cachedEntry.text });
       setLoading(false);
-      onReady?.();
+      onReadyRef.current?.();
       return;
     }
 
@@ -114,13 +116,13 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
       } finally {
         if (!abort.signal.aborted) {
           setLoading(false);
-          onReady?.();
+          onReadyRef.current?.();
         }
       }
     };
     void poll();
     return () => { abort.abort(); clearTimeout(timer); wake?.(); };
-  }, [key, retry, onReady]);
+  }, [key, retry]);
 
   return <section className="planning-activity" aria-label="规划活动记录">
     {loading && !output && <p role="status">正在加载规划活动…</p>}
