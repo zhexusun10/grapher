@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, Copy, Pencil, X } from "lucide-react";
+import { ArrowUp, Check, Copy, Pencil, X } from "lucide-react";
 import type { ChatMessageVersion, ImageAttachment } from "../../types";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
@@ -41,9 +41,9 @@ export function EditableUserBubble({
   onCancel,
   onSend,
   disabled,
-  versions,
-  currentVersionIndex,
-  onSwitchVersion,
+  versions: _versions,
+  currentVersionIndex: _currentVersionIndex,
+  onSwitchVersion: _onSwitchVersion,
 }: {
   text: string;
   images?: ImageAttachment[];
@@ -165,33 +165,6 @@ export function EditableUserBubble({
           </div>
         ) : (
           <div className="chat-bubble-left-tools">
-            {versions && versions.length > 1 && currentVersionIndex !== undefined && onSwitchVersion ? (
-              <div className="chat-branch-pager">
-                <button
-                  type="button"
-                  className="chat-branch-pager-btn"
-                  disabled={currentVersionIndex <= 0 || disabled}
-                  onClick={() => onSwitchVersion(currentVersionIndex - 1)}
-                  title="上一个版本"
-                  aria-label="上一个版本"
-                >
-                  <ChevronLeft size={11} />
-                </button>
-                <span className="chat-branch-pager-text">
-                  {currentVersionIndex + 1}/{versions.length}
-                </span>
-                <button
-                  type="button"
-                  className="chat-branch-pager-btn"
-                  disabled={currentVersionIndex >= versions.length - 1 || disabled}
-                  onClick={() => onSwitchVersion(currentVersionIndex + 1)}
-                  title="下一个版本"
-                  aria-label="下一个版本"
-                >
-                  <ChevronRight size={11} />
-                </button>
-              </div>
-            ) : null}
             <button
               type="button"
               className={`chat-message-copy-btn${copied ? " copied" : ""}`}
