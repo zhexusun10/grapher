@@ -2106,9 +2106,6 @@ fn edit_node(
     selected_version: Option<usize>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
-    if service.planning.load(Ordering::SeqCst) {
-        return Err("Wait for planning to finish before editing a node conversation".into());
-    }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     if runtime.state.run_id != run_id {
         return Err("Run changed while editing a message".into());

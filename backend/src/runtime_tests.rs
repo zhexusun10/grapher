@@ -1163,6 +1163,26 @@ fn moved_binding_blocks_scheduling_resume_intervention_and_publication() {
 }
 
 #[test]
+fn deleting_last_plain_directory_run_removes_only_unused_shadow_repo() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    let shadow = workspace::shadow_repo_dir(&source).unwrap();
+    assert!(shadow.exists());
+
+    let first = runtime.state.run_id.clone();
+    let config = runtime.state.config.clone().unwrap();
+    runtime.create(single(), config).unwrap();
+    let second = runtime.state.run_id.clone();
+    assert_ne!(first, second);
+    assert!(shadow.exists());
+
+    runtime.delete_run(&first).unwrap();
+    assert!(shadow.exists(), "a remaining run still needs the shadow repo");
+
+    runtime.delete_run(&second).unwrap();
+    assert!(!shadow.exists(), "the final conversation should release the shadow repo");
+}
+
+#[test]
 fn viewing_another_project_does_not_change_a_valid_run_binding() {
     let (temp, source, mut runtime) = setup(true, single());
     let other = temp.path().join("other");

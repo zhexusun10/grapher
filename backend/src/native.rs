@@ -37,8 +37,18 @@ fn prepared_runtime() -> Result<PathBuf, String> {
     if let Some(root) = &*cached {
         return Ok(root.clone());
     }
+    let installation = installation_root()
+        .canonicalize()
+        .map_err(|error| format!("Cannot resolve Grapher installation root: {error}"))?;
+    let runtime_parent = installation
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".grapher-workspaces");
+    let compiler = std::env::current_exe().map_err(|error| error.to_string())?;
     let output = Command::new("node")
         .arg(installation_root().join("scripts/prepare-native-runtime.mjs"))
+        .env("GRAPHER_NATIVE_RUNTIME_PARENT", &runtime_parent)
+        .env("GRAPHER_NATIVE_COMPILER", &compiler)
         .output()
         .map_err(|error| format!("Cannot start native runtime preparation with Node: {error}"))?;
     if !output.status.success() {
@@ -57,8 +67,13 @@ fn prepared_runtime() -> Result<PathBuf, String> {
         return Err("Incomplete native runtime: engine entrypoint is missing".into());
     }
     #[cfg(windows)]
-    if !root.join("node.exe").is_file() {
-        return Err("Incomplete native runtime: bundled Node executable is missing".into());
+    {
+        if !root.join("node.exe").is_file() {
+            return Err("Incomplete native runtime: bundled Node executable is missing".into());
+        }
+        if !root.join("grapher-compiler.exe").is_file() {
+            return Err("Incomplete native runtime: bundled Grapher compiler is missing".into());
+        }
     }
     *cached = Some(root.clone());
     Ok(root)
@@ -180,13 +195,15 @@ pub fn execution_command(
         command
             .arg("--grapher-windows-sandbox-helper")
             .current_dir(&current)
+            .env("GRAPHER_WINDOWS_SANDBOX", "1")
+            .env("GRAPHER_WINDOWS_SANDBOX_TARGET", engine.join("node.exe"))
             .env(
-                "GRAPHER_WINDOWS_SANDBOX_TARGET",
-                engine.join("node.exe"),
+                "GRAPHER_WINDOWS_SANDBOX_COMPILER",
+                engine.join("grapher-compiler.exe"),
             )
             .env(
                 "GRAPHER_WINDOWS_SANDBOX_PREFIX",
-                engine.join("engine/entrypoint.mjs"),
+                engine.join("pi/node_modules/tsx/dist/cli.cjs"),
             )
             .env("GRAPHER_WINDOWS_SANDBOX_CURRENT", &current)
             .env("GRAPHER_WINDOWS_SANDBOX_SESSION", session)

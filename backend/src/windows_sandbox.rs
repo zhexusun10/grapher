@@ -7,7 +7,6 @@
 #![cfg(windows)]
 
 use std::{
-    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     ptr,
@@ -47,8 +46,6 @@ use windows_sys::Win32::{
 #[cfg(test)]
 use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
 
-const FILE_TRAVERSE: u32 = 0x20;
-const FILE_READ_ATTRIBUTES: u32 = 0x80;
 const GENERIC_READ_EXECUTE: u32 = 0x1200_00A0;
 const S_OK: i32 = 0;
 const ERROR_ALREADY_EXISTS_HRESULT: i32 = 0x8007_00B7u32 as i32;
@@ -64,10 +61,28 @@ fn wide(value: &str) -> Vec<u16> {
 }
 
 fn path_wide(path: &Path) -> Result<Vec<u16>, String> {
-    Ok(wide(
-        path.to_str()
-            .ok_or("Windows sandbox paths must be valid UTF-8")?,
-    ))
+    let value = path
+        .to_str()
+        .ok_or("Windows sandbox paths must be valid UTF-8")?;
+    // The security APIs reject the extended spelling of a volume root
+    // (\\\\?\\C:\\), even though canonicalize() returns it. Keep extended
+    // paths everywhere else so long workspace paths remain supported.
+    let value = if let Some(local) = value.strip_prefix("\\\\?\\") {
+        let is_volume_root = local.len() == 3
+            && local.as_bytes().get(1) == Some(&b':')
+            && local.ends_with('\\');
+        if is_volume_root {
+            local
+        } else if let Some(unc) = local.strip_prefix("UNC\\") {
+            // UNC share roots have the same API limitation.
+            return Ok(wide(&format!(r"\\{unc}")));
+        } else {
+            value
+        }
+    } else {
+        value
+    };
+    Ok(wide(value))
 }
 
 fn quote_arg(value: &str) -> String {
@@ -126,7 +141,9 @@ fn hard_link_count(path: &Path) -> Result<u32, String> {
 
 fn profile_name(session: &Path) -> String {
     let suffix = session
-        .file_name()
+        .parent()
+        .and_then(Path::file_name)
+        .or_else(|| session.file_name())
         .and_then(|value| value.to_str())
         .unwrap_or("session");
     let safe: String = suffix
@@ -162,7 +179,8 @@ unsafe fn create_profile(
     }
     let mut capability = SID_AND_ATTRIBUTES {
         Sid: capability_sid,
-        Attributes: 0,
+        // SECURITY_CAPABILITIES requires enabled capability attributes.
+        Attributes: 0x0000_0004,
     };
     let mut app_sid = ptr::null_mut();
     let result = CreateAppContainerProfile(
@@ -274,96 +292,183 @@ unsafe fn grant_access(
     Ok(())
 }
 
-fn is_reparse_point(path: &Path) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_attributes() & 0x400 != 0)
-        .unwrap_or(true)
-}
-
 fn grant_tree(
     root: &Path,
     sid: windows_sys::Win32::Security::PSID,
     access: u32,
 ) -> Result<(), String> {
-    let allowed_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    grant_tree_inner(root, &allowed_root, sid, access, &mut HashSet::new())
+    // An inheritable ACE on the allowed root covers existing descendants and
+    // future files. Walking every file here is both slow and unnecessary for
+    // large node_modules/.git trees.
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    unsafe { grant_access(&root, sid, access, SUB_CONTAINERS_AND_OBJECTS_INHERIT) }
 }
 
-fn grant_tree_inner(
-    root: &Path,
-    allowed_root: &Path,
-    sid: windows_sys::Win32::Security::PSID,
-    access: u32,
-    visited: &mut HashSet<PathBuf>,
-) -> Result<(), String> {
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if !visited.insert(canonical) {
-        return Ok(());
-    }
-    unsafe {
-        grant_access(root, sid, access, SUB_CONTAINERS_AND_OBJECTS_INHERIT)?;
-    }
-    if !root.is_dir() || is_reparse_point(root) {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
-        let path = entry.map_err(|error| error.to_string())?.path();
-        if is_reparse_point(&path) {
-            if let Ok(target) = path.canonicalize() {
-                if target.starts_with(allowed_root) {
-                    grant_tree_inner(&target, allowed_root, sid, access, visited)?;
-                }
-            }
-            continue;
-        }
-        if path.is_dir() {
-            grant_tree_inner(&path, allowed_root, sid, access, visited)?;
-        } else {
-            unsafe {
-                grant_access(&path, sid, access, 0)?;
-            }
-        }
-    }
+fn grant_traverse(_path: &Path, _sid: windows_sys::Win32::Security::PSID) -> Result<(), String> {
+    // Do not rewrite C:\\Users or the volume root. AppContainer has the
+    // traverse privilege for directory walks; the actual allowed roots below
+    // receive their own ACLs. Rewriting protected ancestors is the source of
+    // the Windows error 5 seen on machines where the user is not elevated.
     Ok(())
 }
 
-fn grant_traverse(path: &Path, sid: windows_sys::Win32::Security::PSID) -> Result<(), String> {
-    // Only grant the explicitly selected root. Windows' traverse privilege
-    // permits walking its ancestors without read access; changing ACLs on a
-    // user's profile, C:\\Users or the drive root is both unsafe and may fail.
-    // If an ancestor explicitly denies traversal, opening the allowed root
-    // fails closed rather than widening access above the sandbox boundary.
-    unsafe { grant_access(path, sid, FILE_TRAVERSE | FILE_READ_ATTRIBUTES, 0) }
+fn grant_traverse_many(
+    _paths: &[&Path],
+    _sid: windows_sys::Win32::Security::PSID,
+) -> Result<(), String> {
+    Ok(())
 }
 
-fn resolve_path(value: &str) -> PathBuf {
-    PathBuf::from(value)
+fn normal_windows_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(local) = value.strip_prefix(r"\\?\") {
+        PathBuf::from(local)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(local) = value.strip_prefix(r"\\?\") {
+        PathBuf::from(local)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn same_component(left: &std::path::Component<'_>, right: &std::path::Component<'_>) -> bool {
+    match (left, right) {
+        (std::path::Component::Prefix(left), std::path::Component::Prefix(right)) => {
+            left.as_os_str().to_string_lossy().eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+        }
+        (std::path::Component::Normal(left), std::path::Component::Normal(right)) => {
+            left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy())
+        }
+        _ => left == right,
+    }
+}
+
+fn relative_path(from: &Path, target: &Path) -> Option<PathBuf> {
+    let from = normalized_path(from);
+    let target = normalized_path(target);
+    let from_components: Vec<_> = from.components().collect();
+    let target_components: Vec<_> = target.components().collect();
+    let common = from_components
+        .iter()
+        .zip(&target_components)
+        .take_while(|(left, right)| same_component(left, right))
+        .count();
+    if common == 0 {
+        return None;
+    }
+    let mut result = PathBuf::new();
+    for _ in common..from_components.len() {
+        result.push("..");
+    }
+    for component in &target_components[common..] {
+        result.push(component.as_os_str());
+    }
+    Some(if result.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        result
+    })
+}
+
+fn module_specifier(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    if path.starts_with("./") || path.starts_with("../") || path.starts_with('/') {
+        if path.starts_with("../") {
+            format!("./{path}")
+        } else {
+            path
+        }
+    } else {
+        format!("./{path}")
+    }
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn path_suffix(path: &Path, root: &Path) -> Option<PathBuf> {
+    let path = normalized_path(&canonical_or_original(path));
+    let root = normalized_path(&canonical_or_original(root));
+    let suffix = relative_path(&root, &path)?;
+    if suffix
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    Some(if suffix == Path::new(".") {
+        PathBuf::new()
+    } else {
+        suffix
+    })
+}
+
+fn map_child_argument(
+    value: &str,
+    current: &Path,
+    source: &Path,
+    session: &Path,
+    data: &Path,
+    engine: &Path,
+    agent: &Path,
+) -> String {
+    let path = PathBuf::from(value);
+    let mapped = if let Some(suffix) = path_suffix(&path, source) {
+        current.join(suffix)
+    } else if let Some(suffix) = path_suffix(&path, current) {
+        current.join(suffix)
+    } else if let Some(suffix) = path_suffix(&path, session) {
+        session.join(suffix)
+    } else if let Some(suffix) = path_suffix(&path, data) {
+        data.join(suffix)
+    } else if let Some(suffix) = path_suffix(&path, engine) {
+        engine.join(suffix)
+    } else if let Some(suffix) = path_suffix(&path, agent) {
+        agent.join(suffix)
+    } else {
+        return value.into();
+    };
+    relative_path(&canonical_or_original(current), &canonical_or_original(&mapped))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| value.into())
 }
 
 fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String> {
-    let current = resolve_path(
-        &env::var("GRAPHER_WINDOWS_SANDBOX_CURRENT")
+    let current = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_CURRENT")
             .map_err(|_| "Missing sandbox current directory")?,
     );
-    let session = resolve_path(
-        &env::var("GRAPHER_WINDOWS_SANDBOX_SESSION")
+    let session = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_SESSION")
             .map_err(|_| "Missing sandbox session directory")?,
     );
-    let data = resolve_path(
-        &env::var("GRAPHER_WINDOWS_SANDBOX_DATA").map_err(|_| "Missing sandbox data directory")?,
+    let data = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_DATA")
+            .map_err(|_| "Missing sandbox data directory")?,
     );
-    let engine = resolve_path(
-        &env::var("GRAPHER_WINDOWS_SANDBOX_ENGINE")
+    let engine = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_ENGINE")
             .map_err(|_| "Missing sandbox engine directory")?,
     );
-    let agent =
-        resolve_path(&env::var("PI_CODING_AGENT_DIR").map_err(|_| "Missing PI_CODING_AGENT_DIR")?);
-    let target = resolve_path(
-        &env::var("GRAPHER_WINDOWS_SANDBOX_TARGET").map_err(|_| "Missing sandbox target")?,
+    let agent = PathBuf::from(
+        env::var("PI_CODING_AGENT_DIR").map_err(|_| "Missing PI_CODING_AGENT_DIR")?,
     );
-    let source = resolve_path(
-        &env::var("GRAPHER_WINDOWS_SANDBOX_SOURCE")
+    let target = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_TARGET").map_err(|_| "Missing sandbox target")?,
+    );
+    let source = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_SOURCE")
             .map_err(|_| "Missing sandbox source directory")?,
     );
     if engine.starts_with(&source)
@@ -371,7 +476,10 @@ fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String>
         || agent.starts_with(&source)
         || source.starts_with(&agent)
     {
-        return Err("Windows Graph sandbox paths overlap the source or engine boundary".into());
+        return Err(format!(
+            "Windows Graph sandbox paths overlap the source or engine boundary (source={}, engine={}, agent={})",
+            source.display(), engine.display(), agent.display()
+        ));
     }
 
     let temp = session.join("tmp");
@@ -379,9 +487,10 @@ fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String>
 
     // Data itself is not an allowed read/write root. Only the current session
     // is granted access; data is traversable so the session can be reached.
-    for path in [&current, &session, &data, &engine, &agent] {
-        grant_traverse(path, sid)?;
-    }
+    grant_traverse_many(
+        &[&current, &session, &data, &engine, &agent, &target],
+        sid,
+    )?;
     for path in [&current, &session, &engine, &agent, &temp] {
         grant_tree(path, sid, GENERIC_ALL)?;
     }
@@ -401,6 +510,9 @@ fn prepare_access(sid: windows_sys::Win32::Security::PSID) -> Result<(), String>
     }
     unsafe {
         grant_access(&target, sid, GENERIC_READ_EXECUTE, 0)?;
+        if let Ok(compiler) = env::var("GRAPHER_WINDOWS_SANDBOX_COMPILER") {
+            grant_access(Path::new(&compiler), sid, GENERIC_READ_EXECUTE, 0)?;
+        }
     }
 
     // Never walk or rewrite every directory in PATH. CI's PATH includes entire
@@ -416,8 +528,25 @@ pub fn run_helper(arguments: &[String]) -> Result<i32, String> {
         env::var("GRAPHER_WINDOWS_SANDBOX_TARGET").map_err(|_| "Missing sandbox target")?;
     let prefix =
         env::var("GRAPHER_WINDOWS_SANDBOX_PREFIX").map_err(|_| "Missing sandbox prefix")?;
+    let current = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_CURRENT").map_err(|_| "Missing sandbox current")?,
+    );
+    let source = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_SOURCE")
+            .map_err(|_| "Missing sandbox source directory")?,
+    );
     let session = PathBuf::from(
         env::var("GRAPHER_WINDOWS_SANDBOX_SESSION").map_err(|_| "Missing sandbox session")?,
+    );
+    let data = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_DATA").map_err(|_| "Missing sandbox data directory")?,
+    );
+    let engine = PathBuf::from(
+        env::var("GRAPHER_WINDOWS_SANDBOX_ENGINE")
+            .map_err(|_| "Missing sandbox engine directory")?,
+    );
+    let agent = PathBuf::from(
+        env::var("PI_CODING_AGENT_DIR").map_err(|_| "Missing PI_CODING_AGENT_DIR")?,
     );
     let profile = profile_name(&session);
 
@@ -434,7 +563,7 @@ pub fn run_helper(arguments: &[String]) -> Result<i32, String> {
             env::set_var("TMP", &temp);
             let mut capability = SID_AND_ATTRIBUTES {
                 Sid: capability_sid,
-                Attributes: 0,
+                Attributes: 0x0000_0004,
             };
             let mut capabilities = SECURITY_CAPABILITIES {
                 AppContainerSid: app_sid,
@@ -466,18 +595,87 @@ pub fn run_helper(arguments: &[String]) -> Result<i32, String> {
                 return Err(windows_error("UpdateProcThreadAttribute"));
             }
 
-            let command = std::iter::once(target.as_str())
-                .chain(std::iter::once(prefix.as_str()))
-                .chain(arguments.iter().skip(2).map(String::as_str))
+            let mapped_target = map_child_argument(
+                &target, &current, &source, &session, &data, &engine, &agent,
+            );
+            let mapped_prefix = map_child_argument(
+                &prefix, &current, &source, &session, &data, &engine, &agent,
+            );
+            let mapped_arguments: Vec<String> = arguments
+                .iter()
+                .skip(2)
+                .map(|argument| {
+                    map_child_argument(
+                        argument, &current, &source, &session, &data, &engine, &agent,
+                    )
+                })
+                .collect();
+            let mapped_prefix = module_specifier(&mapped_prefix);
+            let mapped_tsconfig = map_child_argument(
+                &engine.join("pi/tsconfig.json").to_string_lossy(),
+                &current, &source, &session, &data, &engine, &agent,
+            );
+            let mapped_execution = map_child_argument(
+                &engine.join("engine/execution-cli.ts").to_string_lossy(),
+                &current, &source, &session, &data, &engine, &agent,
+            );
+            let mapped_extension = map_child_argument(
+                &engine.join("engine/prompt-extension.ts").to_string_lossy(),
+                &current, &source, &session, &data, &engine, &agent,
+            );
+            let mapped_preflight = map_child_argument(
+                &engine.join("pi/node_modules/tsx/dist/preflight.cjs").to_string_lossy(),
+                &current, &source, &session, &data, &engine, &agent,
+            );
+            let mapped_loader = map_child_argument(
+                &engine.join("pi/node_modules/tsx/dist/loader.mjs").to_string_lossy(),
+                &current, &source, &session, &data, &engine, &agent,
+            );
+            let mapped_loader = module_specifier(&mapped_loader);
+            env::set_var("GRAPHER_WINDOWS_SANDBOX_CURRENT_RELATIVE", ".");
+            env::set_var(
+                "GRAPHER_TSX_PIPE_ID",
+                current.file_name().and_then(|name| name.to_str()).unwrap_or("session"),
+            );
+            env::set_var("GRAPHER_WINDOWS_SANDBOX_ENTRYPOINT", &mapped_prefix);
+            env::set_var(
+                "NODE_OPTIONS",
+                "--preserve-symlinks --preserve-symlinks-main",
+            );
+            env::set_var("GRAPHER_WINDOWS_SANDBOX_TSX_PREFLIGHT", &mapped_preflight);
+            env::set_var("GRAPHER_WINDOWS_SANDBOX_TSX_LOADER", &mapped_loader);
+            let command = std::iter::once(mapped_target.as_str())
+                .chain([
+                    "--preserve-symlinks",
+                    "--preserve-symlinks-main",
+                    "--eval",
+                    "require(process.env.GRAPHER_WINDOWS_SANDBOX_ENTRYPOINT)",
+                    "--",
+                    "tsx.cjs",
+                    "--tsconfig",
+                    mapped_tsconfig.as_str(),
+                    mapped_execution.as_str(),
+                    "--extension",
+                    mapped_extension.as_str(),
+                ])
+                .chain(mapped_arguments.iter().map(String::as_str))
                 .map(quote_arg)
                 .collect::<Vec<_>>()
                 .join(" ");
+            if let Ok(compiler) = env::var("GRAPHER_WINDOWS_SANDBOX_COMPILER") {
+                let mapped = map_child_argument(
+                    &compiler, &current, &source, &session, &data, &engine, &agent,
+                );
+                env::set_var("GRAPHER_COMPILER_PATH", mapped);
+            }
             let mut command_line = wide(&command);
-            let current = wide(
-                &env::var("GRAPHER_WINDOWS_SANDBOX_CURRENT")
-                    .map_err(|_| "Missing sandbox current")?,
+            let current_wide = wide(
+                &normal_windows_path(&current)
+                    .to_string_lossy()
+                    .into_owned(),
             );
-            let application = wide(&target);
+            let application_path = normal_windows_path(Path::new(&target));
+            let application = wide(&application_path.to_string_lossy());
             let mut startup = STARTUPINFOEXW::default();
             startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
             startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -509,7 +707,7 @@ pub fn run_helper(arguments: &[String]) -> Result<i32, String> {
                 1,
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
                 ptr::null(),
-                current.as_ptr(),
+                current_wide.as_ptr(),
                 &startup.StartupInfo as *const _,
                 &mut process,
             );

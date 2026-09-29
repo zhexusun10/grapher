@@ -691,21 +691,25 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             head,
             output,
         } => {
+            let superseded = state.superseded_execution_ids.contains(execution_id);
             if let Some(execution) = state
                 .executions
                 .iter_mut()
                 .chain(state.mergers.iter_mut())
                 .find(|item| item.id == *execution_id)
             {
+                let node_name = execution.node.clone();
                 execution.status = "completed".into();
                 execution.after = Some(head.clone());
                 execution.completed_at = Some(event.timestamp);
                 execution.output = output.clone();
                 execution.metrics = Some(parse_execution_metrics(output, execution.started_at, event.timestamp));
-                if let Some(node) = state.nodes.get_mut(&execution.node) {
-                    node.status = "done".into();
-                    node.head = Some(head.clone());
-                    node.instruction_images = None;
+                if !superseded {
+                    if let Some(node) = state.nodes.get_mut(&node_name) {
+                        node.status = "done".into();
+                        node.head = Some(head.clone());
+                        node.instruction_images = None;
+                    }
                 }
             }
         }
@@ -714,9 +718,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             execution_id,
             error,
         } => {
-            let node = state.nodes.get_mut(node).unwrap();
-            node.status = "failed".into();
-            node.error = Some(error.clone());
+            let superseded = execution_id
+                .as_ref()
+                .is_some_and(|id| state.superseded_execution_ids.contains(id));
+            if !superseded {
+                let node = state.nodes.get_mut(node).unwrap();
+                node.status = "failed".into();
+                node.error = Some(error.clone());
+            }
             if let Some(execution) = state
                 .executions
                 .iter_mut()

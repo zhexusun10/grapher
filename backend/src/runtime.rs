@@ -328,11 +328,36 @@ impl Runtime {
         if self.state.run_id == run_id && self.active() {
             return Err("Cannot delete the currently running execution".into());
         }
-        if self.state.run_id == run_id {
+        let target_config = if self.state.run_id == run_id {
+            self.state.config.clone()
+        } else {
+            self.store.load(run_id).ok().and_then(|state| state.config)
+        };
+        let repository = target_config
+            .as_ref()
+            .map(|config| PathBuf::from(&config.repository));
+        let deleting_current = self.state.run_id == run_id;
+        let remove_shadow = if let Some(repository) = repository.as_deref() {
+            if repository.is_dir() && !workspace::is_standard_git(repository) {
+                !self
+                    .store
+                    .has_other_run_for_repository(run_id, repository)?
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if deleting_current {
             self.cleanup_worktrees()?;
         }
+        if remove_shadow {
+            if let Some(repository) = repository.as_deref() {
+                workspace::remove_shadow_repo(repository)?;
+            }
+        }
         self.store.delete_run(run_id)?;
-        if self.state.run_id == run_id {
+        if deleting_current {
             let current_config = self.state.config.clone();
             self.state = Snapshot {
                 config: current_config,
@@ -713,11 +738,11 @@ impl Runtime {
             .find(|execution| {
                 execution.id == execution_id
                     && execution.node == node
-                    && execution.completed_at.is_some()
+                    && (execution.completed_at.is_some() || execution.status == "running")
                     && (selected_version.is_some()
                         || !self.state.superseded_execution_ids.contains(&execution.id))
             })
-            .ok_or("Select an active completed message to edit")?
+            .ok_or("Select an active node message to edit")?
             .clone();
         let start = self
             .state
@@ -760,7 +785,7 @@ impl Runtime {
             Path::new(&anchor.worktree),
             old_text,
             anchor.started_at,
-            anchor.completed_at.ok_or("Execution is not settled")?,
+            anchor.completed_at.unwrap_or(u64::MAX),
         )?;
         if let Err(error) = self.emit(EventKind::ConversationEdited {
             nodes: vec![node.into()],
@@ -803,7 +828,7 @@ impl Runtime {
         } else {
             BTreeSet::from([node.to_owned()])
         };
-        if self
+        if include_downstream && self
             .state
             .executions
             .iter()
@@ -1054,6 +1079,9 @@ impl Runtime {
                         self.state.nodes[&node.name].status.as_str(),
                         "waiting" | "dirty"
                     )
+                    && !self.state.executions.iter().any(|execution| {
+                        execution.node == node.name && execution.status == "running"
+                    })
                     && self
                         .state
                         .graph

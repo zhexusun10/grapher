@@ -46,7 +46,7 @@ interface GraphWorkbenchProps {
   plannerStream: any;
   recoveredPlanningId?: string;
   onSendMessage: (val: string, options?: PromptBoxSubmitOptions) => boolean | void | Promise<boolean>;
-  onEditMessageSubmit?: (msg: ChatMessage, newText: string) => boolean | void | Promise<boolean | void>;
+  onEditMessageSubmit?: (msg: ChatMessage, newText: string, selectedVersion?: number) => boolean | void | Promise<boolean | void>;
   onSwitchMessageVersion?: (msg: ChatMessage, targetIndex: number) => void;
   onRequestConfirmation: (config: ConfirmModalState) => void;
   followUpQueue?: Array<{ id: string; text: string; node?: string; timestamp: number }>;
@@ -1043,19 +1043,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             const first = attempts[0];
                             if (version && first && onEditMessageSubmit) {
                               void onEditMessageSubmit({ id: `task-${selectedNode.name}`, role: "user", text: version.text,
-                                node: selectedNode.name, executionId: version.executionId ?? first.id, runId: state.runId }, version.text);
+                                node: selectedNode.name, executionId: version.executionId ?? first.id, runId: state.runId }, version.text, index);
                             }
                           }}
                           editing={editingTaskNode === selectedNode.name}
                           draft={taskDraft}
                           onDraftChange={setTaskDraft}
-                          onEdit={!active && (!state.approved || selectedState?.status === "done" || selectedState?.status === "failed") ? () => {
+                          onEdit={(!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "running") ? () => {
                             onCancelEditMessage?.();
                             setEditingTaskNode(selectedNode.name);
                             setTaskDraft(selectedNode.task);
                           } : undefined}
                           onCancel={() => setEditingTaskNode("")}
-                          disabled={locked || active || (state.approved && selectedState?.status === "dirty") || taskDraft.trim() === selectedNode.task}
+                          disabled={locked || (state.approved && selectedState?.status === "dirty") || taskDraft.trim() === selectedNode.task}
                           onSend={(value) => {
                             const saveTask = () => {
                               onSave({ ...state.graph, nodes: state.graph.nodes.map((node) =>
@@ -1105,7 +1105,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     {turn.executions.map((exec) => {
                       const isLatestAttempt = exec.id === execution?.id;
-                      const showWorking = isSelectedNodeWorking && isLatestAttempt && !nodeWorkingAfterMessage;
 
                       return (
                         <motion.div
@@ -1128,28 +1127,32 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               runId={state.runId}
                               execution={exec}
                               onUserResize={handleExpandableContentChange}
-                              onInitialOutputReady={exec.id === execution?.id ? revealConversation : undefined}
+                              onInitialOutputReady={isLatestAttempt ? revealConversation : undefined}
                             />
                           </div>
-                          <WorkspaceDetailsPanel
-                            showWorking={showWorking}
-                            scrollContainerRef={chatScrollRef}
-                            onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
-                            onAfterToggle={handleWorkspaceDetailsAfterToggle}
-                          >
-                            <p>Worktree: {exec.worktree}</p>
-                            <p>Session ID: {exec.sessionId}</p>
-                            <p>Commit Before: {exec.before}</p>
-                            <p>Commit After: {exec.after ?? "pending"}</p>
-                            <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
-                          </WorkspaceDetailsPanel>
                         </motion.div>
                       );
                     })}
                   </React.Fragment>
                 ))}
 
-                {isSelectedNodeWorking && (attempts.length === 0 || nodeWorkingAfterMessage) && (
+                {execution && (
+                  <WorkspaceDetailsPanel
+                    key={`${state.runId}:${selectedNode.name}`}
+                    showWorking={isSelectedNodeWorking}
+                    scrollContainerRef={chatScrollRef}
+                    onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
+                    onAfterToggle={handleWorkspaceDetailsAfterToggle}
+                  >
+                    <p>Worktree: {execution.worktree}</p>
+                    <p>Session ID: {execution.sessionId}</p>
+                    <p>Commit Before: {execution.before}</p>
+                    <p>Commit After: {execution.after ?? "pending"}</p>
+                    <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
+                  </WorkspaceDetailsPanel>
+                )}
+
+                {isSelectedNodeWorking && !execution && (
                   <div className="working-indicator" role="status" aria-live="polite">
                     <span className="working-indicator-dot" />
                     Working…
@@ -1283,7 +1286,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                         {turn.executions.map((exec) => {
                           const isLatestSerial = exec.id === serialExecutions[serialExecutions.length - 1]?.id;
-                          const showWorking = isSerialWorking && isLatestSerial && !serialWorkingAfterMessage;
 
                           return (
                             <motion.div
@@ -1299,35 +1301,38 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   runId={state.runId}
                                   execution={exec}
                                   onUserResize={handleExpandableContentChange}
-                                  onInitialOutputReady={exec.id === serialExecutions[serialExecutions.length - 1]?.id ? revealConversation : undefined}
+                                  onInitialOutputReady={isLatestSerial ? revealConversation : undefined}
                                 />
                               </div>
-
-                              <WorkspaceDetailsPanel
-                                showWorking={showWorking}
-                                scrollContainerRef={chatScrollRef}
-                                onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
-                                onAfterToggle={handleWorkspaceDetailsAfterToggle}
-                              >
-                                <p>工作目录: {exec.worktree}</p>
-                                <p>会话实例: {exec.sessionId}</p>
-                                {(() => {
-                                  if (exec.pid) return <p>进程 PID: {exec.pid}</p>;
-                                  const pidMatch = exec.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
-                                                   exec.output.match(/"pid":(\d+)/);
-                                  return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
-                                })()}
-                                <p>Commit Before: {exec.before || "HEAD"}</p>
-                                <p>Commit After: {exec.after ?? "pending"}</p>
-                                <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
-                              </WorkspaceDetailsPanel>
                             </motion.div>
                           );
                         })}
                       </React.Fragment>
                     ))}
 
-                    {isSerialWorking && serialExecutions.length > 0 && serialWorkingAfterMessage && (
+                    {serialExecution && (
+                      <WorkspaceDetailsPanel
+                        key={`${state.runId}:serial`}
+                        showWorking={isSerialWorking}
+                        scrollContainerRef={chatScrollRef}
+                        onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
+                        onAfterToggle={handleWorkspaceDetailsAfterToggle}
+                      >
+                        <p>工作目录: {serialExecution.worktree}</p>
+                        <p>会话实例: {serialExecution.sessionId}</p>
+                        {(() => {
+                          if (serialExecution.pid) return <p>进程 PID: {serialExecution.pid}</p>;
+                          const pidMatch = serialExecution.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
+                                           serialExecution.output.match(/"pid":(\d+)/);
+                          return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
+                        })()}
+                        <p>Commit Before: {serialExecution.before || "HEAD"}</p>
+                        <p>Commit After: {serialExecution.after ?? "pending"}</p>
+                        <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
+                      </WorkspaceDetailsPanel>
+                    )}
+
+                    {isSerialWorking && !serialExecution && (
                       <div className="working-indicator" role="status" aria-live="polite">
                         <span className="working-indicator-dot" />
                         Working…

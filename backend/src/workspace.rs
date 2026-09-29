@@ -111,6 +111,29 @@ pub fn shadow_repo_dir(target: &Path) -> Result<PathBuf, String> {
         .join(format!("{}_{:016x}.git", safe_name, hash)))
 }
 
+pub fn remove_shadow_repo(target: &Path) -> Result<(), String> {
+    let canonical = canonical_workspace_path(target)?;
+    if is_standard_git(&canonical) {
+        return Ok(());
+    }
+    let shadow = shadow_repo_dir(&canonical)?;
+    let metadata = match fs::symlink_metadata(&shadow) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Refusing to remove shadow repository symlink {}",
+            shadow.display()
+        ));
+    }
+    if metadata.is_dir() {
+        fs::remove_dir_all(shadow).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
     let canonical_target = canonical_workspace_path(target)?;
     let shadow_dir = shadow_repo_dir(&canonical_target)?;
@@ -708,7 +731,19 @@ fn copy_planner_files(source: &Path, target: &Path, excluded_data: &Path) -> Res
             continue;
         }
         let original = entry.path();
-        if original == excluded_data {
+        if original == excluded_data
+            || entry.file_name() == std::ffi::OsStr::new(".grapher")
+            || entry.file_name() == std::ffi::OsStr::new(".grapher-workspaces")
+        {
+            continue;
+        }
+        let meta = fs::symlink_metadata(&original).map_err(|e| e.to_string())?;
+        // Cargo build output can contain millions of files and is not part of
+        // the source workspace that a Planner needs to inspect or edit.
+        if meta.is_dir()
+            && entry.file_name() == std::ffi::OsStr::new("target")
+            && source.join("Cargo.toml").is_file()
+        {
             continue;
         }
         let copied = target.join(entry.file_name());

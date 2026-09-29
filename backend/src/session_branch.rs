@@ -70,29 +70,40 @@ fn branch_before_user_matching(
     }).collect::<Result<_, _>>()?;
     let leaf = values.last().and_then(|entry| entry.get("id")).and_then(Value::as_str)
         .ok_or("Pi session has no conversation")?;
+    let mut active_ids = HashSet::new();
     let mut cursor = Some(leaf);
-    let mut visited = HashSet::new();
-    let mut parent = None;
     while let Some(id) = cursor {
-        if !visited.insert(id) { return Err("Pi session contains a cycle".into()); }
+        if !active_ids.insert(id) { return Err("Pi session contains a cycle".into()); }
         let entry = entries.get(id).ok_or("Pi session contains a missing parent")?;
-        let content = user_text(entry);
-        let matches = content.as_deref().is_some_and(|text| text == old_text ||
-            (planner && text.ends_with(&format!("\n{old_text}")) &&
-                (text.starts_with("Current graph node status:\n") || text.starts_with("User query:\n"))));
-        if matches {
-            let time = entry.get("message").and_then(|message| message.get("timestamp"))
-                .and_then(Value::as_u64).unwrap_or(0);
-            if time >= started_at && time <= completed_at {
-                if parent.is_some() {
-                    return Err("Multiple identical user turns in this execution; cannot safely select one to edit".into());
-                }
-                parent = Some(entry.get("parentId").and_then(Value::as_str).map(str::to_owned));
-            }
-        }
         cursor = entry.get("parentId").and_then(Value::as_str);
     }
-    let parent = parent.ok_or("Cannot locate that user turn in the active Pi conversation")?;
+
+    // /tree can select a node from an abandoned branch, so search the whole
+    // durable tree instead of following only the current leaf's parent chain.
+    let mut matches = Vec::new();
+    for entry in values.iter().skip(1) {
+        let content = user_text(entry);
+        let matches_text = content.as_deref().is_some_and(|text| text == old_text ||
+            (planner && text.ends_with(&format!("\n{old_text}")) &&
+                (text.starts_with("Current graph node status:\n") || text.starts_with("User query:\n"))));
+        if !matches_text { continue; }
+        let time = entry.get("message").and_then(|message| message.get("timestamp"))
+            .and_then(Value::as_u64).unwrap_or(0);
+        if time < started_at || time > completed_at { continue; }
+        let id = entry.get("id").and_then(Value::as_str).ok_or("Pi session entry has no identity")?;
+        let parent = entry.get("parentId").and_then(Value::as_str).map(str::to_owned);
+        matches.push((id, parent, active_ids.contains(id)));
+    }
+    let candidate = match matches.as_slice() {
+        [] => return Err("Cannot locate that user turn in the Pi conversation tree".into()),
+        [single] => single,
+        many => {
+            let active: Vec<_> = many.iter().filter(|(_, _, active)| *active).collect();
+            if active.len() == 1 { active[0] }
+            else { return Err("Multiple identical user turns match this Pi conversation".into()); }
+        }
+    };
+    let parent = candidate.1.clone();
     // Pi loads the last entry as the active leaf. A context-free custom entry
     // rooted at the previous parent selects a new branch without injecting an
     // abandoned summary into the model's next prompt.
@@ -137,6 +148,25 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 3);
     }
 
+    #[test]
+    fn editing_a_turn_from_an_abandoned_tree_branch_keeps_the_old_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4().to_string();
+        let path = dir.path().join(format!("test_{id}.jsonl"));
+        let entries = [
+            json!({"type":"session","id":id,"cwd":dir.path()}),
+            json!({"type":"message","id":"root","parentId":null,"message":{"role":"system","content":"system"}}),
+            json!({"type":"message","id":"target","parentId":"root","message":{"role":"user","content":"edit me","timestamp":100}}),
+            json!({"type":"message","id":"old-answer","parentId":"target","message":{"role":"assistant","content":[]}}),
+            json!({"type":"custom","id":"branch","parentId":"root","customType":"grapher-edit"}),
+            json!({"type":"message","id":"new-target","parentId":"branch","message":{"role":"user","content":"replacement","timestamp":300}}),
+        ];
+        fs::write(&path, entries.iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+        let branch = branch_before_user(dir.path(), &id, dir.path(), "edit me", 90, 150).unwrap();
+        let marker: Value = serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap()).unwrap();
+        assert_eq!(marker["parentId"], "root");
+        branch.rollback().unwrap();
+    }
     #[test]
     fn editing_a_turn_branches_without_deleting_the_abandoned_path() {
         let dir = tempfile::tempdir().unwrap();

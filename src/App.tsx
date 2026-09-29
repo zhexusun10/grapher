@@ -807,7 +807,7 @@ export default function App() {
     setConfirmModal({
       title: "删除运行历史",
       message: `确定删除历史快照「Graph ${runId.slice(0, 8)}」吗？`,
-      detail: `快照 ID: ${runId}\n删除后该次运行的执行拓扑图与事件记录将被彻底清除。`,
+      detail: `快照 ID: ${runId}\n删除后该次运行的执行拓扑图与事件记录将被彻底清除；如果这是该项目最后一条 Conversation，对应的外置影子仓库也会一并清理。`,
       confirmText: "删除历史",
       danger: true,
       onConfirm: () => handleDeleteRun(runId),
@@ -1669,7 +1669,7 @@ export default function App() {
       (sessionEntries.length > 0 && sessionEntries[0].id === targetMsg.id) ||
       effectiveMessages[0]?.id === targetMsg.id
     ));
-    if (isPlanning || recoveredPlanning?.status === "running") {
+    if ((isPlanning || recoveredPlanning?.status === "running") && !targetMsg.node && routeType !== "serial") {
       setError("请先停止或等待正在运行的 Planner 完成，再修改历史消息。");
       return false;
     }
@@ -1712,8 +1712,8 @@ export default function App() {
           return true;
         }
         if (!selectedExecution || selectedExecution.node !== selectedNodeName ||
-            !["completed", "failed"].includes(selectedExecution.status)) {
-          throw new Error("无法定位这条消息对应的已结束 Pi 会话。请等待当前执行结束，或重新加载对话后重试。");
+            !["completed", "failed", "running"].includes(selectedExecution.status)) {
+          throw new Error("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。");
         }
         const snap = await runtimeService.editNode({
           runId: state.runId, node: selectedNodeName, executionId: selectedExecution.id,
@@ -1954,9 +1954,9 @@ export default function App() {
         : targetMsg.executionId ?? executionIdForVersion(state, targetNodeName, cleanExisting);
       const execution = state.executions.find((item) => item.id === resolvedExecutionId);
       if (!execution || execution.node !== targetNodeName ||
-          !["completed", "failed"].includes(execution.status) ||
+          !["completed", "failed", "running"].includes(execution.status) ||
           state.supersededExecutionIds?.includes(execution.id)) {
-        setError("无法定位这条消息对应的已结束 Pi 会话。请等待当前执行结束，或重新加载对话后重试。");
+        setError("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。");
         return;
       }
       let accepted = false;

@@ -226,6 +226,33 @@ impl Store {
         runs
     }
 
+    pub fn has_other_run_for_repository(
+        &self,
+        excluded_run_id: &str,
+        repository: &Path,
+    ) -> Result<bool, String> {
+        let run_ids = self
+            .runs()?
+            .into_iter()
+            .filter(|run_id| run_id != excluded_run_id)
+            .collect::<Vec<_>>();
+        for run_id in run_ids {
+            let state = self.load(&run_id)?;
+            let Some(config) = state.config else {
+                continue;
+            };
+            let candidate = Path::new(&config.repository);
+            if candidate == repository
+                || candidate
+                    .canonicalize()
+                    .is_ok_and(|canonical| canonical == repository)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn load(&self, run_id: &str) -> Result<Snapshot, String> {
         if !self.contains_run(run_id)? {
             return Err(format!("Run does not exist: {run_id}"));

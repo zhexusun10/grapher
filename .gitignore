@@ -24,6 +24,7 @@ pnpm-debug.log*
 # Grapher runtime and Rust outputs
 backend/target/
 .grapher/
+.grapher-verify*/
 .pi/
 .agents/skills/
 
