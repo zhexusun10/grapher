@@ -1,5 +1,5 @@
 import { t, localizeError } from "../i18n";
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Key,
@@ -14,7 +14,6 @@ import {
   EyeOff,
   ShieldCheck,
   LogIn,
-  LogOut,
   Trash2,
   X,
   Search,

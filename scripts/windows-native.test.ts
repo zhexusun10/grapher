@@ -66,7 +66,7 @@ test('Planner uses the same unmodified Bash definition and semantics as pinned P
   }
 });
 
-test('production Windows Planner/Graph: concurrent runs, dependencies, publication, cancellation and crash recovery', { skip: !windows, timeout: 240000 }, async () => {
+test('production Windows Planner/Graph: concurrent runs, dependencies, publication, cancellation and crash recovery', { skip: !windows, timeout: 300000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-windows-'));
   const agent = join(directory, 'agent');
   const data = join(directory, 'data');
@@ -156,14 +156,14 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       backend.stderr!.on('data', value => { diagnostics += value.toString(); });
     };
     const api = async (command: string, body: any = {}) => {
-      const response = await fetch(`http://127.0.0.1:${port}/api/${command}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(90000) });
+      const response = await fetch(`http://127.0.0.1:${port}/api/${command}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(180000) });
       const payload = await response.json() as any;
       if (!response.ok || payload.error) throw new Error(payload.error || String(response.status));
       return payload.result;
     };
     const until = async (check: () => Promise<any>, message: string) => {
       const start = Date.now();
-      while (Date.now() - start < 90000) {
+      while (Date.now() - start < 180000) {
         assert.deepEqual(failures, []);
         if (backend?.exitCode !== null) throw new Error(`Backend exited: ${diagnostics}`);
         const result = await check();

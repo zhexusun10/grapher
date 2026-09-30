@@ -6,13 +6,7 @@
 
 ## 历史实验入口与变更范围（入口已删除）
 
-在具有已安装依赖、锁定 Pi、Rust 和原版 Git for Windows 的普通 Windows 用户环境执行：
-
-```powershell
-npm.cmd run probe:windows-native
-```
-
-历史命令离线构建独立 `windows-native-experiments` feature 下的 `windows-native-probe` binary，调用未修改的 Pi Bash 与实际 Planner extension，再生成 [完整 JSON 证据](windows-native-evidence.json)。可以用 `npm.cmd run probe:windows-native -- --output build/windows-native-evidence.json` 改变报告路径。
+历史实验在具有已安装依赖、锁定 Pi、Rust 和原版 Git for Windows 的普通 Windows 用户环境执行。命令离线构建独立 `windows-native-experiments` feature 下的 `windows-native-probe` binary，调用未修改的 Pi Bash 与实际 Planner extension，再生成 [完整 JSON 证据](windows-native-evidence.json)。
 
 仅 Grapher 新建临时文件的 ACL 得到独立 SID 授权；源目录、源 Git、安装目录、Node、Git/MSYS、Rust、系统 DLL 的 ACL 与二进制均不修改。实验临时目录在完成或失败后清理。未改变 Planner/Pi、图编译、调度、基线、工作区、父依赖快照、session、合并、发布或已有路径适配逻辑。
 

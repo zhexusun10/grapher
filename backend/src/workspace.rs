@@ -1364,18 +1364,21 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         // when using the public prepare() API.
         let is_head =
             matches!(parent.len(), 40 | 64) && parent.bytes().all(|b| b.is_ascii_hexdigit());
-        if !is_head {
-            crate::compiler::validate_node_name(parent)?;
-        }
-        let parent_ref = if is_head {
-            format!("refs/grapher/heads/{parent}")
-        } else if let Some(id) = run_id {
-            format!("refs/grapher/runs/{id}/nodes/{parent}")
+        // Node names are arbitrary labels; refs key on their deterministic id.
+        let parent_id = if is_head {
+            parent.clone()
         } else {
-            format!("refs/grapher/nodes/{parent}")
+            crate::compiler::node_id(parent)
+        };
+        let parent_ref = if is_head {
+            format!("refs/grapher/heads/{parent_id}")
+        } else if let Some(id) = run_id {
+            format!("refs/grapher/runs/{id}/nodes/{parent_id}")
+        } else {
+            format!("refs/grapher/nodes/{parent_id}")
         };
         if let Some(url) = source_url.as_deref() {
-            let head_refspec = format!("+{parent_ref}:refs/grapher/parents/{parent}");
+            let head_refspec = format!("+{parent_ref}:refs/grapher/parents/{parent_id}");
             git(
                 path,
                 &[
@@ -1393,14 +1396,14 @@ pub(crate) fn prepare_with_merger_expected_for_run(
                 path,
                 &[
                     "update-ref",
-                    &format!("refs/grapher/parents/{parent}"),
+                    &format!("refs/grapher/parents/{parent_id}"),
                     &head,
                 ],
             )?;
         }
         resolved_heads.push(git(
             path,
-            &["rev-parse", &format!("refs/grapher/parents/{parent}")],
+            &["rev-parse", &format!("refs/grapher/parents/{parent_id}")],
         )?);
     }
     for incoming in independent_heads(path, &resolved_heads)? {
@@ -1467,17 +1470,16 @@ pub fn verify_prepared_ancestor(path: &Path, prepared_head: &str) -> Result<(), 
 
 /// Snapshot an isolated node and import its commit into the host repository.
 /// Repository identity stays in the host Runtime rather than the agent checkout.
-pub fn snapshot_node(path: &Path, repository: &Path, node_id: &str) -> Result<String, String> {
-    snapshot_node_for_run(path, repository, node_id, None)
+pub fn snapshot_node(path: &Path, repository: &Path, node_name: &str) -> Result<String, String> {
+    snapshot_node_for_run(path, repository, node_name, None)
 }
 
 pub fn snapshot_node_for_run(
     path: &Path,
     repository: &Path,
-    node_id: &str,
+    node_name: &str,
     run_id: Option<&str>,
 ) -> Result<String, String> {
-    crate::compiler::validate_node_name(node_id)?;
     if let Some(id) = run_id {
         uuid::Uuid::parse_str(id).map_err(|_| "Invalid Run ID for node snapshot")?;
     }
@@ -1510,6 +1512,8 @@ pub fn snapshot_node_for_run(
     let path_url = git_file_url(&canonical_path)?;
     let head_ref = format!("refs/grapher/heads/{head}");
     let head_refspec = format!("+refs/heads/grapher-node:{head_ref}");
+    // The label stays human-readable; only the ref uses the safe id.
+    let node_id = crate::compiler::node_id(node_name);
     let node_ref = if let Some(id) = run_id {
         format!("refs/grapher/runs/{id}/nodes/{node_id}")
     } else {
@@ -1617,14 +1621,14 @@ pub fn snapshot_repository(path: &Path) -> Result<String, String> {
 
 /// Choose the Serial source/shadow or Graph isolated-node snapshot contract
 /// from canonical workspace identity.
-pub fn snapshot_execution(path: &Path, repository: &Path, node_id: &str) -> Result<String, String> {
-    snapshot_execution_for_run(path, repository, node_id, None)
+pub fn snapshot_execution(path: &Path, repository: &Path, node_name: &str) -> Result<String, String> {
+    snapshot_execution_for_run(path, repository, node_name, None)
 }
 
 pub fn snapshot_execution_for_run(
     path: &Path,
     repository: &Path,
-    node_id: &str,
+    node_name: &str,
     run_id: Option<&str>,
 ) -> Result<String, String> {
     let canonical_repo = repository
@@ -1634,6 +1638,6 @@ pub fn snapshot_execution_for_run(
     if canonical_path == canonical_repo {
         snapshot_repository(&canonical_path)
     } else {
-        snapshot_node_for_run(&canonical_path, &canonical_repo, node_id, run_id)
+        snapshot_node_for_run(&canonical_path, &canonical_repo, node_name, run_id)
     }
 }

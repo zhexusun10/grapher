@@ -2,7 +2,7 @@ import { t, languagePreference, restartFrontendWithLanguage, type LanguagePrefer
 import React, { useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch, Languages, RefreshCw } from "lucide-react";
-import { Config, RepositoryInfo } from "../../types";
+import { Config } from "../../types";
 import type { ProviderCatalog } from "../../services/providerAuth";
 import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
@@ -13,13 +13,8 @@ interface SettingsModalProps {
   onClose: () => void;
   config: Config;
   setConfig: React.Dispatch<React.SetStateAction<Config>>;
-  repoInfo?: RepositoryInfo | null;
   dataPath: string;
   envOverrides?: Record<string, string>;
-  onOpenProject?: () => void;
-  onDetectRepository?: (path?: string) => void;
-  onResetWorkspace?: () => void;
-  onClearHistory?: () => void;
   onSaveConfig: (autoApprove: boolean) => void;
 }
 

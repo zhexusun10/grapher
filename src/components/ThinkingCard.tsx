@@ -5,7 +5,7 @@ import { TranscriptItem } from "../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { useSmoothStreamText } from "../hooks/useSmoothStreamText";
 
-export interface ThinkingCardProps {
+interface ThinkingCardProps {
   item?: TranscriptItem;
   content?: string;
   isStreaming?: boolean;

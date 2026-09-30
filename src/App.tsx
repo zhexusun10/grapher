@@ -1,5 +1,5 @@
 import { t, localizeError } from "./i18n";
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -80,7 +80,6 @@ export default function App() {
     const status = await runtimeService.repositoryStatus(repository);
     if (!status.valid) throw new Error(status.error || t("项目绑定已失效，请重新选择目录。"));
   };
-  const [mainTab, setMainTab] = useState<"graph" | "sessions" | "timeline">("graph");
   const [goal, setGoal] = useState("");
   const [selected, setSelected] = useState<string>("");
   const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
@@ -400,6 +399,15 @@ export default function App() {
             (messagesByRunRef.current.get(runId) ?? []).filter((entry) => entry.id !== message.id));
           setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
           setPlannerStream((prev) => ({ ...prev, items: prev.items.filter((item) => item.id !== message.id) }));
+          // The backend Planner turn can settle between this click and the
+          // request. Its workspace is already published, but the Run is still
+          // revisable: continue the same conversation with a new turn instead
+          // of dropping the message.
+          const failure = error instanceof Error ? error.message : String(error);
+          if (state.runId && /no longer accepting messages|No active Planner/i.test(failure)) {
+            void handlePlanGoal(text, options, "graph", state.runId, false, undefined, true);
+            return;
+          }
           throw error;
         }
       });
@@ -821,67 +829,6 @@ export default function App() {
     });
   };
 
-  const handleClearHistory = () => {
-    setConfirmModal({
-      title: t("清空运行历史"),
-      message: t("确定清空当前工作区的所有历史运行记录吗？"),
-      detail: t("当前工作区的所有历史运行快照与事件将被彻底清除，此操作不可撤销。"),
-      confirmText: t("清空全部"),
-      danger: true,
-      onConfirm: () => run(async () => {
-        const currentRuns = workspaceRuns[currentRepoPath] || [];
-        const data = await runtimeService.bootstrap().catch(() => ({ runs: [] as string[] }));
-        const candidateIds = Array.from(new Set([...currentRuns, ...(data.runs || [])]));
-        const snapshots = await Promise.all(
-          candidateIds.map((id) => runtimeService.history(id).catch(() => null))
-        );
-        const scopedIds = snapshots
-          .filter((snap): snap is Snapshot => !!snap && (snap.config?.repository || "default") === currentRepoPath)
-          .map((snap) => snap.runId);
-        // Sidebar indexes can be stale or misfiled. Only persisted repository
-        // ownership authorizes deletion, and failed deletions remain visible.
-        const deletedIds = new Set<string>();
-        const failures: string[] = [];
-        for (const runId of scopedIds) {
-          try {
-            await runtimeService.deleteRun(runId);
-            deletedIds.add(runId);
-          } catch (error) {
-            failures.push(`${runId}: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-
-        setWorkspaceRuns((prev) => {
-          const updated = Object.fromEntries(
-            Object.entries(prev).map(([repository, ids]) =>
-              [repository, ids.filter(id => !deletedIds.has(id))])
-          );
-          try {
-            localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
-          } catch { }
-          return updated;
-        });
-
-        setRunLabels((prev) => {
-          const copy = { ...prev };
-          deletedIds.forEach((id) => delete copy[id]);
-          try {
-            localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
-          } catch { }
-          return copy;
-        });
-
-        if (failures.length) throw new Error(t("部分运行历史未能删除：\n{0}", failures.join("\n")));
-        if (!deletedIds.has(state.runId)) return;
-        setState(emptySnapshot);
-        resetSessionMessages();
-        setGoal("");
-        setSelected("");
-        setRouteType("undecided");
-      }),
-    });
-  };
-
   // A new conversation is only a view change. The backend may still be
   // executing the previous Run; never reset or terminate it from this button.
   const handleNewConversation = () => {
@@ -894,17 +841,6 @@ export default function App() {
     setSelected("");
     setError("");
   };
-
-  const handleDetectRepository = (customPath?: string) => run(async () => {
-    const info = await runtimeService.detectRepository(customPath || null);
-    if (info) {
-      setRepoInfo(info);
-      setConfig((prev) => ({ ...prev, repository: info.path }));
-      setError("");
-    } else {
-      setError(t("目标路径不存在或无法作为工作区加载。"));
-    }
-  });
 
   const handleSaveConfig = (autoApprove: boolean) => run(async () => {
     let repoPath = config.repository.trim();
@@ -1008,12 +944,16 @@ export default function App() {
     mode?: PlanMode,
     revisionRunId?: string,
     forceFresh?: boolean,
-    editedMessage?: ChatMessage
+    editedMessage?: ChatMessage,
+    // A Planner turn can settle between a send and its steer request. The
+    // caller already verified that turn is over, so continue instead of
+    // rejecting the message as a second concurrent conversation.
+    allowWhilePlanning?: boolean
   ) => run(async () => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return;
     if (config.repository) await requireRepository(config.repository);
-    if (isPlanning) {
+    if (isPlanning && !allowWhilePlanning) {
       throw new Error(t("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。"));
     }
     const isContinuing = !forceFresh && Boolean(revisionRunId || (routeType === "graph" && state.graph.nodes.length > 0 && state.runId));
@@ -1643,7 +1583,6 @@ export default function App() {
       if (!planningRecovery.current(scope)) return;
       setState(snapshot);
       setRouteType(deduceRouteType(snapshot));
-      setMainTab("graph");
       recordRunToWorkspace(snapshot.runId);
       void planningRecovery.finish(scope);
       setSelected("");
@@ -2107,17 +2046,6 @@ export default function App() {
     }
   }, [routeType, state.planType, state.phase, busy, repositoryBlocked]);
 
-  const activeProject = useMemo(() => {
-    return projects.find((p) => p.path === config.repository) || (repoInfo?.path === config.repository ? {
-      id: repoInfo.path,
-      name: repoInfo.name,
-      path: repoInfo.path,
-      branch: repoInfo.branch,
-      clean: repoInfo.clean,
-      lastOpened: Date.now(),
-    } : undefined);
-  }, [projects, config.repository, repoInfo]);
-
   const handleInterrupt = useCallback(async () => {
     if (planningAbortControllerRef.current) {
       planningAbortControllerRef.current.abort();
@@ -2144,8 +2072,7 @@ export default function App() {
   const isLandingView = state.graph.nodes.length === 0 &&
     !isPlanning &&
     !recoveredPlanning &&
-    !failedPlanning &&
-    mainTab === "graph";
+    !failedPlanning;
 
   return (
     <div className={`app-background-root ${isLandingView ? "landing-active" : ""}`}>
@@ -2292,7 +2219,6 @@ export default function App() {
                     onCancelEditMessage={handleCancelEditMessage}
                     onEditMessageSubmit={handleEditMessageSubmit}
                     onSwitchMessageVersion={handleSwitchMessageVersion}
-                    isWorking={isAgentWorking}
                     onInterrupt={handleInterrupt}
                     isPlanning={isPlanning || !!recoveredPlanning}
                     plannerStream={plannerStream}
@@ -2303,11 +2229,8 @@ export default function App() {
                     onSave={save}
                     onOpenEditor={() => setModal("editor")}
                     onOpenApproval={() => setModal("approval")}
-                    onPickRepository={handleOpenProject}
-                    onDetectRepository={() => handleDetectRepository()}
                     repoInfo={repoInfo}
                     config={config}
-                    goal={goal}
                     active={active}
                     locked={locked}
                     pendingRequest={busy}

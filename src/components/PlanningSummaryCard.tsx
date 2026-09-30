@@ -2,10 +2,9 @@ import { t, locale, localizeError } from "../i18n";
 import React, { useState, useEffect, useMemo } from "react";
 import {
   Clock, Cpu, AlertCircle, ChevronDown, ChevronUp,
-  Copy, Check, FileText, CheckCircle2, PauseCircle, Wrench
+  Copy, Check, CheckCircle2, PauseCircle, Wrench
 } from "lucide-react";
-import type { PlanningSummary, PlanningRoleMetrics, Snapshot, TokenUsage } from "../types";
-import { PlanningActivity } from "./PlanningActivity";
+import type { PlanningSummary, Snapshot, TokenUsage } from "../types";
 
 interface PlanningSummaryCardProps {
   planning: PlanningSummary;
@@ -13,7 +12,7 @@ interface PlanningSummaryCardProps {
   defaultExpanded?: boolean;
 }
 
-export function formatSeconds(seconds: number): string {
+function formatSeconds(seconds: number): string {
   if (seconds == null || isNaN(seconds) || seconds < 0) return "0s";
   if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
   const totalSecs = Math.floor(seconds);
@@ -23,12 +22,12 @@ export function formatSeconds(seconds: number): string {
   return t("{0}分{1}秒", minutes, remainingSecs);
 }
 
-export function formatNumber(num?: number): string {
+function formatNumber(num?: number): string {
   if (num == null) return "0";
   return num.toLocaleString(locale);
 }
 
-export function parseTimestamp(val: unknown): number {
+function parseTimestamp(val: unknown): number {
   if (val == null) return 0;
   if (typeof val === "number") return val > 0 ? val : 0;
   if (typeof val === "string") {
@@ -41,7 +40,7 @@ export function parseTimestamp(val: unknown): number {
   return 0;
 }
 
-export function getPlanningCompletedAt(planning: PlanningSummary, state?: Snapshot): number {
+function getPlanningCompletedAt(planning: PlanningSummary, state?: Snapshot): number {
   if (state?.events) {
     const created = state.events.find((e) => e.type === "created");
     if (created && created.timestamp > 0) return created.timestamp;
@@ -59,7 +58,7 @@ export function getPlanningCompletedAt(planning: PlanningSummary, state?: Snapsh
   return 0;
 }
 
-export function calculateApprovalWaitingTime(
+function calculateApprovalWaitingTime(
   planning: PlanningSummary,
   state?: Snapshot,
   now: number = Date.now()
@@ -80,7 +79,7 @@ export function calculateApprovalWaitingTime(
   return { durationSeconds: 0, isWaiting: false };
 }
 
-export function calculatePausedTime(state?: Snapshot, now: number = Date.now()): number {
+function calculatePausedTime(state?: Snapshot, now: number = Date.now()): number {
   if (!state || !state.events) return 0;
   let totalPausedMs = 0;
   let pauseStart: number | null = null;

@@ -1,5 +1,5 @@
 import { t, locale } from "../i18n";
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Execution } from "../types";
 
 /** Uses persisted attempt timestamps; switching attempts never resets the clock. */

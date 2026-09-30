@@ -92,10 +92,10 @@ npm run test:native           # host-native regression (platform dependent)
 
 ## Documentation
 
-- [Architecture, invariants, and Graph/Serial semantics](agent.md)
-- [Pi version pinning, authentication, and upgrade process](engine/README.md)
-- [Native execution and path mapping](engine/native-execution.md)
-- [Planner tool permissions](backend/resources/planning-inspection.md)
+- Architecture, invariants, and Graph/Serial semantics (`agent.md`, Chinese)
+- Pi version pinning, authentication, and upgrade process (`engine/README.md`, Chinese)
+- Native execution and path mapping (`engine/native-execution.md`, Chinese)
+- Planner tool permissions (`backend/resources/planning-inspection.md`)
 
 ## License
 

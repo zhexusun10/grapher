@@ -53,7 +53,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
 #[test]
 fn parse_route_decision_recognizes_exact_single_words_and_formatting() {
     assert_eq!(
-        parse_route_decision("graph"),
+        parse_route_decision("parallel"),
         Route {
             plan_type: "graph".into()
         }
@@ -65,7 +65,7 @@ fn parse_route_decision_recognizes_exact_single_words_and_formatting() {
         }
     );
     assert_eq!(
-        parse_route_decision("Graph"),
+        parse_route_decision("Parallel"),
         Route {
             plan_type: "graph".into()
         }
@@ -77,13 +77,13 @@ fn parse_route_decision_recognizes_exact_single_words_and_formatting() {
         }
     );
     assert_eq!(
-        parse_route_decision("  graph  "),
+        parse_route_decision("  parallel  "),
         Route {
             plan_type: "graph".into()
         }
     );
     assert_eq!(
-        parse_route_decision("**graph**"),
+        parse_route_decision("**parallel**"),
         Route {
             plan_type: "graph".into()
         }
@@ -95,7 +95,7 @@ fn parse_route_decision_recognizes_exact_single_words_and_formatting() {
         }
     );
     assert_eq!(
-        parse_route_decision("\"graph\"."),
+        parse_route_decision("\"parallel\"."),
         Route {
             plan_type: "graph".into()
         }
@@ -106,7 +106,7 @@ fn parse_route_decision_recognizes_exact_single_words_and_formatting() {
 fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
     // Model outputs conversational text instead of single word
     assert_eq!(
-        parse_route_decision("I recommend graph for this parallel task."),
+        parse_route_decision("I recommend parallel for this task."),
         Route {
             plan_type: "graph".into()
         }
@@ -119,7 +119,7 @@ fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
     );
     // Multiline reasoning ending with recommendation
     assert_eq!(
-        parse_route_decision("Analysis:\n- Independent modules\n- Parallel work\nTherefore, graph execution is required."),
+        parse_route_decision("Analysis:\n- Independent modules\n- Independent work\nTherefore, parallel execution is required."),
         Route { plan_type: "graph".into() }
     );
     assert_eq!(
@@ -134,13 +134,13 @@ fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
 fn parse_route_decision_resolves_comparison_of_both_keywords() {
     // When both words are mentioned, later occurrence represents the conclusion
     assert_eq!(
-        parse_route_decision("Serial execution was considered, but we should use a graph."),
+        parse_route_decision("Serial execution was considered, but we should use parallel."),
         Route {
             plan_type: "graph".into()
         }
     );
     assert_eq!(
-        parse_route_decision("While a graph is possible, serial is safer here."),
+        parse_route_decision("While parallel is possible, serial is safer here."),
         Route {
             plan_type: "serial".into()
         }
@@ -150,7 +150,7 @@ fn parse_route_decision_resolves_comparison_of_both_keywords() {
 #[test]
 fn parse_route_decision_recognizes_explicit_decision_marker() {
     assert_eq!(
-        parse_route_decision("Some reasoning here...\nDECISION: graph"),
+        parse_route_decision("Some reasoning here...\nDECISION: parallel"),
         Route {
             plan_type: "graph".into()
         }
@@ -162,7 +162,7 @@ fn parse_route_decision_recognizes_explicit_decision_marker() {
         }
     );
     assert_eq!(
-        parse_route_decision("Reasoning: parallel work.\n**DECISION: GRAPH**"),
+        parse_route_decision("Reasoning: independent work.\n**DECISION: PARALLEL**"),
         Route {
             plan_type: "graph".into()
         }
@@ -198,6 +198,22 @@ fn parse_route_decision_safe_fallback_on_ambiguity_or_gibberish() {
             plan_type: "serial".into()
         }
     );
+}
+
+#[test]
+fn parse_route_decision_does_not_recognize_graph_or_partial_keywords() {
+    for text in ["graph", "grap", "seral", "paragraph", "parallelism", "nonparallel"] {
+        assert_eq!(parse_route_decision(text).plan_type, "serial", "{text}");
+    }
+    assert_eq!(parse_route_decision("graph execution: parallel").plan_type, "graph");
+}
+
+#[test]
+fn partitioner_prompt_uses_parallel_and_serial_labels() {
+    let prompt = include_str!("../resources/prompts/partitioner.md").replace("\r\n", "\n");
+    assert!(prompt.starts_with("Classify the task as parallel or serial."));
+    assert!(prompt.trim_end().ends_with("Output only:\nparallel\nor\nserial"));
+    assert!(!prompt.contains("graph"));
 }
 
 #[test]

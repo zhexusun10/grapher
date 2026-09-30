@@ -77,10 +77,10 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     name: "node", label: "Graph node",
     // Pi normalizes nullable optional edit fields before local validation.
     constrainedSampling: { type: "json_schema", strict: "prefer" },
-    description: `Create, replace, or delete graph nodes. Supply a nonempty 'nodes' array; use one element for a single edit. Each node name may appear only once per call. Each task is passed to a later fresh session with completed dependency filesystem state; the planner conversation is not passed. Updating a name replaces its task and preserves edges. Deleting a node removes its incident edges. Edits are applied in order, then compiled once. A failure leaves the saved graph unchanged.`,
+    description: `Create, replace, or delete graph nodes. Supply a nonempty 'nodes' array; use one element for a single edit. Each node name may appear only once per call. Each task is passed to a later fresh session with completed dependency filesystem state. Updating a name replaces its task and preserves edges. Deleting a node removes its incident edges. Edits are applied in order, then compiled once. A failure leaves the saved graph unchanged.`,
     parameters: Type.Object({
       nodes: Type.Array(Type.Object({
-        name: Type.String({ description: "Stable node identifier, 1–64 ASCII letters, digits, _ or -." }),
+        name: Type.String({ description: "Stable node identifier" }),
         task: Type.Optional(Type.String({ description: "Task for a fresh execution; required unless deleting." })),
         delete: Type.Optional(Type.Boolean({ description: "Delete this node and its incident edges." })),
       }, { additionalProperties: false }), { minItems: 1, description: "Batch node edits, applied in order." }),
@@ -101,7 +101,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       edges: Type.Array(Type.Object({
         from: Type.String({ description: "Existing source node name." }),
         to: Type.String({ description: "Existing target node name, different from source." }),
-        relation: Type.Optional(Type.String({ description: "Human-readable relationship; feedback determines runtime behavior." })),
+        relation: Type.Optional(Type.String({ description: "Briefly describe what the target needs from the source, or what the feedback communicates." })),
         feedback: Type.Optional(Type.Boolean({ description: "True for feedback; otherwise a dependency." })),
         delete: Type.Optional(Type.Boolean({ description: "Remove the ordered pair." })),
       }, { additionalProperties: false }), { minItems: 1, description: "Batch edge edits, applied in order." }),

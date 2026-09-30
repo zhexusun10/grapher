@@ -426,6 +426,180 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 
 #[cfg(feature = "fixture")]
 #[test]
+fn planner_followup_after_publication_reuses_the_session_and_schedules_new_roots() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = crate::fixture::repository(temp.path()).unwrap();
+    let script = temp.path().join("followup-after-publication.sh");
+    fs::write(
+        &script,
+        r#"session=''
+identity=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-dir) session="$2"; shift 2 ;;
+    --session-id) identity="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$GRAPHER_MODE" in
+  planner)
+    printf '%s|%s\n' "$session" "$identity" >> "$(dirname "$0")/session-trace.txt"
+    if [ -f "$session/turns.jsonl" ]; then
+      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first v2"},{"name":"after","task":"after"},{"name":"extra","task":"extra"}],"edges":[{"from":"first","to":"after","relation":"files","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+    else
+      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first"},{"name":"after","task":"after"}],"edges":[{"from":"first","to":"after","relation":"files","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+      mkdir -p "$session"
+      cwd="$PWD"
+      if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
+      printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$cwd" > "$session/turns.jsonl"
+    fi
+    ;;
+  node)
+    printf 'node ran\n' > "node-${GRAPHER_NODE_EXECUTION_ID}.txt"
+    ;;
+esac
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
+"#,
+    )
+    .unwrap();
+    let config = Config {
+        repository: repo.to_string_lossy().into(),
+        engine: "pi".into(),
+        pi_command: "/bin/sh".into(),
+        pi_args: vec![script.to_string_lossy().into()],
+        model: "mock/model".into(),
+        thinking_level: "medium".into(),
+        max_parallel: 2,
+        max_feedback: 1,
+        auto_approve: false,
+        role_models: Default::default(),
+    };
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let settle = |service: &Arc<Service>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let phase = service
+                .runtime
+                .lock()
+                .unwrap()
+                .state
+                .phase
+                .clone();
+            if matches!(phase.as_str(), "completed" | "needs_attention" | "publication_failed") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "Run did not settle: {phase}");
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        while service.driving.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "Driver did not stop");
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+
+    let first = plan_goal_internal(
+        "initial".into(),
+        config.clone(),
+        Some("graph"),
+        None,
+        None,
+        &service,
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
+    let run_id = first.run_id.clone();
+    let first_planning_id = first.planning_id.clone().unwrap();
+    service.runtime.lock().unwrap().approve().unwrap();
+    drive(service.clone());
+    settle(&service);
+    {
+        let runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.state.run_id, run_id);
+        assert_eq!(runtime.state.phase, "completed");
+        assert!(runtime.state.published_head.is_some());
+    }
+
+    // The Planner turn is over and its workspace was published; a new message
+    // must still continue the same conversation and revise the same Run.
+    let revised = plan_goal_internal(
+        "add another workstream".into(),
+        config,
+        Some("graph"),
+        None,
+        Some(run_id.clone()),
+        &service,
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(revised.run_id, run_id);
+    assert!(revised.approved);
+    assert_eq!(revised.phase, "running");
+    assert_ne!(
+        revised.planning_id.as_deref(),
+        Some(first_planning_id.as_str())
+    );
+    let first_node = revised
+        .graph
+        .nodes
+        .iter()
+        .find(|node| node.name == "first")
+        .unwrap();
+    assert_eq!(first_node.task, "first v2");
+    assert!(revised.graph.nodes.iter().any(|node| node.name == "extra"));
+    assert!(matches!(
+        revised.nodes["first"].status.as_str(),
+        "waiting" | "dirty"
+    ));
+    assert!(matches!(
+        revised.nodes["after"].status.as_str(),
+        "waiting" | "dirty"
+    ));
+    assert_eq!(revised.nodes["extra"].status, "waiting");
+
+    settle(&service);
+    let final_snapshot = service.runtime.lock().unwrap().state.clone();
+    assert_eq!(final_snapshot.phase, "completed");
+    for node in ["first", "after", "extra"] {
+        assert_eq!(final_snapshot.nodes[node].status, "done");
+    }
+    assert_eq!(
+        final_snapshot
+            .executions
+            .iter()
+            .filter(|execution| execution.node == "first")
+            .count(),
+        2
+    );
+    assert_eq!(
+        final_snapshot
+            .executions
+            .iter()
+            .filter(|execution| execution.node == "extra")
+            .count(),
+        1
+    );
+    assert!(crate::workspace::git(&repo, &["status", "--porcelain"])
+        .unwrap()
+        .is_empty());
+    let trace = fs::read_to_string(temp.path().join("session-trace.txt")).unwrap();
+    let lines: Vec<_> = trace.lines().collect();
+    assert_eq!(lines.len(), 2, "{trace}");
+    assert_eq!(lines[0], lines[1]);
+    assert!(lines[0].ends_with(&format!("|{first_planning_id}")));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
 fn manually_created_graph_uses_one_planner_session_even_before_first_revision_succeeds() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path().join("runtime");
@@ -2805,7 +2979,7 @@ done
 case "$GRAPHER_MODE" in
     partition)
         test "$model:$thinking" = 'example/small:off' || exit 21
-        text=graph
+        text=parallel
         ;;
     planner)
         test "$model:$thinking" = 'example/large:high' || exit 22

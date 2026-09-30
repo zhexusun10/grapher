@@ -14,7 +14,7 @@ User goal
    v
 Partitioner -------- serial ------> one Node Agent
    |
- graph
+ parallel
    v
 Planner -> Graph IR -> Compiler -> Approval
                                    |
@@ -30,7 +30,7 @@ Planner -> Graph IR -> Compiler -> Approval
 
 核心分工：
 
-- **Partitioner**：判断任务走 `serial` 还是 `graph`，不解决任务。
+- **Partitioner**：判断任务走 `serial` 还是 `parallel`，不解决任务；`parallel` 映射为内部 `graph` 执行模式。
 - **Planner**：读取仓库并生成 Graph IR，图编译通过后退出。
 - **Compiler**：确定性校验图并生成执行批次、根节点和终点。
 - **Graph Runtime**：调度、并发、反馈、失效传播、暂停和恢复。
@@ -65,7 +65,7 @@ Grapher 不运行一个持续在线的 LLM Coordinator。Planner 完成后，调
 Partitioner 是无工具的单轮分类器：
 
 - `serial`：单一或高度线性的工作，后端创建唯一的 `task` 节点并自动批准。
-- `graph`：存在多个可独立推进的实质工作流，进入 Planner 和人工审批流程。
+- `parallel`：存在多个可独立推进的实质工作流，映射到 `graph` 模式，进入 Planner 和人工审批流程。
 
 模型调用失败必须显式失败；只有成功调用但分类文本含糊时才回退到 `serial`。
 
@@ -110,7 +110,7 @@ interface Graph {
 
 Compiler 校验：
 
-- 节点名称格式、唯一性、数量上限和非空 task。
+- 节点名称非空、唯一性、数量上限和非空 task。名称可包含任意文本，仅作为人类可读标签；worktree 目录与 Git ref 使用由名称确定性映射出的安全 id。
 - 边端点存在、无自环、`(from, to)` 不重复。
 - 每个 source 最多一条 outgoing feedback edge。
 - 普通依赖图无环。
@@ -142,7 +142,7 @@ waiting/dirty -> blocked
 
 普通 DAG 在依赖满足且并发槽可用时立即派发，不等待同批慢节点。单个 Graph Run 内的节点并发上限为 1 到 8（`maxParallel=0` 默认 8，硬上限 8），不同 Run 之间不共享该额度，也没有跨 Run 的节点上限。
 
-含 feedback edge 的图使用波次屏障：当前活动 execution 全部结束后，Runtime 先处理反馈和失效传播，再派发下一波，避免消费者使用即将失效的结果。
+含 feedback edge 的图在派发时跳过受该反馈失效范围影响的节点：Runtime 只等待这些可能被反馈失效的节点执行完毕，先处理反馈和失效传播，再派发它们，避免消费者使用即将失效的结果；不受该反馈影响的分支仍可继续执行。
 
 失败只阻塞依赖分支；无关分支继续。暂停只停止新派发，不强杀正在运行的 Pi。
 
@@ -182,7 +182,7 @@ backend -----/                 |
 
 ### Serial
 
-Partitioner 明确选择 Serial 后，唯一 `task` 节点直接在用户目录执行。运行模式单独持久化；Planner 生成的单个 `task` 节点仍按 Graph 隔离。旧事件没有模式字段时保留旧版按图形状判断的行为。Serial 完成后保存快照，不进入整图发布阶段。向已完成的 Serial 任务追加消息会在原 Pi 会话和用户目录中启动下一次执行（图片随消息传递），而不是只记录消息。Graph 中定向发送给已完成节点的追加消息在该节点原 Pi 会话中继续发送新的用户消息，并在结果实际变化时使其普通依赖后继失效、按依赖重新执行；无关分支保持有效。Planner 图修订仍按图的依赖规则处理。Graph 中未选择节点的追加消息仍由 Planner 修订图。
+Partitioner 明确选择 Serial 后，唯一 `task` 节点直接在用户目录执行。运行模式单独持久化；Planner 生成的单个 `task` 节点仍按 Graph 隔离。旧事件没有模式字段时保留旧版按图形状判断的行为。Serial 完成后保存快照，不进入整图发布阶段。向已完成的 Serial 任务追加消息会在原 Pi 会话和用户目录中启动下一次执行（图片随消息传递），而不是只记录消息。Graph 中定向发送给已完成节点的追加消息在该节点原 Pi 会话中继续发送新的用户消息，并在结果实际变化时使其普通依赖后继失效、按依赖重新执行；无关分支保持有效。Planner 图修订仍按图的依赖规则处理。Graph 中未选择节点的追加消息仍由 Planner 修订图；运行完成并发布后仍可追加，它在同一 Run 的 Planner 会话中开启新一轮修订，受影响节点的普通依赖后继重跑，新增的无依赖节点或终点节点在发布阶段一并合并回工作区。
 
 修改已完成的 Serial 或 Graph 节点对话时，Grapher 在该节点的 Pi JSONL 会话中从被修改的用户消息之前创建新分支，保留原分支；Run 的事件保留旧执行记录，但活动分支不再显示被替代的回答。Serial 与 Pi `/tree` 一样只回退对话上下文，不自动撤销用户目录中的文件变更。Graph 仅从该次执行之前的隔离工作区快照继续目标节点的会话；若结果实际变化，其普通依赖后继按依赖重新执行，无关分支保持有效。Planner 图修订仍按图的依赖规则处理。历史 Planner 消息也可以在原 Run 的 Pi 会话中分支编辑，保留旧会话历史。
 
@@ -226,6 +226,8 @@ Runtime 先持久化 `PublicationStarted`，再把当前有效节点 heads 合�
 只有实际 Git 冲突才启动专用 merger Execution Instance。merger 不是图节点，也不唤醒 Planner；它在用户目录的现有 merge 状态中解决冲突。权限错误、脏目录或缺失仓库直接进入 `publication_failed`。
 
 发布失败保留已落地提交和冲突现场。`retry_publication` 复用原 heads，从当前状态继续，不重跑图节点。所有 heads 成为最终 HEAD 的祖先且目录干净后，才发出 `PublicationCompleted`。
+
+首次发布之后，Planner 修订新增或重跑的节点不再从批准基线组合工作区，而是从当前已发布的 HEAD 出发。这样新节点和重跑结果直接叠加在用户已经收到的文件状态上，发布阶段只需要把新的终点 heads 合并回工作区，不会用陈旧的基线覆盖已发布结果。
 
 ## 6. 角色与隔离
 

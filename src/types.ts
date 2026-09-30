@@ -1,15 +1,15 @@
 import { t } from "./i18n";
 export type Status = "waiting" | "running" | "blocked" | "done" | "failed" | "dirty";
-export interface GraphNode { name: string; task: string }
-export interface GraphEdge { from: string; to: string; relation: string; feedback: boolean }
+interface GraphNode { name: string; task: string }
+interface GraphEdge { from: string; to: string; relation: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelRole = "partitioner" | "planner" | "nodeAgent";
 export interface RoleModelConfig { model: string; thinkingLevel?: ThinkingLevel }
 export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean }
-export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
-export interface ExecutionMetrics {
+interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
+interface ExecutionMetrics {
   durationSeconds: number;
   assistantMessages: number;
   tools: number;
@@ -17,7 +17,7 @@ export interface ExecutionMetrics {
   usage: TokenUsage;
 }
 
-export interface RunMetrics {
+interface RunMetrics {
   totalDurationSeconds: number;
   planningDurationSeconds: number;
   executionDurationSeconds: number;

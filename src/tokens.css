@@ -6,12 +6,10 @@
 :root {
   /* 基础背景与画布 */
   --bg-canvas: #FFFFFF;
-  --bg-default: #FFFFFF;
 
   /* 容器与表面 */
   --bg-surface: #F7F7F8;
   --bg-surface-hover: #F1F5F9;
-  --bg-surface-active: #E2E8F0;
 
   /* 边框与分割线 */
   --border-default: #E2E8F0;
@@ -45,7 +43,6 @@
 
   /* 遮罩与画布专用令牌 */
   --bg-overlay: rgba(15, 23, 42, 0.45);
-  --graph-grid-dot: #CBD5E1;
   --graph-edge-default: #94A3B8;
   --graph-edge-feedback: #8B5CF6;
   --graph-edge-feedback-bg: #F5F3FF;

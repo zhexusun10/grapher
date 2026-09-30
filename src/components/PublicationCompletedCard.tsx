@@ -4,7 +4,6 @@ import { CheckCircle2, FolderGit2, GitCommit, Clock, Copy, Check, GitMerge } fro
 import { motion } from "motion/react";
 import type { Snapshot, PlanRouteType, Execution } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
-import { phaseText } from "./graph/TaskNode";
 import "./PublicationCompletedCard.css";
 
 interface PublicationCompletedCardProps {
@@ -65,10 +64,9 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
     >
       <div className="pub-card-header">
         <div className="pub-card-title-group">
-          <CheckCircle2 size={14} className="pub-card-icon" />
+          <CheckCircle2 size={18} className="pub-card-icon" />
           <span className="pub-card-title">{t("此次执行已完成，已完成写入源文件工作区")}</span>
         </div>
-        <span className={`phase-tag ${state.phase}`}>{phaseText[state.phase] ?? t("已完成")}</span>
       </div>
 
       <div className="pub-card-body">

@@ -48,7 +48,8 @@ pub fn execute(
         "Fixture verification passed.\n<ACCEPT>".into()
     } else {
         fs::write(
-            Path::new(&execution.worktree).join(format!("{}.md", execution.node)),
+            Path::new(&execution.worktree)
+                .join(format!("{}.md", crate::compiler::node_id(&execution.node))),
             format!(
                 "# {}\n\n{}\n\nAttempt {}\n",
                 execution.node, task, execution.attempt

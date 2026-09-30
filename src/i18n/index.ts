@@ -1,6 +1,6 @@
 import { en } from "./en";
 
-export type Locale = "zh-CN" | "en";
+type Locale = "zh-CN" | "en";
 export type LanguagePreference = "auto" | Locale;
 export const LANGUAGE_PREFERENCE_KEY = "grapher_language_v1";
 

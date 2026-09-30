@@ -32,14 +32,11 @@ try {
   const planning = { planningId: "plan-123", roles: {}, totalPlanningDuration: 65, modelDuration: 61, status: "failed", error: "用户已停止本次执行；可以修改消息或重新运行。" };
   const cases = [
     ["layout/Sidebar", "Sidebar", { projects: [], activeRepo: "", runs: [], currentRunId: "", runIndicators: {}, onSelectProject: noop, onOpenProject: noop, onRemoveProject: noop, onLoadRun: noop, onDeleteRun: noop, onNewConversation: noop, onOpenSettings: noop }],
-    ["layout/Header", "Header", { config, repoInfo: null, phase: "awaiting_approval", mainTab: "graph", setMainTab: noop, nodesCount: 4, eventsCount: 0 }],
     ["modals/SettingsModal", "SettingsModal", { isOpen: true, config, setConfig: noop, dataPath: "", onClose: noop, onSaveConfig: noop }],
     ["modals/ApprovalModal", "ApprovalModal", { isOpen: true, state, config, onClose: noop, onAdjustPlan: noop, onApprove: noop }],
     ["modals/EditorModal", "EditorModal", { isOpen: true, initialGraph: example, onClose: noop, onSave: noop, onError: noop }],
     ["modals/ConfirmModal", "ConfirmModal", { config: { title: t("删除历史"), message: t("确定清空当前工作区的所有历史运行记录吗？"), confirmText: t("清空全部"), onConfirm: noop }, onClose: noop }],
     ["views/LandingView", "LandingView", { goal: "", setGoal: noop, onPlanGoal: noop }],
-    ["views/TimelineView", "TimelineView", { events: [] }],
-    ["views/SessionsView", "SessionsView", { state: emptySnapshot, selected: "", setSelected: noop }],
     ["PlanningSummaryCard", "PlanningSummaryCard", { planning, state, defaultExpanded: true }],
     ["ThinkingCard", "ThinkingCard", { content: "", isStreaming: true }],
     ["ToolCallCard", "ToolCallCard", { item: { id: "tool", type: "tool_call", toolName: "bash", status: "running", args: {} } }],

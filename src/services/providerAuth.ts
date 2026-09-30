@@ -1,4 +1,4 @@
-export interface ProviderMethod { id: "api_key" | "oauth"; name: string }
+interface ProviderMethod { id: "api_key" | "oauth"; name: string }
 export interface ProviderInfo {
   id: string;
   name: string;
@@ -8,10 +8,10 @@ export interface ProviderInfo {
   authSource?: "stored" | "env" | null;
   authEnvVar?: string | null;
 }
-export interface ModelInfo { provider: string; id: string; name: string; api: string; contextWindow: number; available: boolean }
+interface ModelInfo { provider: string; id: string; name: string; api: string; contextWindow: number; available: boolean }
 export interface ProviderCatalog { providers: ProviderInfo[]; models: ModelInfo[]; warning: string | null }
-export interface AuthPrompt { id: string; type: "text" | "secret" | "select" | "manual_code"; message: string; placeholder?: string; options?: { id: string; label: string; description?: string }[] }
-export interface AuthEvent { type: string; message?: string; url?: string; instructions?: string; userCode?: string; verificationUri?: string; links?: { url: string; label?: string }[] }
+interface AuthPrompt { id: string; type: "text" | "secret" | "select" | "manual_code"; message: string; placeholder?: string; options?: { id: string; label: string; description?: string }[] }
+interface AuthEvent { type: string; message?: string; url?: string; instructions?: string; userCode?: string; verificationUri?: string; links?: { url: string; label?: string }[] }
 export interface LoginState { id: string; provider: string; status: "pending" | "complete" | "cancelled" | "failed"; events: AuthEvent[]; prompt: AuthPrompt | null; error: string | null }
 
 async function call<T>(operation: string, fields: Record<string, unknown> = {}): Promise<T> {

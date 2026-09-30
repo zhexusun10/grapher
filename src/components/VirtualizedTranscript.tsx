@@ -80,7 +80,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
   // Height cache for virtualization
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
-  const [scrollTop, setScrollTop] = useState(0);
+  const [, setScrollTop] = useState(0);
   const [heightVersion, setHeightVersion] = useState(0);
   const [, setExpansionVersion] = useState(0);
   const layoutRef = useRef({ ids: [] as string[], offsets: [0] });

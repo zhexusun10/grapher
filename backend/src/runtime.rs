@@ -1037,10 +1037,15 @@ impl Runtime {
         let mut jobs = Vec::new();
         for node in ready {
             let id = Uuid::new_v4().to_string();
+            // A node with no retained head starts from the current source state.
+            // After publication that is the published commit, not the approval
+            // base: Planner revisions and newly added roots/terminals must build
+            // on and merge back into the workspace users already received.
             let before = self.state.nodes[&node.name]
                 .head
                 .clone()
-                .unwrap_or(self.state.base.clone());
+                .or_else(|| self.state.published_head.clone())
+                .unwrap_or_else(|| self.state.base.clone());
             let resume = if self.state.nodes[&node.name].human_instruction {
                 let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
                 Some(
@@ -1097,7 +1102,7 @@ impl Runtime {
                     parent
                         .join(".grapher-worktrees")
                         .join(&self.state.run_id)
-                        .join(format!("{}-{id}", node.name))
+                        .join(format!("{}-{id}", crate::compiler::node_id(&node.name)))
                         .to_string_lossy()
                         .into()
                 },

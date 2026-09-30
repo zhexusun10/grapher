@@ -52,14 +52,50 @@ fn alternate_dependency_path(graph: &Graph, from: &str, to: &str) -> Option<Vec<
     None
 }
 
-/// Node names also become Git snapshot refs; keep the contract shared.
-pub fn validate_node_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.len() > 64
-        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
-    {
-        return Err(format!("Invalid node name {name:?}: use 1–64 ASCII letters, digits, '_' or '-'."));
+/// Node names are user- and planner-facing labels and may contain any text.
+/// Worktree directories and Git refs instead use a deterministic, safe id:
+/// names that already satisfy the legacy contract map to themselves (so
+/// existing refs and workspaces stay valid), everything else becomes a
+/// bounded slug plus a short content hash. The result is a single path
+/// component and a valid Git ref component for any input.
+pub fn node_id(name: &str) -> String {
+    if is_legacy_node_id(name) {
+        return name.to_string();
     }
-    Ok(())
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            separator = false;
+        } else if !separator && !slug.is_empty() {
+            slug.push('-');
+            separator = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.len() > 24 {
+        slug.truncate(24);
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+    }
+    if slug.is_empty() {
+        slug.push_str("node");
+    }
+    let digest = git2::Oid::hash_object(git2::ObjectType::Blob, name.as_bytes())
+        .map(|oid| oid.to_string())
+        .unwrap_or_else(|_| "0000000000000000000000000000000000000000".into());
+    let short = digest.get(..12).unwrap_or(digest.as_str());
+    format!("{slug}.{short}")
+}
+
+fn is_legacy_node_id(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
 pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>> {
@@ -85,8 +121,8 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
     }
     let mut names = BTreeSet::new();
     for node in &graph.nodes {
-        if let Err(message) = validate_node_name(&node.name) {
-            add("E201", message);
+        if node.name.is_empty() {
+            add("E201", "Node name must not be empty".into());
         }
         if !names.insert(node.name.clone()) {
             add("E202", format!("Duplicate node: {}", node.name));

@@ -5,34 +5,6 @@ import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
 export const planningTranscriptCache = new Map<string, { text: string; offset: number; complete: boolean }>();
 
-export async function prefetchPlanningTranscript(planningIds: string[], signal?: AbortSignal): Promise<string> {
-  const key = planningIds.join(":");
-  const cached = planningTranscriptCache.get(key);
-  if (cached && cached.complete) return cached.text;
-  let text = "";
-  for (const planningId of planningIds) {
-    text += `${JSON.stringify({ type: "grapher_planning_source", planningId })}\n`;
-    let currentOffset = 0;
-    while (!signal?.aborted) {
-      const page = await runtimeService.getPlanningOutput(planningId, "planner", currentOffset, signal);
-      if (signal?.aborted) return text;
-      if (page.planningId !== planningId || page.role !== "planner" || page.nextOffset < currentOffset || (!page.complete && page.nextOffset === currentOffset)) {
-        throw new Error(t("规划记录与请求不匹配，请重试。"));
-      }
-      text += page.content;
-      currentOffset = page.nextOffset;
-      if (page.complete) {
-        if (!page.running && text && !text.endsWith("\n")) {
-          text += "\n";
-        }
-        break;
-      }
-    }
-  }
-  planningTranscriptCache.set(key, { text, offset: text.length, complete: true });
-  return text;
-}
-
 export function activePlannerOutput(output: string, edits: Array<{ old_instruction?: string; nextPlanningId?: string }>): string {
   let active = output;
   for (const edit of edits) {

@@ -208,28 +208,13 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         className: isNew ? "edge-entering" : undefined,
         animated: !isFeedback && state.nodes[edge.from]?.status === "running",
         markerEnd: isFeedback ? "url(#workflow-arrow-feedback)" : "url(#workflow-arrow-default)",
-        data: { isNew, routeX: routing?.routeX, routeSide: routing?.routeSide },
+        // relation 通过跟随光标的悬浮提示展示，不再画在 SVG 里。
+        data: { isNew, routeX: routing?.routeX, routeSide: routing?.routeSide, relation: edge.relation },
         style: {
           stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
           strokeWidth: 1.5,
           strokeDasharray: isFeedback ? "5 4" : undefined,
         },
-        label: isFeedback
-          ? `${edge.relation || t("缺陷重构反馈")} · REVISE`
-          : (edge.relation || undefined),
-        labelStyle: {
-          fontSize: 10,
-          fontWeight: 500,
-          fill: isFeedback ? tokens.graphEdgeFeedbackText : tokens.textSecondary,
-          fontFamily: isFeedback ? "monospace" : "inherit",
-        },
-        labelBgStyle: {
-          fill: isFeedback ? tokens.graphEdgeFeedbackBg : tokens.bgCanvas,
-          stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.borderDefault,
-          strokeWidth: 1,
-        },
-        labelBgPadding: [6, 3] as [number, number],
-        labelBgBorderRadius: 4,
       };
     });
     return [...graphEdges, ...Array.from(mergeTargets.keys(), (target): Edge => ({

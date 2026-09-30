@@ -1,5 +1,5 @@
 use grapher::{
-    compiler::{compile, compile_legacy, downstream},
+    compiler::{compile, compile_legacy, downstream, node_id},
     engine::feedback,
     model::*,
     runtime::{perform, Runtime},
@@ -128,14 +128,28 @@ fn workspace_selection_survives_restart_and_missing_load_preserves_state() {
 }
 
 #[test]
-fn compiler_and_snapshot_share_node_identity_validation() {
-    for name in ["".into(), "a b".into(), "节点".into(), "a.b".into(), "a/../b".into(), "x".repeat(65)] {
+fn arbitrary_node_names_map_to_safe_internal_ids() {
+    for name in ["a b".into(), "节点".into(), "a.b".into(), "a/../b".into(), "x".repeat(65)] {
         let graph = Graph { nodes: vec![Node { name: name.clone(), task: "task".into() }], ..Graph::default() };
-        assert!(compile(&graph, true).unwrap_err().iter().any(|e| e.code == "E201"));
-        let error = workspace::snapshot_node(Path::new("/missing/work"), Path::new("/missing/repo"), &name).unwrap_err();
-        assert!(error.contains("Invalid node name"), "{error}");
+        compile(&graph, true).unwrap();
+        let id = node_id(&name);
+        assert!(!id.is_empty());
+        assert!(id.len() <= 64);
+        assert!(id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'.'));
+        assert!(!id.contains('/') && !id.contains('\\'));
+        assert!(!id.starts_with('.') && !id.ends_with('.'));
+        assert!(!id.contains(".."));
     }
+    // Distinct labels must not collapse to one internal id.
+    assert_ne!(node_id("Foo"), node_id("foo"));
+    assert_ne!(node_id("a b"), node_id("a-b"));
+    assert_ne!(node_id(""), node_id("node"));
+    // The empty name stays a presence error, not a format constraint.
+    let graph = Graph { nodes: vec![Node { name: String::new(), task: "task".into() }], ..Graph::default() };
+    assert!(compile(&graph, true).unwrap_err().iter().any(|e| e.code == "E201"));
+    // Legacy-safe names keep their identity so existing refs and worktrees stay valid.
     for name in ["a-dep-b_9".into(), "x".repeat(64)] {
+        assert_eq!(node_id(&name), name);
         let graph = Graph { nodes: vec![Node { name, task: "task".into() }], ..Graph::default() };
         compile(&graph, true).unwrap();
     }
@@ -321,16 +335,18 @@ fn compiler_rejects_cycles_unknown_nodes_duplicates_empty_tasks_and_self_edges()
 }
 
 #[test]
-fn compiler_rejects_meaningless_feedback_and_unsafe_names() {
+fn compiler_rejects_meaningless_feedback() {
     let mut invalid = graph();
     invalid.edges.last_mut().unwrap().from = "backend".into();
     assert_eq!(compile(&invalid, true).unwrap_err()[0].code, "E207");
     assert!(compile(&invalid, false).is_err());
-    invalid.nodes[0].name = "../../escape".into();
-    assert!(compile(&invalid, true)
-        .unwrap_err()
-        .iter()
-        .any(|error| error.code == "E201"));
+    // Arbitrary labels are valid; only their internal id must stay safe.
+    let arbitrary = Graph {
+        original_goal: "g".into(),
+        nodes: vec![Node { name: "../../escape".into(), task: "task".into() }],
+        edges: Vec::new(),
+    };
+    compile(&arbitrary, true).unwrap();
     assert!(compile(&Graph::default(), true).is_err());
     assert!(compile(&Graph::default(), false).is_ok());
 }
@@ -727,7 +743,10 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
         "grapher-node"
     );
     fs::write(node_a.join("a.txt"), "hello from node A\n").unwrap();
-    assert!(workspace::snapshot_node(&node_a, &repository, "../invalid").is_err());
+    // Arbitrary labels are accepted but reach the ref namespace only as safe ids.
+    let invalid_ref = format!("refs/grapher/nodes/{}", node_id("../invalid"));
+    assert!(workspace::snapshot_node(&node_a, &repository, "../invalid").is_ok());
+    assert!(workspace::git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_ok());
     let head_a = workspace::snapshot_node(&node_a, &repository, "nodeA").unwrap();
 
     // 2. Verify Host has refs/grapher/nodes/nodeA pointing to head_a

@@ -10,7 +10,6 @@ import {
   FileCode,
   FileText,
   File,
-  Bot,
   Sparkles,
 } from "lucide-react";
 import { runtimeService } from "../../services/runtime";
@@ -35,7 +34,7 @@ interface SuggestionCandidate {
   _score?: number;
 }
 
-export interface PromptBoxProps
+interface PromptBoxProps
   extends Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, "onSubmit"> {
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLTextAreaElement> | any) => void;

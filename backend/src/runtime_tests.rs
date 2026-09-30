@@ -1210,3 +1210,142 @@ fn viewing_another_project_does_not_change_a_valid_run_binding() {
     let job = runtime.jobs().unwrap().remove(0);
     assert_eq!(Path::new(&job.config.repository), source);
 }
+
+#[test]
+fn post_publication_revision_rebuilds_from_published_head_and_merges_new_terminal() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: ["root", "child"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "root".into(),
+            to: "child".into(),
+            relation: "files".into(),
+            feedback: false,
+        }],
+    };
+    let (_temp, source, mut runtime) = setup(true, graph.clone());
+    runtime.approve().unwrap();
+    let root_job = runtime.jobs().unwrap().remove(0);
+    let path = Path::new(&root_job.execution.worktree);
+    workspace::prepare(&source, path, &root_job.execution.before, &[]).unwrap();
+    fs::write(path.join("root.txt"), "root v1").unwrap();
+    let root_head = workspace::snapshot_node(path, &source, "root").unwrap();
+    runtime
+        .finish(&root_job.execution, Ok((root_head, "done".into())))
+        .unwrap();
+    let child_job = runtime.jobs().unwrap().remove(0);
+    let path = Path::new(&child_job.execution.worktree);
+    workspace::prepare(
+        &source,
+        path,
+        &child_job.execution.before,
+        &runtime.parents("child"),
+    )
+    .unwrap();
+    fs::write(path.join("child.txt"), "child v1").unwrap();
+    let child_head = workspace::snapshot_node(path, &source, "child").unwrap();
+    runtime
+        .finish(&child_job.execution, Ok((child_head.clone(), "done".into())))
+        .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted {
+            head: published.clone(),
+        })
+        .unwrap();
+    assert_eq!(runtime.state.phase, "completed");
+    runtime.cleanup_worktrees().unwrap();
+
+    let mut revised = graph.clone();
+    revised
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "root")
+        .unwrap()
+        .task = "root v2".into();
+    revised.nodes.push(Node {
+        name: "extra".into(),
+        task: "extra".into(),
+    });
+    runtime
+        .revise_graph(
+            revised,
+            PlanningSummary {
+                planning_id: "revision-after-publication".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(runtime.state.nodes["root"].status, "dirty");
+    assert!(matches!(
+        runtime.state.nodes["child"].status.as_str(),
+        "waiting" | "dirty"
+    ));
+    assert_eq!(runtime.state.nodes["extra"].status, "waiting");
+
+    let mut jobs = runtime.jobs().unwrap();
+    let mut names: Vec<String> = jobs.iter().map(|job| job.execution.node.clone()).collect();
+    names.sort();
+    assert_eq!(names, vec!["extra".to_string(), "root".to_string()]);
+    for job in &jobs {
+        // New and invalidated work starts from the workspace users received,
+        // so its commit merges back cleanly instead of replaying the approval base.
+        assert_eq!(job.execution.before, published);
+    }
+    let root_position = jobs
+        .iter()
+        .position(|job| job.execution.node == "root")
+        .unwrap();
+    let root_job = jobs.remove(root_position);
+    let path = Path::new(&root_job.execution.worktree);
+    workspace::prepare(&source, path, &root_job.execution.before, &[]).unwrap();
+    fs::write(path.join("root.txt"), "root v2").unwrap();
+    let root_head = workspace::snapshot_node(path, &source, "root").unwrap();
+    runtime
+        .finish(&root_job.execution, Ok((root_head, "done".into())))
+        .unwrap();
+    let extra_job = jobs.remove(0);
+    assert_eq!(extra_job.execution.node, "extra");
+    let path = Path::new(&extra_job.execution.worktree);
+    workspace::prepare(&source, path, &extra_job.execution.before, &[]).unwrap();
+    fs::write(path.join("extra.txt"), "extra v1").unwrap();
+    let extra_head = workspace::snapshot_node(path, &source, "extra").unwrap();
+    runtime
+        .finish(&extra_job.execution, Ok((extra_head.clone(), "done".into())))
+        .unwrap();
+    let child_job = runtime.jobs().unwrap().remove(0);
+    assert_eq!(child_job.execution.node, "child");
+    assert_eq!(child_job.execution.before, published);
+    let path = Path::new(&child_job.execution.worktree);
+    workspace::prepare(
+        &source,
+        path,
+        &child_job.execution.before,
+        &runtime.parents("child"),
+    )
+    .unwrap();
+    fs::write(path.join("child.txt"), "child v2").unwrap();
+    let child_head = workspace::snapshot_node(path, &source, "child").unwrap();
+    runtime
+        .finish(&child_job.execution, Ok((child_head.clone(), "done".into())))
+        .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    assert!(publication.heads.contains(&child_head));
+    assert!(publication.heads.contains(&extra_head));
+    crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into())).unwrap();
+    assert_eq!(fs::read_to_string(source.join("root.txt")).unwrap(), "root v2");
+    assert_eq!(fs::read_to_string(source.join("child.txt")).unwrap(), "child v2");
+    assert_eq!(fs::read_to_string(source.join("extra.txt")).unwrap(), "extra v1");
+}

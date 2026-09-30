@@ -1,6 +1,6 @@
 import { t } from "../../i18n";
 import React, { useState } from "react";
-import { Folder, Plus, RotateCcw, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Folder, Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { ProjectItem } from "../../types";
 
 interface SidebarProps {
@@ -163,7 +163,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
 
       <div className="runs-list">
         {runs.length > 0 ? (
-          runs.map((id, index) => {
+          runs.map((id) => {
             const indicator = runIndicators[id];
             const isThisRunActive = ["running", "awaiting_approval", "publishing", "merging"].includes(indicator?.phase ?? (activeBackendRunId === id ? activeBackendPhase ?? "" : ""));
             const isUnread = Boolean(indicator?.unread && currentRunId !== id);

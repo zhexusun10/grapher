@@ -759,7 +759,8 @@ impl PiModelConfig {
     }
 }
 
-/// Parses the model text output to determine whether it chose "graph" or "serial".
+/// Parses the model text output to determine whether it chose "parallel" or "serial".
+/// Maps "parallel" to the internal "graph" execution mode.
 /// If ambiguous, missing, or model hallucinated, defaults safely to "serial".
 pub fn parse_route_decision(text: &str) -> Route {
     let trimmed = text.trim();
@@ -767,7 +768,7 @@ pub fn parse_route_decision(text: &str) -> Route {
 
     // 1. Direct single-word match (ignoring whitespace and surrounding punctuation)
     let clean_single = lower.trim_matches(|c: char| !c.is_alphanumeric());
-    if clean_single == "graph" {
+    if clean_single == "parallel" {
         return Route {
             plan_type: "graph".into(),
         };
@@ -781,7 +782,7 @@ pub fn parse_route_decision(text: &str) -> Route {
     // 2. Check each line in reverse order (bottom-up priority)
     for line in lower.lines().rev() {
         let line_clean = line.trim().trim_matches(|c: char| !c.is_alphanumeric());
-        if line_clean == "graph" {
+        if line_clean == "parallel" {
             return Route {
                 plan_type: "graph".into(),
             };
@@ -796,7 +797,7 @@ pub fn parse_route_decision(text: &str) -> Route {
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
             .collect();
-        let line_g = tokens.contains(&"graph");
+        let line_g = tokens.contains(&"parallel");
         let line_s = tokens.contains(&"serial");
         if line_g && !line_s {
             return Route {
@@ -818,7 +819,7 @@ pub fn parse_route_decision(text: &str) -> Route {
                 .split(|c: char| !c.is_alphanumeric())
                 .filter(|w| !w.is_empty())
                 .collect();
-            let after_g = after_tokens.contains(&"graph");
+            let after_g = after_tokens.contains(&"parallel");
             let after_s = after_tokens.contains(&"serial");
             if after_g && !after_s {
                 return Route {
@@ -838,7 +839,7 @@ pub fn parse_route_decision(text: &str) -> Route {
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .collect();
-    let total_g = all_tokens.contains(&"graph");
+    let total_g = all_tokens.contains(&"parallel");
     let total_s = all_tokens.contains(&"serial");
 
     if total_g && !total_s {
@@ -855,10 +856,10 @@ pub fn parse_route_decision(text: &str) -> Route {
     // 5. If both words are mentioned in prose, the later occurrence represents the conclusion
     if total_g && total_s {
         let last_g = lower
-            .match_indices("graph")
+            .match_indices("parallel")
             .filter_map(|(idx, _)| {
                 let before = lower[..idx].chars().next_back();
-                let after = lower[idx + 5..].chars().next();
+                let after = lower[idx + "parallel".len()..].chars().next();
                 let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
                 let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
                 if before_ok && after_ok {
@@ -1811,7 +1812,7 @@ assert '--mode' in sys.argv and sys.argv[sys.argv.index('--mode')+1] == 'rpc'
 request = json.loads(sys.stdin.readline())
 assert request['type'] == 'prompt'
 print(json.dumps({'type':'response','id':request['id'],'success':True}), flush=True)
-print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'graph'}]}}), flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'parallel'}]}}), flush=True)
 print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read() # RPC shutdown is requested by closing stdin.
 "#).unwrap();
@@ -1845,7 +1846,7 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
             },
             |line| events.push_str(&line),
         );
-        assert_eq!(result.unwrap(), "graph");
+        assert_eq!(result.unwrap(), "parallel");
         assert!(events.contains("grapher_process_exited"));
     }
 
