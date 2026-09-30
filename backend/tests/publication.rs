@@ -155,6 +155,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             pi_command: "/bin/sh".into(),
             pi_args: vec![script.to_string_lossy().into()],
             model: String::new(),
+            role_models: Default::default(),
             thinking_level: "medium".into(),
             max_parallel: 2,
             max_feedback: 1, auto_approve: false,

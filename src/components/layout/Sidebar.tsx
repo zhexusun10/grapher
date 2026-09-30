@@ -204,7 +204,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           })
         ) : (
           <div className="run-placeholder">
-            <span>No conversations for this project</span>
+            <span>暂无对话记录</span>
           </div>
         )}
       </div>

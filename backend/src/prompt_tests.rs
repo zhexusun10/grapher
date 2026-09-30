@@ -360,6 +360,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     runtime
         .create(
@@ -450,6 +451,7 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
                 max_parallel: 2,
                 max_feedback: 1,
                 auto_approve: false,
+                role_models: Default::default(),
             },
         )
         .unwrap();
@@ -506,6 +508,7 @@ fn legacy_planner_session_keeps_its_original_pi_identity() {
                 max_parallel: 2,
                 max_feedback: 1,
                 auto_approve: false,
+                role_models: Default::default(),
             },
             Some(planning_id.clone()),
             None,
@@ -573,6 +576,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let make_service = || {
         Arc::new(Service {
@@ -667,6 +671,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime
@@ -762,6 +767,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime
@@ -863,6 +869,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
@@ -938,6 +945,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     runtime
         .create(
@@ -1036,6 +1044,7 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let graph = Graph {
         original_goal: "test".into(),
@@ -1134,6 +1143,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let snapshot = plan_goal_internal(
         "Build two modules".into(),
@@ -1180,6 +1190,7 @@ fn partitioner_failure_does_not_create_or_approve_a_run() {
             max_parallel: 4,
             max_feedback: 3,
             auto_approve: false,
+            role_models: Default::default(),
         },
         None,
         None,
@@ -1263,6 +1274,7 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
         max_parallel: 1,
         max_feedback: 0,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let first_config = config(&first_script);
     let second_config = config(&second_script);
@@ -1357,6 +1369,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             pi_command: "/bin/sh".into(),
             pi_args: vec![script.to_string_lossy().into()],
             model: "mock/model".into(),
+            role_models: Default::default(),
             thinking_level: "medium".into(),
             max_parallel: 1,
             max_feedback: 0,
@@ -1429,6 +1442,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             pi_command: "/bin/sh".into(),
             pi_args: vec![script.to_string_lossy().into()],
             model: "mock/model".into(),
+            role_models: Default::default(),
             thinking_level: "medium".into(),
             max_parallel: 1,
             max_feedback: 0,
@@ -1520,6 +1534,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                         max_parallel: 1,
                         max_feedback: 0,
                         auto_approve: false,
+                        role_models: Default::default(),
                     },
                 )
                 .unwrap();
@@ -1721,6 +1736,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 max_parallel: 4,
                 max_feedback: 2,
                 auto_approve: false,
+                role_models: Default::default(),
             },
         )
         .unwrap();
@@ -1966,6 +1982,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 pi_command: "/bin/sh".into(),
                 pi_args: vec![script.to_string_lossy().into()],
                 model: "test".into(),
+                role_models: Default::default(),
                 thinking_level: "medium".into(),
                 max_parallel: 4,
                 max_feedback: 1,
@@ -2093,6 +2110,7 @@ fn planning_metrics_parsing_and_persistence() {
         max_parallel: 4,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let mut roles = std::collections::BTreeMap::new();
     roles.insert("planner".to_string(), metrics);
@@ -2162,6 +2180,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         #[cfg(feature = "fixture")]
         pi_args: Vec::new(),
         model: "test-model".into(),
+        role_models: Default::default(),
         thinking_level: "medium".into(),
         max_parallel: 2,
         max_feedback: 1,
@@ -2255,6 +2274,7 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
         max_parallel: 4,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let summary = PlanningSummary {
         planning_id: "legacy-plan-a".into(),
@@ -2356,6 +2376,7 @@ fn completed_graph_is_published_by_driver() {
         max_parallel: 4,
         max_feedback: 1,
         auto_approve: false,
+        role_models: Default::default(),
     };
     runtime
         .create(
@@ -2534,6 +2555,7 @@ fn planning_preflight_checks_model_format() {
         pi_command: "node".into(),
         #[cfg(feature = "fixture")]
         pi_args: vec![],
+        role_models: Default::default(),
     };
 
     // 1. Empty model fails preflight
@@ -2560,6 +2582,7 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
         max_parallel: 2,
         max_feedback: 0,
         auto_approve: false,
+        role_models: Default::default(),
     };
     let calls = std::cell::Cell::new(0);
     let fetch = || {
@@ -2625,6 +2648,7 @@ fn save_config_updates_bootstrap_and_persists() {
     let new_config = Config {
         repository: temp_dir.path().to_string_lossy().into(),
         model: "openai/gpt-4o".into(),
+        role_models: Default::default(),
         thinking_level: "high".into(),
         max_parallel: 2,
         max_feedback: 3,
@@ -2708,4 +2732,122 @@ fn save_config_updates_bootstrap_and_persists() {
         reloaded.effective_role_models.get("planner").unwrap(),
         "openai/gpt-4o"
     );
+}
+
+#[test]
+fn independent_role_settings_persist_and_invalid_levels_do_not_replace_saved_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(temp.path()).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": temp.path(), "model": "legacy/default", "thinkingLevel": "medium", "maxParallel": 2,
+        "roleModels": {
+            "partitioner": {"model": "example/small", "thinkingLevel": "off"},
+            "planner": {"model": "example/large", "thinkingLevel": "high"},
+            "nodeAgent": {"model": "example/coder", "thinkingLevel": "low"}
+        }
+    })).unwrap();
+    save_config(config.clone(), &service).unwrap();
+    let reloaded = bootstrap(&service, false).unwrap();
+    assert_eq!(reloaded.config.role_models, config.role_models);
+    let saved = fs::read(temp.path().join("config.json")).unwrap();
+    let from_disk: Config = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(from_disk.role_models, config.role_models);
+    let mut invalid = config.clone();
+    invalid.role_models.get_mut("planner").unwrap().thinking_level = Some("invalid".into());
+    assert!(save_config(invalid, &service).err().unwrap().contains("planner thinking level"));
+    assert_eq!(fs::read(temp.path().join("config.json")).unwrap(), saved);
+
+    let mut runtime = service.runtime.lock().unwrap();
+    runtime.create(Graph {
+        nodes: vec![Node { name: "task".into(), task: "test".into() }],
+        ..Graph::default()
+    }, config.clone()).unwrap();
+    let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(replayed.config.unwrap().role_models, config.role_models);
+}
+
+#[test]
+fn explicit_node_model_is_checked_even_in_serial_preflight() {
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": "/tmp/fake", "model": "example/default", "maxParallel": 1,
+        "roleModels": {"nodeAgent": {"model": "missing-provider", "thinkingLevel": "off"}}
+    })).unwrap();
+    let error = validate_planning_models_preflight(&config, Some("serial"), || None).unwrap_err();
+    assert!(error.contains("NodeAgent"));
+    assert!(error.contains("provider prefix"));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn auto_planning_and_node_execution_receive_their_independent_cli_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    fs::create_dir(&repository).unwrap();
+    fs::write(repository.join("input.txt"), "initial").unwrap();
+    let script = temp.path().join("roles.sh");
+    fs::write(&script, r#"
+cat > /dev/null
+model=''
+thinking=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --model) model="$2" ;;
+        --thinking) thinking="$2" ;;
+    esac
+    shift
+done
+case "$GRAPHER_MODE" in
+    partition)
+        test "$model:$thinking" = 'example/small:off' || exit 21
+        text=graph
+        ;;
+    planner)
+        test "$model:$thinking" = 'example/large:high' || exit 22
+        printf '%s' '{"originalGoal":"test","nodes":[{"name":"worker","task":"test"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+        text=planned
+        ;;
+    node)
+        test "$model:$thinking" = 'example/coder:low' || exit 23
+        text=done
+        ;;
+    *) exit 24 ;;
+esac
+printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$text"
+"#).unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "legacy/default", "thinkingLevel": "medium", "maxParallel": 1,
+        "engine": "pi", "piCommand": "/bin/sh", "piArgs": [script],
+        "roleModels": {
+            "partitioner": {"model": "example/small", "thinkingLevel": "off"},
+            "planner": {"model": "example/large", "thinkingLevel": "high"},
+            "nodeAgent": {"model": "example/coder", "thinkingLevel": "low"}
+        }
+    })).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&temp.path().join("data")).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let snapshot = plan_goal_internal("test".into(), config, None, None, None, &service, |_| {}, |_| {}, |_| {}).unwrap();
+    assert_eq!(snapshot.plan_type.as_deref(), Some("graph"));
+    assert_eq!(snapshot.phase, "awaiting_approval");
+    service.runtime.lock().unwrap().approve().unwrap();
+    drive(service.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while service.driving.load(Ordering::SeqCst) {
+        assert!(std::time::Instant::now() < deadline, "Driver did not settle");
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let runtime = service.runtime.lock().unwrap();
+    assert_eq!(runtime.state.phase, "completed");
+    assert_eq!(runtime.state.executions.len(), 1);
+    assert_eq!(runtime.state.executions[0].status, "completed");
 }

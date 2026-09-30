@@ -89,6 +89,15 @@ pub struct PlanningSummary {
     pub repository: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleModelConfig {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -107,11 +116,34 @@ pub struct Config {
     pub model: String,
     #[serde(default = "default_thinking_level")]
     pub thinking_level: String,
+    // Missing role settings retain the legacy model/thinking defaults.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub role_models: BTreeMap<String, RoleModelConfig>,
     pub max_parallel: usize,
     #[serde(default = "default_max_feedback")]
     pub max_feedback: usize,
     #[serde(default)]
     pub auto_approve: bool,
+}
+
+impl Config {
+    pub fn validate_model_settings(&self) -> Result<(), String> {
+        const LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+        if !LEVELS.contains(&self.thinking_level.as_str()) {
+            return Err(format!("Invalid default thinking level: {}", self.thinking_level));
+        }
+        for (role, settings) in &self.role_models {
+            if !matches!(role.as_str(), "partitioner" | "planner" | "nodeAgent") {
+                return Err(format!("Unknown model role: {role}"));
+            }
+            if let Some(level) = &settings.thinking_level {
+                if !LEVELS.contains(&level.as_str()) {
+                    return Err(format!("Invalid {role} thinking level: {level}"));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_max_feedback() -> usize {

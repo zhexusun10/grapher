@@ -1406,7 +1406,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           key={savedPlannerKey}
                           planningIds={savedPlannerIds}
                           showUserTurns={!isPlanning}
-                          skipFirstUser={state.events.some((event) => event.type === "created" && event.planning_id === savedPlannerIds[0])}
+                          skipFirstUser={effectiveMessages.length > 0}
                           onReady={() => {
                             setReadySavedPlannerKey(savedPlannerKey);
                             revealConversation();

@@ -47,6 +47,7 @@ fn config() -> Config {
         max_parallel: 2,
         max_feedback: 3,
         auto_approve: false,
+        role_models: Default::default(),
     }
 }
 

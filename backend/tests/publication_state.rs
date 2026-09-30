@@ -15,6 +15,7 @@ fn config(source: &Path) -> Config {
         pi_command: "node".into(),
         #[cfg(feature = "fixture")]
         pi_args: Vec::new(),
+        role_models: Default::default(),
     }
 }
 fn source(root: &Path) -> (std::path::PathBuf, String) {

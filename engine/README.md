@@ -37,12 +37,16 @@ npm run pi:build
 
 | 角色 | Pi 加载策略 |
 | --- | --- |
-| Partitioner | 无工具、无 context files、无 skills/extensions，模型跟随全局配置（或由 `PARTITIONER_MODEL` 覆盖），思维链永远关闭（`thinking=off`，若不支持则设为最低） |
-| Planner | 只开放 `node,edge,read,bash`，加载 Grapher 显式 planning extension，不加载项目 context/自动扩展 |
+| Partitioner | 无工具、无 context files、无 skills/extensions；可独立选择模型与思维等级，默认 `thinking=off`，推荐小型、低延迟模型 |
+| Planner | 只开放 `node,edge,read,bash`，加载 Grapher 显式 planning extension，不加载项目 context/自动扩展；可独立选择模型与思维等级，推荐中大型模型 |
 | Node Agent | 开放 Pi 原生工具，允许受信工作区的 skills/extensions |
 | Merger | 固定冲突修复 prompt 和工具，不加载项目 context/自动扩展 |
 
+设置中分别提供 **Partitioner**、**Planner**、**Node Agent / Pi Instance** 的模型和思维等级选择，共享一套 Provider 认证。配置以 `roleModels.partitioner/planner/nodeAgent` 保存；旧 `model` / `thinkingLevel` 保留为兼容默认值。未单独设置模型的角色使用默认模型，Partitioner 未设置思维等级时关闭，其他角色沿用默认等级。Merger 使用 Node Agent / Pi Instance 配置。角色的 `*_MODEL` / `*_THINKING` 环境变量仍优先于界面设置，并在界面提示；保存设置只影响后续 Run，不改变已运行的会话。
+
 后端启动及保存配置时，会为已绑定的仓库/Partitioner 模型异步预启动一个**空闲的单次使用 RPC 会话**；Auto 规划领取后立即补充下一个。模型或仓库不匹配、图片参数等无法复用时仍冷启动。Pi 最终回答会先在界面展示路线预览；只有正常完成并退出后，后端才确认路线并开始后续规划。预热进程领取时转归当前 Run 管理，取消 Run 会终止它；认证变更会使空闲预热失效。`partition.jsonl` 的 `grapher_process_started.prewarmed` 可用于检查是否命中。
+
+Graph 的共享原生运行时也在后端启动、保存配置和认证完成时异步预热：提前复制并校验 Pi 及依赖，避免首次 Planner 启动才同步承担这项开销。未保存配置的 Auto/Graph 请求会在模型预检时兜底触发，和模型校验、Partitioner 并行。并发触发只执行一次，失败可重试；实际启动仍使用同一份经过校验的运行时。此预热不调用模型、不提前快照项目，也不复用 Planner 对话或独立工作区。Serial 请求不会通过预检触发 Graph 预热。
 
 生产入口为安装目录内的 `engine/entrypoint.mjs`，通过宿主 Node 启动锁定 Pi。Partitioner/Serial/源目录 Merger 使用源项目目录；Planner 与 Graph 节点保留独立工作区，macOS 使用 Seatbelt，Linux 使用 bubblewrap。Windows 使用原版 Node/Git Bash 的宿主进程与独立 Git 工作区，不使用逐节点沙箱；工作流验证与权限差异见 [Windows 原生执行](windows-native-plan.md)。Planner 工具实现及 Pi 源码不改动，宿主 Rust 保留图调度、Git 组合与发布。源目录角色保持原生工具行为；Graph 路径适配及呈现规则见下文。历史配置中的 command/args 只在 `fixture` 测试构建可注入。
 

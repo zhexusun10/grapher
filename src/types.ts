@@ -4,7 +4,9 @@ export interface GraphEdge { from: string; to: string; relation: string; feedbac
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; maxParallel: number; maxFeedback: number; autoApprove: boolean }
+export type ModelRole = "partitioner" | "planner" | "nodeAgent";
+export interface RoleModelConfig { model: string; thinkingLevel?: ThinkingLevel }
+export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
 export interface ExecutionMetrics {
   durationSeconds: number;

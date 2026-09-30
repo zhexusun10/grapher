@@ -25,6 +25,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
+        role_models: Default::default(),
     };
     let mut output = String::new();
     let result = run_pi(
@@ -259,6 +260,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
+        role_models: Default::default(),
     };
     let mut output = String::new();
     let result = run_pi(
@@ -301,6 +303,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
+        role_models: Default::default(),
     };
 
     // 1. Node Agent: must NOT have --no-skills or --no-extensions, MUST have --approve, must NOT restrict tools
@@ -433,6 +436,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
+        role_models: Default::default(),
     };
     for (role, name) in [
         (PiRole::Partitioner, "partition"),
@@ -505,6 +509,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         thinking_level: "medium".into(),
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
+        role_models: Default::default(),
     };
     let mut output = String::new();
     run_pi(
@@ -566,6 +571,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script_path.to_string_lossy().into()],
         model: "internal-grapher-model".into(),
+        role_models: Default::default(),
         thinking_level: "medium".into(),
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
@@ -585,12 +591,12 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         Some("off")
     );
     std::env::set_var("PARTITIONER_THINKING", "medium");
-    // Partitioner deliberately clamps unsupported higher reasoning levels to off.
+    // Partitioner defaults to off, but an explicit role override is respected.
     assert_eq!(
         PiModelConfig::resolve(PiRole::Partitioner, &base_config)
             .thinking
             .as_deref(),
-        Some("off")
+        Some("medium")
     );
     match saved_thinking {
         Some(value) => std::env::set_var("PARTITIONER_THINKING", value),

@@ -11,7 +11,6 @@ import {
   Check,
   Eye,
   EyeOff,
-  Sparkles,
   ShieldCheck,
   LogIn,
   LogOut,
@@ -21,7 +20,8 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
-import type { ThinkingLevel } from "../types";
+import type { Config } from "../types";
+import { RoleModelSettings } from "./RoleModelSettings";
 import styles from "./ProviderSettings.module.css";
 import {
   providerAuth,
@@ -51,25 +51,12 @@ function AuthLink({ url, label }: { url?: string; label?: string }) {
   );
 }
 
-export function ProviderSettings({
-  model,
-  onModel,
-  thinkingLevel,
-  onThinkingLevel,
-  effectiveRoleModels,
-  envOverrides = {},
-}: {
-  model: string;
-  onModel: (model: string) => void;
-  thinkingLevel: ThinkingLevel;
-  onThinkingLevel: (level: ThinkingLevel) => void;
-  effectiveRoleModels?: Record<string, string>;
+export function ProviderSettings({ config, setConfig, envOverrides = {} }: {
+  config: Config;
+  setConfig: React.Dispatch<React.SetStateAction<Config>>;
   envOverrides?: Record<string, string>;
 }) {
   const [catalog, setCatalog] = useState<ProviderCatalog>();
-  const [providerFilter, setProviderFilter] = useState(
-    model.includes("/") ? model.slice(0, model.indexOf("/")) : ""
-  );
   const [activeProvider, setActiveProvider] = useState<ProviderInfo | null>(null);
   const [selectedMethod, setSelectedMethod] = useState<"api_key" | "oauth">("api_key");
   const [login, setLogin] = useState<LoginState>();
@@ -203,12 +190,8 @@ export function ProviderSettings({
     setActionSuccess("");
     try {
       await providerAuth.logout(p.id);
-      if (model.startsWith(`${p.id}/`)) {
-        onModel("");
-      }
-      if (providerFilter === p.id) {
-        setProviderFilter("");
-      }
+      // Credentials are shared across roles. Retain selections so re-login
+      // does not silently change any role's saved model configuration.
       setCatalog((prev) => {
         if (!prev) return prev;
         return {
@@ -269,180 +252,10 @@ export function ProviderSettings({
 
   const configuredProviders = providers.filter((p) => p.configured);
   const configuredCount = configuredProviders.length;
-  const availableModels = catalog?.models.filter(
-    (m) => m.available && (!providerFilter || m.provider === providerFilter)
-  ) ?? [];
 
   return (
     <div className="provider-settings-container">
-      {/* Top Model Setting & Presets */}
-      <div className="model-quick-config">
-        {Object.keys(envOverrides).length > 0 && (
-          <div style={{
-            background: "rgba(234, 179, 8, 0.1)",
-            border: "1px solid rgba(234, 179, 8, 0.3)",
-            borderRadius: "6px",
-            padding: "8px 12px",
-            marginBottom: "12px",
-            fontSize: "12px",
-            color: "#eab308",
-            display: "flex",
-            flexDirection: "column",
-            gap: "4px"
-          }}>
-            <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: "6px" }}>
-              <span>⚠️ 检测到后端环境变量强制覆盖角色模型：</span>
-            </div>
-            {Object.entries(envOverrides).map(([role, mod]) => (
-              <div key={role} style={{ marginLeft: "14px", color: "var(--text-primary, #ddd)" }}>
-                • <code>{role}</code>: <strong>{mod}</strong>
-              </div>
-            ))}
-            <div style={{ color: "var(--text-muted, #888)", fontSize: "11px", marginTop: "2px" }}>
-              环境变量优先于界面设置。
-            </div>
-          </div>
-        )}
-
-        <div className="form-grid">
-          <label className="form-field">
-            <span>Provider 筛选</span>
-            <select
-              value={providerFilter}
-              disabled={busy || pending}
-              onChange={(e) => setProviderFilter(e.target.value)}
-              className="provider-filter-select"
-            >
-              <option value="">全部 Provider</option>
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.id}) {p.configured ? "✓ 已认证" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="form-field">
-            <span>默认模型</span>
-            <div className="model-input-wrapper">
-              <input
-                list="provider-models"
-                value={model}
-                onChange={(e) => onModel(e.target.value)}
-                placeholder="例如: openai/gpt-4o 或 anthropic/claude-3-7-sonnet"
-                className="model-text-input"
-              />
-              {model && (
-                <button
-                  type="button"
-                  className="model-input-clear-btn"
-                  onClick={() => onModel("")}
-                  title="清空已选模型"
-                >
-                  <X size={13} />
-                </button>
-              )}
-            </div>
-            {model && !model.includes("/") && (
-              <div style={{ color: "#f87171", fontSize: "11px", marginTop: "4px" }}>
-                请使用 <code>provider/model</code> 格式
-              </div>
-            )}
-            {catalog?.models && catalog.models.length > 0 && (
-              <select
-                value={catalog.models.some((m) => `${m.provider}/${m.id}` === model) ? model : ""}
-                onChange={(e) => {
-                  if (e.target.value) onModel(e.target.value);
-                }}
-                className="provider-filter-select"
-                style={{ marginTop: "6px", fontSize: "12px" }}
-              >
-                <option value="">-- 从模型列表快速选择 --</option>
-                {catalog.models
-                  .filter((m) => !providerFilter || m.provider === providerFilter)
-                  .map((m) => {
-                    const fullId = `${m.provider}/${m.id}`;
-                    return (
-                      <option key={fullId} value={fullId}>
-                        {fullId} ({m.name}){m.available ? " · [可用]" : ""}
-                      </option>
-                    );
-                  })}
-              </select>
-            )}
-            <datalist id="provider-models">
-              {catalog?.models
-                .filter((m) => !providerFilter || m.provider === providerFilter)
-                .map((m) => (
-                  <option
-                    key={`${m.provider}/${m.id}`}
-                    value={`${m.provider}/${m.id}`}
-                  >
-                    {m.name} · {m.api}
-                    {m.available ? " · [可用]" : ""}
-                  </option>
-                ))}
-            </datalist>
-          </label>
-        </div>
-
-        <label className="settings-thinking-field">
-          <span>思考等级</span>
-          <select
-            value={thinkingLevel}
-            onChange={(e) => onThinkingLevel(e.target.value as ThinkingLevel)}
-          >
-            <option value="off">关闭</option>
-            <option value="minimal">最少 (minimal)</option>
-            <option value="low">低 (low)</option>
-            <option value="medium">中 (medium)</option>
-            <option value="high">高 (high)</option>
-            <option value="xhigh">极高 (xhigh)</option>
-            <option value="max">最大 (max)</option>
-          </select>
-        </label>
-
-        {effectiveRoleModels && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "11px", color: "var(--text-muted, #888)", marginTop: "8px" }}>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ fontWeight: 600 }}>当前生效：</span>
-              <span>规划 (Planner): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.planner || "未设置"}</code></span>
-              <span>任务切分 (Partitioner): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.partitioner || "未设置"}</code></span>
-              <span>节点执行 (Node): <code style={{ color: "var(--text-primary, #ddd)" }}>{effectiveRoleModels.nodeAgent || "未设置"}</code></span>
-            </div>
-            {model && effectiveRoleModels.planner !== model && !envOverrides.planner && (
-              <div style={{ color: "#38bdf8", fontSize: "11px" }}>
-                ℹ️ 已选 <code>{model}</code>（点击下方“保存所有配置”后同步至后端生效）
-              </div>
-            )}
-          </div>
-        )}
-
-        {availableModels.length > 0 && (
-          <div className="model-quick-chips">
-            <span className="quick-chips-label">
-              <Sparkles size={12} /> 可用模型
-            </span>
-            <div className="quick-chips-list">
-              {availableModels.slice(0, 8).map((m) => {
-                const fullId = `${m.provider}/${m.id}`;
-                const isSelected = model === fullId;
-                return (
-                  <button
-                    key={fullId}
-                    type="button"
-                    className={`model-chip ${isSelected ? "active" : ""}`}
-                    onClick={() => onModel(fullId)}
-                    title={`点击选用: ${fullId}`}
-                  >
-                    {m.name || m.id}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
+      <RoleModelSettings config={config} setConfig={setConfig} catalog={catalog} envOverrides={envOverrides} busy={busy || pending} />
 
       {/* Pi Auth Center Header */}
       <div className="pi-auth-header-card">

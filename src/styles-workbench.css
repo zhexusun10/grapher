@@ -3691,6 +3691,18 @@
   outline: none;
 }
 
+.role-model-settings { display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px; }
+.role-model-card { border: 1px solid var(--border-default); border-radius: 8px; padding: 12px; min-width: 0; }
+.role-model-card h5 { margin: 0 0 6px; font-size: 13px; color: var(--text-primary); }
+.role-model-card p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+.role-model-card .form-grid { grid-template-columns: minmax(0, 2fr) minmax(130px, 1fr); }
+.role-model-card .form-field { min-width: 0; }
+.role-model-card .provider-filter-select { max-width: 100%; }
+.role-model-effective, .role-model-warning { display: block; margin-top: 8px; font-size: 11px; overflow-wrap: anywhere; }
+.role-model-effective { color: var(--text-secondary); }
+.role-model-warning { color: #eab308; }
+@media (max-width: 600px) { .role-model-card .form-grid { grid-template-columns: 1fr; } }
+
 .settings-thinking-field {
   display: flex;
   align-items: center;

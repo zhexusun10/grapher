@@ -8,8 +8,51 @@ use std::{
     process::Command,
     sync::{Mutex, OnceLock},
 };
+#[cfg(any(not(feature = "fixture"), test))]
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+};
 
 static RUNTIME: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+#[cfg(not(feature = "fixture"))]
+static RUNTIME_PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Prepare Graph's shared, verified engine copy before a Planner needs it.
+/// No project snapshots, sessions, tools or model calls are started here.
+#[cfg(not(feature = "fixture"))]
+pub(crate) fn warm_graph_runtime(repository: PathBuf) {
+    if repository.as_os_str().is_empty() {
+        return;
+    }
+    schedule_runtime_prewarm(&RUNTIME_PREWARM_STARTED, move || {
+        crate::workspace::validate_binding(&repository)?;
+        require_graph_execution()?;
+        prepared_runtime().map(|_| ())
+    });
+}
+
+#[cfg(any(not(feature = "fixture"), test))]
+fn schedule_runtime_prewarm(
+    started: &'static AtomicBool,
+    prepare: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Option<thread::JoinHandle<()>> {
+    // Saving configuration and starting concurrent runs must not queue threads
+    // behind RUNTIME's expensive copy. A failure remains retryable; successful
+    // preparation is shared by all Graph executions in this backend process.
+    if started
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return None;
+    }
+    Some(thread::spawn(move || {
+        if let Err(error) = prepare() {
+            started.store(false, Ordering::SeqCst);
+            eprintln!("[Grapher] Graph runtime prewarm unavailable: {error}");
+        }
+    }))
+}
 
 pub fn require_graph_execution() -> Result<(), String> {
     #[cfg(windows)]
@@ -292,6 +335,34 @@ pub fn check_retired_leases(data: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_prewarm_is_async_single_flight_and_retries_after_failure() {
+        use std::{sync::mpsc, time::Duration};
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = schedule_runtime_prewarm(&STARTED, move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Err("test preparation failure".into())
+        })
+        .unwrap();
+        // Scheduling returned while preparation is still blocked. Repeated
+        // config saves/requests neither wait nor launch another copy.
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(schedule_runtime_prewarm(&STARTED, || panic!("duplicate preparation")).is_none());
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(!STARTED.load(Ordering::SeqCst));
+
+        schedule_runtime_prewarm(&STARTED, || Ok(()))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(STARTED.load(Ordering::SeqCst));
+        assert!(schedule_runtime_prewarm(&STARTED, || panic!("already prepared")).is_none());
+    }
 
     #[test]
     #[cfg(target_os = "macos")]

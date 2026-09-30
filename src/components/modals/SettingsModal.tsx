@@ -11,7 +11,6 @@ interface SettingsModalProps {
   setConfig: React.Dispatch<React.SetStateAction<Config>>;
   repoInfo?: RepositoryInfo | null;
   dataPath: string;
-  effectiveRoleModels?: Record<string, string>;
   envOverrides?: Record<string, string>;
   onOpenProject?: () => void;
   onDetectRepository?: (path?: string) => void;
@@ -26,7 +25,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   config,
   setConfig,
   dataPath,
-  effectiveRoleModels,
   envOverrides,
   onSaveConfig,
 }) => {
@@ -86,11 +84,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 <h4>模型与 Provider</h4>
               </div>
               <ProviderSettings
-                model={config.model}
-                onModel={model => setConfig(prev => ({ ...prev, model }))}
-                thinkingLevel={config.thinkingLevel ?? "medium"}
-                onThinkingLevel={thinkingLevel => setConfig(prev => ({ ...prev, thinkingLevel }))}
-                effectiveRoleModels={effectiveRoleModels}
+                config={config}
+                setConfig={setConfig}
                 envOverrides={envOverrides}
               />
             </div>

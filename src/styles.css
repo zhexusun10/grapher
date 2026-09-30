@@ -1140,10 +1140,11 @@ a,
   padding: 8px 10px;
   opacity: 0.8;
   user-select: none;
-  white-space: nowrap;
-  width: var(--sidebar-content-width, 200px);
-  min-width: var(--sidebar-content-width, 200px);
-  flex-shrink: 0;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.4;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .sidebar-bottom {

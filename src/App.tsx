@@ -12,6 +12,7 @@ import {
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
 import { providerAuth } from "./services/providerAuth";
+import { modelRoles, planningModelRoles, roleModelConfig } from "./modelConfig";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
@@ -71,7 +72,6 @@ export default function App() {
     return { ...initialConfig, maxFeedback: 3 };
   });
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
-  const [effectiveRoleModels, setEffectiveRoleModels] = useState<Record<string, string>>({});
   const [envOverrides, setEnvOverrides] = useState<Record<string, string>>({});
   const repositoryStatus = useRepositoryStatus(config.repository);
   const repositoryBlocked = !!config.repository && repositoryStatus?.valid === false;
@@ -166,6 +166,12 @@ export default function App() {
     });
   };
 
+  useEffect(() => {
+    if (state.runId && currentRepoPath && !runs.includes(state.runId)) {
+      recordRunToWorkspace(state.runId, currentRepoPath);
+    }
+  }, [state.runId, currentRepoPath, runs]);
+
   // 每个运行的消息按发送顺序显示；修改旧消息也作为新的跟进指令追加。
   const [sessionEntries, setSessionEntries] = useState<ChatMessage[]>([]);
   // Keep optimistic turns scoped to their Run while navigating away. Planner
@@ -205,7 +211,7 @@ export default function App() {
 
   const effectiveMessages = useMemo<ChatMessage[]>(() => {
     if (sessionEntries.length > 0) return sessionEntries;
-    const initialGoal = state.graph.originalGoal || goal;
+    const initialGoal = state.graph.originalGoal || goal || (state.runId ? runLabels[state.runId] : "");
     if (initialGoal) {
       return [
         {
@@ -217,7 +223,7 @@ export default function App() {
       ];
     }
     return [];
-  }, [sessionEntries, state.graph.originalGoal, goal]);
+  }, [sessionEntries, state.graph.originalGoal, goal, state.runId, runLabels]);
 
   const [routeType, setRouteType] = useState<PlanRouteType>(() => deduceRouteType(emptySnapshot));
 
@@ -451,7 +457,6 @@ export default function App() {
     const scope = planningRecovery.begin();
     const data = await runtimeService.bootstrap();
     if (!planningRecovery.current(scope)) return;
-    if (data.effectiveRoleModels) setEffectiveRoleModels(data.effectiveRoleModels);
     if (data.envOverrides) setEnvOverrides(data.envOverrides);
 
     let storedProjects: ProjectItem[] | null = null;
@@ -923,14 +928,11 @@ export default function App() {
     }
     try {
       const boot = await runtimeService.saveConfig(nextConfig);
-      if (boot.effectiveRoleModels) {
-        setEffectiveRoleModels(boot.effectiveRoleModels);
-      }
       if (boot.envOverrides) {
         setEnvOverrides(boot.envOverrides);
       }
     } catch (e) {
-      console.warn("Failed to persist config to backend:", e);
+      throw new Error(`保存设置失败：${String(e)}`);
     }
     setModal(null);
     setError("");
@@ -1112,29 +1114,36 @@ export default function App() {
         setError("请先在左侧工作区选择绑定的本地 Git 仓库。");
         return;
       }
-      const model = config.model?.trim();
-      if (!model) {
-        setModal("settings");
-        setError("请先在设置中配置执行模型。");
-        return;
-      }
-      if (!model.includes("/")) {
-        setModal("settings");
-        setError(`模型标识 "${model}" 缺少 Provider 前缀（例如: openai/gpt-4o 或 opencode-go/qwen3.8-flash）。无前缀模型会导致引擎无法定位提供商。`);
-        return;
-      }
-
-      const providerId = model.split("/")[0];
-      try {
-        const cat = await providerAuth.catalog();
-        const prov = cat.providers.find((p) => p.id === providerId);
-        if (prov && !prov.configured) {
+      const requiredModels = planningModelRoles(effectiveMode).map(role => ({
+        label: modelRoles.find(item => item.id === role)!.label,
+        model: roleModelConfig(config, role, envOverrides).model,
+      }));
+      for (const { label, model } of requiredModels) {
+        if (!model) {
           setModal("settings");
-          setError(`所选模型服务商 "${prov.name || providerId}" 尚未完成认证，请在设置中配置 API Key 或登录凭据后再提交。`);
+          setError(`请先在设置中配置 ${label} 的模型。`);
           return;
         }
+        const [provider, modelId] = model.split("/", 2);
+        if (!provider || !modelId) {
+          setModal("settings");
+          setError(`${label} 模型标识 "${model}" 需使用 provider/model 格式。`);
+          return;
+        }
+      }
+      try {
+        const cat = await providerAuth.catalog();
+        for (const { label, model } of requiredModels) {
+          const providerId = model.split("/")[0];
+          const prov = cat.providers.find(p => p.id === providerId);
+          if (prov && !prov.configured) {
+            setModal("settings");
+            setError(`${label} 所选服务商 "${prov.name || providerId}" 尚未认证，请在设置中配置 API Key 或登录。`);
+            return;
+          }
+        }
       } catch {
-        // If provider catalog call fails or times out, proceed to backend preflight
+        // If provider catalog call fails or times out, proceed to backend preflight.
       }
       let partInTag = false;
       let planInTag = false;
@@ -1149,13 +1158,40 @@ export default function App() {
           if (!planningRecovery.current(scope)) {
             // Detached planning still creates a real Run. Keep it in the sidebar
             // without replacing the newly opened conversation.
+            if (event.type === "run_started" && event.runId) {
+              recordRunToWorkspace(event.runId);
+              setRunLabels((prev) => {
+                if (prev[event.runId!]) return prev;
+                const updated = { ...prev, [event.runId!]: targetGoal };
+                try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch {}
+                return updated;
+              });
+            }
             if (event.type === "complete" && event.snapshot?.runId) {
               recordRunToWorkspace(event.snapshot.runId);
             }
             return;
           }
           if (event.type === "run_started") {
-            if (event.runId) setPlannerStream((prev) => ({ ...prev, runId: event.runId! }));
+            if (event.runId) {
+              const runId = event.runId;
+              setPlannerStream((prev) => ({ ...prev, runId }));
+              recordRunToWorkspace(runId);
+              setState((prev) => ({ ...prev, runId }));
+              setSessionEntries((prev) => {
+                const updated = prev.map((msg) => (!msg.runId ? { ...msg, runId } : msg));
+                messagesByRunRef.current.set(runId, updated);
+                return updated;
+              });
+              setRunLabels((prev) => {
+                if (prev[runId]) return prev;
+                const updated = { ...prev, [runId]: targetGoal };
+                try {
+                  localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+                } catch {}
+                return updated;
+              });
+            }
           } else if (event.type === "partitioner") {
             const pEvent = event.event;
             if (pEvent?.type === "message_update") {
@@ -2149,7 +2185,7 @@ export default function App() {
                 setState(snapshot);
                 markSnapshotRead(snapshot);
                 setRouteType(deduced);
-                setGoal(snapshot.graph.originalGoal || "");
+                setGoal(snapshot.graph.originalGoal || (id ? runLabels[id] : "") || "");
                 if (id !== state.runId) {
                   setSessionEntries(messagesByRunRef.current.get(id) ?? []);
                   setEditingMessage(null);
@@ -2296,7 +2332,6 @@ export default function App() {
                 config={config}
                 setConfig={setConfig}
                 dataPath={dataPath}
-                effectiveRoleModels={effectiveRoleModels}
                 envOverrides={envOverrides}
                 onSaveConfig={handleSaveConfig}
               />

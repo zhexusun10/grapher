@@ -73,6 +73,16 @@ fn partitioner_key(config: &Config) -> Result<(PathBuf, String, String, String),
     ))
 }
 
+/// Warm both Auto routing and Graph's shared native engine off the request path.
+#[cfg(not(feature = "fixture"))]
+pub fn warm_planning_engines(config: Config) {
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) || config.repository.trim().is_empty() {
+        return;
+    }
+    crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
+    warm_partitioner(config);
+}
+
 /// Start a single idle, no-tools RPC Partitioner for the selected repository.
 /// The worker never receives a goal until a matching planning request claims
 /// it; mismatched configurations continue through the normal cold path.
@@ -715,36 +725,31 @@ pub struct PiModelConfig {
 
 impl PiModelConfig {
     pub fn resolve(role: PiRole, base_config: &Config) -> Self {
+        let key = match role {
+            PiRole::Partitioner => "partitioner",
+            PiRole::Planner => "planner",
+            // Merger is also a Pi Instance and follows Node Agent settings
+            // unless MERGER_MODEL / MERGER_THINKING explicitly override them.
+            PiRole::NodeAgent | PiRole::Merger => "nodeAgent",
+        };
+        let settings = base_config.role_models.get(key);
         let model = std::env::var(role.model_env_var())
             .ok()
-            .filter(|m| !m.trim().is_empty())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| settings.map(|value| value.model.clone()).filter(|value| !value.trim().is_empty()))
             .unwrap_or_else(|| base_config.model.clone());
-
-        let thinking = match role {
-            PiRole::Partitioner => {
-                let explicit = std::env::var(role.thinking_env_var())
-                    .ok()
-                    .filter(|t| !t.trim().is_empty());
-                match explicit.as_deref() {
-                    Some("minimal") | Some("low") => explicit,
-                    _ => Some("off".to_string()),
+        let thinking = std::env::var(role.thinking_env_var())
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| settings.and_then(|value| value.thinking_level.clone()))
+            .unwrap_or_else(|| {
+                if role == PiRole::Partitioner {
+                    "off".into()
+                } else {
+                    base_config.thinking_level.clone()
                 }
-            }
-            PiRole::Planner => Some(
-                std::env::var(role.thinking_env_var())
-                    .ok()
-                    .filter(|t| !t.trim().is_empty())
-                    .unwrap_or_else(|| base_config.thinking_level.clone()),
-            ),
-            _ => Some(
-                std::env::var(role.thinking_env_var())
-                    .ok()
-                    .filter(|t| !t.trim().is_empty())
-                    .unwrap_or_else(|| base_config.thinking_level.clone()),
-            ),
-        };
-
-        Self { model, thinking }
+            });
+        Self { model: model.trim().into(), thinking: Some(thinking) }
     }
 
     pub fn effective_config(&self, base_config: &Config) -> Config {
@@ -1138,7 +1143,7 @@ fn run_pi_with_timeout(
         && request.images.is_none_or(<[_]>::is_empty)
         // In particular, @image attachments require the per-request CLI args.
         && request.extra_args.iter().all(|arg| matches!(
-            *arg, "--no-tools" | "--no-context-files" | "--thinking" | "off" | "low" | "minimal"
+            *arg, "--no-tools" | "--no-context-files" | "--thinking" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
         ))
         && request.environment.iter().all(|(key, _)| {
             matches!(*key, "GRAPHER_MODE" | "GRAPHER_GRAPH_PATH")
@@ -1668,6 +1673,7 @@ mod tests {
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            role_models: Default::default(),
         };
         start_warm_partitioner_at(&config, temp.path()).unwrap();
         let mut other = config.clone();
@@ -1740,6 +1746,7 @@ mod tests {
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            role_models: Default::default(),
         };
         let generation = NODE_WARM_GENERATION.load(Ordering::SeqCst);
         start_warm_node(&config, &repository, &session_dir, &session_id, generation).unwrap();
@@ -1818,6 +1825,7 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            role_models: Default::default(),
         };
         let mut events = String::new();
         let result = run_pi(
@@ -1871,6 +1879,7 @@ sys.stdin.read()
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            role_models: Default::default(),
         };
         let session = temp.path().join("planning-1").join("planner-session");
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -1941,6 +1950,7 @@ sys.stdin.read()
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            role_models: Default::default(),
         };
         // Both the first-attempt layout and manual Graph revisions must keep
         // independent RPC channels. Manual revisions share the parent directory
@@ -2027,6 +2037,7 @@ sys.stdin.read()
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
+            role_models: Default::default(),
             thinking_level: "medium".into(),
             max_parallel: 1,
             max_feedback: 0,
@@ -2098,6 +2109,7 @@ sys.stdin.read()
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
+            role_models: Default::default(),
             thinking_level: "medium".into(),
             max_parallel: 1,
             max_feedback: 0,
@@ -2168,6 +2180,7 @@ sys.stdin.read()
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            role_models: Default::default(),
         };
         let result = run_pi_with_timeout(
             PiRequest {
@@ -2205,6 +2218,7 @@ sys.stdin.read()
                 pi_args: vec!["-c".into(), script.into()],
                 repository: temp.path().to_string_lossy().into(),
                 model: "mock/model".into(),
+                role_models: Default::default(),
                 thinking_level: "medium".into(),
                 max_parallel: 1,
                 max_feedback: 0,
@@ -2259,6 +2273,7 @@ sys.stdin.read()
             thinking_level: "medium".into(),
             max_parallel: 1,
             max_feedback: 0, auto_approve: false,
+            role_models: Default::default(),
         };
         let result = run_pi(
             PiRequest {
@@ -2299,6 +2314,7 @@ sys.stdin.read()
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            role_models: Default::default(),
         };
         for role in [PiRole::Partitioner, PiRole::Planner, PiRole::Merger] {
             let variable = role.model_env_var().replace("_MODEL", "_TIMEOUT_SECONDS");
@@ -2346,6 +2362,7 @@ sys.stdin.read()
             pi_command: "node".into(),
             #[cfg(feature = "fixture")]
             pi_args: vec![],
+            role_models: Default::default(),
         };
         std::env::remove_var("PLANNER_THINKING");
         assert_eq!(
@@ -2411,9 +2428,10 @@ sys.stdin.read()
             pi_command: "node".into(),
             #[cfg(feature = "fixture")]
             pi_args: vec![],
+            role_models: Default::default(),
         };
 
-        // Partitioner follows base_config.model, but its thinking is strictly off
+        // Legacy Partitioner follows the base model and defaults to thinking off
         let partitioner_cfg = PiModelConfig::resolve(PiRole::Partitioner, &custom_config);
         assert_eq!(partitioner_cfg.model, "anthropic/claude-3-7-sonnet");
         assert_eq!(partitioner_cfg.thinking, Some("off".to_string()));
@@ -2427,13 +2445,14 @@ sys.stdin.read()
     }
 
     #[test]
-    fn partitioner_thinking_is_strictly_off_or_lowest() {
+    fn partitioner_thinking_defaults_to_off() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("PARTITIONER_THINKING");
 
         let config = Config {
             repository: "/tmp/fake".into(),
             model: String::new(),
+            role_models: Default::default(),
             thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
@@ -2453,7 +2472,7 @@ sys.stdin.read()
     }
 
     #[test]
-    fn partitioner_thinking_ignores_high_levels() {
+    fn partitioner_thinking_allows_explicit_levels() {
         let _guard = ENV_LOCK.lock().unwrap();
 
         let config = Config {
@@ -2469,11 +2488,12 @@ sys.stdin.read()
             pi_command: "node".into(),
             #[cfg(feature = "fixture")]
             pi_args: vec![],
+            role_models: Default::default(),
         };
 
         std::env::set_var("PARTITIONER_THINKING", "high");
         let cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
-        assert_eq!(cfg.thinking, Some("off".to_string()));
+        assert_eq!(cfg.thinking, Some("high".to_string()));
 
         std::env::set_var("PARTITIONER_THINKING", "minimal");
         let cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
@@ -2484,6 +2504,64 @@ sys.stdin.read()
         assert_eq!(cfg.thinking, Some("low".to_string()));
 
         std::env::remove_var("PARTITIONER_THINKING");
+    }
+
+    #[test]
+    fn role_models_resolve_independently_and_environment_still_wins() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _restore = Restore([
+            "PARTITIONER_MODEL", "PARTITIONER_THINKING", "PLANNER_MODEL", "PLANNER_THINKING",
+            "NODE_AGENT_MODEL", "NODE_AGENT_THINKING", "MERGER_MODEL", "MERGER_THINKING",
+        ].into_iter().map(|key| {
+            let value = std::env::var_os(key);
+            std::env::remove_var(key);
+            (key, value)
+        }).collect());
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "repository": "/tmp/fake", "model": "legacy/default", "thinkingLevel": "medium",
+            "maxParallel": 2, "roleModels": {
+                "partitioner": {"model": "example/small", "thinkingLevel": "off"},
+                "planner": {"model": "example/large", "thinkingLevel": "high"},
+                "nodeAgent": {"model": "example/coder", "thinkingLevel": "low"}
+            }
+        })).unwrap();
+        for (role, model, thinking) in [
+            (PiRole::Partitioner, "example/small", "off"),
+            (PiRole::Planner, "example/large", "high"),
+            (PiRole::NodeAgent, "example/coder", "low"),
+            (PiRole::Merger, "example/coder", "low"),
+        ] {
+            let resolved = PiModelConfig::resolve(role, &config);
+            assert_eq!(resolved.model, model);
+            assert_eq!(resolved.thinking.as_deref(), Some(thinking));
+            assert_eq!(resolved.effective_config(&config).model, model);
+        }
+        let mut partial = config.clone();
+        partial.role_models = serde_json::from_value(serde_json::json!({
+            "partitioner": {"model": "example/small"},
+            "planner": {"thinkingLevel": "max"}
+        })).unwrap();
+        assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &partial).thinking.as_deref(), Some("off"));
+        assert_eq!(PiModelConfig::resolve(PiRole::Planner, &partial).model, "legacy/default");
+        assert_eq!(PiModelConfig::resolve(PiRole::Planner, &partial).thinking.as_deref(), Some("max"));
+        assert_eq!(PiModelConfig::resolve(PiRole::NodeAgent, &partial).thinking.as_deref(), Some("medium"));
+
+        std::env::set_var("PLANNER_MODEL", "env/planner");
+        std::env::set_var("PARTITIONER_THINKING", "high");
+        assert_eq!(PiModelConfig::resolve(PiRole::Planner, &config).model, "env/planner");
+        assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &config).thinking.as_deref(), Some("high"));
+        assert_eq!(PiModelConfig::resolve(PiRole::NodeAgent, &config).model, "example/coder");
     }
 
     #[test]
@@ -2503,6 +2581,7 @@ sys.stdin.read()
             pi_command: "node".into(),
             #[cfg(feature = "fixture")]
             pi_args: vec![],
+            role_models: Default::default(),
         };
 
         std::env::set_var("PARTITIONER_MODEL", "custom-partitioner-model");

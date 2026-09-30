@@ -276,6 +276,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
                 .map(|r| r.path.clone())
                 .unwrap_or_default(),
             model: String::new(),
+            role_models: Default::default(),
             thinking_level: "medium".into(),
             max_parallel: 0,
             max_feedback: 3,
@@ -332,6 +333,19 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
         if let Ok(val) = std::env::var(env_var) {
             if !val.trim().is_empty() {
                 env_overrides.insert(role_name.into(), val);
+            }
+        }
+    }
+
+    for (role_name, role) in [
+        ("partitioner", PiRole::Partitioner),
+        ("planner", PiRole::Planner),
+        ("nodeAgent", PiRole::NodeAgent),
+        ("merger", PiRole::Merger),
+    ] {
+        if let Ok(value) = std::env::var(role.thinking_env_var()) {
+            if !value.trim().is_empty() {
+                env_overrides.insert(format!("{role_name}Thinking"), value);
             }
         }
     }
@@ -410,6 +424,7 @@ fn save_graph(
 }
 
 fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
+    config.validate_model_settings()?;
     config.max_feedback = 3;
     let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
     let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
@@ -418,7 +433,7 @@ fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, 
     #[cfg(not(feature = "fixture"))]
     {
         crate::engine::invalidate_warm_node();
-        crate::engine::warm_partitioner(config);
+        crate::engine::warm_planning_engines(config);
     }
     bootstrap(service, false)
 }
@@ -519,8 +534,15 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
 
 pub fn validate_planning_preflight(config: &Config, mode: Option<&str>) -> Result<(), String> {
     #[cfg(not(feature = "fixture"))]
-    if mode == Some("graph") {
-        crate::native::require_graph_execution()?;
+    {
+        // Cover unsaved/request-specific bindings too. Preparation can overlap
+        // provider validation and Auto routing; no project snapshot is taken.
+        if mode != Some("serial") {
+            crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
+        }
+        if mode == Some("graph") {
+            crate::native::require_graph_execution()?;
+        }
     }
     validate_planning_models_preflight(config, mode, || {
         #[cfg(not(feature = "fixture"))]
@@ -544,6 +566,7 @@ fn validate_planning_models_preflight(
     mode: Option<&str>,
     fetch_catalog: impl Fn() -> Option<serde_json::Value>,
 ) -> Result<(), String> {
+    config.validate_model_settings()?;
     let need_partitioner = mode.is_none();
     let need_planner = mode != Some("serial");
     // Keep validation order and failure behavior, but reuse one catalog response
@@ -567,6 +590,12 @@ fn validate_planning_models_preflight(
             &catalog,
             &fetch_catalog,
         )?;
+    }
+    // Explicit per-instance settings must also be checked before approving
+    // Serial or handing a Graph to the user, not only when a node starts.
+    if config.role_models.contains_key("nodeAgent") {
+        let node_cfg = PiModelConfig::resolve(PiRole::NodeAgent, config);
+        validate_role_model_preflight(PiRole::NodeAgent, &node_cfg.model, &catalog, &fetch_catalog)?;
     }
     Ok(())
 }
@@ -2893,7 +2922,7 @@ pub fn dispatch(
                 crate::engine::invalidate_warm_partitioner();
                 if operation.as_deref() == Some("poll") {
                     if let Ok(bootstrap) = bootstrap(service, false) {
-                        crate::engine::warm_partitioner(bootstrap.config);
+                        crate::engine::warm_planning_engines(bootstrap.config);
                     }
                 }
             }
@@ -3209,11 +3238,11 @@ pub fn run() -> Result<(), String> {
     #[cfg(not(feature = "fixture"))]
     crate::native::check_retired_leases(&root)?;
     recover_plannings(&root)?;
-    // Start the selected repository's no-tools RPC Partitioner while dev is
-    // starting the frontend, rather than on the first Auto planning request.
+    // Warm Auto's idle RPC Partitioner and Graph's verified native runtime
+    // while the frontend starts, not on the first planning request.
     #[cfg(not(feature = "fixture"))]
     if let Ok(bootstrap) = bootstrap(&service, false) {
-        crate::engine::warm_partitioner(bootstrap.config);
+        crate::engine::warm_planning_engines(bootstrap.config);
         if let Ok(runtime) = service.runtime.lock() {
             runtime.warm_completed_serial_node();
         }
