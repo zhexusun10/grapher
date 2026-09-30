@@ -15,7 +15,7 @@ export function reuseManagedTools(directory, upstreamDirectory) {
     const bin = join(directory, 'bin');
     mkdirSync(bin, { recursive: true, mode: 0o700 });
     if (process.platform === 'win32') {
-      try { copyFileSync(source, join(bin, name)); } catch {}
+      try { copyFileSync(source, join(bin, name), constants.COPYFILE_EXCL); } catch {}
       continue;
     }
     try { symlinkSync(source, join(bin, name)); }

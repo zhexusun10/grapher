@@ -1,0 +1,60 @@
+﻿{
+    "dateUtc":  "2026-09-30T16:10:07.8701676Z",
+    "callerElevated":  false,
+    "reviewOnly":  false,
+    "graphAvailable":  false,
+    "dllPresent":  true,
+    "driverBinaryPresent":  true,
+    "bindingExportPresent":  true,
+    "driverServiceRegistered":  true,
+    "driverServices":  [
+                           {
+                               "name":  "bindflt",
+                               "state":  "Running",
+                               "startMode":  "Auto"
+                           }
+                       ],
+    "emptySiloCreated":  true,
+    "siloError":  0,
+    "bindingsApplied":  0,
+    "processesLaunched":  0,
+    "productionIntegrated":  false,
+    "baseline":  {
+                     "sourceRead":  {
+                                        "allowed":  true,
+                                        "value":  "protected-fixture"
+                                    },
+                     "sourceWriteOpen":  {
+                                             "allowed":  true
+                                         },
+                     "extendedPathRead":  {
+                                              "allowed":  true,
+                                              "value":  "protected-fixture"
+                                          },
+                     "hardlinkRead":  {
+                                          "allowed":  true,
+                                          "value":  "protected-fixture"
+                                      },
+                     "hardlinkWriteOpen":  {
+                                               "allowed":  true
+                                           },
+                     "externalRead":  {
+                                          "allowed":  true,
+                                          "value":  "external-fixture"
+                                      },
+                     "externalWriteOpen":  {
+                                               "allowed":  true
+                                           },
+                     "sourceDirectory":  {
+                                             "allowed":  true,
+                                             "entries":  [
+                                                             "marker.txt"
+                                                         ]
+                                         },
+                     "hardlinkSameFile":  true
+                 },
+    "mappingError":  -2147024891,
+    "mappingStage":  "BfSetupFilter",
+    "mappingErrorHex":  "0x80070005",
+    "fixtureRoot":  "C:\\Users\\孙哲徐\\Desktop\\grapher\\build\\windows-bindfilter\\fixture-cd64c677139049ceb6fb5e25ce80d1ce"
+}

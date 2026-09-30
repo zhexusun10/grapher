@@ -37,7 +37,7 @@ Grapher 是本地运行的多智能体编程系统：将目标路由为单任务
 
 ## 快速开始
 
-**依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、可用的 Pi 服务商认证和网络。Graph 文件系统隔离分别使用 macOS Seatbelt、Windows 10/11 x64 AppContainer、Linux bubblewrap（要求容器允许非特权 user/mount/PID namespace）。Linux 的完整发布、隔离及 Harbor 实机链已在 Linux 容器/VM 完成验收；Windows 仍需实机平台验收；预检失败不会降级到无隔离执行。Pi 是锁定版本的上游子模块，不会使用全局 Pi 替代。
+**依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、可用的 Pi 服务商认证和网络。macOS/Linux Graph 文件系统边界使用 Seatbelt/bubblewrap（Linux 要求允许非特权 user/mount/PID namespace，预检失败不降级）。Windows Graph 使用原版 Node 和 Git for Windows Bash，保留独立 Git 工作区、并发、快照与发布，不使用虚拟机或逐节点沙箱，也不提供 macOS 的越界文件访问限制；只在可信项目上使用。Windows 验证与边界见 [原生执行说明](engine/windows-native-plan.md)。Linux 的完整发布、隔离及 Harbor 实机链已在 Linux 容器/VM 完成验收。Pi 是锁定版本的上游子模块，不会使用全局 Pi 替代。
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git

@@ -44,11 +44,11 @@ npm run pi:build
 
 后端启动及保存配置时，会为已绑定的仓库/Partitioner 模型异步预启动一个**空闲的单次使用 RPC 会话**；Auto 规划领取后立即补充下一个。模型或仓库不匹配、图片参数等无法复用时仍冷启动。Pi 最终回答会先在界面展示路线预览；只有正常完成并退出后，后端才确认路线并开始后续规划。预热进程领取时转归当前 Run 管理，取消 Run 会终止它；认证变更会使空闲预热失效。`partition.jsonl` 的 `grapher_process_started.prewarmed` 可用于检查是否命中。
 
-生产入口为安装目录内的 `engine/entrypoint.mjs`，通过宿主 Node 启动锁定 Pi。Planner/Partitioner/Serial/Merger 在源项目真实绝对路径执行，复用宿主 PATH、HOME、TMPDIR、原生程序与外部文件。Windows 与 macOS 均保留完整 Graph 执行；Linux Graph 需要 bubblewrap 与任务环境允许 user/mount/PID namespace，并在通过隔离预检后执行。Windows Graph 由 backend helper 使用 AppContainer 启动并授予每实例最小文件访问范围。会话与 Planner 编译器均使用真实宿主路径。源目录角色保持原生工具行为；Graph 路径适配及呈现规则见下文。历史配置中的 command/args 只在 `fixture` 测试构建可注入。
+生产入口为安装目录内的 `engine/entrypoint.mjs`，通过宿主 Node 启动锁定 Pi。Partitioner/Serial/源目录 Merger 使用源项目目录；Planner 与 Graph 节点保留独立工作区，macOS 使用 Seatbelt，Linux 使用 bubblewrap。Windows 使用原版 Node/Git Bash 的宿主进程与独立 Git 工作区，不使用逐节点沙箱；工作流验证与权限差异见 [Windows 原生执行](windows-native-plan.md)。Planner 工具实现及 Pi 源码不改动，宿主 Rust 保留图调度、Git 组合与发布。源目录角色保持原生工具行为；Graph 路径适配及呈现规则见下文。历史配置中的 command/args 只在 `fixture` 测试构建可注入。
 
 **项目内相对、项目外绝对**：节点任务、交付和生成配置优先采用项目根相对路径。Graph 模型侧普通物理路径呈现为 `./...`，结构化 URI 保持有效的源项目绝对地址；文件工具和 bash 完整绝对项目路径适配作为兼容层保留。`cd`/`../` 保持原生语义，外部兄弟目录需明确绝对路径。宿主原生执行、外部脚本及平台 Graph 文件系统边界保留。脚本文件内部硬编码路径和程序动态拼接路径仍不透明映射；这不是内核目录重映射。完整边界见 [native-execution.md](native-execution.md)。
 
-Graph 首次执行将经过 baseline 校验的 Pi 及已安装依赖复制到源项目外，一份副本供本 backend 的节点共享，解决自托管与目录保护冲突。节点只能读取这份引擎。无需密码或特权组件；没有 Docker/VM/chroot 后备路径。完整逻辑与验证见 [native-execution.md](native-execution.md)。
+Graph 首次执行将经过 baseline 校验的 Pi 及已安装依赖复制到源项目外，一份副本供本 backend 共享，解决自托管与目录保护冲突。macOS/Linux 节点对宿主引擎副本只读。Windows 通过相同的 TypeScript 入口运行原版 Node/Pi，不再编译沙箱专用入口或修改 Node/MSYS；运行副本沿用宿主权限，不是只读安全边界。完整逻辑见 [native-execution.md](native-execution.md)。
 
 后端会清除继承的 `PI_MODEL`、`PI_THINKING`、`PI_PROVIDER`、`PI_REASONING_LEVEL`、`PI_SESSION_ID` 和 `PI_SESSION_FILE`，再按角色显式传入模型、thinking、session 和 `GRAPHER_MODE`。
 

@@ -61,18 +61,23 @@ export default async function () {
     assert.equal(readFileSync(join(cwd, 'external-ran'), 'utf8'), label);
     assert.equal(readFileSync(join(cwd, 'local-ran'), 'utf8'), 'ok');
     assert.equal(text(await call('read', { path: join(source, 'external-link') })), 'external material');
-    // Bash remains native. Source absolute writes, siblings, aliases and other
-    // sessions fail under the inherited kernel policy, even in nested children.
-    const denied = [join(source, 'source-marker'), join(cwd, 'source-link', 'source-marker'),
-      process.env.GRAPHER_TEST_SIBLING!, process.env.GRAPHER_TEST_OTHER_SESSION!];
-    for (const path of denied) {
-      const code = `require('node:fs').writeFileSync(Buffer.from(${JSON.stringify(Buffer.from(path).toString('base64'))}, 'base64').toString(), 'BAD')`;
-      await assert.rejects(call('bash', { command: `${quote(process.execPath)} -e ${quote(code)}` }), /exited with code/);
+    // macOS/Linux inherit kernel filesystem restrictions. Windows deliberately
+    // uses host permissions: snapshot separation is not an access sandbox.
+    if (process.platform !== 'win32') {
+      const denied = [join(source, 'source-marker'), join(cwd, 'source-link', 'source-marker'),
+        process.env.GRAPHER_TEST_SIBLING!, process.env.GRAPHER_TEST_OTHER_SESSION!];
+      for (const path of denied) {
+        const code = `require('node:fs').writeFileSync(Buffer.from(${JSON.stringify(Buffer.from(path).toString('base64'))}, 'base64').toString(), 'BAD')`;
+        await assert.rejects(call('bash', { command: `${quote(process.execPath)} -e ${quote(code)}` }), /exited with code/);
+      }
+      const engineEntrypoint = join(runtime, 'engine/entrypoint.mjs');
+      const originalEntrypoint = readFileSync(engineEntrypoint);
+      assert.throws(() => writeFileSync(engineEntrypoint, 'BAD'), { code: /^(EPERM|EACCES|EROFS)$/ });
+      assert.deepEqual(readFileSync(engineEntrypoint), originalEntrypoint);
+    } else {
+      const code = `process.stdout.write(require('node:fs').readFileSync(Buffer.from(${JSON.stringify(Buffer.from(join(source, 'source-marker')).toString('base64'))}, 'base64').toString(), 'utf8'))`;
+      assert.equal(text(await call('bash', { command: `${quote(process.execPath)} -e ${quote(code)}` })), 'SOURCE');
     }
-    const engineEntrypoint = join(runtime, 'engine/entrypoint.mjs');
-    const originalEntrypoint = readFileSync(engineEntrypoint);
-    assert.throws(() => writeFileSync(engineEntrypoint, 'BAD'), { code: /^(EPERM|EACCES|EROFS)$/ });
-    assert.deepEqual(readFileSync(engineEntrypoint), originalEntrypoint);
     const shell = await call('bash', { command: 'false | true; false; printf native-ok' });
     assert.equal(shell.details.exitCode, 0);
     assert.equal(text(shell).trim(), 'native-ok');

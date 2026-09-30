@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, chmodSync, symlinkSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { loadExtensions } from "../pi/packages/coding-agent/src/core/extensions/loader.ts";
+import { createBashToolDefinition } from "../pi/packages/coding-agent/src/core/tools/bash.ts";
 import { convertResponsesTools } from "../pi/packages/ai/src/api/openai-responses-shared.ts";
 import { validateToolArguments } from "../pi/packages/ai/src/utils/validation.ts";
 import type { ExtensionContext } from "../pi/packages/coding-agent/src/core/extensions/types.ts";
@@ -13,9 +15,9 @@ const repository = join(root, "repository");
 mkdirSync(repository);
 writeFileSync(join(repository, "sample.txt"), "planner fixture\n");
 writeFileSync(join(root, "rubric.json"), "hidden criteria");
-symlinkSync(root, join(repository, "outside"));
+symlinkSync(root, join(repository, "outside"), process.platform === "win32" ? "junction" : "dir");
 process.env.GRAPHER_GRAPH_PATH = join(root, "graph.json");
-process.env.GRAPHER_COMPILER_PATH ||= resolve("backend/target/debug/grapher");
+process.env.GRAPHER_COMPILER_PATH ||= resolve(`backend/target/debug/grapher${process.platform === "win32" ? ".exe" : ""}`);
 process.env.GRAPHER_MODE = "planner";
 // Planner behavior must not depend on the host's feedback retry setting.
 process.env.GRAPHER_MAX_FEEDBACK = "0";
@@ -127,10 +129,27 @@ try {
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
   // Each tool compiles its own batch once.
   const compilerPath = process.env.GRAPHER_COMPILER_PATH!;
-  const countedCompiler = join(root, "counted-compiler.mjs");
+  const countedCompiler = join(root, process.platform === "win32" ? "counted-compiler.exe" : "counted-compiler.mjs");
   const compilerCalls = join(root, "compiler-calls.txt");
-  writeFileSync(countedCompiler, `#!${process.execPath}\nimport { appendFileSync, readFileSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';\nappendFileSync(${JSON.stringify(compilerCalls)}, 'compile\\n');\nconst result = spawnSync(${JSON.stringify(compilerPath)}, process.argv.slice(2), { input: readFileSync(0), encoding: 'utf8' });\nprocess.stdout.write(result.stdout || '');\nprocess.stderr.write(result.stderr || '');\nprocess.exit(result.status ?? 1);\n`);
-  chmodSync(countedCompiler, 0o755);
+  if (process.platform === "win32") {
+    // Windows CreateProcess cannot execute a shebang script. Keep the Planner
+    // unchanged and use a test-owned native executable for compile counting.
+    const wrapper = join(root, "counted_compiler.rs");
+    writeFileSync(wrapper, `use std::io::Write;
+fn main() {
+  let mut count = std::fs::OpenOptions::new().create(true).append(true).open(${JSON.stringify(compilerCalls)}).unwrap();
+  count.write_all(b"compile\\n").unwrap();
+  let result = std::process::Command::new(${JSON.stringify(compilerPath)}).args(std::env::args().skip(1)).stdin(std::process::Stdio::inherit()).output().unwrap();
+  std::io::stdout().write_all(&result.stdout).unwrap();
+  std::io::stderr().write_all(&result.stderr).unwrap();
+  std::process::exit(result.status.code().unwrap_or(1));
+}
+`);
+    execFileSync("rustc", ["--crate-name", "counted_compiler", wrapper, "-o", countedCompiler], { stdio: "pipe" });
+  } else {
+    writeFileSync(countedCompiler, `#!${process.execPath}\nimport { appendFileSync, readFileSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';\nappendFileSync(${JSON.stringify(compilerCalls)}, 'compile\\n');\nconst result = spawnSync(${JSON.stringify(compilerPath)}, process.argv.slice(2), { input: readFileSync(0), encoding: 'utf8' });\nprocess.stdout.write(result.stdout || '');\nprocess.stderr.write(result.stderr || '');\nprocess.exit(result.status ?? 1);\n`);
+    chmodSync(countedCompiler, 0o755);
+  }
   process.env.GRAPHER_COMPILER_PATH = countedCompiler;
   writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({ originalGoal: "Batch fixture", nodes: [], edges: [] }));
   const batchNodes = ["contract", "parser", "search", "integration", "verification"].map(name => ({ name, task: `Complete ${name}` }));
@@ -331,8 +350,10 @@ try {
   const updates: any[] = [];
   const shellResult = await workerCall("bash", { command: "pwd; cat mapped.txt" }, update => updates.push(update));
   assert.match(JSON.stringify(shellResult), /after/);
-  assert.ok(JSON.stringify(shellResult).includes(repository), "Native output is not rewritten");
-  assert.ok(updates.some(update => JSON.stringify(update).includes(repository)));
+  const nativePwdResult = await createBashToolDefinition(repository).execute("native-pwd", { command: "pwd" }, undefined, undefined, context);
+  const nativePwd = nativePwdResult.content.filter(part => part.type === "text").map(part => part.text).join("\n").trim();
+  assert.ok(JSON.stringify(shellResult).includes(nativePwd), "Native output is not rewritten");
+  assert.ok(updates.some(update => JSON.stringify(update).includes(nativePwd)));
   assert.match(JSON.stringify(await workerCall("ls", { path: "." })), /mapped.txt/);
   assert.equal(readFileSync(join(repository, "mapped.txt"), "utf8"), "after\n");
   assert.match(JSON.stringify(await workerCall("find", { pattern: "*.txt", path: repository })), /mapped.txt/);

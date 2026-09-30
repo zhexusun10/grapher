@@ -12,7 +12,10 @@ static HOST_REF_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mu
     OnceLock::new();
 
 fn host_ref_lock(repository: &Path) -> Result<Arc<Mutex<()>>, String> {
-    let mut locks = HOST_REF_LOCKS.get_or_init(Default::default).lock().map_err(|e| e.to_string())?;
+    let mut locks = HOST_REF_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|e| e.to_string())?;
     locks.retain(|_, weak| weak.strong_count() > 0);
     if let Some(lock) = locks.get(repository).and_then(Weak::upgrade) {
         return Ok(lock);
@@ -688,11 +691,36 @@ pub fn verify(repository: &Path) -> Result<String, String> {
     }
 }
 
+#[cfg(not(windows))]
+struct PlannerCopy;
+
+#[cfg(windows)]
+struct PlannerCopy {
+    repository: PathBuf,
+    stack: Vec<PathBuf>,
+    linked_bytes: u64,
+    linked_entries: u64,
+}
+
+#[cfg(windows)]
+impl PlannerCopy {
+    fn count_linked_file(&mut self, path: &Path) -> Result<(), String> {
+        self.linked_bytes = self
+            .linked_bytes
+            .saturating_add(fs::metadata(path).map_err(|e| e.to_string())?.len());
+        self.linked_entries += 1;
+        if self.linked_bytes > 512 * 1024 * 1024 || self.linked_entries > 100_000 {
+            return Err("Planner symlink materialization limit exceeded".into());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(windows)]
 fn copy_planner_symlink(
     original: &Path,
     copied: &Path,
-    excluded_data: &Path,
+    context: &mut PlannerCopy,
 ) -> Result<(), String> {
     let resolved = original.canonicalize().map_err(|error| {
         format!(
@@ -700,6 +728,21 @@ fn copy_planner_symlink(
             original.display()
         )
     })?;
+    if !resolved.starts_with(&context.repository)
+        || data_root().canonicalize().ok().is_some_and(|data| resolved.starts_with(data))
+        || resolved
+            .strip_prefix(&context.repository)
+            .unwrap()
+            .components()
+            .any(|component| {
+                matches!(component, std::path::Component::Normal(name) if name == ".git" || name == ".grapher" || name == ".grapher-workspaces")
+            })
+    {
+        return Err(format!(
+            "Planner symlink leaves the allowed repository: {}",
+            original.display()
+        ));
+    }
     let metadata = fs::metadata(&resolved).map_err(|error| {
         format!(
             "Cannot inspect Planner symlink target {}: {error}",
@@ -707,13 +750,17 @@ fn copy_planner_symlink(
         )
     })?;
     if metadata.is_dir() {
-        fs::create_dir_all(copied).map_err(|error| {
-            format!("Cannot create copied Planner symlink directory {}: {error}", copied.display())
-        })?;
-        copy_planner_files(&resolved, copied, excluded_data)
+        // Resolve only repository-local aliases. Track the active directory
+        // chain and limit amplification for DAG-shaped link trees.
+        fs::create_dir_all(copied).map_err(|error| error.to_string())?;
+        copy_planner_files(&resolved, copied, &data_root(), context, true)
     } else if metadata.is_file() {
+        context.count_linked_file(&resolved)?;
         fs::copy(&resolved, copied).map_err(|error| {
-            format!("Cannot copy Planner symlink target {}: {error}", resolved.display())
+            format!(
+                "Cannot copy Planner symlink target {}: {error}",
+                resolved.display()
+            )
         })?;
         Ok(())
     } else {
@@ -724,60 +771,197 @@ fn copy_planner_symlink(
     }
 }
 
-fn copy_planner_files(source: &Path, target: &Path, excluded_data: &Path) -> Result<(), String> {
-    for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if entry.file_name() == std::ffi::OsStr::new(".git") {
-            continue;
+fn copy_planner_files(
+    source: &Path,
+    target: &Path,
+    excluded_data: &Path,
+    context: &mut PlannerCopy,
+    linked: bool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let resolved = source.canonicalize().map_err(|error| error.to_string())?;
+        if context.stack.contains(&resolved) || context.stack.len() >= 128 {
+            return Err(format!(
+                "Planner directory link cycle or depth limit: {}",
+                source.display()
+            ));
         }
-        let original = entry.path();
-        if original == excluded_data
-            || entry.file_name() == std::ffi::OsStr::new(".grapher")
-            || entry.file_name() == std::ffi::OsStr::new(".grapher-workspaces")
-        {
-            continue;
-        }
-        let meta = fs::symlink_metadata(&original).map_err(|e| e.to_string())?;
-        // Cargo build output can contain millions of files and is not part of
-        // the source workspace that a Planner needs to inspect or edit.
-        if meta.is_dir()
-            && entry.file_name() == std::ffi::OsStr::new("target")
-            && source.join("Cargo.toml").is_file()
-        {
-            continue;
-        }
-        let copied = target.join(entry.file_name());
-        let meta = fs::symlink_metadata(&original).map_err(|e| e.to_string())?;
-        if copied.exists() || copied.is_symlink() {
-            if copied.is_dir() && !copied.is_symlink() && !meta.is_dir() {
-                fs::remove_dir_all(&copied).map_err(|e| e.to_string())?;
-            } else if (!copied.is_dir() || copied.is_symlink()) && meta.is_dir() {
-                fs::remove_file(&copied).map_err(|e| e.to_string())?;
-            }
-        }
-        if meta.is_dir() {
-            fs::create_dir_all(&copied).map_err(|e| e.to_string())?;
-            copy_planner_files(&original, &copied, excluded_data)?;
-        } else {
-            if copied.exists() || copied.is_symlink() {
-                fs::remove_file(&copied).map_err(|e| e.to_string())?;
-            }
-            if meta.file_type().is_symlink() {
-                #[cfg(unix)]
-                {
-                    let link = fs::read_link(&original).map_err(|e| e.to_string())?;
-                    std::os::unix::fs::symlink(link, &copied).map_err(|e| e.to_string())?;
-                }
-                #[cfg(windows)]
-                copy_planner_symlink(&original, &copied, excluded_data)?;
-            } else if meta.is_file() {
-                fs::copy(&original, &copied).map_err(|e| e.to_string())?;
-            } else {
-                return Err(format!("Unsupported source entry: {}", original.display()));
-            }
-        }
+        context.stack.push(resolved);
     }
-    Ok(())
+    let result = (|| {
+        for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_name() == std::ffi::OsStr::new(".git") {
+                continue;
+            }
+            let original = entry.path();
+            if entry.file_name() == std::ffi::OsStr::new(".grapher")
+                || entry.file_name() == std::ffi::OsStr::new(".grapher-workspaces")
+            {
+                continue;
+            }
+            let meta = fs::symlink_metadata(&original).map_err(|e| e.to_string())?;
+            if original == excluded_data
+                || (meta.is_dir()
+                    && excluded_data
+                        .canonicalize()
+                        .ok()
+                        .is_some_and(|data| original.canonicalize().ok().as_ref() == Some(&data)))
+            {
+                continue;
+            }
+            // Cargo build output can contain millions of files and is not part of
+            // the source workspace that a Planner needs to inspect or edit.
+            if meta.is_dir()
+                && entry.file_name() == std::ffi::OsStr::new("target")
+                && source.join("Cargo.toml").is_file()
+            {
+                continue;
+            }
+            let copied = target.join(entry.file_name());
+            if copied.exists() || copied.is_symlink() {
+                if copied.is_dir() && !copied.is_symlink() && !meta.is_dir() {
+                    fs::remove_dir_all(&copied).map_err(|e| e.to_string())?;
+                } else if (!copied.is_dir() || copied.is_symlink()) && meta.is_dir() {
+                    fs::remove_file(&copied).map_err(|e| e.to_string())?;
+                }
+            }
+            if meta.is_dir() {
+                fs::create_dir_all(&copied).map_err(|e| e.to_string())?;
+                copy_planner_files(&original, &copied, excluded_data, context, linked)?;
+            } else {
+                if copied.exists() || copied.is_symlink() {
+                    fs::remove_file(&copied).map_err(|e| e.to_string())?;
+                }
+                if meta.file_type().is_symlink() {
+                    #[cfg(unix)]
+                    {
+                        let link = fs::read_link(&original).map_err(|e| e.to_string())?;
+                        std::os::unix::fs::symlink(link, &copied).map_err(|e| e.to_string())?;
+                    }
+                    #[cfg(windows)]
+                    copy_planner_symlink(&original, &copied, context)?;
+                } else if meta.is_file() {
+                    #[cfg(windows)]
+                    if linked {
+                        context.count_linked_file(&original)?;
+                    }
+                    fs::copy(&original, &copied).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("Unsupported source entry: {}", original.display()));
+                }
+            }
+        }
+        Ok(())
+    })();
+    #[cfg(windows)]
+    context.stack.pop();
+    result
+}
+
+#[cfg(all(test, windows))]
+mod planner_symlink_tests {
+    use super::*;
+
+    fn junction(link: &Path, target: &Path) {
+        let result = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn planner_rejects_outside_and_cyclic_junctions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let external = temp.path().join("private");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("secret.txt"), "secret").unwrap();
+        let mut context = PlannerCopy {
+            repository: root.canonicalize().unwrap(),
+            stack: Vec::new(),
+            linked_bytes: 0,
+            linked_entries: 0,
+        };
+        junction(&root.join("outside"), &external);
+        assert!(copy_planner_symlink(
+            &root.join("outside"),
+            &temp.path().join("copy"),
+            &mut context
+        )
+        .unwrap_err()
+        .contains("leaves the allowed repository"));
+        assert!(!temp.path().join("copy/secret.txt").exists());
+        junction(&root.join("cycle"), &root);
+        assert!(copy_planner_files(
+            &root,
+            &temp.path().join("copy"),
+            &external,
+            &mut context,
+            false
+        )
+        .unwrap_err()
+        .contains("cycle"));
+    }
+
+    #[test]
+    fn planner_copies_repository_local_file_link_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file.txt"), "allowed").unwrap();
+        if let Err(error) = std::os::windows::fs::symlink_file("file.txt", root.join("alias.txt")) {
+            eprintln!("Windows file symlink creation unavailable: {error}");
+            return;
+        }
+        let mut context = PlannerCopy {
+            repository: root.canonicalize().unwrap(),
+            stack: Vec::new(),
+            linked_bytes: 0,
+            linked_entries: 0,
+        };
+        let copied = temp.path().join("copy.txt");
+        copy_planner_symlink(&root.join("alias.txt"), &copied, &mut context).unwrap();
+        assert_eq!(fs::read_to_string(copied).unwrap(), "allowed");
+    }
+
+    #[test]
+    fn planner_materializes_internal_directory_junction() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let library = root.join("library");
+        fs::create_dir_all(&library).unwrap();
+        fs::write(library.join("index.js"), "inside").unwrap();
+        junction(&root.join("alias"), &library);
+        let mut context = PlannerCopy {
+            repository: root.canonicalize().unwrap(),
+            stack: Vec::new(),
+            linked_bytes: 0,
+            linked_entries: 0,
+        };
+        let copied = temp.path().join("copy");
+        copy_planner_files(
+            &root,
+            &copied,
+            &temp.path().join("data"),
+            &mut context,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(copied.join("alias/index.js")).unwrap(),
+            "inside"
+        );
+    }
 }
 
 /// Snapshot the source into a private Planner checkout. The source lock is held
@@ -786,6 +970,17 @@ fn copy_planner_files(source: &Path, target: &Path, excluded_data: &Path) -> Res
 pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
     let base = verify(repository)?;
     prepare(repository, path, &base, &[])?;
+    #[cfg(not(windows))]
+    let mut copy_context = PlannerCopy;
+    #[cfg(windows)]
+    let mut copy_context = PlannerCopy {
+        repository: repository
+            .canonicalize()
+            .map_err(|error| error.to_string())?,
+        stack: Vec::new(),
+        linked_bytes: 0,
+        linked_entries: 0,
+    };
     if is_standard_git(repository) {
         let files = git(
             repository,
@@ -823,11 +1018,10 @@ pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
                     #[cfg(unix)]
                     {
                         let target = fs::read_link(&original).map_err(|e| e.to_string())?;
-                        std::os::unix::fs::symlink(target, &copied)
-                            .map_err(|e| e.to_string())?;
+                        std::os::unix::fs::symlink(target, &copied).map_err(|e| e.to_string())?;
                     }
                     #[cfg(windows)]
-                    copy_planner_symlink(&original, &copied, &data_root())?;
+                    copy_planner_symlink(&original, &copied, &mut copy_context)?;
                 } else if meta.is_dir() {
                     // A Git submodule is stored in the index as a gitlink, but
                     // is a directory in the working tree. Its contents will
@@ -850,7 +1044,7 @@ pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
             }
         }
     }
-    copy_planner_files(repository, path, &data_root())?;
+    copy_planner_files(repository, path, &data_root(), &mut copy_context, false)?;
     // The input commit becomes the immutable parent for this Planner's edits.
     snapshot_repository(path)?;
     Ok(())
@@ -961,7 +1155,15 @@ pub fn prepare_with_merger_expected(
     expected_source_head: &str,
     resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
-    prepare_with_merger_expected_for_run(repository, path, base, parents, expected_source_head, None, resolve)
+    prepare_with_merger_expected_for_run(
+        repository,
+        path,
+        base,
+        parents,
+        expected_source_head,
+        None,
+        resolve,
+    )
 }
 
 pub(crate) fn prepare_with_merger_expected_for_run(
@@ -979,11 +1181,12 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     let canonical_repo = canonical_workspace_path(repository)?;
     // A new destination is allowed to be absent; existing paths (including
     // dangling symlinks) must resolve successfully before comparing identity.
-    let canonical_path = if path.try_exists().map_err(|error| error.to_string())? || path.is_symlink() {
-        Some(canonical_workspace_path(path)?)
-    } else {
-        None
-    };
+    let canonical_path =
+        if path.try_exists().map_err(|error| error.to_string())? || path.is_symlink() {
+            Some(canonical_workspace_path(path)?)
+        } else {
+            None
+        };
     if canonical_path.as_ref() == Some(&canonical_repo) {
         if is_standard_git(repository) {
             return git(repository, &["rev-parse", "HEAD"]);
@@ -1159,7 +1362,8 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         // Runtime parents are commit IDs and use immutable pins. Named
         // parents resolve against this Run's refs, or legacy unscoped refs
         // when using the public prepare() API.
-        let is_head = matches!(parent.len(), 40 | 64) && parent.bytes().all(|b| b.is_ascii_hexdigit());
+        let is_head =
+            matches!(parent.len(), 40 | 64) && parent.bytes().all(|b| b.is_ascii_hexdigit());
         if !is_head {
             crate::compiler::validate_node_name(parent)?;
         }

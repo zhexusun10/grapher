@@ -238,10 +238,10 @@ Runtime 先持久化 `PublicationStarted`，再把当前有效节点 heads 合�
 
 生产入口已改为宿主 Node 启动固定 Pi，Docker/容器实现已删除：
 
-- Planner、Partitioner、Serial 和 Merger 在源项目真实绝对路径执行；宿主 PATH、HOME、TMPDIR、外部文件与原生工具直接可用。
-- 新任务和交付采用项目根相对路径，外部资源使用宿主绝对路径。Graph 普通物理路径向模型呈现为 `./...`；文件工具和 bash 完整绝对项目路径映射保留为兼容层。`../` 不代表源项目父目录。脚本文件内部硬编码路径和程序动态拼接路径不透明映射，直接越界访问由平台 Graph 文件系统边界阻止（macOS Seatbelt、Windows AppContainer、Linux bubblewrap）。
+- Partitioner、Serial 和源目录 Merger 在源项目真实绝对路径执行；Planner 和 Graph 节点保留既有独立工作区。Windows Graph 使用原版 Node/Git Bash 的宿主进程和独立 Git 工作区，不使用虚拟机或逐节点沙箱；访问权限仍是宿主用户权限，见 [Windows 原生执行](engine/windows-native-plan.md)。
+- 新任务和交付采用项目根相对路径，外部资源使用宿主绝对路径。Graph 普通物理路径向模型呈现为 `./...`；文件工具和 bash 完整绝对项目路径映射保留为兼容层。`../` 不代表源项目父目录。脚本文件内部硬编码路径和程序动态拼接路径不透明映射，已实现的平台 Graph 文件系统边界为 macOS Seatbelt、Linux bubblewrap。
 - Planner 写入立即生效，Reject 不回撤。批准后快照再分配工作区的代码与回归保留。
-- 文件写入内容和已有脚本不改写；Graph 的命令字面量与模型侧路径呈现由适配器处理（不是通用内核映射）。Planner 编译器使用宿主 Rust binary；会话使用真实独立目录，认证使用专用 Pi 配置目录。Graph 引擎在源外准备一份共享只读运行副本，保护源目录时不阻断自身。
+- 文件写入内容和已有脚本不改写；Graph 的命令字面量与模型侧路径呈现由既有适配器处理（不是通用内核映射）。Planner 编译器使用宿主 Rust binary；Planner Bash 与 Pi 原生工具实现完全一致。会话使用真实独立目录，认证使用专用 Pi 配置目录。Graph 引擎在源外准备共享只读运行副本，保护源目录时不阻断自身。
 - 当前取消仅清理进程组，不能声称覆盖已脱离的后代或外部服务；完整后台写入屏障与崩溃恢复仍未验证。
 - 检测到旧执行器 lease 时拒绝后端启动，不调用旧执行器或删除记录；必须先确认旧执行已经停止。
 
@@ -316,8 +316,8 @@ React UI 负责：
 - 同一数据目录只允许一个后端进程持有 `runtime.lock`（保证事件存储单写者一致性）。该进程内支持多个 Run（含多个 Graph）并发执行；`workspace_selection` 只是 UI 的选中 Run 指针，不是活动 Run 锁。
 - 调度器不为不同 Run 或 Session 获取项目级写锁。同一项目上的并发 Run 或并发发布产生的文件或 Git 冲突不由调度层处理，只通过各自的 execution/publication 状态暴露。
 - 不支持远程节点或多引擎。
-- 当前验证 macOS 原生 Graph 入口和文件工具映射；不提供任意子进程透明路径重定向。
-- 源/兄弟/session 的普通直接及符号链接写入拒绝已验证；间接服务、硬链接、跨进程描述符等不构成已证明的恶意租户隔离。
+- 已验证 macOS 原生 Graph 入口与 Windows 原生 Planner/Graph 工作流和文件工具映射；不提供任意子进程透明路径重定向。
+- macOS/Linux 拒绝源/兄弟/session 的普通越界访问；Windows 不使用逐节点沙箱，独立 Git 仓库只隔离快照，不限制子进程的文件访问。各平台均不宣称恶意租户隔离。
 - 不自动清理历史节点工作区，也不自动安装目标项目依赖。
 - 用户不能在 Graph 发布期间并发修改目标目录；脏目录会使发布失败。
 - prepare 阶段冲突由人工处理；merger 只处理最终发布冲突。

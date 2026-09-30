@@ -81,5 +81,21 @@ test('Windows workspace mapping preserves native and slash paths without requiri
     assert.equal(paths.command(`cat ${slashSource}/marker`), `cat '${slashWorkspace}/marker'`);
     assert.equal(paths.command(`cat ${slashSource}-other/marker`), `cat ${slashSource}-other/marker`);
     assert.deepEqual(paths.view({ [join(workspace, 'marker')]: workspace }), { ['.\\marker']: '.' });
+    const extendedSource = `\\\\?\\${source}`;
+    const extendedWorkspace = `\\\\?\\${workspace}`;
+    const canonical = createWorkspacePaths(extendedWorkspace, extendedSource, source);
+    const driveSource = slashSource.replace(/^([A-Za-z]):\//, (_, drive) => `/${drive.toLowerCase()}/`);
+    for (const prefix of [source, slashSource, extendedSource, extendedSource.replaceAll('\\', '/'), driveSource]) {
+      assert.equal(canonical.physical(`${prefix}/marker`), join(workspace, 'marker'));
+      assert.equal(canonical.physical(`${prefix}-other/marker`), `${prefix}-other/marker`);
+    }
+    assert.equal(canonical.command(`cat '${extendedSource}/marker'`), `cat '${slashWorkspace}/marker'`);
+    const gitRoot = execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim();
+    const cygpath = join(gitRoot, '../../../usr/bin/cygpath.exe');
+    const bashWorkspace = execFileSync(cygpath, ['-u', workspace], { encoding: 'utf8' }).trim();
+    const bashSource = execFileSync(cygpath, ['-u', source], { encoding: 'utf8' }).trim();
+    assert.equal(canonical.visible(`${bashWorkspace}/marker`), './marker');
+    assert.equal(canonical.physical(`${bashSource}/marker`), join(workspace, 'marker'));
+    assert.equal(canonical.command(`cat '${bashSource}/marker'`), `cat '${slashWorkspace}/marker'`);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

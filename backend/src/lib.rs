@@ -17,5 +17,3 @@ pub mod server;
 pub mod snapshot_view;
 pub mod store;
 pub mod workspace;
-#[cfg(windows)]
-pub mod windows_sandbox;
