@@ -1,3 +1,4 @@
+import { t, localizeError } from "../i18n";
 import { useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
@@ -16,7 +17,7 @@ export async function prefetchPlanningTranscript(planningIds: string[], signal?:
       const page = await runtimeService.getPlanningOutput(planningId, "planner", currentOffset, signal);
       if (signal?.aborted) return text;
       if (page.planningId !== planningId || page.role !== "planner" || page.nextOffset < currentOffset || (!page.complete && page.nextOffset === currentOffset)) {
-        throw new Error("规划记录与请求不匹配，请重试。");
+        throw new Error(t("规划记录与请求不匹配，请重试。"));
       }
       text += page.content;
       currentOffset = page.nextOffset;
@@ -117,7 +118,7 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
             const page = await runtimeService.getPlanningOutput(planningId, "planner", offset, abort.signal);
             if (abort.signal.aborted) return;
             if (page.planningId !== planningId || page.role !== "planner" || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
-              throw new Error("规划记录与请求不匹配，请重试。");
+              throw new Error(t("规划记录与请求不匹配，请重试。"));
             }
             text += page.content;
             if (page.content) {
@@ -153,10 +154,10 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
     return () => { abort.abort(); clearTimeout(timer); wake?.(); };
   }, [key, retry]);
 
-  return <section className="planning-activity" aria-label="规划活动记录">
-    {loading && !output && <p role="status">正在加载规划活动…</p>}
-    {error && <p role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>重试</button></p>}
-    {!loading && !error && !output && <p>没有可用的规划输出。</p>}
+  return <section className="planning-activity" aria-label={t("规划活动记录")}>
+    {loading && !output && <p role="status">{t("正在加载规划活动…")}</p>}
+    {error && <p role="alert">{localizeError(error)} <button type="button" onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
+    {!loading && !error && !output && <p>{t("没有可用的规划输出。")}</p>}
     {output && <div className="planning-activity-output">
       <VirtualizedTranscript key={`${key}:${showUserTurns}:${skipFirstUser}:${editKey}`} output={activeOutput} inline
         showUserTurns={showUserTurns} skipFirstUser={skipFirstUser} onUserResize={onUserResize}

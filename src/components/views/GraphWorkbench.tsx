@@ -1,3 +1,4 @@
+import { t, localizeError } from "../../i18n";
 import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
 import {
@@ -225,7 +226,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
           aria-expanded={isOpen}
         >
           <FolderGit2 size={12} />
-          <span>工作区与会话信息</span>
+          <span>{t("工作区与会话信息")}</span>
           <ChevronRight size={11} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} />
         </button>
       </div>
@@ -1082,9 +1083,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                 }, value)).then((accepted) => { if (accepted !== false) setEditingTaskNode(""); });
                               } else {
                                 onRequestConfirmation({
-                                  title: "修改未执行的 Task？",
-                                  message: "此节点尚无 Pi 对话可分支，将创建新的待审批运行。",
-                                  confirmText: "确认修改",
+                                  title: t("修改未执行的 Task？"),
+                                  message: t("此节点尚无 Pi 对话可分支，将创建新的待审批运行。"),
+                                  confirmText: t("确认修改"),
                                   danger: true,
                                   onConfirm: saveTask,
                                 });
@@ -1158,7 +1159,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <p>Session ID: {execution.sessionId}</p>
                     <p>Commit Before: {execution.before}</p>
                     <p>Commit After: {execution.after ?? "pending"}</p>
-                    <p className="details-tip">Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。</p>
+                    <p className="details-tip">{t("Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。")}</p>
                   </WorkspaceDetailsPanel>
                 )}
 
@@ -1171,7 +1172,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                 {selectedState?.error && (
                   <div className="node-error" style={{ marginTop: 12 }}>
-                    {selectedState.error}
+                    {localizeError(selectedState.error)}
                     {selectedState.status === "blocked" && (
                       <button
                         type="button"
@@ -1187,17 +1188,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               </div>
             </div>
             {execution && readyConversationKey !== conversationViewKey && (
-              <div className="conversation-history-loading" role="status">正在加载历史记录…</div>
+              <div className="conversation-history-loading" role="status">{t("正在加载历史记录…")}</div>
             )}
             <button
               ref={scrollBottomBtnRef}
               type="button"
               className="scroll-to-bottom-btn"
               onClick={scrollToBottom}
-              title="回到底部最新输出"
+              title={t("回到底部最新输出")}
             >
               <ArrowDown size={14} />
-              <span>最新</span>
+              <span>{t("最新")}</span>
             </button>
             <motion.div
               className="pane-bottom-chat"
@@ -1209,7 +1210,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 <div className="followup-queue-banner">
                   <div className="queue-info">
                     <Clock size={12} />
-                    <span>排队中 ({followUpQueue.length}): {followUpQueue[0].text.slice(0, 30)}...</span>
+                    <span>{t("排队中 (")}{followUpQueue.length}): {followUpQueue[0].text.slice(0, 30)}...</span>
                   </div>
                   {onCancelFollowUp && (
                     <button
@@ -1217,8 +1218,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       className="queue-cancel-btn"
                       onClick={() => onCancelFollowUp(followUpQueue[0].id)}
                     >
-                      取消
-                    </button>
+                      {t("取消")}</button>
                   )}
                 </div>
               )}
@@ -1227,12 +1227,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={
                   !state.approved
-                    ? "图规划审批启动后，可在此向选定节点发送介入指令…"
+                    ? t("图规划审批启动后，可在此向选定节点发送介入指令…")
                     : isSelectedNodeWorking
-                    ? `向 @${selectedNode.name} 实时发送 Steer（当前工具调用后生效）…`
+                    ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", selectedNode.name)
                     : selectedState?.status === "done"
-                    ? `向 @${selectedNode.name} 留言（仅记录，不重新执行）…`
-                    : `向 @${selectedNode.name} 发送介入指令…`
+                    ? t("向 @{0} 留言（仅记录，不重新执行）…", selectedNode.name)
+                    : t("向 @{0} 发送介入指令…", selectedNode.name)
                 }
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
@@ -1290,7 +1290,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             transition={{ duration: isPlanning ? 0.25 : 0, ease: "easeOut" }}
                           >
                             <Compass size={13} />
-                            <span>任务路线决策：单节点执行</span>
+                            <span>{t("任务路线决策：单节点执行")}</span>
                           </motion.div>
                         )}
 
@@ -1328,17 +1328,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                         onAfterToggle={handleWorkspaceDetailsAfterToggle}
                       >
-                        <p>工作目录: {serialExecution.worktree}</p>
-                        <p>会话实例: {serialExecution.sessionId}</p>
+                        <p>{t("工作目录: ")}{serialExecution.worktree}</p>
+                        <p>{t("会话实例: ")}{serialExecution.sessionId}</p>
                         {(() => {
-                          if (serialExecution.pid) return <p>进程 PID: {serialExecution.pid}</p>;
+                          if (serialExecution.pid) return <p>{t("进程 PID: ")}{serialExecution.pid}</p>;
                           const pidMatch = serialExecution.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
                                            serialExecution.output.match(/"pid":(\d+)/);
-                          return pidMatch ? <p>沙箱进程 PID: {pidMatch[1]}</p> : null;
+                          return pidMatch ? <p>{t("沙箱进程 PID: ")}{pidMatch[1]}</p> : null;
                         })()}
                         <p>Commit Before: {serialExecution.before || "HEAD"}</p>
                         <p>Commit After: {serialExecution.after ?? "pending"}</p>
-                        <p className="details-tip">单节点串行任务直接在本地目录工作，无需额外 worktree。</p>
+                        <p className="details-tip">{t("单节点串行任务直接在本地目录工作，无需额外 worktree。")}</p>
                       </WorkspaceDetailsPanel>
                     )}
 
@@ -1350,7 +1350,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
                     {serialNodeState?.error && (
                       <div className="node-error" style={{ marginTop: 12 }}>
-                        {serialNodeState.error}
+                        {localizeError(serialNodeState.error)}
                       </div>
                     )}
                   </div>
@@ -1398,12 +1398,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         {routeType === "undecided" ? (
                           <>
                             <Loader2 size={13} className="spin" />
-                            <span>正在评估任务路线决策...</span>
+                            <span>{t("正在评估任务路线决策...")}</span>
                           </>
                         ) : (
                           <>
                             <Compass size={13} />
-                            <span>任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）</span>
+                            <span>{t("任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）")}</span>
                           </>
                         )}
                       </motion.div>
@@ -1506,7 +1506,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                 key={item.id}
                                 item={item}
                                 isStreaming={isPlanning && item.status === "running"}
-                                title="思考过程"
+                                title={t("思考过程")}
                                 defaultExpanded={true}
                                 onExpandedChange={handleExpandableContentChange}
                               />
@@ -1539,7 +1539,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             <ThinkingCard
                               content={plannerStream.plannerThinking}
                               isStreaming={isPlanning && plannerStream.plannerThinkingActive}
-                              title="思考过程"
+                              title={t("思考过程")}
                               defaultExpanded={true}
                               onExpandedChange={handleExpandableContentChange}
                             />
@@ -1590,7 +1590,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   }}
                 >
                   <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1, color: "#ef4444" }} />
-                  <span>规划未通过：{failedPlanning.error || "规划阶段异常中断"}</span>
+                  <span>{t("规划未通过：")}{localizeError(failedPlanning.error || t("规划阶段异常中断"))}</span>
                 </div>
               )}
 
@@ -1602,36 +1602,36 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   transition={{ duration: 0.38, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
                 >
                   <div className="plan-summary-header">
-                    <span>执行拓扑概览</span>
-                    <span className={`phase-tag ${state.phase}`}>{phaseText[state.phase] ?? "草稿"}</span>
+                    <span>{t("执行拓扑概览")}</span>
+                    <span className={`phase-tag ${state.phase}`}>{phaseText[state.phase] ?? t("草稿")}</span>
                   </div>
 
                   <div className="plan-stats-row">
                     <div className="plan-stat">
                       <span className="stat-num">{routeType === "graph" ? state.graph.nodes.length : 1}</span>
-                      <span className="stat-lbl">{routeType === "graph" ? "规划节点" : "串行节点"}</span>
+                      <span className="stat-lbl">{routeType === "graph" ? t("规划节点") : t("串行节点")}</span>
                     </div>
                     <div className="plan-stat">
                       <span className="stat-num">{routeType === "graph" ? (state.plan?.executionBatches.length ?? 1) : 1}</span>
-                      <span className="stat-lbl">执行批次</span>
+                      <span className="stat-lbl">{t("执行批次")}</span>
                     </div>
                     <div className="plan-stat">
                       <span className="stat-num">{routeType === "graph" ? state.graph.edges.length : 0}</span>
-                      <span className="stat-lbl">拓扑边</span>
+                      <span className="stat-lbl">{t("拓扑边")}</span>
                     </div>
                     <div className="plan-stat">
                       <span className="stat-num">
                         {routeType === "graph"
                           ? `${completed}/${state.graph.nodes.length}`
-                          : (state.phase === "completed" ? "1/1" : (isSerialWorking ? "0/1 (执行中)" : "0/1"))}
+                          : (state.phase === "completed" ? "1/1" : (isSerialWorking ? t("0/1 (执行中)") : "0/1"))}
                       </span>
-                      <span className="stat-lbl">已完成</span>
+                      <span className="stat-lbl">{t("已完成")}</span>
                     </div>
                   </div>
 
                   <div className="plan-nodes-list">
                     <span className="nodes-list-title">
-                      {routeType === "graph" ? "节点列表（点击聚焦查看详细日志与独立沙箱）：" : "任务节点："}
+                      {routeType === "graph" ? t("节点列表（点击聚焦查看详细日志与独立沙箱）：") : t("任务节点：")}
                     </span>
                     <div className="nodes-chips">
                       {routeType === "graph" ? (
@@ -1671,17 +1671,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               )}
             </div>
             {routeType === "serial" && serialExecutions.length > 0 && readyConversationKey !== conversationViewKey && (
-              <div className="conversation-history-loading" role="status">正在加载历史记录…</div>
+              <div className="conversation-history-loading" role="status">{t("正在加载历史记录…")}</div>
             )}
             <button
               ref={scrollBottomBtnRef}
               type="button"
               className="scroll-to-bottom-btn"
               onClick={scrollToBottom}
-              title="回到底部最新输出"
+              title={t("回到底部最新输出")}
             >
               <ArrowDown size={14} />
-              <span>最新</span>
+              <span>{t("最新")}</span>
             </button>
             <motion.div
               className="pane-bottom-chat"
@@ -1693,7 +1693,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 <div className="followup-queue-banner">
                   <div className="queue-info">
                     <Clock size={12} />
-                    <span>排队中 ({followUpQueue.length}): {followUpQueue[0].text.slice(0, 30)}...</span>
+                    <span>{t("排队中 (")}{followUpQueue.length}): {followUpQueue[0].text.slice(0, 30)}...</span>
                   </div>
                   {onCancelFollowUp && (
                     <button
@@ -1701,8 +1701,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       className="queue-cancel-btn"
                       onClick={() => onCancelFollowUp(followUpQueue[0].id)}
                     >
-                      取消
-                    </button>
+                      {t("取消")}</button>
                   )}
                 </div>
               )}
@@ -1711,12 +1710,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={
                   isPlanning
-                    ? "输入补充规划或纠偏要求，发送将实时转向 (Steer)…"
+                    ? t("输入补充规划或纠偏要求，发送将实时转向 (Steer)…")
                     : isSerialExecution
-                    ? "向当前任务发送介入指令，直接在对话框中继续对话…"
+                    ? t("向当前任务发送介入指令，直接在对话框中继续对话…")
                     : state.approved
-                    ? "向规划器修改当前图，保留未受影响的节点结果…"
-                    : "向规划器追加指令，直接在对话框中继续对话并调整图规划…"
+                    ? t("向规划器修改当前图，保留未受影响的节点结果…")
+                    : t("向规划器追加指令，直接在对话框中继续对话并调整图规划…")
                 }
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
@@ -1744,7 +1743,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               transition={{ duration: 0 }}
               onMouseDown={handleStartResize}
               onDoubleClick={handleResetResizer}
-              title="按住左右拖动调节宽度，双击恢复默认"
+              title={t("按住左右拖动调节宽度，双击恢复默认")}
             >
               <div className="resizer-handle" />
             </motion.div>
@@ -1760,13 +1759,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               <div className="graph-toolbar">
                 <div className="toolbar-left">
                   <Workflow size={15} />
-                  <strong>执行拓扑图</strong>
+                  <strong>{t("执行拓扑图")}</strong>
                 </div>
                 <div className="toolbar-right">
                   <button
                     type="button"
                     className="icon-button"
-                    title="编辑 Graph IR"
+                    title={t("编辑 Graph IR")}
                     onClick={onOpenEditor}
                   >
                     <Code2 size={16} />
@@ -1842,12 +1841,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 {state.graph.nodes.length > 0 && (
                   <>
                     <div className="graph-note">
-                      <span className="note-line" />依赖前进
-                      <span className="note-line feedback" />执行反馈
-                    </div>
+                      <span className="note-line" />{t("依赖前进")}<span className="note-line feedback" />{t("执行反馈")}</div>
 
                     <div className="planner-off">
-                      <span />Planner {isPlanning ? "规划中" : state.graph.nodes.length ? "已离线" : "未启动"}
+                      <span />Planner {isPlanning ? t("规划中") : state.graph.nodes.length ? t("已离线") : t("未启动")}
                     </div>
                   </>
                 )}
@@ -1858,8 +1855,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <div className="progress-label">
                     <span>
                       <span className="progress-dot" />
-                      {completed} / {state.graph.nodes.length} 节点完成
-                    </span>
+                      {completed} / {state.graph.nodes.length}{t(" 节点完成")}</span>
                     <span>{phaseText[state.phase] ?? state.phase}</span>
                   </div>
                   <div className="progress-track">
@@ -1868,10 +1864,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                   <div className="approval-row">
                     <span>
-                      {state.phase === "running" ? "确定性运行时正在推进"
-                        : state.phase === "needs_attention" ? "执行已停止，请检查失败或阻塞节点"
-                        : state.phase === "paused" ? "已暂停后续派发"
-                        : state.phase === "completed" ? "运行已完成"
+                      {state.phase === "running" ? t("确定性运行时正在推进")
+                        : state.phase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
+                        : state.phase === "paused" ? t("已暂停后续派发")
+                        : state.phase === "completed" ? t("运行已完成")
                         : state.approved ? phaseText[state.phase] ?? state.phase : ""}
                     </span>
                     <div>
@@ -1893,7 +1889,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             onClick={() => onControl(state.paused ? "resume" : "pause")}
                           >
                             {state.paused ? <Play size={13} /> : <Pause size={13} />}
-                            {state.paused ? "继续" : "暂停"}
+                            {state.paused ? t("继续") : t("暂停")}
                           </button>
                         </>
                       ) : null}

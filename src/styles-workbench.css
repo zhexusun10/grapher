@@ -3579,7 +3579,7 @@
 
 .settings-modal-footer {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: flex-end;
   gap: 10px;
   padding: 12px 20px;
@@ -3587,6 +3587,56 @@
   background: var(--bg-surface);
   flex-shrink: 0;
   margin-top: 0;
+}
+
+.settings-modal-footer > button {
+  height: 38px;
+  line-height: 1.2;
+}
+
+.settings-modal-footer .settings-cancel-btn {
+  border: 0;
+  border-radius: 6px;
+  padding: 9px 16px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.settings-modal-footer .settings-cancel-btn:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+.settings-language-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.settings-language-row .section-desc {
+  flex: 1;
+  min-width: 200px;
+}
+
+.settings-language-row select {
+  min-width: 150px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.settings-language-error {
+  margin-top: 8px;
+  color: var(--status-danger);
+  font-size: 12px;
 }
 
 .settings-view {

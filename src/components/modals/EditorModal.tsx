@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import React, { useState, useEffect } from "react";
 import { motion } from "motion/react";
 import { Check, X } from "lucide-react";
@@ -62,15 +63,14 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
       >
         <header>
-          <h2 id="modal-title">Graph IR · 编辑与编译</h2>
-          <button className="icon-button" aria-label="关闭弹窗" onClick={onClose}>
+          <h2 id="modal-title">{t("Graph IR · 编辑与编译")}</h2>
+          <button className="icon-button" aria-label={t("关闭弹窗")} onClick={onClose}>
             <X size={18} />
           </button>
         </header>
 
         <p className="modal-description">
-          使用语义化 name 声明节点与前驱后继依赖关系。保存后将通过 Rust 编译器校验；现有未审批图会在原对话中更新。
-        </p>
+          {t("使用语义化 name 声明节点与前驱后继依赖关系。保存后将通过 Rust 编译器校验；现有未审批图会在原对话中更新。")}</p>
         <textarea
           className="json-editor"
           aria-label="Graph JSON"
@@ -85,8 +85,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
             className="secondary"
             onClick={() => setEditorText(JSON.stringify(emptyGraph, null, 2))}
           >
-            清空模板
-          </button>
+            {t("清空模板")}</button>
           <button
             type="button"
             className="primary"
@@ -100,8 +99,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
               }
             }}
           >
-            <Check size={14} />校验并应用
-          </button>
+            <Check size={14} />{t("校验并应用")}</button>
         </footer>
       </motion.section>
     </motion.div>

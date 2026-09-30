@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { useMemo } from "react";
 import type { Edge } from "@xyflow/react";
 import type { Graph, Plan, Snapshot } from "../types";
@@ -181,9 +182,9 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         id: `merger:${target}`, type: "work", width: 236,
         position: { x: node.position.x, y: node.position.y - 155 },
         data: {
-          name: `merger · ${target}`, task: "合并上游分支冲突",
+          name: `merger · ${target}`, task: t("合并上游分支冲突"),
           status: merger.status === "completed" ? "done" : merger.status === "running" ? "running" : "failed",
-          attempts, hint: `合并至 ${target}`, reviewer: false, selected: false,
+          attempts, hint: t("合并至 {0}", target), reviewer: false, selected: false,
           worktree: merger.worktree, hasTop: true, hasBottom: true,
           hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
         },
@@ -214,7 +215,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
           strokeDasharray: isFeedback ? "5 4" : undefined,
         },
         label: isFeedback
-          ? `${edge.relation || "缺陷重构反馈"} · REVISE`
+          ? `${edge.relation || t("缺陷重构反馈")} · REVISE`
           : (edge.relation || undefined),
         labelStyle: {
           fontSize: 10,

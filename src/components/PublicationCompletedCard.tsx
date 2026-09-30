@@ -1,3 +1,4 @@
+import { t, locale } from "../i18n";
 import React, { useState, useMemo } from "react";
 import { CheckCircle2, FolderGit2, GitCommit, Clock, Copy, Check, GitMerge } from "lucide-react";
 import { motion } from "motion/react";
@@ -51,7 +52,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
     } catch { }
   };
 
-  const completedAtStr = completedAt ? new Date(completedAt).toLocaleString() : "";
+  const completedAtStr = completedAt ? new Date(completedAt).toLocaleString(locale) : "";
   const headsCount = publication?.heads?.length ?? state.graph.nodes.length;
 
   return (
@@ -65,9 +66,9 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
       <div className="pub-card-header">
         <div className="pub-card-title-group">
           <CheckCircle2 size={14} className="pub-card-icon" />
-          <span className="pub-card-title">此次执行已完成，已完成写入源文件工作区</span>
+          <span className="pub-card-title">{t("此次执行已完成，已完成写入源文件工作区")}</span>
         </div>
-        <span className={`phase-tag ${state.phase}`}>{phaseText[state.phase] ?? "已完成"}</span>
+        <span className={`phase-tag ${state.phase}`}>{phaseText[state.phase] ?? t("已完成")}</span>
       </div>
 
       <div className="pub-card-body">
@@ -76,7 +77,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
             <div className="pub-card-row">
               <span className="pub-card-label">
                 <FolderGit2 size={13} />
-                <span>目标工作区</span>
+                <span>{t("目标工作区")}</span>
               </span>
               <div className="pub-card-value-box">
                 <code className="pub-card-path" title={targetRepo}>{targetRepo}</code>
@@ -84,8 +85,8 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
                   type="button"
                   className={`pub-card-copy-btn ${copiedRepo ? "copied" : ""}`}
                   onClick={handleCopyRepo}
-                  title="复制工作区目录"
-                  aria-label="复制工作区目录"
+                  title={t("复制工作区目录")}
+                  aria-label={t("复制工作区目录")}
                 >
                   {copiedRepo ? <Check size={12} /> : <Copy size={12} />}
                 </button>
@@ -97,7 +98,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
             <div className="pub-card-row">
               <span className="pub-card-label">
                 <GitCommit size={13} />
-                <span>最终提交 HEAD</span>
+                <span>{t("最终提交 HEAD")}</span>
               </span>
               <div className="pub-card-value-box">
                 <code className="pub-card-head" title={head}>
@@ -107,8 +108,8 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
                   type="button"
                   className={`pub-card-copy-btn ${copiedHead ? "copied" : ""}`}
                   onClick={handleCopyHead}
-                  title="复制完整 Commit SHA"
-                  aria-label="复制完整 Commit SHA"
+                  title={t("复制完整 Commit SHA")}
+                  aria-label={t("复制完整 Commit SHA")}
                 >
                   {copiedHead ? <Check size={12} /> : <Copy size={12} />}
                 </button>
@@ -120,7 +121,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
             <div className="pub-card-row">
               <span className="pub-card-label">
                 <Clock size={13} />
-                <span>完成时间</span>
+                <span>{t("完成时间")}</span>
               </span>
               <span className="pub-card-time">{completedAtStr}</span>
             </div>
@@ -130,13 +131,11 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
         <div className="pub-card-summary-tip">
           {routeType === "graph" ? (
             <span>
-              已完成所有 {state.graph.nodes.length} 个规划节点的执行，
-              {publication?.heads ? `${headsCount} 个拓扑终点及上游变更已聚合并写回目标目录。` : "已聚合写入源文件工作区。"}
+              {t("已完成所有 ")}{state.graph.nodes.length}{t(" 个规划节点的执行，")}{publication?.heads ? t("{0} 个拓扑终点及上游变更已聚合并写回目标目录。", headsCount) : t("已聚合写入源文件工作区。")}
             </span>
           ) : (
             <span>
-              单节点串行任务已在源文件工作区直接完成修改与提交，所有修改已落盘生效。
-            </span>
+              {t("单节点串行任务已在源文件工作区直接完成修改与提交，所有修改已落盘生效。")}</span>
           )}
         </div>
 
@@ -148,11 +147,11 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
           >
             <summary className="pub-card-mergers-summary">
               <GitMerge size={12} />
-              <span>merger 冲突修复现场 ({mergers.length} 次执行)</span>
+              <span>{t("merger 冲突修复现场 (")}{mergers.length}{t(" 次执行)")}</span>
             </summary>
             <div className="pub-card-mergers-body">
               <div className="pub-card-mergers-select-row">
-                <label htmlFor="merger-attempt-select">选择执行记录：</label>
+                <label htmlFor="merger-attempt-select">{t("选择执行记录：")}</label>
                 <select
                   id="merger-attempt-select"
                   className="pub-card-merger-select"
@@ -161,19 +160,19 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
                 >
                   {mergers.map((m) => (
                     <option key={m.id} value={m.id}>
-                      #{m.attempt} · {m.status} · {new Date(m.startedAt).toLocaleTimeString()}
+                      #{m.attempt} · {m.status} · {new Date(m.startedAt).toLocaleTimeString(locale)}
                     </option>
                   ))}
                 </select>
               </div>
               <p className="pub-card-merger-info">
-                会话：<code>{activeMerger.sessionId}</code> · 目录：<code>{activeMerger.worktree}</code>
+                {t("会话：")}<code>{activeMerger.sessionId}</code>{t(" · 目录：")}<code>{activeMerger.worktree}</code>
               </p>
               <div className="pub-card-merger-transcript">
                 <ExecutionTranscript key={activeMerger.id} runId={state.runId} execution={activeMerger} />
               </div>
               <p className="pub-card-merger-commits">
-                Before: <code>{activeMerger.before}</code> · After: <code>{activeMerger.after ?? "已提交"}</code>
+                Before: <code>{activeMerger.before}</code> · After: <code>{activeMerger.after ?? t("已提交")}</code>
               </p>
             </div>
           </details>

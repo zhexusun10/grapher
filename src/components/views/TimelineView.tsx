@@ -1,3 +1,4 @@
+import { t, locale, localizeError } from "../../i18n";
 import React, { useState, useMemo } from "react";
 import { History, Clock3 } from "lucide-react";
 import { GraphEvent } from "../../types";
@@ -31,8 +32,8 @@ export const TimelineView: React.FC<TimelineViewProps> = React.memo(({ events })
           <div className="timeline-title-area">
             <History size={18} />
             <div>
-              <h3>项目事件执行流水 (Audit Log)</h3>
-              <small>确定性状态机按序记录的所有关键决策、依赖推进、代码提交与测试反馈。</small>
+              <h3>{t("项目事件执行流水 (Audit Log)")}</h3>
+              <small>{t("确定性状态机按序记录的所有关键决策、依赖推进、代码提交与测试反馈。")}</small>
             </div>
           </div>
           <div className="timeline-filter-pills">
@@ -43,7 +44,7 @@ export const TimelineView: React.FC<TimelineViewProps> = React.memo(({ events })
                 className={`filter-pill ${timelineFilter === f ? "active" : ""}`}
                 onClick={() => setTimelineFilter(f)}
               >
-                {f === "all" ? "全部事件" : f === "node" ? "节点执行" : f === "feedback" ? "反馈复审" : f === "intervention" ? "人工介入" : "计划审批"}
+                {f === "all" ? t("全部事件") : f === "node" ? t("节点执行") : f === "feedback" ? t("反馈复审") : f === "intervention" ? t("人工介入") : t("计划审批")}
               </button>
             ))}
           </div>
@@ -53,8 +54,8 @@ export const TimelineView: React.FC<TimelineViewProps> = React.memo(({ events })
           {filteredEvents.length === 0 ? (
             <div className="timeline-empty-large">
               <Clock3 size={36} />
-              <h4>暂无事件记录</h4>
-              <p>当审批通过并开始推进节点时，事件流将实时按序显示在此处。</p>
+              <h4>{t("暂无事件记录")}</h4>
+              <p>{t("当审批通过并开始推进节点时，事件流将实时按序显示在此处。")}</p>
             </div>
           ) : (
             filteredEvents.map((event) => (
@@ -64,17 +65,17 @@ export const TimelineView: React.FC<TimelineViewProps> = React.memo(({ events })
                 <div className="card-main">
                   <div className="card-title-row">
                     <strong>{event.type.replaceAll("_", " ").toUpperCase()}</strong>
-                    <time>{new Date(event.timestamp).toLocaleString()}</time>
+                    <time>{new Date(event.timestamp).toLocaleString(locale)}</time>
                   </div>
                   <p className="card-desc">
                     {event.node ? (
-                      <>节点: <code>{event.node}</code></>
+                      <>{t("节点: ")}<code>{event.node}</code></>
                     ) : event.execution?.node ? (
-                      <>执行节点: <code>{event.execution.node}</code></>
+                      <>{t("执行节点: ")}<code>{event.execution.node}</code></>
                     ) : event.from ? (
                       <>{event.from} → {event.to}</>
                     ) : (
-                      `执行事件 #${event.sequence}`
+                      t("执行事件 #{0}", event.sequence)
                     )}
                     {event.type === "feedback" && (
                       <span className={`feedback-tag ${event.accepted ? "accept" : "revise"}`}>
@@ -82,10 +83,10 @@ export const TimelineView: React.FC<TimelineViewProps> = React.memo(({ events })
                       </span>
                     )}
                   </p>
-                  {event.error && <div className="card-error">{event.error}</div>}
+                  {event.error && <div className="card-error">{localizeError(event.error)}</div>}
                   {event.instruction && (
                     <div className="card-instruction">
-                      <span>介入指令:</span> {event.instruction}
+                      <span>{t("介入指令:")}</span> {event.instruction}
                     </div>
                   )}
                   {event.execution && (

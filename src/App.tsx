@@ -1,3 +1,4 @@
+import { t, localizeError } from "./i18n";
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -77,7 +78,7 @@ export default function App() {
   const repositoryBlocked = !!config.repository && repositoryStatus?.valid === false;
   const requireRepository = async (repository: string) => {
     const status = await runtimeService.repositoryStatus(repository);
-    if (!status.valid) throw new Error(status.error || "项目绑定已失效，请重新选择目录。");
+    if (!status.valid) throw new Error(status.error || t("项目绑定已失效，请重新选择目录。"));
   };
   const [mainTab, setMainTab] = useState<"graph" | "sessions" | "timeline">("graph");
   const [goal, setGoal] = useState("");
@@ -298,7 +299,7 @@ export default function App() {
     const text = val.trim();
     if (!text) return false;
     if (repositoryBlocked) {
-      setError(repositoryStatus?.error || "正在确认项目绑定，请稍后重试。");
+      setError(repositoryStatus?.error || t("正在确认项目绑定，请稍后重试。"));
       return false;
     }
     const selectedNode = state.graph.nodes.find((item) => item.name === selected);
@@ -352,7 +353,7 @@ export default function App() {
     }
 
     if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
-      setError("发布期间不能介入节点，请等待发布结束或处理发布失败。");
+      setError(t("发布期间不能介入节点，请等待发布结束或处理发布失败。"));
       return false;
     }
 
@@ -376,7 +377,7 @@ export default function App() {
         return;
       }
       if (plannerStream.stage === "partitioning") {
-        setError("任务路由器仍在工作，请等待 Planner 启动后再追加消息。");
+        setError(t("任务路由器仍在工作，请等待 Planner 启动后再追加消息。"));
         return false;
       }
       // Keep the SSE stream and Pi process alive. Pi's RPC steer inserts a new
@@ -448,7 +449,7 @@ export default function App() {
         handlePlanGoal(text, options, "graph", state.runId);
       } else {
         const baseGoal = state.graph.originalGoal || goal;
-        const combinedGoal = baseGoal ? `${baseGoal}\n\n补充规划要求：\n${text}` : text;
+        const combinedGoal = baseGoal ? t("{0}\n\n补充规划要求：\n{1}", baseGoal, text) : text;
         handlePlanGoal(combinedGoal, options);
       }
     }
@@ -726,10 +727,10 @@ export default function App() {
 
   const handleRemoveWorkspaceConfirm = (project: ProjectItem) => {
     setConfirmModal({
-      title: "移除工作区",
-      message: `确定从工作区列表中移除「${project.name}」吗？`,
-      detail: `路径: ${project.path}\n这仅会从工作区列表中移除索引，不会删除磁盘上的代码文件。`,
-      confirmText: "移除工作区",
+      title: t("移除工作区"),
+      message: t("确定从工作区列表中移除「{0}」吗？", project.name),
+      detail: t("路径: {0}\n这仅会从工作区列表中移除索引，不会删除磁盘上的代码文件。", project.path),
+      confirmText: t("移除工作区"),
       danger: true,
       onConfirm: () => {
         const pathToRemove = project.path;
@@ -811,10 +812,10 @@ export default function App() {
 
   const handleDeleteRunConfirm = (runId: string) => {
     setConfirmModal({
-      title: "删除运行历史",
-      message: `确定删除历史快照「Graph ${runId.slice(0, 8)}」吗？`,
-      detail: `快照 ID: ${runId}\n删除后该次运行的执行拓扑图与事件记录将被彻底清除；如果这是该项目最后一条 Conversation，对应的外置影子仓库也会一并清理。`,
-      confirmText: "删除历史",
+      title: t("删除运行历史"),
+      message: t("确定删除历史快照「Graph {0}」吗？", runId.slice(0, 8)),
+      detail: t("快照 ID: {0}\n删除后该次运行的执行拓扑图与事件记录将被彻底清除；如果这是该项目最后一条 Conversation，对应的外置影子仓库也会一并清理。", runId),
+      confirmText: t("删除历史"),
       danger: true,
       onConfirm: () => handleDeleteRun(runId),
     });
@@ -822,10 +823,10 @@ export default function App() {
 
   const handleClearHistory = () => {
     setConfirmModal({
-      title: "清空运行历史",
-      message: "确定清空当前工作区的所有历史运行记录吗？",
-      detail: "当前工作区的所有历史运行快照与事件将被彻底清除，此操作不可撤销。",
-      confirmText: "清空全部",
+      title: t("清空运行历史"),
+      message: t("确定清空当前工作区的所有历史运行记录吗？"),
+      detail: t("当前工作区的所有历史运行快照与事件将被彻底清除，此操作不可撤销。"),
+      confirmText: t("清空全部"),
       danger: true,
       onConfirm: () => run(async () => {
         const currentRuns = workspaceRuns[currentRepoPath] || [];
@@ -870,7 +871,7 @@ export default function App() {
           return copy;
         });
 
-        if (failures.length) throw new Error(`部分运行历史未能删除：\n${failures.join("\n")}`);
+        if (failures.length) throw new Error(t("部分运行历史未能删除：\n{0}", failures.join("\n")));
         if (!deletedIds.has(state.runId)) return;
         setState(emptySnapshot);
         resetSessionMessages();
@@ -901,7 +902,7 @@ export default function App() {
       setConfig((prev) => ({ ...prev, repository: info.path }));
       setError("");
     } else {
-      setError("目标路径不存在或无法作为工作区加载。");
+      setError(t("目标路径不存在或无法作为工作区加载。"));
     }
   });
 
@@ -910,7 +911,7 @@ export default function App() {
     let info: RepositoryInfo | null = null;
     if (repoPath) {
       info = await runtimeService.detectRepository(repoPath);
-      if (!info) throw new Error("目标路径不存在或无法作为工作区加载。");
+      if (!info) throw new Error(t("目标路径不存在或无法作为工作区加载。"));
       setRepoInfo(info);
       repoPath = info.path;
     }
@@ -933,7 +934,7 @@ export default function App() {
         setEnvOverrides(boot.envOverrides);
       }
     } catch (e) {
-      throw new Error(`保存设置失败：${String(e)}`);
+      throw new Error(t("保存设置失败：{0}", String(e)));
     }
     setModal(null);
     setError("");
@@ -1013,7 +1014,7 @@ export default function App() {
     if (!targetGoal) return;
     if (config.repository) await requireRepository(config.repository);
     if (isPlanning) {
-      throw new Error("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。");
+      throw new Error(t("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。"));
     }
     const isContinuing = !forceFresh && Boolean(revisionRunId || (routeType === "graph" && state.graph.nodes.length > 0 && state.runId));
     const effectiveRevisionRunId = !forceFresh ? (revisionRunId || (isContinuing ? state.runId : undefined)) : undefined;
@@ -1112,7 +1113,7 @@ export default function App() {
     try {
       if (!config.repository) {
         setModal("settings");
-        setError("请先在左侧工作区选择绑定的本地 Git 仓库。");
+        setError(t("请先在左侧工作区选择绑定的本地 Git 仓库。"));
         return;
       }
       const requiredModels = planningModelRoles(effectiveMode).map(role => ({
@@ -1122,13 +1123,13 @@ export default function App() {
       for (const { label, model } of requiredModels) {
         if (!model) {
           setModal("settings");
-          setError(`请先在设置中配置 ${label} 的模型。`);
+          setError(t("请先在设置中配置 {0} 的模型。", label));
           return;
         }
         const [provider, modelId] = model.split("/", 2);
         if (!provider || !modelId) {
           setModal("settings");
-          setError(`${label} 模型标识 "${model}" 需使用 provider/model 格式。`);
+          setError(t("{0} 模型标识 \"{1}\" 需使用 provider/model 格式。", label, model));
           return;
         }
       }
@@ -1139,7 +1140,7 @@ export default function App() {
           const prov = cat.providers.find(p => p.id === providerId);
           if (prov && !prov.configured) {
             setModal("settings");
-            setError(`${label} 所选服务商 "${prov.name || providerId}" 尚未认证，请在设置中配置 API Key 或登录。`);
+            setError(t("{0} 所选服务商 \"{1}\" 尚未认证，请在设置中配置 API Key 或登录。", label, prov.name || providerId));
             return;
           }
         }
@@ -1684,11 +1685,11 @@ export default function App() {
     const cleanText = newText.trim();
     if (!cleanText) return;
     if (repositoryBlocked) {
-      setError(repositoryStatus?.error || "正在确认项目绑定，请稍后重试。");
+      setError(repositoryStatus?.error || t("正在确认项目绑定，请稍后重试。"));
       return;
     }
     if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
-      setError("发布期间不能修改消息，请等待发布结束或处理发布失败。");
+      setError(t("发布期间不能修改消息，请等待发布结束或处理发布失败。"));
       return;
     }
 
@@ -1707,7 +1708,7 @@ export default function App() {
       effectiveMessages[0]?.id === targetMsg.id
     ));
     if ((isPlanning || recoveredPlanning?.status === "running") && !targetMsg.node && routeType !== "serial") {
-      setError("请先停止或等待正在运行的 Planner 完成，再修改历史消息。");
+      setError(t("请先停止或等待正在运行的 Planner 完成，再修改历史消息。"));
       return false;
     }
 
@@ -1716,7 +1717,7 @@ export default function App() {
     if (selectedVersion !== undefined) {
       const selectedVersionData = targetMsg.versions?.[selectedVersion];
       if (!selectedVersionData || selectedVersion < 0 || selectedVersion >= (targetMsg.versions?.length ?? 0)) {
-        setError("无法定位要切换的对话版本，请重新加载对话后重试。");
+        setError(t("无法定位要切换的对话版本，请重新加载对话后重试。"));
         return false;
       }
       const selectedText = selectedVersionData.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
@@ -1739,7 +1740,7 @@ export default function App() {
       try {
         await requireRepository(state.config?.repository || config.repository);
         if (!selectedNodeName) {
-          if (routeType !== "graph" || !state.runId) throw new Error("当前没有可回退的 Planner 会话。");
+          if (routeType !== "graph" || !state.runId) throw new Error(t("当前没有可回退的 Planner 会话。"));
           const snap = await runtimeService.editPlanner({ runId: state.runId,
             oldText: selectedText, instruction: selectedText, versionIndex: selectedVersion });
           setState(snap);
@@ -1750,7 +1751,7 @@ export default function App() {
         }
         if (!selectedExecution || selectedExecution.node !== selectedNodeName ||
             !["completed", "failed", "running"].includes(selectedExecution.status)) {
-          throw new Error("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。");
+          throw new Error(t("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。"));
         }
         const snap = await runtimeService.editNode({
           runId: state.runId, node: selectedNodeName, executionId: selectedExecution.id,
@@ -1835,7 +1836,7 @@ export default function App() {
         const first = state.executions.find((execution) => execution.node === node &&
           !state.supersededExecutionIds?.includes(execution.id));
         if (!first || !["completed", "failed"].includes(first.status)) {
-          setError("请等待当前执行结束后再修改初始消息。");
+          setError(t("请等待当前执行结束后再修改初始消息。"));
           return;
         }
         await run(async () => {
@@ -1967,7 +1968,7 @@ export default function App() {
 
     if (!targetNodeName) {
       if (routeType !== "graph" || !state.runId) {
-        setError("当前没有可回退的 Planner 会话。");
+        setError(t("当前没有可回退的 Planner 会话。"));
         return false;
       }
       try {
@@ -1993,7 +1994,7 @@ export default function App() {
       if (!execution || execution.node !== targetNodeName ||
           !["completed", "failed", "running"].includes(execution.status) ||
           state.supersededExecutionIds?.includes(execution.id)) {
-        setError("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。");
+        setError(t("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。"));
         return;
       }
       let accepted = false;
@@ -2227,12 +2228,12 @@ export default function App() {
                       <AlertTriangle size={15} />
                     </div>
                     <div className="floating-error-content">
-                      <span className="floating-error-text">{error}</span>
+                      <span className="floating-error-text">{localizeError(error)}</span>
                     </div>
                     <button
                       type="button"
                       className="floating-error-close"
-                      aria-label="关闭错误提示"
+                      aria-label={t("关闭错误提示")}
                       onClick={() => setError("")}
                     >
                       <X size={14} />
@@ -2265,8 +2266,8 @@ export default function App() {
                   exit={{ opacity: 0, transition: { duration: 0.18 } }}
                   transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
                 >
-                  {recoveredPlanning && <section aria-label="恢复进行中的规划" className="recovered-planning-section">
-                    <p role="status">已连接正在进行的规划，活动会自动更新。</p>
+                  {recoveredPlanning && <section aria-label={t("恢复进行中的规划")} className="recovered-planning-section">
+                    <p role="status">{t("已连接正在进行的规划，活动会自动更新。")}</p>
                   </section>}
                   <PublicationPanel
                     key={state.runId}

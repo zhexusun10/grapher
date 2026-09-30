@@ -1,11 +1,12 @@
+import { t, locale, localizeError } from "../i18n";
 import { useState, useRef, useEffect } from "react";
 import { X, Loader2 } from "lucide-react";
 import type { Execution, Publication } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
 import "./PublicationPanel.css";
 
-const labels = { publishing: "正在写回工作文件夹", merging: "merger 正在修复冲突", completed: "已写回工作文件夹", failed: "回写失败，需要处理" };
-const executionLabels: Record<string, string> = { running: "执行中", completed: "已完成", failed: "失败" };
+const labels = { publishing: t("正在写回工作文件夹"), merging: t("merger 正在修复冲突"), completed: t("已写回工作文件夹"), failed: t("回写失败，需要处理") };
+const executionLabels: Record<string, string> = { running: t("执行中"), completed: t("已完成"), failed: t("失败") };
 
 // Global set to remember dismissed publication results across run switches
 const dismissedPublicationResults = new Set<string>();
@@ -50,7 +51,7 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
     setDismissedResult(resultId);
   };
 
-  return <section className={`publication-panel ${publication.status}`} aria-label="Graph 结果回写">
+  return <section className={`publication-panel ${publication.status}`} aria-label={t("Graph 结果回写")}>
     <div className="publication-heading">
       <strong role="status" aria-live="polite">
         {(publication.status === "publishing" || publication.status === "merging") && (
@@ -58,34 +59,34 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
         )}
         {labels[publication.status]}
       </strong>
-      <span title="每个终点节点的提交已包含其上游依赖的结果">{publication.heads.length} 个终点结果（含上游变更）</span>
-      {publication.status === "failed" && <button type="button" className="secondary" disabled={busy} onClick={onRetry}>重试回写</button>}
+      <span title={t("每个终点节点的提交已包含其上游依赖的结果")}>{publication.heads.length}{t(" 个终点结果（含上游变更）")}</span>
+      {publication.status === "failed" && <button type="button" className="secondary" disabled={busy} onClick={onRetry}>{t("重试回写")}</button>}
       {publication.status === "completed" && (
         <button
           type="button"
           className="publication-close"
-          aria-label="关闭回写结果"
+          aria-label={t("关闭回写结果")}
           onClick={handleDismiss}
         >
           <X size={16} />
         </button>
       )}
     </div>
-    <p className="publication-target">目标目录：<code>{publication.repository}</code></p>
-    {publication.status !== "completed" && publication.status !== "failed" && <p>节点执行已结束。正在写入最终结果，请等待回写完成后再修改目标目录。</p>}
-    {publication.error && <p role="alert" className="publication-error">{publication.error}</p>}
-    {publication.status === "failed" && <p>节点结果及合并现场已保留。处理本地改动或冲突后重试；已完成的提交会跳过，不重新运行图节点。</p>}
-    {publication.head && <p>最终提交：<code>{publication.head}</code>{publication.completedAt ? ` · ${new Date(publication.completedAt).toLocaleString()}` : ""}</p>}
+    <p className="publication-target">{t("目标目录：")}<code>{publication.repository}</code></p>
+    {publication.status !== "completed" && publication.status !== "failed" && <p>{t("节点执行已结束。正在写入最终结果，请等待回写完成后再修改目标目录。")}</p>}
+    {publication.error && <p role="alert" className="publication-error">{localizeError(publication.error)}</p>}
+    {publication.status === "failed" && <p>{t("节点结果及合并现场已保留。处理本地改动或冲突后重试；已完成的提交会跳过，不重新运行图节点。")}</p>}
+    {publication.head && <p>{t("最终提交：")}<code>{publication.head}</code>{publication.completedAt ? ` · ${new Date(publication.completedAt).toLocaleString(locale)}` : ""}</p>}
     {execution && <details className="publication-mergers" open={publication.status === "merging" || detailsOpen}
       onToggle={event => setDetailsOpen(event.currentTarget.open)}>
-      <summary>merger · Execution Instance · {mergers.length} 次执行</summary>
-      <label>执行记录 <select aria-label="merger 执行记录" value={execution.id} onChange={e => setAttemptId(e.target.value)}>
-        {mergers.map(e => <option key={e.id} value={e.id}>#{e.attempt} · {executionLabels[e.status] ?? e.status} · {new Date(e.startedAt).toLocaleString()}</option>)}
+      <summary>merger · Execution Instance · {mergers.length}{t(" 次执行")}</summary>
+      <label>{t("执行记录 ")}<select aria-label={t("merger 执行记录")} value={execution.id} onChange={e => setAttemptId(e.target.value)}>
+        {mergers.map(e => <option key={e.id} value={e.id}>#{e.attempt} · {executionLabels[e.status] ?? e.status} · {new Date(e.startedAt).toLocaleString(locale)}</option>)}
       </select></label>
-      <p>状态：{executionLabels[execution.status] ?? execution.status} · 会话：<code>{execution.sessionId}</code></p>
-      <p>工作目录：<code>{execution.worktree}</code></p>
+      <p>{t("状态：")}{executionLabels[execution.status] ?? execution.status}{t(" · 会话：")}<code>{execution.sessionId}</code></p>
+      <p>{t("工作目录：")}<code>{execution.worktree}</code></p>
       {(detailsOpen || publication.status === "merging") && <div className="publication-transcript"><ExecutionTranscript key={execution.id} runId={runId} execution={execution} /></div>}
-      <p>Before: <code>{execution.before}</code> · After: <code>{execution.after ?? "待提交"}</code></p>
+      <p>Before: <code>{execution.before}</code> · After: <code>{execution.after ?? t("待提交")}</code></p>
     </details>}
   </section>;
 }

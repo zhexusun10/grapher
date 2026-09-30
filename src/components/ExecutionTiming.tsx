@@ -1,3 +1,4 @@
+import { t, locale } from "../i18n";
 import React, { useEffect, useState } from "react";
 import type { Execution } from "../types";
 
@@ -15,13 +16,13 @@ export function ExecutionTiming({ execution }: { execution: Execution }) {
   const seconds = end == null ? null : Math.max(0, Math.floor((end - execution.startedAt) / 1000));
   return (
     <span className="execution-timing">
-      <time dateTime={new Date(execution.startedAt).toISOString()} title="开始时间">
-        {new Date(execution.startedAt).toLocaleTimeString()}
+      <time dateTime={new Date(execution.startedAt).toISOString()} title={t("开始时间")}>
+        {new Date(execution.startedAt).toLocaleTimeString(locale)}
       </time>
-      {execution.completedAt != null && <> → <time dateTime={new Date(execution.completedAt).toISOString()} title="结束时间">
-        {new Date(execution.completedAt).toLocaleTimeString()}
+      {execution.completedAt != null && <> → <time dateTime={new Date(execution.completedAt).toISOString()} title={t("结束时间")}>
+        {new Date(execution.completedAt).toLocaleTimeString(locale)}
       </time></>}
-      {seconds != null && <> · {running ? "已运行" : "耗时"} {Math.floor(seconds / 60)}分{seconds % 60}秒</>}
+      {seconds != null && <> · {running ? t("已运行") : t("耗时")} {Math.floor(seconds / 60)}{t("分")}{seconds % 60}{t("秒")}</>}
     </span>
   );
 }

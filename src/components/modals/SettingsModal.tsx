@@ -1,10 +1,12 @@
+import { t, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
 import React, { useEffect, useState } from "react";
-import { motion, useReducedMotion } from "motion/react";
-import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch, Languages, RefreshCw } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
 import type { ProviderCatalog } from "../../services/providerAuth";
 import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
+import { ConfirmModal } from "./ConfirmModal";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -34,14 +36,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? false);
   const [catalog, setCatalog] = useState<ProviderCatalog>();
   const [catalogBusy, setCatalogBusy] = useState(true);
+  const [pendingLanguage, setPendingLanguage] = useState<LanguagePreference | null>(null);
+  const [languageError, setLanguageError] = useState("");
+  const languageLabels: Record<LanguagePreference, string> = {
+    auto: t("跟随系统"),
+    "zh-CN": t("中文"),
+    en: t("英文"),
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // Escape dismisses only the confirmation when it is open.
+      if (e.key === "Escape" && pendingLanguage === null) onClose();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [onClose, pendingLanguage]);
 
   if (!isOpen) return null;
 
@@ -52,12 +62,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeInOut" }}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
     >
       <motion.section
         className="modal settings-modal"
+        inert={pendingLanguage !== null}
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
@@ -71,20 +79,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <Settings2 size={18} />
             </div>
             <div>
-              <h2 id="modal-title">设置</h2>
+              <h2 id="modal-title">{t("设置")}</h2>
             </div>
           </div>
-          <button className="icon-button" aria-label="关闭弹窗" onClick={onClose}>
+          <button className="icon-button" aria-label={t("关闭弹窗")} onClick={onClose}>
             <X size={18} />
           </button>
         </header>
 
         <div className="settings-modal-content">
           <div className="settings-sections">
+            <section className="settings-card" aria-labelledby="language-settings-title">
+              <div className="settings-card-title">
+                <Languages size={16} />
+                <h4 id="language-settings-title">{t("界面语言")}</h4>
+              </div>
+              <div className="settings-language-row">
+                <p className="section-desc">{t("切换语言需确认并重启前端后生效。")}</p>
+                <select
+                  aria-label={t("界面语言")}
+                  value={languagePreference}
+                  onChange={(event) => {
+                    const next = event.target.value as LanguagePreference;
+                    if (next === languagePreference) return;
+                    setLanguageError("");
+                    setPendingLanguage(next);
+                  }}
+                >
+                  <option value="auto">{languageLabels.auto}</option>
+                  <option value="zh-CN">{languageLabels["zh-CN"]}</option>
+                  <option value="en">{languageLabels.en}</option>
+                </select>
+              </div>
+              {languageError && <p role="alert" className="settings-language-error">{languageError}</p>}
+            </section>
+
             <section className="settings-card" aria-labelledby="provider-settings-title">
               <div className="settings-card-title">
                 <ShieldCheck size={16} />
-                <h4 id="provider-settings-title">模型与 Provider</h4>
+                <h4 id="provider-settings-title">{t("模型与 Provider")}</h4>
               </div>
               <ProviderSettings onCatalogChange={setCatalog} onBusyChange={setCatalogBusy} />
             </section>
@@ -92,7 +125,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <section className="settings-card" aria-labelledby="role-model-settings-title">
               <div className="settings-card-title">
                 <Terminal size={16} />
-                <h4 id="role-model-settings-title">角色模型配置</h4>
+                <h4 id="role-model-settings-title">{t("角色模型配置")}</h4>
               </div>
               <RoleModelSettings config={config} setConfig={setConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy} />
             </section>
@@ -101,18 +134,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <div className="settings-card">
               <div className="settings-card-title">
                 <GitBranch size={16} />
-                <h4>图纸审批</h4>
+                <h4>{t("图纸审批")}</h4>
               </div>
               <label className="settings-toggle-row">
                 <span>
                   <strong>Auto Approve</strong>
-                  <small>自动批准 Planner 生成的图纸并开始执行</small>
+                  <small>{t("自动批准 Planner 生成的图纸并开始执行")}</small>
                 </span>
                 <input
                   type="checkbox"
                   checked={autoApprove}
                   onChange={(event) => setAutoApprove(event.target.checked)}
-                  aria-label="Auto Approve Planner 图纸"
+                  aria-label={t("Auto Approve Planner 图纸")}
                 />
               </label>
             </div>
@@ -121,17 +154,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <div className="settings-card">
               <div className="settings-card-title">
                 <RotateCcw size={16} />
-                <h4>存储与重置</h4>
+                <h4>{t("存储与重置")}</h4>
               </div>
               <div className="section-desc">
-                <p>数据路径</p>
+                <p>{t("数据路径")}</p>
                 <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                  <code>{dataPath || "本地系统应用目录"}</code>
+                  <code>{dataPath || t("本地系统应用目录")}</code>
                   <button 
                     type="button"
                     className="icon-tiny-btn"
-                    onClick={() => navigator.clipboard.writeText(dataPath || "本地系统应用目录")}
-                    title="复制路径"
+                    onClick={() => navigator.clipboard.writeText(dataPath || t("本地系统应用目录"))}
+                    title={t("复制路径")}
                   >
                     <Copy size={13} />
                   </button>
@@ -141,15 +174,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
           </div>
 
           <footer className="settings-modal-footer">
-            <button type="button" className="secondary" onClick={onClose}>
-              取消
+            <button type="button" className="settings-cancel-btn" onClick={onClose}>
+              {t("取消")}
             </button>
             <button type="button" className="primary save-config-btn" onClick={() => onSaveConfig(autoApprove)}>
-              <Check size={14} /> 保存设置
+              <Check size={18} />{t(" 保存设置")}
             </button>
           </footer>
         </div>
       </motion.section>
+      <AnimatePresence>
+        {pendingLanguage !== null && (
+          <ConfirmModal
+            key="language-confirmation"
+            config={{
+              title: t("切换语言并重启前端？"),
+              message: t("将界面语言切换为「{0}」并重新加载前端。", languageLabels[pendingLanguage]),
+              detail: t("尚未保存的设置和输入内容可能丢失。仅重新加载前端，不会重启后端或停止后台任务。"),
+              confirmText: t("确认并重启前端"),
+              icon: <RefreshCw size={18} />,
+              onConfirm: () => {
+                try {
+                  restartFrontendWithLanguage(pendingLanguage);
+                } catch {
+                  setLanguageError(t("无法保存语言偏好，请检查浏览器是否允许本地存储后重试。"));
+                }
+              },
+            }}
+            onClose={() => setPendingLanguage(null)}
+          />
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 });

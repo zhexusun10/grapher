@@ -1,3 +1,4 @@
+import { t, locale, localizeError } from "../i18n";
 import React, { useState, useEffect, useMemo } from "react";
 import {
   Clock, Cpu, AlertCircle, ChevronDown, ChevronUp,
@@ -19,12 +20,12 @@ export function formatSeconds(seconds: number): string {
   const minutes = Math.floor(totalSecs / 60);
   const remainingSecs = totalSecs % 60;
   if (minutes === 0) return `${seconds.toFixed(1)}s`;
-  return `${minutes}分${remainingSecs}秒`;
+  return t("{0}分{1}秒", minutes, remainingSecs);
 }
 
 export function formatNumber(num?: number): string {
   if (num == null) return "0";
-  return num.toLocaleString();
+  return num.toLocaleString(locale);
 }
 
 export function parseTimestamp(val: unknown): number {
@@ -178,7 +179,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.mem
     <div className="planning-summary-card" data-testid="planning-summary-card">
       <div className="planning-summary-header">
         <div className="planning-summary-title-area">
-          <span className="planning-summary-title">规划阶段摘要</span>
+          <span className="planning-summary-title">{t("规划阶段摘要")}</span>
         </div>
         <div className="planning-summary-actions">
           <span style={{ fontSize: 11, color: "var(--text-secondary)", marginRight: 8 }}>
@@ -188,7 +189,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.mem
             type="button"
             className="planning-id-chip"
             onClick={handleCopyId}
-            title={`点击复制规划 ID: ${planning.planningId}`}
+            title={t("点击复制规划 ID: {0}", planning.planningId)}
           >
             <span className="id-label">ID:</span>
             <span className="id-val">{planning.planningId.slice(0, 8)}...</span>
@@ -199,8 +200,8 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.mem
             className="planning-toggle-btn"
             onClick={() => setExpanded(!expanded)}
             aria-expanded={expanded}
-            aria-label={expanded ? "收起明细" : "展开明细"}
-            title={expanded ? "收起明细" : "展开明细"}
+            aria-label={expanded ? t("收起明细") : t("展开明细")}
+            title={expanded ? t("收起明细") : t("展开明细")}
           >
             {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           </button>
@@ -211,52 +212,49 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.mem
       {(planning.error || planning.status === "failed") && (
         <div className="planning-error-notice" style={{ marginBottom: 10, padding: "8px 12px", background: "#ffffff", borderRadius: 6, color: "#b91c1c", fontSize: 11, display: "flex", alignItems: "flex-start", gap: 6, border: "1px solid #fca5a5", boxShadow: "0 1px 4px rgba(239, 68, 68, 0.08)" }}>
           <AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1, color: "#ef4444" }} />
-          <span>规划未通过：{planning.error || "规划阶段异常中断"}</span>
+          <span>{t("规划未通过：")}{localizeError(planning.error || t("规划阶段异常中断"))}</span>
         </div>
       )}
 
       {/* 关键时耗与资源统计网格 */}
       <div className="planning-stats-grid">
-        <div className="planning-stat-box" title="分片器与规划器的 Pi 会话总时长（涵盖模型推理、工具交互与沙箱执行）">
+        <div className="planning-stat-box" title={t("分片器与规划器的 Pi 会话总时长（涵盖模型推理、工具交互与沙箱执行）")}>
           <span className="stat-label">
             <Cpu size={12} />
-            Pi 会话耗时
-          </span>
-          <span className="stat-value planning-duration">{running ? "完成后统计" : formatSeconds(planning.modelDuration)}</span>
+            {t("Pi 会话耗时")}</span>
+          <span className="stat-value planning-duration">{running ? t("完成后统计") : formatSeconds(planning.modelDuration)}</span>
         </div>
 
-        <div className="planning-stat-box" title={planning.status === "failed" || planning.error || running ? "规划状态" : "规划完成至用户审批或拒绝的等待耗时"}>
+        <div className="planning-stat-box" title={planning.status === "failed" || planning.error || running ? t("规划状态") : t("规划完成至用户审批或拒绝的等待耗时")}>
           <span className="stat-label">
             {planning.status === "failed" || planning.error ? <AlertCircle size={12} /> : <Clock size={12} />}
-            {planning.status === "failed" || planning.error || running ? "规划状态" : "审批等待"}
+            {planning.status === "failed" || planning.error || running ? t("规划状态") : t("审批等待")}
           </span>
           <span className={`stat-value ${planning.status === "failed" || planning.error ? "error" : approvalWaiting.isWaiting ? "warning" : "neutral"}`}>
             {planning.status === "failed" || planning.error ? (
-              <span style={{ color: "#ef4444" }}>未通过</span>
-            ) : running ? "规划中" : (
+              <span style={{ color: "#ef4444" }}>{t("未通过")}</span>
+            ) : running ? t("规划中") : (
               <>
                 {formatSeconds(approvalWaiting.durationSeconds)}
-                {approvalWaiting.isWaiting && <span className="waiting-pill">等待中</span>}
+                {approvalWaiting.isWaiting && <span className="waiting-pill">{t("等待中")}</span>}
               </>
             )}
           </span>
         </div>
 
-        <div className="planning-stat-box" title="规划阶段总时长（开始到完成）">
+        <div className="planning-stat-box" title={t("规划阶段总时长（开始到完成）")}>
           <span className="stat-label">
             <CheckCircle2 size={12} />
-            规划耗时
-          </span>
+            {t("规划耗时")}</span>
           <span className="stat-value neutral">{formatSeconds(running && planning.createdAt ? Math.max(0, now - planning.createdAt) / 1000 : planning.totalPlanningDuration)}</span>
         </div>
 
-        <div className="planning-stat-box" title="规划过程中工具调用总数">
+        <div className="planning-stat-box" title={t("规划过程中工具调用总数")}>
           <span className="stat-label">
             <Wrench size={12} />
-            工具调用
-          </span>
+            {t("工具调用")}</span>
           <span className="stat-value neutral">
-            {running ? "完成后统计" : totalToolCalls}
+            {running ? t("完成后统计") : totalToolCalls}
           </span>
         </div>
       </div>
@@ -265,7 +263,7 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.mem
       {pausedSeconds > 0 && (
         <div className="planning-pause-notice">
           <PauseCircle size={12} />
-          <span>执行暂停耗时：{formatSeconds(pausedSeconds)}</span>
+          <span>{t("执行暂停耗时：")}{formatSeconds(pausedSeconds)}</span>
         </div>
       )}
 
@@ -275,30 +273,30 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.mem
           {/* Token 使用概览 */}
           {totalUsage.totalTokens > 0 && (
             <div className="planning-token-section">
-              <div className="section-title">Token 资源消耗</div>
+              <div className="section-title">{t("Token 资源消耗")}</div>
               <div className="token-metrics-row">
                 <div className="token-item">
-                  <span className="token-lbl">输入 (Input)</span>
+                  <span className="token-lbl">{t("输入 (Input)")}</span>
                   <span className="token-num">{formatNumber(totalUsage.input)}</span>
                 </div>
                 <div className="token-item">
-                  <span className="token-lbl">输出 (Output)</span>
+                  <span className="token-lbl">{t("输出 (Output)")}</span>
                   <span className="token-num">{formatNumber(totalUsage.output)}</span>
                 </div>
                 {totalUsage.cacheRead > 0 && (
                   <div className="token-item">
-                    <span className="token-lbl">缓存读取 (Cache)</span>
+                    <span className="token-lbl">{t("缓存读取 (Cache)")}</span>
                     <span className="token-num">{formatNumber(totalUsage.cacheRead)}</span>
                   </div>
                 )}
                 {totalUsage.reasoning > 0 && (
                   <div className="token-item">
-                    <span className="token-lbl">思考 (Reasoning)</span>
+                    <span className="token-lbl">{t("思考 (Reasoning)")}</span>
                     <span className="token-num">{formatNumber(totalUsage.reasoning)}</span>
                   </div>
                 )}
                 <div className="token-item total">
-                  <span className="token-lbl">总计 (Total)</span>
+                  <span className="token-lbl">{t("总计 (Total)")}</span>
                   <span className="token-num">{formatNumber(totalUsage.totalTokens)}</span>
                 </div>
               </div>
@@ -307,14 +305,14 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.mem
 
           {/* 分角色明细 (Partitioner / Planner) */}
           <div className="planning-roles-section">
-            <div className="section-title">分阶段角色指标</div>
+            <div className="section-title">{t("分阶段角色指标")}</div>
             <div className="roles-grid">
               {rolesList.map(([roleKey, role]) => {
                 const roleDisplayName =
                   roleKey === "partition"
-                    ? "任务分片器 (Partitioner)"
+                    ? t("任务分片器 (Partitioner)")
                     : roleKey === "planner"
-                    ? "拓扑规划器 (Planner)"
+                    ? t("拓扑规划器 (Planner)")
                     : roleKey;
                 return (
                   <div key={roleKey} className="role-metric-card">
@@ -324,17 +322,16 @@ export const PlanningSummaryCard: React.FC<PlanningSummaryCardProps> = React.mem
                     </div>
                     <div className="role-stats-list">
                       <div className="role-stat-line">
-                        <span>工具调用:</span>
+                        <span>{t("工具调用:")}</span>
                         <span>
-                          {role.tools} 次
-                          {role.toolErrors > 0 && (
-                            <span className="error-count-inline"> ({role.toolErrors} 错误)</span>
+                          {role.tools}{t(" 次")}{role.toolErrors > 0 && (
+                            <span className="error-count-inline"> ({role.toolErrors}{t(" 错误)")}</span>
                           )}
                         </span>
                       </div>
                       <div className="role-stat-line">
-                        <span>消息轮次:</span>
-                        <span>{role.assistantMessages} 轮</span>
+                        <span>{t("消息轮次:")}</span>
+                        <span>{role.assistantMessages}{t(" 轮")}</span>
                       </div>
                       {role.usage && (
                         <div className="role-stat-line">

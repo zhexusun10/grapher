@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { useEffect, useState } from "react";
 import { runtimeService } from "../services/runtime";
 
@@ -19,7 +20,7 @@ export function useRepositoryStatus(repository: string) {
         if (!controller.signal.aborted) setStatus(result);
       } catch (error) {
         if (!controller.signal.aborted) {
-          setStatus({ repository, valid: false, error: `无法确认项目绑定：${String(error)}` });
+          setStatus({ repository, valid: false, error: t("无法确认项目绑定：{0}", String(error)) });
         }
       } finally {
         checking = false;

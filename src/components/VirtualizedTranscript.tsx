@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
 import { TranscriptItem } from "../types";
@@ -50,7 +51,7 @@ function getScrollParent(node: HTMLElement | null): HTMLElement | null {
 export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React.memo(({
   output,
   className = "",
-  emptyText = "工作区就绪，等待节点指令输出…",
+  emptyText = t("工作区就绪，等待节点指令输出…"),
   onUserResize,
   inline = false,
   compact = false,

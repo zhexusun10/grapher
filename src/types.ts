@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 export type Status = "waiting" | "running" | "blocked" | "done" | "failed" | "dirty";
 export interface GraphNode { name: string; task: string }
 export interface GraphEdge { from: string; to: string; relation: string; feedback: boolean }
@@ -128,19 +129,19 @@ export const emptySnapshot: Snapshot = {
 };
 
 export const example: Graph = {
-  originalGoal: "为当前项目实现工作图自动化编译与多节点协作执行",
+  originalGoal: t("为当前项目实现工作图自动化编译与多节点协作执行"),
   nodes: [
-    { name: "api_spec", task: "确定系统模块契约与核心数据结构规范" },
-    { name: "frontend", task: "构建交互界面与可视化执行拓扑视图" },
-    { name: "backend", task: "实现确定性状态机与沙箱运行时调度" },
-    { name: "qa_review", task: "执行端到端自动化测试与缺陷复核" },
+    { name: "api_spec", task: t("确定系统模块契约与核心数据结构规范") },
+    { name: "frontend", task: t("构建交互界面与可视化执行拓扑视图") },
+    { name: "backend", task: t("实现确定性状态机与沙箱运行时调度") },
+    { name: "qa_review", task: t("执行端到端自动化测试与缺陷复核") },
   ],
   edges: [
-    { from: "api_spec", to: "frontend", relation: "契约输入", feedback: false },
-    { from: "api_spec", to: "backend", relation: "契约输入", feedback: false },
-    { from: "frontend", to: "qa_review", relation: "提交验收", feedback: false },
-    { from: "backend", to: "qa_review", relation: "提交验收", feedback: false },
-    { from: "qa_review", to: "frontend", relation: "缺陷重构反馈", feedback: true },
+    { from: "api_spec", to: "frontend", relation: t("契约输入"), feedback: false },
+    { from: "api_spec", to: "backend", relation: t("契约输入"), feedback: false },
+    { from: "frontend", to: "qa_review", relation: t("提交验收"), feedback: false },
+    { from: "backend", to: "qa_review", relation: t("提交验收"), feedback: false },
+    { from: "qa_review", to: "frontend", relation: t("缺陷重构反馈"), feedback: true },
   ],
 };
 

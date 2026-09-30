@@ -1,3 +1,4 @@
+import { t, localizeError } from "../i18n";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
@@ -64,7 +65,7 @@ async function fetchExecutionTranscript(runId: string, execution: Execution, sig
     const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, signal, execution.status !== "running");
     if (signal?.aborted) return text;
     if (page.runId !== runId || page.executionId !== execution.id || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
-      throw new Error("执行记录与请求不匹配");
+      throw new Error(t("执行记录与请求不匹配"));
     }
     text += page.content;
     offset = page.nextOffset;
@@ -162,7 +163,7 @@ export function ExecutionTranscript({
         if (abort.signal.aborted) return;
         if (!settled) setIsFetchingFirstPage(false);
         if (page.runId !== runId || page.executionId !== execution.id || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
-          throw new Error("执行记录与请求不匹配");
+          throw new Error(t("执行记录与请求不匹配"));
         }
         text += page.content;
         offset = page.nextOffset;
@@ -203,21 +204,21 @@ export function ExecutionTranscript({
     };
   }, [runId, execution.id, paged, retry, cacheKey, execution.status, settled]);
 
-  let emptyText = "工作区就绪，等待节点指令输出…";
+  let emptyText = t("工作区就绪，等待节点指令输出…");
   if (paged) {
     if (isFetchingFirstPage) {
-      emptyText = "正在加载历史记录…";
+      emptyText = t("正在加载历史记录…");
     } else if (execution.status !== "running" && record.text === "") {
-      emptyText = "该节点没有产生日志输出";
+      emptyText = t("该节点没有产生日志输出");
     }
   } else {
     if (execution.status !== "running" && !execution.output) {
-      emptyText = "该节点没有产生日志输出";
+      emptyText = t("该节点没有产生日志输出");
     }
   }
 
   return <>
-    {error && <p role="alert">{error} <button onClick={() => setRetry(value => value + 1)}>重试</button></p>}
+    {error && <p role="alert">{localizeError(error)} <button onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
     <VirtualizedTranscript key={`${runId}:${execution.id}:${retry}`}
       compact
       emptyText={execution.status === "running" ? "" : emptyText}

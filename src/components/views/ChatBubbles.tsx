@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowUp, Check, Copy, Pencil, X } from "lucide-react";
 import type { ChatMessageVersion, ImageAttachment } from "../../types";
@@ -147,8 +148,8 @@ export function EditableUserBubble({
               type="button"
               className="chat-bubble-action-btn"
               onClick={onCancel}
-              title="取消修改 (Esc)"
-              aria-label="取消修改"
+              title={t("取消修改 (Esc)")}
+              aria-label={t("取消修改")}
             >
               <X size={14} />
             </button>
@@ -157,8 +158,8 @@ export function EditableUserBubble({
               className="chat-bubble-action-btn send"
               onClick={submit}
               disabled={disabled || !draft.trim()}
-              title="回退并重试 (Enter)"
-              aria-label="回退并重试"
+              title={t("回退并重试 (Enter)")}
+              aria-label={t("回退并重试")}
             >
               <ArrowUp size={14} />
             </button>
@@ -169,8 +170,8 @@ export function EditableUserBubble({
               type="button"
               className={`chat-message-copy-btn${copied ? " copied" : ""}`}
               onClick={handleCopy}
-              title={copied ? "已复制" : "复制消息"}
-              aria-label={copied ? "已复制" : "复制消息"}
+              title={copied ? t("已复制") : t("复制消息")}
+              aria-label={copied ? t("已复制") : t("复制消息")}
             >
               {copied ? <Check size={14} /> : <Copy size={14} />}
             </button>
@@ -180,8 +181,8 @@ export function EditableUserBubble({
                 className="chat-message-edit-btn"
                 onClick={beginEdit}
                 disabled={disabled}
-                title="修改消息并回退重试"
-                aria-label="修改消息并回退重试"
+                title={t("修改消息并回退重试")}
+                aria-label={t("修改消息并回退重试")}
               >
                 <Pencil size={14} />
               </button>
@@ -202,7 +203,7 @@ export function EditableUserBubble({
                 <div key={idx} className="chat-user-image-thumb">
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
-                    alt={img.name || `图片 ${idx + 1}`}
+                    alt={img.name || t("图片 {0}", idx + 1)}
                     className="chat-user-img"
                   />
                 </div>
@@ -217,7 +218,7 @@ export function EditableUserBubble({
               <textarea
                 ref={textareaRef}
                 className="chat-bubble-edit-textarea"
-                aria-label="修改消息内容"
+                aria-label={t("修改消息内容")}
                 value={draft}
                 onChange={(event) => onDraftChange(event.target.value)}
                 onCompositionStart={() => {

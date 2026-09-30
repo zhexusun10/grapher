@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import React from "react";
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
 import { ShieldCheck, Code2, LoaderCircle, Check, Circle } from "lucide-react";
@@ -13,16 +14,16 @@ export const statusText: Record<Status, string> = {
 };
 
 export const phaseText: Record<string, string> = {
-  draft: "草稿",
-  awaiting_approval: "等待审批",
-  running: "执行中",
-  paused: "已暂停",
-  completed: "已完成",
-  publishing: "正在写回工作文件夹",
-  merging: "merger 修复冲突中",
-  publication_failed: "回写失败",
-  needs_attention: "需要介入",
-  rejected: "已拒绝",
+  draft: t("草稿"),
+  awaiting_approval: t("等待审批"),
+  running: t("执行中"),
+  paused: t("已暂停"),
+  completed: t("已完成"),
+  publishing: t("正在写回工作文件夹"),
+  merging: t("merger 修复冲突中"),
+  publication_failed: t("回写失败"),
+  needs_attention: t("需要介入"),
+  rejected: t("已拒绝"),
 };
 
 export type WorkNode = Node<{
@@ -46,7 +47,7 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
   return (
     <div
       className={`task-node ${data.selected ? "selected" : ""} ${data.status}`}
-      title={`${data.task}${data.hint ? `\n\n依赖关系:\n${data.hint}` : ""}\n尝试: ${data.attempts}\n工作区: ${data.worktree || "未生成"}`}
+      title={t("{0}{1}\n尝试: {2}\n工作区: {3}", data.task, data.hint ? t("\n\n依赖关系:\n{0}", data.hint) : "", data.attempts, data.worktree || t("未生成"))}
     >
       <Handle id="top" type="target" position={Position.Top}
         className={`react-flow__handle ${data.hasTop ? "connected" : ""}`} />
@@ -69,7 +70,7 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
           {statusText[data.status]}
         </span>
         <span className="node-attempts-badge">
-          {data.attempts > 0 ? `#${data.attempts} 尝试` : "尚未执行"}
+          {data.attempts > 0 ? t("#{0} 尝试", data.attempts) : t("尚未执行")}
         </span>
       </div>
       <Handle id="bottom" type="source" position={Position.Bottom}

@@ -1,3 +1,4 @@
+import { t, locale } from "../../i18n";
 import React, { useState } from "react";
 import { Code2, Terminal, FolderGit2, GitBranch, ArrowRight } from "lucide-react";
 import { Snapshot, Execution } from "../../types";
@@ -44,7 +45,7 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
       <div className="sessions-container">
         <aside className="sessions-node-list">
           <div className="sessions-list-header">
-            <span>节点列表 ({state.graph.nodes.length})</span>
+            <span>{t("节点列表 (")}{state.graph.nodes.length})</span>
           </div>
           <div className="sessions-list-scroll">
             {state.graph.nodes.length > 0 ? (
@@ -68,7 +69,7 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
                       <span className={`status-text ${nState?.status ?? "waiting"}`}>
                         {statusText[nState?.status ?? "waiting"]}
                       </span>
-                      <span className="attempts-count">{nAttempts.length} 次尝试</span>
+                      <span className="attempts-count">{nAttempts.length}{t(" 次尝试")}</span>
                     </div>
                   </button>
                 );
@@ -76,8 +77,8 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
             ) : (
               <div className="sessions-empty-hint">
                 <Code2 size={24} />
-                <span>暂无节点</span>
-                <small>在上方输入任务目标后编译生成</small>
+                <span>{t("暂无节点")}</span>
+                <small>{t("在上方输入任务目标后编译生成")}</small>
               </div>
             )}
           </div>
@@ -96,14 +97,14 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
                 </div>
                 {attempts.length > 0 && (
                   <div className="attempt-select-wrap">
-                    <span>执行记录:</span>
+                    <span>{t("执行记录:")}</span>
                     <select
                       value={execution?.id ?? ""}
                       onChange={(e) => setAttemptId(e.target.value)}
                     >
                       {attempts.map((item) => (
                         <option key={item.id} value={item.id}>
-                          #{item.attempt} · {item.status} · {new Date(item.startedAt).toLocaleTimeString()}
+                          #{item.attempt} · {item.status} · {new Date(item.startedAt).toLocaleTimeString(locale)}
                         </option>
                       ))}
                     </select>
@@ -144,8 +145,8 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
               ) : (
                 <div className="sessions-no-execution">
                   <Terminal size={28} />
-                  <h4>全新独立上下文</h4>
-                  <p>该节点尚未启动或正在等待前驱依赖完成。计划审批启动后，将在隔离 Git worktree 中执行。</p>
+                  <h4>{t("全新独立上下文")}</h4>
+                  <p>{t("该节点尚未启动或正在等待前驱依赖完成。计划审批启动后，将在隔离 Git worktree 中执行。")}</p>
                 </div>
               )}
 
@@ -154,25 +155,24 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
                 onSubmit={handleSubmitIntervention}
               >
                 <textarea
-                  aria-label="节点介入指令"
+                  aria-label={t("节点介入指令")}
                   value={instruction}
                   onChange={(event) => setInstruction(event.target.value)}
                   placeholder={
                     active
-                      ? "执行进行中，先暂停再发送介入指令…"
+                      ? t("执行进行中，先暂停再发送介入指令…")
                       : !state.approved
-                      ? "计划审批并启动后可向节点发送介入指令…"
-                      : "向该节点发送调整或重写指令…"
+                      ? t("计划审批并启动后可向节点发送介入指令…")
+                      : t("向该节点发送调整或重写指令…")
                   }
                   disabled={locked || active || !state.approved}
                 />
                 <div>
                   <span>
-                    <GitBranch size={12} />仅增量重跑下游子图
-                  </span>
+                    <GitBranch size={12} />{t("仅增量重跑下游子图")}</span>
                   <button
                     type="submit"
-                    title="发送介入指令"
+                    title={t("发送介入指令")}
                     disabled={locked || active || !state.approved || !instruction.trim()}
                   >
                     <ArrowRight size={16} />
@@ -183,11 +183,11 @@ export const SessionsView: React.FC<SessionsViewProps> = React.memo(({
           ) : (
             <div className="sessions-select-empty">
               <Terminal size={36} />
-              <h3>{state.graph.nodes.length === 0 ? "暂无节点数据" : "请在左侧选择一个节点"}</h3>
+              <h3>{state.graph.nodes.length === 0 ? t("暂无节点数据") : t("请在左侧选择一个节点")}</h3>
               <p>
                 {state.graph.nodes.length === 0
-                  ? "输入工作目标后，AI 将自动编译并呈现执行工作图。"
-                  : "选择任意节点可查看其隔离 worktree 会话、完整执行终端日志并实时下发修正指令。"}
+                  ? t("输入工作目标后，AI 将自动编译并呈现执行工作图。")
+                  : t("选择任意节点可查看其隔离 worktree 会话、完整执行终端日志并实时下发修正指令。")}
               </p>
             </div>
           )}

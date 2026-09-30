@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import React from "react";
 import { FolderGit2, GitBranch, ChevronRight, GitFork, MessageSquare, History } from "lucide-react";
 import { motion } from "motion/react";
@@ -36,13 +37,12 @@ export const Header: React.FC<HeaderProps> = React.memo(({
       <div className="header-top">
         <div className="workspace-meta">
           <FolderGit2 size={16} />
-          <span className="repo-badge" title={config.repository || "未选择本地仓库"}>
-            {activeProject?.name || matchingRepo?.name || (config.repository ? config.repository.split("/").filter(Boolean).pop() : "未选择项目")}
+          <span className="repo-badge" title={config.repository || t("未选择本地仓库")}>
+            {activeProject?.name || matchingRepo?.name || (config.repository ? config.repository.split("/").filter(Boolean).pop() : t("未选择项目"))}
           </span>
           {activeProject?.isShadow || matchingRepo?.isShadow ? (
-            <span className="shadow-tag" title="本地零侵入影子仓库：版本由 Grapher 内部维护，不污染用户目录">
-              影子仓库
-            </span>
+            <span className="shadow-tag" title={t("本地零侵入影子仓库：版本由 Grapher 内部维护，不污染用户目录")}>
+              {t("影子仓库")}</span>
           ) : activeProject?.branch ? (
             <span className="branch-tag">
               <GitBranch size={11} />
@@ -50,7 +50,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({
             </span>
           ) : null}
           <ChevronRight size={13} />
-          <span className={`phase-tag ${phase}`}>{phaseText[phase] ?? "草稿"}</span>
+          <span className={`phase-tag ${phase}`}>{phaseText[phase] ?? t("草稿")}</span>
         </div>
 
         <nav className="header-nav-tabs">
@@ -67,7 +67,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({
               />
             )}
             <GitFork size={14} />
-            <span>执行拓扑图</span>
+            <span>{t("执行拓扑图")}</span>
             {nodesCount > 0 && <span className="tab-count">{nodesCount}</span>}
           </button>
           <button
@@ -83,7 +83,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({
               />
             )}
             <MessageSquare size={14} />
-            <span>节点会话与日志</span>
+            <span>{t("节点会话与日志")}</span>
           </button>
           <button
             type="button"
@@ -98,7 +98,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({
               />
             )}
             <History size={14} />
-            <span>事件流水</span>
+            <span>{t("事件流水")}</span>
             <span className="tab-count">{eventsCount}</span>
           </button>
         </nav>

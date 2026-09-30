@@ -1,3 +1,4 @@
+import { t, localizeError } from "../i18n";
 import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -44,7 +45,7 @@ function AuthLink({ url, label }: { url?: string; label?: string }) {
       className="provider-oauth-btn"
     >
       <ExternalLink size={14} />
-      <span>{label || "在浏览器中打开授权页面"}</span>
+      <span>{label || t("在浏览器中打开授权页面")}</span>
     </a>
   );
 }
@@ -216,8 +217,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       }
       setActionSuccess(
         p.authSource === "env"
-          ? `已在 Grapher 中屏蔽 ${p.name} (${p.id}) 的环境变量凭据。`
-          : `已成功删除 ${p.name} (${p.id}) 的 API Key 凭据。`
+          ? t("已在 Grapher 中屏蔽 {0} ({1}) 的环境变量凭据。", p.name, p.id)
+          : t("已成功删除 {0} ({1}) 的 API Key 凭据。", p.name, p.id)
       );
       setTimeout(() => {
         if (mounted.current) setActionSuccess("");
@@ -271,9 +272,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           </div>
           <div>
             <div className="pi-auth-main-title">
-              <h5>Provider 认证</h5>
+              <h5>{t("Provider 认证")}</h5>
               <span className="auth-stat-badge">
-                已就绪 {configuredCount} / {providers.length}
+                {t("已就绪 ")}{configuredCount} / {providers.length}
               </span>
             </div>
 
@@ -285,7 +286,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             <Search size={13} className="search-icon" />
             <input
               type="text"
-              placeholder="搜索 Provider..."
+              placeholder={t("搜索 Provider...")}
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
@@ -300,19 +301,17 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             className="secondary compact-btn"
             disabled={busy || pending}
             onClick={() => void load()}
-            title="重新检测本地认证状态"
+            title={t("重新检测本地认证状态")}
           >
-            <RefreshCw size={13} className={busy ? "spin-icon" : ""} /> 刷新状态
-          </button>
+            <RefreshCw size={13} className={busy ? "spin-icon" : ""} />{t(" 刷新状态")}</button>
           <button
             type="button"
             className="secondary compact-btn"
             disabled={busy || pending}
             onClick={() => void load(true)}
-            title="在线同步最新官方模型清单"
+            title={t("在线同步最新官方模型清单")}
           >
-            <Globe size={13} /> 同步最新模型
-          </button>
+            <Globe size={13} />{t(" 同步最新模型")}</button>
         </div>
       </div>
 
@@ -329,11 +328,10 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           <div className="configured-card-header">
             <div className="configured-title-group">
               <Key size={15} className="configured-key-icon" />
-              <strong>已绑定的 API Key 凭据 ({configuredProviders.length})</strong>
+              <strong>{t("已绑定的 API Key 凭据 (")}{configuredProviders.length})</strong>
             </div>
             <span className="configured-status-tag">
-              <CheckCircle2 size={11} /> 运行环境就绪
-            </span>
+              <CheckCircle2 size={11} />{t(" 运行环境就绪")}</span>
           </div>
 
           <div className="configured-list">
@@ -346,8 +344,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   </div>
                   <span className={`configured-type-badge ${p.authSource === "env" ? "env-badge" : "stored-badge"}`}>
                     {p.authSource === "env"
-                      ? `环境变量 (${p.authEnvVar || "ENV"})`
-                      : "API Key 已保存"}
+                      ? t("环境变量 ({0})", p.authEnvVar || "ENV")
+                      : t("API Key 已保存")}
                   </span>
                 </div>
 
@@ -363,19 +361,17 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                         "api_key";
                       void startLogin(p, defaultMethod as "api_key" | "oauth");
                     }}
-                    title="重新输入以更新密钥"
+                    title={t("重新输入以更新密钥")}
                   >
-                    <Key size={12} /> 修改 Key
-                  </button>
+                    <Key size={12} />{t(" 修改 Key")}</button>
                   <button
                     type="button"
                     className="card-action-btn logout-btn"
                     disabled={busy || pending}
                     onClick={() => setConfirmDeleteProvider(p)}
-                    title="彻底删除 / 屏蔽此 API 凭据"
+                    title={t("彻底删除 / 屏蔽此 API 凭据")}
                   >
-                    <Trash2 size={12} /> 删除 API Key
-                  </button>
+                    <Trash2 size={12} />{t(" 删除 API Key")}</button>
                 </div>
               </div>
             ))}
@@ -390,14 +386,14 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             <div className="active-login-title">
               <LogIn size={16} />
               <strong>
-                登录与认证绑定: {activeProvider?.name || login?.provider}
+                {t("登录与认证绑定: ")}{activeProvider?.name || login?.provider}
               </strong>
             </div>
             <button
               type="button"
               className="icon-button-close"
               onClick={handleCancelLogin}
-              title="取消 / 关闭登录面板"
+              title={t("取消 / 关闭登录面板")}
             >
               <X size={15} />
             </button>
@@ -432,17 +428,17 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   )}
                   {event.userCode && (
                     <div className="device-code-box">
-                      <div className="device-code-label">设备授权码 (Device Code):</div>
+                      <div className="device-code-label">{t("设备授权码 (Device Code):")}</div>
                       <div className="device-code-value">
                         <code>{event.userCode}</code>
                         <button
                           type="button"
                           className="copy-btn"
                           onClick={() => copyText(event.userCode!)}
-                          title="复制到剪贴板"
+                          title={t("复制到剪贴板")}
                         >
                           {copiedCode ? <Check size={14} /> : <Copy size={14} />}
-                          <span>{copiedCode ? "已复制" : "复制"}</span>
+                          <span>{copiedCode ? t("已复制") : t("复制")}</span>
                         </button>
                       </div>
                     </div>
@@ -460,7 +456,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           {pending && !login?.prompt && (
             <div className="pending-poll-indicator">
               <div className={styles.pulseDot}></div>
-              <span>正在等待 Pi 内核完成授权校验，请在浏览器中确认...</span>
+              <span>{t("正在等待 Pi 内核完成授权校验，请在浏览器中确认...")}</span>
             </div>
           )}
 
@@ -479,7 +475,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   onChange={(e) => setAnswer(e.target.value)}
                   className="auth-input-field"
                 >
-                  <option value="">请选择选项...</option>
+                  <option value="">{t("请选择选项...")}</option>
                   {login.prompt.options?.map((o) => (
                     <option key={o.id} value={o.id}>
                       {o.label}
@@ -505,8 +501,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     placeholder={
                       login.prompt.placeholder ||
                       (login.prompt.type === "secret"
-                        ? "输入 API Key (如 sk-...)"
-                        : "请输入...")
+                        ? t("输入 API Key (如 sk-...)")
+                        : t("请输入..."))
                     }
                     onChange={(e) => setAnswer(e.target.value)}
                     onKeyDown={(e) => {
@@ -520,7 +516,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                       type="button"
                       className="eye-toggle-btn"
                       onClick={() => setShowKey(!showKey)}
-                      title={showKey ? "隐藏" : "显示"}
+                      title={showKey ? t("隐藏") : t("显示")}
                     >
                       {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
                     </button>
@@ -535,18 +531,16 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   disabled={busy || !answer.trim()}
                   onClick={() => void respond()}
                 >
-                  <Check size={14} /> 保存并绑定到 Pi
-                </button>
+                  <Check size={14} />{t(" 保存并绑定到 Pi")}</button>
                 {activeProvider?.configured && (
                   <button
                     type="button"
                     className="danger-outline-btn"
                     disabled={busy}
                     onClick={() => setConfirmDeleteProvider(activeProvider)}
-                    title="从本地删除该凭据"
+                    title={t("从本地删除该凭据")}
                   >
-                    <Trash2 size={13} /> 删除当前凭据
-                  </button>
+                    <Trash2 size={13} />{t(" 删除当前凭据")}</button>
                 )}
                 <button
                   type="button"
@@ -554,8 +548,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   disabled={busy}
                   onClick={handleCancelLogin}
                 >
-                  取消
-                </button>
+                  {t("取消")}</button>
               </div>
             </div>
           )}
@@ -564,7 +557,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           {login?.status === "complete" && (
             <div className="login-status-alert success">
               <CheckCircle2 size={16} />
-              <span>✓ 认证成功！凭据已成功写入 Pi 本地认证库。</span>
+              <span>{t("✓ 认证成功！凭据已成功写入 Pi 本地认证库。")}</span>
             </div>
           )}
 
@@ -572,7 +565,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           {login?.error && (
             <div className="login-status-alert error">
               <AlertCircle size={16} />
-              <span>{login.error}</span>
+              <span>{localizeError(login.error)}</span>
             </div>
           )}
         </div>
@@ -581,8 +574,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       {/* Provider List Grid */}
       <div className="providers-grid-title" onClick={() => setShowProviders(!showProviders)} style={{ cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", flexDirection: "column" }}>
-          <span>支持的 Provider 列表</span>
-          <small>点击任意 Provider 可一键发起 <code>/login</code> 或管理凭据</small>
+          <span>{t("支持的 Provider 列表")}</span>
+          <small>{t("点击任意 Provider 可一键发起 ")}<code>/login</code>{t(" 或管理凭据")}</small>
         </div>
         {showProviders ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
       </div>
@@ -606,11 +599,10 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                 >
                   {p.configured ? (
                     <>
-                      <CheckCircle2 size={11} /> 已配置
-                      {p.authType ? ` (${p.authType})` : ""}
+                      <CheckCircle2 size={11} />{t(" 已配置")}{p.authType ? ` (${p.authType})` : ""}
                     </>
                   ) : (
-                    "未配置"
+                    t("未配置")
                   )}
                 </div>
               </div>
@@ -629,19 +621,17 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                           "api_key";
                         void startLogin(p, defaultMethod as "api_key" | "oauth");
                       }}
-                      title="重新输入密钥或刷新授权"
+                      title={t("重新输入密钥或刷新授权")}
                     >
-                      <Key size={12} /> 修改 Key
-                    </button>
+                      <Key size={12} />{t(" 修改 Key")}</button>
                     <button
                       type="button"
                       className="card-action-btn logout-btn"
                       disabled={busy || pending}
                       onClick={() => setConfirmDeleteProvider(p)}
-                      title="移除本地已保存的 API Key 凭据"
+                      title={t("移除本地已保存的 API Key 凭据")}
                     >
-                      <Trash2 size={12} /> 删除 Key
-                    </button>
+                      <Trash2 size={12} />{t(" 删除 Key")}</button>
                   </div>
                 ) : (
                   <div className="provider-card-actions">
@@ -658,10 +648,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                           void startLogin(p, defaultMethod as "api_key" | "oauth");
                         }}
                       >
-                        <LogIn size={13} /> 登录 (/login)
-                      </button>
+                        <LogIn size={13} />{t(" 登录 (/login)")}</button>
                     ) : (
-                      <span className="env-only-hint">由环境变量或系统配置</span>
+                      <span className="env-only-hint">{t("由环境变量或系统配置")}</span>
                     )}
                   </div>
                 )}
@@ -675,7 +664,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       {busy && (
         <div className="provider-status-loading">
           <RefreshCw size={14} className="spin-icon" />
-          <span>正在与 Pi 内核通信，同步 Provider 状态...</span>
+          <span>{t("正在与 Pi 内核通信，同步 Provider 状态...")}</span>
         </div>
       )}
 
@@ -689,7 +678,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       {error && (
         <div className="login-status-alert error">
           <AlertCircle size={15} />
-          <span>{error}</span>
+          <span>{localizeError(error)}</span>
         </div>
       )}
 
@@ -722,18 +711,18 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   <Trash2 size={18} />
                 </div>
                 <div className="confirm-delete-titles">
-                  <h4 id="confirm-delete-title">确认移除该 API 凭据？</h4>
+                  <h4 id="confirm-delete-title">{t("确认移除该 API 凭据？")}</h4>
                   <p className="confirm-delete-subtitle">
                     {confirmDeleteProvider.authSource === "env"
-                      ? "检测到该凭据来自系统环境变量，确认后将在 Grapher 中屏蔽"
-                      : "确认后将从 Grapher 本地密钥库中彻底清除"}
+                      ? t("检测到该凭据来自系统环境变量，确认后将在 Grapher 中屏蔽")
+                      : t("确认后将从 Grapher 本地密钥库中彻底清除")}
                   </p>
                 </div>
                 <button
                   type="button"
                   className="confirm-close-btn"
                   onClick={() => setConfirmDeleteProvider(null)}
-                  title="取消并关闭"
+                  title={t("取消并关闭")}
                 >
                   <X size={15} />
                 </button>
@@ -750,21 +739,21 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     </code>
                   </div>
                   <div className="target-provider-source">
-                    凭据来源:{" "}
+                    {t("凭据来源:")}{" "}
                     {confirmDeleteProvider.authSource === "env" ? (
                       <span className="source-tag env">
-                        系统环境变量 ({confirmDeleteProvider.authEnvVar || "ENV"})
+                        {t("系统环境变量 (")}{confirmDeleteProvider.authEnvVar || "ENV"})
                       </span>
                     ) : (
-                      <span className="source-tag local">本地 auth.json</span>
+                      <span className="source-tag local">{t("本地 auth.json")}</span>
                     )}
                   </div>
                 </div>
 
                 <p className="confirm-delete-warning">
                   {confirmDeleteProvider.authSource === "env"
-                    ? "屏蔽后，Grapher 不再向此 Provider 发送请求，相关模型将从可用列表中隐藏。您随时可在下方 Provider 列表中点击“登录”输入新密钥重新激活。"
-                    : "清除后，该 Provider 下的所有模型将无法调用。您可以在下方列表中随时重新输入 API Key 绑定。"}
+                    ? t("屏蔽后，Grapher 不再向此 Provider 发送请求，相关模型将从可用列表中隐藏。您随时可在下方 Provider 列表中点击“登录”输入新密钥重新激活。")
+                    : t("清除后，该 Provider 下的所有模型将无法调用。您可以在下方列表中随时重新输入 API Key 绑定。")}
                 </p>
               </div>
 
@@ -775,8 +764,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   disabled={busy}
                   onClick={() => setConfirmDeleteProvider(null)}
                 >
-                  取消
-                </button>
+                  {t("取消")}</button>
                 <button
                   type="button"
                   className="danger-btn confirm-action-btn"
@@ -787,8 +775,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     await logout(target);
                   }}
                 >
-                  <Trash2 size={13} /> 确认删除
-                </button>
+                  <Trash2 size={13} />{t(" 确认删除")}</button>
               </div>
             </motion.div>
           </motion.div>

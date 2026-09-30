@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import React, { useState, useRef, useLayoutEffect, useEffect, useId, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -142,9 +143,9 @@ function getLanguageForExt(fileName: string): string {
 }
 
 const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string; title: string }> = [
-  { id: "auto", label: "Auto", title: "智能路由：由 Partitioner 评估任务并自动选择单 Agent 或拓扑图架构" },
-  { id: "serial", label: "Serial", title: "单 Agent：跳过 Partitioner，直接启动单 Agent 执行" },
-  { id: "graph", label: "Graph", title: "拓扑图：跳过 Partitioner，直接启动 Planner 规划生成协作拓扑图" },
+  { id: "auto", label: "Auto", title: t("智能路由：由 Partitioner 评估任务并自动选择单 Agent 或拓扑图架构") },
+  { id: "serial", label: "Serial", title: t("单 Agent：跳过 Partitioner，直接启动单 Agent 执行") },
+  { id: "graph", label: "Graph", title: t("拓扑图：跳过 Partitioner，直接启动 Planner 规划生成协作拓扑图") },
 ];
 
 export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
@@ -363,9 +364,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           id: `skill-${s.skill.name}`,
           type: "skill",
           title: `/skill:${s.skill.name}`,
-          subtitle: s.skill.description || "无描述",
+          subtitle: s.skill.description || t("无描述"),
           value: `/skill:${s.skill.name} `,
-          badge: s.skill.scope === "workspace" ? "工作区" : "全局",
+          badge: s.skill.scope === "workspace" ? t("工作区") : t("全局"),
         }));
       }
 
@@ -558,11 +559,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               },
             ];
 
-            const promptText = trimmed || "请分析并处理此图片中的需求与内容。";
-            combinedPrompt = `${promptText}\n\n[附件图片: ${currentAttachment.name}]`;
+            const promptText = trimmed || t("请分析并处理此图片中的需求与内容。");
+            combinedPrompt = t("{0}\n\n[附件图片: {1}]", promptText, currentAttachment.name);
             displayText = trimmed
-              ? `${trimmed} [图片: ${currentAttachment.name}]`
-              : `[图片: ${currentAttachment.name}]`;
+              ? t("{0} [图片: {1}]", trimmed, currentAttachment.name)
+              : t("[图片: {0}]", currentAttachment.name);
           } else {
             let fileContent = "";
             try {
@@ -578,11 +579,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             const lang = getLanguageForExt(currentAttachment.name);
             const promptHeader = trimmed
               ? `${trimmed}\n\n`
-              : `请分析并处理以下附件文件：${currentAttachment.name}\n\n`;
-            combinedPrompt = `${promptHeader}---\n### 附件文件: ${currentAttachment.name}\n\`\`\`${lang}\n${fileContent}\n\`\`\``;
+              : t("请分析并处理以下附件文件：{0}\n\n", currentAttachment.name);
+            combinedPrompt = t("{0}---\n### 附件文件: {1}\n```{2}\n{3}\n```", promptHeader, currentAttachment.name, lang, fileContent);
             displayText = trimmed
-              ? `${trimmed} [附件: ${currentAttachment.name}]`
-              : `[附件: ${currentAttachment.name}]`;
+              ? t("{0} [附件: {1}]", trimmed, currentAttachment.name)
+              : t("[附件: {0}]", currentAttachment.name);
           }
         } catch (err) {
           console.error("Failed to process attached file:", err);
@@ -682,7 +683,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               transition={{ duration: 0.15 }}
             >
               <Paperclip size={20} className="prompt-box-drag-icon" />
-              <span className="prompt-box-drag-text">释放以添加图片或文件附件</span>
+              <span className="prompt-box-drag-text">{t("释放以添加图片或文件附件")}</span>
             </motion.div>
           )}
         </AnimatePresence>
@@ -703,22 +704,21 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   {triggerMode === "@" ? (
                     <>
                       <FileText size={13} className="header-icon-file" />
-                      <span>提及项目文件</span>
+                      <span>{t("提及项目文件")}</span>
                     </>
                   ) : (
                     <>
                       <Sparkles size={13} className="header-icon-skill" />
-                      <span>Pi 技能与指令 (/skill:...)</span>
+                      <span>{t("Pi 技能与指令 (/skill:...)")}</span>
                     </>
                   )}
                 </span>
                 <span className="suggestions-header-hints">
-                  <span className="key-hint">↑↓</span> 选择 <span className="key-hint">↵ / Tab</span> 确认 <span className="key-hint">Esc</span> 关闭
-                </span>
+                  <span className="key-hint">↑↓</span>{t(" 选择 ")}<span className="key-hint">↵ / Tab</span>{t(" 确认 ")}<span className="key-hint">Esc</span>{t(" 关闭")}</span>
               </div>
               <div className="prompt-box-suggestions-list" ref={suggestionsListRef}>
                 {suggestions.length === 0 ? (
-                  <div className="prompt-box-suggestions-empty">未找到匹配候选</div>
+                  <div className="prompt-box-suggestions-empty">{t("未找到匹配候选")}</div>
                 ) : (
                   suggestions.map((item, idx) => {
                     const isActive = idx === activeIndex;
@@ -776,13 +776,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               {selectedFile.type.startsWith("image/") ? (
                 <div className="prompt-box-image-preview-wrapper">
                   <div className="prompt-box-image-thumb">
-                    {selectedImage && <img src={selectedImage} alt="上传附件预览" className="prompt-box-preview-img" />}
+                    {selectedImage && <img src={selectedImage} alt={t("上传附件预览")} className="prompt-box-preview-img" />}
                     <button
                       type="button"
                       onClick={handleRemoveFile}
                       className="prompt-box-image-remove-btn"
-                      title="移除图片"
-                      aria-label="移除图片"
+                      title={t("移除图片")}
+                      aria-label={t("移除图片")}
                     >
                       <X size={12} />
                     </button>
@@ -806,8 +806,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                       type="button"
                       onClick={handleRemoveFile}
                       className="prompt-box-file-remove-btn"
-                      title="移除文件"
-                      aria-label="移除文件"
+                      title={t("移除文件")}
+                      aria-label={t("移除文件")}
                     >
                       <X size={12} />
                     </button>
@@ -874,8 +874,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 fileInputRef.current?.click();
               }}
               className="prompt-box-icon-btn"
-              title="添加文本、代码（.ipynb/.py等）或图片附件"
-              aria-label="添加文本、代码或图片附件"
+              title={t("添加文本、代码（.ipynb/.py等）或图片附件")}
+              aria-label={t("添加文本、代码或图片附件")}
               disabled={disabled || isBusy || isPreparing}
             >
               <Paperclip size={compact ? 15 : 18} />
@@ -885,7 +885,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           {/* Right Action Button: Mode Selector + Send/Interrupt Button */}
           <div className="prompt-box-right-actions">
             {planMode !== undefined && onPlanModeChange && (
-              <div className="prompt-box-mode-selector" role="group" aria-label="执行规划模式">
+              <div className="prompt-box-mode-selector" role="group" aria-label={t("执行规划模式")}>
                 {MODE_OPTIONS.map((item) => {
                   const isSelected = planMode === item.id;
                   return (
@@ -938,16 +938,16 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               title={
                 isWorking
                   ? hasText || selectedFile
-                    ? "发送以实时调整方向 (Steer)"
-                    : "点击打断执行"
-                  : "发送消息"
+                    ? t("发送以实时调整方向 (Steer)")
+                    : t("点击打断执行")
+                  : t("发送消息")
               }
               aria-label={
                 isWorking
                   ? hasText || selectedFile
-                    ? "发送以实时调整方向 (Steer)"
-                    : "点击打断执行"
-                  : "发送消息"
+                    ? t("发送以实时调整方向 (Steer)")
+                    : t("点击打断执行")
+                  : t("发送消息")
               }
             >
               {isWorking && !hasText && !selectedFile ? (

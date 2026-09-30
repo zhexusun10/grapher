@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot } from "../types";
 
 const filesCache = new Map<string, string[]>();
@@ -13,12 +14,12 @@ async function request<T>(command: string, body: Record<string, unknown> = {}, s
       signal,
     });
   } catch {
-    throw new Error("无法连接后端，请在终端运行 npm run backend。");
+    throw new Error(t("无法连接后端，请在终端运行 npm run backend。"));
   }
   const data = await response.json().catch(() => {
-    throw new Error(`后端未返回有效响应 (${response.status})，请确认终端中的后端已启动。`);
+    throw new Error(t("后端未返回有效响应 ({0})，请确认终端中的后端已启动。", response.status));
   });
-  if (!response.ok || data.error) throw new Error(data.error || `后端请求失败 (${response.status})`);
+  if (!response.ok || data.error) throw new Error(data.error || t("后端请求失败 ({0})", response.status));
   return data.result as T;
 }
 
@@ -77,7 +78,7 @@ export const runtimeService = {
     });
 
     if (!response.ok) {
-      let errMsg = `规划请求失败 (${response.status})`;
+      let errMsg = t("规划请求失败 ({0})", response.status);
       try {
         const errJson = await response.json();
         if (errJson.error) errMsg = errJson.error;
@@ -87,7 +88,7 @@ export const runtimeService = {
 
     const reader = response.body?.getReader();
     if (!reader) {
-      throw new Error("浏览器不支持流式响应读取");
+      throw new Error(t("浏览器不支持流式响应读取"));
     }
 
     const decoder = new TextDecoder();
@@ -136,7 +137,7 @@ export const runtimeService = {
                 planningId: dataObj.planningId,
                 summary: dataObj.summary,
               });
-              const err = new Error(dataObj.error || "规划失败");
+              const err = new Error(dataObj.error || t("规划失败"));
               (err as any).planningId = dataObj.planningId;
               (err as any).summary = dataObj.summary;
               throw err;
@@ -149,7 +150,7 @@ export const runtimeService = {
     }
 
     if (!finalSnapshot) {
-      throw new Error("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。");
+      throw new Error(t("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。"));
     }
     return finalSnapshot;
   },
@@ -190,10 +191,10 @@ export const runtimeService = {
       }
       console.warn("Native file picker failed or unsupported, fallback to prompt", err);
     }
-    const path = window.prompt("输入本地项目文件夹绝对路径（支持 Git 仓库或普通文件夹）");
+    const path = window.prompt(t("输入本地项目文件夹绝对路径（支持 Git 仓库或普通文件夹）"));
     if (!path?.trim()) return null;
     const info = await this.detectRepository(path.trim());
-    if (!info) throw new Error("无法加载该路径为有效工作区。");
+    if (!info) throw new Error(t("无法加载该路径为有效工作区。"));
     return info;
   },
   resetWorkspace: () => request<Snapshot>("reset_workspace"),

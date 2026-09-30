@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import React, { useState, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -77,42 +78,42 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
           return {
             icon: <Terminal size={14} className="tool-icon bash" />,
             badge: "bash",
-            summary: args.command ? `$ ${args.command}` : "执行系统终端命令",
+            summary: args.command ? `$ ${args.command}` : t("执行系统终端命令"),
             type: "terminal",
           };
         case "read":
           return {
             icon: <FileText size={14} className="tool-icon read" />,
             badge: "read",
-            summary: args.path || args.file || "读取工作区文件",
+            summary: args.path || args.file || t("读取工作区文件"),
             type: "file",
           };
         case "write":
           return {
             icon: <FileCode size={14} className="tool-icon write" />,
             badge: "write",
-            summary: args.path || args.file || "写入或创建文件",
+            summary: args.path || args.file || t("写入或创建文件"),
             type: "file",
           };
         case "edit":
           return {
             icon: <FileEdit size={14} className="tool-icon edit" />,
             badge: "edit",
-            summary: args.path || args.file || "代码编辑与修改",
+            summary: args.path || args.file || t("代码编辑与修改"),
             type: "file",
           };
         case "route_task":
           return {
             icon: <Compass size={14} className="tool-icon route" />,
             badge: "route_task",
-            summary: args.plan_type ? `决定任务路线: [${args.plan_type}]` : "任务路线决策",
+            summary: args.plan_type ? t("决定任务路线: [{0}]", args.plan_type) : t("任务路线决策"),
             type: "route",
           };
         case "node":
           return {
             icon: <Boxes size={14} className="tool-icon node" />,
             badge: "node",
-            summary: args.name ? `创建执行节点 [${args.name}]` : "定义拓扑节点",
+            summary: args.name ? t("创建执行节点 [{0}]", args.name) : t("定义拓扑节点"),
             type: "graph",
           };
         case "edge":
@@ -121,15 +122,15 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
             badge: "edge",
             summary:
               args.from && args.to
-                ? `${args.feedback ? "反馈边" : "依赖边"}: [${args.from}] → [${args.to}]`
-                : "连接依赖关系",
+                ? `${args.feedback ? t("反馈边") : t("依赖边")}: [${args.from}] → [${args.to}]`
+                : t("连接依赖关系"),
             type: "graph",
           };
         default:
           return {
             icon: <Wrench size={14} className="tool-icon default" />,
             badge: toolName,
-            summary: "工具调用",
+            summary: t("工具调用"),
             type: "custom",
           };
       }
@@ -173,14 +174,13 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
           <div className="tool-header-right">
             {isTruncated && (
-              <span className="tool-truncated-pill" title="输出已截断，可通过详情或全量输出文件查看完整日志">
-                已截断
-              </span>
+              <span className="tool-truncated-pill" title={t("输出已截断，可通过详情或全量输出文件查看完整日志")}>
+                {t("已截断")}</span>
             )}
             {status === "running" && (
               <span className="tool-status running">
                 <Loader2 size={12} className="spin" />
-                <span>执行中...</span>
+                <span>{t("执行中...")}</span>
               </span>
             )}
             {status !== "running" && !isError && !hasSubcommandWarning && (
@@ -188,27 +188,27 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 className="tool-status success"
                 title={
                   toolName === "bash"
-                    ? `执行成功${exitCode !== null ? `，退出码: ${exitCode}` : ""}`
-                    : "执行成功"
+                    ? t("执行成功{0}", exitCode !== null ? t("，退出码: {0}", exitCode) : "")
+                    : t("执行成功")
                 }
               >
                 <CheckCircle2 size={13} />
                 <span>
                   {toolName === "bash"
                     ? exitCode !== null
-                      ? `完成 (Exit ${exitCode})`
-                      : "完成"
-                    : "完成"}
+                      ? t("完成 (Exit {0})", exitCode)
+                      : t("完成")
+                    : t("完成")}
                 </span>
               </span>
             )}
             {status !== "running" && !isError && hasSubcommandWarning && (
               <span
                 className="tool-status warning"
-                title="命令退出码为 0，但输出中包含被遮蔽的子步骤警告"
+                title={t("命令退出码为 0，但输出中包含被遮蔽的子步骤警告")}
               >
                 <AlertTriangle size={13} />
-                <span>包含警告/错误</span>
+                <span>{t("包含警告/错误")}</span>
               </span>
             )}
             {isError && (
@@ -216,17 +216,17 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 className="tool-status error"
                 title={
                   toolName === "bash"
-                    ? `执行失败${exitCode !== null ? `，退出码: ${exitCode}` : " (退出码未知)"}`
-                    : "执行失败"
+                    ? t("执行失败{0}", exitCode !== null ? t("，退出码: {0}", exitCode) : t(" (退出码未知)"))
+                    : t("执行失败")
                 }
               >
                 <AlertCircle size={13} />
                 <span>
                   {toolName === "bash"
                     ? exitCode !== null
-                      ? `失败 (Exit ${exitCode})`
-                      : "失败 (退出码未知)"
-                    : "失败"}
+                      ? t("失败 (Exit {0})", exitCode)
+                      : t("失败 (退出码未知)")
+                    : t("失败")}
                 </span>
               </span>
             )}
@@ -234,7 +234,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
               type="button"
               className="tool-copy-btn"
               onClick={handleCopy}
-              title="复制调用参数与结果"
+              title={t("复制调用参数与结果")}
             >
               {isCopied ? <Check size={12} /> : <Copy size={12} />}
             </button>
@@ -255,24 +255,24 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 {toolName === "bash" && (
                   <div className="tool-meta-bar">
                     <div className="tool-meta-item">
-                      <span className="meta-lbl">退出码:</span>
+                      <span className="meta-lbl">{t("退出码:")}</span>
                       <span
                         className={`meta-val ${
                           exitCode === 0 ? "success" : exitCode !== null ? "error" : "neutral"
                         }`}
                       >
-                        {exitCode !== null ? exitCode : "退出码未知"}
+                        {exitCode !== null ? exitCode : t("退出码未知")}
                       </span>
                     </div>
                     <div className="tool-meta-item">
-                      <span className="meta-lbl">输出状态:</span>
+                      <span className="meta-lbl">{t("输出状态:")}</span>
                       <span className={`meta-val ${isTruncated ? "warning" : "neutral"}`}>
-                        {isTruncated ? "已截断 (Truncated)" : "完整 (Complete)"}
+                        {isTruncated ? t("已截断 (Truncated)") : t("完整 (Complete)")}
                       </span>
                     </div>
                     {args.command && (
                       <div className="tool-meta-item cmd-full">
-                        <span className="meta-lbl">命令:</span>
+                        <span className="meta-lbl">{t("命令:")}</span>
                         <code className="meta-val-code">{args.command}</code>
                       </div>
                     )}
@@ -281,7 +281,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
                 {Object.keys(args).length > 0 && (
                   <div className="tool-args-section">
-                    <div className="section-label">参数 (Arguments)</div>
+                    <div className="section-label">{t("参数 (Arguments)")}</div>
                     <pre className="tool-args-code">
                       {JSON.stringify(args, null, 2)}
                     </pre>
@@ -291,10 +291,10 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 {item.result !== undefined && item.result !== null && (
                   <div className="tool-result-section">
                     <div className="section-label">
-                      {isError ? "错误输出 (Error Output)" : "执行结果 (Result Output)"}
+                      {isError ? t("错误输出 (Error Output)") : t("执行结果 (Result Output)")}
                     </div>
                     <pre className={`tool-result-code ${isError ? "error" : ""}`}>
-                      {item.result.trim() || "(无文本输出)"}
+                      {item.result.trim() || t("(无文本输出)")}
                     </pre>
                   </div>
                 )}

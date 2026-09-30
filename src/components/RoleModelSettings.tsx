@@ -1,11 +1,12 @@
+import { t } from "../i18n";
 import React, { useState } from "react";
 import type { Config, ThinkingLevel } from "../types";
 import type { ProviderCatalog } from "../services/providerAuth";
 import { modelRoles, roleModelConfig, updateRoleModelConfig } from "../modelConfig";
 
 const thinkingLevels: Array<[ThinkingLevel, string]> = [
-  ["off", "关闭"], ["minimal", "最少 (minimal)"], ["low", "低 (low)"],
-  ["medium", "中 (medium)"], ["high", "高 (high)"], ["xhigh", "极高 (xhigh)"], ["max", "最大 (max)"],
+  ["off", t("关闭")], ["minimal", t("最少 (minimal)")], ["low", t("低 (low)")],
+  ["medium", t("中 (medium)")], ["high", t("高 (high)")], ["xhigh", t("极高 (xhigh)")], ["max", t("最大 (max)")],
 ];
 
 export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {}, busy }: {
@@ -25,16 +26,16 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
 
   return (
     <div className="role-model-settings">
-      <p className="role-model-note">三个角色分别配置模型与思维等级，仅可选择已可用的模型。Provider 认证由上方统一管理。</p>
+      <p className="role-model-note">{t("三个角色分别配置模型与思维等级，仅可选择已可用的模型。Provider 认证由上方统一管理。")}</p>
       <label className="form-field">
-        <span>可用模型 Provider 筛选</span>
+        <span>{t("可用模型 Provider 筛选")}</span>
         <select value={activeFilter} disabled={busy || availableProviders.length === 0} onChange={event => setProviderFilter(event.target.value)} className="provider-filter-select">
-          <option value="">全部可用 Provider</option>
+          <option value="">{t("全部可用 Provider")}</option>
           {availableProviders.map(provider => <option key={provider.id} value={provider.id}>{provider.name} ({provider.id})</option>)}
         </select>
       </label>
-      {!catalog && <p className="role-model-note" role="status">{busy ? "正在加载可用模型…" : "模型列表暂不可用，请在上方刷新 Provider 状态。"}</p>}
-      {catalog && availableModels.length === 0 && <p className="role-model-note" role="status">暂无可用模型，请先在上方登录 Provider 或绑定 API Key，然后刷新状态。</p>}
+      {!catalog && <p className="role-model-note" role="status">{busy ? t("正在加载可用模型…") : t("模型列表暂不可用，请在上方刷新 Provider 状态。")}</p>}
+      {catalog && availableModels.length === 0 && <p className="role-model-note" role="status">{t("暂无可用模型，请先在上方登录 Provider 或绑定 API Key，然后刷新状态。")}</p>}
       {modelRoles.map(role => {
         const selected = config.roleModels?.[role.id];
         const model = selected?.model ?? (role.id === "nodeAgent" ? config.model : "");
@@ -47,25 +48,25 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
         // provider. An unavailable saved value is displayed but not selectable.
         const choices = currentModel && !models.includes(currentModel) ? [currentModel, ...models] : models;
         return (
-          <section className="role-model-card" key={role.id} aria-label={`${role.label} 模型配置`}>
+          <section className="role-model-card" key={role.id} aria-label={t("{0} 模型配置", role.label)}>
             <h5>{role.label}</h5>
             <p>{role.description}</p>
             <div className="form-grid">
               <label className="form-field">
-                <span>{role.label} 模型</span>
+                <span>{role.label}{t(" 模型")}</span>
                 <select value={model} onChange={event => {
                   const value = event.target.value;
                   if (!value || availableModels.some(item => `${item.provider}/${item.id}` === value)) {
                     setConfig(prev => updateRoleModelConfig(prev, role.id, { model: value }));
                   }
                 }} className="provider-filter-select" disabled={busy || !catalog || availableModels.length === 0}>
-                  <option value="">{role.id === "nodeAgent" ? "请选择可用模型" : "使用 Node Agent 默认模型"}</option>
-                  {model && !currentModel && <option value={model} disabled>{catalog ? "已选模型不可用：" : "当前模型："}{model}</option>}
+                  <option value="">{role.id === "nodeAgent" ? t("请选择可用模型") : t("使用 Node Agent 默认模型")}</option>
+                  {model && !currentModel && <option value={model} disabled>{catalog ? t("已选模型不可用：") : t("当前模型：")}{model}</option>}
                   {choices.map(item => <option key={`${item.provider}/${item.id}`} value={`${item.provider}/${item.id}`}>{item.name || item.id} ({item.provider}/{item.id})</option>)}
                 </select>
               </label>
               <label className="form-field">
-                <span>{role.label} 思维等级</span>
+                <span>{role.label}{t(" 思维等级")}</span>
                 <select value={settings.thinkingLevel} onChange={event => {
                   const value = event.target.value as ThinkingLevel;
                   setConfig(prev => updateRoleModelConfig(prev, role.id, { thinkingLevel: value }));
@@ -75,11 +76,11 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
               </label>
             </div>
             <small className={override ? "role-model-warning" : "role-model-effective"}>
-              {override ? "环境变量覆盖：" : "保存后使用："}{effective.model || "未设置模型"} · {effective.thinkingLevel}
+              {override ? t("环境变量覆盖：") : t("保存后使用：")}{effective.model || t("未设置模型")} · {effective.thinkingLevel}
             </small>
-            {unavailable && <small className="role-model-warning">当前使用的模型不可用，请先认证对应 Provider 或重新选择可用模型。</small>}
+            {unavailable && <small className="role-model-warning">{t("当前使用的模型不可用，请先认证对应 Provider 或重新选择可用模型。")}</small>}
             {role.id === "nodeAgent" && (envOverrides.merger || envOverrides.mergerThinking) && (
-              <small className="role-model-warning">Merger 环境变量覆盖：{envOverrides.merger || settings.model} · {envOverrides.mergerThinking || settings.thinkingLevel}</small>
+              <small className="role-model-warning">{t("Merger 环境变量覆盖：")}{envOverrides.merger || settings.model} · {envOverrides.mergerThinking || settings.thinkingLevel}</small>
             )}
           </section>
         );

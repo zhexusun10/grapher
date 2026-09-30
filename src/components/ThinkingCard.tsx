@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import React, { useState, useEffect, useRef } from "react";
 import { Brain, ChevronDown, ChevronRight, Copy, Check, Sparkles } from "lucide-react";
 import { TranscriptItem } from "../types";
@@ -20,7 +21,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     item,
     content: directContent,
     isStreaming: directStreaming,
-    title = "思维链推理 (Chain of Thought)",
+    title = t("思维链推理 (Chain of Thought)"),
     defaultExpanded = true,
     expanded,
     onExpandedChange,
@@ -83,7 +84,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
               toggleExpand();
             }
           }}
-          title={isExpanded ? "点击折叠思维链" : "点击展开思维链"}
+          title={isExpanded ? t("点击折叠思维链") : t("点击展开思维链")}
         >
           <div className="thinking-header-left">
             <div className={`thinking-icon-box ${isStreaming ? "pulse" : ""}`}>
@@ -93,11 +94,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             {isStreaming ? (
               <span className="thinking-status streaming">
                 <span className="thinking-pulse-dot" />
-                思考中...
-              </span>
+                {t("思考中...")}</span>
             ) : (
               <span className="thinking-status completed">
-                已完成 {charCount > 0 ? `(${charCount} 字符)` : ""}
+                {t("已完成 ")}{charCount > 0 ? t("({0} 字符)", charCount) : ""}
               </span>
             )}
           </div>
@@ -108,10 +108,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
                 type="button"
                 className="thinking-copy-btn"
                 onClick={handleCopy}
-                title="复制思维链内容"
+                title={t("复制思维链内容")}
               >
                 {isCopied ? <Check size={12} className="text-success" /> : <Copy size={12} />}
-                <span>{isCopied ? "已复制" : "复制"}</span>
+                <span>{isCopied ? t("已复制") : t("复制")}</span>
               </button>
             )}
             <div className="thinking-toggle-btn">
@@ -134,7 +134,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             ) : (
               <div className="thinking-shimmer">
                 <span className="shimmer-line" />
-                <span className="thinking-shimmer-text">模型正在生成分析与推演逻辑...</span>
+                <span className="thinking-shimmer-text">{t("模型正在生成分析与推演逻辑...")}</span>
               </div>
             )}
           </div>

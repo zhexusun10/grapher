@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import React, { useEffect } from "react";
 import { motion } from "motion/react";
 import { AlertTriangle, Trash2 } from "lucide-react";
@@ -8,6 +9,7 @@ export interface ConfirmModalState {
   detail?: string;
   confirmText: string;
   danger?: boolean;
+  icon?: React.ReactNode;
   onConfirm: () => void;
   onCancel?: () => void;
 }
@@ -55,7 +57,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
       >
         <div className="confirm-header">
           <div className={`confirm-icon-wrap ${config.danger ? "danger" : ""}`}>
-            {config.danger ? <AlertTriangle size={18} /> : <Trash2 size={18} />}
+            {config.icon ?? (config.danger ? <AlertTriangle size={18} /> : <Trash2 size={18} />)}
           </div>
           <div className="confirm-texts">
             <h4 id="confirm-dialog-title">{config.title}</h4>
@@ -71,8 +73,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
             className="cancel-btn"
             onClick={cancel}
           >
-            取消
-          </button>
+            {t("取消")}</button>
           <button
             type="button"
             className={config.danger ? "danger-btn" : "primary-btn"}

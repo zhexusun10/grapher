@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import React, { useState } from "react";
 import { Folder, Plus, RotateCcw, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { ProjectItem } from "../../types";
@@ -75,7 +76,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   }, []);
 
   return (
-    <aside className={`sidebar${isCollapsed ? " is-collapsed" : ""}`} aria-label="侧边栏">
+    <aside className={`sidebar${isCollapsed ? " is-collapsed" : ""}`} aria-label={t("侧边栏")}>
       <div className="sidebar-brand-row">
         <div className="brand">
           <strong>Grapher</strong>
@@ -84,9 +85,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           type="button"
           className="sidebar-toggle-btn"
           onClick={toggleCollapsed}
-          aria-label={isCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          aria-label={isCollapsed ? t("展开侧边栏") : t("收起侧边栏")}
           aria-expanded={!isCollapsed}
-          title={isCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          title={isCollapsed ? t("展开侧边栏") : t("收起侧边栏")}
         >
           {isCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
         </button>
@@ -98,8 +99,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <button
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
-            title="添加或打开本地 Git 仓库"
-            aria-label="添加或打开本地 Git 仓库"
+            title={t("添加或打开本地 Git 仓库")}
+            aria-label={t("添加或打开本地 Git 仓库")}
             onClick={onOpenProject}
           >
             <Plus size={18} />
@@ -122,7 +123,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   setRunContextMenu(null);
                   setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
                 }}
-                title={`${proj.name}\n${proj.path}\n分支: ${proj.branch}\n(右键管理工作区)`}
+                title={t("{0}\n{1}\n分支: {2}\n(右键管理工作区)", proj.name, proj.path, proj.branch)}
               >
                 <span className="proj-icon">
                   <Folder size={16} />
@@ -139,8 +140,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         ) : (
           <div className="empty-projects-hint" onClick={onOpenProject}>
             <Folder size={24} />
-            <span>暂无工作区</span>
-            <small>点击打开本地项目文件夹</small>
+            <span>{t("暂无工作区")}</span>
+            <small>{t("点击打开本地项目文件夹")}</small>
           </div>
         )}
       </div>
@@ -151,8 +152,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <button
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
-            title="新建对话（不停止后台运行）"
-            aria-label="新建对话"
+            title={t("新建对话（不停止后台运行）")}
+            aria-label={t("新建对话")}
             onClick={onNewConversation}
           >
             <Plus size={18} />
@@ -183,17 +184,17 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   setProjectContextMenu(null);
                   setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
                 }}
-                title={labelText ? `${labelText}\n\n快照: ${id}\n(右键可复制 ID 或删除)` : `快照: ${id}\n(右键可复制 ID 或删除)`}
+                title={labelText ? t("{0}\n\n快照: {1}\n(右键可复制 ID 或删除)", labelText, id) : t("快照: {0}\n(右键可复制 ID 或删除)", id)}
               >
                 {isThisRunActive ? (
                   <span
                     className="run-dot running-pulse"
-                    title="正在运行中"
+                    title={t("正在运行中")}
                   />
                 ) : isUnread ? (
                   <span
                     className={`run-dot ${needsUnreadApproval ? "approval-pulse" : ""}`}
-                    title={needsUnreadApproval ? "有待审批的未读更新" : "有未读更新"}
+                    title={needsUnreadApproval ? t("有待审批的未读更新") : t("有未读更新")}
                   />
                 ) : null}
                 <span className="run-title-text">
@@ -204,7 +205,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           })
         ) : (
           <div className="run-placeholder">
-            <span>暂无对话记录</span>
+            <span>{t("暂无对话记录")}</span>
           </div>
         )}
       </div>
@@ -215,7 +216,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           className={`sidebar-bottom-btn ${isSettingsOpen ? "active" : ""}`}
           onClick={onOpenSettings}
           title="Setting"
-          aria-label="设置"
+          aria-label={t("设置")}
         >
           <Settings2 size={18} />
           <span>Setting</span>
@@ -239,7 +240,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             }}
           >
             <Copy size={14} />
-            <span>复制仓库路径</span>
+            <span>{t("复制仓库路径")}</span>
           </button>
           <div className="context-menu-divider" />
           <button
@@ -251,7 +252,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             }}
           >
             <Trash2 size={14} />
-            <span>从工作区移除</span>
+            <span>{t("从工作区移除")}</span>
           </button>
         </div>
       )}
@@ -273,7 +274,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             }}
           >
             <Copy size={14} />
-            <span>复制快照 ID</span>
+            <span>{t("复制快照 ID")}</span>
           </button>
           <div className="context-menu-divider" />
           <button
@@ -285,7 +286,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             }}
           >
             <Trash2 size={14} />
-            <span>删除此条历史</span>
+            <span>{t("删除此条历史")}</span>
           </button>
         </div>
       )}
