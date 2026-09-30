@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { Settings2, RotateCcw, Terminal, Check, X, Copy, GitBranch } from "lucide-react";
+import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch } from "lucide-react";
 import { Config, RepositoryInfo } from "../../types";
+import type { ProviderCatalog } from "../../services/providerAuth";
 import { ProviderSettings } from "../ProviderSettings";
+import { RoleModelSettings } from "../RoleModelSettings";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -30,6 +32,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 }) => {
   const reduceMotion = useReducedMotion();
   const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? false);
+  const [catalog, setCatalog] = useState<ProviderCatalog>();
+  const [catalogBusy, setCatalogBusy] = useState(true);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -77,20 +81,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 
         <div className="settings-modal-content">
           <div className="settings-sections">
-            {/* Section 1: 模型与 Provider */}
-            <div className="settings-card">
+            <section className="settings-card" aria-labelledby="provider-settings-title">
+              <div className="settings-card-title">
+                <ShieldCheck size={16} />
+                <h4 id="provider-settings-title">模型与 Provider</h4>
+              </div>
+              <ProviderSettings onCatalogChange={setCatalog} onBusyChange={setCatalogBusy} />
+            </section>
+
+            <section className="settings-card" aria-labelledby="role-model-settings-title">
               <div className="settings-card-title">
                 <Terminal size={16} />
-                <h4>模型与 Provider</h4>
+                <h4 id="role-model-settings-title">角色模型配置</h4>
               </div>
-              <ProviderSettings
-                config={config}
-                setConfig={setConfig}
-                envOverrides={envOverrides}
-              />
-            </div>
+              <RoleModelSettings config={config} setConfig={setConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy} />
+            </section>
 
-            {/* Section 2: 图纸审批 */}
+            {/* 图纸审批 */}
             <div className="settings-card">
               <div className="settings-card-title">
                 <GitBranch size={16} />
@@ -110,7 +117,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               </label>
             </div>
 
-            {/* Section 3: 存储与重置 */}
+            {/* 存储与重置 */}
             <div className="settings-card">
               <div className="settings-card-title">
                 <RotateCcw size={16} />

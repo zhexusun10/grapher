@@ -122,7 +122,7 @@ Compiler 输出 `executionBatches`、`roots`、`terminals` 和 warnings。Mutati
 
 ### Node 与 Execution Instance
 
-Graph Node 是稳定的任务定义；Execution Instance 是一次执行尝试。首次运行、反馈重跑与手动重跑创建新的 Pi session；已完成节点的人工追加指令在新 execution 中恢复原节点 Pi session 与工作区，向其上下文发送新的用户消息。历史 execution 的输出与提交只读保留。
+Graph Node 是稳定的任务定义；Execution Instance 是一次执行尝试。首次运行创建新的 Pi session；反馈重跑与人工追加指令都在该节点原 Pi session 中追加一条用户消息、复用原工作区；其普通依赖后继仅在该结果实际变化时按依赖重新执行。历史 execution 的输出与提交只读保留。
 
 节点状态为：
 
@@ -153,7 +153,7 @@ waiting/dirty -> blocked
 拥有 outgoing feedback edge 的节点会自动收到响应协议：最终一行必须是 `<ACCEPT>` 或 `<REVISE>`。每个 source 最多一条 outgoing feedback edge；Compiler 拒绝一个 source 指向多个 target，因为 verdict 本身不选择 target。
 
 - `<ACCEPT>`：不触发反馈。
-- `<REVISE>`：触发该 source 的唯一 outgoing feedback edge，使 target 及其普通依赖后继失效并重新执行。
+- `<REVISE>`：触发该 source 的唯一 outgoing feedback edge，使 target 及其普通依赖后继失效；target 在原 Pi session 中收到该反馈消息并复用原工作区继续执行，其余受影响节点重新执行。
 - 协议错误：当前 execution 失败。
 - 超过 `maxFeedback`：来源分支失败，无关分支继续。
 
@@ -170,9 +170,9 @@ backend -----/                 |
 
 路由由 Graph 决定，评价由节点完成，状态迁移由 Runtime 完成。
 
-### 人工追加指令与手动重跑
+### 人工追加指令
 
-节点正在执行时，用户可直接通过 Pi RPC `steer` 向该 session 发送新消息，不等待 execution 结束，也不触发 `dirty`。已完成节点可继续原 Pi session 发送新的用户消息，或不附加指令而重跑原任务；只有受影响的节点正在执行时才需等待。Runtime 对已执行的受影响节点增加 revision 并标为 `dirty`，从未执行过的下游节点保持 `waiting`。已完成节点的后续消息不与原节点任务拼接。
+节点正在执行时，用户可直接通过 Pi RPC `steer` 向该 session 发送新消息，不等待 execution 结束，也不触发 `dirty`。已完成节点可继续原 Pi session 发送新的用户消息；只有受影响的节点正在执行时才需等待。Runtime 对已执行的受影响节点增加 revision 并标为 `dirty`，从未执行过的下游节点保持 `waiting`。已完成节点的后续消息不与原节点任务拼接。
 
 下游工作区组合发生 Git 冲突时，节点进入 `blocked`。用户在保留的工作区完成并提交冲突解决后，通过 `Use resolved workspace` 继续；原任务仍由新的 Execution Instance 完成。
 
@@ -182,9 +182,9 @@ backend -----/                 |
 
 ### Serial
 
-Partitioner 明确选择 Serial 后，唯一 `task` 节点直接在用户目录执行。运行模式单独持久化；Planner 生成的单个 `task` 节点仍按 Graph 隔离。旧事件没有模式字段时保留旧版按图形状判断的行为。Serial 完成后保存快照，不进入整图发布阶段。向已完成的 Serial 任务追加消息会在原 Pi 会话和用户目录中启动下一次执行（图片随消息传递），而不是只记录消息。Graph 中定向发送给已完成节点的追加消息只继续该节点自己的 Pi 会话，不使其他节点或下游结果失效；显式手动重跑及 Planner 图修订仍按图的依赖规则处理。Graph 中未选择节点的追加消息仍由 Planner 修订图。
+Partitioner 明确选择 Serial 后，唯一 `task` 节点直接在用户目录执行。运行模式单独持久化；Planner 生成的单个 `task` 节点仍按 Graph 隔离。旧事件没有模式字段时保留旧版按图形状判断的行为。Serial 完成后保存快照，不进入整图发布阶段。向已完成的 Serial 任务追加消息会在原 Pi 会话和用户目录中启动下一次执行（图片随消息传递），而不是只记录消息。Graph 中定向发送给已完成节点的追加消息在该节点原 Pi 会话中继续发送新的用户消息，并在结果实际变化时使其普通依赖后继失效、按依赖重新执行；无关分支保持有效。Planner 图修订仍按图的依赖规则处理。Graph 中未选择节点的追加消息仍由 Planner 修订图。
 
-修改已完成的 Serial 或 Graph 节点对话时，Grapher 在该节点的 Pi JSONL 会话中从被修改的用户消息之前创建新分支，保留原分支；Run 的事件保留旧执行记录，但活动分支不再显示被替代的回答。Serial 与 Pi `/tree` 一样只回退对话上下文，不自动撤销用户目录中的文件变更。Graph 仅从该次执行之前的隔离工作区快照继续目标节点的会话，不自动重跑其他节点或下游；显式手动重跑及 Planner 图修订仍按图的依赖规则处理。历史 Planner 消息也可以在原 Run 的 Pi 会话中分支编辑，保留旧会话历史。
+修改已完成的 Serial 或 Graph 节点对话时，Grapher 在该节点的 Pi JSONL 会话中从被修改的用户消息之前创建新分支，保留原分支；Run 的事件保留旧执行记录，但活动分支不再显示被替代的回答。Serial 与 Pi `/tree` 一样只回退对话上下文，不自动撤销用户目录中的文件变更。Graph 仅从该次执行之前的隔离工作区快照继续目标节点的会话；若结果实际变化，其普通依赖后继按依赖重新执行，无关分支保持有效。Planner 图修订仍按图的依赖规则处理。历史 Planner 消息也可以在原 Run 的 Pi 会话中分支编辑，保留旧会话历史。
 
 ### Graph
 
@@ -272,7 +272,7 @@ SQLite 保存 append-only Graph events；`Snapshot` 是事件 reducer 的当前�
 
 - Graph、Config、Plan 与节点状态。
 - Execution / merger 元数据和工作区 revision。
-- Feedback、人工追加指令、手动重跑、审批、暂停和发布事件。
+- Feedback、人工追加指令、审批、暂停和发布事件。
 - Planning identity 与汇总指标。
 
 完整 execution 输出和 planning JSONL 按会话保存在数据目录，普通 snapshot/list API 只返回 metadata。UI 按 `(runId, executionId, byteOffset)` 或 planning cursor 分页读取，单页最多 256 KiB。
@@ -307,7 +307,7 @@ React UI 负责：
 - 工作区选择、目标提交和规划输出。
 - Graph 审批、状态可视化和执行时间线。
 - Execution/merger 日志分页展示。
-- 暂停、恢复、人工追加指令、手动重跑、冲突确认和发布重试。
+- 暂停、恢复、人工追加指令、冲突确认和发布重试。
 
 前端不得自行推导权威状态或模拟后端执行。所有状态来自 Runtime snapshot/event projection。
 

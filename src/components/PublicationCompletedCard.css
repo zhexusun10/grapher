@@ -1,0 +1,208 @@
+/* 此次执行已完成，已完成写入源文件工作区卡片 - 采用与整体工作区一致的极简克制风格 */
+.workspace-written-completed-card {
+  width: 100%;
+  max-width: 860px;
+  margin: 10px auto 0;
+  box-sizing: border-box;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.pub-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.pub-card-title-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pub-card-icon {
+  color: var(--status-success);
+  flex-shrink: 0;
+}
+
+.pub-card-title {
+  color: var(--text-primary);
+}
+
+.pub-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pub-card-fields-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.pub-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11.5px;
+}
+
+.pub-card-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.pub-card-value-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 75%;
+}
+
+.pub-card-path,
+.pub-card-head {
+  display: inline-block;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 11px;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pub-card-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.pub-card-copy-btn:hover {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+.pub-card-copy-btn.copied {
+  color: var(--status-success);
+}
+
+.pub-card-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+}
+
+.pub-card-summary-tip {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: 0 2px;
+}
+
+/* Merger 现场记录折叠面板 */
+.pub-card-mergers {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  padding: 6px 10px;
+  font-size: 11px;
+}
+
+.pub-card-mergers-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-weight: 500;
+  user-select: none;
+}
+
+.pub-card-mergers-summary:hover {
+  color: var(--text-primary);
+}
+
+.pub-card-mergers-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pub-card-mergers-select-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.pub-card-merger-select {
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.pub-card-merger-info,
+.pub-card-merger-commits {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.pub-card-merger-info code,
+.pub-card-merger-commits code {
+  font-family: var(--font-mono, monospace);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--text-primary);
+}
+
+.pub-card-merger-transcript {
+  margin-top: 4px;
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-canvas);
+}

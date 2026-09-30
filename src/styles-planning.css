@@ -25,7 +25,8 @@
 .conversation-pane.full-width .initial-query-scroll > div:not(.chat-messages-stream),
 .conversation-pane.full-width .planning-summary-card-wrapper,
 .conversation-pane.full-width .planning-summary-card,
-.conversation-pane.full-width .plan-summary-card {
+.conversation-pane.full-width .plan-summary-card,
+.conversation-pane.full-width .workspace-written-completed-card {
   max-width: 860px;
   margin-left: auto;
   margin-right: auto;
@@ -60,6 +61,7 @@
 .workbench.historical-settled .chat-message-row,
 .workbench.historical-settled .route-decision-pill,
 .workbench.historical-settled .plan-summary-card,
+.workbench.historical-settled .workspace-written-completed-card,
 .workbench.historical-settled .planning-summary-card-wrapper,
 .workbench.historical-settled .planning-summary-card,
 .workbench.historical-settled .initial-query-scroll>div:not(.chat-messages-stream) {

@@ -232,6 +232,10 @@ pub struct NodeState {
     pub edit_execution_id: Option<String>,
     #[serde(default)]
     pub human_instruction: bool,
+    /// Result the node held when a follow-up/edit started. A finished run that
+    /// produces a different head invalidates this node's dependency descendants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_head: Option<String>,
     pub error: Option<String>,
 }
 
@@ -245,6 +249,7 @@ impl Default for NodeState {
             instruction_images: None,
             edit_execution_id: None,
             human_instruction: false,
+            baseline_head: None,
             error: None,
         }
     }
@@ -724,23 +729,65 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             output,
         } => {
             let superseded = state.superseded_execution_ids.contains(execution_id);
-            if let Some(execution) = state
+            let completed = state
                 .executions
                 .iter_mut()
                 .chain(state.mergers.iter_mut())
                 .find(|item| item.id == *execution_id)
-            {
-                let node_name = execution.node.clone();
-                execution.status = "completed".into();
-                execution.after = Some(head.clone());
-                execution.completed_at = Some(event.timestamp);
-                execution.output = output.clone();
-                execution.metrics = Some(parse_execution_metrics(output, execution.started_at, event.timestamp));
+                .map(|execution| {
+                    let node_name = execution.node.clone();
+                    execution.status = "completed".into();
+                    execution.after = Some(head.clone());
+                    execution.completed_at = Some(event.timestamp);
+                    execution.output = output.clone();
+                    execution.metrics =
+                        Some(parse_execution_metrics(output, execution.started_at, event.timestamp));
+                    node_name
+                });
+            if let Some(node_name) = completed {
                 if !superseded {
+                    let changed = state
+                        .nodes
+                        .get(&node_name)
+                        .and_then(|node| node.baseline_head.as_deref())
+                        .is_some_and(|baseline| baseline != head.as_str());
+                    let dependents: Vec<String> = if changed {
+                        crate::compiler::downstream(&state.graph, &node_name)
+                            .into_iter()
+                            .filter(|name| name != &node_name)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     if let Some(node) = state.nodes.get_mut(&node_name) {
                         node.status = "done".into();
                         node.head = Some(head.clone());
                         node.instruction_images = None;
+                        node.baseline_head = None;
+                    }
+                    // A follow-up that changed the result makes every descendant
+                    // recompute from it. Unrelated branches stay valid.
+                    for name in dependents {
+                        let never_executed =
+                            !state.executions.iter().any(|execution| execution.node == name);
+                        if let Some(node) = state.nodes.get_mut(&name) {
+                            let unstarted = node.status == "waiting"
+                                || (node.status == "blocked" && never_executed);
+                            node.status = if unstarted { "waiting" } else { "dirty" }.into();
+                            node.error = None;
+                            node.head = None;
+                            node.baseline_head = None;
+                            node.instruction.clear();
+                            node.instruction_images = None;
+                            node.edit_execution_id = None;
+                            node.human_instruction = false;
+                            if !unstarted {
+                                node.revision += 1;
+                            }
+                        }
+                    }
+                    if changed {
+                        state.publication = None;
                     }
                 }
             }
@@ -757,6 +804,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 let node = state.nodes.get_mut(node).unwrap();
                 node.status = "failed".into();
                 node.error = Some(error.clone());
+                node.baseline_head = None;
             }
             if let Some(execution) = state
                 .executions
@@ -813,25 +861,37 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 let unstarted = node.status == "waiting" || (node.status == "blocked" && never_executed);
                 node.status = if unstarted { "waiting" } else { "dirty" }.into();
                 node.error = None;
-                // A manual rerun starts from the original inputs. Only a
-                // follow-up intervention continues from the previous result.
-                if name != target || (*human && instruction.is_empty()) {
+                // Only the target continues from its previous result; every
+                // other affected node is recomputed from its parents.
+                if name != target {
                     node.head = None;
+                    node.baseline_head = None;
                 }
                 if *human && !unstarted {
                     node.revision += 1;
                 }
             }
             let target_node = state.nodes.get_mut(target).unwrap();
-            if *human {
-                // A new user follow-up replaces previous instructions rather than
-                // accumulating prompt suffixes across fresh executions.
+            if *human && !instruction.is_empty() {
+                // A user follow-up continues from the target's current result.
+                // Descendants are recomputed only if that result changes.
+                target_node.baseline_head = target_node.head.clone();
                 target_node.instruction = instruction.clone();
                 target_node.instruction_images = images.clone();
                 target_node.edit_execution_id = None;
-                target_node.human_instruction = !instruction.is_empty();
+                target_node.human_instruction = true;
+            } else if !instruction.is_empty() {
+                // Automated feedback continues the target's existing Pi session:
+                // the reviewer's message is appended as the next user turn, and
+                // the node keeps its previous result and worktree.
+                target_node.baseline_head = None;
+                target_node.instruction = instruction.clone();
+                target_node.instruction_images = None;
+                target_node.edit_execution_id = None;
+                target_node.human_instruction = true;
             } else {
-                target_node.instruction.push_str(&format!("\n{instruction}"));
+                // Downstream-only invalidation: the target keeps its result.
+                target_node.baseline_head = None;
             }
             state.phase = if state.paused { "paused" } else { "running" }.into();
         }
@@ -863,6 +923,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.error = None;
                 node.revision += 1;
                 if name == target {
+                    node.baseline_head = node.head.clone();
                     node.head = Some(anchor.before.clone());
                     node.instruction = instruction.clone();
                     node.instruction_images = images.clone();
@@ -870,6 +931,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     node.edit_execution_id = Some(from_execution_id.clone());
                 } else {
                     node.head = None;
+                    node.baseline_head = None;
                     node.instruction.clear();
                     node.instruction_images = None;
                     node.edit_execution_id = None;

@@ -20,8 +20,6 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
-import type { Config } from "../types";
-import { RoleModelSettings } from "./RoleModelSettings";
 import styles from "./ProviderSettings.module.css";
 import {
   providerAuth,
@@ -51,10 +49,9 @@ function AuthLink({ url, label }: { url?: string; label?: string }) {
   );
 }
 
-export function ProviderSettings({ config, setConfig, envOverrides = {} }: {
-  config: Config;
-  setConfig: React.Dispatch<React.SetStateAction<Config>>;
-  envOverrides?: Record<string, string>;
+export function ProviderSettings({ onCatalogChange, onBusyChange }: {
+  onCatalogChange: (catalog: ProviderCatalog | undefined) => void;
+  onBusyChange: (busy: boolean) => void;
 }) {
   const [catalog, setCatalog] = useState<ProviderCatalog>();
   const [activeProvider, setActiveProvider] = useState<ProviderInfo | null>(null);
@@ -106,6 +103,13 @@ export function ProviderSettings({ config, setConfig, envOverrides = {} }: {
   }, [login?.prompt?.id]);
 
   useEffect(() => {
+    if (login?.status === "complete") {
+      activeId.current = undefined;
+      void load();
+    }
+  }, [login?.id, login?.status]);
+
+  useEffect(() => {
     if (!login || login.status !== "pending") return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -117,7 +121,6 @@ export function ProviderSettings({ config, setConfig, envOverrides = {} }: {
         setLogin(next);
         if (next.status !== "pending") {
           activeId.current = undefined;
-          void load();
         } else {
           timer = setTimeout(poll, 700);
         }
@@ -243,6 +246,11 @@ export function ProviderSettings({ config, setConfig, envOverrides = {} }: {
 
   const pending = login?.status === "pending";
 
+  // Share the single catalog with the separate role settings section, including
+  // immediate credential removal and successful API-key/OAuth authentication.
+  useEffect(() => { onCatalogChange(catalog); }, [catalog, onCatalogChange]);
+  useEffect(() => { onBusyChange(busy || pending); }, [busy, pending, onBusyChange]);
+
   const providers = catalog?.providers ?? [];
   const filteredProviders = providers.filter(
     (p) =>
@@ -255,8 +263,6 @@ export function ProviderSettings({ config, setConfig, envOverrides = {} }: {
 
   return (
     <div className="provider-settings-container">
-      <RoleModelSettings config={config} setConfig={setConfig} catalog={catalog} envOverrides={envOverrides} busy={busy || pending} />
-
       {/* Pi Auth Center Header */}
       <div className="pi-auth-header-card">
         <div className="pi-auth-title-group">

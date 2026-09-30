@@ -259,10 +259,12 @@ fn message_after_run_completed_keeps_it_completed() {
 }
 
 #[test]
-fn rerun_starts_from_clean_inputs_but_intervention_continues_the_result() {
+fn intervention_continues_the_previous_result_in_place() {
     let (_temp, source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
+    let session_id = first.execution.session_id.clone();
+    let first_execution_id = first.execution.id.clone();
     let path = Path::new(&first.execution.worktree);
     workspace::prepare(&source, path, &first.execution.before, &[]).unwrap();
     fs::write(path.join("tracked.txt"), "first result").unwrap();
@@ -270,19 +272,13 @@ fn rerun_starts_from_clean_inputs_but_intervention_continues_the_result() {
     runtime.emit(EventKind::Finished {
         execution_id: first.execution.id, head: head.clone(), output: "done".into(),
     }).unwrap();
-    runtime.rerun("task").unwrap();
-    assert_eq!(runtime.state.nodes["task"].head, None);
-    let again = runtime.jobs().unwrap().remove(0);
-    assert_eq!(again.execution.before, runtime.state.base);
-    assert_ne!(again.execution.worktree, path.to_string_lossy());
-    workspace::prepare(&source, Path::new(&again.execution.worktree), &again.execution.before, &[]).unwrap();
-    assert_eq!(fs::read_to_string(Path::new(&again.execution.worktree).join("tracked.txt")).unwrap(), "original");
-    runtime.emit(EventKind::Finished {
-        execution_id: again.execution.id, head: head.clone(), output: "done".into(),
-    }).unwrap();
     runtime.intervene("task", "continue").unwrap();
+    assert_eq!(runtime.state.nodes["task"].head, Some(head.clone()));
     let followup = runtime.jobs().unwrap().remove(0);
     assert_eq!(followup.execution.before, head);
+    assert_eq!(followup.execution.worktree, path.to_string_lossy());
+    assert_eq!(followup.execution.session_id, session_id);
+    assert_eq!(followup.resume_execution_id.as_deref(), Some(first_execution_id.as_str()));
 }
 
 #[test]
@@ -403,7 +399,7 @@ fn editing_serial_initial_turn_updates_goal_without_replacing_the_run() {
 }
 
 #[test]
-fn editing_graph_node_uses_earlier_checkpoint_without_rerunning_descendants() {
+fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
     let graph = Graph {
         original_goal: "graph".into(),
         nodes: ["parent", "child"].into_iter().map(|name| Node {
@@ -426,7 +422,8 @@ fn editing_graph_node_uses_earlier_checkpoint_without_rerunning_descendants() {
     runtime.emit(EventKind::Finished {
         execution_id: later.execution.id.clone(), head: runtime.state.base.clone(), output: "later".into(),
     }).unwrap();
-    assert_eq!(runtime.state.nodes["child"].status, "done", "a follow-up does not restart its child");
+    // The follow-up returned the same result, so the descendant stays valid.
+    assert_eq!(runtime.state.nodes["child"].status, "done");
     let session_dir = runtime.root.join("sessions").join(&first.execution.id);
     fs::create_dir_all(&session_dir).unwrap();
     fs::create_dir_all(&first.execution.worktree).unwrap();
@@ -440,6 +437,7 @@ fn editing_graph_node_uses_earlier_checkpoint_without_rerunning_descendants() {
     runtime.edit_node_message("parent", &first.execution.id, "parent", "edited parent", None).unwrap();
     assert_eq!(runtime.state.graph.nodes[0].task, "edited parent");
     assert_eq!(runtime.state.nodes["parent"].head.as_deref(), Some(first.execution.before.as_str()));
+    // The edited run has not finished, so the descendant is still valid.
     assert_eq!(runtime.state.nodes["child"].status, "done");
     assert!(runtime.state.superseded_execution_ids.contains(&first.execution.id));
     assert!(!runtime.state.superseded_execution_ids.contains(&child.execution.id));
@@ -448,10 +446,16 @@ fn editing_graph_node_uses_earlier_checkpoint_without_rerunning_descendants() {
     assert_eq!(new_job.execution.worktree, first.execution.worktree);
     assert_eq!(new_job.execution.before, first.execution.before);
     assert_eq!(new_job.task, "edited parent");
+    // The edited run changed the result, so the descendant recomputes.
+    runtime.emit(EventKind::Finished {
+        execution_id: new_job.execution.id.clone(), head: "changed-parent".into(), output: "edited".into(),
+    }).unwrap();
+    assert_eq!(runtime.state.nodes["parent"].head.as_deref(), Some("changed-parent"));
+    assert_eq!(runtime.state.nodes["child"].status, "dirty");
 }
 
 #[test]
-fn graph_followup_only_continues_the_target_conversation() {
+fn graph_followup_propagates_only_when_the_result_changes() {
     let graph = Graph {
         original_goal: "graph".into(),
         nodes: ["parent", "child", "independent"].into_iter().map(|name| Node {
@@ -473,12 +477,19 @@ fn graph_followup_only_continues_the_target_conversation() {
     }).unwrap();
     runtime.intervene("parent", "continue parent").unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "dirty");
+    // Unchanged until the follow-up actually produces a new result.
     assert_eq!(runtime.state.nodes["child"].status, "done");
     assert_eq!(runtime.state.nodes["independent"].status, "done");
     let next = runtime.jobs().unwrap().remove(0);
     assert_eq!(next.execution.node, "parent");
     assert_eq!(next.task, "continue parent");
     assert!(next.resume_execution_id.is_some());
+    runtime.emit(EventKind::Finished {
+        execution_id: next.execution.id.clone(), head: "changed-parent".into(), output: "done".into(),
+    }).unwrap();
+    assert_eq!(runtime.state.nodes["parent"].status, "done");
+    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert_eq!(runtime.state.nodes["independent"].status, "done");
 }
 
 #[test]
@@ -829,18 +840,56 @@ fn shadow_prepare_refuses_user_edits_after_approval() {
 }
 
 #[test]
-fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_rebasing() {
+fn feedback_continues_the_owner_session_and_worktree() {
+    let graph = Graph {
+        original_goal: "feedback rework".into(),
+        nodes: ["owner", "review"]
+            .into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() })
+            .collect(),
+        edges: [
+            ("owner", "review", false),
+            ("review", "owner", true),
+        ]
+        .into_iter()
+        .map(|(from, to, feedback)| Edge {
+            from: from.into(), to: to.into(), relation: String::new(), feedback,
+        })
+        .collect(),
+    };
+    let (_temp, source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let owner = runtime.jobs().unwrap().remove(0);
+    let owner_session = owner.execution.session_id.clone();
+    let owner_id = owner.execution.id.clone();
+    let owner_path = Path::new(&owner.execution.worktree);
+    workspace::prepare(&source, owner_path, &owner.execution.before, &[]).unwrap();
+    fs::write(owner_path.join("tracked.txt"), "owner result").unwrap();
+    let owner_head = workspace::snapshot_node_for_run(owner_path, &source, "owner", Some(&runtime.state.run_id)).unwrap();
+    runtime.finish(&owner.execution, Ok((owner_head, "done".into()))).unwrap();
+
+    let review = runtime.jobs().unwrap().remove(0);
+    assert_eq!(review.execution.node, "review");
+    runtime.finish(&review.execution, Ok((runtime.state.base.clone(), "please adjust\n<REVISE>".into()))).unwrap();
+    runtime.apply_feedback("review", "please adjust\n<REVISE>").unwrap();
+
+    assert_eq!(runtime.state.nodes["owner"].status, "dirty");
+    assert!(runtime.state.nodes["review"].head.is_none());
+    let jobs = runtime.jobs_with_pending_feedback(true, &[]).unwrap();
+    let rework = jobs.iter().find(|job| job.execution.node == "owner").unwrap();
+    assert_eq!(rework.execution.session_id, owner_session);
+    assert_eq!(rework.resume_execution_id.as_deref(), Some(owner_id.as_str()));
+    assert_eq!(rework.execution.worktree, owner_path.to_string_lossy());
+    assert_eq!(rework.task, "Feedback from review:\nplease adjust\n<REVISE>");
+}
+
+#[test]
+fn completed_shadow_graph_intervention_is_blocked_when_source_changed() {
     let graph = Graph {
         original_goal: "test".into(),
         nodes: vec![
-            Node {
-                name: "parent".into(),
-                task: "parent task".into(),
-            },
-            Node {
-                name: "child".into(),
-                task: "child task".into(),
-            },
+            Node { name: "parent".into(), task: "parent task".into() },
+            Node { name: "child".into(), task: "child task".into() },
         ],
         edges: vec![Edge {
             from: "parent".into(),
@@ -858,9 +907,7 @@ fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_reba
         workspace::prepare(&source, path, &job.execution.before, &runtime.parents(name)).unwrap();
         fs::write(path.join(format!("{name}.txt")), name).unwrap();
         let head = workspace::snapshot_node(path, &source, name).unwrap();
-        runtime
-            .finish(&job.execution, Ok((head, "done".into())))
-            .unwrap();
+        runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
     }
     runtime.jobs().unwrap();
     let publication = runtime.state.publication.clone().unwrap();
@@ -869,50 +916,22 @@ fn completed_shadow_graph_intervention_reruns_target_and_downstream_without_reba
     })
     .unwrap();
     runtime
-        .emit(EventKind::PublicationCompleted {
-            head: published.clone(),
-        })
+        .emit(EventKind::PublicationCompleted { head: published.clone() })
         .unwrap();
     assert_ne!(published, base);
     fs::write(source.join("tracked.txt"), "external edit").unwrap();
     assert!(runtime
-        .rerun("parent")
+        .intervene("parent", "again")
         .unwrap_err()
         .contains("changed after approval"));
     assert_eq!(runtime.state.nodes["parent"].status, "done");
     fs::write(source.join("tracked.txt"), "original").unwrap();
-    runtime.rerun("parent").unwrap();
+    runtime.intervene("parent", "again").unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "dirty");
-    assert_eq!(runtime.state.nodes["child"].status, "dirty");
-    assert!(runtime.state.nodes["child"].head.is_none());
-    assert_eq!(runtime.state.base, base);
+    // The follow-up only recomputes downstream once its result changes.
+    assert_eq!(runtime.state.nodes["child"].status, "done");
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
     assert_eq!(replay.published_head.as_deref(), Some(published.as_str()));
-    let job = runtime.jobs().unwrap().remove(0);
-    assert_eq!(job.execution.node, "parent");
-    assert_eq!(job.expected_source_head, published);
-    let path = Path::new(&job.execution.worktree);
-    workspace::prepare_with_merger_expected(
-        &source,
-        path,
-        &job.execution.before,
-        &[],
-        &job.expected_source_head,
-        || Err("merge conflict".into()),
-    )
-    .unwrap();
-    fs::write(source.join("tracked.txt"), "external edit").unwrap();
-    let next = source.parent().unwrap().join("another-worktree");
-    assert!(workspace::prepare_with_merger_expected(
-        &source,
-        &next,
-        &base,
-        &[],
-        &job.expected_source_head,
-        || Err("merge conflict".into())
-    )
-    .unwrap_err()
-    .contains("changed after approval"));
     fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap();
 }
 
@@ -1121,7 +1140,7 @@ fn moved_binding_blocks_approval_without_migrating_or_snapshotting() {
 }
 
 #[test]
-fn moved_binding_blocks_scheduling_resume_intervention_and_publication() {
+fn moved_binding_blocks_scheduling_and_publication() {
     let (temp, source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     fs::rename(&source, temp.path().join("moved")).unwrap();
@@ -1130,10 +1149,6 @@ fn moved_binding_blocks_scheduling_resume_intervention_and_publication() {
     runtime.pause(true).unwrap();
     assert!(runtime.pause(false).unwrap_err().contains("项目绑定已失效"));
     assert!(runtime.state.paused);
-    assert!(runtime
-        .rerun("task")
-        .unwrap_err()
-        .contains("项目绑定已失效"));
     assert!(runtime
         .resolved("task")
         .unwrap_err()

@@ -277,7 +277,7 @@ export default function App() {
   };
 
   const control = (action: string, extra: Record<string, unknown> = {}) => run(async () => {
-    if (["approve", "resume", "intervene", "rerun", "resolve", "retry_publication"].includes(action)) {
+    if (["approve", "resume", "intervene", "resolve", "retry_publication"].includes(action)) {
       await requireRepository(state.config?.repository || config.repository);
     }
     const defaultNode = selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
@@ -331,7 +331,8 @@ export default function App() {
     };
 
     // A completed node continues its own persisted Pi session. In Graph mode
-    // only this node is rerun; downstream results remain valid.
+    // its dependency descendants are rerun only if the result actually
+    // changes; unrelated branches keep their results.
     if (targetNodeName && state.nodes[targetNodeName]?.status === "done") {
       const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg);
       run(async () => {

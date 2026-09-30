@@ -2016,7 +2016,6 @@ fn control(
             instruction.as_deref().unwrap_or_default(),
             images,
         )?,
-        "rerun" => runtime.rerun(node.as_deref().unwrap_or_default())?,
         "resolve" => runtime.resolved(node.as_deref().unwrap_or_default())?,
         _ => return Err("Unknown action".into()),
     }
@@ -2024,7 +2023,7 @@ fn control(
     drop(runtime);
     if matches!(
         action.as_str(),
-        "approve" | "resume" | "intervene" | "rerun" | "resolve" | "retry_publication"
+        "approve" | "resume" | "intervene" | "resolve" | "retry_publication"
     ) {
         drive(service.clone());
     }

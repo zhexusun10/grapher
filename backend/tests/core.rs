@@ -388,7 +388,7 @@ fn feedback_has_exact_final_line_protocol() {
 }
 
 #[test]
-fn feedback_reexecutes_only_affected_branch_with_fresh_sessions() {
+fn feedback_reexecutes_only_affected_branch_in_place() {
     let temp = TempDir::new().unwrap();
     let mut runtime = runtime(temp.path());
     runtime
@@ -413,8 +413,10 @@ fn feedback_reexecutes_only_affected_branch_with_fresh_sessions() {
         .filter(|execution| execution.node == "frontend")
         .collect();
     assert_eq!(frontend.len(), 2);
-    assert_ne!(frontend[0].session_id, frontend[1].session_id);
-    assert_ne!(frontend[0].worktree, frontend[1].worktree);
+    // Feedback continues the owner's Pi session and worktree in place.
+    assert_eq!(frontend[0].session_id, frontend[1].session_id);
+    assert_eq!(frontend[0].worktree, frontend[1].worktree);
+    assert_eq!(frontend[1].before, frontend[0].after.clone().unwrap());
     assert_eq!(
         runtime
             .state
@@ -475,7 +477,7 @@ fn failure_propagates_but_independent_work_remains_ready() {
 }
 
 #[test]
-fn pause_drains_and_rerun_preserves_history() {
+fn pause_drains_and_intervention_preserves_history() {
     let temp = TempDir::new().unwrap();
     let mut runtime = runtime(temp.path());
     runtime
@@ -485,7 +487,6 @@ fn pause_drains_and_rerun_preserves_history() {
         .unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     runtime.pause(true).unwrap();
-    assert!(runtime.rerun("spec").is_err());
     runtime
         .finish(&job.execution, Ok(("spec-head".into(), "done".into())))
         .unwrap();

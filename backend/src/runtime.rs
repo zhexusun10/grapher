@@ -689,9 +689,9 @@ impl Runtime {
         {
             return Err("No completed node session to continue; revise the plan instead".into());
         }
-        // A conversation follow-up concerns this node's Pi session only.
-        // Explicit reruns and Planner graph revisions retain their own dependency policy.
-        self.validate_invalidation(node, false)?;
+        // A follow-up continues this node's session; its descendants are only
+        // recomputed if this run actually changes the node's result.
+        self.validate_invalidation(node)?;
         self.emit(EventKind::Invalidated {
             nodes: vec![node.into()],
             target: node.into(),
@@ -699,10 +699,6 @@ impl Runtime {
             human: true,
             images,
         })
-    }
-
-    pub fn rerun(&mut self, node: &str) -> Result<(), String> {
-        self.invalidate_node(node, "", None)
     }
 
     /// Re-edit a settled Pi user turn, keeping the abandoned conversation as
@@ -730,7 +726,7 @@ impl Runtime {
         if instruction.trim().is_empty() {
             return Err("Enter a replacement message".into());
         }
-        self.validate_invalidation(node, false)?;
+        self.validate_invalidation(node)?;
         let anchor = self
             .state
             .executions
@@ -806,11 +802,10 @@ impl Runtime {
         Ok(())
     }
 
-    fn validate_invalidation(
-        &self,
-        node: &str,
-        include_downstream: bool,
-    ) -> Result<BTreeSet<String>, String> {
+    /// Refuses an update while a downstream node is still running, because a
+    /// changed result would make that run stale. The result comparison itself
+    /// happens when the target finishes.
+    fn validate_invalidation(&self, node: &str) -> Result<(), String> {
         if matches!(
             self.state.phase.as_str(),
             "publishing" | "merging" | "publication_failed"
@@ -821,63 +816,15 @@ impl Runtime {
             return Err("Approve the graph before updating a node".into());
         }
         if !self.state.nodes.contains_key(node) {
-            return Err("Select a node to rerun".into());
-        }
-        let affected = if include_downstream {
-            downstream(&self.state.graph, node)
-        } else {
-            BTreeSet::from([node.to_owned()])
-        };
-        if include_downstream && self
-            .state
-            .executions
-            .iter()
-            .any(|execution| execution.status == "running" && affected.contains(&execution.node))
-        {
-            return Err("Wait for running downstream nodes before editing their inputs".into());
-        }
-        let repository = resolve_repository(
-            &self.root,
-            self.state.config.as_ref().ok_or("Missing config")?,
-        )?;
-        if !self.is_serial() && !workspace::is_standard_git(&repository) {
-            workspace::check_shadow_source(
-                &repository,
-                self.state
-                    .published_head
-                    .as_deref()
-                    .unwrap_or(&self.state.base),
-            )?;
-        }
-        Ok(affected)
-    }
-
-    fn invalidate_node(
-        &mut self,
-        node: &str,
-        instruction: &str,
-        images: Option<Vec<ImageAttachment>>,
-    ) -> Result<(), String> {
-        if matches!(
-            self.state.phase.as_str(),
-            "publishing" | "merging" | "publication_failed"
-        ) {
-            return Err("Resolve or retry publication before changing node results".into());
-        }
-        if !self.state.approved {
-            return Err("Approve the graph before updating a node".into());
-        }
-        if !self.state.nodes.contains_key(node) {
-            return Err("Select a node to rerun".into());
+            return Err("Select a node".into());
         }
         let affected = downstream(&self.state.graph, node);
-        if self
-            .state
-            .executions
-            .iter()
-            .any(|execution| execution.status == "running" && affected.contains(&execution.node))
-        {
-            return Err("Steer a running node directly; wait for running downstream nodes before rerunning their inputs".into());
+        if self.state.executions.iter().any(|execution| {
+            execution.status == "running"
+                && execution.node != node
+                && affected.contains(&execution.node)
+        }) {
+            return Err("Steer a running node directly; wait for running downstream nodes before rerunning this node".into());
         }
         let repository = resolve_repository(
             &self.root,
@@ -892,13 +839,7 @@ impl Runtime {
                     .unwrap_or(&self.state.base),
             )?;
         }
-        self.emit(EventKind::Invalidated {
-            nodes: affected.into_iter().collect(),
-            target: node.into(),
-            instruction: instruction.into(),
-            human: true,
-            images,
-        })
+        Ok(())
     }
 
     pub fn resolved(&mut self, node: &str) -> Result<(), String> {

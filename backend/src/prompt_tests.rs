@@ -1758,9 +1758,9 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         thread::sleep(std::time::Duration::from_millis(20));
     };
     // The driver is waiting on the slow worker. A new API event must still
-    // dispatch the rerun without waiting for that worker to finish.
+    // dispatch the follow-up without waiting for that worker to finish.
     if observed.nodes["after_fast"].status == "done" {
-        control("rerun".into(), Some("z_fast".into()), None, None, None, None, &service).unwrap();
+        control("intervene".into(), Some("z_fast".into()), Some("again".into()), None, None, None, &service).unwrap();
     }
     let rerun_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let rerun_observed = loop {
