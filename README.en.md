@@ -36,7 +36,7 @@ Goal -> Partitioner --serial--> one task (runs in project directory)
 
 ## Quick start
 
-**Requirements:** Node.js 22.19+, stable Rust, Git, npm, working Pi provider authentication, and network access. Graph filesystem boundaries use macOS Seatbelt, Windows 10/11 x64 AppContainer, or Linux bubblewrap (the container must permit unprivileged user/mount/PID namespaces). Linux publishing, isolation, and Harbor end-to-end runs have been validated in Linux container/VM environments; Windows still requires real-platform validation. Failed preflight never falls back to unisolated execution. Pi is a pinned upstream submodule, not a globally installed replacement.
+**Requirements:** Node.js 22.19+, stable Rust, Git, npm, working Pi provider authentication, and network access. macOS/Linux Graph filesystem boundaries use Seatbelt/bubblewrap (Linux requires unprivileged user/mount/PID namespaces; failed isolation preflight never falls back). Windows Graph runs stock Node and Git for Windows Bash with independent Git workspaces, concurrency, snapshots, and publication—no VM or per-node sandbox. Windows does not enforce macOS-style filesystem access restrictions; use trusted projects only. See [Windows native execution](engine/windows-native-plan.md). Linux publishing, isolation, and Harbor end-to-end runs have been validated in Linux container/VM environments. Pi is a pinned upstream submodule, not a globally installed replacement.
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git

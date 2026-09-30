@@ -41,7 +41,11 @@ test('reuses executable managed tools without replacing local tools or importing
     writeFileSync(join(upstream, 'bin', fd), 'not executable');
     writeFileSync(join(upstream, 'bin', 'other'), 'not a managed tool');
     reuseManagedTools(target, upstream);
-    assert.equal(readlinkSync(join(target, 'bin', rg)), join(upstream, 'bin', rg));
+    if (process.platform === 'win32') {
+      assert.deepEqual(readFileSync(join(target, 'bin', rg)), readFileSync(join(upstream, 'bin', rg)));
+    } else {
+      assert.equal(readlinkSync(join(target, 'bin', rg)), join(upstream, 'bin', rg));
+    }
     assert.equal(existsSync(join(target, 'bin', 'other')), false);
     if (process.platform !== 'win32') assert.equal(existsSync(join(target, 'bin', fd)), false);
     rmSync(join(target, 'bin', rg));

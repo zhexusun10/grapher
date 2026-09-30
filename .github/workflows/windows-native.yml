@@ -1,4 +1,4 @@
-name: Windows Native Baseline
+name: Windows Native Graph
 
 on:
   push:
@@ -32,10 +32,7 @@ jobs:
       - name: Check production backend
         run: cargo check --manifest-path backend/Cargo.toml --no-default-features
       - name: Run backend library tests
-        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib -- --skip windows_sandbox::tests::appcontainer_allows_current_workspace_and_denies_source
-      - name: Run Windows AppContainer boundary test
-        timeout-minutes: 3
-        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib windows_sandbox::tests::appcontainer_allows_current_workspace_and_denies_source -- --nocapture
+        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib
       - name: Run offline Graph, Serial, publication, and recovery fixtures
         timeout-minutes: 10
         run: cargo test --manifest-path backend/Cargo.toml --no-default-features --features fixture --test core --test graph_merge --test shadow --test publication --test publication_state
@@ -43,3 +40,8 @@ jobs:
         run: npm run test:native
       - name: Run project binding checks
         run: npm run test:bindings
+      - name: Run native Planner and production Graph acceptance (local model responses)
+        timeout-minutes: 5
+        run: npm run test:windows-native
+      - name: Check Planner and Pi extension tools
+        run: npm run test:extensions

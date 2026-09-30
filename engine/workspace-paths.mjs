@@ -1,5 +1,27 @@
 import { realpathSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+let cygpath;
+const msysPaths = new Map();
+function msysPath(value) {
+  if (msysPaths.has(value)) return msysPaths.get(value);
+  // Git Bash may expose mounts such as /tmp, not just /c/.... Use its path
+  // converter without starting a replacement shell or changing Pi commands.
+  if (cygpath === undefined) {
+    try {
+      const execPath = execFileSync('git', ['--exec-path'], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim();
+      cygpath = resolve(execPath, '../../../usr/bin/cygpath.exe');
+    } catch { cygpath = null; }
+  }
+  let result = value.replace(/^([A-Za-z]):\//, (_, drive) => `/${drive.toLowerCase()}/`);
+  if (cygpath) {
+    try { result = execFileSync(cygpath, ['-u', value], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim(); }
+    catch { /* Keep the ordinary drive spelling when Git has no converter. */ }
+  }
+  msysPaths.set(value, result);
+  return result;
+}
 
 import { pathToFileURL } from 'node:url';
 
@@ -33,14 +55,25 @@ function shellWords(text) {
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 
 export function createWorkspacePaths(directory, originalRoot = directory, sourceAlias = originalRoot) {
-  const root = realpathSync(directory);
-  // Rust canonicalizes the binding before entering Seatbelt; the source itself
-  // is intentionally inaccessible here. Do not stat it from the node.
-  const base = resolve(originalRoot);
+  // Rust canonicalize() emits extended Windows paths. Node and Git Bash also
+  // expose normal drive paths and /c/... spellings of the same directory.
+  const hostPath = value => {
+    if (process.platform !== 'win32') return value;
+    if (value.startsWith('\\\\?\\UNC\\')) return `\\\\${value.slice(8)}`;
+    return value.startsWith('\\\\?\\') ? value.slice(4) : value;
+  };
+  const root = hostPath(realpathSync(hostPath(directory)));
+  // The source can be inaccessible under macOS/Linux isolation; never stat it.
+  const base = hostPath(resolve(originalRoot));
   const WORKSPACE_PATH = base;
-  const variants = value => process.platform === 'win32'
-    ? [value, value.replaceAll('\\', '/')]
-    : [value];
+  const variants = value => {
+    if (process.platform !== 'win32') return [value];
+    const native = hostPath(value);
+    const slash = native.replaceAll('\\', '/');
+    const extended = native.startsWith('\\\\') ? `\\\\?\\UNC\\${native.slice(2)}` : `\\\\?\\${native}`;
+    const drive = slash.replace(/^([A-Za-z]):\//, (_, letter) => `/${letter.toLowerCase()}/`);
+    return [native, slash, extended, extended.replaceAll('\\', '/'), drive, msysPath(slash)];
+  };
   const aliases = [...new Set([...new Set([resolve(directory), root])].flatMap(variants))].sort((a, b) => b.length - a.length);
   const projects = [...new Set([...new Set([base, resolve(sourceAlias)])].flatMap(variants))].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s\\/"'`<>:;,&|()\[\]{}]/.test(c);
@@ -79,8 +112,10 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   const commandRoot = process.platform === 'win32' ? root.replaceAll('\\', '/') : root;
   const visible = text => replacements.reduce((value, [alias, project]) => replace(value, alias, project), text);
   const physical = value => {
-    if (typeof value !== 'string' || !pathPrefix(value, WORKSPACE_PATH)) return value;
-    const suffix = value.slice(WORKSPACE_PATH.length).replaceAll('\\', sep);
+    if (typeof value !== 'string') return value;
+    const project = projects.find(project => pathPrefix(value, project));
+    if (!project) return value;
+    const suffix = value.slice(project.length).replaceAll('\\', sep).replaceAll('/', sep);
     return root + suffix;
   };
   function mapCommand(text, WORKSPACE_PATH) {

@@ -1,0 +1,52 @@
+{
+  "version": "1.18.5",
+  "graphAvailable": false,
+  "date": "2026-09-30T15:39:35.012Z",
+  "evaluationLimitSeconds": 300,
+  "boxes": [
+    {
+      "label": "two",
+      "exitCode": 1,
+      "signal": null,
+      "stdoutPreserved": false,
+      "stderrPreserved": false,
+      "result": null,
+      "launcherStdout": "",
+      "launcherStderr": "",
+      "launcherStages": [
+        "helper main entered",
+        "loading stock SbieDll.dll",
+        "stock SbieDll.dll loaded",
+        "calling SbieDll_RunSandboxed",
+        "sandbox child created suspended",
+        "sandbox child assigned to Job",
+        "sandbox child resumed"
+      ],
+      "hostWritesPresent": false
+    },
+    {
+      "label": "one",
+      "exitCode": 1,
+      "signal": null,
+      "stdoutPreserved": false,
+      "stderrPreserved": false,
+      "result": null,
+      "launcherStdout": "",
+      "launcherStderr": "",
+      "launcherStages": [
+        "helper main entered",
+        "loading stock SbieDll.dll",
+        "stock SbieDll.dll loaded",
+        "calling SbieDll_RunSandboxed",
+        "sandbox child created suspended",
+        "sandbox child assigned to Job",
+        "sandbox child resumed"
+      ],
+      "hostWritesPresent": false
+    }
+  ],
+  "ownSectionsRemoved": true,
+  "launcher": "SbieDll_RunSandboxed + suspended Job",
+  "launchErrors": [],
+  "syntheticProtectedFilesUnchanged": true
+}

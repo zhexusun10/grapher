@@ -1,5 +1,6 @@
 //! Host-native execution with explicit Pi file-tool mapping and per-platform
-//! Graph filesystem boundaries. Bash keeps native path semantics.
+//! Graph workspaces. macOS/Linux enforce filesystem boundaries; Windows runs
+//! ordinary host processes (no per-agent sandbox). Bash keeps Pi's semantics.
 use crate::engine::PiRole;
 use std::{
     fs,
@@ -11,25 +12,26 @@ use std::{
 static RUNTIME: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 pub fn require_graph_execution() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // Windows deliberately uses the caller's ordinary host permissions.
+        // Independent Git repositories isolate snapshots, not filesystem access.
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     {
         return crate::linux_sandbox::require_supported();
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         if !crate::sandbox::supported() {
-            return Err(if cfg!(target_os = "windows") {
-                "Windows Graph execution requires the Windows AppContainer filesystem sandbox."
-                    .into()
-            } else {
-                "Native Graph execution requires macOS sandbox-exec".into()
-            });
+            return Err("Native Graph execution requires macOS sandbox-exec".into());
         }
         Ok(())
     }
 }
 
-fn prepared_runtime() -> Result<PathBuf, String> {
+pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
     let mut cached = RUNTIME
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -40,15 +42,17 @@ fn prepared_runtime() -> Result<PathBuf, String> {
     let installation = installation_root()
         .canonicalize()
         .map_err(|error| format!("Cannot resolve Grapher installation root: {error}"))?;
-    let runtime_parent = installation
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".grapher-workspaces");
-    let compiler = std::env::current_exe().map_err(|error| error.to_string())?;
+    let runtime_parent = std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            installation
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(".grapher-workspaces")
+        });
     let output = Command::new("node")
         .arg(installation_root().join("scripts/prepare-native-runtime.mjs"))
         .env("GRAPHER_NATIVE_RUNTIME_PARENT", &runtime_parent)
-        .env("GRAPHER_NATIVE_COMPILER", &compiler)
         .output()
         .map_err(|error| format!("Cannot start native runtime preparation with Node: {error}"))?;
     if !output.status.success() {
@@ -61,19 +65,13 @@ fn prepared_runtime() -> Result<PathBuf, String> {
     let raw_root = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
     let root = PathBuf::from(raw_root.trim());
     let root = root.canonicalize().map_err(|error| {
-        format!("Cannot resolve prepared native runtime {}: {error}", root.display())
+        format!(
+            "Cannot resolve prepared native runtime {}: {error}",
+            root.display()
+        )
     })?;
     if !root.join("engine/entrypoint.mjs").is_file() {
         return Err("Incomplete native runtime: engine entrypoint is missing".into());
-    }
-    #[cfg(windows)]
-    {
-        if !root.join("node.exe").is_file() {
-            return Err("Incomplete native runtime: bundled Node executable is missing".into());
-        }
-        if !root.join("grapher-compiler.exe").is_file() {
-            return Err("Incomplete native runtime: bundled Grapher compiler is missing".into());
-        }
     }
     *cached = Some(root.clone());
     Ok(root)
@@ -81,6 +79,21 @@ fn prepared_runtime() -> Result<PathBuf, String> {
 
 pub fn installation_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+/// Rust's extended Windows paths are valid filesystem identities, but stock
+/// Node's CLI/module loader and Git Bash expect ordinary drive/UNC paths.
+pub(crate) fn host_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let value = path.to_string_lossy();
+        if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        return PathBuf::from(value.strip_prefix(r"\\?\").unwrap_or(&value));
+    }
+    #[cfg(not(windows))]
+    path.to_path_buf()
 }
 
 pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result<(), String> {
@@ -131,7 +144,7 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
     if repository.canonicalize().map_err(|e| e.to_string())?
         != cwd.canonicalize().map_err(|e| e.to_string())?
     {
-        return Err("Private workspaces require execution_command and its sandbox profile".into());
+        return Err("Private workspaces require execution_command and its platform context".into());
     }
     let mut command = Command::new("node");
     command.arg(installation_root().join("engine/entrypoint.mjs"));
@@ -163,7 +176,7 @@ pub fn execution_command(
         })
         .ok_or("Graph workspace must be .grapher-worktrees/<run>/<instance>")?;
     #[cfg(windows)]
-    let _ = worktree_root; // Validation is required even though Windows uses the current path.
+    let _ = worktree_root; // Keep the same workspace layout validation on Windows.
     let engine = prepared_runtime()?;
     #[cfg(target_os = "macos")]
     {
@@ -190,27 +203,12 @@ pub fn execution_command(
     }
     #[cfg(target_os = "windows")]
     {
-        let helper = std::env::current_exe().map_err(|e| e.to_string())?;
-        let mut command = Command::new(helper);
+        let _ = (data, session);
+        let mut command = Command::new("node");
         command
-            .arg("--grapher-windows-sandbox-helper")
-            .current_dir(&current)
-            .env("GRAPHER_WINDOWS_SANDBOX", "1")
-            .env("GRAPHER_WINDOWS_SANDBOX_TARGET", engine.join("node.exe"))
-            .env(
-                "GRAPHER_WINDOWS_SANDBOX_COMPILER",
-                engine.join("grapher-compiler.exe"),
-            )
-            .env(
-                "GRAPHER_WINDOWS_SANDBOX_PREFIX",
-                engine.join("pi/node_modules/tsx/dist/cli.cjs"),
-            )
-            .env("GRAPHER_WINDOWS_SANDBOX_CURRENT", &current)
-            .env("GRAPHER_WINDOWS_SANDBOX_SESSION", session)
-            .env("GRAPHER_WINDOWS_SANDBOX_DATA", data)
-            .env("GRAPHER_WINDOWS_SANDBOX_SOURCE", &source)
-            .env("GRAPHER_WINDOWS_SANDBOX_ENGINE", &engine)
-            .env("PI_CODING_AGENT_DIR", agent_dir()?);
+            .arg(host_path(&engine.join("engine/entrypoint.mjs")))
+            .current_dir(host_path(&current))
+            .env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
         return Ok(command);
     }
     #[cfg(target_os = "linux")]
@@ -329,7 +327,14 @@ mod tests {
         let private = temp.path().join(".grapher-workspaces/run/planner");
         fs::create_dir_all(&private).unwrap();
         crate::workspace::git(&private, &["init", "-q"]).unwrap();
-        assert!(validate_workspace(PiRole::Planner, &source, &private).is_ok());
+        let planner = validate_workspace(PiRole::Planner, &source, &private);
+        #[cfg(not(windows))]
+        assert!(planner.is_ok());
+        #[cfg(windows)]
+        match require_graph_execution() {
+            Ok(()) => assert!(planner.is_ok()),
+            Err(error) => assert_eq!(planner.unwrap_err(), error),
+        }
         assert!(validate_workspace(PiRole::Partitioner, &source, &private).is_err());
         #[cfg(unix)]
         {
@@ -415,11 +420,10 @@ export default function () {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     fn graph_launcher_runs_parallel_native_tools_and_absolute_scripts() {
-        use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
+        let base = host_path(&temp.path().canonicalize().unwrap());
         let source = base.join("source");
         let data = source.join(".grapher"); // exercise data inside protected source
         let root = base.join(".grapher-worktrees");
@@ -454,8 +458,13 @@ export default function () {
         let engine = prepared_runtime().unwrap();
         let mut workers = Vec::new();
         for (label, cwd, sibling) in [("A", &a, &b), ("B", &b, &a)] {
-            symlink(&source, cwd.join("source-link")).unwrap();
-            symlink(&material, cwd.join("external-link")).unwrap();
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&source, cwd.join("source-link")).unwrap();
+                std::os::unix::fs::symlink(&material, cwd.join("external-link")).unwrap();
+            }
+            #[cfg(windows)]
+            fs::copy(&material, cwd.join("external-link")).unwrap();
             let session = data.join(format!("sessions/{label}"));
             fs::create_dir_all(&session).unwrap();
             let mut command =
@@ -504,9 +513,12 @@ export default function () {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
-            workers.push((label, command.spawn().unwrap()));
+            crate::process_control::configure_command(&mut command);
+            let child = command.spawn().unwrap();
+            let tree = crate::process_control::track(&child).unwrap();
+            workers.push((label, child, tree));
         }
-        for (label, worker) in workers {
+        for (label, worker, _tree) in workers {
             let output = worker.wait_with_output().unwrap();
             assert!(
                 output.status.success(),

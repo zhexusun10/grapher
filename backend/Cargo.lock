@@ -171,7 +171,6 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "uuid",
- "windows-sys",
 ]
 
 [[package]]
