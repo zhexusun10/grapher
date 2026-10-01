@@ -86,10 +86,13 @@ npm test                      # Rust fixture tests; no paid model
 npm run test:concurrent       # HTTP multi-Run regression (requires /bin/sh)
 npm run test:conversation-acceptance # TC-01–14: copied history, HTTP/browser/process stress
 npm run test:pi               # pinned Pi / auth transport contract
+npm run test:extensions       # real extension tools; grep/find need ripgrep/fd
 npm run test:native           # host-native regression (platform dependent)
 npm run migrate               # migrate historical logs and reclaim disk (stop backend first)
 npm run compact               # compatibility alias for migrate
 ```
+
+`test:extensions` first resolves Pi's actual `rg` / `fd` executables and prints their versions. Missing tools retain managed-download diagnostics; search tests are never skipped. For offline runs, install them on PATH: Windows `choco install ripgrep fd -y`, macOS `brew install ripgrep fd`, or Debian/Ubuntu `sudo apt-get install ripgrep fd-find` (`fdfind` is supported). Windows CI explicitly installs these prerequisites and runs extension checks with `PI_OFFLINE=1`, without implicit downloads during testing.
 
 Logs are UTF-8 byte-indexed chunks in `execution_logs`; terminal business events persist byte counts and structured metrics, not transcripts. Opening a conversation loads metadata only; mounted nodes request their own logs. Each browser transcript cache is limited to 20 entries / 30 MiB. Legacy logs remain readable through per-execution JIT migration without rewriting events. Back up the data directory, stop the backend, then run `npm run migrate` to preserve finished, failed, interrupted and merger transcripts, clean legacy events and run `VACUUM`. The command is idempotent and takes the backend's exclusive runtime lease.
 

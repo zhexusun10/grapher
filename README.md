@@ -87,10 +87,13 @@ npm test                      # Rust 固定样例测试；无需付费模型
 npm run test:concurrent       # HTTP 多 Run 并发与后台旧会话回归（需 /bin/sh）
 npm run test:conversation-acceptance # TC-01–14：旧库副本、真实 HTTP/浏览器/进程压测
 npm run test:pi               # 锁定版本的 Pi 与认证传输契约测试
+npm run test:extensions       # 真实扩展工具；grep/find 需要 ripgrep/fd
 npm run test:native           # 宿主原生回归测试（依赖平台）
 npm run migrate               # 维护：迁移历史执行日志并回收磁盘（先关闭后端）
 npm run compact               # migrate 的兼容别名
 ```
+
+`test:extensions` 会先检查 Pi 实际使用的 `rg` / `fd` 并输出版本；缺失时保留自动下载的错误诊断，不跳过搜索测试。离线运行前需安装到 PATH：Windows `choco install ripgrep fd -y`，macOS `brew install ripgrep fd`，Debian/Ubuntu `sudo apt-get install ripgrep fd-find`（支持 `fdfind`）。Windows CI 显式安装这些依赖后，以 `PI_OFFLINE=1` 执行扩展检查，不依赖测试期间的隐式下载。
 
 执行日志按 UTF-8 字节偏移分块写入独立的 `execution_logs` 表；`Finished` / `Failed` 等业务事件仅持久化字节数和结构化指标。打开历史会话只加载元数据，选中节点才按需读取完整日志；浏览器两个 transcript 缓存分别限制为 20 条 / 30 MiB。未迁移老库可通过单节点读取自动兼容（不修改老事件）；建议先备份数据目录、关闭后端，再运行 `npm run migrate`，逐 execution 保留完成、失败、中断和 merger 日志，清洗老事件并执行 `VACUUM`。重复执行是幂等的，维护命令复用运行锁拒绝并发。
 
