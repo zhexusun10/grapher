@@ -68,7 +68,9 @@ export default async function () {
         process.env.GRAPHER_TEST_SIBLING!, process.env.GRAPHER_TEST_OTHER_SESSION!];
       for (const path of denied) {
         const code = `require('node:fs').writeFileSync(Buffer.from(${JSON.stringify(Buffer.from(path).toString('base64'))}, 'base64').toString(), 'BAD')`;
-        await assert.rejects(call('bash', { command: `${quote(process.execPath)} -e ${quote(code)}` }), /exited with code/);
+        const result = await call('bash', { command: `${quote(process.execPath)} -e ${quote(code)}` });
+        assert.equal(result.isError, true, `Expected sandbox to deny write to ${path}`);
+        assert.match(text(result), /exited with code/);
       }
       const engineEntrypoint = join(runtime, 'engine/entrypoint.mjs');
       const originalEntrypoint = readFileSync(engineEntrypoint);
