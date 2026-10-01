@@ -3,6 +3,12 @@ import React, { useState } from "react";
 import { Folder, Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { ProjectItem } from "../../types";
 
+export function normalizeWorkspacePath(path: string): string {
+  if (path.startsWith("\\\\?\\UNC\\")) return `\\\\${path.slice(8)}`;
+  if (path.startsWith("\\\\?\\")) return path.slice(4);
+  return path;
+}
+
 interface SidebarProps {
   projects: ProjectItem[];
   activeRepo: string;
@@ -123,16 +129,13 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   setRunContextMenu(null);
                   setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
                 }}
-                title={t("{0}\n{1}\n分支: {2}\n(右键管理工作区)", proj.name, proj.path, proj.branch)}
+                title={t("{0}\n{1}\n分支: {2}\n(右键管理工作区)", proj.name, normalizeWorkspacePath(proj.path), proj.branch)}
               >
-                <span className="proj-icon">
-                  <Folder size={16} />
-                </span>
                 <div className="proj-details">
                   <div className="proj-name-row">
                     <strong>{proj.name}</strong>
                   </div>
-                  <small className="proj-path-text">{proj.path}</small>
+                  <small className="proj-path-text">{normalizeWorkspacePath(proj.path)}</small>
                 </div>
               </div>
             );
@@ -236,7 +239,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <button
             className="context-menu-item"
             onClick={() => {
-              navigator.clipboard?.writeText(projectContextMenu.project.path);
+              navigator.clipboard?.writeText(normalizeWorkspacePath(projectContextMenu.project.path));
               setProjectContextMenu(null);
             }}
           >

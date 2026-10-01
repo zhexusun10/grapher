@@ -90,6 +90,19 @@ fn canonical_workspace_path(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("Cannot resolve workspace path {}: {error}", path.display()))
 }
 
+pub(crate) fn normalize_workspace_display_path(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let value = path.to_string_lossy();
+        if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc}");
+        }
+        return value.strip_prefix(r"\\?\").unwrap_or(&value).to_string();
+    }
+    #[cfg(not(windows))]
+    path.to_string_lossy().to_string()
+}
+
 pub fn shadow_repo_dir(target: &Path) -> Result<PathBuf, String> {
     let canonical = canonical_workspace_path(target)?;
     let mut hasher = DefaultHasher::new();
@@ -311,7 +324,7 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
             Ok(top) => PathBuf::from(top),
             Err(_) => return Ok(None),
         };
-        let path_str = top_level.to_string_lossy().to_string();
+        let path_str = normalize_workspace_display_path(&top_level);
         let name = top_level
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -333,9 +346,8 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
     } else if candidate.is_dir() {
         let shadow = ensure_shadow_repo(&candidate)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
-        let path_str = canonical_workspace_path(&candidate)?
-            .to_string_lossy()
-            .to_string();
+        let canonical = canonical_workspace_path(&candidate)?;
+        let path_str = normalize_workspace_display_path(&canonical);
         let name = candidate
             .file_name()
             .map(|n| n.to_string_lossy().to_string())

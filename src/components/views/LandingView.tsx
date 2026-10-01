@@ -69,7 +69,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
             animate={{ opacity: 1 }}
             transition={{ duration: 0.25, delay: 0.1 }}
           >
-            The Most Elegant Multi-Agent Architecture Ever
+            Don't orchestrate agents. Compile work.
           </motion.p>
         </motion.div>
         <motion.div

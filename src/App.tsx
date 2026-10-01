@@ -24,7 +24,7 @@ import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
-import { Sidebar } from "./components/layout/Sidebar";
+import { Sidebar, normalizeWorkspacePath } from "./components/layout/Sidebar";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
@@ -43,7 +43,13 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     try {
       const saved = localStorage.getItem("grapher_projects");
-      return saved ? JSON.parse(saved) : [];
+      if (!saved) return [];
+      const items: ProjectItem[] = JSON.parse(saved);
+      return items.map((p) => ({
+        ...p,
+        path: normalizeWorkspacePath(p.path),
+        id: normalizeWorkspacePath(p.id || p.path),
+      }));
     } catch {
       return [];
     }
@@ -64,7 +70,7 @@ export default function App() {
         if (list.length > 0) {
           const sorted = [...list].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
           if (sorted[0]?.path) {
-            initialConfig.repository = sorted[0].path;
+            initialConfig.repository = normalizeWorkspacePath(sorted[0].path);
           }
         }
       }
@@ -640,20 +646,21 @@ export default function App() {
     const info = await runtimeService.pickRepository();
     if (!planningRecovery.current(pending)) return;
     if (info) {
-      const scope = detachForeground(info.path);
-      setRepoInfo(info);
-      setConfig((prev) => ({ ...prev, repository: info.path }));
+      const normalizedPath = normalizeWorkspacePath(info.path);
+      const scope = detachForeground(normalizedPath);
+      setRepoInfo({ ...info, path: normalizedPath });
+      setConfig((prev) => ({ ...prev, repository: normalizedPath }));
       const item: ProjectItem = {
-        id: info.path,
+        id: normalizedPath,
         name: info.name,
-        path: info.path,
+        path: normalizedPath,
         branch: info.branch,
         clean: info.clean,
         isShadow: info.isShadow,
         lastOpened: Date.now(),
       };
       setProjects((prev) => {
-        const next = [item, ...prev.filter((p) => p.path !== info.path)];
+        const next = [item, ...prev.filter((p) => normalizeWorkspacePath(p.path) !== normalizedPath)];
         try {
           localStorage.setItem("grapher_projects", JSON.stringify(next));
         } catch { }
