@@ -1,15 +1,8 @@
 //! Read projections for the browser. They never mutate the event-sourced state
 //! or redefine the persisted Snapshot/Execution schema.
 use crate::model::{Event, EventKind, Execution, Snapshot};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
-
-#[derive(Deserialize)]
-struct ProcessStart<'a> {
-    #[serde(rename = "type", borrow)]
-    kind: &'a str,
-    pid: Option<u64>,
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,17 +25,14 @@ struct ExecutionMetadata<'a> {
 }
 
 fn execution_metadata(execution: &Execution) -> ExecutionMetadata<'_> {
-    let pid = execution.output.lines().next()
-        .and_then(|line| serde_json::from_str::<ProcessStart<'_>>(line).ok())
-        .filter(|event| event.kind == "grapher_process_started")
-        .and_then(|event| event.pid);
     ExecutionMetadata {
         id: &execution.id, node: &execution.node, revision: execution.revision,
         attempt: execution.attempt, session_id: &execution.session_id,
         worktree: &execution.worktree, before: &execution.before, after: &execution.after,
         status: &execution.status, started_at: execution.started_at,
-        completed_at: execution.completed_at, output: "", output_bytes: execution.output.len(),
-        pid, metrics: &execution.metrics,
+        completed_at: execution.completed_at, output: "",
+        output_bytes: if execution.status == "running" { execution.output.len().max(execution.output_bytes) } else { execution.output_bytes },
+        pid: execution.pid, metrics: &execution.metrics,
     }
 }
 
@@ -60,7 +50,7 @@ enum EventMetadata<'a> {
     },
 }
 
-/// Durable projection only: history and transcripts remain in the event table.
+/// Durable projection only: history stays in events, transcripts in execution_logs.
 pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
     json!({
         "runId": state.run_id, "planType": state.plan_type,
@@ -113,7 +103,7 @@ mod tests {
             sequence: 1, timestamp: 42,
             kind: EventKind::Finished {
                 execution_id: "worker".into(), head: "abc".into(),
-                output: "large output".repeat(1000),
+                output: "large output".repeat(1000), output_bytes: 0, metrics: None,
             },
         });
         state.events.push(Event {
@@ -128,7 +118,7 @@ mod tests {
             id: "worker".into(), node: "n".into(), revision: 1, attempt: 1,
             session_id: "s".into(), worktree: String::new(), before: String::new(),
             after: None, status: "running".into(), started_at: 42,
-            completed_at: None, metrics: None,
+            completed_at: None, metrics: None, output_bytes: 0, pid: Some(123),
             output: "{\"type\":\"grapher_process_started\",\"pid\":123,\"cwd\":\"x\"}\nsecret".into(),
         });
         let metadata = snapshot_metadata(&state).unwrap();
@@ -140,37 +130,4 @@ mod tests {
         assert_eq!(metadata["executions"][0]["output"], "");
         assert_eq!(metadata["executions"][0]["outputBytes"], state.executions[0].output.len());
     }
-}
-
-pub fn execution_page(
-    state: &Snapshot,
-    execution_id: &str,
-    offset: usize,
-) -> Result<Value, String> {
-    execution_page_with_limit(state, execution_id, offset, 256 * 1024)
-}
-
-pub fn execution_page_with_limit(
-    state: &Snapshot,
-    execution_id: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<Value, String> {
-    let execution = state
-        .executions
-        .iter()
-        .chain(&state.mergers)
-        .find(|e| e.id == execution_id)
-        .ok_or("Execution not found in run")?;
-    let text = &execution.output;
-    if offset > text.len() || !text.is_char_boundary(offset) {
-        return Err("Invalid output offset".into());
-    }
-    let mut end = offset.saturating_add(limit).min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    Ok(json!({ "runId": state.run_id, "executionId": execution_id,
-        "content": &text[offset..end], "nextOffset": end, "totalBytes": text.len(),
-        "complete": end == text.len(), "status": execution.status }))
 }

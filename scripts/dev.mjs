@@ -134,7 +134,12 @@ function childOptions() {
 }
 
 console.log(`[dev] Starting backend (cargo run --manifest-path backend/Cargo.toml --bin grapher)...`);
-const backend = spawn(findCargoExecutable() ?? "cargo", ["run", "--manifest-path", "backend/Cargo.toml", "--bin", "grapher"], childOptions());
+const backend = spawn(findCargoExecutable() ?? "cargo", ["run", "--manifest-path", "backend/Cargo.toml", "--bin", "grapher"], {
+  ...childOptions(),
+  // Dev restarts must not replay a settled Run's multi-hundred-MB transcript
+  // log before the server is reachable. The browser loads Runs on demand.
+  env: { ...process.env, GRAPHER_DEV_LAZY_PRIMARY: "1" },
+});
 children.push(backend);
 
 backend.on("error", (error) => {
@@ -145,6 +150,24 @@ backend.on("error", (error) => {
 backend.on("exit", (code) => {
   if (!stopping) {
     console.error(`[dev] Backend process exited unexpectedly with code ${code ?? 0}`);
+    void stop(code ?? 1);
+  }
+});
+
+// Vite only proxies /api lazily, so it can boot while Cargo compiles and the
+// backend warms up instead of starting after the readiness poll.
+console.log(`[dev] Starting frontend (vite)...`);
+const frontend = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1"], childOptions());
+children.push(frontend);
+
+frontend.on("error", (error) => {
+  console.error(`[dev] Failed to spawn frontend: ${error.message}`);
+  void stop(1);
+});
+
+frontend.on("exit", (code) => {
+  if (!stopping) {
+    console.log(`[dev] Frontend exited with code ${code ?? 0}`);
     void stop(code ?? 1);
   }
 });
@@ -162,18 +185,4 @@ try {
 
 if (stopping) process.exit(process.exitCode ?? 0);
 
-console.log(`[dev] Backend ready on http://127.0.0.1:${backendPort}. Starting frontend (vite)...`);
-const frontend = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1"], childOptions());
-children.push(frontend);
-
-frontend.on("error", (error) => {
-  console.error(`[dev] Failed to spawn frontend: ${error.message}`);
-  void stop(1);
-});
-
-frontend.on("exit", (code) => {
-  if (!stopping) {
-    console.log(`[dev] Frontend exited with code ${code ?? 0}`);
-    void stop(code ?? 1);
-  }
-});
+console.log(`[dev] Backend ready on http://127.0.0.1:${backendPort}.`);

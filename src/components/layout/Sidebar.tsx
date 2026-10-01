@@ -175,6 +175,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             }
             return (
               <button
+                data-run-id={id}
                 className={`run-item ${currentRunId === id ? "chosen" : ""} ${isThisRunActive ? "active-running" : ""}`}
                 key={id}
                 onClick={() => onLoadRun(id)}

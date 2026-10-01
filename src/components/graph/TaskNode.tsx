@@ -46,6 +46,7 @@ export type WorkNode = Node<{
 export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
   return (
     <div
+      data-node-name={data.name}
       className={`task-node ${data.selected ? "selected" : ""} ${data.status}`}
       title={t("{0}{1}\n尝试: {2}\n工作区: {3}", data.task, data.hint ? t("\n\n依赖关系:\n{0}", data.hint) : "", data.attempts, data.worktree || t("未生成"))}
     >

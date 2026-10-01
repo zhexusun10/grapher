@@ -115,7 +115,7 @@ pub fn resolve_with_merger_for_node(
             before: git(repository, &["rev-parse", "HEAD"])?,
             after: None,
             status: "running".into(),
-            output: String::new(),
+            output: String::new(), output_bytes: 0, pid: None,
             started_at: now(),
             completed_at: None,
             metrics: None,
@@ -184,14 +184,14 @@ pub fn resolve_with_merger_for_node(
             eprintln!("[Grapher] [Merger] Finished resolving conflicts for '{node}' (HEAD: {head})");
             emit(EventKind::MergerFinished {
                 execution_id: id.clone(),
-                head,
+                head, output_bytes: 0, metrics: None,
             })?
         }
         Err(error) => {
             eprintln!("[Grapher] [Merger] Failed resolving conflicts for '{node}': {error}");
             emit(EventKind::MergerFailed {
                 execution_id: id.clone(),
-                error: error.clone(),
+                error: error.clone(), output_bytes: 0, metrics: None,
             })?
         }
     }

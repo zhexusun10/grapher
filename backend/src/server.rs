@@ -3,7 +3,7 @@ use crate::{
     engine::{parse_route_decision, run_pi, PiModelConfig, PiRequest, PiRole},
     model::*,
     runtime::{perform_with_merger, Runtime},
-    snapshot_view::{execution_page, execution_page_with_limit, snapshot_metadata},
+    snapshot_view::snapshot_metadata,
 };
 use serde::Serialize;
 use std::{
@@ -32,6 +32,32 @@ pub struct Service {
 static RUN_SERVICES: OnceLock<
     Mutex<std::collections::HashMap<PathBuf, std::collections::HashMap<String, Weak<Service>>>>,
 > = OnceLock::new();
+// Active workers retain their own services; only two idle/historical services
+// are pinned so repeated polls do not replay a Run on every HTTP request.
+static HOT_SERVICES: OnceLock<Mutex<std::collections::VecDeque<(PathBuf, String, Arc<Service>)>>> = OnceLock::new();
+
+fn cache_service(root: &std::path::Path, id: &str, service: Arc<Service>) -> Arc<Service> {
+    if let Ok(mut cache) = HOT_SERVICES.get_or_init(Default::default).lock() {
+        cache.retain(|(path, key, saved)| path != root || (key != id && !Arc::ptr_eq(saved, &service)));
+        cache.push_back((root.to_owned(), id.to_owned(), service.clone()));
+        while cache.len() > 2 { cache.pop_front(); }
+    }
+    service
+}
+
+fn invalidate_service_cache(root: &std::path::Path, id: Option<&str>) {
+    if let Some(registry) = RUN_SERVICES.get() {
+        if let Ok(mut registry) = registry.lock() {
+            if let Some(runs) = registry.get_mut(root) {
+                runs.retain(|key, _| id.is_some_and(|id| key != id));
+            }
+        }
+    }
+    if let Ok(mut cache) = HOT_SERVICES.get_or_init(Default::default).lock() {
+        cache.retain(|(path, key, _)| path != root || id.is_some_and(|id| key != id));
+    }
+}
+
 static SOURCE_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
     OnceLock::new();
 static CANCELLED_PLANNING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
@@ -95,8 +121,11 @@ fn service_for_run(
     let root = runtime.root.clone();
     let registry = RUN_SERVICES.get_or_init(Default::default);
     let mut registry = registry.lock().map_err(|e| e.to_string())?;
-    let runs = registry.entry(root).or_default();
+    let runs = registry.entry(root.clone()).or_default();
     runs.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(service) = runs.get(run_id).and_then(Weak::upgrade) {
+        return Ok(cache_service(&root, run_id, service));
+    }
     // A new planning request starts in a provisional service. Its durable Run
     // ID is assigned when the plan is committed, so resolve by the runtime's
     // current identity rather than relying only on the provisional map key.
@@ -107,10 +136,7 @@ fn service_for_run(
             .is_ok_and(|runtime| runtime.state.run_id == run_id)
     }) {
         runs.insert(run_id.to_owned(), Arc::downgrade(&service));
-        return Ok(service);
-    }
-    if let Some(service) = runs.get(run_id).and_then(Weak::upgrade) {
-        return Ok(service);
+        return Ok(cache_service(&root, run_id, service));
     }
     let exists = runtime.store.contains_run(run_id)?;
     if !create && !exists {
@@ -130,7 +156,7 @@ fn service_for_run(
         extension: primary.extension.clone(),
     });
     runs.insert(run_id.to_owned(), Arc::downgrade(&child));
-    Ok(child)
+    Ok(cache_service(&root, run_id, child))
 }
 
 // Worker logs flow through one bounded-batch event writer rather than each
@@ -195,6 +221,9 @@ const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
 #[cfg(test)]
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
+#[cfg(test)]
+#[path = "service_cache_tests.rs"]
+mod service_cache_tests;
 
 fn load_env_file() {
     let candidates = [
@@ -2167,7 +2196,12 @@ fn reset_workspace(service: &Arc<Service>) -> Result<Snapshot, String> {
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
-    runtime.reset_workspace()
+    let root = runtime.root.clone();
+    let id = runtime.state.run_id.clone();
+    let result = runtime.reset_workspace()?;
+    drop(runtime);
+    invalidate_service_cache(&root, Some(&id));
+    Ok(result)
 }
 
 fn clear_history(service: &Arc<Service>) -> Result<(), String> {
@@ -2180,23 +2214,27 @@ fn clear_history(service: &Arc<Service>) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .root
         .clone();
-    if let Some(registry) = RUN_SERVICES.get() {
+    let children: Vec<_> = if let Some(registry) = RUN_SERVICES.get() {
         let registry = registry.lock().map_err(|e| e.to_string())?;
-        if let Some(runs) = registry.get(&root) {
-            for child in runs.values().filter_map(Weak::upgrade) {
-                if child.driving.load(Ordering::SeqCst)
-                    || child.planning.load(Ordering::SeqCst)
-                    || child.runtime.lock().map_err(|e| e.to_string())?.active()
-                {
-                    return Err("Cannot clear history while another Run is active".into());
-                }
-            }
+        registry.get(&root).into_iter().flat_map(|runs| runs.values()).filter_map(Weak::upgrade).collect()
+    } else { Vec::new() };
+    // Never wait on a runtime while holding the registry mutex: service lookup
+    // holds the primary runtime before acquiring the registry.
+    for child in children {
+        if child.driving.load(Ordering::SeqCst)
+            || child.planning.load(Ordering::SeqCst)
+            || child.runtime.lock().map_err(|e| e.to_string())?.active()
+        {
+            return Err("Cannot clear history while another Run is active".into());
         }
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
-    runtime.clear_history()
+    runtime.clear_history()?;
+    drop(runtime);
+    invalidate_service_cache(&root, None);
+    Ok(())
 }
 
 fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
@@ -2206,7 +2244,11 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
-    runtime.delete_run(&run_id)
+    let root = runtime.root.clone();
+    runtime.delete_run(&run_id)?;
+    drop(runtime);
+    invalidate_service_cache(&root, Some(&run_id));
+    Ok(())
 }
 
 fn planning_attachment_path(
@@ -2403,36 +2445,6 @@ fn argument<T: serde::de::DeserializeOwned>(
         .map_err(|error| format!("Invalid {key}: {error}"))
 }
 
-fn get_run_execution_outputs(
-    body: &serde_json::Value,
-    service: &Arc<Service>,
-) -> Result<serde_json::Value, String> {
-    let run_id: String = argument(body, "runId")?;
-    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-    let historical;
-    let state = if runtime.state.run_id == run_id {
-        &runtime.state
-    } else {
-        historical = runtime.store.load(&run_id)?;
-        &historical
-    };
-    // One historical snapshot read for the entire conversation instead of
-    // re-reading it once per execution (and once per 256 KiB page).
-    let outputs: Vec<_> = state
-        .executions
-        .iter()
-        .chain(&state.mergers)
-        .filter(|exec| exec.status != "running")
-        .map(|exec| {
-            serde_json::json!({
-            "executionId": exec.id, "content": exec.output,
-            "totalBytes": exec.output.len(), "status": exec.status,
-            })
-        })
-        .collect();
-    Ok(serde_json::json!({ "runId": run_id, "outputs": outputs }))
-}
-
 fn get_execution_output(
     body: &serde_json::Value,
     service: &Arc<Service>,
@@ -2444,29 +2456,39 @@ fn get_execution_output(
         .map(|_| argument(body, "offset"))
         .transpose()?
         .unwrap_or(0);
-    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-    let historical;
-    let state = if runtime.state.run_id == run_id {
-        &runtime.state
+    let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+    if runtime.state.run_id != run_id { return Err("Run does not match service".into()); }
+    let status = runtime.state.executions.iter().chain(&runtime.state.mergers)
+        .find(|exec| exec.id == execution_id).ok_or("Execution not found in run")?.status.clone();
+    let mut total = runtime.store.log_bytes(&run_id, &execution_id)?;
+    if total == 0 && status != "running" {
+        total = runtime.store.ensure_legacy_logs(&run_id, &execution_id)?;
+        let state = &mut runtime.state;
+        if let Some(exec) = state.executions.iter_mut().chain(state.mergers.iter_mut()).find(|e| e.id == execution_id) {
+            exec.output_bytes = total;
+        }
+        if total > 0 { runtime.touch(); }
+    }
+    let limit = if status != "running" && body.get("full").and_then(serde_json::Value::as_bool) == Some(true) {
+        usize::MAX
     } else {
-        historical = runtime.store.load(&run_id)?;
-        &historical
+        body.get("limit").map(|_| argument::<usize>(body, "limit")).transpose()?.unwrap_or(256 * 1024).clamp(4, 1024 * 1024)
     };
-    // Completed transcripts are immutable. Send them in one response rather
-    // than reloading the entire historical snapshot for every 256 KiB page.
-    // Keep bounded pages for actively running agents.
-    if body.get("full").and_then(serde_json::Value::as_bool) == Some(true) {
-        let completed = state
-            .executions
-            .iter()
-            .chain(&state.mergers)
-            .find(|exec| exec.id == execution_id)
-            .is_some_and(|exec| exec.status != "running");
-        if completed {
-            return execution_page_with_limit(state, &execution_id, offset, usize::MAX);
+    let page = runtime.store.execution_log_page(&run_id, &execution_id, offset, limit)?;
+    // Legacy events without a checkpoint have no structured metrics. Recover
+    // them from the already requested full response, never during Store::load.
+    if status != "running" && offset == 0 && page.complete {
+        let state = &mut runtime.state;
+        if let Some(exec) = state.executions.iter_mut().chain(state.mergers.iter_mut())
+            .find(|e| e.id == execution_id && e.metrics.is_none()) {
+            exec.metrics = Some(parse_execution_metrics(&page.content, exec.started_at, exec.completed_at.unwrap_or_else(now)));
+            state.run_metrics = Some(state.compute_run_metrics());
+            runtime.touch();
         }
     }
-    execution_page(state, &execution_id, offset)
+    Ok(serde_json::json!({ "runId":run_id, "executionId":execution_id,
+        "content":page.content, "nextOffset":page.next_offset, "totalBytes":page.total_bytes,
+        "complete":page.complete, "status":status }))
 }
 
 #[derive(Serialize)]
@@ -2950,7 +2972,6 @@ pub fn dispatch(
             service,
         )?),
         "get_execution_output" => return get_execution_output(&body, service),
-        "get_run_execution_outputs" => return get_run_execution_outputs(&body, service),
         "get_planning_snapshot" => {
             let id: String = argument(&body, "planningId")?;
             let repository: String = argument(&body, "repository")?;
@@ -3149,8 +3170,7 @@ fn api_service(
         | "edit_planner"
         | "save_graph"
         | "delete_run"
-        | "get_execution_output"
-        | "get_run_execution_outputs" => {
+        | "get_execution_output" => {
             if let Some(run_id) = body.get("runId").and_then(serde_json::Value::as_str) {
                 service_for_run(primary, run_id, false)
             } else if command == "save_graph" {
@@ -3215,6 +3235,31 @@ fn origin_matches_allowlist(origin: &str, allowed: &str) -> bool {
     })
 }
 
+/// Offline per-execution log migration and physical compaction. The legacy
+/// --compact flag is an alias. Refuse concurrent backends via the runtime lease.
+pub fn compact_output_chunks() -> Result<(), String> {
+    let root = crate::workspace::data_root();
+    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let _lock = crate::runtime_lock::acquire(&root)?;
+    let path = root.join("events.sqlite");
+    let before = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let store = crate::store::Store::open(&path)?;
+    let report = store.migrate_legacy_logs()?;
+    store.vacuum()?;
+    let after = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    println!(
+        "[migrate] backfilled {} rows, migrated {} executions, updated {} rows, deleted {} output chunks\n[migrate] events.sqlite: {:.1} MB -> {:.1} MB",
+        report.backfilled_rows,
+        report.migrated_executions,
+        report.updated_rows,
+        report.deleted_chunks,
+        before as f64 / 1_048_576.0,
+        after as f64 / 1_048_576.0
+    );
+    Ok(())
+}
+
 pub fn run() -> Result<(), String> {
     use tiny_http::{Response, Server};
     load_env_file();
@@ -3227,8 +3272,17 @@ pub fn run() -> Result<(), String> {
     let extension = root.join("grapher-planner.ts");
     fs::write(&extension, include_str!("../resources/planner.ts"))
         .map_err(|error| error.to_string())?;
+    // `npm run dev` restarts are dominated by replaying the selected Run's
+    // streamed output. The browser only materializes a settled Run when it is
+    // opened, so dev can start without replaying it.
+    let lazy_primary = std::env::var_os("GRAPHER_DEV_LAZY_PRIMARY").is_some();
+    let runtime = if lazy_primary {
+        Runtime::open_lazy(&root)?
+    } else {
+        Runtime::open(&root)?
+    };
     let service = Arc::new(Service {
-        runtime: Mutex::new(Runtime::open(&root)?),
+        runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
         drive_signal: (Mutex::new(0), Condvar::new()),
         planning: AtomicBool::new(false),

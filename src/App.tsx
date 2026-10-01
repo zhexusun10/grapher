@@ -28,7 +28,6 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
-import { prefetchRunExecutionTranscripts } from "./components/ExecutionTranscript";
 import { PublicationPanel } from "./components/PublicationPanel";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
 import { ConfirmModal, type ConfirmModalState } from "./components/modals/ConfirmModal";
@@ -2122,13 +2121,8 @@ export default function App() {
                 }
                 setSelected("");
 
-                // Load the settled node histories in one background request.
-                // The backend reads the Run only once and mounted nodes share
-                // this request; live executions continue to stream separately.
-                const executions = [...snapshot.executions, ...(snapshot.mergers ?? [])];
-                void prefetchRunExecutionTranscripts(id, executions, controller.signal).catch(() => {
-                  // Mounted transcripts can retry independently on failure.
-                });
+                // Mounted node transcripts fetch only their own history.
+                // Unselected nodes never allocate or transfer historical logs.
               });
             }}
             onDeleteRun={handleDeleteRunConfirm}

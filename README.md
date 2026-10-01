@@ -47,7 +47,7 @@ npm run pi:setup
 npm run dev
 ```
 
-打开 <http://127.0.0.1:1420>。首次启动可能需要等待 Cargo 编译。已有克隆仓库请先运行 `git submodule update --init --recursive`。在设置中选择本机项目目录和 `provider/model`，通过服务商设置登录，或运行 `npm run pi` 使用上游命令行工具登录。不要将真实密钥写入 `.env.example`；如需环境变量，可复制为 Git 忽略的 `.env`。Pi 凭据默认位于 `~/.grapher/pi-agent`（可由 `PI_CODING_AGENT_DIR` 指定）。
+打开 <http://127.0.0.1:1420>。首次启动可能需要等待 Cargo 编译。开发模式不会在启动时重放已完成 Run 的历史输出；打开对应会话时再按需加载。已有克隆仓库请先运行 `git submodule update --init --recursive`。在设置中选择本机项目目录和 `provider/model`，通过服务商设置登录，或运行 `npm run pi` 使用上游命令行工具登录。不要将真实密钥写入 `.env.example`；如需环境变量，可复制为 Git 忽略的 `.env`。Pi 凭据默认位于 `~/.grapher/pi-agent`（可由 `PI_CODING_AGENT_DIR` 指定）。
 
 1. 输入目标；任务路由器选择串行（单任务，自动批准）或图执行。
 2. 规划器生成执行图，经编译器校验后由用户检查并批准；互不依赖的节点可以没有相互连接的边。
@@ -85,9 +85,16 @@ npm run check                 # 类型检查
 npm run build                 # 界面构建
 npm test                      # Rust 固定样例测试；无需付费模型
 npm run test:concurrent       # HTTP 多 Run 并发与后台旧会话回归（需 /bin/sh）
+npm run test:conversation-acceptance # TC-01–14：旧库副本、真实 HTTP/浏览器/进程压测
 npm run test:pi               # 锁定版本的 Pi 与认证传输契约测试
 npm run test:native           # 宿主原生回归测试（依赖平台）
+npm run migrate               # 维护：迁移历史执行日志并回收磁盘（先关闭后端）
+npm run compact               # migrate 的兼容别名
 ```
+
+执行日志按 UTF-8 字节偏移分块写入独立的 `execution_logs` 表；`Finished` / `Failed` 等业务事件仅持久化字节数和结构化指标。打开历史会话只加载元数据，选中节点才按需读取完整日志；浏览器两个 transcript 缓存分别限制为 20 条 / 30 MiB。未迁移老库可通过单节点读取自动兼容（不修改老事件）；建议先备份数据目录、关闭后端，再运行 `npm run migrate`，逐 execution 保留完成、失败、中断和 merger 日志，清洗老事件并执行 `VACUUM`。重复执行是幂等的，维护命令复用运行锁拒绝并发。
+
+会话日志严格验收及已知边界见 [TC-01–TC-14 证据报告](CONVERSATION_PERFORMANCE_ACCEPTANCE.md)。验收脚本要求 Python 3.11+ 和浏览器，每次创建隔离副本，不会迁移原库；大库为真实历史文本派生的压力数据，不冒充原始 720MB 文件。
 
 `benchmark/` 提供独立的 Harbor 自定义 agent 适配器（不包含 benchmark 数据集或 host）；参见 [Harbor 接入与 Linux Graph 隔离环境要求](benchmark/README.md)。HTTP API 的绑定和生命周期测试由 `npm run test:bindings` 使用仓库内的 `scripts/check-project-binding.mjs` 完成；其余上述基本检查也可在本仓库运行。固定样例和无模型测试不能证明真实服务商的语义质量或全部沙箱边界；发布前需要平台和真实模型验收。
 

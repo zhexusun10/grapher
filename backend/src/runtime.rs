@@ -61,12 +61,28 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn open(root: &Path) -> Result<Self, String> {
+        Self::open_with(root, true)
+    }
+
+    /// Dev-mode variant: open the store without replaying the selected Run.
+    /// Long transcript logs are loaded on demand by `open_run` when a run is
+    /// actually viewed, so restarting the dev backend does not pay for history
+    /// that the browser is not going to display.
+    pub fn open_lazy(root: &Path) -> Result<Self, String> {
+        Self::open_with(root, false)
+    }
+
+    fn open_with(root: &Path, load_selected: bool) -> Result<Self, String> {
         fs::create_dir_all(root).map_err(|error| error.to_string())?;
         let lock = Arc::new(acquire(root)?);
         let store = Store::open(&root.join("events.sqlite"))?;
         #[allow(unused_mut)]
-        let mut state = if let Some(run) = store.selected_run()? {
-            store.load(&run)?
+        let mut state = if load_selected {
+            if let Some(run) = store.selected_run()? {
+                store.load(&run)?
+            } else {
+                Snapshot::default()
+            }
         } else {
             Snapshot::default()
         };
@@ -93,7 +109,7 @@ impl Runtime {
             .cloned()
             .collect();
         for execution in interrupted {
-            runtime.emit(EventKind::Failed { node: execution.node, execution_id: Some(execution.id), error: "Application stopped during this execution. Its result is not trusted; inspect and rerun with a fresh Execution Instance.".into() })?;
+            runtime.emit(EventKind::Failed { node: execution.node, execution_id: Some(execution.id), output_bytes: 0, metrics: None, error: "Application stopped during this execution. Its result is not trusted; inspect and rerun with a fresh Execution Instance.".into() })?;
         }
         runtime.recover_publication()?;
         if runtime.state.approved
@@ -142,7 +158,7 @@ impl Runtime {
             runtime.emit(EventKind::Failed {
                 node: execution.node,
                 execution_id: Some(execution.id),
-                error: "Application stopped during this execution. Inspect and rerun.".into(),
+                error: "Application stopped during this execution. Inspect and rerun.".into(), output_bytes: 0, metrics: None,
             })?;
         }
         runtime.recover_publication()?;
@@ -171,7 +187,35 @@ impl Runtime {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn emit(&mut self, kind: EventKind) -> Result<(), String> {
+    pub fn emit(&mut self, mut kind: EventKind) -> Result<(), String> {
+        if let EventKind::MergerFailed { execution_id, error, .. } = &kind {
+            self.store.ensure_legacy_logs(&self.state.run_id, execution_id)?;
+            self.store.append(&mut self.state, EventKind::Output {
+                execution_id: execution_id.clone(), text: format!("\nMerger failed: {error}\n"),
+            })?;
+        }
+        let terminal = match &mut kind {
+            EventKind::Failed { execution_id: Some(id), output_bytes, metrics, .. }
+            | EventKind::MergerFinished { execution_id: id, output_bytes, metrics, .. }
+            | EventKind::MergerFailed { execution_id: id, output_bytes, metrics, .. } => Some((id, output_bytes, metrics)),
+            _ => None,
+        };
+        if let Some((id, output_bytes, metrics)) = terminal {
+            *output_bytes = self.store.ensure_legacy_logs(&self.state.run_id, id)?;
+            if let Some(execution) = self.state.executions.iter().chain(&self.state.mergers).find(|e| e.id == *id) {
+                *output_bytes = (*output_bytes).max(execution.output_bytes).max(execution.output.len());
+                if metrics.is_none() {
+                    // Restart recovery has metadata but no live buffer. Parse
+                    // its committed logs once here, not during snapshot load.
+                    let recovered;
+                    let text = if execution.output.len() != *output_bytes {
+                        recovered = self.store.execution_log_page(&self.state.run_id, id, 0, usize::MAX)?.content;
+                        &recovered
+                    } else { &execution.output };
+                    *metrics = Some(parse_execution_metrics(text, execution.started_at, now()));
+                }
+            }
+        }
         self.store.append(&mut self.state, kind)?;
         self.touch();
         Ok(())
@@ -201,7 +245,7 @@ impl Runtime {
                 .iter()
                 .any(|e| e.id == execution_id && e.node == "merger");
             self.emit(EventKind::MergerFailed {
-                execution_id,
+                execution_id, output_bytes: 0, metrics: None,
                 error: if publication_merge {
                     "Merger interrupted; inspect the merge and retry publication."
                 } else {
@@ -393,7 +437,7 @@ impl Runtime {
             self.emit(EventKind::Failed {
                 node: execution.node,
                 execution_id: Some(execution.id),
-                error: "Execution was interrupted. Inspect and rerun.".into(),
+                error: "Execution was interrupted. Inspect and rerun.".into(), output_bytes: 0, metrics: None,
             })?;
         }
         self.recover_publication()?;
@@ -1109,7 +1153,7 @@ impl Runtime {
                 before,
                 after: None,
                 status: "running".into(),
-                output: String::new(),
+                output: String::new(), output_bytes: 0, pid: None,
                 started_at: now(),
                 completed_at: None,
                 metrics: None,
@@ -1298,22 +1342,25 @@ impl Runtime {
                         self.emit(EventKind::Failed {
                             node: execution.node.clone(),
                             execution_id: Some(execution.id.clone()),
-                            error,
+                            error, output_bytes: 0, metrics: None,
                         })?;
                         return Ok(None);
                     }
                 }
-                let raw = self
-                    .state
-                    .executions
-                    .iter()
-                    .find(|item| item.id == execution.id)
-                    .map(|item| item.output.clone())
-                    .unwrap_or_default();
-                self.emit(EventKind::Finished {
+                // The driver has already awaited the writer's Flush. Commit
+                // the tail synchronously under this same runtime lock: waiting
+                // for a writer ACK here would deadlock on the lock we hold.
+                self.emit_outputs(vec![EventKind::Output {
                     execution_id: execution.id.clone(),
-                    head: head.clone(),
-                    output: format!("{raw}\n── Final response ──\n{output}\n"),
+                    text: format!("\n── Final response ──\n{output}\n"),
+                }])?;
+                let live = self.state.executions.iter().find(|item| item.id == execution.id)
+                    .ok_or("Execution not found")?;
+                let output_bytes = live.output.len();
+                let metrics = Some(parse_execution_metrics(&live.output, live.started_at, now()));
+                self.emit(EventKind::Finished {
+                    execution_id: execution.id.clone(), head: head.clone(),
+                    output: String::new(), output_bytes, metrics,
                 })?;
                 #[cfg(not(feature = "fixture"))]
                 self.warm_completed_serial_node();
@@ -1357,7 +1404,7 @@ impl Runtime {
                 self.emit(EventKind::Failed {
                     node: execution.node.clone(),
                     execution_id: Some(execution.id.clone()),
-                    error: error.clone(),
+                    error: error.clone(), output_bytes: 0, metrics: None,
                 })?;
                 if error.starts_with("Workspace composition blocked") {
                     self.emit(EventKind::Blocked {
@@ -1393,7 +1440,7 @@ impl Runtime {
                 self.emit(EventKind::Failed {
                     node: from.into(),
                     execution_id: None,
-                    error: "Feedback retry limit exhausted; unrelated branches continue".into(),
+                    error: "Feedback retry limit exhausted; unrelated branches continue".into(), output_bytes: 0, metrics: None,
                 })?;
                 return Ok(());
             }

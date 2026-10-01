@@ -19,9 +19,12 @@
     "test:bindings": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher && node scripts/check-project-binding.mjs && node --import ./pi/node_modules/tsx/dist/loader.mjs --test scripts/execution-route.test.mjs",
     "test:extensions": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher && node --import ./pi/node_modules/tsx/dist/loader.mjs scripts/check-pi-extension.ts",
     "dev": "node scripts/dev.mjs",
+    "compact": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --compact",
+    "migrate": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --migrate",
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test:frontend": "node --import ./pi/node_modules/tsx/dist/loader.mjs --test scripts/graph-elements.test.ts scripts/model-settings.test.ts scripts/execution-transcript-prefetch.test.ts scripts/planner-user-turns.test.ts scripts/conversation-branch.test.ts scripts/pi-tree-branch.test.ts scripts/planner-branch.test.ts scripts/node-working.test.ts scripts/frontend-i18n.test.ts scripts/workbench-split-ratio.test.ts",
+    "test:conversation-acceptance": "node --expose-gc scripts/conversation-acceptance.mjs",
     "test:concurrent": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --no-default-features --features fixture --bin grapher && node scripts/concurrent-runs.test.mjs",
     "test": "node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture",
     "frontend": "vite --host 127.0.0.1",
@@ -37,6 +40,7 @@
     "react-dom": "19.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.20.2",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",

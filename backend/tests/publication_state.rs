@@ -74,7 +74,7 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
         before: head.clone(),
         after: None,
         status: "running".into(),
-        output: String::new(),
+        output: String::new(), output_bytes: 0, pid: None,
         started_at: now(),
         completed_at: None,
         metrics: None,

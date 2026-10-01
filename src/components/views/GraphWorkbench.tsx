@@ -1080,7 +1080,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               className="initial-query-scroll"
               ref={chatScrollRef}
               onScroll={handleChatScroll}
-              style={readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
             >
               <div className="chat-messages-stream">
                 {nodeTurns.map((turn) => (
@@ -1229,9 +1228,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 )}
               </div>
             </div>
-            {execution && readyConversationKey !== conversationViewKey && (
-              <div className="conversation-history-loading" role="status">{t("正在加载历史记录…")}</div>
-            )}
             <button
               ref={scrollBottomBtnRef}
               type="button"
@@ -1293,7 +1289,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               className="initial-query-scroll"
               ref={chatScrollRef}
               onScroll={handleChatScroll}
-              style={!isPlanning && readyConversationKey !== conversationViewKey ? { visibility: "hidden" } : undefined}
             >
               <div className="chat-messages-stream">
                 {routeType === "serial" ? (
@@ -1712,9 +1707,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 />
               )}
             </div>
-            {routeType === "serial" && serialExecutions.length > 0 && readyConversationKey !== conversationViewKey && (
-              <div className="conversation-history-loading" role="status">{t("正在加载历史记录…")}</div>
-            )}
             <button
               ref={scrollBottomBtnRef}
               type="button"

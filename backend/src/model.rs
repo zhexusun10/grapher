@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[cfg(feature = "acceptance")]
+pub static LOG_TEXT_DESERIALIZED_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "acceptance")]
+fn count_log_deserialization<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    LOG_TEXT_DESERIALIZED_BYTES.fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
+    Ok(text)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Node {
@@ -212,7 +222,13 @@ pub struct Execution {
     pub before: String,
     pub after: Option<String>,
     pub status: String,
+    #[serde(default)]
+    #[cfg_attr(feature = "acceptance", serde(deserialize_with = "count_log_deserialization"))]
     pub output: String,
+    #[serde(default)]
+    pub output_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u64>,
     pub started_at: u64,
     pub completed_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,17 +327,28 @@ pub enum EventKind {
     },
     Output {
         execution_id: String,
+        #[cfg_attr(feature = "acceptance", serde(deserialize_with = "count_log_deserialization"))]
         text: String,
     },
     Finished {
         execution_id: String,
         head: String,
+        #[serde(default)]
+        #[cfg_attr(feature = "acceptance", serde(deserialize_with = "count_log_deserialization"))]
         output: String,
+        #[serde(default)]
+        output_bytes: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics: Option<ExecutionMetrics>,
     },
     Failed {
         node: String,
         execution_id: Option<String>,
         error: String,
+        #[serde(default)]
+        output_bytes: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics: Option<ExecutionMetrics>,
     },
     Blocked {
         node: String,
@@ -386,10 +413,18 @@ pub enum EventKind {
     MergerFinished {
         execution_id: String,
         head: String,
+        #[serde(default)]
+        output_bytes: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics: Option<ExecutionMetrics>,
     },
     MergerFailed {
         execution_id: String,
         error: String,
+        #[serde(default)]
+        output_bytes: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics: Option<ExecutionMetrics>,
     },
     Settled,
 }
@@ -610,6 +645,21 @@ pub fn now() -> u64 {
         .as_millis() as u64
 }
 
+pub fn append_live_output(execution: &mut Execution, text: &str) {
+    execution.output.push_str(text);
+    execution.output_bytes = execution.output.len();
+    if execution.pid.is_none() {
+        // The lifecycle record may itself span multiple output messages.
+        if let Some(line) = execution.output.split_once('\n').map(|(line, _)| line) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                if value["type"] == "grapher_process_started" {
+                    execution.pid = value["pid"].as_u64();
+                }
+            }
+        }
+    }
+}
+
 pub fn apply(state: &mut Snapshot, event: &Event) {
     match &event.kind {
         EventKind::Created {
@@ -711,8 +761,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .chain(state.mergers.iter_mut())
                 .find(|item| item.id == *execution_id)
             {
-                execution.output.push_str(text);
+                append_live_output(execution, text);
             }
+            // Streaming logs are not business events and must not accumulate
+            // a second, unbounded copy in state.events.
+            return;
         }
         EventKind::Prepared { execution_id, head } => {
             if let Some(execution) = state
@@ -727,6 +780,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             execution_id,
             head,
             output,
+            output_bytes,
+            metrics,
         } => {
             let superseded = state.superseded_execution_ids.contains(execution_id);
             let completed = state
@@ -739,9 +794,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     execution.status = "completed".into();
                     execution.after = Some(head.clone());
                     execution.completed_at = Some(event.timestamp);
-                    execution.output = output.clone();
-                    execution.metrics =
-                        Some(parse_execution_metrics(output, execution.started_at, event.timestamp));
+                    execution.output_bytes = (*output_bytes).max(output.len());
+                    execution.metrics = metrics.clone().or_else(|| (!output.is_empty()).then(||
+                        parse_execution_metrics(output, execution.started_at, event.timestamp)));
+                    execution.output = String::new();
                     node_name
                 });
             if let Some(node_name) = completed {
@@ -796,6 +852,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node,
             execution_id,
             error,
+            output_bytes,
+            metrics,
         } => {
             let superseded = execution_id
                 .as_ref()
@@ -814,7 +872,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             {
                 execution.status = "failed".into();
                 execution.completed_at = Some(event.timestamp);
-                execution.metrics = Some(parse_execution_metrics(&execution.output, execution.started_at, event.timestamp));
+                execution.output_bytes = (*output_bytes).max(execution.output_bytes).max(execution.output.len());
+                execution.metrics = metrics.clone().or_else(|| (!execution.output.is_empty()).then(|| parse_execution_metrics(&execution.output, execution.started_at, event.timestamp)));
+                execution.output = String::new();
             }
         }
         EventKind::Blocked { node, error } => {
@@ -993,12 +1053,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }
             }
         }
-        EventKind::MergerFinished { execution_id, head } => {
+        EventKind::MergerFinished { execution_id, head, output_bytes, metrics } => {
             if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
                 execution.status = "completed".into();
                 execution.after = Some(head.clone());
                 execution.completed_at = Some(event.timestamp);
-                execution.metrics = Some(parse_execution_metrics(&execution.output, execution.started_at, event.timestamp));
+                execution.output_bytes = (*output_bytes).max(execution.output_bytes).max(execution.output.len());
+                execution.metrics = metrics.clone().or_else(|| (!execution.output.is_empty()).then(|| parse_execution_metrics(&execution.output, execution.started_at, event.timestamp)));
+                execution.output = String::new();
             }
             if state.mergers.iter().any(|e| e.id == *execution_id && e.node == "merger") {
                 state.phase = "publishing".into();
@@ -1010,14 +1072,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::MergerFailed {
             execution_id,
             error,
+            output_bytes,
+            metrics,
         } => {
             if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
                 execution.status = "failed".into();
-                execution
-                    .output
-                    .push_str(&format!("\nMerger failed: {error}\n"));
+                // Runtime persists the annotation before this terminal event.
+                // Replay restores byte counts from the log table, not text.
+                let _ = error;
                 execution.completed_at = Some(event.timestamp);
-                execution.metrics = Some(parse_execution_metrics(&execution.output, execution.started_at, event.timestamp));
+                execution.output_bytes = (*output_bytes).max(execution.output_bytes).max(execution.output.len());
+                execution.metrics = metrics.clone().or_else(|| (!execution.output.is_empty()).then(|| parse_execution_metrics(&execution.output, execution.started_at, event.timestamp)));
+                execution.output = String::new();
             }
         }
         EventKind::Settled => {
@@ -1030,23 +1096,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
     }
     state.events.push(event.clone());
-    if matches!(&event.kind, EventKind::Output { .. }) {
-        // Output only changes the event clock; execution usage/duration is
-        // parsed on Finished/Failed. Preserve the live and replayed wall clock
-        // without rescanning every execution for each streamed chunk.
-        if let Some(metrics) = state.run_metrics.as_mut() {
-            let first = state.events.first().expect("just appended an event").timestamp;
-            metrics.total_duration_seconds = if event.timestamp >= first {
-                (event.timestamp - first) as f64 / 1000.0
-            } else {
-                metrics.planning_duration_seconds + metrics.execution_duration_seconds
-            };
-        } else {
-            state.run_metrics = Some(state.compute_run_metrics());
-        }
-    } else {
-        state.run_metrics = Some(state.compute_run_metrics());
-    }
+    state.run_metrics = Some(state.compute_run_metrics());
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1069,7 +1119,7 @@ mod metrics_tests {
     use super::*;
 
     #[test]
-    fn output_updates_wall_clock_without_changing_other_metrics() {
+    fn streaming_output_is_not_retained_as_business_history() {
         let mut state = Snapshot::default();
         let mut roles = BTreeMap::new();
         roles.insert("planner".into(), PlanningRoleMetrics {
@@ -1088,6 +1138,7 @@ mod metrics_tests {
             apply(&mut state, &Event { sequence, timestamp, kind });
             assert_eq!(state.run_metrics, Some(state.compute_run_metrics()));
         }
-        assert_eq!(state.run_metrics.unwrap().total_duration_seconds, 3.0);
+        assert_eq!(state.events.len(), 1);
+        assert_eq!(state.run_metrics.unwrap().total_duration_seconds, 0.0);
     }
 }

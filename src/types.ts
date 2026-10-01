@@ -196,6 +196,8 @@ export interface TranscriptItem {
   type: "text" | "thinking" | "tool_call" | "system";
   role?: "user" | "assistant" | "system";
   content?: string;
+  // Raw stdout is displayed as text but is not assistant RPC stream content.
+  rawOutput?: boolean;
   toolName?: string;
   toolCallId?: string;
   args?: Record<string, any>;

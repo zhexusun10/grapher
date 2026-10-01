@@ -281,7 +281,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                   const textBefore = remaining.slice(0, startIdx);
                   if (textBefore) {
                     const lastItem = currentItems[currentItems.length - 1];
-                    if (lastItem && lastItem.type === "text" && lastItem.role === "assistant") {
+                    if (lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
                       lastItem.content = (lastItem.content || "") + textBefore;
                     } else {
                       currentItems.push({
@@ -297,7 +297,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                   remaining = remaining.slice(startIdx + startTag.length);
                 } else {
                   const lastItem = currentItems[currentItems.length - 1];
-                  if (lastItem && lastItem.type === "text" && lastItem.role === "assistant") {
+                  if (lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
                     lastItem.content = (lastItem.content || "") + remaining;
                   } else {
                     currentItems.push({
@@ -321,7 +321,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             lastItem.status = "success";
           }
 
-          if (lastItem && lastItem.type === "text" && lastItem.role === "assistant") {
+          if (lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
             lastItem.content = (lastItem.content || "") + delta;
           } else {
             currentItems.push({
@@ -435,7 +435,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             const fullText = message.content.filter((c: { type: string }) => c.type === "text")
               .map((c: { text?: string }) => c.text || "").join("");
             const captured = currentItems.slice(assistantStartIndexRef.current)
-              .filter(item => item.type === "text" && item.role === "assistant")
+              .filter(item => item.type === "text" && item.role === "assistant" && !item.rawOutput)
               .map(item => item.content || "").join("");
             const missing = fullText.startsWith(captured) ? fullText.slice(captured.length) : "";
             if (missing) currentItems.push({
@@ -476,7 +476,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           });
         } else {
           const lastItem = currentItems[currentItems.length - 1];
-          if (lastItem && lastItem.type === "text" && lastItem.role === "assistant") {
+          if (lastItem && lastItem.type === "text" && lastItem.role === "assistant" && lastItem.rawOutput) {
             lastItem.content = (lastItem.content || "") + "\n" + line;
           } else {
             currentItems.push({
@@ -484,6 +484,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
               type: "text",
               role: "assistant",
               content: line,
+              rawOutput: true,
               timestamp: Date.now(),
             });
           }
