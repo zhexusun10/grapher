@@ -4,7 +4,7 @@
 >
 > 不编排智能体，编译工作。
 
-Grapher is a **local multi-agent coding system** that turns complex coding tasks into inspectable execution graphs and runs them with a deterministic Rust runtime. Independent coding agents work in parallel and combine their changes through Git—not a supervisor agent's ongoing conversation.
+Grapher is a **GUI for [Pi](https://github.com/earendil-works/pi) and a local multi-agent coding system**. Use a single Pi coding agent in a graphical workbench, or compile complex tasks into inspectable execution graphs run by a deterministic Rust runtime. Independent agents collaborate through Git—not a supervisor agent's ongoing conversation.
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
@@ -14,6 +14,7 @@ Grapher is a **local multi-agent coding system** that turns complex coding tasks
 
 ## Why Grapher?
 
+- **Pi, with a GUI** — Chat with coding agents, manage provider sign-in and model settings, inspect tool calls and logs, and send follow-up instructions from one graphical workbench. Single-agent work needs no graph planning.
 - **Deterministic orchestration** — Scheduling, dependencies, retries, and feedback are explicit Rust state transitions, not hidden in LLM conversations.
 - **Git-native collaboration** — Agents exchange file states and commits, not each other's chat histories. Graph nodes use independent Git repositories.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
@@ -34,7 +35,7 @@ npm run dev
 Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo compiles.
 
 1. In **Settings**, select a local project, authenticate a provider, and choose a `provider/model`. You can also sign in through `npm run pi`; see [Providers](docs/guides/providers.md).
-2. Enter a coding goal. Simple or linear work uses one Serial agent; independent workstreams can use Graph.
+2. Enter a coding goal. Choose **Serial** for a single Pi agent, **Graph** for a task graph, or **Auto** to let the Partitioner select the route.
 3. For Graph, inspect and **approve** the plan. Follow node logs, pause new dispatches, or send instructions.
 4. Graph work is complete only after valid results are published to your project. Publication failures preserve state for inspection or retry.
 
