@@ -290,7 +290,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const [editingTaskNode, setEditingTaskNode] = useState("");
   const [taskDraft, setTaskDraft] = useState("");
   useEffect(() => {
+    setAttemptId("");
     setEditingTaskNode("");
+    setTaskDraft("");
     onCancelEditMessage?.();
   }, [selected, state.runId]);
   const selectedNode = state.graph.nodes.find((item) => item.name === selected);
@@ -535,7 +537,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     graphFitFrameRef.current = requestAnimationFrame(() => {
       graphFitFrameRef.current = requestAnimationFrame(() => {
         graphFitFrameRef.current = null;
-        if (graphFlowRef.current !== instance) return;
+        if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
         void instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6, duration: 0 });
         setReadyGraphRunKey(targetKey);
       });
@@ -639,7 +641,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       el.removeEventListener("touchstart", onTouchStart);
       el.removeEventListener("touchmove", onTouchMove);
     };
-  }, []);
+  }, [conversationViewKey]);
 
   const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
     suppressAutoScrollRef.current = true;
@@ -784,7 +786,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     return () => observer.disconnect();
-  }, [handleChatScroll]);
+  }, [handleChatScroll, conversationViewKey]);
 
   // Auto-scroll to bottom when new messages or streaming content arrives
   useLayoutEffect(() => {
@@ -1261,6 +1263,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
               <PromptBox
+                layoutId="conversation-composer"
                 repository={config?.repository}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={
@@ -1397,9 +1400,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <motion.div
                         key={effectiveMessages[0].id}
                         className={`chat-message-row ${effectiveMessages[0].role}`}
-                        initial={isPlanning ? { opacity: 0, y: 16, scale: 0.98 } : false}
+                        initial={false}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
-                        transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+                        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
                       >
                         {effectiveMessages[0].role === "user" ? (
                           <EditableUserBubble
@@ -1719,7 +1722,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             </button>
             <motion.div
               className="pane-bottom-chat"
-              initial={isPlanning ? { opacity: 0, y: 22 } : false}
+              initial={false}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.48, ease: [0.16, 1, 0.3, 1] }}
             >
@@ -1740,6 +1743,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
               <PromptBox
+                layoutId="conversation-composer"
                 repository={config?.repository}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={

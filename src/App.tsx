@@ -1,7 +1,7 @@
 import { t, localizeError } from "./i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, X } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { AlertTriangle, Loader2, X } from "lucide-react";
+import { motion, AnimatePresence, LayoutGroup, useReducedMotion } from "motion/react";
 
 import {
   defaultConfig, emptyGraph, emptySnapshot,
@@ -24,7 +24,8 @@ import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
-import { Sidebar, normalizeWorkspacePath } from "./components/layout/Sidebar";
+import { Sidebar } from "./components/layout/Sidebar";
+import { bindRunToWorkspace, normalizeWorkspacePath, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey } from "./services/workspaceConversations";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
@@ -39,6 +40,7 @@ const nodeTypes = { work: TaskNode };
 const edgeTypes = { workflow: SmoothWorkflowEdge };
 
 export default function App() {
+  const reduceMotion = useReducedMotion();
   const [state, setState] = useState<Snapshot>(emptySnapshot);
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     try {
@@ -75,7 +77,7 @@ export default function App() {
         }
       }
     } catch { }
-    return { ...initialConfig, maxFeedback: 3 };
+    return { ...initialConfig, repository: normalizeWorkspacePath(initialConfig.repository), maxFeedback: 3 };
   });
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
   const [envOverrides, setEnvOverrides] = useState<Record<string, string>>({});
@@ -94,14 +96,9 @@ export default function App() {
   const historyPrefetchRef = useRef<AbortController | null>(null);
   useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
-  const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
-    try {
-      const saved = localStorage.getItem("grapher_workspace_runs");
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
+  // Do not flash unvalidated, potentially cross-workspace browser indexes.
+  // Bootstrap repairs ownership before publishing the saved cards.
+  const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>({});
   const [runLabels, setRunLabels] = useState<Record<string, string>>(() => {
     try {
       const saved = localStorage.getItem("grapher_run_labels");
@@ -115,11 +112,11 @@ export default function App() {
   const [recentlyAddedEdgeIds, setRecentlyAddedEdgeIds] = useState<Set<string>>(new Set());
   const pendingToolArgsRef = useRef<Map<string, any>>(new Map());
 
-  const currentRepoPath = useMemo(() => config.repository || repoInfo?.path || "default", [config.repository, repoInfo]);
+  const currentRepoPath = useMemo(() => workspaceKey(config.repository), [config.repository]);
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
 
   useEffect(() => {
-    const missing = runs.filter(id => !(id in runLabels) && !pendingRunLabelIdsRef.current.has(id));
+    const missing = runs.filter(id => !id.startsWith("pending-") && !(id in runLabels) && !pendingRunLabelIdsRef.current.has(id));
     if (missing.length > 0) {
       missing.forEach(id => {
         pendingRunLabelIdsRef.current.add(id);
@@ -127,14 +124,14 @@ export default function App() {
           setRunLabels(prev => {
             if (prev[id] !== undefined) return prev; // already fetched
             const updated = { ...prev, [id]: snapshot.graph.originalGoal || "" };
-            localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+            try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch { }
             return updated;
           });
         }).catch(() => {
           setRunLabels(prev => {
             if (prev[id] !== undefined) return prev; // already fetched
             const updated = { ...prev, [id]: "" };
-            localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+            try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch { }
             return updated;
           });
         }).finally(() => pendingRunLabelIdsRef.current.delete(id));
@@ -142,10 +139,12 @@ export default function App() {
     }
   }, [runs, runLabels, runtimeService]);
   const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot } = useRunIndicators(state);
-  const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, runs, state.runId, state.phase);
+  const allRunIds = useMemo(() => [...new Set(Object.values(workspaceRuns).flat())], [workspaceRuns]);
+  const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, allRunIds, state.runId, state.phase);
 
   const [dataPath, setDataPath] = useState("");
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
+  const [dismissedRecoveryId, setDismissedRecoveryId] = useState<string | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
   // Recover an orphaned Planner only on initial load, not after the user
   // intentionally opens a different Conversation in this repository.
@@ -159,11 +158,10 @@ export default function App() {
     if (summary) setSelected("");
   }));
 
-  const recordRunToWorkspace = (runId: string, repo: string = currentRepoPath) => {
+  const recordRunToWorkspace = (runId: string, repo: string) => {
     setWorkspaceRuns((prev) => {
-      const existing = prev[repo] || [];
-      const nextList = [runId, ...existing.filter((id) => id !== runId)];
-      const updated = { ...prev, [repo]: nextList };
+      const updated = bindRunToWorkspace(prev, runId, repo);
+      if (updated === prev) return prev;
       try {
         localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
       } catch { }
@@ -171,11 +169,73 @@ export default function App() {
     });
   };
 
-  useEffect(() => {
-    if (state.runId && currentRepoPath && !runs.includes(state.runId)) {
-      recordRunToWorkspace(state.runId, currentRepoPath);
+  const replaceProvisionalRunId = (oldId: string, newId: string, label: string, repository: string) => {
+    setWorkspaceRuns((prev) => {
+      const updated = bindRunToWorkspace(prev, newId, repository, oldId);
+      try {
+        localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
+      } catch { }
+      return updated;
+    });
+
+    setRunLabels((prev) => {
+      const copy = { ...prev };
+      delete copy[oldId];
+      copy[newId] = label;
+      try {
+        localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
+      } catch { }
+      return copy;
+    });
+
+    setState((prev) => (prev.runId === oldId ? { ...prev, runId: newId } : prev));
+    setPlannerStream((prev) => (prev.runId === oldId ? { ...prev, runId: newId } : prev));
+    const cached = messagesByRunRef.current.get(oldId);
+    if (cached) {
+      messagesByRunRef.current.set(newId, cached.map(msg => ({ ...msg, runId: newId })));
+      messagesByRunRef.current.delete(oldId);
     }
-  }, [state.runId, currentRepoPath, runs]);
+    setSessionEntries((prev) => {
+      // Detached SSE events cannot retag the newly opened conversation's turns.
+      if (!prev.some(msg => msg.runId === oldId)) return prev;
+      const updated = prev.map(msg => msg.runId === oldId ? { ...msg, runId: newId } : msg);
+      messagesByRunRef.current.set(newId, updated);
+      return updated;
+    });
+  };
+
+  const removeProvisionalRunId = (provisionalId: string) => {
+    setWorkspaceRuns((prev) => {
+      const updated: Record<string, string[]> = {};
+      for (const [repo, list] of Object.entries(prev)) {
+        updated[repo] = list.filter((id) => id !== provisionalId);
+      }
+      try {
+        localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
+      } catch { }
+      return updated;
+    });
+
+    setRunLabels((prev) => {
+      const copy = { ...prev };
+      delete copy[provisionalId];
+      try {
+        localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
+      } catch { }
+      return copy;
+    });
+
+    setState((prev) => (prev.runId === provisionalId ? { ...emptySnapshot } : prev));
+    setPlannerStream(prev => prev.runId === provisionalId ? initialPlannerStream : prev);
+    setSessionEntries(prev => prev.filter(msg => msg.runId !== provisionalId));
+    messagesByRunRef.current.delete(provisionalId);
+  };
+
+  useEffect(() => {
+    if (state.runId && state.config?.repository) {
+      recordRunToWorkspace(state.runId, state.config.repository);
+    }
+  }, [state.runId, state.config?.repository]);
 
   // 每个运行的消息按发送顺序显示；修改旧消息也作为新的跟进指令追加。
   const [sessionEntries, setSessionEntries] = useState<ChatMessage[]>([]);
@@ -262,17 +322,30 @@ export default function App() {
 
   const [plannerStream, setPlannerStream] = useState(initialPlannerStream);
 
-  const run = async (work: () => Promise<void>) => {
+  const applyForegroundSnapshot = (snapshot: Snapshot, generation: number) => {
+    if (snapshot.runId && snapshot.config?.repository) {
+      recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
+      observeRunSnapshot(snapshot);
+      setBackendStatus({ runId: snapshot.runId, phase: snapshot.phase });
+    }
+    if (generation !== foregroundGeneration.current || !snapshotBelongsToWorkspace(snapshot, config.repository)) return false;
+    setState(snapshot);
+    return true;
+  };
+
+  const run = async (work: () => Promise<boolean | void>): Promise<boolean> => {
     const generation = foregroundGeneration.current;
     busyOperations.current += 1;
     setBusy(true);
     setError("");
     try {
-      await work();
+      const result = await work();
+      return generation === foregroundGeneration.current && result !== false;
     } catch (err) {
       if (generation === foregroundGeneration.current) {
         setError(err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err));
       }
+      return false;
     } finally {
       if (generation === foregroundGeneration.current) {
         busyOperations.current -= 1;
@@ -282,9 +355,11 @@ export default function App() {
   };
 
   const control = (action: string, extra: Record<string, unknown> = {}) => run(async () => {
+    const generation = foregroundGeneration.current;
     if (["approve", "resume", "intervene", "resolve", "retry_publication"].includes(action)) {
       await requireRepository(state.config?.repository || config.repository);
     }
+    if (generation !== foregroundGeneration.current) return;
     const defaultNode = selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
     const targetNode = extra.node !== undefined ? extra.node : defaultNode;
     const payload: Record<string, unknown> = { runId: state.runId, ...extra };
@@ -292,180 +367,111 @@ export default function App() {
       payload.node = targetNode;
     }
     const snapshot = await runtimeService.control(action, payload);
-    setState(snapshot);
+    if (!applyForegroundSnapshot(snapshot, generation)) return false;
     setModal(null);
   });
 
   const handleSendMessage = (
     val: string,
     options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[]; images?: ImageAttachment[] }
-  ): boolean | void | Promise<boolean> => {
+  ): boolean | Promise<boolean> => {
     const text = val.trim();
     if (!text) return false;
     if (repositoryBlocked) {
       setError(repositoryStatus?.error || t("正在确认项目绑定，请稍后重试。"));
       return false;
     }
-    const selectedNode = state.graph.nodes.find((item) => item.name === selected);
-    const targetNodeName = selectedNode
-      ? selectedNode.name
-      : (routeType === "serial" && state.graph.nodes.length > 0
-        ? (state.graph.nodes[0]?.name || "task")
-        : undefined);
-
-    const displayMsg = options?.displayText || text;
-    const parentId = sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null;
-
-    const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"], executionId?: string) => {
-      const newMsg: ChatMessage = {
-        id: `msg-${Date.now()}`,
-        parentId,
-        role: "user",
-        text: textToRecord,
-        images: options?.images,
-        timestamp: Date.now(),
-        runId: isPlanning && !targetNodeName ? (plannerStream.runId || state.runId) : state.runId,
-        node: targetNodeName,
-        delivery,
-        executionId,
-      };
-      setSessionEntries((prev) => [...prev, newMsg]);
-      setEditingMessage(null);
-      setEditPrefillText("");
-      return newMsg;
-    };
-
-    // A completed node continues its own persisted Pi session. In Graph mode
-    // its dependency descendants are rerun only if the result actually
-    // changes; unrelated branches keep their results.
-    if (targetNodeName && state.nodes[targetNodeName]?.status === "done") {
-      const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg);
-      run(async () => {
-        try {
-          await requireRepository(state.config?.repository || config.repository);
-          const snap = await runtimeService.control("intervene", {
-            runId: state.runId, node: targetNodeName, instruction: text, images: options?.images,
-          });
-          setState(snap);
-          if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
-        } catch (error) {
-          setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
-          throw error;
-        }
-      });
-      return;
-    }
-
-    if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
+    if (publishing || publicationFailed) {
       setError(t("发布期间不能介入节点，请等待发布结束或处理发布失败。"));
       return false;
     }
-
-    if (isPlanning || recoveredPlanning?.status === "running") {
-      // A node conversation still steers that node, even while Planner is active.
-      const execution = targetNodeName && [...state.executions].reverse()
-        .find((item) => item.node === targetNodeName && item.status === "running");
-      if (execution) {
-        const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`, "steered", execution.id);
-        run(async () => {
-          try {
-            await runtimeService.control("steer", {
-              runId: state.runId, executionId: execution.id, node: targetNodeName,
-              instruction: text, images: options?.images,
-            });
-          } catch (error) {
-            setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
-            throw error;
-          }
-        });
-        return;
+    const generation = foregroundGeneration.current;
+    const isCurrent = () => generation === foregroundGeneration.current;
+    const selectedNode = state.graph.nodes.find(item => item.name === selected);
+    const targetNodeName = selectedNode?.name || (routeType === "serial" ? state.graph.nodes[0]?.name : undefined);
+    const displayMsg = options?.displayText || text;
+    const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"], executionId?: string) => {
+      const message: ChatMessage = {
+        id: `msg-${crypto.randomUUID()}`, parentId: (sessionEntries.at(-1) || effectiveMessages.at(-1))?.id ?? null,
+        role: "user", text: textToRecord, images: options?.images, timestamp: Date.now(),
+        runId: state.runId || plannerStream.runId, node: targetNodeName, delivery, executionId,
+      };
+      setSessionEntries(prev => [...(prev.length ? prev : effectiveMessages), message]);
+      setEditingMessage(null);
+      setEditPrefillText("");
+      return message;
+    };
+    const removeMessage = (message: ChatMessage) => {
+      if (message.runId) {
+        const cached = messagesByRunRef.current.get(message.runId);
+        if (cached) messagesByRunRef.current.set(message.runId, cached.filter(entry => entry.id !== message.id));
       }
-      if (plannerStream.stage === "partitioning") {
+      setSessionEntries(prev => prev.filter(entry => entry.id !== message.id));
+      setPlannerStream(prev => ({ ...prev, items: prev.items.filter(item => item.id !== message.id) }));
+    };
+    const submitNodeMessage = (action: "steer" | "intervene", message: ChatMessage, executionId?: string) => run(async () => {
+      try {
+        await requireRepository(state.config?.repository || config.repository);
+        if (!isCurrent()) { removeMessage(message); return false; }
+        let snapshot = await runtimeService.control(action, {
+          runId: state.runId, node: targetNodeName, executionId, instruction: text, images: options?.images,
+        });
+        // Once accepted, resuming the originating Run is independent of navigation.
+        if (snapshot.paused) snapshot = await runtimeService.control("resume", { runId: snapshot.runId });
+        return applyForegroundSnapshot(snapshot, generation);
+      } catch (error) {
+        removeMessage(message);
+        throw error;
+      }
+    });
+
+    if (targetNodeName && state.nodes[targetNodeName]?.status === "done") {
+      return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg));
+    }
+    const execution = targetNodeName && [...state.executions].reverse()
+      .find(item => item.node === targetNodeName && item.status === "running");
+    if ((isPlanning || recoveredPlanning?.status === "running" || active) && execution) {
+      const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`, "steered", execution.id);
+      return submitNodeMessage("steer", message, execution.id);
+    }
+    if (isPlanning || recoveredPlanning?.status === "running") {
+      const planningRunId = plannerStream.runId || state.runId;
+      if (plannerStream.stage === "partitioning" || !planningRunId || planningRunId.startsWith("pending-")) {
         setError(t("任务路由器仍在工作，请等待 Planner 启动后再追加消息。"));
         return false;
       }
-      // Keep the SSE stream and Pi process alive. Pi's RPC steer inserts a new
-      // user turn into the current Planner session instead of restarting it.
       const message = recordMessage(displayMsg);
-      setPlannerStream((prev) => ({
-        ...prev,
-        items: [...closeRunningThinkingItem(prev.items), {
+      setPlannerStream(prev => ({
+        ...prev, items: [...closeRunningThinkingItem(prev.items), {
           id: message.id, type: "text", role: "user", content: displayMsg, timestamp: message.timestamp,
         }],
       }));
-      run(async () => {
+      return run(async () => {
         try {
-          await runtimeService.control("steer_planner", {
-            runId: plannerStream.runId || undefined, instruction: text, images: options?.images,
-          });
+          await runtimeService.control("steer_planner", { runId: planningRunId, instruction: text, images: options?.images });
+          return isCurrent();
         } catch (error) {
-          const runId = message.runId;
-          if (runId) messagesByRunRef.current.set(runId,
-            (messagesByRunRef.current.get(runId) ?? []).filter((entry) => entry.id !== message.id));
-          setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
-          setPlannerStream((prev) => ({ ...prev, items: prev.items.filter((item) => item.id !== message.id) }));
-          // The backend Planner turn can settle between this click and the
-          // request. Its workspace is already published, but the Run is still
-          // revisable: continue the same conversation with a new turn instead
-          // of dropping the message.
+          removeMessage(message);
+          if (!isCurrent()) return false;
           const failure = error instanceof Error ? error.message : String(error);
-          if (state.runId && /no longer accepting messages|No active Planner/i.test(failure)) {
-            void handlePlanGoal(text, options, "graph", state.runId, false, undefined, true);
-            return;
+          if (/no longer accepting messages|No active Planner/i.test(failure)) {
+            void handlePlanGoal(text, options, "graph", planningRunId, false, undefined, true);
+            return true;
           }
           throw error;
         }
       });
-      return;
     }
-
-    if (active && targetNodeName) {
-      const execution = [...state.executions].reverse().find((item) => item.node === targetNodeName && item.status === "running");
-      if (execution) {
-        const displayLabel = targetNodeName !== "task" ? `[@${targetNodeName}] ` : "";
-        const message = recordMessage(`${displayLabel}${displayMsg}`, "steered", execution.id);
-        run(async () => {
-          try {
-            await requireRepository(state.config?.repository || config.repository);
-            const snap = await runtimeService.control("steer", {
-              runId: state.runId, executionId: execution.id, node: targetNodeName, instruction: text, images: options?.images,
-            });
-            setState(snap);
-          } catch (error) {
-            setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
-            throw error;
-          }
-        });
-        return;
-      }
-      // A different node may be running; the backend will reject only if that
-      // execution depends on the node being revised.
-    }
-
     if (targetNodeName) {
-      const message = recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg);
-      run(async () => {
-        try {
-          await requireRepository(state.config?.repository || config.repository);
-          const snap = await runtimeService.control("intervene", { node: targetNodeName, instruction: text, images: options?.images, runId: state.runId });
-          setState(snap);
-          if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
-        } catch (error) {
-          setSessionEntries((prev) => prev.filter((entry) => entry.id !== message.id));
-          throw error;
-        }
-      });
-    } else {
-      // 未选中具体节点：处于与 AI 规划器对话面板，直接在对话框中继续对话更新规划
-      const isPlannerContinuation = (routeType === "graph" || state.graph.nodes.length > 0) && !!state.runId;
-      if (isPlannerContinuation) {
-        handlePlanGoal(text, options, "graph", state.runId);
-      } else {
-        const baseGoal = state.graph.originalGoal || goal;
-        const combinedGoal = baseGoal ? t("{0}\n\n补充规划要求：\n{1}", baseGoal, text) : text;
-        handlePlanGoal(combinedGoal, options);
-      }
+      return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg));
     }
+    if ((routeType === "graph" || state.graph.nodes.length > 0) && state.runId) {
+      void handlePlanGoal(text, options, "graph", state.runId);
+    } else {
+      const baseGoal = state.graph.originalGoal || goal;
+      void handlePlanGoal(baseGoal ? t("{0}\n\n补充规划要求：\n{1}", baseGoal, text) : text, options);
+    }
+    return true;
   };
 
   const load = useCallback(async () => {
@@ -478,7 +484,9 @@ export default function App() {
     try {
       const saved = localStorage.getItem("grapher_projects");
       if (saved !== null) {
-        storedProjects = JSON.parse(saved);
+        storedProjects = (JSON.parse(saved) as ProjectItem[]).map(project => ({
+          ...project, path: normalizeWorkspacePath(project.path), id: normalizeWorkspacePath(project.id || project.path),
+        }));
       }
     } catch { }
 
@@ -498,7 +506,7 @@ export default function App() {
       const latestProj = sorted[0];
       activeRepo = latestProj.path;
 
-      if (data.repositoryInfo && data.repositoryInfo.path === latestProj.path) {
+      if (data.repositoryInfo && workspaceKey(data.repositoryInfo.path) === workspaceKey(latestProj.path)) {
         activeInfo = data.repositoryInfo;
         const updatedProjects = sorted.map((p) =>
           p.path === latestProj.path
@@ -520,8 +528,8 @@ export default function App() {
         };
         setProjects(sorted);
         runtimeService.detectRepository(latestProj.path).then((detected) => {
-          if (detected) {
-            setRepoInfo(detected);
+          if (detected && planningRecovery.current(scope)) {
+            setRepoInfo({ ...detected, path: normalizeWorkspacePath(detected.path) });
             setProjects((prev) => {
               const updated = prev.map((p) =>
                 p.path === latestProj.path
@@ -537,7 +545,7 @@ export default function App() {
         }).catch(() => { });
       }
     } else if (data.repositoryInfo) {
-      const info = data.repositoryInfo;
+      const info = { ...data.repositoryInfo, path: normalizeWorkspacePath(data.repositoryInfo.path) };
       const item: ProjectItem = {
         id: info.path,
         name: info.name,
@@ -579,25 +587,24 @@ export default function App() {
     // Local browser indexes can lag another tab or a restarted backend.
     // Reconcile persisted Runs by their actual repository, not the currently
     // selected project (which may differ for concurrent conversations).
-    const indexedRuns = { ...(storedWorkspaceRuns || {}) };
-    const indexedIds = new Set(Object.values(indexedRuns).flat());
-    const missingIds = (data.runs || []).filter((id) => !indexedIds.has(id));
-    const missingSnapshots = await Promise.all(missingIds.map((id) => runtimeService.history(id).catch(() => null)));
-    if (!planningRecovery.current(scope)) return;
-    for (const snapshot of missingSnapshots) {
-      if (!snapshot?.runId || !snapshot.config?.repository) continue;
-      const repo = snapshot.config.repository;
-      indexedRuns[repo] = [...(indexedRuns[repo] || []), snapshot.runId];
+    const indexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
+      .filter(id => !id.startsWith("pending-"));
+    const snapshots: Array<Snapshot | null> = [];
+    // Validate cached ownership too, using bounded metadata requests.
+    for (let offset = 0; offset < indexedIds.length; offset += 8) {
+      snapshots.push(...await Promise.all(indexedIds.slice(offset, offset + 8).map(id => runtimeService.history(id).catch(() => null))));
+      if (!planningRecovery.current(scope)) return;
     }
+    const indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
     setWorkspaceRuns(indexedRuns);
     try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
 
-    const currentRuns = indexedRuns[activeRepo] || [];
+    const currentRuns = indexedRuns[workspaceKey(activeRepo)] || [];
     const isActivelyRunning = Boolean(
       data.snapshot.runId &&
       data.snapshot.phase === "running" &&
       activeRepo &&
-      (data.snapshot.config?.repository === activeRepo || (!data.snapshot.config?.repository && activeRepo === (data.repositoryInfo?.path || ""))) &&
+      snapshotBelongsToWorkspace(data.snapshot, activeRepo) &&
       currentRuns.includes(data.snapshot.runId)
     );
 
@@ -638,6 +645,10 @@ export default function App() {
     setIsPlanning(false);
     setRecoveredPlanning(null);
     setAutoRecoverPlanning(false);
+    setModal(null);
+    setConfirmModal(null);
+    setRecentlyAddedEdgeIds(new Set());
+    pendingToolArgsRef.current.clear();
     return scope;
   };
 
@@ -660,13 +671,14 @@ export default function App() {
         lastOpened: Date.now(),
       };
       setProjects((prev) => {
-        const next = [item, ...prev.filter((p) => normalizeWorkspacePath(p.path) !== normalizedPath)];
+        const next = [item, ...prev.filter((p) => workspaceKey(p.path) !== workspaceKey(normalizedPath))];
         try {
           localStorage.setItem("grapher_projects", JSON.stringify(next));
         } catch { }
         return next;
       });
       const nextSnapshot = emptySnapshot;
+      resetSessionMessages();
       setState(nextSnapshot);
       setRouteType("undecided");
       setPlannerStream(initialPlannerStream);
@@ -680,18 +692,26 @@ export default function App() {
   });
 
   const handleSelectProject = (proj: ProjectItem) => {
-    if (config.repository === proj.path) return;
+    if (workspaceKey(config.repository) === workspaceKey(proj.path)) return;
     const scope = detachForeground(proj.path);
+    // Clear the old view synchronously, before repository detection can yield.
+    setConfig(prev => ({ ...prev, repository: normalizeWorkspacePath(proj.path) }));
+    setRepoInfo(null);
+    setState(emptySnapshot);
+    setRouteType("undecided");
+    setPlannerStream(initialPlannerStream);
+    setGoal("");
+    setSelected("");
+    resetSessionMessages();
     return run(async () => {
-      setPlannerStream(initialPlannerStream);
       const info = await runtimeService.detectRepository(proj.path);
       if (!planningRecovery.current(scope)) return;
       if (info) {
-        setRepoInfo(info);
-        setConfig((prev) => ({ ...prev, repository: info.path }));
+        setRepoInfo({ ...info, path: normalizeWorkspacePath(info.path) });
+        setConfig((prev) => ({ ...prev, repository: normalizeWorkspacePath(info.path) }));
         setProjects((prev) => {
           const next = prev.map((p) =>
-            p.path === info.path
+            workspaceKey(p.path) === workspaceKey(info.path)
               ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
               : p
           );
@@ -704,17 +724,21 @@ export default function App() {
         setRepoInfo(null);
         setConfig((prev) => ({ ...prev, repository: proj.path }));
       }
-      const projRuns = workspaceRuns[proj.path] || [];
+      const projRuns = workspaceRuns[workspaceKey(proj.path)] || [];
       let loadedSnapshot: Snapshot = emptySnapshot;
       if (projRuns.length > 0) {
         try {
           const snapshot = await runtimeService.snapshotForRun(projRuns[0]);
           if (!planningRecovery.current(scope)) return;
+          if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
+          if (!snapshotBelongsToWorkspace(snapshot, proj.path)) throw new Error("Workspace ownership mismatch");
           const deduced = deduceRouteType(snapshot);
           setState(snapshot);
           setRouteType(deduced);
           setGoal(snapshot.graph.originalGoal || "");
-          resetSessionMessages();
+          setSessionEntries(messagesByRunRef.current.get(snapshot.runId) ?? []);
+          setEditingMessage(null);
+          setEditPrefillText("");
           setSelected("");
           loadedSnapshot = snapshot;
         } catch {
@@ -748,7 +772,7 @@ export default function App() {
       danger: true,
       onConfirm: () => {
         const pathToRemove = project.path;
-        const remainingProjects = projects.filter((p) => p.path !== pathToRemove);
+        const remainingProjects = projects.filter((p) => workspaceKey(p.path) !== workspaceKey(pathToRemove));
         setProjects(remainingProjects);
         try {
           localStorage.setItem("grapher_projects", JSON.stringify(remainingProjects));
@@ -756,17 +780,19 @@ export default function App() {
 
         setWorkspaceRuns((prev) => {
           const copy = { ...prev };
-          delete copy[pathToRemove];
+          delete copy[workspaceKey(pathToRemove)];
           try {
             localStorage.setItem("grapher_workspace_runs", JSON.stringify(copy));
           } catch { }
           return copy;
         });
 
-        if (config.repository === pathToRemove || repoInfo?.path === pathToRemove) {
+        if (workspaceKey(config.repository) === workspaceKey(pathToRemove)) {
           if (remainingProjects.length > 0) {
             handleSelectProject(remainingProjects[0]);
           } else {
+            detachForeground("");
+            setPlannerStream(initialPlannerStream);
             setConfig((prev) => ({ ...prev, repository: "" }));
             setRepoInfo(null);
             setState(emptySnapshot);
@@ -781,7 +807,10 @@ export default function App() {
   };
 
   const handleDeleteRun = (runIdToDelete: string) => run(async () => {
-    await runtimeService.deleteRun(runIdToDelete);
+    const generation = foregroundGeneration.current;
+    if (!runIdToDelete.startsWith("pending-")) {
+      await runtimeService.deleteRun(runIdToDelete);
+    }
     setWorkspaceRuns((prev) => {
       const copy: Record<string, string[]> = {};
       for (const [repo, idList] of Object.entries(prev)) {
@@ -800,16 +829,31 @@ export default function App() {
       } catch { }
       return copy;
     });
-    if (state.runId === runIdToDelete) {
+    messagesByRunRef.current.delete(runIdToDelete);
+    if (state.runId === runIdToDelete && generation === foregroundGeneration.current) {
+      const scope = detachForeground(config.repository);
+      const deleteGeneration = foregroundGeneration.current;
+      resetSessionMessages();
+      setPlannerStream(initialPlannerStream);
+      setState(emptySnapshot);
+      setRouteType("undecided");
+      setGoal("");
+      setSelected("");
       const remainingRuns = (workspaceRuns[currentRepoPath] || []).filter((id) => id !== runIdToDelete);
       if (remainingRuns.length > 0) {
         try {
           const snapshot = await runtimeService.snapshotForRun(remainingRuns[0]);
+          if (deleteGeneration !== foregroundGeneration.current || !planningRecovery.current(scope)) return;
+          if (!snapshotBelongsToWorkspace(snapshot, config.repository)) throw new Error("Workspace ownership mismatch");
           setState(snapshot);
           setRouteType(deduceRouteType(snapshot));
           setGoal(snapshot.graph.originalGoal || "");
+          setSessionEntries(messagesByRunRef.current.get(snapshot.runId) ?? []);
           setSelected("");
+          void planningRecovery.restore(scope, snapshot);
         } catch {
+          if (deleteGeneration !== foregroundGeneration.current || !planningRecovery.current(scope)) return;
+          setRouteType("undecided");
           setState(emptySnapshot);
           setGoal("");
           setSelected("");
@@ -825,6 +869,10 @@ export default function App() {
   });
 
   const handleDeleteRunConfirm = (runId: string) => {
+    if (runId.startsWith("pending-")) {
+      setError(t("对话正在创建，请稍后再删除。"));
+      return;
+    }
     setConfirmModal({
       title: t("删除运行历史"),
       message: t("确定删除历史快照「Graph {0}」吗？", runId.slice(0, 8)),
@@ -848,57 +896,59 @@ export default function App() {
     setError("");
   };
 
-  const handleSaveConfig = (autoApprove: boolean) => run(async () => {
+  const handleSaveConfig = (draftConfig: Config) => run(async () => {
+    const generation = foregroundGeneration.current;
     let repoPath = config.repository.trim();
     let info: RepositoryInfo | null = null;
     if (repoPath) {
       info = await runtimeService.detectRepository(repoPath);
       if (!info) throw new Error(t("目标路径不存在或无法作为工作区加载。"));
-      setRepoInfo(info);
-      repoPath = info.path;
+      repoPath = normalizeWorkspacePath(info.path);
     }
-    const nextConfig = { ...config, repository: repoPath, maxFeedback: 3, autoApprove };
+    if (generation !== foregroundGeneration.current) return false;
+    const nextConfig = { ...draftConfig, repository: repoPath, maxFeedback: 3 };
+    try {
+      const boot = await runtimeService.saveConfig(nextConfig);
+      if (generation !== foregroundGeneration.current) return false;
+      if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
+    } catch (error) {
+      throw new Error(t("保存设置失败：{0}", String(error)));
+    }
+    // Commit only after the backend accepts the draft. Cancel/failure changes nothing.
     setConfig(nextConfig);
+    if (info) setRepoInfo({ ...info, path: repoPath });
     try {
       localStorage.setItem("grapher_config", JSON.stringify(nextConfig));
     } catch { }
     if (info) {
       setProjects((prev) => {
         const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
-        const next = [item, ...prev.filter((project) => project.path !== info.path)];
+        const next = [item, ...prev.filter((project) => workspaceKey(project.path) !== workspaceKey(info.path))];
         try { localStorage.setItem("grapher_projects", JSON.stringify(next)); } catch { }
         return next;
       });
-    }
-    try {
-      const boot = await runtimeService.saveConfig(nextConfig);
-      if (boot.envOverrides) {
-        setEnvOverrides(boot.envOverrides);
-      }
-    } catch (e) {
-      throw new Error(t("保存设置失败：{0}", String(e)));
     }
     setModal(null);
     setError("");
   });
 
   const save = (graph: Graph) => run(async () => {
+    const generation = foregroundGeneration.current;
     // An unapproved/rejected graph is still the same conversation. Pass its
     // identity so the backend edits that draft rather than creating a Run.
     const draftRunId = state.runId && !state.approved &&
       (state.phase === "rejected" || state.phase === "awaiting_approval") && routeType === "graph"
       ? state.runId : undefined;
     const snapshot = await runtimeService.saveGraph(graph, config, draftRunId);
+    if (!applyForegroundSnapshot(snapshot, generation)) return false;
     const deduced = deduceRouteType(snapshot);
-    setState(snapshot);
     setRouteType(deduced);
     setGoal(graph.originalGoal);
     setModal(null);
-    recordRunToWorkspace(snapshot.runId);
     if (draftRunId && snapshot.runId === draftRunId) {
       setRunLabels((prev) => {
         const updated = { ...prev, [draftRunId]: graph.originalGoal || "" };
-        localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+        try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch { }
         return updated;
       });
     }
@@ -955,41 +1005,51 @@ export default function App() {
     // caller already verified that turn is over, so continue instead of
     // rejecting the message as a second concurrent conversation.
     allowWhilePlanning?: boolean
-  ) => run(async () => {
+  ) => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
-    if (!targetGoal) return;
-    if (config.repository) await requireRepository(config.repository);
+    if (!targetGoal) return Promise.resolve();
+
     if (isPlanning && !allowWhilePlanning) {
-      throw new Error(t("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。"));
+      setError(t("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。"));
+      return Promise.resolve(false);
     }
+
     const isContinuing = !forceFresh && Boolean(revisionRunId || (routeType === "graph" && state.graph.nodes.length > 0 && state.runId));
     const effectiveRevisionRunId = !forceFresh ? (revisionRunId || (isContinuing ? state.runId : undefined)) : undefined;
-    // Tool edits are provisional until the backend atomically commits the
-    // revision; never show them as the executing graph while nodes are running.
     const liveRevision = isContinuing && state.approved;
     const effectiveMode = mode || (isContinuing ? "graph" : planMode);
+    const targetRepo = config.repository;
+    if (!targetRepo) {
+      setModal("settings");
+      setError(t("请先在左侧工作区选择绑定的本地 Git 仓库。"));
+      return Promise.resolve();
+    }
+    const scope = planningRecovery.begin(targetRepo);
+    let startedRunId: string | undefined;
 
-    if (!isContinuing) setGoal(targetGoal);
-    setError("");
-    setIsPlanning(true);
-    // Explicit modes bypass the Partitioner on the backend; show that route
-    // immediately instead of displaying an Auto-only evaluation placeholder.
-    if (!isContinuing) setRouteType(effectiveMode === "auto" ? "undecided" : effectiveMode);
-    setSelected("");
-    const parentId = !isContinuing ? null : (sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null);
-    const newMsg: ChatMessage = {
-      ...editedMessage,
-      id: editedMessage?.id || `msg-${Date.now()}`,
-      parentId,
-      role: "user",
-      text: options?.displayText || targetGoal,
-      images: options?.images,
-      timestamp: Date.now(),
-      runId: effectiveRevisionRunId,
-    };
-    if (editedMessage) {
-      // The replacement is already in the truncated local branch.
-    } else if (!isContinuing) {
+    let provisionalRunId: string | undefined;
+
+    if (!isContinuing) {
+      provisionalRunId = `pending-${Date.now()}`;
+      setGoal("");
+      setIsPlanning(true);
+      setRouteType(effectiveMode === "auto" ? "undecided" : effectiveMode);
+      setSelected("");
+
+      recordRunToWorkspace(provisionalRunId, targetRepo);
+      setRunLabels((prev) => ({ ...prev, [provisionalRunId!]: targetGoal }));
+
+      const newMsg: ChatMessage = {
+        ...editedMessage,
+        id: editedMessage?.id || `msg-${Date.now()}`,
+        parentId: null,
+        role: "user",
+        text: options?.displayText || targetGoal,
+        images: options?.images,
+        timestamp: Date.now(),
+        runId: provisionalRunId,
+      };
+
       setSessionEntries((prev) => {
         if (prev.length > 0 && prev[0].versions) {
           return [{
@@ -1002,15 +1062,9 @@ export default function App() {
         }
         return [newMsg];
       });
-    } else {
-      setSessionEntries((prev) => [...prev, newMsg]);
-    }
-    setEditingMessage(null);
-    setEditPrefillText("");
 
-    if (!isContinuing) {
       setPlannerStream({
-        runId: "",
+        runId: provisionalRunId,
         stage: effectiveMode === "auto" ? "partitioning" : effectiveMode === "graph" ? "planning" : "idle",
         items: [],
         representedPlanningIds: [],
@@ -1025,6 +1079,9 @@ export default function App() {
       });
       setState((prev) => ({
         ...prev,
+        runId: provisionalRunId!,
+        config: { ...config, repository: targetRepo },
+        phase: "running",
         graph: {
           ...prev.graph,
           nodes: [],
@@ -1034,6 +1091,24 @@ export default function App() {
         nodes: {},
       }));
     } else {
+      setIsPlanning(true);
+      setState((prev) => ({ ...prev, phase: "running" }));
+      const parentId = sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null;
+      const newMsg: ChatMessage = {
+        ...editedMessage,
+        id: editedMessage?.id || `msg-${Date.now()}`,
+        parentId,
+        role: "user",
+        text: options?.displayText || targetGoal,
+        images: options?.images,
+        timestamp: Date.now(),
+        runId: effectiveRevisionRunId,
+      };
+      if (editedMessage) {
+        // The replacement is already in the truncated local branch.
+      } else {
+        setSessionEntries((prev) => [...(prev.length ? prev : effectiveMessages), newMsg]);
+      }
       setPlannerStream((prev) => ({
         ...prev,
         stage: "planning",
@@ -1053,94 +1128,116 @@ export default function App() {
         plannerText: "",
       }));
     }
-    const scope = planningRecovery.begin(config.repository);
-    let abortController: AbortController | null = null;
-    let routeConfirmed = false;
-    try {
-      if (!config.repository) {
-        setModal("settings");
-        setError(t("请先在左侧工作区选择绑定的本地 Git 仓库。"));
-        return;
-      }
-      const requiredModels = planningModelRoles(effectiveMode).map(role => ({
-        label: modelRoles.find(item => item.id === role)!.label,
-        model: roleModelConfig(config, role, envOverrides).model,
-      }));
-      for (const { label, model } of requiredModels) {
-        if (!model) {
-          setModal("settings");
-          setError(t("请先在设置中配置 {0} 的模型。", label));
-          return;
-        }
-        const [provider, modelId] = model.split("/", 2);
-        if (!provider || !modelId) {
-          setModal("settings");
-          setError(t("{0} 模型标识 \"{1}\" 需使用 provider/model 格式。", label, model));
-          return;
-        }
-      }
+
+    setEditingMessage(null);
+    setEditPrefillText("");
+    setError("");
+
+    return run(async () => {
+      let abortController: AbortController | null = null;
+      let routeConfirmed = false;
       try {
-        const cat = await providerAuth.catalog();
+        await requireRepository(targetRepo);
+        if (!planningRecovery.current(scope)) return;
+        if (!config.repository) {
+          setModal("settings");
+          setError(t("请先在左侧工作区选择绑定的本地 Git 仓库。"));
+          return;
+        }
+        const requiredModels = planningModelRoles(effectiveMode).map(role => ({
+          label: modelRoles.find(item => item.id === role)!.label,
+          model: roleModelConfig(config, role, envOverrides).model,
+        }));
         for (const { label, model } of requiredModels) {
-          const providerId = model.split("/")[0];
-          const prov = cat.providers.find(p => p.id === providerId);
-          if (prov && !prov.configured) {
+          if (!model) {
             setModal("settings");
-            setError(t("{0} 所选服务商 \"{1}\" 尚未认证，请在设置中配置 API Key 或登录。", label, prov.name || providerId));
+            setError(t("请先在设置中配置 {0} 的模型。", label));
+            return;
+          }
+          const [provider, modelId] = model.split("/", 2);
+          if (!provider || !modelId) {
+            setModal("settings");
+            setError(t("{0} 模型标识 \"{1}\" 需使用 provider/model 格式。", label, model));
             return;
           }
         }
-      } catch {
-        // If provider catalog call fails or times out, proceed to backend preflight.
-      }
-      let partInTag = false;
-      let planInTag = false;
-
-      abortController = new AbortController();
-      planningAbortControllerRef.current = abortController;
-
-      const snapshot = await runtimeService.planGoalStream(
-        targetGoal,
-        config,
-        (event) => {
-          if (!planningRecovery.current(scope)) {
-            // Detached planning still creates a real Run. Keep it in the sidebar
-            // without replacing the newly opened conversation.
-            if (event.type === "run_started" && event.runId) {
-              recordRunToWorkspace(event.runId);
-              setRunLabels((prev) => {
-                if (prev[event.runId!]) return prev;
-                const updated = { ...prev, [event.runId!]: targetGoal };
-                try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch {}
-                return updated;
-              });
+        try {
+          const cat = await providerAuth.catalog();
+          for (const { label, model } of requiredModels) {
+            const providerId = model.split("/")[0];
+            const prov = cat.providers.find(p => p.id === providerId);
+            if (prov && !prov.configured) {
+              setModal("settings");
+              setError(t("{0} 所选服务商 \"{1}\" 尚未认证，请在设置中配置 API Key 或登录。", label, prov.name || providerId));
+              return;
             }
-            if (event.type === "complete" && event.snapshot?.runId) {
-              recordRunToWorkspace(event.snapshot.runId);
-            }
-            return;
           }
-          if (event.type === "run_started") {
-            if (event.runId) {
-              const runId = event.runId;
-              setPlannerStream((prev) => ({ ...prev, runId }));
-              recordRunToWorkspace(runId);
-              setState((prev) => ({ ...prev, runId }));
-              setSessionEntries((prev) => {
-                const updated = prev.map((msg) => (!msg.runId ? { ...msg, runId } : msg));
-                messagesByRunRef.current.set(runId, updated);
-                return updated;
-              });
-              setRunLabels((prev) => {
-                if (prev[runId]) return prev;
-                const updated = { ...prev, [runId]: targetGoal };
-                try {
-                  localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
-                } catch {}
-                return updated;
-              });
+        } catch {
+          // If provider catalog call fails or times out, proceed to backend preflight.
+        }
+        if (!planningRecovery.current(scope)) return;
+        let partInTag = false;
+        let planInTag = false;
+
+        abortController = new AbortController();
+        planningAbortControllerRef.current = abortController;
+
+        const snapshot = await runtimeService.planGoalStream(
+          targetGoal,
+          config,
+          (event) => {
+            if (event.type === "run_started" && event.runId) startedRunId = event.runId;
+            if (event.type === "complete" && event.snapshot?.runId) startedRunId = event.snapshot.runId;
+            if (!planningRecovery.current(scope)) {
+              // Detached planning still creates a real Run. Keep it in the sidebar
+              // without replacing the newly opened conversation.
+              if (event.type === "run_started" && event.runId) {
+                if (provisionalRunId) {
+                  replaceProvisionalRunId(provisionalRunId, event.runId, targetGoal, targetRepo);
+                } else {
+                  recordRunToWorkspace(event.runId, targetRepo);
+                  setRunLabels((prev) => {
+                    if (prev[event.runId!]) return prev;
+                    const updated = { ...prev, [event.runId!]: targetGoal };
+                    try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch {}
+                    return updated;
+                  });
+                }
+              }
+              if (event.type === "complete" && event.snapshot?.runId) {
+                if (provisionalRunId) {
+                  replaceProvisionalRunId(provisionalRunId, event.snapshot.runId, targetGoal, event.snapshot.config?.repository || targetRepo);
+                } else {
+                  recordRunToWorkspace(event.snapshot.runId, event.snapshot.config?.repository || targetRepo);
+                }
+              }
+              return;
             }
-          } else if (event.type === "partitioner") {
+            if (event.type === "run_started") {
+              if (event.runId) {
+                const runId = event.runId;
+                if (provisionalRunId) {
+                  replaceProvisionalRunId(provisionalRunId, runId, targetGoal, targetRepo);
+                } else {
+                  setPlannerStream((prev) => ({ ...prev, runId }));
+                  recordRunToWorkspace(runId, targetRepo);
+                  setState((prev) => ({ ...prev, runId }));
+                  setSessionEntries((prev) => {
+                    const updated = prev.map((msg) => (!msg.runId ? { ...msg, runId } : msg));
+                    messagesByRunRef.current.set(runId, updated);
+                    return updated;
+                  });
+                  setRunLabels((prev) => {
+                    if (prev[runId]) return prev;
+                    const updated = { ...prev, [runId]: targetGoal };
+                    try {
+                      localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+                    } catch {}
+                    return updated;
+                  });
+                }
+              }
+            } else if (event.type === "partitioner") {
             const pEvent = event.event;
             if (pEvent?.type === "message_update") {
               const aEvent = pEvent.assistantMessageEvent;
@@ -1570,7 +1667,7 @@ export default function App() {
             if (event.snapshot) {
               setState(event.snapshot);
               setRouteType(deduceRouteType(event.snapshot));
-              recordRunToWorkspace(event.snapshot.runId);
+              recordRunToWorkspace(event.snapshot.runId, event.snapshot.config?.repository || targetRepo);
               const id = event.snapshot.planningId;
               if (id) setPlannerStream((prev) => ({
                 ...prev,
@@ -1589,7 +1686,7 @@ export default function App() {
       if (!planningRecovery.current(scope)) return;
       setState(snapshot);
       setRouteType(deduceRouteType(snapshot));
-      recordRunToWorkspace(snapshot.runId);
+      recordRunToWorkspace(snapshot.runId, snapshot.config?.repository || targetRepo);
       void planningRecovery.finish(scope);
       setSelected("");
       setPlannerStream((prev) => ({
@@ -1602,6 +1699,7 @@ export default function App() {
       }));
     } catch (err: any) {
       if (!planningRecovery.current(scope)) return;
+      if (provisionalRunId && !startedRunId) setGoal(targetGoal);
       const isAbort =
         err?.name === "AbortError" ||
         String(err?.message || err).includes("AbortError") ||
@@ -1622,24 +1720,45 @@ export default function App() {
       if (abortController && planningAbortControllerRef.current === abortController) {
         planningAbortControllerRef.current = null;
       }
+      if (provisionalRunId && !startedRunId) {
+        removeProvisionalRunId(provisionalRunId);
+        if (planningRecovery.current(scope)) setGoal(targetGoal);
+      }
       if (planningRecovery.current(scope)) setIsPlanning(false);
     }
   });
+};
 
   const handleEditMessageSubmit = useCallback(async (targetMsg: ChatMessage, newText: string, selectedVersion?: number) => {
+    const generation = foregroundGeneration.current;
+    const isCurrent = () => generation === foregroundGeneration.current;
+    const requireEditRepository = async () => {
+      await requireRepository(state.config?.repository || config.repository);
+      return isCurrent();
+    };
+    const acceptNodeEdit = async (snapshot: Snapshot) => {
+      if (!applyForegroundSnapshot(snapshot, generation)) return false;
+      if (!snapshot.paused) return true;
+      const resumed = await runtimeService.control("resume", { runId: snapshot.runId });
+      return applyForegroundSnapshot(resumed, generation);
+    };
+    const reportEditError = (error: unknown) => {
+      if (isCurrent()) setError(String(error));
+      return false;
+    };
     const cleanText = newText.trim();
-    if (!cleanText) return;
+    if (!cleanText) return false;
     if (repositoryBlocked) {
       setError(repositoryStatus?.error || t("正在确认项目绑定，请稍后重试。"));
       return;
     }
     if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
       setError(t("发布期间不能修改消息，请等待发布结束或处理发布失败。"));
-      return;
+      return false;
     }
 
     const cleanExisting = targetMsg.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
-    if (cleanText === cleanExisting) {
+    if (selectedVersion === undefined && cleanText === cleanExisting) {
       setEditingMessage(null);
       setEditPrefillText("");
       return;
@@ -1683,14 +1802,21 @@ export default function App() {
         currentVersionIndex: selectedVersion,
       };
       try {
-        await requireRepository(state.config?.repository || config.repository);
+        if (!await requireEditRepository()) return false;
         if (!selectedNodeName) {
           if (routeType !== "graph" || !state.runId) throw new Error(t("当前没有可回退的 Planner 会话。"));
           const snap = await runtimeService.editPlanner({ runId: state.runId,
             oldText: selectedText, instruction: selectedText, versionIndex: selectedVersion });
-          setState(snap);
-          setSessionEntries([selectedMessage]);
-          setGoal(selectedText);
+          if (!applyForegroundSnapshot(snap, generation)) return false;
+          if (isInitialGoal) {
+            setSessionEntries([selectedMessage]);
+            setGoal(selectedText);
+          } else {
+            setSessionEntries(prev => {
+              const index = prev.findIndex(entry => entry.id === targetMsg.id);
+              return index >= 0 ? prev.slice(0, index) : effectiveMessages.slice(0, 1);
+            });
+          }
           await handlePlanGoal(selectedText, { images: selectedVersionData.images }, "graph", state.runId, false, selectedMessage);
           return true;
         }
@@ -1703,7 +1829,7 @@ export default function App() {
           oldText: selectedText, instruction: selectedText, images: selectedVersionData.images,
           versionIndex: selectedVersion,
         });
-        setState(snap);
+        if (!await acceptNodeEdit(snap)) return false;
         if (isInitialGoal) setGoal(selectedText);
         setSessionEntries(prev => {
           const index = prev.findIndex(entry => entry.id === targetMsg.id);
@@ -1714,21 +1840,19 @@ export default function App() {
         });
         setEditingMessage(null);
         setEditPrefillText("");
-        if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
         return true;
       } catch (error) {
-        setError(String(error));
-        return false;
+        return reportEditError(error);
       }
     }
 
     if (isInitialGoal && routeType === "graph" && state.runId && state.planningId) {
       try {
-        await requireRepository(state.config?.repository || config.repository);
+        if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({
           runId: state.runId, oldText: cleanExisting, instruction: cleanText,
         });
-        setState(snap);
+        if (!applyForegroundSnapshot(snap, generation)) return false;
         const updated: ChatMessage = { ...targetMsg, text: cleanText, runId: state.runId,
           versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, timestamp: Date.now() }]),
             { id: `v${Date.now()}`, text: cleanText, timestamp: Date.now() }],
@@ -1738,7 +1862,7 @@ export default function App() {
         setGoal(cleanText);
         await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updated);
         return true;
-      } catch (error) { setError(String(error)); return false; }
+      } catch (error) { return reportEditError(error); }
     }
     if (!isInitialGoal && routeType === "graph" && state.runId && state.planningId && !targetMsg.node) {
       const msgIdx = sessionEntries.findIndex((entry) => entry.id === targetMsg.id);
@@ -1759,18 +1883,18 @@ export default function App() {
         timestamp: Date.now(), versions, currentVersionIndex: versions.length - 1,
       };
       try {
-        await requireRepository(state.config?.repository || config.repository);
+        if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({
           runId: state.runId, oldText: cleanExisting, instruction: cleanText,
         });
-        setState(snap);
+        if (!applyForegroundSnapshot(snap, generation)) return false;
         // Planner history is rendered from the durable Pi transcript. Keep only
         // the local prefix here; inserting a historical follow-up as the first
         // effective message would place it above the route decision card.
         setSessionEntries(previous);
         await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updatedPlannerMessage);
         return true;
-      } catch (error) { setError(String(error)); return false; }
+      } catch (error) { return reportEditError(error); }
     }
 
     if (isInitialGoal) {
@@ -1784,13 +1908,13 @@ export default function App() {
           setError(t("请等待当前执行结束后再修改初始消息。"));
           return;
         }
-        await run(async () => {
-          await requireRepository(state.config?.repository || config.repository);
+        return run(async () => {
+          if (!await requireEditRepository()) return false;
           const snap = await runtimeService.editNode({
             runId: state.runId, node, executionId: first.id,
             oldText: state.graph.originalGoal, instruction: cleanText, images: targetMsg.images,
           });
-          setState(snap);
+          if (!await acceptNodeEdit(snap)) return false;
           setGoal(cleanText);
           setSessionEntries([{ ...targetMsg, id: "msg-initial-goal", node: undefined, text: cleanText,
             versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, images: targetMsg.images, timestamp: Date.now() }]),
@@ -1799,9 +1923,8 @@ export default function App() {
           }]);
           setEditingMessage(null);
           setEditPrefillText("");
-          if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
+          return true;
         });
-        return;
       }
       setEditingMessage(null);
       setEditPrefillText("");
@@ -1809,7 +1932,8 @@ export default function App() {
       if (state.runId && (active || isPlanning)) {
         try {
           await runtimeService.control("stop", { runId: state.runId });
-        } catch {}
+        } catch (error) { return reportEditError(error); }
+        if (!isCurrent()) return false;
       }
 
       const currentInitial = sessionEntries[0] || targetMsg;
@@ -1917,14 +2041,14 @@ export default function App() {
         return false;
       }
       try {
-        await requireRepository(state.config?.repository || config.repository);
+        if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({ runId: state.runId,
           oldText: cleanExisting, instruction: cleanText });
-        setState(snap);
+        if (!applyForegroundSnapshot(snap, generation)) return false;
         setSessionEntries(rolledBackEntries);
         await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updatedMsg);
         return true;
-      } catch (error) { setError(String(error)); return false; }
+      } catch (error) { return reportEditError(error); }
     }
     {
       const eventSequence = targetMsg.id.startsWith("event-")
@@ -1942,21 +2066,18 @@ export default function App() {
         setError(t("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。"));
         return;
       }
-      let accepted = false;
-      await run(async () => {
-        await requireRepository(state.config?.repository || config.repository);
+      return run(async () => {
+        if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editNode({
           runId: state.runId, node: targetNodeName, executionId: execution.id,
           oldText: cleanExisting, instruction: cleanText, images: targetMsg.images,
         });
-        setState(snap);
+        if (!await acceptNodeEdit(snap)) return false;
         setSessionEntries(rolledBackEntries);
         setEditingMessage(null);
         setEditPrefillText("");
-        accepted = true;
-        if (snap.paused) setState(await runtimeService.control("resume", { runId: state.runId }));
+        return true;
       });
-      return accepted;
     }
   }, [
     repositoryBlocked,
@@ -1973,6 +2094,7 @@ export default function App() {
     recoveredPlanning?.status,
     handlePlanGoal,
     requireRepository,
+    applyForegroundSnapshot,
     run,
   ]);
 
@@ -2053,6 +2175,7 @@ export default function App() {
   }, [routeType, state.planType, state.phase, busy, repositoryBlocked]);
 
   const handleInterrupt = useCallback(async () => {
+    const generation = foregroundGeneration.current;
     if (planningAbortControllerRef.current) {
       planningAbortControllerRef.current.abort();
       planningAbortControllerRef.current = null;
@@ -2061,8 +2184,9 @@ export default function App() {
       const runId = state.runId || plannerStream.runId;
       await runtimeService.control("stop", runId ? { runId } : {});
     } catch (e) {
-      console.warn("Stop command failed:", e);
+      if (generation === foregroundGeneration.current) console.warn("Stop command failed:", e);
     }
+    if (generation !== foregroundGeneration.current) return;
     if (isPlanning) {
       setIsPlanning(false);
       setPlannerStream((prev) => ({
@@ -2075,7 +2199,7 @@ export default function App() {
 
   const { nodes, edges } = useGraphElements(state, selected, recentlyAddedEdgeIds);
 
-  const isLandingView = state.graph.nodes.length === 0 &&
+  const isLandingView = !state.runId && state.graph.nodes.length === 0 &&
     !isPlanning &&
     !recoveredPlanning &&
     !failedPlanning;
@@ -2098,6 +2222,7 @@ export default function App() {
             currentRunId={state.runId}
             runIndicators={runIndicators}
             onLoadRun={(id) => {
+              if (!runs.includes(id) || id.startsWith("pending-")) return;
               if (id !== state.runId || isPlanning || recoveredPlanning) detachForeground(config.repository);
               historyPrefetchRef.current?.abort();
               const controller = new AbortController();
@@ -2116,6 +2241,11 @@ export default function App() {
                   throw error;
                 }
                 if (controller.signal.aborted || generation !== foregroundGeneration.current) return;
+                if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
+                if (!snapshotBelongsToWorkspace(snapshot, config.repository)) {
+                  setError(t("此对话不属于当前工作区，请在对应工作区中打开。"));
+                  return;
+                }
                 const deduced = deduceRouteType(snapshot);
                 setState(snapshot);
                 markSnapshotRead(snapshot);
@@ -2139,7 +2269,7 @@ export default function App() {
           />
 
           <main className="main">
-            {/* 全局悬浮报错横幅 (居中于工作区主体，排除侧边栏) */}
+            {/* 全局悬浮横幅 (居中于工作区主体，排除侧边栏) */}
             <div className="floating-error-banner-container">
               <AnimatePresence>
                 {error && (
@@ -2168,16 +2298,48 @@ export default function App() {
                     </button>
                   </motion.div>
                 )}
+                {recoveredPlanning && dismissedRecoveryId !== recoveredPlanning.planningId && (
+                  <motion.section
+                    key={`floating-recovered-banner-${recoveredPlanning.planningId}`}
+                    className="floating-recovered-banner"
+                    aria-label={t("恢复进行中的规划")}
+                    initial={{ opacity: 0, y: -20, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -16, scale: 0.96 }}
+                    transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <div className="floating-recovered-icon">
+                      <Loader2 size={13} className="floating-recovered-spinner" />
+                    </div>
+                    <div className="floating-recovered-content">
+                      <p role="status" className="floating-recovered-text">
+                        {t("已连接正在进行的规划，活动会自动更新。")}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="floating-recovered-close"
+                      aria-label={t("关闭提示")}
+                      onClick={() => setDismissedRecoveryId(recoveredPlanning.planningId)}
+                    >
+                      <X size={13} />
+                    </button>
+                  </motion.section>
+                )}
               </AnimatePresence>
             </div>
 
-            <AnimatePresence mode="wait" initial={false}>
+            <LayoutGroup id="main-conversation">
+            <div className="main-view-stage">
+            <AnimatePresence initial={false}>
               {isLandingView ? (
                 <LandingView
                   key="landing-view"
                   goal={goal}
                   setGoal={setGoal}
-                  onPlanGoal={handlePlanGoal}
+                  onPlanGoal={(val, options) => {
+                    void handlePlanGoal(val, options);
+                  }}
                   isBusy={busy || isPlanning || repositoryBlocked}
                   planMode={planMode}
                   onPlanModeChange={handlePlanModeChange}
@@ -2189,14 +2351,11 @@ export default function App() {
                 <motion.div
                   key="workspace-view"
                   className="workspace-view-wrapper"
-                  initial={{ opacity: 0, y: 16 }}
+                  initial={{ opacity: 0, y: reduceMotion ? 0 : 12 }}
                   animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, transition: { duration: 0.18 } }}
-                  transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+                  exit={{ opacity: 0, y: reduceMotion ? 0 : 8 }}
+                  transition={{ duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] }}
                 >
-                  {recoveredPlanning && <section aria-label={t("恢复进行中的规划")} className="recovered-planning-section">
-                    <p role="status">{t("已连接正在进行的规划，活动会自动更新。")}</p>
-                  </section>}
                   <PublicationPanel
                     key={state.runId}
                     runId={state.runId}
@@ -2207,6 +2366,7 @@ export default function App() {
                   />
 
                   <GraphWorkbench
+                    key={foregroundGeneration.current}
                     state={state}
                     routeType={routeType}
                     selected={selected}
@@ -2246,6 +2406,8 @@ export default function App() {
                 </motion.div>
               )}
             </AnimatePresence>
+            </div>
+            </LayoutGroup>
           </main>
 
           {/* Modals with Opening and Closing Animations */}
@@ -2256,16 +2418,16 @@ export default function App() {
                 isOpen={true}
                 onClose={() => setModal(null)}
                 config={config}
-                setConfig={setConfig}
                 dataPath={dataPath}
                 envOverrides={envOverrides}
+                error={error}
                 onSaveConfig={handleSaveConfig}
               />
             )}
 
             {modal === "editor" && (
               <EditorModal
-                key="editor-modal"
+                key={`editor-modal-${state.runId || currentRepoPath}`}
                 isOpen={true}
                 onClose={() => setModal(null)}
                 initialGraph={state.graph.nodes.length ? state.graph : emptyGraph}

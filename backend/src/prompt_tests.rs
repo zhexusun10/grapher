@@ -75,6 +75,63 @@ fn done_node_message_control_does_not_wait_for_planner_or_start_driver() {
 
 #[cfg(feature = "fixture")]
 #[test]
+fn failed_node_instruction_control_starts_a_new_running_execution() {
+    for route in ["graph", "serial"] {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("runtime");
+        let repository = crate::fixture::repository(temp.path()).unwrap();
+        let mut runtime = Runtime::open(&root).unwrap();
+        runtime.create(Graph {
+            original_goal: "test".into(), nodes: vec![Node {
+                name: "task".into(), task: "test".into(),
+            }], edges: vec![],
+        }, serde_json::from_value(serde_json::json!({
+            "repository": repository, "model": "mock/model", "engine": "fixture",
+            "maxParallel": 1, "maxFeedback": 0,
+        })).unwrap()).unwrap();
+        runtime.set_route(route).unwrap();
+        runtime.approve().unwrap();
+        let failed = runtime.jobs().unwrap().remove(0);
+        runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
+        runtime.jobs().unwrap();
+        let run_id = runtime.state.run_id.clone();
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+            drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+            planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+        });
+        let snapshot = control("intervene".into(), Some("task".into()), Some("try again".into()),
+            Some(run_id), None, None, &service).unwrap();
+        assert_eq!(snapshot.phase, "running");
+        assert_eq!(snapshot.nodes["task"].error, None);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let runtime = service.runtime.lock().unwrap();
+            if runtime.state.executions.len() == 2 {
+                let next = &runtime.state.executions[1];
+                assert_eq!(next.status, "running");
+                assert_eq!(runtime.state.nodes["task"].status, "running");
+                assert_eq!(next.session_id, failed.execution.session_id);
+                assert_eq!(next.worktree, failed.execution.worktree);
+                assert_eq!(runtime.state.executions[0].status, "failed");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "retry did not start");
+            drop(runtime);
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        while service.driving.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "retry driver did not settle");
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.state.phase, "completed");
+        assert_eq!(runtime.state.nodes["task"].status, "done");
+    }
+}
+
+#[cfg(feature = "fixture")]
+#[test]
 fn edit_planner_api_branches_the_same_run_and_keeps_the_previous_turn() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path().join("runtime");
@@ -2129,7 +2186,7 @@ fn feedback_drains_its_component_but_not_unrelated_siblings_or_stale_consumers()
 case "$PWD" in
   *slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > slow.txt ;;
   *related-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > related.txt ;;
-  *review-*) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<REVISE>"}}]}}}}'; exit 0 ;;
+  *review-*) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
   *consumer-*) echo invalid > stale.txt ;;
   *) echo done > owner.txt ;;
 esac

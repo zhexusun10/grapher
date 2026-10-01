@@ -1,5 +1,5 @@
-import { t, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
-import React, { useEffect, useState } from "react";
+import { t, localizeError, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
+import React, { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch, Languages, RefreshCw } from "lucide-react";
 import { Config } from "../../types";
@@ -12,23 +12,41 @@ interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   config: Config;
-  setConfig: React.Dispatch<React.SetStateAction<Config>>;
   dataPath: string;
   envOverrides?: Record<string, string>;
-  onSaveConfig: (autoApprove: boolean) => void;
+  error?: string;
+  onSaveConfig: (config: Config) => void | Promise<boolean>;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   isOpen,
   onClose,
   config,
-  setConfig,
   dataPath,
   envOverrides,
+  error,
   onSaveConfig,
 }) => {
   const reduceMotion = useReducedMotion();
+  const [draftConfig, setDraftConfig] = useState(() => ({ ...config }));
   const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [saveError, setSaveError] = useState("");
+  const save = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onSaveConfig({ ...draftConfig, autoApprove });
+    } catch (error) {
+      setSaveError(String(error));
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
   const [catalog, setCatalog] = useState<ProviderCatalog>();
   const [catalogBusy, setCatalogBusy] = useState(true);
   const [pendingLanguage, setPendingLanguage] = useState<LanguagePreference | null>(null);
@@ -42,7 +60,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Escape dismisses only the confirmation when it is open.
-      if (e.key === "Escape" && pendingLanguage === null) onClose();
+      if (e.key === "Escape" && pendingLanguage === null && !savingRef.current &&
+          !document.querySelector(".settings-modal [role='alertdialog']")) onClose();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -77,7 +96,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <h2 id="modal-title">{t("设置")}</h2>
             </div>
           </div>
-          <button className="icon-button" aria-label={t("关闭弹窗")} onClick={onClose}>
+          <button className="icon-button" aria-label={t("关闭弹窗")} disabled={saving} onClick={onClose}>
             <X size={18} />
           </button>
         </header>
@@ -93,6 +112,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 <p className="section-desc">{t("切换语言需确认并重启前端后生效。")}</p>
                 <select
                   aria-label={t("界面语言")}
+                  disabled={saving}
                   value={languagePreference}
                   onChange={(event) => {
                     const next = event.target.value as LanguagePreference;
@@ -122,7 +142,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 <Terminal size={16} />
                 <h4 id="role-model-settings-title">{t("角色模型配置")}</h4>
               </div>
-              <RoleModelSettings config={config} setConfig={setConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy} />
+              <RoleModelSettings config={draftConfig} setConfig={setDraftConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy || saving} />
             </section>
 
             {/* 图纸审批 */}
@@ -139,6 +159,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 <input
                   type="checkbox"
                   checked={autoApprove}
+                  disabled={saving}
                   onChange={(event) => setAutoApprove(event.target.checked)}
                   aria-label={t("Auto Approve Planner 图纸")}
                 />
@@ -168,11 +189,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             </div>
           </div>
 
+          {(saveError || error) && <p role="alert" className="settings-language-error">{localizeError(saveError || error || "")}</p>}
           <footer className="settings-modal-footer">
-            <button type="button" className="settings-cancel-btn" onClick={onClose}>
+            <button type="button" className="settings-cancel-btn" disabled={saving} onClick={onClose}>
               {t("取消")}
             </button>
-            <button type="button" className="primary save-config-btn" onClick={() => onSaveConfig(autoApprove)}>
+            <button type="button" className="primary save-config-btn" disabled={saving || catalogBusy} onClick={() => void save()}>
               <Check size={18} />{t(" 保存设置")}
             </button>
           </footer>

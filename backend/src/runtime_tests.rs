@@ -145,7 +145,7 @@ fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
     let next = runtime.jobs().unwrap();
     let review = next.iter().find(|job| job.execution.node == "review").unwrap();
     runtime.emit(EventKind::Finished {
-        execution_id: review.execution.id.clone(), head: runtime.state.base.clone(), output: "<REVISE>".into(), output_bytes: 0, metrics: None,
+        execution_id: review.execution.id.clone(), head: runtime.state.base.clone(), output: "<FEEDBACK>".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     assert!(runtime.feedback_source_busy("review"));
     let other = first.iter().find(|job| job.execution.node == "other").unwrap();
@@ -306,6 +306,84 @@ fn serial_followup_resumes_completed_pi_session_with_images_after_settlement() {
     assert_eq!(next.resume_execution_id, Some(first.execution.id));
     assert_eq!(next.execution.session_id, first.execution.session_id);
     assert_eq!(next.execution.worktree, first.execution.worktree);
+}
+
+#[test]
+fn messaging_a_failed_node_resumes_its_session_without_a_successful_result() {
+    for route in ["graph", "serial"] {
+        for paused in [false, true] {
+            let (_temp, _source, mut runtime) = setup(true, single());
+            runtime.set_route(route).unwrap();
+            runtime.approve().unwrap();
+            let failed = runtime.jobs().unwrap().remove(0);
+            runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
+            runtime.jobs().unwrap();
+            assert_eq!(runtime.state.phase, "needs_attention");
+            assert_eq!(runtime.state.nodes["task"].status, "failed");
+            assert!(runtime.state.executions[0].after.is_none());
+            if paused {
+                runtime.pause(true).unwrap();
+            }
+            let event_count = runtime.state.events.len();
+            assert!(runtime.intervene("task", "   ").is_err());
+            assert!(runtime.intervene("missing", "retry").is_err());
+            assert_eq!(runtime.state.events.len(), event_count);
+
+            let images = Some(vec![ImageAttachment {
+                r#type: "image".into(), mime_type: "image/png".into(),
+                data: "aGVsbG8=".into(), name: None,
+            }]);
+            runtime.intervene_with_images("task", "  retry with this image  ", images.clone()).unwrap();
+            assert_eq!(runtime.state.nodes["task"].status, "dirty");
+            assert_eq!(runtime.state.nodes["task"].error, None);
+            assert_eq!(runtime.state.nodes["task"].revision, 2);
+            let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+            assert_eq!(replayed.phase, if paused { "paused" } else { "running" });
+            assert_eq!(replayed.nodes["task"].instruction, "retry with this image");
+            assert_eq!(replayed.executions[0].status, "failed");
+            if paused {
+                assert!(runtime.jobs().unwrap().is_empty());
+                runtime.pause(false).unwrap();
+            }
+
+            let next = runtime.jobs().unwrap().remove(0);
+            assert_eq!(runtime.state.phase, "running");
+            assert_eq!(runtime.state.nodes["task"].status, "running");
+            assert_eq!(next.task, "retry with this image");
+            assert_eq!(serde_json::to_value(&next.images).unwrap(), serde_json::to_value(&images).unwrap());
+            assert_ne!(next.execution.id, failed.execution.id);
+            assert_eq!(next.execution.attempt, 2);
+            assert_eq!(next.execution.session_id, failed.execution.session_id);
+            assert_eq!(next.execution.worktree, failed.execution.worktree);
+            assert_eq!(next.resume_execution_id, Some(failed.execution.id.clone()));
+            assert_eq!(runtime.state.executions[0].status, "failed");
+            assert!(runtime.state.executions[0].after.is_none());
+            runtime.finish(&next.execution, Ok((runtime.state.base.clone(), "recovered".into()))).unwrap();
+            assert_eq!(runtime.state.nodes["task"].status, "done");
+        }
+    }
+}
+
+#[test]
+fn messaging_a_failed_followup_keeps_the_original_session_and_last_result() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    let head = runtime.state.base.clone();
+    runtime.finish(&first.execution, Ok((head.clone(), "done".into()))).unwrap();
+    runtime.intervene("task", "second turn").unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
+    runtime.jobs().unwrap();
+    runtime.intervene("task", "try again").unwrap();
+    let next = runtime.jobs().unwrap().remove(0);
+    assert_eq!(runtime.state.nodes["task"].status, "running");
+    assert_eq!(next.execution.before, head);
+    assert_eq!(next.execution.attempt, 3);
+    assert_eq!(next.execution.session_id, failed.execution.session_id);
+    assert_eq!(next.execution.worktree, failed.execution.worktree);
+    assert_eq!(next.resume_execution_id, Some(first.execution.id));
+    assert_eq!(runtime.state.executions[1].status, "failed");
 }
 
 #[test]
@@ -510,6 +588,8 @@ fn resolved_preparation_is_not_a_completed_node_execution() {
     assert_eq!(runtime.state.executions[0].status, "resolved");
     assert_eq!(runtime.state.executions[0].after, None);
     assert_eq!(runtime.state.nodes["task"].status, "dirty");
+    // Resolving workspace preparation does not create a Pi conversation.
+    assert!(runtime.intervene("task", "continue").is_err());
     let head = runtime.state.nodes["task"].head.clone().unwrap();
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
     assert_eq!(replayed.executions[0].status, "resolved");
@@ -870,8 +950,8 @@ fn feedback_continues_the_owner_session_and_worktree() {
 
     let review = runtime.jobs().unwrap().remove(0);
     assert_eq!(review.execution.node, "review");
-    runtime.finish(&review.execution, Ok((runtime.state.base.clone(), "please adjust\n<REVISE>".into()))).unwrap();
-    runtime.apply_feedback("review", "please adjust\n<REVISE>").unwrap();
+    runtime.finish(&review.execution, Ok((runtime.state.base.clone(), "please adjust\n<FEEDBACK>".into()))).unwrap();
+    runtime.apply_feedback("review", "please adjust\n<FEEDBACK>").unwrap();
 
     assert_eq!(runtime.state.nodes["owner"].status, "dirty");
     assert!(runtime.state.nodes["review"].head.is_none());
@@ -880,7 +960,7 @@ fn feedback_continues_the_owner_session_and_worktree() {
     assert_eq!(rework.execution.session_id, owner_session);
     assert_eq!(rework.resume_execution_id.as_deref(), Some(owner_id.as_str()));
     assert_eq!(rework.execution.worktree, owner_path.to_string_lossy());
-    assert_eq!(rework.task, "Feedback from review:\nplease adjust\n<REVISE>");
+    assert_eq!(rework.task, "Feedback from review:\nplease adjust\n<FEEDBACK>");
 }
 
 #[test]

@@ -2,12 +2,9 @@ import { t } from "../../i18n";
 import React, { useState } from "react";
 import { Folder, Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { ProjectItem } from "../../types";
+import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
 
-export function normalizeWorkspacePath(path: string): string {
-  if (path.startsWith("\\\\?\\UNC\\")) return `\\\\${path.slice(8)}`;
-  if (path.startsWith("\\\\?\\")) return path.slice(4);
-  return path;
-}
+export { normalizeWorkspacePath } from "../../services/workspaceConversations";
 
 interface SidebarProps {
   projects: ProjectItem[];
@@ -117,7 +114,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       <div className="projects-list">
         {projects.length > 0 ? (
           projects.map((proj) => {
-            const isActive = activeRepo === proj.path;
+            const isActive = workspaceKey(activeRepo) === workspaceKey(proj.path);
             return (
               <div
                 key={proj.path}
@@ -283,6 +280,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <div className="context-menu-divider" />
           <button
             className="context-menu-item danger"
+            disabled={runContextMenu.runId.startsWith("pending-")}
+            title={runContextMenu.runId.startsWith("pending-") ? t("对话正在创建，请稍后再删除。") : undefined}
             onClick={() => {
               const runId = runContextMenu.runId;
               setRunContextMenu(null);

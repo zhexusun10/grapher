@@ -65,6 +65,8 @@ export function EditableUserBubble({
   const compositionEndedAtRef = useRef(0);
   const [initialSize, setInitialSize] = useState<{ width: number; height: number } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -123,9 +125,20 @@ export function EditableUserBubble({
     }
   }, [editing]);
 
-  const submit = () => {
+  const submit = async () => {
     const value = draft.trim();
-    if (value && !disabled) onSend(value);
+    if (!value || disabled || submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onSend(value);
+    } catch (error) {
+      // The owner reports errors; retain the editable draft for retry.
+      console.error("Failed to edit message:", error);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   const beginEdit = () => {
@@ -148,6 +161,7 @@ export function EditableUserBubble({
               type="button"
               className="chat-bubble-action-btn"
               onClick={onCancel}
+              disabled={submitting}
               title={t("取消修改 (Esc)")}
               aria-label={t("取消修改")}
             >
@@ -157,7 +171,7 @@ export function EditableUserBubble({
               type="button"
               className="chat-bubble-action-btn send"
               onClick={submit}
-              disabled={disabled || !draft.trim()}
+              disabled={disabled || submitting || !draft.trim()}
               title={t("回退并重试 (Enter)")}
               aria-label={t("回退并重试")}
             >
@@ -219,6 +233,7 @@ export function EditableUserBubble({
                 ref={textareaRef}
                 className="chat-bubble-edit-textarea"
                 aria-label={t("修改消息内容")}
+                disabled={submitting}
                 value={draft}
                 onChange={(event) => onDraftChange(event.target.value)}
                 onCompositionStart={() => {
@@ -231,7 +246,7 @@ export function EditableUserBubble({
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
                     event.stopPropagation();
-                    onCancel();
+                    if (!submittingRef.current) onCancel();
                   } else if (event.key === "Enter" && !event.shiftKey) {
                     if (
                       event.nativeEvent.isComposing ||

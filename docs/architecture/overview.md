@@ -61,7 +61,7 @@ The host owns transferable refs for completed results. Ordinary project folders 
 
 ## Feedback
 
-A reviewer with an outgoing feedback edge returns `<ACCEPT>` or `<REVISE>` as its final line. The graph chooses the target, the model judges the result, and the runtime applies the bounded state transition.
+A node with an outgoing feedback edge returns `<ACCEPT>` or `<FEEDBACK>` as its final line. The graph chooses the target, the model chooses whether to send an additional instruction, and the runtime applies the bounded state transition.
 
 For two parallel implementations, one integration owner can receive review feedback:
 

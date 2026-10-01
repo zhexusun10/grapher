@@ -22,7 +22,8 @@ pnpm-debug.log*
 *.key
 
 # Grapher runtime and Rust outputs
-backend/target/
+backend/target*/
+target/
 .grapher/
 .grapher-verify*/
 .pi/

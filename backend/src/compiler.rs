@@ -267,15 +267,37 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         return Err(errors);
     }
     let mut warnings = Vec::new();
+    // Compare literal task text, not inferred intent or overlapping file paths.
+    let mut task_nodes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for node in &graph.nodes {
-        if node.task.contains("<REVISE>")
+        task_nodes.entry(node.task.as_str()).or_default().insert(node.name.as_str());
+    }
+    for nodes in task_nodes.values().filter(|nodes| nodes.len() > 1) {
+        warnings.push(format!(
+            "W301: Nodes {} have identical task text; they may duplicate work. Confirm that this is intentional.",
+            nodes.iter().copied().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    for node in &graph.nodes {
+        if node.task.contains("<FEEDBACK>")
             && !graph
                 .edges
                 .iter()
                 .any(|edge| edge.feedback && edge.from == node.name)
         {
-            warnings.push(format!("W302: {} mentions <REVISE> but has no outgoing feedback edge; the marker cannot trigger revision.", node.name));
+            warnings.push(format!("W302: {} mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback.", node.name));
         }
+    }
+    for edge in graph.edges.iter().filter(|edge| edge.feedback) {
+        // Match the runtime's invalidation set exactly: target plus dependency
+        // descendants, without following other feedback edges or judging size.
+        warnings.push(format!(
+            "W303: If <FEEDBACK> from {} to {} is applied, the target and dependency descendants will be invalidated: {}. Completed results must be recomputed; {} continues its session/workspace. Nodes outside this set are unaffected.",
+            edge.from,
+            edge.to,
+            downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", "),
+            edge.to
+        ));
     }
     Ok(Plan {
         execution_batches: batches,

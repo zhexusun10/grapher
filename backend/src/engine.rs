@@ -936,6 +936,47 @@ pub struct PiRequest<'request> {
     pub images: Option<&'request [crate::model::ImageAttachment]>,
 }
 
+pub fn clean_model_error(error: &str) -> String {
+    let trimmed = error.trim();
+    if let Some((code, rest)) = trimmed.split_once(':') {
+        let rest = rest.trim();
+        let code_clean = code.trim();
+        if !code_clean.contains('{') && !code_clean.contains('"') {
+            if let Ok(value) = serde_json::from_str::<Value>(rest) {
+                let extracted = value
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .or_else(|| {
+                        value.get("error").and_then(|e| {
+                            e.get("message")
+                                .and_then(|m| m.as_str())
+                                .or_else(|| e.as_str())
+                        })
+                    });
+                if let Some(msg) = extracted {
+                    return format!("{}: {}", code_clean, msg.trim());
+                }
+            }
+        }
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        let extracted = value
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| {
+                value.get("error").and_then(|e| {
+                    e.get("message")
+                        .and_then(|m| m.as_str())
+                        .or_else(|| e.as_str())
+                })
+            });
+        if let Some(msg) = extracted {
+            return msg.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<String, String> {
     // All roles run until completion or explicit cancellation.
     run_pi_with_timeout(request, on_output, None)
@@ -1352,6 +1393,8 @@ fn run_pi_with_timeout(
     let mut final_text = String::new();
     let mut agent_error = None;
     let mut stderr_tail = String::new();
+    let mut stderr_lines = Vec::<String>::new();
+    let mut raw_stdout_lines = Vec::<String>::new();
     let mut exited_at = None;
     let mut timed_out = false;
     let mut agent_ended = None::<Instant>;
@@ -1389,11 +1432,21 @@ fn run_pi_with_timeout(
                     {
                         continue;
                     }
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        stderr_lines.push(trimmed.to_string());
+                    }
                     stderr_tail = line.clone();
                     on_output(format!("[stderr] {line}\n"));
                     continue;
                 }
                 let mut event = serde_json::from_str::<Value>(&line).ok();
+                if event.is_none() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        raw_stdout_lines.push(trimmed.to_string());
+                    }
+                }
                 if let Some(event) = event.as_ref() {
                     match event["type"].as_str().unwrap_or_default() {
                         "agent_start" | "turn_start" if rpc_agent => agent_ended = None,
@@ -1457,6 +1510,33 @@ fn run_pi_with_timeout(
                                 // Keep the stream, but judge the final assistant response.
                                 agent_error = None;
                             }
+                        }
+                        "turn_end" => {
+                            if agent_error.is_none() {
+                                if let Some(err) = event["message"]["errorMessage"].as_str() {
+                                    agent_error = Some(err.to_string());
+                                }
+                            }
+                        }
+                        "agent_end" => {
+                            if agent_error.is_none() {
+                                if let Some(messages) = event["messages"].as_array() {
+                                    for msg in messages.iter().rev() {
+                                        if let Some(err) = msg["errorMessage"].as_str() {
+                                            agent_error = Some(err.to_string());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "error" => {
+                            let msg = event["error"]["message"]
+                                .as_str()
+                                .or_else(|| event["error"].as_str())
+                                .or_else(|| event["message"].as_str())
+                                .unwrap_or("Pi encountered an error");
+                            agent_error = Some(msg.to_string());
                         }
                         _ => {}
                     }
@@ -1553,16 +1633,40 @@ fn run_pi_with_timeout(
             timeout.expect("timed out with a deadline").as_secs_f64()
         ));
     }
+    if let Some(error) = agent_error {
+        return Err(clean_model_error(&error));
+    }
     if !status.success() {
-        return Err(format!("Pi exited with {status}: {stderr_tail}"));
+        let stderr_summary = if !stderr_tail.trim().is_empty() {
+            stderr_tail.trim().to_string()
+        } else {
+            stderr_lines
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .cloned()
+                .unwrap_or_default()
+        };
+        let tail = if !stderr_summary.is_empty() {
+            stderr_summary
+        } else {
+            raw_stdout_lines
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .cloned()
+                .unwrap_or_default()
+        };
+        return Err(if tail.is_empty() {
+            format!("Pi exited with {status}")
+        } else {
+            format!("Pi exited with {status}: {tail}")
+        });
     }
     if let Some(error) = input_error {
         if !input_broken_pipe_on_success {
             return Err(format!("Cannot send task to {phase}: {error}"));
         }
-    }
-    if let Some(error) = agent_error {
-        return Err(error);
     }
     if final_text.trim().is_empty() {
         return Err(
@@ -1588,7 +1692,7 @@ pub fn execute(
         return crate::fixture::execute(execution, task, feedback_source, on_output);
     }
     let task = if feedback_source {
-        format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<REVISE>\nIf REVISE, clearly describe the changes needed before the marker.")
+        format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.")
     } else {
         task.into()
     };
@@ -1637,8 +1741,8 @@ pub fn execute(
 pub fn feedback(output: &str) -> Result<bool, String> {
     match output.trim().lines().last().map(str::trim) {
         Some("<ACCEPT>") => Ok(false),
-        Some("<REVISE>") => Ok(true),
-        _ => Err("Feedback protocol error: final line must be exactly <ACCEPT> or <REVISE>".into()),
+        Some("<FEEDBACK>") => Ok(true),
+        _ => Err("Feedback protocol error: final line must be exactly <ACCEPT> or <FEEDBACK>".into()),
     }
 }
 
@@ -1679,6 +1783,46 @@ mod tests {
         #[cfg(not(windows))]
         {
             "python3".into()
+        }
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn feedback_source_prompt_uses_generic_feedback_marker() {
+        let _guard = lock_env();
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("capture_task.py");
+        fs::write(&script, r#"import json, sys
+text = sys.stdin.read()
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':text}]}}), flush=True)
+"#).unwrap();
+        let config = Config {
+            engine: "pi".into(),
+            pi_command: test_python(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 1,
+            max_feedback: 3,
+            auto_approve: false,
+            role_models: Default::default(),
+        };
+        let execution = Execution {
+            id: "feedback-prompt".into(), node: "review".into(), revision: 1, attempt: 1,
+            session_id: "feedback-prompt".into(), worktree: temp.path().to_string_lossy().into(),
+            before: String::new(), after: None, status: "running".into(),
+            output: String::new(), output_bytes: 0, pid: None, started_at: 0,
+            completed_at: None, metrics: None,
+        };
+        let task = "Inspect the result";
+        for feedback_source in [false, true] {
+            let captured = execute(&config, &execution, task, feedback_source, None, None, temp.path(), |_| {}).unwrap();
+            if feedback_source {
+                assert_eq!(captured, format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker."));
+            } else {
+                assert_eq!(captured, task);
+            }
         }
     }
 
@@ -2616,5 +2760,23 @@ sys.stdin.read()
         assert_eq!(planner_cfg.model, "claude-3-7-sonnet");
 
         std::env::remove_var("PARTITIONER_MODEL");
+    }
+
+    #[test]
+    fn clean_model_error_formats_json_and_plain_messages() {
+        let quota = r#"402: {"message":"Insufficient Balance (request_id: 3377e532-1486-4f6f-af77-71b9023c1ac8)","type":"unknown_error","param":null,"code":"invalid_request_error"}"#;
+        assert_eq!(
+            clean_model_error(quota),
+            "402: Insufficient Balance (request_id: 3377e532-1486-4f6f-af77-71b9023c1ac8)"
+        );
+
+        let error_nested = r#"{"error":{"message":"You exceeded your current quota"}}"#;
+        assert_eq!(clean_model_error(error_nested), "You exceeded your current quota");
+
+        let plain = "Authentication failed";
+        assert_eq!(clean_model_error(plain), "Authentication failed");
+
+        let code_and_plain = "401: Unauthorized access";
+        assert_eq!(clean_model_error(code_and_plain), "401: Unauthorized access");
     }
 }
