@@ -3,7 +3,9 @@ import { useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "rea
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
-export const planningTranscriptCache = new Map<string, { text: string; offset: number; complete: boolean }>();
+import { utf8Bytes } from "../lib/BoundedLruCache";
+import { planningTranscriptCache } from "../services/transcriptCache";
+export { planningTranscriptCache } from "../services/transcriptCache";
 
 export function activePlannerOutput(output: string, edits: Array<{ old_instruction?: string; nextPlanningId?: string }>): string {
   let active = output;
@@ -82,10 +84,13 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
     const poll = async () => {
       try {
         let text = "";
+        let bytes = 0;
         for (const planningId of planningIds) {
           let offset = 0;
-          if (text && !text.endsWith("\n")) text += "\n";
-          text += `${JSON.stringify({ type: "grapher_planning_source", planningId })}\n`;
+          if (text && !text.endsWith("\n")) { text += "\n"; bytes++; }
+          const source = `${JSON.stringify({ type: "grapher_planning_source", planningId })}\n`;
+          text += source;
+          bytes += utf8Bytes(source);
           while (!abort.signal.aborted) {
             const page = await runtimeService.getPlanningOutput(planningId, "planner", offset, abort.signal);
             if (abort.signal.aborted) return;
@@ -93,9 +98,10 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
               throw new Error(t("规划记录与请求不匹配，请重试。"));
             }
             text += page.content;
+            bytes += page.nextOffset - offset;
             if (page.content) {
               setRecord({ id: key, content: text });
-              planningTranscriptCache.set(key, { text, offset, complete: false });
+              planningTranscriptCache.set(key, { text, offset: bytes, complete: false });
             }
             offset = page.nextOffset;
             if (page.complete) {
@@ -104,6 +110,7 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
                 // newline; the transcript parser waits for a complete line.
                 if (text && !text.endsWith("\n")) {
                   text += "\n";
+                  bytes++;
                   setRecord({ id: key, content: text });
                 }
                 break;
@@ -112,7 +119,7 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
             }
           }
         }
-        planningTranscriptCache.set(key, { text, offset: text.length, complete: true });
+        planningTranscriptCache.set(key, { text, offset: bytes, complete: true });
       } catch (error) {
         if (!abort.signal.aborted) setError(error instanceof Error ? error.message : String(error));
       } finally {

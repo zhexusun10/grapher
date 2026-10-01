@@ -1,4 +1,5 @@
 import { t } from "../i18n";
+import { invalidateTranscriptCaches } from "./transcriptCache";
 import { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot } from "../types";
 
 const filesCache = new Map<string, string[]>();
@@ -154,9 +155,6 @@ export const runtimeService = {
     }
     return finalSnapshot;
   },
-  getRunExecutionOutputs: (runId: string, signal?: AbortSignal) =>
-    request<{ runId: string; outputs: Array<{ executionId: string; content: string; totalBytes: number; status: string }> }>(
-      "get_run_execution_outputs", { runId }, signal),
   getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false) =>
     request<{ runId: string; executionId: string; content: string; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
       "get_execution_output", { runId, executionId, offset, full }, signal),
@@ -197,9 +195,19 @@ export const runtimeService = {
     if (!info) throw new Error(t("无法加载该路径为有效工作区。"));
     return info;
   },
-  resetWorkspace: () => request<Snapshot>("reset_workspace"),
-  clearHistory: () => request<void>("clear_history"),
-  deleteRun: (runId: string) => request<void>("delete_run", { runId }),
+  resetWorkspace: async () => {
+    const snapshot = await request<Snapshot>("reset_workspace");
+    invalidateTranscriptCaches();
+    return snapshot;
+  },
+  clearHistory: async () => {
+    await request<void>("clear_history");
+    invalidateTranscriptCaches();
+  },
+  deleteRun: async (runId: string) => {
+    await request<void>("delete_run", { runId });
+    invalidateTranscriptCaches(runId);
+  },
   listFiles: async (repository?: string, forceRefresh = false): Promise<string[]> => {
     const key = repository || "__default__";
     if (!forceRefresh && filesCache.has(key)) {

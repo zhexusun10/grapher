@@ -140,7 +140,7 @@ fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.jobs().unwrap();
     let run_id = runtime.state.run_id.clone();
@@ -248,7 +248,7 @@ fn buffered_output_flushes_before_finish_and_replays() {
         before: "".into(),
         after: None,
         status: "running".into(),
-        output: String::new(),
+        output: String::new(), output_bytes: 0, pid: None,
         started_at: now(),
         completed_at: None,
         metrics: None,
@@ -302,27 +302,31 @@ fn buffered_output_flushes_before_finish_and_replays() {
     for producer in producers {
         producer.join().unwrap();
     }
+    // The flush barrier applied every streamed chunk to the projection before
+    // Finished, so the sealed transcript contains the whole stream.
+    {
+        let runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.state.executions[0].output, "x".repeat(800));
+    }
     service
         .runtime
         .lock()
         .unwrap()
-        .emit(EventKind::Finished {
-            execution_id: id.clone(),
-            head: "done".into(),
-            output: "result".into(),
-        })
+        .finish(&execution, Ok(("done".into(), "result".into())))
         .unwrap();
     drop(tx);
     writer.join().unwrap();
     let runtime = service.runtime.lock().unwrap();
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+    // Finished supersedes the streamed chunks; both the store and the in-memory
+    // log drop them so a reload cannot resurrect unreachable history.
     assert_eq!(
         replay
             .events
             .iter()
             .filter(|e| matches!(e.kind, EventKind::Output { .. }))
             .count(),
-        800
+        0
     );
     assert_eq!(
         replay
@@ -332,6 +336,16 @@ fn buffered_output_flushes_before_finish_and_replays() {
             .count(),
         1
     );
+    assert_eq!(
+        replay.executions[0].output,
+        runtime.state.executions[0].output
+    );
+    let page = runtime.store.execution_log_page(&runtime.state.run_id, &id, 0, usize::MAX).unwrap();
+    assert!(replay.executions[0].output.is_empty());
+    assert!(page.content.contains(&"x".repeat(800)));
+    assert!(page.content.contains("Final response"));
+    assert!(page.content.contains("result"));
+    assert_eq!(replay.executions[0].output_bytes, page.total_bytes);
     let finish = replay.events.last().unwrap();
     assert!(matches!(finish.kind, EventKind::Finished { .. }));
 }
@@ -432,7 +446,8 @@ fn planner_followup_after_publication_reuses_the_session_and_schedules_new_roots
     let script = temp.path().join("followup-after-publication.sh");
     fs::write(
         &script,
-        r#"session=''
+        r#"cat >/dev/null
+session=''
 identity=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -717,7 +732,8 @@ fn planner_continues_the_same_run_session_across_revisions_and_reload() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("planner-session.sh");
-    fs::write(&script, r#"session=''
+    fs::write(&script, r#"cat >/dev/null
+session=''
 identity=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -1006,7 +1022,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
                 .emit(EventKind::Finished {
                     execution_id: execution.id.clone(),
                     head: snapshot.base,
-                    output: "completed".into(),
+                    output: "completed".into(), output_bytes: 0, metrics: None,
                 })
                 .unwrap();
             break;
@@ -1994,7 +2010,7 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         before: String::new(),
         after: None,
         status: "running".into(),
-        output: text.clone(),
+        output: String::new(), output_bytes: 0, pid: None,
         started_at: now(),
         completed_at: None,
         metrics: None,
@@ -2010,13 +2026,14 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         let mut runtime = service.runtime.lock().unwrap();
         runtime.state.run_id = "large-run".into();
         runtime.state.executions.push(execution);
+        runtime.emit_outputs(vec![EventKind::Output { execution_id: "large".into(), text: text.clone() }]).unwrap();
         runtime.state.events.push(Event {
             sequence: 1,
             timestamp: now(),
             kind: EventKind::Finished {
                 execution_id: "large".into(),
                 head: "head".into(),
-                output: text.clone(),
+                output: text.clone(), output_bytes: 0, metrics: None,
             },
         });
     }
@@ -2088,11 +2105,6 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
     ).unwrap();
     assert_eq!(full["content"], text);
     assert_eq!(full["complete"], true);
-    let all = get_run_execution_outputs(
-        &serde_json::json!({"runId":"large-run"}), &service,
-    ).unwrap();
-    assert_eq!(all["outputs"][0]["executionId"], "large");
-    assert_eq!(all["outputs"][0]["content"], text);
     assert!(get_execution_output(
         &serde_json::json!({"runId":"large-run", "executionId":"large", "offset":256*1024}),
         &service
@@ -2384,7 +2396,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         before: "base-head".into(),
         after: None,
         status: "running".into(),
-        output: String::new(),
+        output: String::new(), output_bytes: 0, pid: None,
         started_at: 1726300000000,
         completed_at: None,
         metrics: None,
@@ -2394,7 +2406,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         .emit(EventKind::Finished {
             execution_id: "exec-1".into(),
             head: "finished-head".into(),
-            output: sample_output.into(),
+            output: sample_output.into(), output_bytes: 0, metrics: None,
         })
         .unwrap();
 
@@ -2596,6 +2608,22 @@ fn completed_graph_is_published_by_driver() {
     assert!(crate::workspace::git(&source, &["status", "--porcelain"])
         .unwrap()
         .is_empty());
+    drop(runtime);
+    // The fixture streams output chunks, then Finished seals the transcript;
+    // the redundant chunks must not accumulate in the event store.
+    let db = rusqlite::Connection::open(temp.path().join("events.sqlite")).unwrap();
+    let chunks: i64 = db
+        .query_row("SELECT COUNT(*) FROM events WHERE kind='output'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(chunks, 0);
+    let transcripts: i64 = db
+        .query_row("SELECT COUNT(*) FROM events WHERE kind='finished'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(transcripts >= 2);
 }
 
 #[test]

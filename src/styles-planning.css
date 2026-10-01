@@ -906,6 +906,35 @@
   transform: translateY(-2px);
 }
 
+.transcript-loading-skeleton {
+  min-height: 112px;
+  padding: 20px;
+  border-radius: 8px;
+  background: #101419;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.transcript-loading-skeleton span {
+  height: 8px;
+  width: 72%;
+  border-radius: 3px;
+  background: #27313c;
+  animation: transcript-breathe 1.4s ease-in-out infinite;
+}
+.transcript-loading-skeleton span:nth-child(2) { width: 48%; }
+.transcript-loading-skeleton span:nth-child(3) { width: 60%; }
+.transcript-loading-skeleton i {
+  width: 7px;
+  height: 13px;
+  background: #91a7b7;
+  animation: transcript-breathe 1.4s ease-in-out infinite;
+}
+@keyframes transcript-breathe { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .transcript-loading-skeleton span, .transcript-loading-skeleton i { animation: none; }
+}
+
 .transcript-empty-state {
   display: flex;
   flex-direction: column;

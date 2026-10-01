@@ -3,38 +3,14 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
+import { utf8Bytes } from "../lib/BoundedLruCache";
+import { executionTranscriptCache, type CachedTranscript } from "../services/transcriptCache";
+export { executionTranscriptCache } from "../services/transcriptCache";
 
 // In-memory cache for execution transcripts so switching between node agents or reopening them
 // immediately displays known logs on frame 0 instead of flashing empty.
-export const executionTranscriptCache = new Map<string, { text: string; offset: number; complete: boolean; status?: string }>();
-type CachedTranscript = NonNullable<ReturnType<typeof executionTranscriptCache.get>>;
 const prefetches = new Map<string, Promise<string>>();
 const listeners = new Map<string, Set<(entry: CachedTranscript) => void>>();
-// A single request loads all settled outputs for a selected conversation.
-// Mounted transcripts join these promises instead of issuing duplicate reads.
-export function prefetchRunExecutionTranscripts(runId: string, executions: Execution[], signal?: AbortSignal): Promise<void> {
-  const pending = executions.filter(exec => exec.status !== "running" && !executionTranscriptCache.get(`${runId}:${exec.id}`)?.complete);
-  if (pending.length === 0) return Promise.resolve();
-  const request = runtimeService.getRunExecutionOutputs(runId, signal).then(result => {
-    if (signal?.aborted || result.runId !== runId) return;
-    const expected = new Set(pending.map(exec => exec.id));
-    for (const output of result.outputs) {
-      if (!expected.has(output.executionId)) continue;
-      const text = output.content && !output.content.endsWith("\n") ? `${output.content}\n` : output.content;
-      publishTranscript(`${runId}:${output.executionId}`, {
-        text, offset: output.totalBytes, complete: true, status: output.status,
-      });
-    }
-  });
-  for (const exec of pending) {
-    const key = `${runId}:${exec.id}`;
-    const job = request.then(() => executionTranscriptCache.get(key)?.text ?? "");
-    prefetches.set(key, job);
-    void job.finally(() => { if (prefetches.get(key) === job) prefetches.delete(key); }).catch(() => {});
-  }
-  return request;
-}
-
 function publishTranscript(key: string, entry: CachedTranscript) {
   executionTranscriptCache.set(key, entry);
   listeners.get(key)?.forEach(listener => listener(entry));
@@ -56,7 +32,7 @@ async function fetchExecutionTranscript(runId: string, execution: Execution, sig
   if (cached && cached.complete) return cached.text;
   if (execution.outputBytes === undefined) {
     const text = execution.output ?? "";
-    publishTranscript(cacheKey, { text, offset: text.length, complete: execution.status !== "running", status: execution.status });
+    publishTranscript(cacheKey, { text, offset: utf8Bytes(text), complete: execution.status !== "running", status: execution.status });
     return text;
   }
   let text = cached ? cached.text : "";
@@ -80,8 +56,7 @@ async function fetchExecutionTranscript(runId: string, execution: Execution, sig
   return text;
 }
 
-// Mounted conversations consume an in-flight conversation prefetch when available;
-// otherwise they fetch directly. Snapshots carry metadata alone.
+// Only mounted/explicitly requested nodes load logs; snapshots are metadata-only.
 export function ExecutionTranscript({
   runId,
   execution,
@@ -98,7 +73,7 @@ export function ExecutionTranscript({
   const paged = execution.outputBytes !== undefined;
   const settled = execution.status !== "running";
   const [record, setRecord] = useState(() => ({
-    id: execution.id,
+    id: cacheKey,
     text: cached && (!settled || cached.complete) ? cached.text : (!paged ? execution.output ?? "" : ""),
   }));
   const [error, setError] = useState("");
@@ -106,7 +81,7 @@ export function ExecutionTranscript({
   const [isFetchingFirstPage, setIsFetchingFirstPage] = useState(paged && (settled ? !cached?.complete : !cached && !execution.output));
   const [initialOutputReady, setInitialOutputReady] = useState(!paged || Boolean(cached?.complete || (!settled && cached?.text.includes("\n"))));
   const announcedToRef = useRef<typeof onInitialOutputReady>(undefined);
-  const displayedText = paged ? (record.id === execution.id ? record.text : "") : execution.output;
+  const displayedText = paged ? (record.id === cacheKey ? record.text : "") : execution.output;
 
   useLayoutEffect(() => {
     if (onInitialOutputReady && announcedToRef.current !== onInitialOutputReady && initialOutputReady) {
@@ -119,7 +94,7 @@ export function ExecutionTranscript({
     if (!paged) return;
     const cachedEntry = executionTranscriptCache.get(cacheKey);
     if (cachedEntry?.complete && execution.status !== "running") {
-      setRecord({ id: execution.id, text: cachedEntry.text });
+      setRecord({ id: cacheKey, text: cachedEntry.text });
       setIsFetchingFirstPage(false);
       setInitialOutputReady(true);
       return;
@@ -130,10 +105,10 @@ export function ExecutionTranscript({
     let offset = cachedEntry ? cachedEntry.offset : 0;
     let text = cachedEntry ? cachedEntry.text : "";
     if (cachedEntry && (!settled || cachedEntry.complete)) {
-      setRecord({ id: execution.id, text: cachedEntry.text });
+      setRecord({ id: cacheKey, text: cachedEntry.text });
       setIsFetchingFirstPage(false);
     } else {
-      setRecord({ id: execution.id, text: "" });
+      setRecord({ id: cacheKey, text: "" });
       setIsFetchingFirstPage(true);
     }
     setError("");
@@ -142,7 +117,7 @@ export function ExecutionTranscript({
       text = entry.text;
       offset = entry.offset;
       if (!settled || entry.complete) {
-        setRecord({ id: execution.id, text });
+        setRecord({ id: cacheKey, text });
         setIsFetchingFirstPage(false);
         if (entry.complete || text.includes("\n")) setInitialOutputReady(true);
       }
@@ -172,7 +147,7 @@ export function ExecutionTranscript({
         if (!settled || page.complete) {
           publishTranscript(cacheKey, { text: finalText, offset, complete, status: page.status });
           if (page.content || page.status !== "running") {
-            setRecord({ id: execution.id, text: finalText });
+            setRecord({ id: cacheKey, text: finalText });
           }
           setIsFetchingFirstPage(false);
           if (text.includes("\n") || page.complete) setInitialOutputReady(true);
@@ -217,12 +192,15 @@ export function ExecutionTranscript({
     }
   }
 
-  return <>
+  return <div data-execution-id={execution.id} data-run-id={runId} aria-busy={isFetchingFirstPage}>
     {error && <p role="alert">{localizeError(error)} <button onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
-    <VirtualizedTranscript key={`${runId}:${execution.id}:${retry}`}
+    {paged && settled && !displayedText && !error && (isFetchingFirstPage || record.id !== cacheKey) ?
+      <div className="transcript-loading-skeleton" role="status" aria-label={t("正在加载历史记录…")}>
+        <span /><span /><span /><i aria-hidden="true" />
+      </div> : <VirtualizedTranscript key={`${runId}:${execution.id}:${retry}`}
       compact
       emptyText={execution.status === "running" ? "" : emptyText}
       onUserResize={onUserResize}
-      output={displayedText} />
-  </>;
+      output={displayedText} />}
+  </div>;
 }

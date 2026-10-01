@@ -32,6 +32,14 @@ fn main() {
         println!("{}", result.unwrap_or_else(|error| serde_json::json!({ "diagnostics": [{ "code": "E000", "message": error.to_string() }] })));
         return;
     }
+    if matches!(std::env::args().nth(1).as_deref(), Some("--compact" | "--migrate")) {
+        if let Err(error) = grapher::server::compact_output_chunks() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Err(error) = grapher::server::run() {
         eprintln!("{error}");
         std::process::exit(1);

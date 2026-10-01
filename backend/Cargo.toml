@@ -7,6 +7,12 @@ license = "MIT"
 [features]
 default = []
 fixture = []
+# Opt-in counters for the offline acceptance harness, absent from normal builds.
+acceptance = []
+
+[[example]]
+name = "conversation_acceptance"
+required-features = ["acceptance"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

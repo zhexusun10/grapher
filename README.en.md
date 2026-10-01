@@ -46,7 +46,7 @@ npm run pi:setup
 npm run dev
 ```
 
-Open <http://127.0.0.1:1420>. The first launch may take time while Cargo compiles. For an existing clone, first run `git submodule update --init --recursive`. In Settings, select a local project directory and a `provider/model`; sign in through Provider settings or run `npm run pi` to authenticate with the upstream CLI. Do not put real secrets in `.env.example`; if you need environment variables, copy it to the Git-ignored `.env`. Pi credentials default to `~/.grapher/pi-agent` (configurable via `PI_CODING_AGENT_DIR`).
+Open <http://127.0.0.1:1420>. The first launch may take time while Cargo compiles. Dev mode does not replay a settled Run's history at startup; it loads on demand when that conversation is opened. For an existing clone, first run `git submodule update --init --recursive`. In Settings, select a local project directory and a `provider/model`; sign in through Provider settings or run `npm run pi` to authenticate with the upstream CLI. Do not put real secrets in `.env.example`; if you need environment variables, copy it to the Git-ignored `.env`. Pi credentials default to `~/.grapher/pi-agent` (configurable via `PI_CODING_AGENT_DIR`).
 
 1. Enter a goal; the Partitioner routes it to Serial (one task, automatically approved) or Graph.
 2. For Graph, the Planner generates a graph, the Compiler validates it, and the user reviews and approves it. Independent nodes need not be connected by edges.
@@ -84,9 +84,16 @@ npm run check                 # TypeScript
 npm run build                 # UI
 npm test                      # Rust fixture tests; no paid model
 npm run test:concurrent       # HTTP multi-Run regression (requires /bin/sh)
+npm run test:conversation-acceptance # TC-01–14: copied history, HTTP/browser/process stress
 npm run test:pi               # pinned Pi / auth transport contract
 npm run test:native           # host-native regression (platform dependent)
+npm run migrate               # migrate historical logs and reclaim disk (stop backend first)
+npm run compact               # compatibility alias for migrate
 ```
+
+Logs are UTF-8 byte-indexed chunks in `execution_logs`; terminal business events persist byte counts and structured metrics, not transcripts. Opening a conversation loads metadata only; mounted nodes request their own logs. Each browser transcript cache is limited to 20 entries / 30 MiB. Legacy logs remain readable through per-execution JIT migration without rewriting events. Back up the data directory, stop the backend, then run `npm run migrate` to preserve finished, failed, interrupted and merger transcripts, clean legacy events and run `VACUUM`. The command is idempotent and takes the backend's exclusive runtime lease.
+
+See the [TC-01–TC-14 evidence report](CONVERSATION_PERFORMANCE_ACCEPTANCE.md) for conversation-log acceptance and its limits. The harness needs Python 3.11+ and a browser, creates isolated copies, and never migrates the original database. Its large fixture derives from real transcripts; it is not claimed to be the original 720 MB file.
 
 `benchmark/` provides a Harbor custom agent adapter (not a benchmark dataset or host); see [Harbor setup and Linux Graph isolation environment requirements](benchmark/README.md). HTTP API binding and lifecycle checks run locally through `npm run test:bindings` and `scripts/check-project-binding.mjs`; the other basic checks above also work with this repository alone. Fixtures and model-free tests cannot establish real provider semantic quality or every sandbox boundary; release requires platform and real-model acceptance testing.
 

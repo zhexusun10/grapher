@@ -60,7 +60,7 @@ fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
             .emit(EventKind::Finished {
                 execution_id: first.execution.id,
                 head: runtime.state.base.clone(),
-                output: "done".into(),
+                output: "done".into(), output_bytes: 0, metrics: None,
             })
             .unwrap();
         assert_eq!(
@@ -96,14 +96,14 @@ fn feedback_scope_does_not_block_a_shared_ancestors_other_branch() {
     runtime.approve().unwrap();
     let root = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: root.execution.id, head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: root.execution.id, head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     let first = runtime.jobs().unwrap();
     assert_eq!(first.len(), 2);
     assert!(runtime.feedback_source_busy("review"));
     let fast = first.iter().find(|job| job.execution.node == "fast").unwrap();
     runtime.emit(EventKind::Finished {
-        execution_id: fast.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: fast.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     assert_eq!(runtime.jobs().unwrap().iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["after_fast"]);
     assert_eq!(runtime.state.nodes["owner"].status, "running");
@@ -140,17 +140,17 @@ fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
     let first = runtime.jobs().unwrap();
     let owner = first.iter().find(|job| job.execution.node == "owner").unwrap();
     runtime.emit(EventKind::Finished {
-        execution_id: owner.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: owner.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     let next = runtime.jobs().unwrap();
     let review = next.iter().find(|job| job.execution.node == "review").unwrap();
     runtime.emit(EventKind::Finished {
-        execution_id: review.execution.id.clone(), head: runtime.state.base.clone(), output: "<REVISE>".into(),
+        execution_id: review.execution.id.clone(), head: runtime.state.base.clone(), output: "<REVISE>".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     assert!(runtime.feedback_source_busy("review"));
     let other = first.iter().find(|job| job.execution.node == "other").unwrap();
     runtime.emit(EventKind::Finished {
-        execution_id: other.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: other.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     let jobs = runtime.jobs_with_pending_feedback(true, &["review"]).unwrap();
     assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["after_other"]);
@@ -217,7 +217,7 @@ fn messaging_done_node_preserves_its_result_and_running_downstream() {
     runtime.approve().unwrap();
     let parent = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: parent.execution.id, head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: parent.execution.id, head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     let child = runtime.jobs().unwrap().remove(0);
     let before = runtime.state.nodes.clone();
@@ -246,7 +246,7 @@ fn message_after_run_completed_keeps_it_completed() {
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: job.execution.id, head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: job.execution.id, head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.emit(EventKind::Settled).unwrap();
     let head = runtime.state.nodes["task"].head.clone();
@@ -270,7 +270,7 @@ fn intervention_continues_the_previous_result_in_place() {
     fs::write(path.join("tracked.txt"), "first result").unwrap();
     let head = workspace::snapshot_node_for_run(path, &source, "task", Some(&runtime.state.run_id)).unwrap();
     runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id, head: head.clone(), output: "done".into(),
+        execution_id: first.execution.id, head: head.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.intervene("task", "continue").unwrap();
     assert_eq!(runtime.state.nodes["task"].head, Some(head.clone()));
@@ -288,7 +288,7 @@ fn serial_followup_resumes_completed_pi_session_with_images_after_settlement() {
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.jobs().unwrap(); // settle the run
     assert_eq!(runtime.state.phase, "completed");
@@ -315,17 +315,17 @@ fn editing_an_earlier_serial_turn_branches_pi_and_supersedes_later_executions() 
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(),
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.intervene("task", "second").unwrap();
     let second = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: second.execution.id.clone(), head: runtime.state.base.clone(), output: "second".into(),
+        execution_id: second.execution.id.clone(), head: runtime.state.base.clone(), output: "second".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.intervene("task", "third").unwrap();
     let third = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: third.execution.id.clone(), head: runtime.state.base.clone(), output: "third".into(),
+        execution_id: third.execution.id.clone(), head: runtime.state.base.clone(), output: "third".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     let session_dir = runtime.root.join("sessions").join(&first.execution.id);
     fs::create_dir_all(&session_dir).unwrap();
@@ -378,7 +378,7 @@ fn editing_serial_initial_turn_updates_goal_without_replacing_the_run() {
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     let session_dir = runtime.root.join("sessions").join(&first.execution.id);
     fs::create_dir_all(&session_dir).unwrap();
@@ -411,16 +411,16 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(),
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     let child = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: child.execution.id.clone(), head: runtime.state.base.clone(), output: "child".into(),
+        execution_id: child.execution.id.clone(), head: runtime.state.base.clone(), output: "child".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.intervene("parent", "later").unwrap();
     let later = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: later.execution.id.clone(), head: runtime.state.base.clone(), output: "later".into(),
+        execution_id: later.execution.id.clone(), head: runtime.state.base.clone(), output: "later".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     // The follow-up returned the same result, so the descendant stays valid.
     assert_eq!(runtime.state.nodes["child"].status, "done");
@@ -448,7 +448,7 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
     assert_eq!(new_job.task, "edited parent");
     // The edited run changed the result, so the descendant recomputes.
     runtime.emit(EventKind::Finished {
-        execution_id: new_job.execution.id.clone(), head: "changed-parent".into(), output: "edited".into(),
+        execution_id: new_job.execution.id.clone(), head: "changed-parent".into(), output: "edited".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     assert_eq!(runtime.state.nodes["parent"].head.as_deref(), Some("changed-parent"));
     assert_eq!(runtime.state.nodes["child"].status, "dirty");
@@ -468,12 +468,12 @@ fn graph_followup_propagates_only_when_the_result_changes() {
     let first = runtime.jobs().unwrap();
     for job in &first {
         runtime.emit(EventKind::Finished {
-            execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(),
+            execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
         }).unwrap();
     }
     let child = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: child.execution.id, head: runtime.state.base.clone(), output: "done".into(),
+        execution_id: child.execution.id, head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.intervene("parent", "continue parent").unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "dirty");
@@ -485,7 +485,7 @@ fn graph_followup_propagates_only_when_the_result_changes() {
     assert_eq!(next.task, "continue parent");
     assert!(next.resume_execution_id.is_some());
     runtime.emit(EventKind::Finished {
-        execution_id: next.execution.id.clone(), head: "changed-parent".into(), output: "done".into(),
+        execution_id: next.execution.id.clone(), head: "changed-parent".into(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "done");
     assert_eq!(runtime.state.nodes["child"].status, "dirty");
@@ -503,7 +503,7 @@ fn resolved_preparation_is_not_a_completed_node_execution() {
     workspace::snapshot_repository(path).unwrap();
     runtime.emit(EventKind::Failed {
         node: "task".into(), execution_id: Some(first.execution.id.clone()),
-        error: "Workspace composition blocked".into(),
+        error: "Workspace composition blocked".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.emit(EventKind::Blocked { node: "task".into(), error: "Resolve".into() }).unwrap();
     runtime.resolved("task").unwrap();
@@ -653,7 +653,7 @@ fn planning_revision_defers_publication_but_not_ready_jobs() {
         .emit(EventKind::Finished {
             execution_id: jobs[0].execution.id.clone(),
             head: runtime.state.base.clone(),
-            output: "done".into(),
+            output: "done".into(), output_bytes: 0, metrics: None,
         })
         .unwrap();
     assert!(runtime.jobs_with_publication(false).unwrap().is_empty());
@@ -695,7 +695,7 @@ fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_wait
         .emit(EventKind::Failed {
             node: "failed".into(),
             execution_id: Some(failed.execution.id.clone()),
-            error: "failed".into(),
+            error: "failed".into(), output_bytes: 0, metrics: None,
         })
         .unwrap();
     assert_eq!(runtime.state.nodes["waiting"].status, "waiting");
@@ -772,7 +772,7 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     let jobs = runtime.jobs().unwrap();
     for job in jobs {
         runtime
-            .emit(EventKind::Finished {
+            .emit(EventKind::Finished { output_bytes: 0, metrics: None,
                 execution_id: job.execution.id,
                 head: runtime.state.base.clone(),
                 output: "done".into(),
@@ -782,7 +782,7 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     // The consumer has actually executed, so changing its input invalidates its result.
     for job in runtime.jobs().unwrap() {
         runtime
-            .emit(EventKind::Finished {
+            .emit(EventKind::Finished { output_bytes: 0, metrics: None,
                 execution_id: job.execution.id,
                 head: runtime.state.base.clone(),
                 output: "done".into(),
@@ -1080,7 +1080,7 @@ fn node_merger_events_do_not_enter_publication_phase() {
     runtime
         .emit(EventKind::MergerFinished {
             execution_id: merger.id,
-            head: runtime.state.base.clone(),
+            head: runtime.state.base.clone(), output_bytes: 0, metrics: None,
         })
         .unwrap();
     assert_eq!(runtime.state.phase, "running");
@@ -1100,7 +1100,7 @@ fn reset_cleans_only_its_run_worktrees() {
         .emit(EventKind::Failed {
             node: job.execution.node,
             execution_id: Some(job.execution.id),
-            error: "test".into(),
+            error: "test".into(), output_bytes: 0, metrics: None,
         })
         .unwrap();
     runtime.reset_workspace().unwrap();
