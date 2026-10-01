@@ -1,4 +1,4 @@
-import { en } from "./en";
+import { en } from "./en.ts";
 
 type Locale = "zh-CN" | "en";
 export type LanguagePreference = "auto" | Locale;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { activePlannerOutput } from '../src/components/PlanningActivity.tsx';
+import { activePlannerOutput } from '../src/lib/plannerOutput.ts';
 
 const source = (id: string) => JSON.stringify({ type: 'grapher_planning_source', planningId: id });
 const user = (text: string) => JSON.stringify({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } });

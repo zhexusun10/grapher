@@ -3,6 +3,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { root, source, verifyBaseline } from "../scripts/pi-baseline.mjs";
 import { configureAgentDir } from "./agent-dir.mjs";
 
@@ -38,9 +39,9 @@ try {
       }
     }
   }
+  const resolverUrl = pathToFileURL(join(source, "packages/coding-agent/src/experimental/source-resolver.ts")).href;
   const child = spawn(process.execPath, [
-    join(source, "node_modules/tsx/dist/cli.mjs"),
-    "--tsconfig", join(source, "tsconfig.json"),
+    "--import", resolverUrl,
     join(root, "engine/execution-cli.ts"),
     ...process.argv.slice(2),
     "--extension", join(root, "engine/prompt-extension.ts"),

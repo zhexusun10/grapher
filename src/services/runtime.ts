@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import { invalidateTranscriptCaches } from "./transcriptCache";
-import { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot } from "../types";
+import type { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot } from "../types";
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
