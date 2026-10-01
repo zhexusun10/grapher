@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { t } from "./i18n/index.ts";
 export type Status = "waiting" | "running" | "blocked" | "done" | "failed" | "dirty";
 interface GraphNode { name: string; task: string }
 interface GraphEdge { from: string; to: string; relation: string; feedback: boolean }

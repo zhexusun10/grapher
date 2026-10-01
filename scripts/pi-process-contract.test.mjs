@@ -3,14 +3,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { root, lock } from './pi-baseline.mjs';
 
 // Exercise the same CLI and IPC entrypoints the Rust host launches, without
 // loading user credentials or contacting a provider. This catches SDK imports,
 // CLI flags and DTO drift that a types-only compatibility probe cannot see.
-const tsx = join(root, 'pi/node_modules/tsx/dist/cli.mjs');
-const tsconfig = join(root, 'pi/tsconfig.json');
+const resolverUrl = pathToFileURL(join(root, 'pi/packages/coding-agent/src/experimental/source-resolver.ts')).href;
 
 test('production Pi CLI reports the pinned version', () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-pi-cli-'));
@@ -39,7 +39,7 @@ test('Provider/Auth IPC returns a catalog after input EOF without exposing crede
       windir: process.env.windir,
       PI_CODING_AGENT_DIR: dir,
     };
-    const output = execFileSync(process.execPath, [tsx, '--tsconfig', tsconfig, join(root, 'engine/provider-host.ts')], {
+    const output = execFileSync(process.execPath, ['--import', resolverUrl, join(root, 'engine/provider-host.ts')], {
       cwd: root,
       encoding: 'utf8',
       timeout: 45000,

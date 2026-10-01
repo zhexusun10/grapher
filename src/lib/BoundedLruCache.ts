@@ -16,12 +16,18 @@ export function utf8Bytes(text: string): number {
 export class BoundedLruCache<K, V> extends Map<K, V> {
   private sizes = new Map<K, number>();
   private usedBytes = 0;
+  private readonly sizeOf: (value: V) => number;
+  readonly maxEntries: number;
+  readonly maxBytes: number;
   constructor(
-    private readonly sizeOf: (value: V) => number,
-    readonly maxEntries = 20,
-    readonly maxBytes = 30 * 1024 * 1024,
+    sizeOf: (value: V) => number,
+    maxEntries = 20,
+    maxBytes = 30 * 1024 * 1024,
   ) {
     super();
+    this.sizeOf = sizeOf;
+    this.maxEntries = maxEntries;
+    this.maxBytes = maxBytes;
   }
   get byteSize() { return this.usedBytes; }
   override get(key: K): V | undefined {
