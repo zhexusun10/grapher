@@ -63,7 +63,7 @@ test('Planner uses the same unmodified Bash definition and semantics as pinned P
       }
       const nonzero = await tool.execute('nonzero', { command: 'exit 7' }, undefined, undefined, context);
       assert.equal(nonzero.isError, true);
-      assert.match(nonzero.content.find((p: any) => p.type === 'text')?.text || '', /exited with code 7/);
+      assert.match(nonzero.content.find((p): p is { type: 'text'; text: string } => p.type === 'text')?.text || '', /exited with code 7/);
       await assert.rejects(() => tool.execute('timeout', { command: 'sleep 2', timeout: 0.1 }, undefined, undefined, context), /timed out/i);
     }
   } finally {
