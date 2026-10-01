@@ -10,7 +10,7 @@ Grapher 是一个**本地多智能体编程系统（multi-agent coding system）
 
 ![Grapher 真实界面：审批前的示例图，包含前后端并行任务、集成和有界审查反馈](assets/execution-graph.png)
 
-*真实 Grapher 界面，展示等待审批的示例图。使用固定样例数据，不是真实模型执行记录或性能测试。[截图来源](assets/README.md)。*
+*真实 Grapher 界面，展示等待审批的示例图。使用固定样例数据，不是真实模型执行记录或性能测试。*
 
 ## 为什么选择 Grapher？
 

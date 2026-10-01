@@ -10,7 +10,7 @@ Grapher is a **local multi-agent coding system** that turns complex coding tasks
 
 ![Grapher UI showing parallel frontend and backend tasks, integration, and a bounded review feedback edge before approval](assets/execution-graph.png)
 
-*Actual Grapher UI with a demo graph awaiting approval. Fixture data, not a live-model run or benchmark. [Screenshot source](assets/README.md).*
+*Actual Grapher UI with a demo graph awaiting approval. Fixture data, not a live-model run or benchmark.*
 
 ## Why Grapher?
 
