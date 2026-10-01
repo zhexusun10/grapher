@@ -4,7 +4,7 @@
 >
 > Don't orchestrate agents. Compile work.
 
-Grapher 是一个**本地多智能体编程系统（multi-agent coding system）**：将复杂的编程目标编译成可检查的执行图，由确定性的 Rust 运行时调度多个独立 Coding Agent 并行工作，再通过 Git 合并结果，而不是让一个“主管 Agent”持续通过对话调度其他 Agent。
+Grapher 既是一套 **[Pi](https://github.com/earendil-works/pi) GUI（图形化界面）**，也是一个**本地多智能体编程系统**。你可以在可视化工作台中使用单个 Pi Coding Agent，也可以将复杂目标编译成可检查的执行图，由确定性的 Rust 运行时调度多个独立 Agent，再通过 Git 合并结果，而不是让一个“主管 Agent”持续通过对话调度其他 Agent。
 
 [快速开始](#快速开始) · [工作方式](#工作方式) · [架构](docs/architecture/overview.md) · [English](README.md)
 
@@ -14,6 +14,7 @@ Grapher 是一个**本地多智能体编程系统（multi-agent coding system）
 
 ## 为什么选择 Grapher？
 
+- **Pi 的图形化工作台** — 在同一个界面中与 Coding Agent 对话、管理服务商登录与模型设置、查看工具调用和日志、追加指令。单 Agent 编程无需规划任务图。
 - **确定性编排** — 调度、依赖、重试和反馈是明确的 Rust 状态转换，不隐藏在 LLM 对话中。
 - **Git 原生协作** — Agent 交换文件状态和提交，而不是彼此的聊天记录；Graph 节点使用独立 Git 仓库。
 - **可检查的执行图** — 执行前查看并批准任务图，执行中清楚看到依赖、并行分支和有次数限制的返工。
@@ -34,7 +35,7 @@ npm run dev
 打开 **<http://127.0.0.1:1420>**。首次启动可能需要等待 Cargo 编译。
 
 1. 在**设置**中选择本机项目，完成服务商认证并选择 `provider/model`。也可通过 `npm run pi` 登录；详见[服务商指南](docs/guides/providers.md)。
-2. 输入编程目标。单一或线性任务走单 Agent 的 Serial 路径；独立工作流可以走 Graph。
+2. 输入编程目标。选择 **Serial** 使用单个 Pi Agent，选择 **Graph** 规划任务图，或让 **Auto** 由 Partitioner 判断路线。
 3. Graph 模式下查看并**批准**计划。执行中可查看节点日志、暂停新任务派发，或追加指令。
 4. Graph 的有效结果成功发布回项目后才算完成；发布失败会保留状态供检查或重试。
 
