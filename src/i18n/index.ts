@@ -51,13 +51,72 @@ export function t(key: string, ...values: unknown[]): string {
   return translate(locale, key, ...values);
 }
 
+function annotateProviderError(message: string, language: Locale): string {
+  if (!message) return message;
+
+  let text = message;
+  if (language === "zh-CN") {
+    text = text
+      .replace(/^Partitioner failed:\s*/i, "任务分片器 (Partitioner) 失败: ")
+      .replace(/^Planner failed:\s*/i, "任务规划器 (Planner) 失败: ");
+  }
+
+  const isBalance =
+    /\b402\b/i.test(text) ||
+    /insufficient\s*(?:balance|quota)/i.test(text) ||
+    /quota\s*exceeded/i.test(text) ||
+    /credit\s*(?:expired|exceeded|insufficient)/i.test(text);
+
+  const isAuth =
+    /\b401\b/i.test(text) ||
+    /invalid[_\s]*api[_\s]*key/i.test(text) ||
+    /authentication\s*failed/i.test(text) ||
+    /unauthorized/i.test(text);
+
+  const isRateLimit =
+    /\b429\b/i.test(text) ||
+    /rate[_\s]*limit/i.test(text) ||
+    /too\s*many\s*requests/i.test(text);
+
+  const isAbortCode = /0xc0000409/i.test(text);
+
+  let hint = "";
+  if (isBalance) {
+    hint =
+      language === "zh-CN"
+        ? "提示：模型服务商账户余额不足或额度耗尽 (Insufficient Balance)，请充值或在设置中更换可用模型。"
+        : "Tip: Model provider account balance or quota is insufficient (Insufficient Balance). Please recharge or switch models in settings.";
+  } else if (isAuth) {
+    hint =
+      language === "zh-CN"
+        ? "提示：服务商认证失败或 API Key 无效，请在模型设置中检查配置。"
+        : "Tip: Provider authentication failed or API key is invalid. Please check your model settings.";
+  } else if (isRateLimit) {
+    hint =
+      language === "zh-CN"
+        ? "提示：已超出服务商调用频率限制 (Rate Limit)，请稍后重试。"
+        : "Tip: Provider rate limit exceeded. Please retry later.";
+  } else if (isAbortCode && !text.includes("402") && !text.includes("Insufficient")) {
+    hint =
+      language === "zh-CN"
+        ? "提示：子进程异常退出 (0xc0000409)，通常由服务商 API 调用报错中止或运行时异常导致。"
+        : "Tip: Process aborted with exit code 0xc0000409, typically caused by a provider API error or runtime abort.";
+  }
+
+  if (hint && !text.includes(hint)) {
+    return `${text}\n${hint}`;
+  }
+  return text;
+}
+
 /** Localize application errors, never conversation content or tool/model output. */
 export function localizeError(error: unknown, language: Locale = locale): string {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  if (language === "zh-CN" || !/\p{Script=Han}/u.test(message)) return message;
+  if (language === "zh-CN") return annotateProviderError(message, language);
+  if (!/\p{Script=Han}/u.test(message)) return annotateProviderError(message, language);
   const prefix = message.startsWith("Error: ") ? "Error: " : "";
   const text = prefix ? message.slice(prefix.length) : message;
-  if (en[text]) return prefix + en[text];
+  if (en[text]) return annotateProviderError(prefix + en[text], language);
   for (const [key, english] of Object.entries(en)) {
     if (!/\{\d+\}/.test(key)) continue;
     const indices: number[] = [];
@@ -72,11 +131,14 @@ export function localizeError(error: unknown, language: Locale = locale): string
     if (match) {
       const values: string[] = [];
       indices.forEach((index, i) => { values[index] = localizeError(match[i + 1], language); });
-      return prefix + english.replace(/\{(\d+)\}/g, (_, index: string) => values[Number(index)]);
+      return annotateProviderError(
+        prefix + english.replace(/\{(\d+)\}/g, (_, index: string) => values[Number(index)]),
+        language
+      );
     }
   }
   // Backend/native diagnostics may not have a UI translation. Keep the full
   // original in the console rather than exposing untranslated Chinese in English UI.
   console.warn("Untranslated application error:", message);
-  return "The operation failed. Check the browser console for diagnostic details.";
+  return annotateProviderError("The operation failed. Check the browser console for diagnostic details.", language);
 }

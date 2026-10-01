@@ -230,6 +230,19 @@ fn provider_error_with_success_exit_is_still_failure() {
 }
 
 #[test]
+fn provider_error_with_nonzero_exit_prioritizes_model_error() {
+    let (result, _) = execute_script(
+        r#"cat >/dev/null
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"402: {\"message\":\"Insufficient Balance (request_id: 123)\"}","content":[]}}'
+exit 1
+"#,
+    );
+    let err = result.unwrap_err();
+    assert!(err.contains("Insufficient Balance"), "Expected Insufficient Balance, got: {err}");
+    assert!(!err.starts_with("Pi exited with"), "Should not be overshadowed by exit code: {err}");
+}
+
+#[test]
 fn nonzero_exit_and_empty_response_fail_closed() {
     let (result, stream) = execute_script("cat >/dev/null\necho 'bad CLI arguments' >&2\nexit 2\n");
     assert!(result.unwrap_err().contains("bad CLI arguments"));

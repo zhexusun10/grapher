@@ -251,14 +251,84 @@ fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
 }
 
 #[test]
-fn compiler_warns_when_revision_marker_cannot_route_a_retry() {
+fn compiler_warns_about_identical_tasks_without_rejecting_the_graph() {
+    let mut candidate = Graph {
+        original_goal: "Check repeated task text".into(),
+        nodes: [
+            ("third", "Shared task"),
+            ("first", "Shared task"),
+            ("other_b", "Other task"),
+            ("other_a", "Other task"),
+            ("spaced", "Shared task "),
+            ("case", "shared task"),
+        ]
+        .into_iter()
+        .map(|(name, task)| Node { name: name.into(), task: task.into() })
+        .collect(),
+        edges: vec![],
+    };
+    let expected = vec![
+        "W301: Nodes other_a, other_b have identical task text; they may duplicate work. Confirm that this is intentional.",
+        "W301: Nodes first, third have identical task text; they may duplicate work. Confirm that this is intentional.",
+    ];
+    assert_eq!(compile(&candidate, false).unwrap().warnings, expected);
+    assert_eq!(compile(&candidate, true).unwrap().warnings, expected);
+    // Group names deterministically, but do not normalize text or infer similarity.
+    candidate.nodes.reverse();
+    assert_eq!(compile(&candidate, true).unwrap().warnings, expected);
+    candidate.nodes.iter_mut().find(|node| node.name == "first").unwrap().task = "First task".into();
+    candidate.nodes.iter_mut().find(|node| node.name == "other_a").unwrap().task = "Another task".into();
+    assert!(compile(&candidate, true).unwrap().warnings.is_empty());
+}
+
+#[test]
+fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
+    let mut candidate = graph();
+    for name in ["inspect", "delivery"] {
+        candidate.nodes.push(Node { name: name.into(), task: format!("Implement {name}") });
+    }
+    candidate.edges.extend([
+        Edge { from: "frontend".into(), to: "inspect".into(), relation: String::new(), feedback: false },
+        Edge { from: "inspect".into(), to: "spec".into(), relation: String::new(), feedback: true },
+        Edge { from: "review".into(), to: "delivery".into(), relation: String::new(), feedback: false },
+    ]);
+    let plan = compile(&candidate, true).unwrap();
+    assert_eq!(plan.warnings.len(), 2);
+    assert!(plan.warnings.iter().all(|warning| warning.starts_with("W303:")));
+    assert!(plan.warnings.iter().any(|warning| warning ==
+        "W303: If <FEEDBACK> from review to frontend is applied, the target and dependency descendants will be invalidated: delivery, frontend, inspect, review. Completed results must be recomputed; frontend continues its session/workspace. Nodes outside this set are unaffected."
+    ));
+    assert!(plan.warnings.iter().any(|warning| warning ==
+        "W303: If <FEEDBACK> from inspect to spec is applied, the target and dependency descendants will be invalidated: backend, delivery, frontend, inspect, review, spec. Completed results must be recomputed; spec continues its session/workspace. Nodes outside this set are unaffected."
+    ));
+    // Compare the reported set to the actual event, not a size heuristic or
+    // merely the dependency path from the target to the feedback source.
+    let temp = TempDir::new().unwrap();
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    runtime.create(candidate, config()).unwrap();
+    runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+    let unaffected = ["backend", "spec"].map(|name| serde_json::to_value(&runtime.state.nodes[name]).unwrap());
+    runtime.apply_feedback("review", "Additional instruction\n<FEEDBACK>").unwrap();
+    let invalidated = runtime.state.events.iter().rev().find_map(|event| match &event.kind {
+        EventKind::Invalidated { nodes, target, .. } if target == "frontend" => Some(nodes),
+        _ => None,
+    }).unwrap();
+    assert_eq!(invalidated, &vec!["delivery", "frontend", "inspect", "review"]);
+    assert_eq!(
+        ["backend", "spec"].map(|name| serde_json::to_value(&runtime.state.nodes[name]).unwrap()),
+        unaffected
+    );
+}
+
+#[test]
+fn compiler_warns_when_feedback_marker_cannot_route_an_instruction() {
     let mut candidate = graph();
     candidate
         .nodes
         .iter_mut()
         .find(|node| node.name == "review")
         .unwrap()
-        .task = "Check acceptance and finish with <REVISE> if corrections are needed".into();
+        .task = "Check acceptance and finish with <FEEDBACK> if an additional instruction is needed".into();
     assert!(!compile(&candidate, true)
         .unwrap()
         .warnings
@@ -393,14 +463,19 @@ fn invalid_replacement_leaves_current_graph_unchanged() {
 
 #[test]
 fn feedback_has_exact_final_line_protocol() {
-    assert_eq!(feedback("Need a fix\n<REVISE>\n").unwrap(), true);
+    assert_eq!(feedback("Additional instruction\n<FEEDBACK>\n").unwrap(), true);
     assert_eq!(
-        feedback("Earlier text mentions <REVISE>\n<ACCEPT>").unwrap(),
+        feedback("Earlier text mentions <FEEDBACK>\n<ACCEPT>").unwrap(),
         false
     );
     assert!(feedback("<ACCEPT> trailing text").is_err());
+    assert!(feedback("<FEEDBACK> trailing text").is_err());
     assert!(feedback("```\n<ACCEPT>\n```").is_err());
-    assert!(feedback("").is_err());
+    assert!(feedback("```\n<FEEDBACK>\n```").is_err());
+    assert!(feedback("<Feedback>").is_err());
+    assert!(feedback("<feedback>").is_err());
+    assert!(feedback("<FEEDBACK>\nAdditional instruction").is_err());
+    assert_eq!(feedback("").unwrap_err(), "Feedback protocol error: final line must be exactly <ACCEPT> or <FEEDBACK>");
 }
 
 #[test]
@@ -414,7 +489,7 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
         .unwrap();
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "<ACCEPT>");
-    finish_wave(&mut runtime, "Add empty state\n<REVISE>");
+    finish_wave(&mut runtime, "Add empty state\n<FEEDBACK>");
     assert_eq!(runtime.state.nodes["frontend"].status, "dirty");
     assert_eq!(runtime.state.nodes["review"].status, "dirty");
     assert_eq!(runtime.state.nodes["backend"].status, "done");
@@ -456,10 +531,10 @@ fn retry_limit_halts_branch_without_halting_runtime() {
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "<ACCEPT>");
     for _ in 0..3 {
-        finish_wave(&mut runtime, "<REVISE>");
+        finish_wave(&mut runtime, "<FEEDBACK>");
         finish_wave(&mut runtime, "<ACCEPT>");
     }
-    finish_wave(&mut runtime, "<REVISE>");
+    finish_wave(&mut runtime, "<FEEDBACK>");
     assert_eq!(runtime.state.nodes["review"].status, "failed");
     assert_eq!(runtime.state.nodes["backend"].status, "done");
     assert_eq!(runtime.state.feedback_counts["review->frontend"], 3);

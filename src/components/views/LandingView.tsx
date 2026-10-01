@@ -1,5 +1,5 @@
 import React from "react";
-import { motion } from "motion/react";
+import { motion, useIsPresent, useReducedMotion } from "motion/react";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { PlanMode } from "../../types";
 
@@ -26,25 +26,27 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
   onInterrupt,
   repository,
 }) => {
+  const reduceMotion = useReducedMotion();
+  const isPresent = useIsPresent();
   return (
     <motion.div
       className="landing-screen"
-      initial={{ opacity: 0, y: 12 }}
+      inert={!isPresent}
+      initial={{ opacity: 0, y: reduceMotion ? 0 : 12 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{
         opacity: 0,
-        y: -16,
-        transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] },
+        y: reduceMotion ? 0 : -8,
       }}
-      transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+      transition={{ duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] }}
     >
       <div className="landing-center-content">
         <motion.div
           className="landing-title-container"
           exit={{
             opacity: 0,
-            y: -14,
-            transition: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
+            y: reduceMotion ? 0 : -14,
+            transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] },
           }}
         >
           <motion.p
@@ -72,16 +74,9 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
             Don't orchestrate agents. Compile work.
           </motion.p>
         </motion.div>
-        <motion.div
-          style={{ width: "100%", position: "relative" }}
-          exit={{
-            opacity: 0,
-            scale: 0.98,
-            y: -6,
-            transition: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
-          }}
-        >
+        <div style={{ width: "100%", position: "relative", flexShrink: 0 }}>
           <PromptBox
+            layoutId="conversation-composer"
             repository={repository}
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
@@ -93,7 +88,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
             onPlanModeChange={onPlanModeChange}
             placeholder=""
           />
-        </motion.div>
+        </div>
       </div>
     </motion.div>
   );

@@ -43,7 +43,7 @@ pub fn execute(
     ));
     thread::sleep(Duration::from_millis(650));
     let output = if feedback_source && execution.attempt == 1 {
-        "Fixture verification: add an empty-state message.\n<REVISE>".into()
+        "Fixture verification: add an empty-state message.\n<FEEDBACK>".into()
     } else if feedback_source {
         "Fixture verification passed.\n<ACCEPT>".into()
     } else {

@@ -1,6 +1,6 @@
 import { t } from "../../i18n";
 import React, { useState, useRef, useLayoutEffect, useEffect, useId, useCallback, useMemo } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   ArrowUp,
   Paperclip,
@@ -170,6 +170,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     },
     forwardedRef
   ) => {
+    const reduceMotion = useReducedMotion();
     const internalTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -185,6 +186,12 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const pillLayoutId = useId();
     const composingRef = useRef(false);
     const compositionEndedAtRef = useRef(0);
+    const mountedRef = useRef(true);
+    const [attachmentError, setAttachmentError] = useState("");
+    useEffect(() => {
+      mountedRef.current = true;
+      return () => { mountedRef.current = false; };
+    }, []);
 
     // 智能补全联想状态（@ 文件/智能体，/ Skills）
     const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
@@ -196,36 +203,49 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const suggestionsListRef = useRef<HTMLDivElement | null>(null);
 
     const loadedRepoRef = useRef<string | null>(null);
+    const loadingRepoRef = useRef<string | null>(null);
+    const completionsGenerationRef = useRef(0);
 
     const loadCompletions = useCallback(async (force = false) => {
+      const key = repository || "__default__";
+      if (loadingRepoRef.current === key) return;
+      const generation = completionsGenerationRef.current;
+      loadingRepoRef.current = key;
       try {
-        const files = await runtimeService.listFiles(repository, force);
-        const skills = await runtimeService.listSkills(repository, force);
+        const [files, skills] = await Promise.all([
+          runtimeService.listFiles(repository, force), runtimeService.listSkills(repository, force),
+        ]);
+        if (generation !== completionsGenerationRef.current) return;
         setWorkspaceFiles(files || []);
         setWorkspaceSkills(skills || []);
-        loadedRepoRef.current = repository || "__default__";
+        loadedRepoRef.current = key;
       } catch (err) {
+        if (generation !== completionsGenerationRef.current) return;
         console.warn("Failed to load completions:", err);
         setWorkspaceFiles([]);
+        setWorkspaceSkills([]);
+      } finally {
+        if (generation === completionsGenerationRef.current) loadingRepoRef.current = null;
       }
     }, [repository]);
 
     // 当切换工作区 repository 时，立即清空旧工作区文件，并强制刷新新工作区数据
     useEffect(() => {
+      loadedRepoRef.current = null;
+      loadingRepoRef.current = null;
       setWorkspaceFiles([]);
-      loadCompletions(true);
+      setWorkspaceSkills([]);
+      void loadCompletions(true);
+      return () => { completionsGenerationRef.current += 1; };
     }, [repository, loadCompletions]);
 
     // 同步外部 value 变化（如编辑消息回填或清除）
     useEffect(() => {
-      if (value !== undefined) {
-        setInternalValue(value);
-        if (value) {
-          setTimeout(() => {
-            internalTextareaRef.current?.focus();
-          }, 40);
-        }
-      }
+      if (value === undefined) return;
+      setInternalValue(value);
+      if (!value) return;
+      const timer = setTimeout(() => internalTextareaRef.current?.focus(), 40);
+      return () => clearTimeout(timer);
     }, [value]);
 
     const currentText = value !== undefined && onChange ? value : internalValue;
@@ -422,7 +442,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       setInternalValue(e.target.value);
-      setCursorPos(e.target.selectionStart || e.target.value.length);
+      setCursorPos(e.target.selectionStart ?? e.target.value.length);
       if (dismissedTrigger !== null && triggerStart !== dismissedTrigger) {
         setDismissedTrigger(null);
       }
@@ -432,6 +452,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     };
 
     const processIncomingFile = useCallback((file: File) => {
+      setAttachmentError("");
       selectedFileRef.current = file;
       setSelectedFile(file);
       setSelectedImage(null);
@@ -516,6 +537,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     const handleRemoveFile = (e: React.MouseEvent) => {
       e.stopPropagation();
+      if (submittingRef.current) return;
+      setAttachmentError("");
       selectedFileRef.current = null;
       setSelectedImage(null);
       setSelectedFile(null);
@@ -529,6 +552,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       if ((!trimmed && !selectedFile) || disabled || isBusy || isPreparing || submittingRef.current) return;
       submittingRef.current = true;
       setIsSubmitting(true);
+      setAttachmentError("");
       let combinedPrompt = trimmed;
       let displayText = trimmed;
       const currentAttachment = selectedFile;
@@ -586,12 +610,19 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           }
         } catch (err) {
           console.error("Failed to process attached file:", err);
+          submittingRef.current = false;
+          if (mountedRef.current) {
+            setAttachmentError(t("无法读取附件，请重新选择文件后重试。"));
+            setIsSubmitting(false);
+          }
+          return;
         } finally {
-          setIsPreparing(false);
+          if (mountedRef.current) setIsPreparing(false);
         }
       }
 
       try {
+        if (!mountedRef.current) return;
         if (onSubmit) {
           const accepted = await onSubmit(combinedPrompt, {
             files: currentAttachment ? [currentAttachment] : [],
@@ -600,10 +631,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             displayText,
             mode: (isExecuting || isWorking) ? "steer" : undefined,
           });
-          if (accepted === false) return;
+          if (accepted === false || !mountedRef.current) return;
         }
 
         setInternalValue("");
+        onChange?.({ target: { value: "" } } as React.ChangeEvent<HTMLTextAreaElement>);
+        setCursorPos(0);
+        setDismissedTrigger(null);
         selectedFileRef.current = null;
         setSelectedImage(null);
         setSelectedFile(null);
@@ -611,11 +645,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         console.error("Failed to send message:", error);
       } finally {
         submittingRef.current = false;
-        setIsSubmitting(false);
+        if (mountedRef.current) setIsSubmitting(false);
       }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      restProps.onKeyDown?.(e);
+      if (e.defaultPrevented) return;
       if (showSuggestions && suggestions.length > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
@@ -658,7 +694,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     return (
       <motion.div
         layoutId={layoutId || undefined}
-        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: reduceMotion ? 0 : 0.38, ease: [0.22, 1, 0.36, 1] }}
         className={`prompt-box-container ${compact ? "compact" : "landing"} ${disabled ? "disabled" : ""} ${isDraggingOver ? "dragging-over" : ""} ${className}`}
         onClick={() => {
           if (!disabled && !isBusy) {
@@ -817,9 +853,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           )}
         </AnimatePresence>
 
+        {attachmentError && <p role="alert" className="prompt-box-attachment-error">{attachmentError}</p>}
         {/* Textarea Input */}
         <div className="prompt-box-textarea-row">
           <textarea
+            {...restProps}
             ref={(el) => {
               internalTextareaRef.current = el;
               if (typeof forwardedRef === "function") forwardedRef(el);
@@ -857,7 +895,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             placeholder={placeholder}
             disabled={disabled || isBusy || isPreparing || isSubmitting}
             className="prompt-box-textarea"
-            {...restProps}
           />
         </div>
 
@@ -875,7 +912,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               className="prompt-box-icon-btn"
               title={t("添加文本、代码（.ipynb/.py等）或图片附件")}
               aria-label={t("添加文本、代码或图片附件")}
-              disabled={disabled || isBusy || isPreparing}
+              disabled={disabled || isBusy || isPreparing || isSubmitting}
             >
               <Paperclip size={compact ? 15 : 18} />
             </button>

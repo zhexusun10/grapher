@@ -1,5 +1,8 @@
 // Keys retain the existing Chinese UI copy so the Chinese version stays unchanged.
 export const en: Record<string, string> = {
+  "对话正在创建，请稍后再删除。": "This conversation is being created. Wait before deleting it.",
+  "无法读取附件，请重新选择文件后重试。": "The attachment could not be read. Select the file again and retry.",
+  "此对话不属于当前工作区，请在对应工作区中打开。": "This conversation belongs to another workspace. Open it in its own workspace.",
   "项目绑定已失效，请重新选择目录。": "The project binding is no longer valid. Please select the directory again.",
   "正在确认项目绑定，请稍后重试。": "Checking the project binding. Please try again shortly.",
   "发布期间不能介入节点，请等待发布结束或处理发布失败。": "Nodes cannot be changed during publication. Wait for publication to finish or resolve the failure.",
@@ -31,6 +34,7 @@ export const en: Record<string, string> = {
   "无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。": "The Pi session for this message could not be found. Reload the conversation and try again.",
   "请等待当前执行结束后再修改初始消息。": "Wait for the current execution to finish before editing the initial message.",
   "关闭错误提示": "Dismiss error",
+  "关闭提示": "Dismiss notification",
   "恢复进行中的规划": "Recovered active planning",
   "已连接正在进行的规划，活动会自动更新。": "Connected to the active planning session. Activity will update automatically.",
   "负责判断任务走 Serial 还是 Graph。推荐选择小型、低延迟模型，思维链默认关闭。": "Decides whether a task uses Serial or Graph. A small, low-latency model is recommended. Reasoning is off by default.",

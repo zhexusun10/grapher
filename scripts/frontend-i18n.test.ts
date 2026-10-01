@@ -121,6 +121,24 @@ test("application errors are localized without changing the Chinese version", ()
   }
 });
 
+test("provider errors include actionable hints and role localization", () => {
+  const errZh = localizeError("Partitioner failed: 402: Insufficient Balance (request_id: 123)", "zh-CN");
+  assert.ok(errZh.includes("任务分片器 (Partitioner) 失败: 402: Insufficient Balance"));
+  assert.ok(errZh.includes("余额不足或额度耗尽"));
+
+  const errEn = localizeError("Partitioner failed: 402: Insufficient Balance (request_id: 123)", "en");
+  assert.ok(errEn.includes("Partitioner failed: 402: Insufficient Balance"));
+  assert.ok(errEn.includes("Insufficient Balance"));
+  assert.ok(errEn.includes("Tip:"));
+
+  const authZh = localizeError("Planner failed: 401: Invalid API Key", "zh-CN");
+  assert.ok(authZh.includes("任务规划器 (Planner) 失败:"));
+  assert.ok(authZh.includes("认证失败或 API Key 无效"));
+
+  const abortZh = localizeError("Partitioner failed: Pi exited with exit code: 0xc0000409", "zh-CN");
+  assert.ok(abortZh.includes("子进程异常退出 (0xc0000409)"));
+});
+
 for (const [systemLanguage, preference] of [["zh-CN", "en"], ["en-US", "zh-CN"], ["fr-FR", "auto"]]) {
   test(`settings language ${preference} overrides ${systemLanguage} after reload`, () => {
     const output = execFileSync(process.execPath, ["scripts/fixtures/frontend-i18n-smoke.mjs", systemLanguage, preference], { encoding: "utf8", timeout: 30_000 });

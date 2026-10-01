@@ -4,6 +4,8 @@ import { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillI
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
+const filesRequests = new Map<string, number>();
+const skillsRequests = new Map<string, number>();
 
 async function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   let response: Response;
@@ -14,7 +16,8 @@ async function request<T>(command: string, body: Record<string, unknown> = {}, s
       body: JSON.stringify({ ...body, compact: true, detail: "metadata" }),
       signal,
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     throw new Error(t("无法连接后端，请在终端运行 npm run backend。"));
   }
   const data = await response.json().catch(() => {
@@ -213,10 +216,12 @@ export const runtimeService = {
     if (!forceRefresh && filesCache.has(key)) {
       return filesCache.get(key)!;
     }
+    const ticket = (filesRequests.get(key) ?? 0) + 1;
+    filesRequests.set(key, ticket);
     try {
       const res = await request<{ files: string[] }>("list_files", repository ? { repository } : {});
       const files = res?.files || [];
-      filesCache.set(key, files);
+      if (filesRequests.get(key) === ticket) filesCache.set(key, files);
       return files;
     } catch (err) {
       console.warn("Failed to list files:", err);
@@ -226,15 +231,15 @@ export const runtimeService = {
   listSkills: async (repository?: string, forceRefresh = false): Promise<SkillItem[]> => {
     const key = repository || "__default__";
     if (!forceRefresh && skillsCache.has(key)) {
-      const cached = skillsCache.get(key)!;
-      if (cached.length > 0) return cached;
+      return skillsCache.get(key)!;
     }
+    const ticket = (skillsRequests.get(key) ?? 0) + 1;
+    skillsRequests.set(key, ticket);
     try {
       const res = await request<{ skills: SkillItem[] }>("list_skills", repository ? { repository } : {});
       const skills = res?.skills || [];
-      if (skills.length > 0) {
-        skillsCache.set(key, skills);
-      }
+      // An empty refresh is authoritative too; removed skills must stay removed.
+      if (skillsRequests.get(key) === ticket) skillsCache.set(key, skills);
       return skills;
     } catch (err) {
       console.warn("Failed to list skills:", err);

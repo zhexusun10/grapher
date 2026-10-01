@@ -729,10 +729,14 @@ impl Runtime {
             .state
             .executions
             .iter()
-            .any(|execution| execution.node == node && execution.after.is_some())
+            .any(|execution| {
+                execution.node == node
+                    && (execution.after.is_some() || execution.status == "failed")
+            })
         {
-            return Err("No completed node session to continue; revise the plan instead".into());
+            return Err("No previous node session to continue; revise the plan instead".into());
         }
+        // Failed executions also retain a session, even without a result head.
         // A follow-up continues this node's session; its descendants are only
         // recomputed if this run actually changes the node's result.
         self.validate_invalidation(node)?;
@@ -1102,7 +1106,7 @@ impl Runtime {
                                 && execution.completed_at.is_some()
                                 && anchor.is_none_or(|id| execution.id == id)
                         })
-                        .ok_or("No completed node session to continue")?,
+                        .ok_or("No previous node session to continue")?,
                 )
             } else {
                 None
@@ -1418,7 +1422,7 @@ impl Runtime {
     }
 
     pub fn apply_feedback(&mut self, from: &str, output: &str) -> Result<(), String> {
-        let revise = engine::feedback(output)?;
+        let send_feedback = engine::feedback(output)?;
         let edges: Vec<_> = self
             .state
             .graph
@@ -1428,7 +1432,7 @@ impl Runtime {
             .cloned()
             .collect();
         for edge in edges {
-            if revise
+            if send_feedback
                 && self
                     .state
                     .feedback_counts
@@ -1457,9 +1461,9 @@ impl Runtime {
             self.emit(EventKind::Feedback {
                 from: edge.from,
                 to: edge.to.clone(),
-                accepted: !revise,
+                accepted: !send_feedback,
             })?;
-            if revise {
+            if send_feedback {
                 self.emit(EventKind::Invalidated {
                     nodes: downstream(&self.state.graph, &edge.to)
                         .into_iter()

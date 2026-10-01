@@ -1,5 +1,5 @@
 import { t } from "../../i18n";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { motion } from "motion/react";
 import { Check, X } from "lucide-react";
 import { Graph, emptyGraph } from "../../types";
@@ -23,12 +23,14 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
   onSave,
   onError,
 }) => {
-  const [editorText, setEditorText] = useState("");
+  const [editorText, setEditorText] = useState(() => JSON.stringify(initialGraph, null, 2));
+  const wasOpen = useRef(isOpen);
 
-  useEffect(() => {
-    if (isOpen) {
-      setEditorText(JSON.stringify(initialGraph, null, 2));
-    }
+  useLayoutEffect(() => {
+    // Polling may deliver a new graph object while the user is typing.
+    // Only opening a new editor session initializes its draft.
+    if (isOpen && !wasOpen.current) setEditorText(JSON.stringify(initialGraph, null, 2));
+    wasOpen.current = isOpen;
   }, [isOpen, initialGraph]);
 
   useEffect(() => {

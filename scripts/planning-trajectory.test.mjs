@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-test('separates rejected graph attempts, successful mutations and process outcome', () => {
+for (const appliedField of ['applied', 'mutationApplied']) test(`separates graph attempts and process outcome (${appliedField})`, () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-trajectory-'));
   try {
     const events = [{ type: 'grapher_process_started', timestamp: 1000 }];
@@ -15,7 +15,8 @@ test('separates rejected graph attempts, successful mutations and process outcom
         result: { content: [{ type: 'text', text: JSON.stringify(mutation) }], ...(diagnosticCodes ? { details: { diagnosticCodes } } : {}) } });
     }
     call('explore', 'bash', 10, 30, {}, true);
-    const rejected = { mutationApplied: false, diagnostics: [{ code: 'mutation-input' }] };
+    const topology = { nodes: ['build'], edges: [] };
+    const rejected = { [appliedField]: false, topology, diagnostics: [{ code: 'mutation-input' }] };
     call('a', 'node', 20, 25, rejected, true);
     call('b', 'node', 40, 41, rejected, true);
     events.push({ type: 'grapher_process_exited', success: true, elapsedMs: 100 });
@@ -31,8 +32,8 @@ test('separates rejected graph attempts, successful mutations and process outcom
     assert.equal(failed.longestGraphRejectionStreak, 2);
     assert.deepEqual(failed.graphDiagnostics, { 'mutation-input': 2 });
     assert.equal(failed.toolWallMs, 21, 'overlapping tools must not double count');
-    call('c', 'node', 60, 65, { mutationApplied: true });
-    call('d', 'edge', 70, 71, { mutationApplied: false, diagnostics: ['Redundant dependency'] }, true, ['E209']);
+    call('c', 'node', 60, 65, { [appliedField]: true, topology });
+    call('d', 'edge', 70, 71, { [appliedField]: false, topology, diagnostics: ['Redundant dependency'] }, true, ['E209']);
     const recovered = report();
     assert.equal(recovered.firstSuccessfulGraphMutationMs, 65);
     assert.equal(recovered.longestGraphRejectionStreak, 2);

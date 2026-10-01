@@ -69,23 +69,26 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
 
   const mounted = useRef(false);
   const activeId = useRef<string | undefined>(undefined);
+  const authGeneration = useRef(0);
+  const loginRevision = useRef(0);
+  const catalogGeneration = useRef(0);
+  const actionInFlight = useRef(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function load(refresh = false) {
+    const generation = ++catalogGeneration.current;
     setBusy(true);
     setError("");
     try {
       const result = await providerAuth.catalog(refresh);
-      if (mounted.current) {
+      if (mounted.current && generation === catalogGeneration.current) {
         setCatalog(result);
-        if (activeProvider) {
-          const updated = result.providers.find((p) => p.id === activeProvider.id);
-          if (updated) setActiveProvider(updated);
-        }
+        setActiveProvider(current => current ? result.providers.find(p => p.id === current.id) ?? current : null);
       }
     } catch (err) {
-      if (mounted.current) setError(String(err));
+      if (mounted.current && generation === catalogGeneration.current) setError(String(err));
     } finally {
-      if (mounted.current) setBusy(false);
+      if (mounted.current && generation === catalogGeneration.current && !actionInFlight.current) setBusy(false);
     }
   }
 
@@ -94,6 +97,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     void load();
     return () => {
       mounted.current = false;
+      authGeneration.current += 1;
+      catalogGeneration.current += 1;
+      if (copyTimer.current) clearTimeout(copyTimer.current);
       if (activeId.current) void providerAuth.cancel(activeId.current).catch(() => {});
     };
   }, []);
@@ -114,10 +120,14 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
 
+    const generation = authGeneration.current;
     const poll = async () => {
+      if (actionInFlight.current) { timer = setTimeout(poll, 700); return; }
+      const revision = loginRevision.current;
       try {
         const next = await providerAuth.poll(login.id);
-        if (stopped) return;
+        if (stopped || generation !== authGeneration.current) return;
+        if (revision !== loginRevision.current) { timer = setTimeout(poll, 700); return; }
         setLogin(next);
         if (next.status !== "pending") {
           activeId.current = undefined;
@@ -125,11 +135,11 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           timer = setTimeout(poll, 700);
         }
       } catch (err) {
-        if (!stopped) {
-          setError(String(err));
-          activeId.current = undefined;
-          setLogin(undefined);
-        }
+        if (stopped || generation !== authGeneration.current) return;
+        if (revision !== loginRevision.current) { timer = setTimeout(poll, 700); return; }
+        setError(String(err));
+        activeId.current = undefined;
+        setLogin(undefined);
       }
     };
 
@@ -141,6 +151,14 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   }, [login?.id, login?.status]);
 
   async function startLogin(p: ProviderInfo, method: "api_key" | "oauth") {
+    if (actionInFlight.current) return;
+    const generation = ++authGeneration.current;
+    loginRevision.current += 1;
+    actionInFlight.current = true;
+    if (activeId.current) void providerAuth.cancel(activeId.current).catch(() => {});
+    activeId.current = undefined;
+    setAnswer("");
+    setShowKey(false);
     setBusy(true);
     setError("");
     setLogin(undefined);
@@ -149,32 +167,44 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
 
     try {
       const next = await providerAuth.login(p.id, method);
-      if (!mounted.current) {
+      if (!mounted.current || generation !== authGeneration.current) {
         await providerAuth.cancel(next.id);
         return;
       }
       activeId.current = next.id;
       setLogin(next);
     } catch (err) {
-      if (mounted.current) setError(String(err));
+      if (mounted.current && generation === authGeneration.current) setError(String(err));
     } finally {
-      if (mounted.current) setBusy(false);
+      if (generation === authGeneration.current) {
+        actionInFlight.current = false;
+        if (mounted.current) setBusy(false);
+      }
     }
   }
 
   async function respond() {
-    if (!login?.prompt) return;
+    if (!login?.prompt || !answer.trim() || actionInFlight.current) return;
+    const generation = authGeneration.current;
+    const revision = ++loginRevision.current;
+    actionInFlight.current = true;
     const value = answer;
     setAnswer("");
     setBusy(true);
     setError("");
     try {
       const next = await providerAuth.respond(login.id, login.prompt.id, value);
-      if (mounted.current) setLogin(next);
+      if (mounted.current && generation === authGeneration.current && revision === loginRevision.current) setLogin(next);
     } catch (err) {
-      if (mounted.current) setError(String(err));
+      if (mounted.current && generation === authGeneration.current) {
+        setAnswer(value);
+        setError(String(err));
+      }
     } finally {
-      if (mounted.current) setBusy(false);
+      if (generation === authGeneration.current) {
+        actionInFlight.current = false;
+        if (mounted.current) setBusy(false);
+      }
     }
   }
 
@@ -193,6 +223,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     setActionSuccess("");
     try {
       await providerAuth.logout(p.id);
+      if (!mounted.current) return;
       // Credentials are shared across roles. Retain selections so re-login
       // does not silently change any role's saved model configuration.
       setCatalog((prev) => {
@@ -210,10 +241,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
         };
       });
       await load();
-      if (activeProvider?.id === p.id) {
-        setLogin(undefined);
-        setActiveProvider(null);
-      }
+      if (!mounted.current) return;
+      setActiveProvider(current => current?.id === p.id ? null : current);
+      if (activeProvider?.id === p.id) setLogin(undefined);
       setActionSuccess(
         p.authSource === "env"
           ? t("已在 Grapher 中屏蔽 {0} ({1}) 的环境变量凭据。", p.name, p.id)
@@ -230,18 +260,29 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   }
 
   function handleCancelLogin() {
-    if (login) {
-      void providerAuth.cancel(login.id).catch(() => {});
-    }
+    authGeneration.current += 1;
+    loginRevision.current += 1;
+    const id = activeId.current || login?.id;
+    if (id) void providerAuth.cancel(id).catch(() => {});
+    activeId.current = undefined;
+    actionInFlight.current = false;
+    setBusy(false);
     setLogin(undefined);
     setActiveProvider(null);
     setAnswer("");
+    setShowKey(false);
   }
 
-  function copyText(text: string) {
-    navigator.clipboard.writeText(text);
-    setCopiedCode(true);
-    setTimeout(() => setCopiedCode(false), 2000);
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      if (!mounted.current) return;
+      setCopiedCode(true);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => { if (mounted.current) setCopiedCode(false); }, 2000);
+    } catch (error) {
+      if (mounted.current) setError(String(error));
+    }
   }
 
   const pending = login?.status === "pending";
@@ -470,6 +511,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
               {login.prompt.type === "select" ? (
                 <select
                   id="auth-answer"
+                  disabled={busy}
                   value={answer}
                   onChange={(e) => setAnswer(e.target.value)}
                   className="auth-input-field"
@@ -486,6 +528,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                 <div className="secret-input-wrap">
                   <input
                     id="auth-answer"
+                    disabled={busy}
                     type={
                       login.prompt.type === "secret" ||
                       login.prompt.type === "manual_code"

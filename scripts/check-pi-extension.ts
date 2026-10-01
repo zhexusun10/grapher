@@ -51,10 +51,31 @@ try {
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = extension.tools.get(name)!.definition;
     const args = validateToolArguments(tool, { type: "toolCall", id: "test", name, arguments: parameters });
-    return tool.execute("test", args, undefined, undefined, context);
+    const response = await tool.execute("test", args, undefined, undefined, context);
+    if (name === "node" || name === "edge") {
+      const feedback = JSON.parse(response.content[0].text);
+      const saved = JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"));
+      assert.equal(typeof feedback.applied, "boolean");
+      const hasWarnings = Object.hasOwn(feedback, "warnings");
+      assert.deepEqual(Object.keys(feedback), feedback.applied
+        ? ["applied", "topology", ...(hasWarnings ? ["warnings"] : [])]
+        : ["applied", "topology", "diagnostics"]);
+      assert.deepEqual(feedback.topology, {
+        nodes: saved.nodes.map((node: { name: string }) => node.name),
+        edges: saved.edges,
+      }, "Every result must describe the saved graph, never a rejected candidate or task text");
+      if (hasWarnings) {
+        assert.ok(Array.isArray(feedback.warnings));
+        assert.ok(feedback.warnings.length > 0, "Empty warnings must be omitted from the result");
+        assert.ok(feedback.warnings.every((warning: unknown) => typeof warning === "string"));
+      }
+    }
+    return response;
   }
   const node = (edit: Record<string, unknown>) => call("node", { nodes: [edit] });
   const edge = (edit: Record<string, unknown>) => call("edge", { edges: [edit] });
+  const feedbackWarning = (from: string, to: string, nodes: string[]) =>
+    `W303: If <FEEDBACK> from ${from} to ${to} is applied, the target and dependency descendants will be invalidated: ${nodes.join(", ")}. Completed results must be recomputed; ${to} continues its session/workspace. Nodes outside this set are unaffected.`;
   // Regression: run 72feb3ad repeatedly supplied both single and batch fields.
   // Verify the actual provider schema, then exercise nullable wire arguments
   // through Pi's validator and the real compiler (not direct execute alone).
@@ -63,6 +84,7 @@ try {
     const wire = convertResponsesTools([tool])[0] as any;
     assert.equal(wire.strict, true);
     assert.equal(wire.description, tool.description);
+    assert.doesNotMatch(tool.description, /Returns applied|topology|warnings|\bplan\b|executionBatches|dependencyLayers/);
     const key = name === "node" ? "nodes" : "edges";
     assert.deepEqual(Object.keys(wire.parameters.properties), [key]);
     assert.deepEqual(wire.parameters.required, [key]);
@@ -76,26 +98,32 @@ try {
   const nullableNodes = JSON.parse((await call("node", {
     nodes: [{ name: "nullable-build", task: "Build", delete: null }, { name: "nullable-review", task: "Review", delete: null }],
   })).content[0].text);
-  assert.equal(nullableNodes.mutationApplied, true);
+  assert.equal(nullableNodes.applied, true);
   const nullableEdge = JSON.parse((await call("edge", {
     edges: [{ from: "nullable-build", to: "nullable-review", relation: null, feedback: null, delete: null }],
   })).content[0].text);
-  assert.equal(nullableEdge.mutationApplied, true);
-  assert.equal(JSON.parse((await node({ name: "nullable-build", task: "Updated", delete: null })).content[0].text).mutationApplied, true);
+  assert.equal(nullableEdge.applied, true);
+  assert.equal(JSON.parse((await node({ name: "nullable-build", task: "Updated", delete: null })).content[0].text).applied, true);
   assert.equal(JSON.parse((await edge({
     from: "nullable-build", to: "nullable-review", relation: null, feedback: null, delete: true,
-  })).content[0].text).mutationApplied, true);
+  })).content[0].text).applied, true);
   await node({ name: "nullable-build", task: null, delete: true });
-  await node({ name: "nullable-review", delete: true });
+  const emptyGraph = JSON.parse((await node({ name: "nullable-review", delete: true })).content[0].text);
+  assert.equal(emptyGraph.applied, true, "Mutation checks are not final graph validation");
+  assert.deepEqual(emptyGraph.topology, { nodes: [], edges: [] });
+  assert.equal(emptyGraph.warnings, undefined);
   const firstMutation = await node({ name: "build", task: "Build it" });
   assert.deepEqual(Object.keys(firstMutation), ["content"]);
   const firstResult = JSON.parse(firstMutation.content[0].text);
-  assert.deepEqual(firstResult, { mutationApplied: true });
+  assert.deepEqual(firstResult, {
+    applied: true,
+    topology: { nodes: ["build"], edges: [] },
+  });
   await node({ name: "review", task: "Review it" });
   const beforeFeedback = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   const prematureFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true })).content[0].text);
-  assert.equal(prematureFeedback.mutationApplied, false);
-  assert.deepEqual(Object.keys(prematureFeedback), ["mutationApplied", "diagnostics"]);
+  assert.equal(prematureFeedback.applied, false);
+  assert.deepEqual(Object.keys(prematureFeedback), ["applied", "topology", "diagnostics"]);
   assert.match(prematureFeedback.diagnostics[0], /dependency path from build to review/);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeFeedback);
   const missingEndpoint = JSON.parse((await edge({ from: "build", to: "missing", feedback: false })).content[0].text);
@@ -103,7 +131,13 @@ try {
   assert.match(missingEndpoint.diagnostics[0], /Existing nodes: build, review/);
   const dependency = await edge({ from: "build", to: "review" });
   assert.deepEqual(Object.keys(dependency), ["content"]);
-  assert.deepEqual(JSON.parse(dependency.content[0].text), { mutationApplied: true });
+  assert.deepEqual(JSON.parse(dependency.content[0].text), {
+    applied: true,
+    topology: {
+      nodes: ["build", "review"],
+      edges: [{ from: "build", to: "review", relation: "", feedback: false }],
+    },
+  });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges[0].feedback, false);
   const before = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
   const rejected = await edge({ from: "review", to: "build", feedback: false });
@@ -111,7 +145,7 @@ try {
   assert.deepEqual(rejected.details.diagnosticCodes, ["E101"]);
   assert.doesNotMatch(rejected.content[0].text, /E101/);
   const cycle = JSON.parse(rejected.content[0].text);
-  assert.equal(cycle.mutationApplied, false);
+  assert.equal(cycle.applied, false);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), before);
   assert.match(cycle.diagnostics[0], /build → review/);
   assert.match(cycle.diagnostics[0], /review → build/);
@@ -119,10 +153,29 @@ try {
   assert.deepEqual(await toolResultHook({ toolName: "edge", details: rejected.details, isError: false }), { isError: true });
   const accepted = await node({ name: "review", task: "Review it" });
   assert.equal(await toolResultHook({ toolName: "node", details: accepted.details, isError: false }), undefined);
-  assert.deepEqual(JSON.parse(accepted.content[0].text), { mutationApplied: true });
+  assert.equal(JSON.parse(accepted.content[0].text).applied, true);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), before);
-  const repairedFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true })).content[0].text);
-  assert.deepEqual(repairedFeedback, { mutationApplied: true });
+  const duplicateTask = await node({ name: "review", task: "Build it" });
+  const duplicateTaskFeedback = JSON.parse(duplicateTask.content[0].text);
+  assert.equal(duplicateTaskFeedback.applied, true);
+  assert.deepEqual(duplicateTaskFeedback.warnings, ["W301: Nodes build, review have identical task text; they may duplicate work. Confirm that this is intentional."]);
+  assert.equal(await toolResultHook({ toolName: "node", details: duplicateTask.details, isError: false }), undefined, "Duplicate tasks are advisory, not rejected edits");
+  assert.equal(JSON.parse((await node({ name: "review", task: "Review it" })).content[0].text).warnings, undefined);
+  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), before);
+  const warning = await node({ name: "review", task: "Review it; return <FEEDBACK> when needed." });
+  const warningFeedback = JSON.parse(warning.content[0].text);
+  assert.equal(warningFeedback.applied, true);
+  assert.deepEqual(warningFeedback.warnings, ["W302: review mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback."]);
+  assert.equal(await toolResultHook({ toolName: "node", details: warning.details, isError: false }), undefined, "Warnings do not reject mutations");
+  const repaired = await edge({ from: "review", to: "build", relation: "Send an additional instruction", feedback: true });
+  const repairedFeedback = JSON.parse(repaired.content[0].text);
+  assert.equal(repairedFeedback.applied, true);
+  assert.deepEqual(repairedFeedback.topology.edges, [
+    { from: "build", to: "review", relation: "", feedback: false },
+    { from: "review", to: "build", relation: "Send an additional instruction", feedback: true },
+  ]);
+  assert.deepEqual(repairedFeedback.warnings, [feedbackWarning("review", "build", ["build", "review"])], "Adding a feedback route replaces the missing-route warning with its conditional invalidation scope");
+  assert.equal(await toolResultHook({ toolName: "edge", details: repaired.details, isError: false }), undefined, "Feedback scope warnings do not reject mutations");
   const portableGraph = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   for (const task of [`Work at ${repository}.`, `Read ${repository}/sample.txt`]) {
     await node({ name: "build", task });
@@ -136,7 +189,10 @@ try {
   }
   assert.equal(readFileSync(join(repository, "changed"), "utf8"), "changed");
   assert.equal(extension.handlers.has("context"), false, "Planner must preserve file contents and tool results");
-  await node({ name: "build", delete: true });
+  const deletedBuild = JSON.parse((await node({ name: "build", delete: true })).content[0].text);
+  assert.deepEqual(deletedBuild.topology, { nodes: ["review"], edges: [] });
+  assert.equal(deletedBuild.warnings.length, 1);
+  assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target removes the scope warning and exposes the missing-route warning again");
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
   // Each tool compiles its own batch once.
   const compilerPath = process.env.GRAPHER_COMPILER_PATH!;
@@ -170,10 +226,17 @@ fn main() {
     { from: "integration", to: "verification" },
   ];
   const nodeBatch = JSON.parse((await call("node", { nodes: batchNodes })).content[0].text);
-  assert.deepEqual(nodeBatch, { mutationApplied: true });
+  assert.equal(nodeBatch.applied, true);
+  assert.deepEqual(nodeBatch.topology, { nodes: batchNodes.map(node => node.name), edges: [] });
+  assert.equal(nodeBatch.warnings, undefined);
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
   const batchResult = JSON.parse((await call("edge", { edges: batchEdges })).content[0].text);
-  assert.deepEqual(batchResult, { mutationApplied: true });
+  assert.equal(batchResult.applied, true);
+  assert.deepEqual(batchResult.topology, {
+    nodes: batchNodes.map(node => node.name),
+    edges: batchEdges.map(edge => ({ ...edge, relation: "", feedback: false })),
+  });
+  assert.equal(batchResult.warnings, undefined);
   assert.equal(readFileSync(compilerCalls, "utf8"), "compile\ncompile\n");
   const batchSaved = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   assert.equal(JSON.parse(batchSaved).originalGoal, "Batch fixture");
@@ -183,12 +246,12 @@ fn main() {
     { from: "contract", to: "verification", relation: "Verification uses the contract" },
   ] });
   const redundantResult = JSON.parse(redundant.content[0].text);
-  assert.equal(redundantResult.mutationApplied, false);
+  assert.equal(redundantResult.applied, false);
   assert.equal(redundantResult.diagnostics.length, 2);
   assert.deepEqual(redundant.details.diagnosticCodes, ["E209", "E209"]);
   assert.match(redundantResult.diagnostics[0], /contract → parser → integration/);
   assert.equal(redundantResult.retryHint, undefined);
-  assert.deepEqual(Object.keys(redundantResult), ["mutationApplied", "diagnostics"]);
+  assert.deepEqual(Object.keys(redundantResult), ["applied", "topology", "diagnostics"]);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
   assert.deepEqual(await toolResultHook({ toolName: "edge", details: redundant.details, isError: false }), { isError: true });
   for (const [toolName, edits, code] of [
@@ -205,10 +268,10 @@ fn main() {
   ] as const) {
     const response = await call(toolName, edits);
     const rejectedBatch = JSON.parse(response.content[0].text);
-    assert.equal(rejectedBatch.mutationApplied, false);
+    assert.equal(rejectedBatch.applied, false);
     assert.equal(typeof rejectedBatch.diagnostics[0], "string");
     assert.equal(response.details.diagnosticCodes[0], code);
-    assert.deepEqual(Object.keys(rejectedBatch), ["mutationApplied", "diagnostics"]);
+    assert.deepEqual(Object.keys(rejectedBatch), ["applied", "topology", "diagnostics"]);
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
     assert.deepEqual(await toolResultHook({ toolName, details: response.details, isError: false }), { isError: true });
   }
@@ -225,7 +288,7 @@ fn main() {
   ] as const) {
     const response = await call(toolName, { [key]: edits });
     const rejectedDuplicate = JSON.parse(response.content[0].text);
-    assert.equal(rejectedDuplicate.mutationApplied, false);
+    assert.equal(rejectedDuplicate.applied, false);
     assert.deepEqual(response.details.diagnosticCodes, ["duplicate-target"]);
     assert.match(rejectedDuplicate.diagnostics[0], new RegExp(`${key}\\[2\\]`));
     assert.ok(rejectedDuplicate.diagnostics[0].includes(`${key}[1]`));
@@ -256,7 +319,7 @@ fn main() {
   }
   // A single edit uses the same array interface.
   const single = JSON.parse((await node({ name: "single", task: "Single task" })).content[0].text);
-  assert.equal(single.mutationApplied, true);
+  assert.equal(single.applied, true);
   await node({ name: "single", delete: true });
   // Reversing an edge creates a temporary cycle; only the final batch must compile.
   const rewired = JSON.parse((await call("edge", { edges: [
@@ -265,34 +328,45 @@ fn main() {
     { from: "parser", to: "integration", delete: true },
     { from: "verification", to: "parser", feedback: true },
   ] })).content[0].text);
-  assert.equal(rewired.mutationApplied, true);
-  assert.deepEqual(rewired, { mutationApplied: true });
+  assert.equal(rewired.applied, true);
+  assert.deepEqual(rewired.topology, {
+    nodes: batchNodes.map(node => node.name),
+    edges: [
+      { from: "contract", to: "search", relation: "", feedback: false },
+      { from: "search", to: "integration", relation: "", feedback: false },
+      { from: "integration", to: "verification", relation: "", feedback: false },
+      { from: "parser", to: "contract", relation: "", feedback: false },
+      { from: "verification", to: "parser", relation: "", feedback: true },
+    ],
+  });
+  assert.deepEqual(rewired.warnings, [feedbackWarning("verification", "parser", ["contract", "integration", "parser", "search", "verification"])]);
   // Node deletion removes incident edges; other targets can be replaced atomically.
   assert.equal(JSON.parse((await call("node", { nodes: [
     { name: "contract", delete: true },
     { name: "search", task: "Final replacement" },
-  ] })).content[0].text).mutationApplied, false);
+  ] })).content[0].text).applied, false);
   // The failed mutation leaves the saved graph untouched; add a direct path
   // around the deleted node in the same batch before removing it.
   assert.equal(JSON.parse((await call("edge", { edges: [
     { from: "parser", to: "integration" },
     { from: "parser", to: "contract", delete: true },
-  ] })).content[0].text).mutationApplied, true);
+  ] })).content[0].text).applied, true);
   assert.equal(JSON.parse((await call("node", { nodes: [
     { name: "contract", delete: true },
     { name: "search", task: "Final replacement" },
-  ] })).content[0].text).mutationApplied, true);
+  ] })).content[0].text).applied, true);
   const afterDeletion = JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"));
   assert.equal(afterDeletion.nodes.find((n: { name: string }) => n.name === "search").task, "Final replacement");
   assert.ok(afterDeletion.edges.every((e: { from: string; to: string }) => e.from !== "contract" && e.to !== "contract"));
   // A dependency and its feedback route can be created in one edge batch.
-  assert.equal(JSON.parse((await call("node", { nodes: [{ name: "fix", task: "Fix" }, { name: "check", task: "Check" }] })).content[0].text).mutationApplied, true);
+  assert.equal(JSON.parse((await call("node", { nodes: [{ name: "fix", task: "Fix" }, { name: "check", task: "Check" }] })).content[0].text).applied, true);
   assert.equal(JSON.parse((await call("edge", { edges: [
     { from: "check", to: "fix", feedback: true }, { from: "fix", to: "check" },
-  ] })).content[0].text).mutationApplied, true);
+  ] })).content[0].text).applied, true);
   const beforeUnavailable = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   process.env.GRAPHER_COMPILER_PATH = join(root, "missing-compiler");
   const unavailable = await call("node", { nodes: [{ name: "fix", task: "Changed" }] });
+  assert.equal(JSON.parse(unavailable.content[0].text).applied, false);
   assert.deepEqual(unavailable.details.diagnosticCodes, ["compiler-unavailable"]);
   assert.match(unavailable.content[0].text, /missing-compiler ENOENT/);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeUnavailable);

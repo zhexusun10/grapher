@@ -9,6 +9,10 @@ type NodeEdit = { name: string; task?: string; delete?: boolean };
 type EdgeEdit = { from: string; to: string; relation?: string; feedback?: boolean; delete?: boolean };
 type Diagnostic = { code: string; message: string };
 
+function topology(graph: Graph) {
+  return { nodes: graph.nodes.map(node => node.name), edges: graph.edges };
+}
+
 function duplicateTargets(field: "nodes" | "edges", targets: string[]): Diagnostic[] {
   const firstIndex = new Map<string, number>();
   const diagnostics: Diagnostic[] = [];
@@ -58,7 +62,8 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     const saved: Graph = JSON.parse(readFileSync(graphPath, "utf8"));
     const graph: Graph = structuredClone(saved);
     const rejected = (diagnostics: Diagnostic[]) => result(JSON.stringify({
-      mutationApplied: false,
+      applied: false,
+      topology: topology(saved),
       diagnostics: diagnostics.map(diagnostic => diagnostic.message),
     }), diagnostics.map(diagnostic => diagnostic.code));
     const inputErrors = change(graph);
@@ -71,7 +76,11 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     if (output.diagnostics?.length) return rejected(output.diagnostics);
     if (!output.plan) return rejected([{ code: "compiler-response", message: "Compiler returned no plan." }]);
     writeFileSync(graphPath, JSON.stringify(graph));
-    return result(JSON.stringify({ mutationApplied: true }));
+    return result(JSON.stringify({
+      applied: true,
+      topology: topology(graph),
+      ...(output.plan.warnings?.length ? { warnings: output.plan.warnings } : {}),
+    }));
   }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node",
@@ -96,7 +105,11 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   pi.registerTool(defineTool({
     name: "edge", label: "Graph edge",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
-    description: `Create, replace, or delete directed edges between existing nodes. Supply a nonempty 'edges' array; use one element for a single edit. Each ordered pair may appear only once per call. There is one edge per ordered pair. Edits are applied in order, then compiled once; a failure leaves the saved graph unchanged. Omitted or false feedback creates a dependency: the target waits for the source to complete successfully and receives its filesystem state. True feedback allows a descendant to choose whether to send an additional instruction to a dependency ancestor; it adds no execution ordering or filesystem input.`,
+    description: `Create, replace, or delete directed edges between existing nodes. Supply a nonempty edges array; use one element for a single edit. Each ordered pair may appear only once per call. There is one edge per ordered pair.
+An edge with feedback omitted or false is a dependency edge. For a dependency edge A -> B, read it as “B depends on A.” The target waits for the source to complete successfully and receives its filesystem state. Dependency filesystem states are merged when a node has multiple dependencies.
+Dependency edges must form a DAG.
+An edge with feedback: true is a feedback edge. For a feedback edge B -> A, B must be a descendant of A in the dependency DAG. Feedback edges do not participate in dependency ordering or cycle detection, and they provide no filesystem input. They allow a descendant to optionally send additional information to a dependency ancestor.
+Edits are applied in order, then compiled once; a failure leaves the saved graph unchanged.`,
     parameters: Type.Object({
       edges: Type.Array(Type.Object({
         from: Type.String({ description: "Existing source node name." }),

@@ -24,6 +24,36 @@ Opposite directions are distinct ordered pairs. Dependency and feedback edits in
 
 Compiler validation is not task execution or model-quality assessment. Final Graph execution still requires a valid plan and approval.
 
+## Mutation feedback
+
+Both tools return `applied` and a `topology` snapshot of the **saved graph after the call**, not just the edited targets. `topology.nodes` contains all node names; `topology.edges` contains all edges with `from`, `to`, `relation`, and explicit `feedback`. Task text, the original goal, and runtime node status are not repeated.
+
+A successful call returns `applied: true` and the saved topology. It includes `warnings` as readable strings only when the compiler emits at least one warning; otherwise the field is omitted:
+
+```json
+{
+  "applied": true,
+  "topology": {
+    "nodes": ["build", "review"],
+    "edges": [{"from": "build", "to": "review", "relation": "Review implementation", "feedback": false}]
+  }
+}
+```
+
+A rejected call returns `applied: false`, the **unchanged saved topology**, and `diagnostics` as readable strings. The diagnostics describe the rejected candidate edits, not the returned topology. This also applies to duplicate-target errors and compiler failures; reporting the saved topology does not invoke the compiler a second time. Rejections are marked as tool errors; successful calls with warnings are not.
+
+The compiler's execution plan stays internal. Derived dependency layers, roots, and terminals are not repeated in tool results; the topology already contains the graph structure.
+
+Compiler warnings are advisory and do not reject otherwise valid edits:
+
+- `W301`: distinct nodes have exactly identical task text. The warning lists their names so the Planner can confirm whether repeating the work is intentional; no semantic similarity or file-write conflict is inferred.
+- `W302`: a task mentions `<FEEDBACK>` but its node has no outgoing feedback edge, so the marker cannot send an additional instruction.
+- `W303`: each feedback edge reports what happens **if its source sends `<FEEDBACK>` and the feedback is applied**. It lists the target and all dependency descendants that would be invalidated, including the feedback source when reachable. Completed results in this set must be recomputed; the target continues its existing session/workspace. Other branches stay valid. Feedback edges are not traversed when computing this set. This describes the effect without judging the scope's size.
+
+The feedback protocol uses an exact standalone final line: `<ACCEPT>` sends no additional instruction; `<FEEDBACK>` sends the preceding instruction to the edge's target. File-write conflict detection is not part of these warnings.
+
+`applied: true` means the request passed mutation validation and was saved, even if it made no change. Mutation compilation uses `finalCheck: false`, so it can accept an empty graph during editing. Success does not mean final validation, approval, or execution has occurred.
+
 ## Native inspection tools
 
 `read` uses Pi's native implementation, description, and offset/limit behavior. `bash` uses Pi's native backend without write-command filtering or implicit `errexit`/`pipefail`. There are no file `edit`/`write` tools, automatic project context files, or automatically discovered skills/extensions for the Planner.

@@ -40,10 +40,12 @@ const reports = files.map(file => {
         const text = e.result?.content?.find(c => c.type === 'text')?.text;
         let mutation;
         try { mutation = JSON.parse(text); } catch {}
-        if (mutation?.mutationApplied === true && !call.isError) {
+        // Retained logs may predate the Planner's applied field.
+        const applied = mutation?.applied ?? mutation?.mutationApplied;
+        if (applied === true && !call.isError) {
           firstSuccessfulGraphMutationMs ??= call.endMs;
           graphRejectionStreak = 0;
-        } else if (mutation?.mutationApplied === false) {
+        } else if (applied === false) {
           lastGraphFailure = mutation.diagnostics ?? [];
           graphRejectionStreak++;
           longestGraphRejectionStreak = Math.max(longestGraphRejectionStreak, graphRejectionStreak);
@@ -76,7 +78,7 @@ const reports = files.map(file => {
     firstGraphMutationMs: calls.find(c => ['node', 'edge'].includes(c.name))?.startMs ?? null,
     firstSuccessfulGraphMutationMs, longestGraphRejectionStreak, graphDiagnostics, lastGraphFailure,
     processSuccess: end?.success ?? null,
-    outcomeNote: 'Process exit success is not graph compilation or task success. firstGraphMutationMs measures the first attempt; firstSuccessfulGraphMutationMs requires mutationApplied=true.',
+    outcomeNote: 'Process exit success is not graph compilation or task success. firstGraphMutationMs measures the first attempt; firstSuccessfulGraphMutationMs requires applied=true and no tool error.',
     toolWallMs, nonToolWallMs: elapsedMs == null ? null : Math.max(0, elapsedMs - toolWallMs),
     timingNote: 'Receipt timestamps measure host-observed activity. Non-tool time includes model generation, network, startup and orchestration; it is not pure reasoning time.',
     tools: calls.length, toolErrors: calls.filter(c => c.isError).length, incompleteCalls: pending.size, usage, calls,

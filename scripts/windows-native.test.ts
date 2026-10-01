@@ -18,6 +18,9 @@ const windows = process.platform === 'win32';
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms));
+const safeRm = async (target: string) => {
+  await rm(target, { recursive: true, force: true, maxRetries: 40, retryDelay: 250 });
+};
 
 test('Planner uses the same unmodified Bash definition and semantics as pinned Pi', { skip: !windows }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-bash-'));
@@ -27,6 +30,7 @@ test('Planner uses the same unmodified Bash definition and semantics as pinned P
     await mkdir(workspace);
     process.chdir(workspace);
     const loaded = await loadExtensions([join(root, 'backend/resources/planner.ts')], workspace);
+    process.chdir(previous);
     assert.deepEqual(loaded.errors, []);
     const planner = loaded.extensions[0].tools.get('bash')!.definition;
     const builtin = createBashToolDefinition(workspace);
@@ -58,12 +62,12 @@ test('Planner uses the same unmodified Bash definition and semantics as pinned P
         assert.equal(input.command, command);
       }
       await assert.rejects(() => tool.execute('nonzero', { command: 'exit 7' }, undefined, undefined, context), /exited with code 7/);
-      await assert.rejects(() => tool.execute('timeout', { command: 'sleep 5', timeout: 0.1 }, undefined, undefined, context), /timed out/i);
+      await assert.rejects(() => tool.execute('timeout', { command: 'sleep 2', timeout: 0.1 }, undefined, undefined, context), /timed out/i);
     }
   } finally {
     process.chdir(previous);
-    await delay(100);
-    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await delay(200);
+    await safeRm(directory);
   }
 });
 
@@ -257,6 +261,6 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
     await killBackend();
     modelServer.closeAllConnections();
     await new Promise<void>(done => modelServer.close(() => done()));
-    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await safeRm(directory);
   }
 });

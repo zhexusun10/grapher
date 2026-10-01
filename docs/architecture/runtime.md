@@ -53,10 +53,10 @@ Short source locks cover Planner preparation/merge and approval. They do not ser
 
 ## Bounded feedback
 
-A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `<REVISE>`:
+A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `<FEEDBACK>`:
 
-- `<ACCEPT>` leaves the result accepted without starting a revision.
-- `<REVISE>` sends feedback to the graph's one explicit target. That node continues its session/workspace, and affected dependency results are invalidated and recomputed.
+- `<ACCEPT>` leaves the result accepted without sending an additional instruction.
+- `<FEEDBACK>` sends an additional instruction to the graph's one explicit target. That node continues its session/workspace; the target and its dependency descendants are invalidated, and completed results in that set are recomputed. Other branches remain valid.
 - A malformed verdict fails the execution.
 - Exceeding `maxFeedback` fails the source branch. The runtime caps the configured limit at 3; it does not allow an unbounded model loop.
 

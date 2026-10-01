@@ -746,13 +746,6 @@
 .chip-name {
   font-weight: 550;
 }
-.recovered-planning-section {
-  width: 100%;
-  max-width: 860px;
-  margin-left: auto;
-  margin-right: auto;
-  box-sizing: border-box;
-}
 
 .planning-summary-card {
   width: 100%;
@@ -1692,16 +1685,105 @@
   color: var(--status-danger);
 }
 
-/* 全局悬浮报错横幅容器 - 绝对定位于主内容区 (排除侧边栏) 顶部居中 */
+/* 全局悬浮横幅容器 - 绝对定位于主内容区 (排除侧边栏) 顶部居中，垂直堆叠不侵占页面流 */
 .floating-error-banner-container {
   position: absolute;
   top: 16px;
   left: 0;
   right: 0;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
   pointer-events: none;
   z-index: 99999;
+}
+
+/* 全局悬浮恢复规划横幅 (Floating Recovered Planning Banner) - 浮动胶囊风格，不侵占布局流 */
+.floating-recovered-banner {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  max-width: min(580px, calc(100% - 32px));
+  padding: 6px 12px 6px 10px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--brand-border, #BFDBFE);
+  border-radius: 9999px;
+  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.08), 0 4px 12px -2px rgba(37, 99, 235, 0.08);
+  color: var(--text-primary, #0F172A);
+  font-size: 12.5px;
+  line-height: 1.4;
+  pointer-events: auto;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+.floating-recovered-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--brand-subtle, #EFF6FF);
+  border: 1px solid rgba(37, 99, 235, 0.15);
+  color: var(--brand-default, #2563EB);
+  flex-shrink: 0;
+}
+
+.floating-recovered-spinner {
+  animation: banner-spin 1.2s linear infinite;
+}
+
+@keyframes banner-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.floating-recovered-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.floating-recovered-text {
+  margin: 0;
+  font-weight: 500;
+  color: var(--text-primary, #0F172A);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.floating-recovered-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #64748B);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 2px;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.floating-recovered-close:hover {
+  background: var(--bg-surface-hover, #F1F5F9);
+  color: var(--text-primary, #0F172A);
+}
+
+.floating-recovered-close:active {
+  transform: scale(0.92);
 }
 
 /* 全局悬浮报错横幅 (Floating Error Banner) - 浮动展示，不占用页面流，白底告警风格 */
