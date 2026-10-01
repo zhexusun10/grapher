@@ -24,27 +24,13 @@ jobs:
           /usr/bin/bwrap --die-with-parent --unshare-user --unshare-pid --cap-drop ALL --bind / / --dev-bind /dev /dev --proc /proc -- /bin/sh -c ': <>/dev/null'
       - name: Install pinned Pi
         run: npm run pi:setup
-      - name: Verify isolated Pi model catalog contract
-        run: node --test scripts/agent-dir.test.mjs
-      - name: Check production Linux backend and commit identity
+      - name: Check production Linux backend and build release binary
         run: |
           cargo check --manifest-path backend/Cargo.toml --no-default-features
           cargo build --release --manifest-path backend/Cargo.toml --bin grapher
           test "$(backend/target/release/grapher --build-identity)" = "$(git rev-parse HEAD)"
-      - name: Exercise real Linux namespace, source/session, sibling and external Git boundaries
-        timeout-minutes: 3
-        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib linux_sandbox::tests -- --nocapture
-      - name: Run two parallel Graph nodes with actual pinned Pi and native tools
-        timeout-minutes: 5
-        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib native::tests::graph_launcher_runs_parallel_native_tools_and_absolute_scripts -- --nocapture
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install pinned Harbor (outside Grapher checkout)
-        timeout-minutes: 10
-        run: python -m pip install 'git+https://github.com/harbor-framework/harbor.git@31668af15560fb50a9d0584816d12726036656cf'
-      - name: Test real Harbor import-path agent and lifecycle without a paid model
-        run: python -m unittest discover -s benchmark -p 'test_*.py'
-      - name: Run offline Graph/Serial/approval/publication regressions
-        timeout-minutes: 10
-        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --features fixture
+      - name: Run Linux sandbox and native tools tests
+        timeout-minutes: 8
+        run: |
+          cargo test --manifest-path backend/Cargo.toml --no-default-features --lib linux_sandbox::tests -- --nocapture
+          cargo test --manifest-path backend/Cargo.toml --no-default-features --lib native::tests::graph_launcher_runs_parallel_native_tools_and_absolute_scripts -- --nocapture

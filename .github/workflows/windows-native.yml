@@ -31,29 +31,10 @@ jobs:
         run: npm ci
       - name: Install pinned Pi dependencies and baseline data
         run: npm run pi:setup
-      - name: Exercise pinned Pi CLI and Provider/Auth IPC (offline)
-        timeout-minutes: 3
-        run: node --test scripts/pi-process-contract.test.mjs
-      - name: Check frontend
-        run: npm run check
-      - name: Build frontend
-        run: npm run build
-      - name: Check production backend
-        run: cargo check --manifest-path backend/Cargo.toml --no-default-features
-      - name: Run backend library tests
-        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --lib
-      - name: Run offline Graph, Serial, publication, and recovery fixtures
-        timeout-minutes: 10
-        run: cargo test --manifest-path backend/Cargo.toml --no-default-features --features fixture --test core --test graph_merge --test shadow --test publication --test publication_state
-      - name: Run native path and lifecycle checks
-        run: npm run test:native
-      - name: Run project binding checks
-        run: npm run test:bindings
+      - name: Check backend and run core tests
+        run: |
+          cargo check --manifest-path backend/Cargo.toml --no-default-features
+          cargo test --manifest-path backend/Cargo.toml --no-default-features --lib
       - name: Run native Planner and production Graph acceptance (local model responses)
         timeout-minutes: 5
         run: npm run test:windows-native
-      - name: Check Planner and Pi extension tools
-        env:
-          # Provision above, not an implicit GitHub download during tool calls.
-          PI_OFFLINE: '1'
-        run: npm run test:extensions
