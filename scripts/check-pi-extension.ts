@@ -8,6 +8,17 @@ import { createBashToolDefinition } from "../pi/packages/coding-agent/src/core/t
 import { convertResponsesTools } from "../pi/packages/ai/src/api/openai-responses-shared.ts";
 import { validateToolArguments } from "../pi/packages/ai/src/utils/validation.ts";
 import type { ExtensionContext } from "../pi/packages/coding-agent/src/core/extensions/types.ts";
+import { ensureTool } from "../pi/packages/coding-agent/src/utils/tools-manager.ts";
+
+// Exercise the real search tools, but resolve their prerequisites before the
+// graph mutations. Unlike the built-ins, retain download/offline diagnostics.
+for (const tool of ["fd", "rg"] as const) {
+  const binary = await ensureTool(tool, status => console.error(`[Pi tools] ${status.message}`));
+  if (!binary) {
+    throw new Error(`Pi extension smoke requires ${tool}. Install ripgrep and fd on PATH (Windows: choco install ripgrep fd -y; macOS: brew install ripgrep fd; Debian/Ubuntu: apt-get install ripgrep fd-find), or allow Pi's managed download. Search assertions are not skipped.`);
+  }
+  execFileSync(binary, ["--version"], { stdio: "inherit", timeout: 10_000 });
+}
 
 const source = process.cwd();
 const root = realpathSync(mkdtempSync(join(tmpdir(), "grapher-extension-")));

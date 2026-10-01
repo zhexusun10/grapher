@@ -18,6 +18,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable-x86_64-pc-windows-msvc
+      - name: Install native Pi search tools
+        shell: pwsh
+        run: |
+          choco install ripgrep fd --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Failed to install ripgrep/fd" }
+          rg --version
+          if ($LASTEXITCODE -ne 0) { throw "ripgrep is not executable on PATH" }
+          fd --version
+          if ($LASTEXITCODE -ne 0) { throw "fd is not executable on PATH" }
       - name: Install Grapher dependencies
         run: npm ci
       - name: Install pinned Pi dependencies and baseline data
@@ -44,4 +53,7 @@ jobs:
         timeout-minutes: 5
         run: npm run test:windows-native
       - name: Check Planner and Pi extension tools
+        env:
+          # Provision above, not an implicit GitHub download during tool calls.
+          PI_OFFLINE: '1'
         run: npm run test:extensions
