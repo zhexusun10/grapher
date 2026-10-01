@@ -456,15 +456,20 @@ a,
 }
 
 .proj-icon {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-default);
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-secondary);
   flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.project-workspace-item:hover .proj-icon {
+  color: var(--text-primary);
+}
+
+.project-workspace-item.active .proj-icon {
+  color: var(--brand-default);
 }
 
 
@@ -1173,6 +1178,7 @@ a,
   height: 100%;
   position: relative;
   overflow-y: auto;
+  overflow-x: hidden;
   will-change: transform, opacity;
   transform: translateZ(0);
 }
@@ -1192,13 +1198,13 @@ a,
   flex-direction: column;
   align-items: flex-start;
   position: absolute;
-  top: 40%;
+  top: 38%;
   right: 0;
   translate: 0 -50%;
   width: -moz-fit-content;
   width: fit-content;
   max-width: 100%;
-  gap: 4px;
+  gap: 2px;
   transform: translateX(clamp(0px, 12.5vw, 200px));
   transition: transform 0.2s ease;
 }
@@ -1211,10 +1217,10 @@ a,
 }
 
 .landing-title {
-  font-size: clamp(32px, 4.4vw, 44px);
-  line-height: 1.15;
+  font-size: clamp(34px, 3.5vw, 50px);
+  line-height: 1.12;
   font-style: normal;
-  font-weight: 550;
+  font-weight: 600;
   letter-spacing: -0.025em;
   color: var(--text-primary);
   text-align: left;
@@ -1227,8 +1233,16 @@ a,
   pointer-events: none;
 }
 
+/* 第二行以斜角大写字母 W 开头，微调 2px 使其视觉重心主干与第一行 B 及副标 D 处于同一光学垂直线上 */
+.landing-title:nth-child(2) {
+  margin-left: 2px;
+}
+
 .landing-subtitle {
-  font-size: clamp(14px, 2vw, 18px);
+  font-size: clamp(15px, 1.35vw, 19.5px);
+  line-height: 1.4;
+  margin-top: 10px;
+  margin-left: 2.5px;
   font-style: normal;
   font-weight: 500;
   color: var(--text-primary);

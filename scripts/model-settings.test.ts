@@ -60,7 +60,7 @@ test("settings expose three model and thinking selectors with recommendations", 
   const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config: legacy, setConfig: () => {}, catalog, busy: false }));
   for (const role of modelRoles) {
     assert.ok(markup.includes(t("{0} 模型配置", role.label)));
-    assert.ok(markup.includes(`${role.label}${t(" 思维等级")}`));
+    assert.ok(markup.includes(role.id === "nodeAgent" ? t("Pi Instance 思维等级") : `${role.label}${t(" 思维等级")}`));
   }
   assert.ok(markup.includes(modelRoles[0].description));
   assert.ok(markup.includes(modelRoles[1].description));

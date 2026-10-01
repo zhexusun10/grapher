@@ -210,6 +210,7 @@ export const en: Record<string, string> = {
   "已选模型不可用：": "Selected model unavailable: ",
   "当前模型：": "Current model: ",
   " 思维等级": " reasoning level",
+  "Pi Instance 思维等级": "Pi Instance reasoning level",
   "环境变量覆盖：": "Environment override: ",
   "保存后使用：": "After saving: ",
   "未设置模型": "No model configured",

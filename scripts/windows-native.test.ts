@@ -62,7 +62,8 @@ test('Planner uses the same unmodified Bash definition and semantics as pinned P
     }
   } finally {
     process.chdir(previous);
-    await rm(directory, { recursive: true, force: true });
+    await delay(100);
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

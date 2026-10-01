@@ -66,7 +66,7 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
                 </select>
               </label>
               <label className="form-field">
-                <span>{role.label}{t(" 思维等级")}</span>
+                <span>{role.id === "nodeAgent" ? t("Pi Instance 思维等级") : `${role.label}${t(" 思维等级")}`}</span>
                 <select value={settings.thinkingLevel} onChange={event => {
                   const value = event.target.value as ThinkingLevel;
                   setConfig(prev => updateRoleModelConfig(prev, role.id, { thinkingLevel: value }));
