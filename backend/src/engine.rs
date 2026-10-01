@@ -76,7 +76,10 @@ fn partitioner_key(config: &Config) -> Result<(PathBuf, String, String, String),
 /// Warm both Auto routing and Graph's shared native engine off the request path.
 #[cfg(not(feature = "fixture"))]
 pub fn warm_planning_engines(config: Config) {
-    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) || config.repository.trim().is_empty() {
+    if cfg!(test)
+        || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
+        || config.repository.trim().is_empty()
+    {
         return;
     }
     crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
@@ -88,7 +91,8 @@ pub fn warm_planning_engines(config: Config) {
 /// it; mismatched configurations continue through the normal cold path.
 #[cfg(not(feature = "fixture"))]
 pub fn warm_partitioner(config: Config) {
-    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
+    if cfg!(test)
+        || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
         || config.repository.trim().is_empty()
         || PiModelConfig::resolve(PiRole::Partitioner, &config)
             .model
@@ -1681,6 +1685,8 @@ mod tests {
     #[cfg(not(feature = "fixture"))]
     #[test]
     fn prestarted_partitioner_is_claimed_by_matching_repository_and_exits_on_eof() {
+        let _guard = lock_env();
+        invalidate_warm_partitioner();
         let temp = tempfile::tempdir().unwrap();
         let repository = temp.path().join("repository");
         fs::create_dir(&repository).unwrap();
