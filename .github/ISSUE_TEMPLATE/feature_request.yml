@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a focused improvement to Grapher.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What coding workflow is difficult today? Why is the existing Serial or Graph route insufficient?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-visible result, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Risks and boundaries
+      description: Note any effects on approval, Git publication, persisted state, credentials, or platform isolation.

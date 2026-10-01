@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible problem with Grapher.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For vulnerabilities, use [private reporting](https://github.com/zhexusun10/grapher/security/advisories/new), not this form.
+        Reproduce in a disposable project. Remove credentials, private code, prompts, and personal paths from logs.
+  - type: input
+    id: revision
+    attributes:
+      label: Grapher revision
+      description: Output of git rev-parse HEAD, or a release tag.
+      placeholder: Commit SHA or tag
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS/version, Node.js, Rust, Git, and browser versions. For provider errors, name the provider/model without credentials.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Execution mode
+      options:
+        - Serial
+        - Graph
+        - Auto
+        - Not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal task/project and the steps that trigger the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the error and execution/publication phase, if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized logs or screenshots
+      description: Do not attach .env, auth files, events.sqlite, or unreviewed traces. Use fenced code blocks for logs.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed secrets and private data from this report.
+          required: true

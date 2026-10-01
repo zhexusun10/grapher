@@ -4,7 +4,9 @@
 >
 > Don't orchestrate agents. Compile work.
 
-Grapher 既是一套 **[Pi](https://github.com/earendil-works/pi) GUI（图形化界面）**，也是一个**本地多智能体编程系统**。你可以在可视化工作台中使用单个 Pi Coding Agent，也可以将复杂目标编译成可检查的执行图，由确定性的 Rust 运行时调度多个独立 Agent，再通过 Git 合并结果，而不是让一个“主管 Agent”持续通过对话调度其他 Agent。
+[![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Grapher 是一个**基于 [Pi](https://github.com/earendil-works/pi) 的本地 Coding Agent 工作台**。它可以直接运行单 Agent 编程任务，也可以将复杂工作编译成可检查的执行图，由确定性的 Rust 运行时执行。独立 Agent 通过 Git 协作，而不是依赖“主管 Agent”的持续对话。
 
 [快速开始](#快速开始) · [工作方式](#工作方式) · [架构](docs/architecture/overview.md) · [English](README.md)
 
@@ -19,6 +21,28 @@ Grapher 既是一套 **[Pi](https://github.com/earendil-works/pi) GUI（图形�
 - **Git 原生协作** — Agent 交换文件状态和提交，而不是彼此的聊天记录；Graph 节点使用独立 Git 仓库。
 - **可检查的执行图** — 执行前查看并批准任务图，执行中清楚看到依赖、并行分支和有次数限制的返工。
 - **本地优先** — 在你的机器上运行；Graph 的有效结果成功发布回代码库后才宣告完成。模型请求仍会发送给你配置的服务商。
+
+## 什么时候应该使用 Grapher？
+
+**Agent 并不是越多越好。** 当编程任务包含独立工作流时，Grapher 更有用，例如：
+
+- 前端 + 后端修改
+- 实现 + 测试
+- 多个独立模块
+- 实现后进行有界审查 / 返工
+
+小型、线性或高度耦合的任务应使用 **Serial**；当独立工作流和显式依赖值得拆图时，再使用 **Graph**。**Auto** 可让 Partitioner 选择路线。
+
+| | Serial | Graph |
+| --- | --- | --- |
+| 适合任务 | 小型 / 线性任务 | 独立工作流 |
+| 编程 Agent | 一个 | 一个或多个任务节点 |
+| 规划 | 直接执行 | 编译执行图 |
+| 审批 | 自动 | 默认由用户批准 |
+| 工作区 | 用户项目 | 独立 Git 仓库 |
+| 调度 | 顺序执行 | 依赖感知、有界并行 |
+
+规划副作用和发布语义见[执行模型](docs/architecture/execution-model.md)。Graph 是执行路线，不是 Agent 数量要求；图也可以只有一个节点。
 
 ## 快速开始
 
@@ -113,7 +137,7 @@ npm run test:frontend
 npm test                      # Rust 固定样例；无需付费模型
 ```
 
-集成、平台验证和日志验收见[开发指南](docs/development/contributing.md)与[测试指南](docs/development/testing.md)。无模型测试不能证明服务商效果或全部沙箱边界。
+集成、平台验证和日志验收见[贡献指南](CONTRIBUTING.md)与[测试指南](docs/development/testing.md)。安全漏洞请按[安全政策](SECURITY.md)报告。无模型测试不能证明服务商效果或全部沙箱边界。
 
 ## 文档导航
 
