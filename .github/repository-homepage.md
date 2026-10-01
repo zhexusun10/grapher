@@ -5,7 +5,7 @@ GitHub About fields are remote repository settings; committing Markdown does not
 ## Description
 
 ```text
-Local multi-agent coding system that compiles tasks into inspectable execution graphs, runs them with a deterministic Rust runtime, and merges results through Git.
+Local coding-agent workbench built on Pi. Compile complex work into inspectable execution graphs, execute with a deterministic Rust runtime, and publish through Git.
 ```
 
 ## Homepage
@@ -41,7 +41,7 @@ Confirm the CLI is authenticated and you have permission. Inspect existing field
 gh repo view zhexusun10/grapher --json description,homepageUrl,repositoryTopics
 
 gh repo edit zhexusun10/grapher \
-  --description "Local multi-agent coding system that compiles tasks into inspectable execution graphs, runs them with a deterministic Rust runtime, and merges results through Git." \
+  --description "Local coding-agent workbench built on Pi. Compile complex work into inspectable execution graphs, execute with a deterministic Rust runtime, and publish through Git." \
   --homepage "https://github.com/zhexusun10/grapher#quick-start" \
   --add-topic coding-agent,multi-agent,agentic-ai,llm,rust,git,local-first,developer-tools,task-graph,deterministic-runtime
 

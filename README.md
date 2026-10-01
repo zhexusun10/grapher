@@ -4,7 +4,9 @@
 >
 > 不编排智能体，编译工作。
 
-Grapher is a **GUI for [Pi](https://github.com/earendil-works/pi) and a local multi-agent coding system**. Use a single Pi coding agent in a graphical workbench, or compile complex tasks into inspectable execution graphs run by a deterministic Rust runtime. Independent agents collaborate through Git—not a supervisor agent's ongoing conversation.
+[![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Grapher is a **local coding-agent workbench built on [Pi](https://github.com/earendil-works/pi)**. It runs single-agent coding tasks directly, or compiles complex work into inspectable execution graphs executed by a deterministic Rust runtime. Independent agents collaborate through Git—not a supervisor agent's ongoing conversation.
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
@@ -19,6 +21,28 @@ Grapher is a **GUI for [Pi](https://github.com/earendil-works/pi) and a local mu
 - **Git-native collaboration** — Agents exchange file states and commits, not each other's chat histories. Graph nodes use independent Git repositories.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
+
+## When should I use Grapher?
+
+**More agents are not always better.** Grapher works best when a coding task contains independent workstreams, for example:
+
+- Frontend + backend changes
+- Implementation + tests
+- Multiple independent modules
+- Implementation followed by bounded review/rework
+
+For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph** when explicit dependencies and independent workstreams justify it; **Auto** lets the Partitioner choose.
+
+| | Serial | Graph |
+| --- | --- | --- |
+| Best for | Small / linear tasks | Independent workstreams |
+| Coding agents | One | One or more task nodes |
+| Planning | Direct | Compiled execution graph |
+| Approval | Automatic | User approval by default |
+| Workspace | Your project | Independent Git repositories |
+| Scheduling | Sequential | Dependency-aware, bounded parallelism |
+
+See the [execution model](docs/architecture/execution-model.md) for planning side effects and publication semantics. Graph is a route, not a minimum agent count; it can contain a single node.
 
 ## Quick start
 
@@ -113,7 +137,7 @@ npm run test:frontend
 npm test                      # Rust fixtures; no paid model
 ```
 
-See the [development guide](docs/development/contributing.md) and [testing guide](docs/development/testing.md) for integration/platform checks and log acceptance. Model-free tests do not establish provider quality or every sandbox boundary.
+See [Contributing](CONTRIBUTING.md) and the [testing guide](docs/development/testing.md) for integration/platform checks and log acceptance. Report vulnerabilities through the [security policy](SECURITY.md). Model-free tests do not establish provider quality or every sandbox boundary.
 
 ## Documentation
 
