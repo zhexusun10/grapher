@@ -86,13 +86,14 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     name: "node", label: "Graph node",
     // Pi normalizes nullable optional edit fields before local validation.
     constrainedSampling: { type: "json_schema", strict: "prefer" },
-    description: `Create, replace, or delete graph nodes. Supply a nonempty 'nodes' array; use one element for a single edit. Each node name may appear only once per call. Each task is passed to a later fresh session with completed dependency filesystem state. Updating a name replaces its task and preserves edges. Deleting a node removes its incident edges. Edits are applied in order, then compiled once. A failure leaves the saved graph unchanged.`,
+    description:
+      "Create, replace, or delete graph nodes. Provide a nonempty nodes array; use one element for a single edit. Each nodes[].name must be unique within the call. Replacing a node updates its task and preserves its edges. Deleting a node removes its connected edges. A node's first execution starts a fresh session with its task and completed dependencies' filesystem state. Edits are applied in order and validated together. If validation fails, the saved graph is unchanged.",
     parameters: Type.Object({
       nodes: Type.Array(Type.Object({
-        name: Type.String({ description: "Stable node identifier" }),
-        task: Type.Optional(Type.String({ description: "Task for a fresh execution; required unless deleting." })),
-        delete: Type.Optional(Type.Boolean({ description: "Delete this node and its incident edges." })),
-      }, { additionalProperties: false }), { minItems: 1, description: "Batch node edits, applied in order." }),
+        name: Type.String({ description: "Stable node name" }),
+        task: Type.Optional(Type.String({ description: "Task to execute (required unless deleting)" })),
+        delete: Type.Optional(Type.Boolean({ description: "Delete the node and its connected edges (default: false)" })),
+      }, { additionalProperties: false }), { minItems: 1, description: "One or more node edits, applied in order" }),
     }, { additionalProperties: false }),
     async execute(_id, parameters) {
       return mutate(graph => {
@@ -105,19 +106,16 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   pi.registerTool(defineTool({
     name: "edge", label: "Graph edge",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
-    description: `Create, replace, or delete directed edges between existing nodes. Supply a nonempty edges array; use one element for a single edit. Each ordered pair may appear only once per call. There is one edge per ordered pair.
-An edge with feedback omitted or false is a dependency edge. For a dependency edge A -> B, read it as “B depends on A.” The target waits for the source to complete successfully and receives its filesystem state. Dependency filesystem states are merged when a node has multiple dependencies.
-Dependency edges must form a DAG.
-An edge with feedback: true is a feedback edge. For a feedback edge B -> A, B must be a descendant of A in the dependency DAG. Feedback edges do not participate in dependency ordering or cycle detection, and they provide no filesystem input. They allow a descendant to optionally send additional information to a dependency ancestor.
-Edits are applied in order, then compiled once; a failure leaves the saved graph unchanged.`,
+    description:
+      "Create, replace, or delete directed edges between existing nodes. Provide a nonempty edges array; use one element for a single edit. Each ordered (from, to) pair must be unique within the call. Only one edge is stored per ordered pair. With feedback omitted or false, A -> B means B depends on A. B waits for A to complete successfully and receives A's filesystem state. Multiple dependencies' filesystem states are merged before B runs. Dependency edges must form a DAG. With feedback: true, B -> A lets B optionally send an additional instruction to A, which must be an ancestor of B in the dependency DAG. When an additional instruction is sent, it is appended as a new message in A's existing conversation. A continues its existing session and workspace to improve its previous work. B's conversation is not copied into A's session. A's dependency descendants wait for the updated results; those that have already completed run again using updated dependency inputs. Other branches remain valid. Feedback edges provide no filesystem input and do not affect dependency ordering or cycle detection. Edits are applied in order and validated together. If validation fails, the saved graph is unchanged.",
     parameters: Type.Object({
       edges: Type.Array(Type.Object({
-        from: Type.String({ description: "Existing source node name." }),
-        to: Type.String({ description: "Existing target node name, different from source." }),
-        relation: Type.Optional(Type.String({ description: "Briefly describe what the target needs from the source, or what the feedback communicates." })),
-        feedback: Type.Optional(Type.Boolean({ description: "True for feedback; otherwise a dependency." })),
-        delete: Type.Optional(Type.Boolean({ description: "Remove the ordered pair." })),
-      }, { additionalProperties: false }), { minItems: 1, description: "Batch edge edits, applied in order." }),
+        from: Type.String({ description: "Source node name (must exist)" }),
+        to: Type.String({ description: "Target node name (must exist and differ from source)" }),
+        relation: Type.Optional(Type.String({ description: "Brief description of what the target needs from the source or what feedback communicates" })),
+        feedback: Type.Optional(Type.Boolean({ description: "True for a feedback edge (default: false)" })),
+        delete: Type.Optional(Type.Boolean({ description: "Delete the edge (default: false)" })),
+      }, { additionalProperties: false }), { minItems: 1, description: "One or more edge edits, applied in order" }),
     }, { additionalProperties: false }),
     async execute(_id, parameters) {
       return mutate(graph => {
