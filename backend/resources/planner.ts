@@ -43,7 +43,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   const result = (text: string, diagnosticCodes?: string[]) => ({
     content: [{ type: "text" as const, text }],
     ...(diagnosticCodes ? { details: { diagnosticCodes } } : {}),
-  });
+  } as any);
   // Pi derives execution errors from tool_result hooks, not an isError property
   // returned by execute. Keep diagnostic codes in internal details only.
   pi.on("tool_result", async event => {
