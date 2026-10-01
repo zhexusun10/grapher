@@ -1,82 +1,12 @@
-# Execution Instance Engine: Pi baseline
+# Pi execution engine
 
-Pi 是 Grapher 唯一的生产 Execution Instance Engine。一次模型执行称为 **Execution Instance**；Graph 节点执行实例称为 **Node Agent**，最终发布冲突使用专用 **merger** 实例。
+This directory contains Grapher's pinned Pi launcher, compatibility boundary, provider bridge, and Graph path/tool adapters. Pi itself remains the upstream `pi/` submodule.
 
-## 所有权边界
+Canonical documentation:
 
-- `pi/`：未修改的 upstream Pi submodule，拥有 execution core、provider/API、认证、CLI、SDK、skills 和 extensions。
-- `engine/pi-compat.ts`：生产侧 Pi SDK、私有路径解析与 CLI 入口的集中适配边界；升级时优先审阅此处，并检查进程启动和认证适配。
-- `engine/entrypoint.mjs`：校验锁定基线，并通过仓库内 tsx 启动 upstream CLI；不回退到全局 Pi。
-- `engine/pi-lock.json`：锁定 upstream commit、package lock 和模型目录校验和。
-- `engine/model-data/`：由 upstream hydration 流程产生的模型目录和 `.manifest.json` 校验清单，供全新 clone 离线构建；不是 Grapher 自行维护的 provider 实现。
-- `engine/provider-host.ts`：在独立进程中调用 upstream `ModelRuntime`。
-- `backend/src/engine.rs`：拥有进程组、角色配置、取消、JSON 事件消费和 Execution Instance 生命周期。
-- `backend/src/native.rs`：宿主启动策略、Graph 映射能力门槛、专用认证目录和旧 lease 检查。
-- `backend/src/provider_auth.rs`：Provider/Auth Adapter 的本地 IPC 桥接。
+- [Pi integration, baseline setup, and upgrades](../docs/development/pi-integration.md)
+- [Providers and authentication](../docs/guides/providers.md)
+- [Filesystem isolation and path mapping](../docs/architecture/filesystem-isolation.md)
+- [Windows execution](../docs/guides/windows.md)
 
-Grapher 拥有图编译、调度、工作区、sandbox、发布和事件记录；Pi 拥有模型调用及 provider/auth 能力。Rust 后端和浏览器不读取或保存 Pi 的 token/key。
-
-当前锁定版本见 [pi-lock.json](pi-lock.json)。更新版本必须显式审阅并同步 gitlink、lock manifest 和模型数据校验和，运行时不会浮动更新。
-
-## 安装与验证
-
-```sh
-git submodule update --init --recursive
-npm run pi:setup
-npm run pi:verify
-npm run pi -- --version
-npm run pi
-npm run pi:build
-```
-
-要求 Node.js 22.19+、Git 和 npm。`pi:setup` 校验 commit/lock/checksum，安装 upstream 依赖、恢复固定模型目录并执行 offline build（新版本的源码入口需要 sibling workspace 的 `dist/`）；`pi:build` 可单独重建。
-
-开发入口直接使用锁定源码和仓库内 tsx，不要求系统安装 Pi。认证可在 Grapher 设置界面完成，也可通过 `npm run pi` 使用 upstream `/login`、`/logout`。
-
-## 角色策略
-
-| 角色 | Pi 加载策略 |
-| --- | --- |
-| Partitioner | 无工具、无 context files、无 skills/extensions；可独立选择模型与思维等级，默认 `thinking=off`，推荐小型、低延迟模型 |
-| Planner | 只开放 `node,edge,read,bash`，加载 Grapher 显式 planning extension，不加载项目 context/自动扩展；可独立选择模型与思维等级，推荐中大型模型 |
-| Node Agent | 开放 Pi 原生工具，允许受信工作区的 skills/extensions |
-| Merger | 固定冲突修复 prompt 和工具，不加载项目 context/自动扩展 |
-
-设置中分别提供 **Partitioner**、**Planner**、**Node Agent / Pi Instance** 的模型和思维等级选择，共享一套 Provider 认证。配置以 `roleModels.partitioner/planner/nodeAgent` 保存；旧 `model` / `thinkingLevel` 保留为兼容默认值。未单独设置模型的角色使用默认模型，Partitioner 未设置思维等级时关闭，其他角色沿用默认等级。Merger 使用 Node Agent / Pi Instance 配置。角色的 `*_MODEL` / `*_THINKING` 环境变量仍优先于界面设置，并在界面提示；保存设置只影响后续 Run，不改变已运行的会话。
-
-后端启动及保存配置时，会为已绑定的仓库/Partitioner 模型异步预启动一个**空闲的单次使用 RPC 会话**；Auto 规划领取后立即补充下一个。模型或仓库不匹配、图片参数等无法复用时仍冷启动。Pi 最终回答会先在界面展示路线预览；只有正常完成并退出后，后端才确认路线并开始后续规划。预热进程领取时转归当前 Run 管理，取消 Run 会终止它；认证变更会使空闲预热失效。`partition.jsonl` 的 `grapher_process_started.prewarmed` 可用于检查是否命中。
-
-Graph 的共享原生运行时也在后端启动、保存配置和认证完成时异步预热：提前复制并校验 Pi 及依赖，避免首次 Planner 启动才同步承担这项开销。未保存配置的 Auto/Graph 请求会在模型预检时兜底触发，和模型校验、Partitioner 并行。并发触发只执行一次，失败可重试；实际启动仍使用同一份经过校验的运行时。此预热不调用模型、不提前快照项目，也不复用 Planner 对话或独立工作区。Serial 请求不会通过预检触发 Graph 预热。
-
-生产入口为安装目录内的 `engine/entrypoint.mjs`，通过宿主 Node 启动锁定 Pi。Partitioner/Serial/源目录 Merger 使用源项目目录；Planner 与 Graph 节点保留独立工作区，macOS 使用 Seatbelt，Linux 使用 bubblewrap。Windows 使用原版 Node/Git Bash 的宿主进程与独立 Git 工作区，不使用逐节点沙箱；工作流验证与权限差异见 [Windows 原生执行](windows-native-plan.md)。Planner 工具实现及 Pi 源码不改动，宿主 Rust 保留图调度、Git 组合与发布。源目录角色保持原生工具行为；Graph 路径适配及呈现规则见下文。历史配置中的 command/args 只在 `fixture` 测试构建可注入。
-
-**项目内相对、项目外绝对**：节点任务、交付和生成配置优先采用项目根相对路径。Graph 模型侧普通物理路径呈现为 `./...`，结构化 URI 保持有效的源项目绝对地址；文件工具和 bash 完整绝对项目路径适配作为兼容层保留。`cd`/`../` 保持原生语义，外部兄弟目录需明确绝对路径。宿主原生执行、外部脚本及平台 Graph 文件系统边界保留。脚本文件内部硬编码路径和程序动态拼接路径仍不透明映射；这不是内核目录重映射。完整边界见 [native-execution.md](native-execution.md)。
-
-Graph 首次执行将经过 baseline 校验的 Pi 及已安装依赖复制到源项目外，一份副本供本 backend 共享，解决自托管与目录保护冲突。macOS/Linux 节点对宿主引擎副本只读。Windows 通过相同的 TypeScript 入口运行原版 Node/Pi，不再编译沙箱专用入口或修改 Node/MSYS；运行副本沿用宿主权限，不是只读安全边界。完整逻辑见 [native-execution.md](native-execution.md)。
-
-后端会清除继承的 `PI_MODEL`、`PI_THINKING`、`PI_PROVIDER`、`PI_REASONING_LEVEL`、`PI_SESSION_ID` 和 `PI_SESSION_FILE`，再按角色显式传入模型、thinking、session 和 `GRAPHER_MODE`。
-
-## Provider/Auth Adapter
-
-Adapter 支持 upstream provider catalog、login、poll、交互响应、cancel 和 logout。长期凭据及刷新逻辑留在 upstream `ModelRuntime`；浏览器只接收非敏感状态并提交当前认证交互所需输入。宿主 Adapter、`npm run pi` 和原生执行共享专用 `~/.grapher/pi-agent`（或 `PI_CODING_AGENT_DIR`）。不读取或自动复制旧 `~/.pi/agent` 凭据。`test:pi` 在隔离的空认证目录中测试真实 CLI 版本与 Provider/Auth IPC catalog（包括关闭输入后的完整输出），不调用付费模型。
-
-修改 provider/auth 边界时，应同时验证：
-
-```sh
-npm run test:pi
-npm run check
-cargo check --manifest-path backend/Cargo.toml --no-default-features
-npm run test:bindings
-```
-
-## 同步 upstream
-
-1. 运行 `npm run pi:verify`，确认当前 submodule 与锁文件一致；保留父仓库已有修改。
-2. 在 `pi/` 中 fetch 目标 upstream，记录并审阅完整 commit SHA。
-3. 仅使用显式目标 SHA 更新 submodule；不要使用启动时 `git pull` 或 `submodule update --remote`。
-4. 使用新 upstream 的 lockfile 安装依赖（`npm ci --prefix pi`），并运行 `npm --prefix pi run hydrate:model-data`。
-5. 运行 `npm run pi:adopt -- <完整的 40 位 SHA>`：在确认 Pi 工作树干净且模型数据有效后，生成新 `engine/pi-lock.json` 并同步 `engine/model-data/`。审阅生成的变更，将父仓库 gitlink 一并提交。此命令不 fetch、pull 或跳过基线验证。
-6. 先运行 `npm run pi:setup`，审阅 `engine/pi-compat.ts` 的源码级绑定，然后运行 `npm run pi:upgrade-check`（校验基线、离线构建、CLI/Provider/Auth 合约、类型、后端、extensions、native、bindings）。此命令不调用付费模型；仍需人工检查认证交互和真实模型调用。`test:native` 包含两个实际 Pi CLI 经生产 launcher 执行工具及绝对脚本的检查。
-7. 若使用 fork commit，必须先推送到可公开获取的 remote，再更新 `.gitmodules` 并用全新 clone 验证。
-
-基线更新、适配层修改和校验数据应在同一变更中提交。集中适配减少升级时的修改范围，**不保证任意上游版本的 API/行为兼容**：尤其是 Provider/Auth、扩展事件、工具语义和私有 CLI 入口，仍须通过实际回归验证。任何构建或合约测试失败都不能标记为可发布。
+The current baseline is recorded in [pi-lock.json](pi-lock.json).

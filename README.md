@@ -1,43 +1,27 @@
 # Grapher
 
-[English](README.en.md)
+> **Don't orchestrate agents. Compile work.**
+>
+> 不编排智能体，编译工作。
 
-> **不编排智能体，编译工作。**
+Grapher is a **local multi-agent coding system** that turns complex coding tasks into inspectable execution graphs and runs them with a deterministic Rust runtime. Independent coding agents work in parallel and combine their changes through Git—not a supervisor agent's ongoing conversation.
 
-Grapher 是本地运行的多智能体编程系统：将目标路由为单任务或编译成可检查的执行图，由确定性的 Rust 运行时调度彼此独立的 Pi 执行实例，通过 Git 文件状态组合结果，并在成功发布到用户项目后才宣告完成。
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
-与基于对话的智能体编排不同：规划器在编译完成后退出，不在执行期间管理节点；智能体交换 Git 文件状态而非对话记录；重试与反馈是有明确边界的状态转换；只有有效结果发布到用户项目后，图才算完成。线性任务保持串行，增加智能体并不一定更好。
+![Grapher UI showing parallel frontend and backend tasks, integration, and a bounded review feedback edge before approval](assets/execution-graph.png)
 
-## 为什么不只是另一个多智能体系统？
+*Actual Grapher UI with a demo graph awaiting approval. Fixture data, not a live-model run or benchmark. [Screenshot source](assets/README.md).*
 
-常见的多智能体用法是让一个大语言模型持续拆任务、分派子智能体、阅读回复、再决定下一步。这样很灵活，但调度逻辑藏在对话里：失败、重试、并发、依赖失效和“最终做完了吗”很难有可复现的答案。Grapher 尝试把**能确定的工作交给程序，把需要判断的工作留给模型，以图的形式确定任务与智能体协作的框架**：
+## Why Grapher?
 
-| 问题 | Grapher 的选择 |
-| --- | --- |
-| 谁决定任务结构？ | 任务路由器Partitioner选择 `serial` / `graph`；Planner生成节点、依赖和显式反馈边；编译器静态校验，图执行需用户批准。Planner不会在执行期间继续管理节点。 |
-| 谁决定下一步执行什么？ | Rust 状态机按照已编译的有向无环图、依赖与反馈波次派发；就绪节点启动独立模型 Session；仅同一 Graph Run 内的节点最多同时执行 8 个（可通过 `maxParallel` 设更低上限），不同 Run 的 Session 不共用这个额度。运行期不靠协调器的下一条消息。 |
-| 智能体之间传什么？ | Git 表示的**文件系统状态**，不是彼此的聊天记录；下游工作区组合上游提交。 |
-| 失败和返工怎么办？ | 首次尝试是新的 Pi 会话；反馈返工在原节点会话中追加一条消息并复用原工作区，仅在结果实际变化时按依赖重算其普通依赖后继；失败只阻塞受影响分支；反馈边有明确目标和次数上限，变更使下游结果失效。 |
-| 什么时候算完成？ | 图中有效的终端节点结果成功发布回用户目录之后；最终发布遇到 Git 冲突会启动专用 Merger 尝试解决，解决并发布成功才算完成；未解决的冲突或脏目录会保留现场，不伪装成功。 |
-| 谁拥有事实？ | SQLite 只追加事件和后端运行时；界面只显示投影，并提供审批、暂停与追加指令。 |
+- **Deterministic orchestration** — Scheduling, dependencies, retries, and feedback are explicit Rust state transitions, not hidden in LLM conversations.
+- **Git-native collaboration** — Agents exchange file states and commits, not each other's chat histories. Graph nodes use independent Git repositories.
+- **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
+- **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
-**不是**模型质量的替代品，也不是声称所有任务都适合拆图。单一或线性任务走串行路径；不必要的并行会带来冲突。执行图的价值是让并行、依赖、反馈和交付边界显式且可检查，而非让多个模型同时说话。技术细节和不变量见 [架构文档](agent.md)。
+## Quick start
 
-```text
-目标 -> 任务路由器 --串行--> 单任务（在项目目录运行）
-            |
-            +--图执行--> 规划器 -> 图中间表示 -> 编译器 -> 用户批准
-                                                     |
-                                                     v
-                                  Rust 运行时 -> 全新 Pi 执行实例
-                                       |           （独立 Git 仓库）
-                                       +-> 合并文件状态 -> 发布到项目
-```
-
-
-## 快速开始
-
-**依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、可用的 Pi 服务商认证和网络。macOS/Linux Graph 文件系统边界使用 Seatbelt/bubblewrap（Linux 要求允许非特权 user/mount/PID namespace，预检失败不降级）。Windows Graph 使用原版 Node 和 Git for Windows Bash，保留独立 Git 工作区、并发、快照与发布，不使用虚拟机或逐节点沙箱，也不提供 macOS 的越界文件访问限制；只在可信项目上使用。Windows 验证与边界见 [原生执行说明](engine/windows-native-plan.md)。Linux 的完整发布、隔离及 Harbor 实机链已在 Linux 容器/VM 完成验收。Pi 是锁定版本的上游子模块，不会使用全局 Pi 替代。
+**Requirements:** Node.js 22.19+, stable Rust, Git, npm, network access, and provider authentication. Windows needs Git for Windows Bash; Linux Graph needs bubblewrap and permitted unprivileged user/mount/PID namespaces. See [Installation](docs/guides/installation.md) for host prerequisites and troubleshooting.
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
@@ -47,69 +31,97 @@ npm run pi:setup
 npm run dev
 ```
 
-打开 <http://127.0.0.1:1420>。首次启动可能需要等待 Cargo 编译。开发模式不会在启动时重放已完成 Run 的历史输出；打开对应会话时再按需加载。已有克隆仓库请先运行 `git submodule update --init --recursive`。在设置中选择本机项目目录和 `provider/model`，通过服务商设置登录，或运行 `npm run pi` 使用上游命令行工具登录。不要将真实密钥写入 `.env.example`；如需环境变量，可复制为 Git 忽略的 `.env`。Pi 凭据默认位于 `~/.grapher/pi-agent`（可由 `PI_CODING_AGENT_DIR` 指定）。
+Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo compiles.
 
-1. 输入目标；任务路由器选择串行（单任务，自动批准）或图执行。
-2. 规划器生成执行图，经编译器校验后由用户检查并批准；互不依赖的节点可以没有相互连接的边。
-3. 运行时执行节点、组合 Git 状态、处理有限反馈和冲突；界面可暂停、追加指令、查看历史。
-4. 图执行发布成功后才算完成；发布失败时保留状态供检查或重试。
+1. In **Settings**, select a local project, authenticate a provider, and choose a `provider/model`. You can also sign in through `npm run pi`; see [Providers](docs/guides/providers.md).
+2. Enter a coding goal. Simple or linear work uses one Serial agent; independent workstreams can use Graph.
+3. For Graph, inspect and **approve** the plan. Follow node logs, pause new dispatches, or send instructions.
+4. Graph work is complete only after valid results are published to your project. Publication failures preserve state for inspection or retry.
 
-生产模式在本机 `127.0.0.1:1421` 提供页面及 API：
+**Use trusted projects; start with a disposable one.** Successful planning can merge Planner changes into the source before approval, and snapshots can stage/commit existing non-ignored changes. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read the [execution model](docs/architecture/execution-model.md) and [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.
+
+For an existing clone, first run `git submodule update --init --recursive`. Pi is pinned; a global Pi installation is not substituted.
+
+For local production mode:
 
 ```sh
 npm run build
 npm start
 ```
 
-`GRAPHER_PORT` 可调整后端端口；分开运行 `npm run backend` 和 `npm run frontend` 时需要一致。不要把 `GRAPHER_ALLOWED_ORIGINS` 当成 API 鉴权。
+Open <http://127.0.0.1:1421>. Configuration, credentials, data paths, and startup issues are covered in the [installation guide](docs/guides/installation.md).
 
-## 架构与代码
+## How it works
 
-| 目录 | 作用 |
-| --- | --- |
-| `backend/src/` | Rust 编译器、运行时、工作区、Git 发布、SQLite 和本地 HTTP 接口 |
-| `engine/` | 锁定的 Pi 启动器、服务商和认证适配、图节点路径工具 |
-| `src/` | React 界面、图、时间线和运行日志 |
-| `backend/resources/` | 规划器与任务路由器提示词及工具契约 |
-| `scripts/`, `backend/tests/` | 基线检查、固定样例和集成回归 |
-| `pi/` | 上游 Pi 子模块；其文档和许可证属于上游 |
-
-默认运行数据位于 `.grapher/`（可用 `GRAPHER_DATA_DIR` 覆盖），包括 SQLite、规划记录、会话与影子仓库。图执行工作区在项目旁的 `<project-parent>/.grapher-worktrees/`；目录名称虽含工作树，实际每节点是**独立 Git 仓库**。普通文件夹使用外置的影子 Git 元数据，不在用户目录创建 `.git`。更多路径、映射限制与生命周期见 [原生执行说明](engine/native-execution.md)。
-
-多个 Run 可同时运行，切换或新建 Conversation 不会停止其他 Run；每个 Run 分别保存事件、状态、进程和模型 Session。同一后端进程不限制不同 Run / Planner / Serial Session 的并发数，也没有跨 Run 的节点额度。仅同一 Graph Run 内的节点有并发上限：`maxParallel=0` 默认最多 8 个，正数可设置更低上限（硬上限 8）。含反馈边的图仅等待可能被反馈失效的节点执行完毕；不受该反馈影响的分支仍可继续执行。调度器不会为不同 Session 获取项目级写锁。Session 同时写入同一项目产生的文件或 Git 冲突不由调度层处理，结果由各自的执行/发布状态暴露。Graph 节点仍使用独立工作区；Runtime 数据目录仍由单个后端进程独占，以保证事件存储一致性。
-
-## 开发与验证
-
-```sh
-npm run check                 # 类型检查
-npm run build                 # 界面构建
-npm test                      # Rust 固定样例测试；无需付费模型
-npm run test:concurrent       # HTTP 多 Run 并发与后台旧会话回归（需 /bin/sh）
-npm run test:conversation-acceptance # TC-01–14：旧库副本、真实 HTTP/浏览器/进程压测
-npm run test:pi               # 锁定版本的 Pi 与认证传输契约测试
-npm run test:extensions       # 真实扩展工具；grep/find 需要 ripgrep/fd
-npm run test:native           # 宿主原生回归测试（依赖平台）
-npm run migrate               # 维护：迁移历史执行日志并回收磁盘（先关闭后端）
-npm run compact               # migrate 的兼容别名
+```text
+Coding goal
+    |
+    v
+Partitioner
+    |-- Simple / linear task --> Serial agent --> User's project
+    |
+    '-- Independent workstreams
+                |
+                v
+             Planner
+                |
+                v
+       Execution graph --> Compiler --> User approval
+                                           |
+                                           v
+                              Deterministic Rust runtime
+                                  |      |      |
+                               Agent A Agent B Agent C
+                                  '--- Git state ---'
+                                           |
+                                           v
+                                  Publish to project
 ```
 
-`test:extensions` 会先检查 Pi 实际使用的 `rg` / `fd` 并输出版本；缺失时保留自动下载的错误诊断，不跳过搜索测试。离线运行前需安装到 PATH：Windows `choco install ripgrep fd -y`，macOS `brew install ripgrep fd`，Debian/Ubuntu `sudo apt-get install ripgrep fd-find`（支持 `fdfind`）。Windows CI 显式安装这些依赖后，以 `PI_OFFLINE=1` 执行扩展检查，不依赖测试期间的隐式下载。
+Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG; explicit feedback edges define bounded revision paths.
 
-执行日志按 UTF-8 字节偏移分块写入独立的 `execution_logs` 表；`Finished` / `Failed` 等业务事件仅持久化字节数和结构化指标。打开历史会话只加载元数据，选中节点才按需读取完整日志；浏览器两个 transcript 缓存分别限制为 20 条 / 30 MiB。未迁移老库可通过单节点读取自动兼容（不修改老事件）；建议先备份数据目录、关闭后端，再运行 `npm run migrate`，逐 execution 保留完成、失败、中断和 merger 日志，清洗老事件并执行 `VACUUM`。重复执行是幂等的，维护命令复用运行锁拒绝并发。
+## Unlike conversational multi-agent systems
 
-会话日志严格验收及已知边界见 [TC-01–TC-14 证据报告](CONVERSATION_PERFORMANCE_ACCEPTANCE.md)。验收脚本要求 Python 3.11+ 和浏览器，每次创建隔离副本，不会迁移原库；大库为真实历史文本派生的压力数据，不冒充原始 720MB 文件。
+Conversation-driven orchestration keeps an LLM coordinator in the execution loop:
 
-`benchmark/` 提供独立的 Harbor 自定义 agent 适配器（不包含 benchmark 数据集或 host）；参见 [Harbor 接入与 Linux Graph 隔离环境要求](benchmark/README.md)。HTTP API 的绑定和生命周期测试由 `npm run test:bindings` 使用仓库内的 `scripts/check-project-binding.mjs` 完成；其余上述基本检查也可在本仓库运行。固定样例和无模型测试不能证明真实服务商的语义质量或全部沙箱边界；发布前需要平台和真实模型验收。
+```text
+Agent -> Coordinator -> Agent -> Coordinator -> ...
+```
 
-## 文档导航
+Grapher compiles the collaboration structure first:
 
-- [架构、不变量与图执行和串行执行语义](agent.md)
-- [Pi 版本锁定、认证与升级流程](engine/README.md)
-- [原生执行与路径映射](engine/native-execution.md)
-- [规划器工具权限](backend/resources/planning-inspection.md)
+```text
+Goal -> Graph -> Deterministic runtime -> Agents -> Git -> Result
+```
 
-## 许可证
+Inspectable scheduling does **not** make model outputs deterministic or guarantee better code. Single or linear work stays Serial; unnecessary parallelism can create conflicts.
 
-Grapher 原创代码采用 [MIT 许可证](LICENSE)，版权所有 © 2026 Sun Zhe-xu。`pi/` 是独立的上游子模块，遵循其自身的 [MIT 许可证和版权声明](pi/LICENSE)；第三方依赖仍遵循各自的许可证。
+## Architecture
 
-**公开前仍需：** 确认所有贡献者及所用素材可按相应许可证发布，复核历史提交/外置制品中的凭据，并完成实际平台安全验收。
+The Rust backend and SQLite event log own runtime state; the React UI displays projections. Graph nodes use independent Git repositories, and delivery requires successful publication—not merely finished model calls.
+
+Read [Architecture](docs/architecture/overview.md) for motivation and invariants, or [Execution model](docs/architecture/execution-model.md) for planning, sessions, Git state, and publication semantics. Low-level runtime, isolation, and Pi contracts are linked from those pages rather than duplicated here.
+
+## Development
+
+```sh
+npm run check
+npm run build
+npm run check:docs
+npm run test:frontend
+npm test                      # Rust fixtures; no paid model
+```
+
+See the [development guide](docs/development/contributing.md) and [testing guide](docs/development/testing.md) for integration/platform checks and log acceptance. Model-free tests do not establish provider quality or every sandbox boundary.
+
+## Documentation
+
+- [Architecture](docs/architecture/overview.md)
+- [Execution model](docs/architecture/execution-model.md)
+- [Installation & providers](docs/guides/installation.md)
+- [Development guide](docs/development/contributing.md)
+- [Benchmarks](docs/benchmarks/harbor.md)
+
+## License
+
+Original Grapher code is licensed under the [MIT License](LICENSE), copyright © 2026 Sun Zhe-xu. The upstream `pi/` submodule has its own [MIT license and copyright notice](pi/LICENSE). Third-party dependencies retain their respective licenses.
