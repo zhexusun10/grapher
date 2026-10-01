@@ -53,6 +53,5 @@ gh repo view zhexusun10/grapher --json description,homepageUrl,repositoryTopics
 - [English product homepage](../README.md)
 - [Chinese product homepage](../README.zh-CN.md)
 - [Canonical documentation index](../docs/README.md)
-- [Screenshot provenance and reproduction](../assets/README.md)
 
 The screenshot shows an approval-stage demo graph, not execution success or benchmark performance. Maintainer checks belong in development documentation or issue tracking, not the product README.
