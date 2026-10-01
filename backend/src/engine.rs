@@ -1227,7 +1227,7 @@ fn run_pi_with_timeout(
         on_output(line);
     }
     let mut stdin = child.stdin.take().ok_or("Pi stdin unavailable")?;
-    let (input_sender, input_receiver) = mpsc::channel();
+    let (input_sender, input_receiver) = mpsc::channel::<Result<(), std::io::Error>>();
     let mut rpc_sender = None;
     let mut rpc_guard = None;
     let mut rpc_pending = None;
@@ -1307,7 +1307,7 @@ fn run_pi_with_timeout(
         thread::spawn(move || {
             for command in rx {
                 if let Err(error) = writeln!(stdin, "{command}").and_then(|_| stdin.flush()) {
-                    let _ = input_sender.send(Err(error.to_string()));
+                    let _ = input_sender.send(Err(error));
                     break;
                 }
             }
@@ -1317,7 +1317,7 @@ fn run_pi_with_timeout(
         let task = request.task.as_bytes().to_vec();
         // Large tasks can fill the pipe before an unresponsive child reads stdin.
         thread::spawn(move || {
-            let _ = input_sender.send(stdin.write_all(&task).map_err(|error| error.to_string()));
+            let _ = input_sender.send(stdin.write_all(&task));
         });
     }
     let (sender, receiver) = mpsc::channel();
@@ -1499,6 +1499,11 @@ fn run_pi_with_timeout(
     drop(rpc_guard);
     drop(rpc_sender);
     let status = child.wait().map_err(|error| error.to_string())?;
+    while let Ok(Err(error)) = input_receiver.try_recv() {
+        if input_error.is_none() {
+            input_error = Some(error);
+        }
+    }
     #[cfg(not(feature = "fixture"))]
     let copied_session = if let Some(warm_dir) = warm_session {
         // Keep the per-attempt Pi conversation alongside partition.jsonl even
@@ -1524,11 +1529,17 @@ fn run_pi_with_timeout(
     if request.role == PiRole::Partitioner {
         warm_partitioner(config.clone());
     }
+    // If the process completed successfully and emitted valid assistant text,
+    // a BrokenPipe on writing stdin simply indicates that the process finished
+    // its work and closed its stdin pipe early.
+    let input_broken_pipe_on_success = input_error
+        .as_ref()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe && status.success() && !final_text.trim().is_empty());
     // ProcessGuard clears the process group. Detached descendants are not
     // guaranteed to be covered; tasks must finish background work before returning.
     on_output(format!(
         "{}\n",
-        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success() && !timed_out && input_error.is_none(), "timedOut":timed_out, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
+        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success() && !timed_out && (input_error.is_none() || input_broken_pipe_on_success), "timedOut":timed_out, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
     ));
     #[cfg(not(feature = "fixture"))]
     copied_session?;
@@ -1542,7 +1553,9 @@ fn run_pi_with_timeout(
         return Err(format!("Pi exited with {status}: {stderr_tail}"));
     }
     if let Some(error) = input_error {
-        return Err(format!("Cannot send task to {phase}: {error}"));
+        if !input_broken_pipe_on_success {
+            return Err(format!("Cannot send task to {phase}: {error}"));
+        }
     }
     if let Some(error) = agent_error {
         return Err(error);
@@ -1631,6 +1644,10 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[cfg(feature = "fixture")]
     fn test_python() -> String {
@@ -1853,7 +1870,7 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
     #[cfg(feature = "fixture")]
     #[test]
     fn planner_rpc_steer_keeps_session_and_delivers_follow_up() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("planner_rpc.py");
         fs::write(&script, r#"import json, sys
@@ -1926,7 +1943,7 @@ sys.stdin.read()
     #[cfg(feature = "fixture")]
     #[test]
     fn concurrent_planners_steer_only_their_own_run() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("concurrent_planners.py");
         fs::write(&script, r#"import json, os, sys
@@ -2258,7 +2275,7 @@ sys.stdin.read()
     #[cfg(feature = "fixture")]
     #[test]
     fn node_agent_has_no_deadline_even_if_timeout_env_is_set() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         let variable = PiRole::NodeAgent
             .model_env_var()
             .replace("_MODEL", "_TIMEOUT_SECONDS");
@@ -2268,7 +2285,7 @@ sys.stdin.read()
         let config = Config {
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
-            pi_args: vec!["-c".into(), "sleep 1.2; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
+            pi_args: vec!["-c".into(), "cat >/dev/null; sleep 1.2; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
@@ -2303,12 +2320,12 @@ sys.stdin.read()
     #[cfg(feature = "fixture")]
     #[test]
     fn other_roles_ignore_legacy_timeout_environment() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
-            pi_args: vec!["-c".into(), "echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
+            pi_args: vec!["-c".into(), "cat >/dev/null; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
@@ -2348,7 +2365,7 @@ sys.stdin.read()
 
     #[test]
     fn planner_budget_is_explicit_and_overridable() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         let original = std::env::var_os("PLANNER_THINKING");
         let mut config = Config {
             repository: "/tmp/fake".into(),
@@ -2412,7 +2429,7 @@ sys.stdin.read()
 
     #[test]
     fn partitioner_model_follows_base_config_model_with_thinking_off() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         std::env::remove_var("PARTITIONER_MODEL");
         std::env::remove_var("PARTITIONER_THINKING");
 
@@ -2447,7 +2464,7 @@ sys.stdin.read()
 
     #[test]
     fn partitioner_thinking_defaults_to_off() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         std::env::remove_var("PARTITIONER_THINKING");
 
         let config = Config {
@@ -2474,7 +2491,7 @@ sys.stdin.read()
 
     #[test]
     fn partitioner_thinking_allows_explicit_levels() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
 
         let config = Config {
             repository: "/tmp/fake".into(),
@@ -2509,7 +2526,7 @@ sys.stdin.read()
 
     #[test]
     fn role_models_resolve_independently_and_environment_still_wins() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -2567,7 +2584,7 @@ sys.stdin.read()
 
     #[test]
     fn partitioner_model_env_override_works_independently() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
 
         let config = Config {
             repository: "/tmp/fake".into(),
