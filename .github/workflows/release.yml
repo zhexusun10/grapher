@@ -50,8 +50,7 @@ jobs:
             ## Current limitations
 
             - No one-command installation yet (requires Node.js, Rust, and manual setup)
-            - Windows sandboxing is still evolving
-            - Provider compatibility coverage is partial
+            - Windows filesystem sandboxing is process isolation only
             - This is alpha software
 
             ## Installation
@@ -72,8 +71,8 @@ jobs:
             | Platform | Status | Notes |
             |----------|--------|-------|
             | Linux (Ubuntu 22.04+) | ✅ Tested | Requires bubblewrap for Graph sandbox |
-            | macOS | ⚠️ Experimental | Graph sandboxing not yet implemented |
-            | Windows | ⚠️ Experimental | Graph workspaces use process isolation only |
+            | macOS | ✅ Experimental | Uses sandbox-exec/Seatbelt for Graph isolation |
+            | Windows | ⚠️ Experimental | Graph uses process isolation only (no filesystem sandbox) |
 
             ## Checksums
 
