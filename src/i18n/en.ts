@@ -1,5 +1,18 @@
 // Keys retain the existing Chinese UI copy so the Chinese version stays unchanged.
 export const en: Record<string, string> = {
+  "Pi 全局扩展": "Global Pi extensions",
+  "始终启用，不可删除": "Always enabled; cannot be removed",
+  "删除": "Remove",
+  "添加": "Add",
+  "{0}扩展 {1}": "{0} extension {1}",
+  "刷新扩展": "Refresh extensions",
+  "删除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。": "Removing only disables an extension in Grapher; it does not uninstall it globally. Add it back anytime.",
+  "pi-trim 对所有角色生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。": "pi-trim applies to all roles; other extensions, MCP and skills apply only to Planner and Node Agent.",
+  "正在读取扩展…": "Loading extensions…",
+  "已启用": "Enabled",
+  "暂无已启用的扩展": "No enabled extensions",
+  "待选扩展": "Available extensions",
+  "暂无待选扩展": "No available extensions",
   "对话正在创建，请稍后再删除。": "This conversation is being created. Wait before deleting it.",
   "无法读取附件，请重新选择文件后重试。": "The attachment could not be read. Select the file again and retry.",
   "此对话不属于当前工作区，请在对应工作区中打开。": "This conversation belongs to another workspace. Open it in its own workspace.",

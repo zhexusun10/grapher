@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -25,6 +25,27 @@ test('production Pi CLI reports the pinned version', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('Settings IPC discovers extensions and persists removal/restoration without executing user code', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'grapher-pi-extensions-ipc-'));
+  try {
+    const global = join(dir, 'global');
+    mkdirSync(join(global, 'extensions'), { recursive: true });
+    const file = join(global, 'extensions/probe.ts');
+    const code = 'throw new Error("must not execute at discovery");';
+    writeFileSync(file, code);
+    const call = fields => JSON.parse(execFileSync(process.execPath, ['--import', resolverUrl, join(root, 'engine/extensions-host.ts')], {
+      encoding: 'utf8', timeout: 30000, input: JSON.stringify({ version: 1, ...fields }),
+      env: { ...process.env, PI_CODING_AGENT_DIR: join(dir, 'own'), GRAPHER_GLOBAL_PI_AGENT_DIR: global, GRAPHER_ISOLATED_PI_MODELS: '1' },
+    })).result;
+    const extension = call({ operation: 'catalog' }).extensions.find(extension => !extension.bundled);
+    assert.ok(extension);
+    assert.equal(call({ operation: 'set_enabled', id: extension.id, enabled: false }).extensions.find(value => value.id === extension.id).enabled, false);
+    assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === extension.id).enabled, false);
+    assert.equal(call({ operation: 'set_enabled', id: extension.id, enabled: true }).extensions.find(value => value.id === extension.id).enabled, true);
+    assert.equal(readFileSync(file, 'utf8'), code);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('Provider/Auth IPC returns a catalog after input EOF without exposing credentials', () => {

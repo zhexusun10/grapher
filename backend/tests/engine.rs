@@ -318,7 +318,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
 }
 
 #[test]
-fn node_agent_allows_skills_and_plugins_while_planner_and_partitioner_disable_them() {
+fn planner_and_node_allow_resources_while_partitioner_disables_them() {
     let temp = TempDir::new().unwrap();
     let script_path = temp.path().join("fake-pi.sh");
     let script = r#"cat >/dev/null
@@ -378,7 +378,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         "Node agent must not restrict tools via --tools"
     );
 
-    // 2. Planner: MUST have --no-skills, --no-extensions, --no-approve, and restricted tools
+    // 2. Planner: accepts skills/extensions, keeps native tools read-only without hiding extension tools.
     let mut planner_out = String::new();
     let _ = run_pi(
         PiRequest {
@@ -398,20 +398,20 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         |text| planner_out.push_str(&text),
     );
     assert!(
-        planner_out.contains("--no-skills"),
-        "Planner must have --no-skills"
+        !planner_out.contains("--no-skills"),
+        "Planner must allow skills"
     );
     assert!(
-        planner_out.contains("--no-extensions"),
-        "Planner must have --no-extensions"
+        !planner_out.contains("--no-extensions"),
+        "Planner must allow selected extensions"
     );
     assert!(
         planner_out.contains("--no-approve"),
         "Planner must have --no-approve"
     );
     assert!(
-        planner_out.contains("--tools node,edge,read,bash"),
-        "Planner must restrict tools"
+        planner_out.contains("--exclude-tools edit,write,ls,find,grep") && !planner_out.contains("--tools"),
+        "Planner must restrict base tools without excluding extension tools"
     );
 
     // 3. Partitioner: MUST have --no-skills, --no-extensions, --no-approve, and --no-tools

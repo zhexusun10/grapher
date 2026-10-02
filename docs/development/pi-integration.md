@@ -36,16 +36,24 @@ npm run pi:build
 
 | Role | Policy |
 | --- | --- |
-| Partitioner | No tools, context files, automatic skills/extensions; thinking defaults to `off` |
-| Planner | `node`, `edge`, `read`, `bash`; explicit Grapher planning extension; no automatic project context/extensions |
-| Node Agent | Pi native tools and trusted workspace skills/extensions |
-| Merger | Pi default prompt with a fixed conflict-repair addendum (`--append-system-prompt`); fixed tools; no automatic project context/extensions |
+| Partitioner | No tools, context files, user extensions, MCP or skills; bundled `pi-trim` only; thinking defaults to `off` |
+| Planner | `node`, `edge`, `read`, `bash` plus selected global extension/MCP tools and skills; no automatic project context files |
+| Node Agent | Pi native tools, selected global extensions/MCP/skills, and trusted workspace resources |
+| Merger | Pi default prompt with a conflict-repair addendum (`--append-system-prompt`); fixed tools; bundled `pi-trim` only; no user extensions, MCP, skills or automatic context files |
 
 The Partitioner/Serial use source-native execution. The Planner uses a private project copy, and Graph nodes use their own repositories. The Merger runs in whichever workspace contains the conflict: a node repository, Planner publication preview, or source project. Private Mergers use the same validated launcher and platform boundaries as other private executions; see [composition recovery](../architecture/execution-model.md#parent-composition-conflicts). Platform access rules and Graph path adaptation are described in [Filesystem isolation](../architecture/filesystem-isolation.md).
 
 The backend removes inherited Pi model/session selectors and sets explicit role/session identities. Long-term auth remains upstream-owned. Do not implement a competing Rust/browser token store or silently drop supported provider credentials from the child environment.
 
 Production engine/command selection is fixed; custom historical command/args injection is restricted to `fixture` builds.
+
+## Global extension settings
+
+Settings starts with the enabled and available Pi extension lists. Remove disables an extension **only in Grapher**, keeps the globally installed files, and moves it into the available list; Add restores it. Changes save immediately and apply to new agent processes, not a currently running turn. Idle prewarmed processes are invalidated after selection changes.
+
+Discovery uses Pi's package manager to resolve `~/.pi/agent/settings.json`, installed npm/git/local packages, and `~/.pi/agent/extensions/` without executing extension factories or installing missing packages. Set `GRAPHER_GLOBAL_PI_AGENT_DIR` for a different global Pi directory. Credentials and Grapher selection overrides (`extensions.json`) remain in Grapher's dedicated agent directory (`PI_CODING_AGENT_DIR`, normally `~/.grapher/pi-agent`). Global MCP config and skills are also available to Planner/Node Agent; dedicated/project MCP definitions take precedence on name collisions.
+
+`pi-trim@0.1.1` is a pinned, required project dependency, always enabled for every role. It replaces the former in-project prompt trimming; no second trimming implementation remains. A globally installed `pi-trim` (e.g. `pi install npm:pi-trim`) is deduplicated against the bundled copy. It cannot be removed or disabled in Settings or through the API; older disabled selections are ignored. The private Graph runtime includes this package so no network install is needed at agent startup.
 
 ## Prewarming and prepared runtime
 

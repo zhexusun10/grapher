@@ -9,6 +9,7 @@ pub mod graph_merge;
 pub mod model;
 pub mod process_control;
 pub mod provider_auth;
+pub mod pi_extensions;
 pub mod runtime;
 pub mod session_branch;
 pub mod runtime_lock;

@@ -72,7 +72,7 @@ class GrapherAgent(BaseInstalledAgent):
         # mount on task images that do not ship it themselves.
         checks = [
             f"test -x {binary}",
-            f"test -f {qroot}/pi/node_modules/tsx/dist/cli.mjs",
+            f"(test -f {qroot}/node_modules/tsx/dist/cli.mjs || test -f {qroot}/pi/node_modules/tsx/dist/cli.mjs)",
             f"test -f {qroot}/engine/entrypoint.mjs",
             f"test ! -e {qroot}/.env && test ! -e {qroot}/backend/.env",
             "command -v python3 && command -v git && command -v node",

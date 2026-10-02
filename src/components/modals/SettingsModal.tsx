@@ -6,6 +6,7 @@ import { Config } from "../../types";
 import type { ProviderCatalog } from "../../services/providerAuth";
 import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
+import { ExtensionSettings } from "../ExtensionSettings";
 import { ConfirmModal } from "./ConfirmModal";
 
 interface SettingsModalProps {
@@ -103,6 +104,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 
         <div className="settings-modal-content">
           <div className="settings-sections">
+            <ExtensionSettings disabled={saving} />
             <section className="settings-card" aria-labelledby="language-settings-title">
               <div className="settings-card-title">
                 <Languages size={16} />

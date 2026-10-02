@@ -44,7 +44,6 @@ try {
     "--import", resolverUrl,
     join(root, "engine/execution-cli.ts"),
     ...process.argv.slice(2),
-    "--extension", join(root, "engine/prompt-extension.ts"),
   ], { stdio: "inherit", env: childEnv });
   for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => {
     if (process.platform === "win32" && child.pid) {

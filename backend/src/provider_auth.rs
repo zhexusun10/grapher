@@ -29,17 +29,28 @@ impl Drop for Bridge {
 impl Bridge {
     fn start() -> Result<Self, String> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let tsx_cli = {
+            let root_tsx = root.join("node_modules/tsx/dist/cli.mjs");
+            let pi_tsx = root.join("pi/node_modules/tsx/dist/cli.mjs");
+            if root_tsx.exists() {
+                root_tsx
+            } else if pi_tsx.exists() {
+                pi_tsx
+            } else {
+                return Err("Cannot start Provider/Auth Adapter: tsx not found. Run npm ci.".into());
+            }
+        };
         let mut command = Command::new("node");
         command
-            .arg(root.join("pi/node_modules/tsx/dist/cli.mjs"))
+            .arg(crate::native::host_path(&tsx_cli))
             .arg("--tsconfig")
-            .arg(root.join("pi/tsconfig.json"))
-            .arg(root.join("engine/provider-host.ts"))
+            .arg(crate::native::host_path(&root.join("pi/tsconfig.json")))
+            .arg(crate::native::host_path(&root.join("engine/provider-host.ts")))
             .current_dir(&root)
             .env("PI_CODING_AGENT_DIR", crate::native::agent_dir()?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         crate::process_control::configure_command(&mut command);
         let mut child = command
             .spawn()
@@ -51,6 +62,15 @@ impl Bridge {
         })?;
         let input = child.stdin.take().ok_or("Adapter input unavailable")?;
         let stdout = child.stdout.take().ok_or("Adapter output unavailable")?;
+        let stderr = child.stderr.take();
+        if let Some(stderr) = stderr {
+            thread::spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    let Ok(line) = line else { break };
+                    eprintln!("[provider_auth] {line}");
+                }
+            });
+        }
         let (tx, output) = mpsc::sync_channel(1);
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -127,5 +147,23 @@ pub fn shutdown() {
         if let Ok(mut guard) = bridge.lock() {
             *guard = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_auth_catalog() {
+        let result = request(serde_json::json!({
+            "version": 1,
+            "operation": "catalog",
+            "refresh": false,
+        }));
+        assert!(result.is_ok(), "Expected catalog to succeed, got: {:?}", result.err());
+        let val = result.unwrap();
+        assert!(val.get("providers").is_some());
+        shutdown();
     }
 }

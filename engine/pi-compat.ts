@@ -4,6 +4,8 @@
 export {
   ModelRuntime,
   SettingsManager,
+  DefaultPackageManager,
+  createMcpExtension,
   createBashToolDefinition,
   createLocalBashOperations,
   createReadToolDefinition,
@@ -15,9 +17,14 @@ export {
 } from '../pi/packages/coding-agent/src/index.ts';
 export type { ExtensionAPI, BashOperations } from '../pi/packages/coding-agent/src/index.ts';
 
-// Pi does not currently export its path normalization or source CLI entrypoint
-// through the SDK. These two private touchpoints remain explicit until it does.
+// Private path, MCP-config and CLI-setup touchpoints remain centralized here.
+export { loadMcpConfig } from '../pi/packages/coding-agent/src/extensions/mcp/config.ts';
 export { resolveToCwd } from '../pi/packages/coding-agent/src/core/tools/path-utils.ts';
-export async function runPiCli() {
-  await import('../pi/packages/coding-agent/src/cli.ts');
+import type { MainOptions } from '../pi/packages/coding-agent/src/index.ts';
+export type { InlineExtension } from '../pi/packages/coding-agent/src/index.ts';
+export async function runPiCli(args: string[], options: MainOptions = {}) {
+  const { setupCli } = await import('../pi/packages/coding-agent/src/cli/setup.ts');
+  const { main } = await import('../pi/packages/coding-agent/src/index.ts');
+  setupCli();
+  await main(args, options);
 }

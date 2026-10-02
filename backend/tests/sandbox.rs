@@ -146,11 +146,16 @@ fn node_network_and_upstream_tools_work_inside_sandbox() {
         String::from_utf8_lossy(&network.stderr)
     );
     server.join().unwrap();
+    let tsx_cli = if project.join("node_modules/tsx/dist/cli.mjs").exists() {
+        project.join("node_modules/tsx/dist/cli.mjs")
+    } else {
+        project.join("pi/node_modules/tsx/dist/cli.mjs")
+    };
     let probe = Command::new("/usr/bin/sandbox-exec")
         .arg("-f")
         .arg(&profile)
         .arg("node")
-        .arg(project.join("pi/node_modules/tsx/dist/cli.mjs"))
+        .arg(tsx_cli)
         .arg("--tsconfig")
         .arg(project.join("pi/tsconfig.json"))
         .arg(project.join("scripts/sandbox-probe.ts"))

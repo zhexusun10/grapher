@@ -104,6 +104,54 @@ test("credential catalog updates remove and restore choices without changing sav
   assert.deepEqual(config.roleModels?.planner, { model: "example/default", thinkingLevel: "low" });
 });
 
+test('required pi-trim has no remove/add button; user extensions remain selectable', async () => {
+  const { createServer } = await import('vite');
+  const vite = await createServer({
+    configFile: false, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] },
+    server: { middlewareMode: true, watch: null, hmr: false, ws: false },
+  });
+  try {
+    const { ExtensionItem } = await vite.ssrLoadModule('/src/components/ExtensionSettings.tsx');
+    const render = (bundled: boolean, enabled = true) => renderToStaticMarkup(React.createElement(ExtensionItem, {
+      extension: { id: bundled ? 'npm:pi-trim' : 'probe.ts', name: bundled ? 'pi-trim' : 'probe', bundled, enabled, path: 'probe.ts', source: 'auto' },
+      disabled: false, onToggle() {},
+    }));
+    const required = render(true);
+    assert.ok(!required.includes('<button'));
+    assert.ok(!required.includes('<small'));
+    assert.match(required, /role="img"/);
+    assert.ok(required.includes(t('始终启用，不可删除')));
+    assert.equal(required.replace(/<[^>]*>/g, ''), 'pi-trimauto', 'bundled extension shows no badge or lock text');
+    assert.ok(render(false).includes(t('{0}扩展 {1}', t('删除'), 'probe')));
+    assert.ok(render(false, false).includes(t('{0}扩展 {1}', t('添加'), 'probe')));
+  } finally { await vite.close(); }
+});
+
+test('Auto Approve defaults to off, including legacy configs; only an explicit saved true enables it', async () => {
+  assert.equal(defaultConfig.autoApprove, false);
+  const { createServer } = await import('vite');
+  const vite = await createServer({
+    configFile: false, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] },
+    server: { middlewareMode: true, watch: null, hmr: false, ws: false },
+  });
+  try {
+    const { SettingsModal } = await vite.ssrLoadModule('/src/components/modals/SettingsModal.tsx');
+    const checkbox = (config: Config) => {
+      const markup = renderToStaticMarkup(React.createElement(SettingsModal, {
+        isOpen: true, onClose() {}, config, dataPath: '', onSaveConfig() {},
+      }));
+      const input = markup.match(/<input\b[^>]*>/g)?.find(input => input.includes(`aria-label="${t('Auto Approve Planner 图纸')}"`));
+      assert.ok(input, 'Auto Approve checkbox is present');
+      return input;
+    };
+    assert.doesNotMatch(checkbox(defaultConfig), /checked=""/);
+    const oldConfig: Partial<Config> = { ...defaultConfig };
+    delete oldConfig.autoApprove;
+    assert.doesNotMatch(checkbox(oldConfig as Config), /checked=""/);
+    assert.match(checkbox({ ...defaultConfig, autoApprove: true }), /checked=""/);
+  } finally { await vite.close(); }
+});
+
 test("settings group Provider management and role configuration in separate sections", async () => {
   // Vite handles the auth component's CSS module during server-side rendering.
   const { createServer } = await import("vite");
@@ -118,6 +166,12 @@ test("settings group Provider management and role configuration in separate sect
     const markup = renderToStaticMarkup(React.createElement(SettingsModal, {
       isOpen: true, onClose() {}, config: legacy, setConfig() {}, dataPath: "", onSaveConfig() {},
     }));
+    const extensionStart = markup.indexOf('aria-labelledby="extension-settings-title"');
+    const languageStart = markup.indexOf('aria-labelledby="language-settings-title"');
+    assert.ok(extensionStart >= 0 && languageStart > extensionStart, 'Extensions are the top Settings section');
+    assert.ok(markup.includes(t('Pi 全局扩展')));
+    assert.ok(markup.includes(t('删除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。')));
+    assert.ok(!markup.includes('更改立即保存，对新启动的 Agent 生效。'));
     const providerStart = markup.indexOf('aria-labelledby="provider-settings-title"');
     const rolesStart = markup.indexOf('aria-labelledby="role-model-settings-title"');
     assert.ok(providerStart >= 0 && rolesStart > providerStart);

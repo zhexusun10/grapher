@@ -1,0 +1,8 @@
+.extension-settings .settings-card-title .icon-button { margin-left: auto; }
+.extension-settings ul { list-style: none; padding: 0; margin: 0; }
+.extension-settings h5 { margin: 14px 0 6px; }
+.extension-settings-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
+.extension-settings-row > div { flex: 1; min-width: 0; }
+.extension-settings-row code, .extension-settings-directory { display: block; font-size: 11px; overflow-wrap: anywhere; opacity: .65; }
+.extension-settings-row button, .extension-settings-required { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.extension-settings-required { font-size: 12px; opacity: .65; }

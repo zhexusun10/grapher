@@ -1062,17 +1062,24 @@ fn run_pi_with_timeout(
     }
     if request.role == PiRole::NodeAgent {
         command.arg("--approve");
+    } else if request.role == PiRole::Planner {
+        command.arg("--no-approve");
     } else {
         command.args(["--no-extensions", "--no-skills", "--no-approve"]);
+    }
+    // An allowlist would also hide tools contributed by user extensions/MCP.
+    // Retain the Planner's read/bash base while allowing extension tools.
+    if request.role == PiRole::Planner {
+        command.args(["--exclude-tools", "edit,write,ls,find,grep"]);
     }
     match request.tools {
         Some(tools) if tools.trim().is_empty() => {
             command.arg("--no-tools");
         }
-        Some(tools) => {
+        Some(tools) if request.role != PiRole::Planner => {
             command.args(["--tools", tools]);
         }
-        None => {}
+        _ => {}
     }
     if let Some(_extension) = request.extension {
         #[cfg(feature = "fixture")]

@@ -1,4 +1,3 @@
-import { grapherSystemPrompt } from './system-prompt.mjs';
 import { createWorkspacePaths } from './workspace-paths.mjs';
 import { registerWorkspaceTools } from './workspace-tools.ts';
 import {
@@ -22,7 +21,7 @@ export default function (pi: ExtensionAPI) {
       : 'Use project-root-relative paths in Bash commands and project files.';
   if (process.env.GRAPHER_MODE !== 'partition') {
     pi.on('before_agent_start', async event => {
-      const systemPrompt = grapherSystemPrompt(event.systemPrompt);
+      const systemPrompt = event.systemPrompt;
       return {
         systemPrompt: `${paths ? paths.visible(systemPrompt) : systemPrompt}\n\n${pathGuideline}`,
       };

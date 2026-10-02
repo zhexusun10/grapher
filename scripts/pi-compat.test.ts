@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import { accessSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { grapherSystemPrompt } from '../engine/system-prompt.mjs';
+import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
+import { bundledTrim } from '../engine/global-extensions.ts';
 import {
   ModelRuntime, SettingsManager, resolveToCwd,
   createBashToolDefinition, createLocalBashOperations,
@@ -11,14 +12,18 @@ import {
   createLsToolDefinition, createFindToolDefinition, createGrepToolDefinition,
 } from '../engine/pi-compat.ts';
 
-test('Grapher removes Pi identity and docs sections from the upstream prompt', () => {
+test('bundled pi-trim replaces Grapher prompt trimming', async () => {
   const prompt = [
     'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files.',
     '<rules>\n- Be concise\n</rules>',
-    '<docs>\nPi documentation: /path/to/pi/docs\n- Read it when asked about Pi\n</docs>',
+    '<docs>\nPi documentation (read only when the user asks about Pi): /path/to/pi/docs\n- Read it when asked about Pi\n</docs>',
     '<cwd>\n/workspace\n</cwd>',
   ].join('\n');
-  const sanitized = grapherSystemPrompt(prompt);
+  const loaded = await loadExtensions([bundledTrim], process.cwd());
+  assert.deepEqual(loaded.errors, []);
+  const hook = loaded.extensions[0].handlers.get('context_with_system')![0];
+  const result = await hook({ messages: [{ role: 'system', content: prompt }] } as any, {} as any) as any;
+  const sanitized = result.messages[0].content;
   assert.match(sanitized, /^You are an expert coding assistant\. You help users/);
   assert.match(sanitized, /<rules>[\s\S]*<\/rules>/);
   assert.doesNotMatch(sanitized, /operating inside pi, a coding agent harness/);

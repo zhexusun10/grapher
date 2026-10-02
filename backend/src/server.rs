@@ -2972,6 +2972,18 @@ pub fn dispatch(
         }
     }
     let result = match command {
+        "pi_extensions" => {
+            let changed = body["operation"] == "set_enabled";
+            let result = crate::pi_extensions::request(body)?;
+            #[cfg(not(feature = "fixture"))]
+            if changed {
+                crate::engine::invalidate_warm_partitioner();
+                crate::engine::invalidate_warm_node();
+            }
+            #[cfg(feature = "fixture")]
+            let _ = changed;
+            to_value(result)
+        }
         "provider_auth" => {
             #[cfg(not(feature = "fixture"))]
             let operation = body["operation"].as_str().map(str::to_owned);

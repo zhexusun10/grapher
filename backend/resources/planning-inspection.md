@@ -56,9 +56,9 @@ The feedback protocol uses an exact standalone final line: `<ACCEPT>` sends no a
 
 ## Native inspection tools
 
-`read` uses Pi's native implementation, description, and offset/limit behavior. `bash` uses Pi's native backend without write-command filtering or implicit `errexit`/`pipefail`. There are no file `edit`/`write` tools, automatic project context files, or automatically discovered skills/extensions for the Planner.
+`read` uses Pi's native implementation, description, and offset/limit behavior. `bash` uses Pi's native backend without write-command filtering or implicit `errexit`/`pipefail`. The base tool set has no file `edit`/`write` tools or automatic project context files. Selected global Pi extensions, MCP tools and skills may additionally be available to the Planner.
 
-The native tools run in the **private Planner repository's actual cwd**. Commands and file contents are not transparently rewritten to the source directory. Required PATH/HOME/temp/external resources remain subject to the host and private-workspace platform policy. Native Bash can write files in that workspace; a four-tool policy is not read-only inspection.
+The native tools run in the **private Planner repository's actual cwd**. Commands and file contents are not transparently rewritten to the source directory. Required PATH/HOME/temp/external resources remain subject to the host and private-workspace platform policy. Native Bash and user extensions can write files in that workspace; the base tool policy is not read-only inspection.
 
 ## Source effects and approval
 

@@ -6,11 +6,11 @@
 
 | Role | Working directory | Tool policy |
 | --- | --- | --- |
-| Partitioner | Source project | Classification only; no tools or automatic skills/extensions |
-| Planner | Private project copy | `node`, `edge`, native `read`/`bash`; explicit Grapher extension only |
+| Partitioner | Source project | Classification only; `pi-trim` only, no user extensions/MCP/skills or tools |
+| Planner | Private project copy | `node`, `edge`, native `read`/`bash`, selected global extensions/MCP/skills |
 | Serial agent | Source project | Pi tools and trusted skills/extensions |
 | Graph node | Independent node repository | Pi tools with Graph path adaptation |
-| Merger | Conflicted node workspace, Planner preview, or source project | Conflict-repair tools; no automatic project extensions/context |
+| Merger | Conflicted node workspace, Planner preview, or source project | Conflict-repair tools and `pi-trim`; no user extensions/MCP/skills or automatic context |
 
 Planner and private Merger filesystem permissions follow the private-workspace platform policy below. A private Merger does not gain source/sibling access merely because it repairs conflicts. Its Bash is still Pi's native tool, not a read-only command filter. Successful Planner changes can be merged into the source before approval; Reject does not roll them back. See [Planning and approval](execution-model.md#planning-and-approval).
 
