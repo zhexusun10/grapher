@@ -22,11 +22,9 @@ Goal → Supervisor LLM → Agent → Supervisor LLM → Agent → ...
 Grapher
 
 Goal → Planner → Compiled Graph → Deterministic Runtime
-                                      ├── Agent A
-                                      |        |
-                                      |   Agent B
-                                      └── Agent C
-                                            ....
+                                      ├── Agent A ──┐
+                                      ├── Agent B ──┼──→ Agent D
+                                      └── Agent C ──┘
 ```
 
 **Core differences:**
@@ -38,7 +36,7 @@ Goal → Planner → Compiled Graph → Deterministic Runtime
 
 **Not all work needs multiple agents.** Grapher uses intent-based routing in **Auto** mode or lets you choose manually: **Serial** for linear tasks, **Graph** when parallelism helps.
 
-Built on [Pi](https://github.com/earendil-works/pi). Child nodes inherit their completed parents' workspace state—not their conversations. Scheduling does not depend on a supervisor agent's ongoing conversation.
+Built on [Pi](https://github.com/earendil-works/pi).
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
@@ -48,7 +46,7 @@ Built on [Pi](https://github.com/earendil-works/pi). Child nodes inherit their c
 
 ## Why Grapher?
 
-- **Pi, with a GUI** — Chat with coding agents, manage provider sign-in and model settings, inspect tool calls and logs, and send follow-up instructions from one graphical workbench. Single-agent work needs no graph planning.
+- **Integrated coding-agent environment** — Chat with coding agents, manage provider authentication and model settings, inspect tool calls and logs, and intervene from the same UI.
 - **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions.
 - **Workspace inheritance** — Child nodes start from their completed parents' workspace state, combined when there are multiple parents. Each node works in its own workspace.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
@@ -160,22 +158,6 @@ Partitioner
 ```
 
 Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits their workspace state. Explicit feedback edges send bounded rework instructions to a fixed target; they do not copy conversations or supply filesystem input.
-
-## Unlike conversational multi-agent systems
-
-Conversation-driven orchestration keeps an LLM coordinator in the execution loop:
-
-```text
-Agent -> Coordinator -> Agent -> Coordinator -> ...
-```
-
-Grapher compiles the collaboration structure first:
-
-```text
-Goal -> Graph -> Deterministic runtime -> Node workspaces -> Published result
-```
-
-Inspectable scheduling does **not** make model outputs deterministic or guarantee better code. Single or linear work stays Serial; unnecessary parallelism can create conflicts.
 
 ## Architecture
 
