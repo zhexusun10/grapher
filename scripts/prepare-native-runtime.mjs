@@ -23,6 +23,9 @@ try {
     mode: constants.COPYFILE_FICLONE,
     dereference: process.platform === 'win32',
     verbatimSymlinks: process.platform !== 'win32',
+    // Node 22's native recursive cp fails on Unicode Windows source paths.
+    // A filter selects its portable walker (Pi already needs one for .git).
+    filter: process.platform === 'win32' ? () => true : undefined,
   };
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   // Independent metadata; never retain the submodule's pointer into source/.git.
