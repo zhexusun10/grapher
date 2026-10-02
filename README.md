@@ -2,11 +2,10 @@
 
 > **Don't orchestrate agents. Compile work.**
 >
-> 不编排智能体，编译工作。
 
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Grapher is a **local coding-agent workbench built on [Pi](https://github.com/earendil-works/pi)**. It runs single-agent coding tasks directly, or compiles complex work into inspectable execution graphs executed by a deterministic Rust runtime. Independent agents collaborate through Git—not a supervisor agent's ongoing conversation.
+Grapher is a **local coding-agent workbench built on [Pi](https://github.com/earendil-works/pi)**. It runs single-agent coding tasks directly, or compiles complex work into inspectable execution graphs executed by a deterministic Rust runtime. Child nodes inherit their completed parents' workspace state—not their conversations. Scheduling does not depend on a supervisor agent's ongoing conversation.
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
@@ -17,8 +16,8 @@ Grapher is a **local coding-agent workbench built on [Pi](https://github.com/ear
 ## Why Grapher?
 
 - **Pi, with a GUI** — Chat with coding agents, manage provider sign-in and model settings, inspect tool calls and logs, and send follow-up instructions from one graphical workbench. Single-agent work needs no graph planning.
-- **Deterministic orchestration** — Scheduling, dependencies, retries, and feedback are explicit Rust state transitions, not hidden in LLM conversations.
-- **Git-native collaboration** — Agents exchange file states and commits, not each other's chat histories. Graph nodes use independent Git repositories.
+- **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions, not hidden in LLM conversations.
+- **Workspace inheritance** — Child nodes start from their completed parents' workspace state, combined when there are multiple parents. Each node works in its own workspace; parent conversations are not inherited.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
@@ -39,7 +38,7 @@ For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph
 | Coding agents | One | One or more task nodes |
 | Planning | Direct | Compiled execution graph |
 | Approval | Automatic | User approval by default |
-| Workspace | Your project | Independent Git repositories |
+| Workspace | Your project | Private node workspaces with dependency-based inheritance |
 | Scheduling | Sequential | Dependency-aware, bounded parallelism |
 
 See the [execution model](docs/architecture/execution-model.md) for planning side effects and publication semantics. Graph is a route, not a minimum agent count; it can contain a single node.
@@ -95,15 +94,19 @@ Partitioner
                                            |
                                            v
                               Deterministic Rust runtime
-                                  |      |      |
-                               Agent A Agent B Agent C
-                                  '--- Git state ---'
+                                  |               |
+                               Agent A         Agent B
+                                  \               /
+                                  Workspace inheritance
+                                           |
+                                           v
+                                        Agent C
                                            |
                                            v
                                   Publish to project
 ```
 
-Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG; explicit feedback edges define bounded revision paths.
+Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits their workspace state. Explicit feedback edges send bounded rework instructions to a fixed target; they do not copy conversations or supply filesystem input.
 
 ## Unlike conversational multi-agent systems
 
@@ -116,16 +119,16 @@ Agent -> Coordinator -> Agent -> Coordinator -> ...
 Grapher compiles the collaboration structure first:
 
 ```text
-Goal -> Graph -> Deterministic runtime -> Agents -> Git -> Result
+Goal -> Graph -> Deterministic runtime -> Node workspaces -> Published result
 ```
 
 Inspectable scheduling does **not** make model outputs deterministic or guarantee better code. Single or linear work stays Serial; unnecessary parallelism can create conflicts.
 
 ## Architecture
 
-The Rust backend and SQLite event log own runtime state; the React UI displays projections. Graph nodes use independent Git repositories, and delivery requires successful publication—not merely finished model calls.
+The Rust backend and SQLite event log own runtime state; the React UI displays projections. Graph nodes have their own workspaces and Git metadata. The backend prepares inherited workspace state and records results as Git snapshots; agents do not exchange commits. Delivery requires successful publication—not merely finished model calls.
 
-Read [Architecture](docs/architecture/overview.md) for motivation and invariants, or [Execution model](docs/architecture/execution-model.md) for planning, sessions, Git state, and publication semantics. Low-level runtime, isolation, and Pi contracts are linked from those pages rather than duplicated here.
+Read [Architecture](docs/architecture/overview.md) for motivation and invariants, or [Execution model](docs/architecture/execution-model.md) for planning, sessions, workspace inheritance, Git snapshots, and publication semantics. Low-level runtime, isolation, and Pi contracts are linked from those pages rather than duplicated here.
 
 ## Development
 

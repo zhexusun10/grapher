@@ -266,13 +266,13 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
 }
 
 #[test]
-fn passes_system_prompt_flag_when_provided() {
+fn merger_appends_system_prompt_while_other_roles_keep_replacement_behavior() {
     let temp = TempDir::new().unwrap();
     let script_path = temp.path().join("fake-pi.sh");
     let script = r#"cat >/dev/null
 echo "ARGS: $@"
 for arg in "$@"; do
-    if [ "$prev" = "--system-prompt" ]; then
+    if [ "$prev" = "--system-prompt" ] || [ "$prev" = "--append-system-prompt" ]; then
         echo "SYSTEM_PROMPT_CONTENT: $(cat "$arg")"
     fi
     prev="$arg"
@@ -291,27 +291,30 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         thinking_level: "medium".into(),
         role_models: Default::default(),
     };
-    let mut output = String::new();
-    let result = run_pi(
-        PiRequest {
-            role: PiRole::NodeAgent,
-            config: &config,
-            cwd: temp.path(),
-            task: "Do not run a model",
-            session_dir: &temp.path().join("session"),
-            extension: None,
-            tools: Some("read,bash"),
-            session_id: Some("test-session"),
-            extra_args: Vec::new(),
-            environment: Vec::new(),
-            system_prompt: Some("Custom system prompt content for test"),
-            images: None,
-        },
-        |text| output.push_str(&text),
-    );
-    assert_eq!(result.unwrap(), "OK");
-    assert!(output.contains("--system-prompt"));
-    assert!(output.contains("SYSTEM_PROMPT_CONTENT: Custom system prompt content for test"));
+    for role in [PiRole::Merger, PiRole::NodeAgent, PiRole::Planner, PiRole::Partitioner] {
+        let mut output = String::new();
+        let result = run_pi(
+            PiRequest {
+                role,
+                config: &config,
+                cwd: temp.path(),
+                task: "Do not run a model",
+                session_dir: &temp.path().join(role.name()),
+                extension: None,
+                tools: Some("read,bash"),
+                session_id: Some("test-session"),
+                extra_args: Vec::new(),
+                environment: Vec::new(),
+                system_prompt: Some("Custom system prompt content for test"),
+                images: None,
+            },
+            |text| output.push_str(&text),
+        );
+        assert_eq!(result.unwrap(), "OK");
+        assert_eq!(output.contains("--append-system-prompt"), role == PiRole::Merger);
+        assert_eq!(output.contains("--system-prompt"), role != PiRole::Merger);
+        assert!(output.contains("SYSTEM_PROMPT_CONTENT: Custom system prompt content for test"));
+    }
 }
 
 #[test]

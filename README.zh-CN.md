@@ -6,7 +6,7 @@
 
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Grapher 是一个**基于 [Pi](https://github.com/earendil-works/pi) 的本地 Coding Agent 工作台**。它可以直接运行单 Agent 编程任务，也可以将复杂工作编译成可检查的执行图，由确定性的 Rust 运行时执行。独立 Agent 通过 Git 协作，而不是依赖“主管 Agent”的持续对话。
+Grapher 是一个**基于 [Pi](https://github.com/earendil-works/pi) 的本地 Coding Agent 工作台**。它可以直接运行单 Agent 编程任务，也可以将复杂工作编译成可检查的执行图，由确定性的 Rust 运行时执行。子节点继承已完成父节点的工作区状态，而不继承其对话；调度不依赖“主管 Agent”的持续对话。
 
 [快速开始](#快速开始) · [工作方式](#工作方式) · [架构](docs/architecture/overview.md) · [English](README.md)
 
@@ -17,8 +17,8 @@ Grapher 是一个**基于 [Pi](https://github.com/earendil-works/pi) 的本地 C
 ## 为什么选择 Grapher？
 
 - **Pi 的图形化工作台** — 在同一个界面中与 Coding Agent 对话、管理服务商登录与模型设置、查看工具调用和日志、追加指令。单 Agent 编程无需规划任务图。
-- **确定性编排** — 调度、依赖、重试和反馈是明确的 Rust 状态转换，不隐藏在 LLM 对话中。
-- **Git 原生协作** — Agent 交换文件状态和提交，而不是彼此的聊天记录；Graph 节点使用独立 Git 仓库。
+- **确定性编排** — 调度、依赖、结果失效和有界反馈是明确的 Rust 状态转换，不隐藏在 LLM 对话中。
+- **工作区继承** — 子节点从已完成父节点的工作区状态开始执行；多个父节点的状态会先合并。各节点在自己的工作区中工作，不继承父节点的对话。
 - **可检查的执行图** — 执行前查看并批准任务图，执行中清楚看到依赖、并行分支和有次数限制的返工。
 - **本地优先** — 在你的机器上运行；Graph 的有效结果成功发布回代码库后才宣告完成。模型请求仍会发送给你配置的服务商。
 
@@ -39,7 +39,7 @@ Grapher 是一个**基于 [Pi](https://github.com/earendil-works/pi) 的本地 C
 | 编程 Agent | 一个 | 一个或多个任务节点 |
 | 规划 | 直接执行 | 编译执行图 |
 | 审批 | 自动 | 默认由用户批准 |
-| 工作区 | 用户项目 | 独立 Git 仓库 |
+| 工作区 | 用户项目 | 按依赖继承状态的独立节点工作区 |
 | 调度 | 顺序执行 | 依赖感知、有界并行 |
 
 规划副作用和发布语义见[执行模型](docs/architecture/execution-model.md)。Graph 是执行路线，不是 Agent 数量要求；图也可以只有一个节点。
@@ -95,15 +95,19 @@ npm start
                                 |
                                 v
                          确定性 Rust 运行时
-                           |      |      |
-                        Agent A Agent B Agent C
-                           '--- Git 状态 ---'
+                           |             |
+                        Agent A       Agent B
+                           \             /
+                            工作区状态继承
+                                |
+                                v
+                             Agent C
                                 |
                                 v
                             发布到项目
 ```
 
-模型负责拆分工作和执行具体任务，编译器负责验证图。编译完成后，规划器可以退出：调度不再依赖协调器的下一条消息。普通依赖构成 DAG，显式反馈边定义有次数限制的修订路径。
+模型负责拆分工作和执行具体任务，编译器负责验证图。编译完成后，规划器可以退出：调度不再依赖协调器的下一条消息。普通依赖构成 DAG：子节点等待父节点完成，再继承其工作区状态。显式反馈边向固定目标发送有次数限制的返工指令，不复制对话，也不提供文件系统输入。
 
 ## 与对话式多智能体系统有什么不同？
 
@@ -116,16 +120,16 @@ Agent -> Coordinator -> Agent -> Coordinator -> ...
 Grapher 先编译协作结构，再执行：
 
 ```text
-目标 -> 图 -> 确定性运行时 -> Agents -> Git -> 结果
+目标 -> 图 -> 确定性运行时 -> 节点工作区 -> 发布结果
 ```
 
 可检查的调度**不代表模型输出是确定的，也不保证代码质量更高**。单一或线性任务保持串行；不必要的并行可能带来冲突。
 
 ## 架构
 
-Rust 后端与 SQLite 事件日志拥有运行状态，React 界面只显示投影。Graph 节点使用独立 Git 仓库；完成边界是成功发布，而不是模型调用结束。
+Rust 后端与 SQLite 事件日志拥有运行状态，React 界面只显示投影。Graph 节点拥有各自的工作区和 Git 元数据。后端负责准备继承的工作区状态，并用 Git 快照记录结果；Agent 不交换提交。完成边界是成功发布，而不是模型调用结束。
 
-[架构概览](docs/architecture/overview.md)解释动机与不变量；[执行模型](docs/architecture/execution-model.md)解释规划、会话、Git 状态和发布语义。底层运行时、隔离和 Pi 契约从这些页面继续导航，不在首页重复。
+[架构概览](docs/architecture/overview.md)解释动机与不变量；[执行模型](docs/architecture/execution-model.md)解释规划、会话、工作区继承、Git 快照和发布语义。底层运行时、隔离和 Pi 契约从这些页面继续导航，不在首页重复。
 
 ## 开发
 

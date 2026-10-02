@@ -133,6 +133,76 @@ fn concurrent_planner_merges_preserve_source_on_conflict() {
 }
 
 #[test]
+fn planner_merger_repairs_preview_and_any_late_source_conflict() {
+    for late_conflict in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let (source, _) = repository(temp.path());
+        let run = "b44201e4-2c8b-4c80-b1a1-3e660a83c7b1";
+        let root = temp.path().join(".grapher-workspaces").join(run);
+        let planner = root.join("planner");
+        let preview = root.join("preview");
+        grapher::workspace::prepare_planner(&source, &planner).unwrap();
+        fs::write(planner.join("shared"), "planner\n").unwrap();
+        let planner_head = snapshot_repository(&planner).unwrap();
+        fs::write(source.join("shared"), "source\n").unwrap();
+        let source_head = snapshot_repository(&source).unwrap();
+        let mut locations = Vec::new();
+        let mut late_head = None;
+        grapher::workspace::publish_planner_with_merger(
+            &source, &planner, &preview, run, run,
+            |cwd| {
+                locations.push(cwd.to_path_buf());
+                assert!(!git(cwd, &["diff", "--name-only", "--diff-filter=U"])?.is_empty());
+                fs::write(cwd.join("shared"), "source + planner\n").unwrap();
+                git(cwd, &["add", "shared"])?;
+                git(cwd, &["commit", "--no-edit"])?;
+                if cwd == preview && late_conflict {
+                    // An external writer may bypass Grapher's source lock.
+                    fs::write(source.join("shared"), "late source\n").unwrap();
+                    late_head = Some(snapshot_repository(&source).unwrap());
+                }
+                Ok(())
+            },
+        ).unwrap();
+        assert_eq!(locations, if late_conflict {
+            vec![preview.clone(), source.clone()]
+        } else {
+            vec![preview.clone()]
+        });
+        assert_eq!(fs::read_to_string(source.join("shared")).unwrap().replace("\r\n", "\n"), "source + planner\n");
+        for head in [Some(planner_head), Some(source_head), late_head].into_iter().flatten() {
+            git(&source, &["merge-base", "--is-ancestor", &head, "HEAD"]).unwrap();
+        }
+        assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn failed_planner_merger_preserves_preview_without_dirtying_source() {
+    let temp = TempDir::new().unwrap();
+    let (source, _) = repository(temp.path());
+    let run = "b44201e4-2c8b-4c80-b1a1-3e660a83c7b1";
+    let root = temp.path().join(".grapher-workspaces").join(run);
+    let planner = root.join("planner");
+    let preview = root.join("preview");
+    grapher::workspace::prepare_planner(&source, &planner).unwrap();
+    fs::write(planner.join("shared"), "planner\n").unwrap();
+    fs::write(source.join("shared"), "source\n").unwrap();
+    let before = snapshot_repository(&source).unwrap();
+    let error = grapher::workspace::publish_planner_with_merger(
+        &source, &planner, &preview, run, run,
+        |cwd| {
+            assert_eq!(cwd, preview);
+            Err("Merger unavailable".into())
+        },
+    ).unwrap_err();
+    assert!(error.contains("Merger unavailable"));
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), before);
+    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+    assert!(!git(&preview, &["diff", "--name-only", "--diff-filter=U"]).unwrap().is_empty());
+}
+
+#[test]
 fn concurrent_graph_preparation_never_uses_another_runs_base() {
     let temp = TempDir::new().unwrap();
     let (source, base_a) = repository(temp.path());

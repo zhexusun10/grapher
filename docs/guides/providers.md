@@ -43,7 +43,7 @@ A model identifier uses **`provider/model`**. In Settings, choose models and thi
 | Partitioner | Fast route classification | Inherits the default model; thinking defaults to `off` |
 | Planner | Graph design and repository inspection | Inherits default model/thinking unless overridden |
 | Node Agent / Pi Instance | Coding tasks | Inherits default model/thinking unless overridden |
-| Merger | Final publication conflicts | Uses Node Agent settings unless overridden by environment |
+| Merger | Node composition, Planner publication, and final publication conflicts | Uses Node Agent settings unless overridden by environment |
 
 Role settings are stored as `roleModels.partitioner`, `.planner`, and `.nodeAgent`. Legacy `model`/`thinkingLevel` remain defaults. Saving settings affects subsequent Runs, not already-running sessions.
 
@@ -54,11 +54,13 @@ Smaller low-latency models may suit the Partitioner; graph planning and difficul
 Role-specific environment variables take precedence over UI settings:
 
 ```text
-PARTITIONER_MODEL / PARTITIONER_THINKING / PARTITIONER_TIMEOUT_SECONDS
-PLANNER_MODEL     / PLANNER_THINKING     / PLANNER_TIMEOUT_SECONDS
-NODE_AGENT_MODEL  / NODE_AGENT_THINKING  / NODE_AGENT_TIMEOUT_SECONDS
-MERGER_MODEL      / MERGER_THINKING      / MERGER_TIMEOUT_SECONDS
+PARTITIONER_MODEL / PARTITIONER_THINKING
+PLANNER_MODEL     / PLANNER_THINKING
+NODE_AGENT_MODEL  / NODE_AGENT_THINKING
+MERGER_MODEL      / MERGER_THINKING
 ```
+
+The legacy `*_TIMEOUT_SECONDS` role variables are ignored. Production role sessions have no Grapher-imposed per-role deadline; stop/cancel ends a session. A benchmark runner can impose a separate end-to-end trial budget.
 
 Available thinking levels depend on the selected model. The UI reports effective overrides; check them when a role appears to ignore a saved selection.
 

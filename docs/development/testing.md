@@ -25,6 +25,7 @@ npm test
 | `npm run test:extensions` | Real Pi extension tools and Planner graph mutations; compatible `rg`/`fd` required |
 | `npm run test:native` | Path adaptation plus native launcher/platform filesystem tests; actual pinned Pi and host tools |
 | `npm run test:windows-native` | Windows production backend + real Pi/Bash; model responses served locally |
+| `npm run test:merger` | Production backend + pinned Pi/Git; local-model node, Planner-preview, and source conflict repair, including shadow folders and retained failures; native Graph prerequisites apply |
 | `npm run test:bindings` | Local HTTP project binding/lifecycle and execution-route behavior |
 | `npm run test:concurrent` | Fixture HTTP multi-Run regression; requires `/bin/sh`, skips on Windows |
 | `npm run test:conversation-acceptance` | Legacy-history copies, log migration, browser/HTTP/process stress; see prerequisites below |

@@ -146,8 +146,11 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         .canonicalize()
         .map_err(|e| format!("Invalid execution directory: {e}"))?;
     if cwd != repository {
-        if !matches!(role, PiRole::NodeAgent | PiRole::Planner) {
-            return Err("Partitioner/Merger must use the bound source directory".into());
+        // Conflict repair belongs in the checkout containing the merge, not
+        // necessarily the source. Private Mergers retain the same workspace
+        // validation and platform boundaries as other private executions.
+        if role == PiRole::Partitioner {
+            return Err("Partitioner must use the bound source directory".into());
         }
         if cwd.starts_with(&repository) || repository.starts_with(&cwd) {
             return Err("Graph workspace must not overlap the source directory".into());
@@ -419,6 +422,32 @@ mod tests {
     }
 
     #[test]
+    fn merger_can_use_source_node_and_planner_workspaces_without_bypassing_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        assert!(validate_workspace(PiRole::Merger, &source, &source).is_ok());
+        for relative in [".grapher-worktrees/run/node", ".grapher-workspaces/run/preview"] {
+            let private = temp.path().join(relative);
+            fs::create_dir_all(&private).unwrap();
+            assert!(validate_workspace(PiRole::Merger, &source, &private)
+                .unwrap_err().contains("private Git"));
+            crate::workspace::git(&private, &["init", "-q"]).unwrap();
+            validate_workspace(PiRole::Merger, &source, &private).unwrap();
+            assert!(validate_workspace(PiRole::Partitioner, &source, &private).is_err());
+            assert!(command(PiRole::Merger, &source, &private)
+                .unwrap_err().contains("platform context"));
+        }
+        let overlapping = source.join("nested");
+        fs::create_dir(&overlapping).unwrap();
+        crate::workspace::git(&overlapping, &["init", "-q"]).unwrap();
+        assert!(validate_workspace(PiRole::Merger, &source, &overlapping)
+            .unwrap_err().contains("overlap"));
+        assert!(validate_workspace(PiRole::Merger, &source, temp.path())
+            .unwrap_err().contains("overlap"));
+    }
+
+    #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn private_planner_can_write_its_graph_but_not_the_source() {
         let temp = tempfile::tempdir().unwrap();
@@ -528,7 +557,10 @@ export default function () {
         .unwrap();
         let engine = prepared_runtime().unwrap();
         let mut workers = Vec::new();
-        for (label, cwd, sibling) in [("A", &a, &b), ("B", &b, &a)] {
+        for (label, role, cwd, sibling) in [
+            ("A", PiRole::NodeAgent, &a, &b),
+            ("B", PiRole::Merger, &b, &a),
+        ] {
             #[cfg(unix)]
             {
                 std::os::unix::fs::symlink(&source, cwd.join("source-link")).unwrap();
@@ -539,7 +571,7 @@ export default function () {
             let session = data.join(format!("sessions/{label}"));
             fs::create_dir_all(&session).unwrap();
             let mut command =
-                execution_command(PiRole::NodeAgent, &source, cwd, &data, &session).unwrap();
+                execution_command(role, &source, cwd, &data, &session).unwrap();
             // macOS additionally denies the original installation when
             // testing Grapher on its own source; Linux's copied engine is RO.
             #[cfg(target_os = "macos")]
@@ -571,7 +603,7 @@ export default function () {
                 .arg(&probe)
                 .arg("--session-dir")
                 .arg(&session)
-                .env("GRAPHER_MODE", "node")
+                .env("GRAPHER_MODE", if role == PiRole::Merger { "merger" } else { "node" })
                 .env("GRAPHER_EXECUTION_KIND", "graph")
                 .env("GRAPHER_ORIGINAL_ROOT", &source)
                 .env("GRAPHER_SOURCE_ALIAS", &source)

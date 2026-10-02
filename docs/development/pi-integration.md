@@ -39,9 +39,9 @@ npm run pi:build
 | Partitioner | No tools, context files, automatic skills/extensions; thinking defaults to `off` |
 | Planner | `node`, `edge`, `read`, `bash`; explicit Grapher planning extension; no automatic project context/extensions |
 | Node Agent | Pi native tools and trusted workspace skills/extensions |
-| Merger | Fixed conflict-repair prompt/tools; no automatic project context/extensions |
+| Merger | Pi default prompt with a fixed conflict-repair addendum (`--append-system-prompt`); fixed tools; no automatic project context/extensions |
 
-The Partitioner/Serial/Merger use source-native execution. The Planner uses a private project copy, and Graph nodes use their own repositories. Platform access rules and Graph path adaptation are described in [Filesystem isolation](../architecture/filesystem-isolation.md).
+The Partitioner/Serial use source-native execution. The Planner uses a private project copy, and Graph nodes use their own repositories. The Merger runs in whichever workspace contains the conflict: a node repository, Planner publication preview, or source project. Private Mergers use the same validated launcher and platform boundaries as other private executions; see [composition recovery](../architecture/execution-model.md#parent-composition-conflicts). Platform access rules and Graph path adaptation are described in [Filesystem isolation](../architecture/filesystem-isolation.md).
 
 The backend removes inherited Pi model/session selectors and sets explicit role/session identities. Long-term auth remains upstream-owned. Do not implement a competing Rust/browser token store or silently drop supported provider credentials from the child environment.
 

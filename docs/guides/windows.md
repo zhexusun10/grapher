@@ -22,7 +22,7 @@ Open <http://127.0.0.1:1420> and configure a provider in Settings.
 
 - Stock Node, pinned Pi, and Git for Windows Bash; no patched Node/MSYS binaries.
 - A private Planner repository and independent Graph node repositories.
-- Graph compilation, approval, concurrent branches, Git dependency state, bounded feedback, and final publication.
+- Graph compilation, approval, concurrent branches, parent-to-child workspace inheritance, bounded feedback, and final publication.
 - Process-tree management through Windows Job Objects. A child is attached while suspended, then resumed; kill-on-close supports termination with its owning backend.
 
 Planner uses Pi's native Bash tool. Grapher does not substitute PowerShell or change Bash's shell semantics.
@@ -64,6 +64,6 @@ npm.cmd run build
 
 `test:windows-native` uses the production Rust backend, real pinned Pi, Planner extension, Git, and Bash. Only model responses come from a temporary local OpenAI-compatible service; this is not an external-model quality benchmark or fixture-engine substitute.
 
-Coverage includes Bash/native tool semantics, concurrent Graph workflows, Git dependency propagation/publication, cancellation of selected descendant writers, and interrupted-run recovery. Unknown third-party tools, detached services, and other crash conditions still require independent checks.
+Coverage includes Bash/native tool semantics, concurrent Graph workflows, workspace inheritance/publication, cancellation of selected descendant writers, and interrupted-run recovery. Unknown third-party tools, detached services, and other crash conditions still require independent checks.
 
 For offline extension tests, install `ripgrep` and `fd` first; see [Testing](../development/testing.md#search-tools-and-offline-runs). The [Windows CI workflow](../../.github/workflows/windows-native.yml) records the checks configured for the hosted runner, not a guarantee for every Windows installation.

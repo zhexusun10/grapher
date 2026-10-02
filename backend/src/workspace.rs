@@ -1063,13 +1063,28 @@ pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
 }
 
 /// Merge one Planner's private changes under the project's short publication
-/// lock. A dry run prevents ordinary merge conflicts from dirtying the source.
+/// lock. Without a resolver, preview conflicts fail without dirtying the source.
 pub fn publish_planner(
     repository: &Path,
     planner: &Path,
     preview: &Path,
     run_id: &str,
     planning_id: &str,
+) -> Result<(), String> {
+    publish_planner_with_merger(repository, planner, preview, run_id, planning_id, |_| {
+        Err("Planner merge conflict requires a Merger or manual resolution".into())
+    })
+}
+
+/// Resolve Planner conflicts in a private preview first, then publish the
+/// resolved snapshot. A late source conflict is repaired in the source itself.
+pub fn publish_planner_with_merger(
+    repository: &Path,
+    planner: &Path,
+    preview: &Path,
+    run_id: &str,
+    planning_id: &str,
+    mut resolve: impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let source_head = snapshot_repository(repository)?;
     let head = snapshot_node_for_run(
@@ -1086,17 +1101,26 @@ pub fn publish_planner(
     {
         return Ok(());
     }
-    prepare(repository, preview, &source_head, &[head.clone()]).map_err(|error| {
+    let mut resolved_preview = false;
+    prepare_with_merger(repository, preview, &source_head, &[head.clone()], || {
+        resolve(preview)?;
+        resolved_preview = true;
+        Ok(())
+    }).map_err(|error| {
         format!(
             "Planner changes conflict with the source; the private workspace is retained: {error}"
         )
     })?;
-    crate::graph_merge::merge_graph(repository, &[head], || {
-        Err(
-            "Planner merge conflicted after preflight; resolve the source merge before retrying"
-                .into(),
-        )
-    })?;
+    // Publish the actual repaired state, not the original conflicting Planner
+    // head. Otherwise the source would repeat the already-resolved conflict.
+    let head = if resolved_preview {
+        snapshot_node_for_run(
+            preview, repository, &format!("planner-{planning_id}-preview"), Some(run_id),
+        )?
+    } else {
+        head
+    };
+    crate::graph_merge::merge_graph(repository, &[head], || resolve(repository))?;
     Ok(())
 }
 

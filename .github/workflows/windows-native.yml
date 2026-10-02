@@ -38,3 +38,6 @@ jobs:
       - name: Run native Planner and production Graph acceptance (local model responses)
         timeout-minutes: 5
         run: npm run test:windows-native
+      - name: Run production workspace Merger acceptance (local model responses)
+        timeout-minutes: 5
+        run: npm run test:merger
