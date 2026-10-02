@@ -10,9 +10,9 @@
 | Planner | Private project copy | `node`, `edge`, native `read`/`bash`; explicit Grapher extension only |
 | Serial agent | Source project | Pi tools and trusted skills/extensions |
 | Graph node | Independent node repository | Pi tools with Graph path adaptation |
-| Final Merger | Source project and its existing merge state | Conflict-repair tools; no automatic project extensions/context |
+| Merger | Conflicted node workspace, Planner preview, or source project | Conflict-repair tools; no automatic project extensions/context |
 
-Planner filesystem permissions follow the private-workspace platform policy below. Its Bash is still Pi's native tool, not a read-only command filter. Successful Planner changes can be merged into the source before approval; Reject does not roll them back. See [Planning and approval](execution-model.md#planning-and-approval).
+Planner and private Merger filesystem permissions follow the private-workspace platform policy below. A private Merger does not gain source/sibling access merely because it repairs conflicts. Its Bash is still Pi's native tool, not a read-only command filter. Successful Planner changes can be merged into the source before approval; Reject does not roll them back. See [Planning and approval](execution-model.md#planning-and-approval).
 
 ## Platform boundaries
 
@@ -28,11 +28,13 @@ The mount layout exposes the current private repository/session, masks source an
 
 An outer Docker/Harbor container is **not** a substitute for these per-execution boundaries. See [Harbor requirements](../benchmarks/harbor.md#linux-task-environment).
 
+On macOS/Linux, a workspace using Git alternates also has read access to the bound source's Git object database. Source working files and unrelated refs remain restricted, but object-store access can expose historical file contents and other stored snapshots. This is not a history-confidentiality boundary. The object database is protected from writes by private executions; see [workspace storage](execution-model.md#backend-git-storage).
+
 ### Windows
 
 Private workspaces run stock Node, pinned Pi, and Git for Windows Bash with the host user's permissions. There is **no VM, per-node filesystem sandbox, custom isolation driver, or patched Node/MSYS binary**.
 
-Processes may access the source, siblings, other sessions, engine files, HOME, and credentials where the host user can. Independent Git repositories isolate snapshots and propagation, not access rights. See the [Windows guide](../guides/windows.md).
+Processes may access the source, siblings, other sessions, engine files, HOME, and credentials where the host user can. Separate node workspaces and Git metadata isolate edits and inherited snapshots, not access rights. See the [Windows guide](../guides/windows.md).
 
 ## Path convention
 

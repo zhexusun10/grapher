@@ -1133,6 +1133,7 @@ fn plan_goal_internal(
                     crate::native::require_graph_execution()?;
                 }
                 let mut planner_metrics = None;
+                let mut merger_log = String::new();
                 let graph = match route.plan_type.as_str() {
                     "serial" => Graph {
                         original_goal: goal.clone(),
@@ -1144,8 +1145,8 @@ fn plan_goal_internal(
                     },
                     "graph" => {
                         // Persist a private checkout across revisions of this Run.
-                        // The source is locked only for the initial filesystem copy
-                        // and the final merge, not for Pi's model/tool session.
+                        // The source is locked for copying and publication,
+                        // including any conflict repair, not Planner inspection.
                         let workspace_file = directory.join("planner-workspace");
                         let previous_workspace = {
                             let runtime =
@@ -1316,7 +1317,11 @@ fn plan_goal_internal(
                         {
                             let _source_guard = lock.lock().map_err(|e| e.to_string())?;
                             check_planning_cancelled(&owner)?;
-                            crate::workspace::publish_planner(
+                            let mut merger_events = fs::File::create(directory.join("merger-events.jsonl"))
+                                .map_err(|error| error.to_string())?;
+                            let mut merger_output = fs::File::create(directory.join("merger.jsonl"))
+                                .map_err(|error| error.to_string())?;
+                            crate::workspace::publish_planner_with_merger(
                                 &repository,
                                 &planner_workspace,
                                 &workspace_root.join(format!("{planning_id}-preview")),
@@ -1326,6 +1331,25 @@ fn plan_goal_internal(
                                     &owner
                                 },
                                 &planning_id,
+                                |cwd| {
+                                    check_planning_cancelled(&owner)?;
+                                    crate::graph_merge::resolve_with_merger_for_node(
+                                        cwd, &goal, &config, &root, 1,
+                                        &format!("merge:planner-{planning_id}"),
+                                        |event| {
+                                            serde_json::to_writer(&mut merger_events, &event)
+                                                .map_err(|error| error.to_string())?;
+                                            merger_events.write_all(b"\n").map_err(|error| error.to_string())?;
+                                            if let EventKind::Output { text, .. } = event {
+                                                merger_output.write_all(text.as_bytes()).map_err(|error| error.to_string())?;
+                                                merger_log.push_str(&text);
+                                                on_planner_line(&text);
+                                            }
+                                            Ok(())
+                                        },
+                                    )?;
+                                    check_planning_cancelled(&owner)
+                                },
                             )?;
                         }
                         serde_json::from_str(
@@ -1336,7 +1360,12 @@ fn plan_goal_internal(
                     _ => return Err("Partitioner returned an invalid route".into()),
                 };
                 let total_planning_duration = planning_start.elapsed().as_secs_f64();
-                let model_duration = partition_metrics.duration_seconds
+                let merger_metrics = (!merger_log.is_empty()).then(|| {
+                    let model = PiModelConfig::resolve(PiRole::Merger, &config);
+                    parse_planning_role_metrics(&model.model, &merger_log)
+                });
+                let model_duration = merger_metrics.as_ref().map(|m| m.duration_seconds).unwrap_or(0.0)
+                    + partition_metrics.duration_seconds
                     + planner_metrics
                         .as_ref()
                         .map(|p| p.duration_seconds)
@@ -1345,6 +1374,9 @@ fn plan_goal_internal(
                 roles.insert("partition".to_string(), partition_metrics);
                 if let Some(m) = planner_metrics {
                     roles.insert("planner".to_string(), m);
+                }
+                if let Some(m) = merger_metrics {
+                    roles.insert("merger".to_string(), m);
                 }
                 if let Some(m) = roles.get("planner") {
                     eprintln!(
@@ -1466,6 +1498,14 @@ fn plan_goal_internal(
                             let m = parse_planning_role_metrics(&planner_config.model, &content);
                             model_duration += m.duration_seconds;
                             roles.insert("planner".into(), m);
+                        }
+                    }
+                    if let Ok(content) = fs::read_to_string(directory.join("merger.jsonl")) {
+                        if !content.is_empty() {
+                            let model = PiModelConfig::resolve(PiRole::Merger, &config);
+                            let metrics = parse_planning_role_metrics(&model.model, &content);
+                            model_duration += metrics.duration_seconds;
+                            roles.insert("merger".into(), metrics);
                         }
                     }
                     let failure_summary = PlanningSummary {

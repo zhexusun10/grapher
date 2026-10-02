@@ -56,7 +56,7 @@ Installing the package does not enable namespaces prohibited by the host/contain
 
 **Planning and approval can change your project.** Planner runs in a private copy, but successful planning merges its changes to the source before graph approval. Snapshots can stage and commit existing non-ignored user changes. Rejecting the plan does not roll back those merges or side effects. See [Planning and approval](../architecture/execution-model.md#planning-and-approval).
 
-Graph node dependencies are not automatically installed. Ignored, untracked dependency files do not automatically propagate with Git snapshots; tasks must prepare the dependencies they need.
+Graph node dependencies are not automatically installed. Ignored, untracked dependency files are not automatically included in inherited workspace snapshots; tasks must prepare the dependencies they need.
 
 ## Local production mode
 

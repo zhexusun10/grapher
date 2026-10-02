@@ -15,6 +15,7 @@
     "test:native": "node --test scripts/workspace-paths.test.mjs && node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --lib native::tests && node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --lib linux_sandbox::tests",
     "probe:file-mapping": "node scripts/node-ts.mjs scripts/check-file-tool-mapping.ts",
     "probe:native-mapping": "python3 scripts/probe-native-mapping.py --output .grapher/probes/native-mapping.json",
+    "test:merger": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher && node scripts/node-ts.mjs --test scripts/merger-native.test.ts",
     "test:windows-native": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher && node scripts/node-ts.mjs --test scripts/windows-native.test.ts",
     "test:bindings": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher && node scripts/check-project-binding.mjs && node scripts/node-ts.mjs --test scripts/execution-route.test.mjs",
     "test:extensions": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher && node scripts/node-ts.mjs scripts/check-pi-extension.ts",

@@ -932,6 +932,7 @@ pub struct PiRequest<'request> {
     pub session_id: Option<&'request str>,
     pub extra_args: Vec<&'request str>,
     pub environment: Vec<(&'request str, String)>,
+    /// Appended to Pi's default prompt for Merger; replaces it for other roles.
     pub system_prompt: Option<&'request str>,
     pub images: Option<&'request [crate::model::ImageAttachment]>,
 }
@@ -1112,7 +1113,11 @@ fn run_pi_with_timeout(
             path
         };
         command.args([
-            "--system-prompt",
+            if request.role == PiRole::Merger {
+                "--append-system-prompt"
+            } else {
+                "--system-prompt"
+            },
             prompt_path.to_str().ok_or("Invalid system prompt path")?,
         ]);
     }

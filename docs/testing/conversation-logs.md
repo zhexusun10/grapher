@@ -7,8 +7,8 @@ This page describes the log-storage contract and acceptance method, **not a publ
 - Business events are append-only; terminal events store byte counts and structured metrics rather than full transcripts.
 - UTF-8 execution output is chunked in SQLite `execution_logs` and addressed by byte offset.
 - Opening a conversation loads metadata, not every node's historical log.
-- Selected node transcripts and planning streams load on demand through bounded pages.
-- Each of the browser's two transcript caches is limited to 20 entries / 30 MiB.
+- Selected node transcripts and planning streams load on demand. Running node output and planning streams use bounded pages; the UI requests settled node transcripts in full.
+- Each of the browser's two transcript caches is limited to 20 entries / 30 MiB. This limits retained cache entries, not the size of a selected transcript.
 - Legacy output remains readable through per-execution compatibility migration without rewriting historical business events during normal reads.
 
 See [Runtime](../architecture/runtime.md) and the implementations in [store.rs](../../backend/src/store.rs) and [transcriptCache.ts](../../src/services/transcriptCache.ts).

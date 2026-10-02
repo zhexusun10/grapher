@@ -62,11 +62,11 @@ The native tools run in the **private Planner repository's actual cwd**. Command
 
 ## Source effects and approval
 
-After the planning session succeeds, the host snapshots and merges private Planner changes into the source, with a preview merge to detect ordinary conflicts. Short source locks protect copying and merging, not the entire model session. A failed merge preserves the private workspace.
+After the planning session succeeds, the host snapshots and merges private Planner changes into the source. Preview conflicts invoke the Merger in the private preview; the repaired snapshot is published, and any late source conflict invokes the Merger in the source. Source locks protect copying and publication, including conflict repair, not the Planner's inspection session. A failed merge preserves the affected workspace and logs.
 
 This happens before graph approval. Approval snapshots the resulting current source, including existing non-ignored user changes, and can stage/commit those changes before node workspaces are allocated. **Reject does not undo already-merged changes or external command side effects.**
 
-A Planner-generated single `task` graph remains Graph because routing is persisted independently. First node executions get fresh sessions and Git dependency state; continuations can reuse the same node session. Planner/parent conversations are not copied into downstream agents.
+A Planner-generated single `task` graph remains Graph because routing is persisted independently. First node executions get fresh sessions: roots start from the source baseline, and children inherit completed parents' workspace state. Continuations can reuse the same node session. Planner/parent conversations are not copied into downstream agents.
 
 ## Boundaries
 

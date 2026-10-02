@@ -39,7 +39,7 @@ waiting / dirty -> blocked
 - `failed`: the execution or protocol failed.
 - `blocked`: dependencies failed or workspace composition could not proceed.
 
-Nodes remain stable across recorded execution attempts. Historical output and commits remain inspectable even when a later revision supersedes their result.
+Nodes remain stable across recorded execution attempts. Historical output and backend-recorded Git snapshots remain inspectable even when a later revision supersedes their result.
 
 ## Scheduling and concurrency
 
@@ -49,7 +49,7 @@ There is no global pool limiting nodes across Runs, and no shared cap for Planne
 
 Failure blocks dependent branches; unrelated work continues. Pause stops new dispatches without forcibly terminating active model calls. Stop/cancel is a separate process-lifecycle action.
 
-Short source locks cover Planner preparation/merge and approval. They do not serialize all model sessions or final publication across Runs. Concurrent direct edits or publications can produce conflicts, surfaced by each execution/publication result.
+Source locks cover Planner preparation/publication and approval, including conflict repair during Planner publication. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce conflicts, surfaced by each execution/publication result.
 
 ## Bounded feedback
 
@@ -68,7 +68,7 @@ Live steering does not itself mark a running node dirty. Completed-node follow-u
 
 Business events include graph creation/revision, approval, execution transitions, feedback, human intervention, pause, and publication. Execution output is stored separately in UTF-8 byte-indexed `execution_logs` chunks; terminal events carry structured metadata rather than full transcripts.
 
-Snapshot/history/list requests are metadata-oriented. Node logs load on demand using `(runId, executionId, byteOffset)`; planning output has its own cursor. A page is bounded at 256 KiB. The two browser transcript caches each have a 20-entry / 30 MiB limit.
+Snapshot/history/list requests are metadata-oriented. Node logs load on demand using `(runId, executionId, byteOffset)`; planning output has its own cursor. Execution-log pages default to 256 KiB, with a configurable limit capped at 1 MiB. For settled executions, `full=true` bypasses that page limit; the current UI uses this to load the selected historical transcript in full. Planning-output pages are capped at 256 KiB. The two browser transcript caches each have a 20-entry / 30 MiB limit; those cache limits are not a cap on a selected transcript's size.
 
 Planning attempts retain requests, graph candidates, summaries, and Pi JSONL streams. UI switching must not confuse one Run's transcripts with another's. Tests and legacy-log migration are described in [Conversation logs](../testing/conversation-logs.md).
 
@@ -81,7 +81,8 @@ After interruption:
 - Old model sessions are not automatically resumed.
 - Interrupted executions become failed and the Run is paused.
 - Interrupted planning becomes failed, preserving available output.
-- Interrupted publication/Merger becomes `publication_failed` for explicit retry.
+- Interrupted publication or its Merger becomes `publication_failed` for explicit retry.
+- An interrupted node-composition Merger is recorded as failed without entering the publication phase; inspect the node workspace and rerun or resolve it.
 
 Old executor leases block startup until the old execution is confirmed stopped; the native backend does not silently discard them or take over background writers.
 

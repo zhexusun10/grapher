@@ -9,7 +9,7 @@ This document describes what happens to your project, sessions, and files. [Runt
 | Suitable work | One task or tightly coupled linear work | Independent workstreams with explicit dependencies |
 | Planning | A single `task` node; automatically approved | Planner, compiler, and graph approval |
 | Agent directory | The user's project | An independent Git repository per node |
-| Collaboration | One agent works directly on the project | Git commits propagate through dependencies |
+| Dependency inputs | One agent works directly on the project | Children inherit completed parents' workspace state |
 | Completion | Task completion and snapshot | Valid results successfully published to the project |
 
 The route is persisted separately from the graph's shape. A Planner-generated graph with one node called `task` is still Graph. Older events without a route retain a compatibility heuristic.
@@ -19,32 +19,43 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 1. The Partitioner selects a route, unless the user explicitly selects Serial or Graph.
 2. For Graph, the backend copies the project into a private Planner repository under `<project-parent>/.grapher-workspaces/<owner>/<planning-id>/`.
 3. The Planner uses `node`, `edge`, `read`, and native `bash`. It can change files in that copy; it is not a read-only inspector.
-4. After a successful planning session, the host snapshots and merges Planner changes into the source. A preview merge detects ordinary conflicts; failure retains the private workspace.
+4. After a successful planning session, the host snapshots and merges Planner changes into the source. A preview merge detects conflicts and invokes the Merger in that private workspace. The repaired snapshot is then published; a late source conflict invokes the Merger in the source. Failure retains the affected workspace and logs.
 5. The graph is validated and presented for approval. Approval snapshots the source's current non-ignored changes as the execution baseline; node workspaces are then allocated.
 
 **Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Successful planning can merge changes before approval. Reject does not undo those changes, Git commits, or external command side effects. Existing user changes can also be staged and committed during source snapshots.
 
 The Planner copy includes project files needed for inspection, including ignored dependencies where supported, but excludes Git internals and Grapher runtime data. That is distinct from node baseline propagation: ignored, untracked dependencies do not automatically become node Git snapshots.
 
-Short source locks protect Planner copy/merge and approval operations. Model sessions and final Graph publication do not hold a project-wide execution lock; concurrent Runs can still conflict.
+Source locks protect Planner copying/publication and approval. Planner inspection runs unlocked, but Planner publication holds the lock through any Merger conflict repair. Node model sessions and final Graph publication do not hold a project-wide execution lock; concurrent Runs can still conflict.
 
-## Node workspaces and Git propagation
+## Node workspaces and inheritance
 
 ```text
 <project-parent>/.grapher-worktrees/<run>/<node>-<execution>/
 ```
 
-These are **independent Git repositories**, not `git worktree` checkouts. Each has private Git metadata and the history needed for its task.
+Each node has its own working directory and private Git metadata; these are not `git worktree` checkouts.
 
-1. The approved source baseline is exposed through Grapher-owned refs.
-2. The node fetches the baseline and completed dependency refs via `file://`.
-3. Multiple parent commits are merged before the task runs.
-4. Completed file changes are committed in the node repository.
-5. The host fetches the result into its own refs for downstream use and publication.
+1. A root starts from the approved source baseline (or the current published baseline after a successful publication).
+2. A child waits for its ordinary dependencies to finish successfully. The backend prepares its workspace from their recorded filesystem states, combining multiple parents before the task runs.
+3. The agent performs its task in that workspace with its own session. It does not receive parent conversations or exchange commits with other agents.
+4. After execution, the backend snapshots the result for downstream inheritance and final publication.
 
-Transfer uses advertised refs such as `refs/grapher/base`, `refs/grapher/nodes/<node>`, and `refs/grapher/heads/<sha>`, not an assumption that arbitrary unadvertised SHAs are fetchable. Fetches use `--no-write-fetch-head` to avoid parallel writes to `FETCH_HEAD`. Human-readable node names map to safe directory/ref identifiers.
+Inheritance uses **recorded workspace state**, not live access to a parent's directory. Ignored, untracked files are not included automatically. Feedback edges carry an additional instruction, not a workspace input.
 
-A parent composition conflict blocks the affected node. Resolve and commit the preserved workspace, then use **Use resolved workspace**; the original task still needs an execution. The final-publication Merger is not a general resolver for preparation conflicts.
+### Backend Git storage
+
+Git is the host's snapshot/composition mechanism, not an agent messaging protocol. The backend stages non-ignored changes and creates snapshot commits when needed; agents are not required to commit their work or send commits to one another.
+
+Node repositories normally borrow the source Git object database through `.git/objects/info/alternates` and pin the required baseline and parent refs locally. They are not fully self-contained copies of history. Sources with chained alternates or promisor packs use a `file://` fetch fallback instead. The host imports completed snapshots through `file://` fetches for later inheritance and publication.
+
+Host pins use `refs/grapher/heads/<sha>`; node results use Run-scoped `refs/grapher/runs/<run>/nodes/<node-id>`. The unscoped `refs/grapher/nodes/<node-id>` namespace remains for legacy/public helper calls. Inside a node, `refs/grapher/base` and `refs/grapher/parents/<parent-id>` pin its inputs. Fetches use `--no-write-fetch-head`; human-readable node names map to safe directory/ref identifiers.
+
+### Parent composition conflicts
+
+A real Git conflict while combining parents invokes the Merger in the child's workspace before the task starts. The Merger uses that workspace's platform access policy and must finish a clean merge preserving the incoming parent's history. Successful repair resumes composition and task execution; it does not enter final publication or wake the Planner.
+
+If the Merger fails or leaves an unresolved conflict, the affected node is blocked and its workspace/logs are preserved. Resolve and commit the merge there, then use **Use resolved workspace**; the original task still needs an execution. Retrying final publication does not repair a node's preparation conflict.
 
 ## Sessions, follow-ups, and history edits
 
@@ -89,7 +100,7 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
   runtime.lock           # One backend writer per data directory
   planning/              # Planning attempts and JSONL output
   sessions/              # Node Pi sessions
-  mergers/               # Publication Merger sessions/output
+  mergers/               # Merger sessions/output (including composition attempts)
   shadow_repos/          # Git metadata for ordinary folders
 ```
 

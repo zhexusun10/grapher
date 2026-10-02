@@ -10,6 +10,10 @@ use std::{
 };
 use uuid::Uuid;
 
+fn merger_prompt(query: &str) -> String {
+    format!("User query:\n{query}\n\nResolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.")
+}
+
 fn pending(repository: &Path) -> Option<String> {
     git(repository, &["rev-parse", "--verify", "MERGE_HEAD"]).ok()
 }
@@ -25,7 +29,7 @@ fn finish_merge(repository: &Path, head: &str) -> Result<(), String> {
     git(repository, &["merge-base", "--is-ancestor", head, "HEAD"])
         .map_err(|_| "Merger did not preserve the incoming commit".to_string())?;
     if !git(repository, &["status", "--porcelain"])?.is_empty() {
-        return Err("Publication left uncommitted changes; inspect the user directory".into());
+        return Err("Merge left uncommitted changes; inspect the affected workspace".into());
     }
     Ok(())
 }
@@ -121,20 +125,21 @@ pub fn resolve_with_merger_for_node(
             metrics: None,
         },
     })?;
-    let prompt = format!("User query:\n{query}\n\nResolve the current Git merge conflicts. Preserve valid changes completed by each node. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming parent's commit.");
+    let prompt = merger_prompt(query);
     // Make native Git commands work in a plain folder without adding a .git
-    // entry there. This environment is scoped to the merger process tree.
+    // entry there. This environment is scoped to the merger process tree;
+    // stock Git/Bash must receive host paths, not Windows device prefixes.
     let environment = if workspace::is_standard_git(repository) {
         Vec::new()
     } else {
         vec![
             (
                 "GIT_DIR",
-                workspace::shadow_repo_dir(repository)?
+                crate::native::host_path(&workspace::shadow_repo_dir(repository)?)
                     .to_string_lossy()
                     .into(),
             ),
-            ("GIT_WORK_TREE", repository.to_string_lossy().into()),
+            ("GIT_WORK_TREE", crate::native::host_path(repository).to_string_lossy().into()),
         ]
     };
     let mut output_error = None;
@@ -200,4 +205,15 @@ pub fn resolve_with_merger_for_node(
         "status": if result.is_ok() { "completed" } else { "failed" }, "error": result.as_ref().err(),
     })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn merger_prompt_preserves_task_context_without_graph_specific_terminology() {
+        assert_eq!(
+            super::merger_prompt("Combine results"),
+            "User query:\nCombine results\n\nResolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit."
+        );
+    }
 }

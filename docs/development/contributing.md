@@ -34,6 +34,7 @@ Keep Pi unmodified unless deliberately updating the pinned baseline. Do not patc
 - Keep deterministic graph checks, scheduling, and publication decisions in Rust—not an LLM coordinator or browser heuristic.
 - Treat backend events/Snapshots as authoritative. The frontend must not manufacture completed status.
 - Distinguish task nodes, recorded execution attempts, and reused Pi sessions.
+- Describe ordinary dependencies as parent-to-child workspace inheritance, not agent-to-agent exchange. Git snapshots/commits are host implementation details, not an agent collaboration protocol.
 - Preserve explicit feedback targets and limits, invalidation scope, and the publication completion boundary.
 - Do not describe independent Git repositories or Windows Job Objects as security sandboxes.
 - Do not silently downgrade failed platform preflight, provider errors, or interrupted execution into success.

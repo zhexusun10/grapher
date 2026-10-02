@@ -19,10 +19,13 @@ Goal -> Partitioner --serial--> one Pi agent in the user's project
                                                              |
                                                              v
                                                         Rust runtime
-                                                        /    |    \
-                                                     Agent Agent Agent
-                                                        \    |    /
-                                                         Git states
+                                                        /         \
+                                                     Agent A     Agent B
+                                                        \         /
+                                                    Workspace inheritance
+                                                             |
+                                                             v
+                                                          Agent C
                                                              |
                                                              v
                                                       Publish to project
@@ -53,11 +56,11 @@ Ready nodes dispatch when dependencies and concurrency slots permit. Failure blo
 
 The same backend can drive multiple Runs. Concurrency and pause are Run-scoped; a runtime data directory has one backend writer. See [Runtime](runtime.md) for limits, feedback, events, and recovery.
 
-## Git state propagation
+## Workspace inheritance
 
-Graph nodes use independent Git repositories with private `.git` directories, despite the `.grapher-worktrees` directory name. Downstream repositories combine completed parent commits. Git carries filesystem state, not chat histories or a custom artifact protocol.
+Ordinary dependency edges define one-way workspace inheritance. Roots start from the source baseline; a child waits for its parents to complete and starts from their resulting filesystem state. Multiple parents' states are combined before the child runs. Agents do not exchange workspaces, commits, or conversation histories with one another.
 
-The host owns transferable refs for completed results. Ordinary project folders use external shadow Git metadata rather than receiving a new `.git` directory.
+Each node has its own workspace and private `.git` directory, despite the `.grapher-worktrees` directory name. The backend uses Git snapshots and merges to implement inheritance and publication; committing or sending a result is not an agent-to-agent protocol. These repositories normally borrow the source Git object store rather than copy all history. Ordinary project folders use external shadow Git metadata rather than receiving a new `.git` directory. See [Execution model](execution-model.md#node-workspaces-and-inheritance) for the storage mechanism and conflict-recovery limits.
 
 ## Feedback
 
@@ -76,7 +79,7 @@ Alternatively, give each implementation its own reviewer. One reviewer cannot dy
 
 ## Publication
 
-Node completion is not Graph completion. Valid terminal heads must be published to the user's project. Only actual final Git conflicts invoke a dedicated Merger; it does not wake the Planner. Other publication errors remain explicit failures.
+Node completion is not Graph completion. Valid terminal heads must be published to the user's project. At final publication, only actual Git conflicts invoke a dedicated Merger; it does not wake the Planner. Other publication errors remain explicit failures.
 
 Failed publication preserves the working state and heads. Retrying publication does not rerun completed nodes. A successful publication emits `PublicationCompleted`; interrupted work does not silently restart.
 
@@ -88,7 +91,7 @@ Planner changes are a separate earlier merge: after the planning session succeed
 2. Scheduling does not depend on a persistent LLM coordinator.
 3. Ordinary dependencies form a DAG; cycles require explicit bounded feedback.
 4. A new node starts a fresh session; continuation never imports another agent's chat history.
-5. Git filesystem state is the collaboration boundary.
+5. Ordinary dependencies pass workspace state from completed parents to children, not conversations or agent-to-agent messages.
 6. Backend state and append-only events are authoritative; the UI is a projection.
 7. Graph completion requires successful publication, not merely finished model calls.
 8. Independent Git repositories are not, by themselves, security sandboxes.
@@ -100,7 +103,7 @@ Planner changes are a separate earlier merge: after the planning session succeed
 | [compiler.rs](../../backend/src/compiler.rs) | Graph validation and execution plan |
 | [runtime.rs](../../backend/src/runtime.rs) | Scheduling, feedback, revisions, and events |
 | [workspace.rs](../../backend/src/workspace.rs) | Private repositories, snapshots, Planner copy/merge, and refs |
-| [graph_merge.rs](../../backend/src/graph_merge.rs) | Final publication and conflict Merger |
+| [graph_merge.rs](../../backend/src/graph_merge.rs) | Workspace conflict Merger and final publication |
 | [engine.rs](../../backend/src/engine.rs) | Role configuration and Pi process protocol |
 | [native.rs](../../backend/src/native.rs) | Native launchers and platform preflight |
 | [store.rs](../../backend/src/store.rs) | SQLite events and execution logs |

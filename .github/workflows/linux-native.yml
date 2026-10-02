@@ -22,6 +22,8 @@ jobs:
           sudo apt-get install -y bubblewrap build-essential git
           test -x /usr/bin/bwrap
           /usr/bin/bwrap --die-with-parent --unshare-user --unshare-pid --cap-drop ALL --bind / / --dev-bind /dev /dev --proc /proc -- /bin/sh -c ': <>/dev/null'
+      - name: Install Grapher dependencies
+        run: npm ci --ignore-scripts
       - name: Install pinned Pi
         run: npm run pi:setup
       - name: Check production Linux backend and build release binary
@@ -34,3 +36,6 @@ jobs:
         run: |
           cargo test --manifest-path backend/Cargo.toml --no-default-features --lib linux_sandbox::tests -- --nocapture
           cargo test --manifest-path backend/Cargo.toml --no-default-features --lib native::tests::graph_launcher_runs_parallel_native_tools_and_absolute_scripts -- --nocapture
+      - name: Run production workspace Merger acceptance (local model responses)
+        timeout-minutes: 5
+        run: npm run test:merger
