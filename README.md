@@ -29,17 +29,16 @@ Goal → Planner → Compiled Graph → Deterministic Runtime
                                             ....
 ```
 
-**Three core differences:**
+**Core differences:**
 
 1. **No supervisor in the execution loop** — The LLM plans the graph, then gets out of the scheduler.
 2. **Parallel work inherits code, not conversations** — Each node receives completed parent workspace state.
 3. **The graph is executable state** — Dependencies, retries, feedback and publication are explicit runtime transitions.
+4. **No predefined agent roles** — All nodes run general-purpose coding agents; specialization comes from task context, not hardcoded roles.
 
 **Not all work needs multiple agents.** Grapher uses intent-based routing in **Auto** mode or lets you choose manually: **Serial** for linear tasks, **Graph** when parallelism helps.
 
-Built on [Pi](https://github.com/earendil-works/pi). Simple tasks run as a single agent; complex work is compiled into an execution graph and scheduled by a deterministic Rust runtime.
-
-Child nodes inherit their completed parents' workspace state—not their conversations. Scheduling does not depend on a supervisor agent's ongoing conversation.
+Built on [Pi](https://github.com/earendil-works/pi). Child nodes inherit their completed parents' workspace state—not their conversations. Scheduling does not depend on a supervisor agent's ongoing conversation.
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
@@ -50,8 +49,8 @@ Child nodes inherit their completed parents' workspace state—not their convers
 ## Why Grapher?
 
 - **Pi, with a GUI** — Chat with coding agents, manage provider sign-in and model settings, inspect tool calls and logs, and send follow-up instructions from one graphical workbench. Single-agent work needs no graph planning.
-- **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions, not hidden in LLM conversations.
-- **Workspace inheritance** — Child nodes start from their completed parents' workspace state, combined when there are multiple parents. Each node works in its own workspace; parent conversations are not inherited.
+- **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions.
+- **Workspace inheritance** — Child nodes start from their completed parents' workspace state, combined when there are multiple parents. Each node works in its own workspace.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
