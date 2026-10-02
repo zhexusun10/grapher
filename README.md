@@ -3,9 +3,16 @@
 > **Don't orchestrate agents. Compile work.**
 >
 
+[![Linux CI](https://github.com/zhexusun10/grapher/actions/workflows/linux-native.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/linux-native.yml)
+[![Windows CI](https://github.com/zhexusun10/grapher/actions/workflows/windows-native.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/windows-native.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
-Grapher is a **local coding-agent workbench built on [Pi](https://github.com/earendil-works/pi)**. It runs single-agent coding tasks directly, or compiles complex work into inspectable execution graphs executed by a deterministic Rust runtime. Child nodes inherit their completed parents' workspace state—not their conversations. Scheduling does not depend on a supervisor agent's ongoing conversation.
+**Local coding-agent workbench that compiles complex work into inspectable execution graphs.**
+
+Built on [Pi](https://github.com/earendil-works/pi). Simple tasks run as a single agent; complex work is compiled into an execution graph and scheduled by a deterministic Rust runtime.
+
+Child nodes inherit their completed parents' workspace state—not their conversations. Scheduling does not depend on a supervisor agent's ongoing conversation.
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
@@ -74,6 +81,26 @@ npm start
 ```
 
 Open <http://127.0.0.1:1421>. Configuration, credentials, data paths, and startup issues are covered in the [installation guide](docs/guides/installation.md).
+
+## Project status
+
+**Grapher is currently alpha software.**
+
+**Working:**
+- Serial coding-agent workflow
+- Graph planning and approval
+- Dependency-aware execution
+- Workspace inheritance
+- Bounded feedback edges
+- Result publication
+- Linux sandbox (bubblewrap)
+
+**Still evolving:**
+- Packaging and one-command installation
+- Cross-platform isolation (Windows sandboxing)
+- Routing quality and graph compilation heuristics
+- Provider compatibility coverage
+- Performance optimization
 
 ## How it works
 
@@ -145,6 +172,7 @@ See [Contributing](CONTRIBUTING.md) and the [testing guide](docs/development/tes
 ## Documentation
 
 - [Architecture](docs/architecture/overview.md)
+- [Why compile agent work?](docs/architecture/why-compile.md)
 - [Execution model](docs/architecture/execution-model.md)
 - [Installation & providers](docs/guides/installation.md)
 - [Development guide](docs/development/contributing.md)

@@ -19,7 +19,8 @@ const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(done => setTimeout(done, ms));
 const safeRm = async (target: string) => {
-  await rm(target, { recursive: true, force: true, maxRetries: 40, retryDelay: 250 });
+  // Forty linearly backed-off retries can spend 205 seconds on one busy path.
+  await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
 };
 
 test('Planner uses the same unmodified Bash definition and semantics as pinned Pi', { skip: !windows }, async () => {
@@ -73,12 +74,18 @@ test('Planner uses the same unmodified Bash definition and semantics as pinned P
   }
 });
 
-test('production Windows Planner/Graph: concurrent runs, dependencies, publication, cancellation and crash recovery', { skip: !windows, timeout: 300000 }, async () => {
+// Leave time inside CI's five-minute step for cancellation and cleanup.
+test('production Windows Planner/Graph: concurrent runs, dependencies, publication, cancellation and crash recovery', { skip: !windows, timeout: 240000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-windows-'));
   const agent = join(directory, 'agent');
   const data = join(directory, 'data');
   let backend: ChildProcess | undefined;
   let diagnostics = '';
+  const work = new AbortController();
+  const workSignal = AbortSignal.any([t.signal, work.signal]);
+  const started = Date.now();
+  const progress = (message: string) => console.log(`[windows-native +${((Date.now() - started) / 1000).toFixed(1)}s] ${message}`);
+  progress(`Node ${process.version}; workspace: ${directory}`);
   const toolRequests: string[] = [];
   const failures: unknown[] = [];
   const repositories = new Map<string, string>();
@@ -135,10 +142,10 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
     }
   });
   const killBackend = async () => {
-    if (backend?.pid && backend.exitCode === null) {
-      const exited = once(backend, 'exit');
+    if (backend?.pid && backend.exitCode === null && backend.signalCode === null) {
+      const exited = once(backend, 'exit', { signal: AbortSignal.timeout(10000) });
       // Terminate only the test-owned backend. Kill-on-close must handle agents.
-      execFileSync('taskkill', ['/PID', String(backend.pid), '/F'], { stdio: 'ignore' });
+      backend.kill('SIGKILL');
       await exited;
     }
   };
@@ -161,9 +168,13 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
     const startBackend = () => {
       backend = spawn(join(root, 'backend/target/debug/grapher.exe'), [], { env, stdio: ['ignore', 'ignore', 'pipe'] });
       backend.stderr!.on('data', value => { diagnostics += value.toString(); });
+      backend.on('error', error => { diagnostics += `${error}\n`; });
+      progress(`Backend started: PID ${backend.pid}`);
     };
     const api = async (command: string, body: any = {}) => {
-      const response = await fetch(`http://127.0.0.1:${port}/api/${command}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(180000) });
+      const timeout = command === 'plan_goal' ? 180000 : 10000;
+      const signal = AbortSignal.any([workSignal, AbortSignal.timeout(timeout)]);
+      const response = await fetch(`http://127.0.0.1:${port}/api/${command}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
       const payload = await response.json() as any;
       if (!response.ok || payload.error) throw new Error(payload.error || String(response.status));
       return payload.result;
@@ -171,8 +182,9 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
     const until = async (check: () => Promise<any>, message: string) => {
       const start = Date.now();
       while (Date.now() - start < 180000) {
+        workSignal.throwIfAborted();
         assert.deepEqual(failures, []);
-        if (backend?.exitCode !== null) throw new Error(`Backend exited: ${diagnostics}`);
+        if (!backend || backend.exitCode !== null || backend.signalCode !== null) throw new Error(`Backend exited: ${diagnostics}`);
         const result = await check();
         if (result) return result;
         await delay(100);
@@ -182,6 +194,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
     const ready = () => until(async () => { try { return await api('bootstrap'); } catch { return false; } }, 'Backend did not start');
     startBackend();
     await ready();
+    progress('Backend ready; preparing repositories');
     for (const label of ['WIN_ONE', 'WIN_TWO', 'WIN_CANCEL', 'WIN_CRASH']) {
       const repository = join(directory, `中文 ${label} repo`);
       await mkdir(repository);
@@ -189,6 +202,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       git(repository, 'init', '-q'); git(repository, 'add', '-A'); git(repository, 'commit', '-qm', 'base');
       repositories.set(label, repository);
     }
+    progress('Starting two concurrent Planners (includes native runtime preparation)');
     const plans = await Promise.all(['WIN_ONE', 'WIN_TWO'].map(async label => {
       const repository = repositories.get(label)!;
       const snapshot = await api('plan_goal', { goal: `${label}: implement two independent branches and combine them`, mode: 'graph', config: config(repository) });
@@ -197,9 +211,11 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       assert.equal(snapshot.graph.nodes.length, 3);
       assert.equal(snapshot.graph.edges.length, 2);
       assert.equal(await readFile(join(repository, 'planned.txt'), 'utf8'), 'planned');
+      progress(`Planner ${label} published: ${snapshot.runId}`);
       return { label, repository, runId: snapshot.runId };
     }));
     assert.notEqual(plans[0].runId, plans[1].runId);
+    progress('Approving both Graph runs');
     await Promise.all(plans.map(plan => api('control', { action: 'approve', runId: plan.runId })));
     const completed = await Promise.all(plans.map(plan => until(async () => {
       const snapshot = await api('snapshot', { runId: plan.runId });
@@ -224,18 +240,27 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
         git(plan.repository, 'merge-base', '--is-ancestor', execution.after, 'HEAD');
       }
     }
+    progress('Both Graph runs completed; inheritance and publication verified');
     const startWriter = async (label: string) => {
+      progress(`Starting background writer ${label}`);
       const snapshot = await api('save_graph', { graph: { originalGoal: label, nodes: [{ name: 'worker', task: `${label} LONG_RUNNING` }], edges: [] }, config: config(repositories.get(label)!) });
       await api('control', { action: 'approve', runId: snapshot.runId });
       const marker = join(directory, `writer-${label}.txt`);
       try {
-        await until(async () => { try { return (await stat(marker)).size > 0; } catch { return false; } }, 'Background writer did not start');
+        await until(async () => {
+          try { if ((await stat(marker)).size > 0) return true; } catch {}
+          const state = await api('snapshot', { runId: snapshot.runId });
+          assert.ok(!['failed', 'blocked'].includes(state.nodes.worker.status), JSON.stringify(state));
+          return false;
+        }, 'Background writer did not start');
       } catch (error) {
+        workSignal.throwIfAborted();
         const state = await api('snapshot', { runId: snapshot.runId });
         const execution = state.executions.at(-1);
         const output = execution && await api('get_execution_output', { runId: snapshot.runId, executionId: execution.id });
         throw new Error(`${error}\nRequests: ${JSON.stringify(toolRequests)}\nExecution: ${JSON.stringify(output)}`);
       }
+      progress(`Background writer ${label} is active`);
       return { runId: snapshot.runId, marker };
     };
     const stable = async (marker: string) => {
@@ -245,12 +270,16 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       assert.equal((await stat(marker)).size, before, 'Job descendants must stop writing');
     };
     const cancelled = await startWriter('WIN_CANCEL');
+    progress('Cancelling writer run');
     await api('control', { action: 'cancel', runId: cancelled.runId });
     await stable(cancelled.marker);
     await until(async () => (await api('snapshot', { runId: cancelled.runId })).executions.every((execution: any) => execution.status !== 'running'), 'Cancellation did not settle');
+    progress('Cancellation settled; descendants stopped');
     const crashed = await startWriter('WIN_CRASH');
+    progress('Killing backend to test crash recovery');
     await killBackend();
     await stable(crashed.marker);
+    progress('Crash descendants stopped; restarting backend');
     startBackend();
     await ready();
     const recovered = await api('snapshot', { runId: crashed.runId });
@@ -259,10 +288,23 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
     assert.equal(recovered.nodes.worker.status, 'failed');
     assert.deepEqual(failures, []);
     assert.ok(toolRequests.filter(value => value.includes(':planner:bash')).length >= 2);
+    progress('Crash recovery verified');
+  } catch (error) {
+    console.error(`[windows-native] ${error}\nBackend stderr:\n${diagnostics}\nModel tool requests: ${JSON.stringify(toolRequests)}`);
+    throw error;
   } finally {
-    await killBackend();
-    modelServer.closeAllConnections();
-    await new Promise<void>(done => modelServer.close(() => done()));
-    await safeRm(directory);
+    // Promise.all can leave another Planner request or polling loop in flight.
+    work.abort();
+    progress('Cleanup: stopping backend');
+    try {
+      await killBackend();
+    } finally {
+      progress('Cleanup: closing local model server');
+      modelServer.closeAllConnections();
+      await new Promise<void>(done => modelServer.close(() => done()));
+      progress('Cleanup: removing workspaces and native runtime');
+      await safeRm(directory);
+      progress('Cleanup complete');
+    }
   }
 });

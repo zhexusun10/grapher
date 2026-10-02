@@ -1,0 +1,300 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Get version from tag
+        id: get_version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Grapher v${{ steps.get_version.outputs.version }}
+          draft: true
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          body: |
+            # Grapher v${{ steps.get_version.outputs.version }}
+
+            ## What is Grapher?
+
+            Grapher is a local coding-agent workbench that compiles complex work into inspectable execution graphs.
+
+            ## What's working
+
+            - Serial coding-agent workflow
+            - Graph planning and approval
+            - Dependency-aware execution
+            - Workspace inheritance
+            - Bounded feedback edges
+            - Result publication
+            - Linux sandbox (bubblewrap)
+
+            ## Current limitations
+
+            - No one-command installation yet (requires Node.js, Rust, and manual setup)
+            - Windows sandboxing is still evolving
+            - Provider compatibility coverage is partial
+            - This is alpha software
+
+            ## Installation
+
+            See the [Installation Guide](https://github.com/zhexusun10/grapher/blob/main/docs/guides/installation.md) for full prerequisites and setup instructions.
+
+            **Quick start:**
+            ```sh
+            git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
+            cd grapher
+            npm ci --ignore-scripts
+            npm run pi:setup
+            npm run dev
+            ```
+
+            ## Platform support
+
+            | Platform | Status | Notes |
+            |----------|--------|-------|
+            | Linux (Ubuntu 22.04+) | ✅ Tested | Requires bubblewrap for Graph sandbox |
+            | macOS | ⚠️ Experimental | Graph sandboxing not yet implemented |
+            | Windows | ⚠️ Experimental | Graph workspaces use process isolation only |
+
+            ## Checksums
+
+            SHA256 checksums are provided for each binary below.
+
+            ## Full Changelog
+
+            See [CHANGELOG.md](https://github.com/zhexusun10/grapher/blob/main/CHANGELOG.md) for detailed changes.
+
+  build-linux:
+    name: Build Linux binary
+    needs: create-release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap build-essential git
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install pinned Pi
+        run: npm run pi:setup
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build release binary
+        run: cargo build --release --manifest-path backend/Cargo.toml --bin grapher
+
+      - name: Create distribution package
+        run: |
+          mkdir -p grapher-linux-x64
+          cp backend/target/release/grapher grapher-linux-x64/
+          cp -r dist grapher-linux-x64/
+          cp -r pi grapher-linux-x64/
+          cp -r engine grapher-linux-x64/
+          cp README.md LICENSE grapher-linux-x64/
+          cat > grapher-linux-x64/start.sh << 'EOF'
+          #!/bin/bash
+          cd "$(dirname "$0")"
+          ./grapher
+          EOF
+          chmod +x grapher-linux-x64/start.sh
+          tar czf grapher-linux-x64.tar.gz grapher-linux-x64
+
+      - name: Generate checksum
+        run: sha256sum grapher-linux-x64.tar.gz > grapher-linux-x64.tar.gz.sha256
+
+      - name: Upload Linux binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./grapher-linux-x64.tar.gz
+          asset_name: grapher-linux-x64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload Linux checksum
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./grapher-linux-x64.tar.gz.sha256
+          asset_name: grapher-linux-x64.tar.gz.sha256
+          asset_content_type: text/plain
+
+  build-macos:
+    name: Build macOS binary
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install pinned Pi
+        run: npm run pi:setup
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build release binary
+        run: cargo build --release --manifest-path backend/Cargo.toml --bin grapher
+
+      - name: Create distribution package
+        run: |
+          mkdir -p grapher-macos-x64
+          cp backend/target/release/grapher grapher-macos-x64/
+          cp -r dist grapher-macos-x64/
+          cp -r pi grapher-macos-x64/
+          cp -r engine grapher-macos-x64/
+          cp README.md LICENSE grapher-macos-x64/
+          cat > grapher-macos-x64/start.sh << 'EOF'
+          #!/bin/bash
+          cd "$(dirname "$0")"
+          ./grapher
+          EOF
+          chmod +x grapher-macos-x64/start.sh
+          tar czf grapher-macos-x64.tar.gz grapher-macos-x64
+
+      - name: Generate checksum
+        run: shasum -a 256 grapher-macos-x64.tar.gz > grapher-macos-x64.tar.gz.sha256
+
+      - name: Upload macOS binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./grapher-macos-x64.tar.gz
+          asset_name: grapher-macos-x64.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload macOS checksum
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./grapher-macos-x64.tar.gz.sha256
+          asset_name: grapher-macos-x64.tar.gz.sha256
+          asset_content_type: text/plain
+
+  build-windows:
+    name: Build Windows binary
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Install native Pi search tools
+        shell: pwsh
+        run: |
+          choco install ripgrep fd --yes --no-progress
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install pinned Pi
+        run: npm run pi:setup
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build release binary
+        run: cargo build --release --manifest-path backend/Cargo.toml --bin grapher
+
+      - name: Create distribution package
+        shell: pwsh
+        run: |
+          mkdir grapher-windows-x64
+          cp backend/target/release/grapher.exe grapher-windows-x64/
+          cp -r dist grapher-windows-x64/
+          cp -r pi grapher-windows-x64/
+          cp -r engine grapher-windows-x64/
+          cp README.md,LICENSE grapher-windows-x64/
+          @'
+          @echo off
+          cd /d "%~dp0"
+          grapher.exe
+          '@ | Out-File -FilePath grapher-windows-x64/start.bat -Encoding ASCII
+          Compress-Archive -Path grapher-windows-x64 -DestinationPath grapher-windows-x64.zip
+
+      - name: Generate checksum
+        shell: pwsh
+        run: |
+          $hash = Get-FileHash grapher-windows-x64.zip -Algorithm SHA256
+          "$($hash.Hash.ToLower())  grapher-windows-x64.zip" | Out-File -FilePath grapher-windows-x64.zip.sha256 -Encoding ASCII
+
+      - name: Upload Windows binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./grapher-windows-x64.zip
+          asset_name: grapher-windows-x64.zip
+          asset_content_type: application/zip
+
+      - name: Upload Windows checksum
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./grapher-windows-x64.zip.sha256
+          asset_name: grapher-windows-x64.zip.sha256
+          asset_content_type: text/plain

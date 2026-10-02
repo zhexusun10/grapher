@@ -4,9 +4,16 @@
 >
 > Don't orchestrate agents. Compile work.
 
+[![Linux CI](https://github.com/zhexusun10/grapher/actions/workflows/linux-native.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/linux-native.yml)
+[![Windows CI](https://github.com/zhexusun10/grapher/actions/workflows/windows-native.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/windows-native.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
-Grapher 是一个**基于 [Pi](https://github.com/earendil-works/pi) 的本地 Coding Agent 工作台**。它可以直接运行单 Agent 编程任务，也可以将复杂工作编译成可检查的执行图，由确定性的 Rust 运行时执行。子节点继承已完成父节点的工作区状态，而不继承其对话；调度不依赖“主管 Agent”的持续对话。
+**基于 [Pi](https://github.com/earendil-works/pi) 的本地 Coding Agent 工作台，将复杂任务编译为可检查的执行图。**
+
+简单任务以单 Agent 运行；复杂工作被编译成执行图，由确定性的 Rust 运行时调度。
+
+子节点继承已完成父节点的工作区状态，而不继承其对话；调度不依赖"主管 Agent"的持续对话。
 
 [快速开始](#快速开始) · [工作方式](#工作方式) · [架构](docs/architecture/overview.md) · [English](README.md)
 
@@ -131,6 +138,26 @@ Rust 后端与 SQLite 事件日志拥有运行状态，React 界面只显示投�
 
 [架构概览](docs/architecture/overview.md)解释动机与不变量；[执行模型](docs/architecture/execution-model.md)解释规划、会话、工作区继承、Git 快照和发布语义。底层运行时、隔离和 Pi 契约从这些页面继续导航，不在首页重复。
 
+## 项目状态
+
+**Grapher 目前是 alpha 阶段软件。**
+
+**已实现功能：**
+- Serial 单 Agent 编程工作流
+- Graph 任务图规划与审批
+- 依赖感知的执行调度
+- 工作区状态继承
+- 有界反馈边
+- 结果发布机制
+- Linux 沙箱（bubblewrap）
+
+**仍在完善：**
+- 打包与一键安装
+- 跨平台隔离（Windows 沙箱）
+- 路由质量与图编译启发式
+- 服务商兼容性覆盖
+- 性能优化
+
 ## 开发
 
 ```sh
@@ -147,6 +174,7 @@ npm test                      # Rust 固定样例；无需付费模型
 
 `docs/` 采用英文作为权威版本，中文 README 保留产品入口。
 
+- [为什么编译 Agent 工作？](docs/architecture/why-compile.md)
 - [架构](docs/architecture/overview.md)
 - [执行模型](docs/architecture/execution-model.md)
 - [安装与服务商](docs/guides/installation.md)
