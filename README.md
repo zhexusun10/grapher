@@ -8,7 +8,34 @@
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
-**Local coding-agent workbench that compiles complex work into inspectable execution graphs.**
+**Local coding-agent architecture that compiles complex work into inspectable execution graphs.**
+
+### Typical multi-agent systems vs Grapher
+
+```text
+Typical multi-agent systems
+
+Goal → Supervisor LLM → Agent → Supervisor LLM → Agent → ...
+             ↑ scheduling lives inside the conversation loop
+
+
+Grapher
+
+Goal → Planner → Compiled Graph → Deterministic Runtime
+                                      ├── Agent A
+                                      |        |
+                                      |   Agent B
+                                      └── Agent C
+                                            ....
+```
+
+**Three core differences:**
+
+1. **No supervisor in the execution loop** — The LLM plans the graph, then gets out of the scheduler.
+2. **Parallel work inherits code, not conversations** — Each node receives completed parent workspace state.
+3. **The graph is executable state** — Dependencies, retries, feedback and publication are explicit runtime transitions.
+
+**Not all work needs multiple agents.** Grapher uses intent-based routing in **Auto** mode or lets you choose manually: **Serial** for linear tasks, **Graph** when parallelism helps.
 
 Built on [Pi](https://github.com/earendil-works/pi). Simple tasks run as a single agent; complex work is compiled into an execution graph and scheduled by a deterministic Rust runtime.
 
