@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, chmodSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { loadExtensions } from "../pi/packages/coding-agent/src/core/extensions/loader.ts";
+import { buildSystemPrompt, normalizeBuildSystemPromptOptions } from "../pi/packages/coding-agent/src/core/system-prompt.ts";
 import { createBashToolDefinition } from "../pi/packages/coding-agent/src/core/tools/bash.ts";
 import { convertResponsesTools } from "../pi/packages/ai/src/api/openai-responses-shared.ts";
 import { validateToolArguments } from "../pi/packages/ai/src/utils/validation.ts";
@@ -380,9 +381,12 @@ fn main() {
   assert.deepEqual([...extracted.extensions[0].tools.keys()].sort(), ["bash", "edge", "node"]);
   const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
   assert.match(JSON.stringify(listed), /sample.txt/);
-  const plannerPrompt = await extracted.extensions[1].handlers.get("before_agent_start")![0]({ systemPrompt: "base" });
-  assert.match(plannerPrompt.systemPrompt, /Use project-root-relative paths in Bash commands, project files, and node task handoffs/);
-  assert.doesNotMatch(plannerPrompt.systemPrompt, /generated configuration/);
+  const plannerOptions = normalizeBuildSystemPromptOptions({ customPrompt: "base", cwd: repository });
+  assert.equal(await extracted.extensions[1].handlers.get("before_agent_start")![0]({ systemPromptOptions: plannerOptions }), undefined);
+  assert.equal(plannerOptions.forceSystemPrompt, undefined, "Path guidance must not bypass request-time prompt trimming");
+  const plannerPrompt = buildSystemPrompt(plannerOptions);
+  assert.match(plannerPrompt, /Use project-root-relative paths in Bash commands, project files, and node task handoffs/);
+  assert.doesNotMatch(plannerPrompt, /generated configuration/);
 
   // Partitioner and Merger use the same namespace without the Planner extension.
   for (const mode of ["partition", "merger"]) {
@@ -395,9 +399,12 @@ fn main() {
     if (mode === "partition") assert.equal(roleExtension.extensions[0].tools.size, 0);
     else {
       assert.ok(roleExtension.extensions[0].tools.has("bash"));
-      const mergerPrompt = await hooks.get("before_agent_start")![0]({ systemPrompt: "base" });
-      assert.match(mergerPrompt.systemPrompt, /Use project-root-relative paths in Bash commands and project files/);
-      assert.doesNotMatch(mergerPrompt.systemPrompt, /handoffs|generated configuration/);
+      const mergerOptions = normalizeBuildSystemPromptOptions({ customPrompt: "base", cwd: repository });
+      assert.equal(await hooks.get("before_agent_start")![0]({ systemPromptOptions: mergerOptions }), undefined);
+      assert.equal(mergerOptions.forceSystemPrompt, undefined);
+      const mergerPrompt = buildSystemPrompt(mergerOptions);
+      assert.match(mergerPrompt, /Use project-root-relative paths in Bash commands and project files/);
+      assert.doesNotMatch(mergerPrompt, /handoffs|generated configuration/);
     }
   }
   // Exercise the production node adapter with real read/write/edit/bash tools.

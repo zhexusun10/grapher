@@ -21,10 +21,18 @@ export default function (pi: ExtensionAPI) {
       : 'Use project-root-relative paths in Bash commands and project files.';
   if (process.env.GRAPHER_MODE !== 'partition') {
     pi.on('before_agent_start', async event => {
-      const systemPrompt = event.systemPrompt;
-      return {
-        systemPrompt: `${paths ? paths.visible(systemPrompt) : systemPrompt}\n\n${pathGuideline}`,
-      };
+      // Pi 1.0 projects forceSystemPrompt after context_with_system handlers.
+      // Returning systemPrompt here would overwrite pi-trim's request-time edits.
+      // Keep ordinary prompts structured so the upstream extension can trim them.
+      const options = event.systemPromptOptions;
+      if (paths) Object.assign(options, paths.view(options));
+      if (options.forceSystemPrompt !== undefined) {
+        // Respect an explicit override supplied by another extension. Such
+        // overrides require separate compatibility review with Pi's projection.
+        options.forceSystemPrompt = `${options.forceSystemPrompt}\n\n${pathGuideline}`;
+      } else {
+        options.appendSystemPrompt = `${options.appendSystemPrompt}${options.appendSystemPrompt ? '\n\n' : ''}${pathGuideline}`;
+      }
     });
   }
   // Planner owns its native bash tool; Partitioner has no tools.

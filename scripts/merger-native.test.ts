@@ -58,7 +58,7 @@ test('production Merger repairs node, Planner preview and source conflicts; fail
       } else if (merger) {
         const system = messages.filter((message: any) => message.role === 'system')
           .map((message: any) => JSON.stringify(message.content)).join('\n');
-        assert.ok(system.includes('You are an expert coding assistant.'), 'Merger must retain the default coding prompt');
+        assert.ok(system.includes('You are an expert coding assistant'), 'Merger must retain the default coding prompt');
         assert.ok(system.includes('<tools>') && system.includes('<rules>'), 'Merger must retain Pi tool guidance and rules');
         assert.ok(system.includes('Preserve valid changes. Do not modify unrelated files.'), 'Merger instructions must be appended');
         assert.ok(system.includes('Do not discard the incoming commit.'));

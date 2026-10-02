@@ -16,6 +16,7 @@ export default async function () {
     const tools = new Map<string, any>();
     const hooks = new Map<string, any[]>();
     const extension = await import(pathToFileURL(join(runtime, 'engine/prompt-extension.ts')).href);
+    const { buildSystemPrompt, normalizeBuildSystemPromptOptions } = await import(pathToFileURL(join(runtime, 'pi/packages/coding-agent/src/core/system-prompt.ts')).href);
     extension.default({
       registerTool(tool: any) { tools.set(tool.name, tool); },
       on(event: string, callback: any) { hooks.set(event, [...(hooks.get(event) || []), callback]); },
@@ -92,12 +93,16 @@ export default async function () {
     const nested = `require('node:child_process').execFileSync(process.execPath,['-e',"require('node:fs').writeFileSync('nested-ran','ok')"])`;
     await call('bash', { command: `${quote(process.execPath)} -e ${quote(nested)}` });
     assert.equal(readFileSync(join(cwd, 'nested-ran'), 'utf8'), 'ok');
-    const system = await hooks.get('before_agent_start')![0]({ systemPrompt: 'base' });
-    assert.ok(system.systemPrompt.startsWith('base\n\n'));
-    assert.match(system.systemPrompt, /Use project-root-relative paths in Bash commands and project files/);
-    assert.doesNotMatch(system.systemPrompt, /handoffs|generated configuration|after cd/);
-    const systemWithCwd = await hooks.get('before_agent_start')![0]({ systemPrompt: `Original instructions.\nCurrent working directory: ${cwd}` });
-    assert.ok(systemWithCwd.systemPrompt.startsWith('Original instructions.\nCurrent working directory: .\n\n'));
+    const options = normalizeBuildSystemPromptOptions({ customPrompt: 'base', cwd });
+    assert.equal(await hooks.get('before_agent_start')![0]({ systemPromptOptions: options }), undefined);
+    assert.equal(options.forceSystemPrompt, undefined, 'Adapter must not override pi-trim request transforms');
+    const system = buildSystemPrompt(options);
+    assert.ok(system.startsWith('base\n\n'));
+    assert.match(system, /Use project-root-relative paths in Bash commands and project files/);
+    assert.doesNotMatch(system, /handoffs|generated configuration|after cd/);
+    const withCwd = normalizeBuildSystemPromptOptions({ customPrompt: `Original instructions.\nCurrent working directory: ${cwd}`, cwd });
+    await hooks.get('before_agent_start')![0]({ systemPromptOptions: withCwd });
+    assert.ok(buildSystemPrompt(withCwd).startsWith('Original instructions.\nCurrent working directory: .\n\n'));
     const updates: any[] = [];
     const bash = tools.get('bash');
     for (const command of [

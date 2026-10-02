@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { createInterface } from 'node:readline';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,6 +48,117 @@ test('Settings IPC discovers extensions and persists removal/restoration without
     assert.equal(call({ operation: 'set_enabled', id: extension.id, enabled: true }).extensions.find(value => value.id === extension.id).enabled, true);
     assert.equal(readFileSync(file, 'utf8'), code);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('pi-trim transforms actual provider requests for every role without removing tools or task prompts', { timeout: 90000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-trim-provider-'));
+  const agent = join(directory, 'agent');
+  const global = join(directory, 'global');
+  for (const path of [agent, global]) mkdirSync(path);
+  const requests = [];
+  const serverErrors = [];
+  const server = createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+      const chunk = (delta, finish_reason) => ({ id: 'audit', object: 'chat.completion.chunk', created: 1, model: 'local',
+        choices: [{ index: 0, delta, finish_reason }] });
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(`data: ${JSON.stringify(chunk({ role: 'assistant', content: 'audit complete' }, null))}\n\ndata: ${JSON.stringify(chunk({}, 'stop'))}\n\ndata: [DONE]\n\n`);
+    } catch (error) {
+      serverErrors.push(error);
+      response.writeHead(500);
+      response.end('Audit server failed');
+    }
+  });
+  const identity = 'You are an expert coding assistant operating inside pi, a coding agent harness.';
+  const opaqueUser = `${identity}\n<docs>\nPi documentation (read only in user content)\n</docs>`;
+  const text = content => typeof content === 'string' ? content : (content ?? []).map(block => block.text ?? '').join('\n');
+  const run = (role, args, user) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-session',
+      '--no-context-files', '--no-prompt-templates', '--no-themes', '--model', 'pi-trim-audit/local', '--thinking', 'off', ...args], {
+      cwd: directory, stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PI_CODING_AGENT_DIR: agent, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
+        GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: 'source', PI_OFFLINE: '1' },
+    });
+    let stderr = '';
+    const events = [];
+    child.stderr.on('data', value => { stderr += value.toString(); });
+    child.stdin.on('error', () => {}); // An early exit is reported with its stderr below.
+    const lines = createInterface({ input: child.stdout });
+    lines.on('line', line => {
+      try {
+        const event = JSON.parse(line);
+        events.push(event);
+        if (event.type === 'agent_end') child.stdin.end();
+      } catch {}
+    });
+    const timeout = setTimeout(() => {
+      if (process.platform === 'win32' && child.pid) {
+        try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      } else child.kill('SIGTERM');
+      reject(new Error(`${role} timed out: ${stderr}`));
+    }, 20000);
+    child.once('error', error => { clearTimeout(timeout); lines.close(); reject(error); });
+    child.once('close', code => {
+      clearTimeout(timeout);
+      lines.close();
+      if (code !== 0) reject(new Error(`${role} exited ${code}: ${stderr}`));
+      else resolve(events);
+    });
+    child.stdin.write(`${JSON.stringify({ id: role, type: 'prompt', message: user })}\n`);
+  });
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { 'pi-trim-audit': {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'local-audit-only',
+      models: [{ id: 'local', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    } } }));
+    for (const role of ['partition', 'planner', 'node', 'merger']) {
+      const args = role === 'node' ? ['--approve'] : role === 'planner' ? ['--exclude-tools', 'edit,write,ls,find,grep']
+        : ['--no-extensions', '--no-skills'];
+      const custom = `<role_policy>\n${role} instructions remain intact\n<docs>\nProject documentation\n</docs>\n</role_policy>`;
+      if (role === 'partition' || role === 'planner') {
+        const promptFile = join(directory, `${role}-prompt.md`);
+        writeFileSync(promptFile, custom);
+        args.push('--system-prompt', promptFile);
+      }
+      if (role === 'partition') args.push('--no-tools');
+      const addendum = 'Resolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files.';
+      if (role === 'merger') {
+        const file = join(directory, 'merger-addendum.md');
+        writeFileSync(file, addendum);
+        args.push('--append-system-prompt', file);
+      }
+      const before = requests.length;
+      const user = `TRIM_AUDIT[${role}]\n${opaqueUser}`;
+      const events = await run(role, args, user);
+      assert.deepEqual(serverErrors, []);
+      assert.equal(requests.length, before + 1, `${role}: exactly one local model request`);
+      const body = requests[before];
+      const system = body.messages.filter(message => message.role === 'system').map(message => text(message.content)).join('\n');
+      assert.ok(body.messages.some(message => message.role === 'user' && text(message.content) === user), `${role}: preserve user text`);
+      if (role === 'partition' || role === 'planner') assert.ok(system.includes(custom), `${role}: preserve role policy and nested docs`);
+      else {
+        assert.ok(system.includes('You are an expert coding assistant.'), `${role}: trim Pi identity; provider roles=${body.messages.map(message => message.role)}\n${system}`);
+        assert.ok(!system.includes(identity), `${role}: no Pi identity in provider system prompt`);
+        assert.ok(!system.includes('Pi documentation (read only'), `${role}: no Pi docs in provider system prompt`);
+        assert.ok(system.includes('<tools>') && system.includes('<rules>'), `${role}: retain tool and rule sections`);
+      }
+      if (role === 'merger') assert.ok(system.includes(addendum), 'preserve conflict-repair instructions');
+      const tools = body.tools?.map(tool => tool.function.name) ?? [];
+      if (role === 'partition') assert.deepEqual(tools, []);
+      else assert.ok(tools.includes('read') && tools.includes('bash'), `${role}: retain provider tool schemas`);
+      assert.ok(events.some(event => event.type === 'message_end' && event.message?.role === 'assistant' &&
+        event.message.content.some(part => part.type === 'text' && part.text === 'audit complete')), `${role}: request completes successfully`);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('Provider/Auth IPC returns a catalog after input EOF without exposing credentials', () => {

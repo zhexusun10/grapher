@@ -1,16 +1,32 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accessSync } from 'node:fs';
+import { accessSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
 import { bundledTrim } from '../engine/global-extensions.ts';
+import { buildSystemPromptState } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
 import {
   ModelRuntime, SettingsManager, resolveToCwd,
   createBashToolDefinition, createLocalBashOperations,
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
   createLsToolDefinition, createFindToolDefinition, createGrepToolDefinition,
 } from '../engine/pi-compat.ts';
+
+test('bundled pi-trim matches the selected exact release, manifest and lock integrity', () => {
+  const installed = JSON.parse(readFileSync(new URL('../node_modules/pi-trim/package.json', import.meta.url), 'utf8'));
+  const project = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+  const spec: string = project.dependencies['pi-trim'];
+  const pinned = lock.packages['node_modules/pi-trim'];
+  assert.equal(lock.packages[''].dependencies['pi-trim'], spec);
+  assert.equal(pinned.version, installed.version);
+  assert.deepEqual(installed.pi.extensions, ['./extensions/index.ts'], 'Review the launcher if the upstream entrypoint changes');
+  assert.deepEqual(Object.keys(installed.dependencies ?? {}), [], 'Graph copies only pi-trim; review new runtime dependencies before upgrading');
+  assert.match(pinned.integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
+  assert.equal(spec, installed.version, 'Registry updates must pin an exact release, not latest or a version range');
+  assert.equal(pinned.resolved, `https://registry.npmjs.org/pi-trim/-/pi-trim-${installed.version}.tgz`);
+});
 
 test('bundled pi-trim replaces Grapher prompt trimming', async () => {
   const prompt = [
@@ -29,6 +45,53 @@ test('bundled pi-trim replaces Grapher prompt trimming', async () => {
   assert.doesNotMatch(sanitized, /operating inside pi, a coding agent harness/);
   assert.doesNotMatch(sanitized, /<docs>|Pi documentation|\/path\/to\/pi\/docs/);
   assert.match(sanitized, /<cwd>[\s\S]*<\/cwd>/);
+});
+
+test('pi-trim handles Pi 1.0 prompt sections and mid-turn updates without altering tools, project context or stored messages', async () => {
+  const identity = 'You are an expert coding assistant operating inside pi, a coding agent harness.';
+  const environmentRule = '- You can inspect PI_* environment variables for current model and session details.';
+  const projectText = `${identity}\n<docs>\nPi documentation (read only for this project)\n</docs>\n${environmentRule}`;
+  const state = buildSystemPromptState({
+    cwd: '/workspace', selectedTools: ['read', 'bash'], toolSnippets: { read: 'Read files', bash: 'Run commands' },
+    promptGuidelines: [environmentRule.slice(2)], appendSystemPrompt: 'Preserve valid changes. Do not modify unrelated files.',
+    contextFiles: [{ path: 'AGENTS.md', content: projectText }],
+    sections: { skills: projectText, mcp_servers: 'Keep MCP guidance intact' },
+  });
+  const tool = { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: {} } };
+  const messages = [
+    { role: 'system', ...state, toolsAdded: [tool], timestamp: 1 },
+    { role: 'user', content: projectText, timestamp: 2 },
+    { role: 'assistant', content: [{ type: 'text', text: projectText }], timestamp: 3 },
+    { role: 'system', content: [{ type: 'text', text: identity, cacheControl: { type: 'ephemeral' } }], timestamp: 4,
+      sections: { docs: state.sections!.docs, rules: `<rules>\n${environmentRule}\n- Keep task instructions\n</rules>`, obsolete: null },
+      toolsAdded: [tool], toolsRemoved: [{ name: 'bash' }] },
+    { role: 'toolResult', toolCallId: 'read-1', toolName: 'read', content: [{ type: 'text', text: projectText }], timestamp: 5 },
+  ];
+  const snapshot = structuredClone(messages);
+  const loaded = await loadExtensions([bundledTrim], process.cwd());
+  assert.deepEqual(loaded.errors, []);
+  const hook = loaded.extensions[0].handlers.get('context_with_system')![0];
+  const result = await hook({ type: 'context_with_system', messages } as any, {} as any) as any;
+  assert.deepEqual(messages, snapshot, 'request-time trimming must not mutate stored transcript data');
+  assert.equal(result.messages[0].sections.docs, null);
+  assert.match(result.messages[0].sections.preamble, /^You are an expert coding assistant\./);
+  assert.ok(!result.messages[0].sections.rules.includes(environmentRule));
+  for (const name of ['tools', 'project_context', 'skills', 'mcp_servers', 'cwd', 'addendum']) {
+    assert.equal(result.messages[0].sections[name], state.sections![name], `preserve ${name}`);
+  }
+  const delta = result.messages[3];
+  assert.equal(delta.sections.docs, null);
+  assert.equal(delta.sections.obsolete, null);
+  assert.equal(delta.content[0].text, 'You are an expert coding assistant.');
+  assert.deepEqual(delta.content[0].cacheControl, { type: 'ephemeral' });
+  assert.match(delta.sections.rules, /Keep task instructions/);
+  assert.ok(!delta.sections.rules.includes(environmentRule));
+  for (const index of [0, 3]) {
+    assert.strictEqual(result.messages[index].toolsAdded, messages[index].toolsAdded);
+    assert.strictEqual(result.messages[index].toolsRemoved, messages[index].toolsRemoved);
+  }
+  for (const index of [1, 2, 4]) assert.strictEqual(result.messages[index], messages[index]);
+  assert.equal(await hook({ type: 'context_with_system', messages: result.messages } as any, {} as any), undefined, 'trimming is idempotent');
 });
 
 test('Pi SDK surface required by Grapher remains available', () => {

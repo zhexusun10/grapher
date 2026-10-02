@@ -53,7 +53,22 @@ Settings starts with the enabled and available Pi extension lists. Remove disabl
 
 Discovery uses Pi's package manager to resolve `~/.pi/agent/settings.json`, installed npm/git/local packages, and `~/.pi/agent/extensions/` without executing extension factories or installing missing packages. Set `GRAPHER_GLOBAL_PI_AGENT_DIR` for a different global Pi directory. Credentials and Grapher selection overrides (`extensions.json`) remain in Grapher's dedicated agent directory (`PI_CODING_AGENT_DIR`, normally `~/.grapher/pi-agent`). Global MCP config and skills are also available to Planner/Node Agent; dedicated/project MCP definitions take precedence on name collisions.
 
-`pi-trim@0.1.1` is a pinned, required project dependency, always enabled for every role. It replaces the former in-project prompt trimming; no second trimming implementation remains. A globally installed `pi-trim` (e.g. `pi install npm:pi-trim`) is deduplicated against the bundled copy. It cannot be removed or disabled in Settings or through the API; older disabled selections are ignored. The private Graph runtime includes this package so no network install is needed at agent startup.
+`pi-trim@0.2.0` is a pinned, required project dependency from the npm registry, always enabled for every role. `package-lock.json` records the official tarball URL and SHA-512 integrity; no vendored archive or Git dependency is needed. It replaces the former in-project prompt trimming; no second trimming implementation remains. A globally installed `pi-trim` (e.g. `pi install npm:pi-trim`) is deduplicated against the bundled copy. It cannot be removed or disabled in Settings or through the API; older disabled selections are ignored. The private Graph runtime includes this package so no network install is needed at agent startup.
+
+## Updating pi-trim independently
+
+`pi-trim` can be upgraded without moving the pinned Pi submodule, **provided the target release passes the contracts against the current Pi baseline**. The upstream peer-dependency range `*` is not a compatibility guarantee. Current checks cover real provider requests for all four roles, Pi 1.0 structured sections and mid-turn updates, preserved tool declarations/project/user content, immutability, deduplication, and mandatory loading.
+
+The Grapher prompt adapter edits `before_agent_start.systemPromptOptions`, not a full `systemPrompt` replacement. In pinned Pi 1.0, `forceSystemPrompt` is projected **after** `context_with_system`, which can overwrite pi-trim's changes. Third-party extensions returning full prompt overrides therefore need separate review; prefer structured prompt-option changes. This is a Pi pipeline boundary, not something an arbitrary future pi-trim version can be assumed to fix.
+
+Upgrade procedure:
+
+1. Review the release, Node/Pi API requirements, `pi.extensions` manifest, and runtime dependencies. Grapher currently loads `extensions/index.ts` and copies only pi-trim into private runtimes; entrypoint changes or new runtime dependencies require adapting that integration first.
+2. Stop active agent work. Install an **exact** registry version (`npm install --save-exact pi-trim@<version>`). Update package/lock files together. The tests derive the selected version from those files; there is no hard-coded `0.2.0` assertion to change.
+3. Run `npm run test:pi`, `npm run build`, and the applicable native-launcher tests. These local-model contracts verify prompt transformations, not paid-model quality or arbitrary third-party extensions.
+4. Restart the backend. Graph uses a cached shared runtime copy, and source executions can reuse prewarmed processes; neither is refreshed by changing `node_modules` or reopening Settings. Already running agents retain their loaded code.
+
+`npm update pi-trim` does not advance the current exact version pin; select a new version explicitly using the command above. Global `pi update` or `pi install npm:pi-trim` also does not replace Grapher's deduplicated, mandatory bundled copy. Automatic/hot updates are not supported.
 
 ## Prewarming and prepared runtime
 
