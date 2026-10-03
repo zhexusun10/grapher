@@ -21,7 +21,8 @@ for (const blocked of [source, sibling]) {
   await assert.rejects(() => write.execute("write-blocked", { path: join(blocked, "marker"), content: "wrong" }));
   await assert.rejects(() => edit.execute("edit-blocked", { path: join(blocked, "marker"), edits: [{ oldText: "original", newText: "wrong" }] }));
   const quoted = `'${join(blocked, "marker").replaceAll("'", "'\\''")}'`;
-  await assert.rejects(() => bash.execute("bash-blocked", { command: `/bin/cat ${quoted}` }));
+  const blockedResult = await bash.execute("bash-blocked", { command: `/bin/cat ${quoted}` });
+  assert.equal(blockedResult.isError, true, `sandbox allowed Bash access to ${blocked}: ${JSON.stringify(blockedResult)}`);
 }
 // A fake credential file in an isolated PI_CODING_AGENT_DIR proves that the
 // upstream credential reader still works. No key is transmitted or printed.
