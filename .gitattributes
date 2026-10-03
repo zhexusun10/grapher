@@ -1,3 +1,7 @@
+# Ensure correct line endings across platforms
+* text=auto
+
 # Pi baseline verifies the raw SHA-256 of these files. Windows must not
 # convert their line endings during checkout.
 engine/model-data/*.json text eol=lf
+*.sh text eol=lf
