@@ -2538,10 +2538,41 @@ fn same_repository_binding(left: &str, right: &str) -> bool {
 
 #[cfg(windows)]
 fn windows_repository_key(path: &std::path::Path) -> Option<String> {
-    if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
         return None;
     }
-    let value = path.to_str()?.replace('/', "\\").to_lowercase();
+    // Archived bindings may point at a deleted final directory. Canonicalize
+    // the longest existing ancestor first so 8.3 aliases such as RUNNER~1
+    // still match the saved long path without guessing a missing component.
+    let original = path.to_path_buf();
+    let mut probe = original.clone();
+    let mut missing = Vec::new();
+    let mut found_existing = probe.exists();
+    while !found_existing {
+        let Some(name) = probe.file_name().map(|name| name.to_os_string()) else {
+            break;
+        };
+        missing.push(name);
+        if !probe.pop() {
+            break;
+        }
+        found_existing = probe.exists();
+    }
+    if found_existing {
+        if let Ok(canonical) = probe.canonicalize() {
+            probe = canonical;
+            for name in missing.iter().rev() {
+                probe.push(name);
+            }
+        }
+    } else {
+        probe = original;
+    }
+    let value = probe.to_str()?.replace('/', "\\").to_lowercase();
     let value = if let Some(unc) = value.strip_prefix(r"\\?\unc\") {
         format!(r"\\{unc}")
     } else {

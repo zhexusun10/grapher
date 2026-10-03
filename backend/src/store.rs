@@ -4,11 +4,21 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     path::Path,
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 mod logs;
 pub use logs::{LogPage, MigrationReport};
 const CHECKPOINT_INTERVAL: usize = 128;
+
+static STORE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn store_write_guard() -> Result<MutexGuard<'static, ()>, String> {
+    STORE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|error| error.to_string())
+}
 
 /// Serde tag of an event, stored as a column so maintenance and compaction can
 /// filter without parsing the payload it is stored next to.
@@ -88,6 +98,7 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
+        let _write_guard = store_write_guard()?;
         let connection = Connection::open(path).map_err(|error| error.to_string())?;
         connection
             .busy_timeout(std::time::Duration::from_secs(10))
@@ -182,7 +193,7 @@ impl Store {
         if matches!(kind, EventKind::Output { .. }) {
             return self.append_logs(state, vec![kind]);
         }
-        // Accept legacy callers, but never write transcripts into new events.
+        let _write_guard = store_write_guard()?;
         if let EventKind::Finished { execution_id, output, output_bytes, metrics, .. } = &mut kind {
             if !output.is_empty() {
                 let started = state.executions.iter().chain(&state.mergers)
@@ -246,6 +257,7 @@ impl Store {
             return Ok(());
         }
         let count = kinds.len();
+        let _write_guard = store_write_guard()?;
         let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
         let mut events = Vec::with_capacity(count);
         for kind in kinds {
@@ -313,6 +325,7 @@ impl Store {
 
     /// Rewrite the database without the freed pages. Requires exclusive access.
     pub fn vacuum(&self) -> Result<(), String> {
+        let _write_guard = store_write_guard()?;
         self.connection
             .execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
             .map_err(|error| error.to_string())
@@ -347,6 +360,7 @@ impl Store {
     }
 
     pub fn select_run(&self, run_id: Option<&str>) -> Result<(), String> {
+        let _write_guard = store_write_guard()?;
         self.connection.execute(
             "INSERT INTO workspace_selection(id,run_id) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id",
             [run_id],
@@ -516,6 +530,7 @@ impl Store {
     }
 
     pub fn delete_run(&self, run_id: &str) -> Result<(), String> {
+        let _write_guard = store_write_guard()?;
         let tx = self
             .connection
             .unchecked_transaction()
@@ -538,6 +553,7 @@ impl Store {
     }
 
     pub fn clear(&self) -> Result<(), String> {
+        let _write_guard = store_write_guard()?;
         let tx = self
             .connection
             .unchecked_transaction()

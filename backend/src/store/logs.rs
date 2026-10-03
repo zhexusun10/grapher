@@ -1,4 +1,4 @@
-use super::Store;
+use super::{store_write_guard, Store};
 use crate::model::{append_live_output, parse_execution_metrics, EventKind, Snapshot};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -63,6 +63,7 @@ impl Store {
     }
 
     pub(super) fn append_logs(&self, state: &mut Snapshot, kinds: Vec<EventKind>) -> Result<(), String> {
+        let _write_guard = store_write_guard()?;
         if kinds.is_empty() { return Ok(()); }
         let count = kinds.len();
         // Coalesce tiny stdout packets within the bounded writer batch; one
@@ -171,6 +172,7 @@ impl Store {
     /// JIT writes only the log table. The IMMEDIATE transaction serializes
     /// cross-Service readers and checks for an already committed migration.
     pub fn ensure_legacy_logs(&self, run: &str, id: &str) -> Result<usize, String> {
+        let _write_guard = store_write_guard()?;
         let tx = rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
         let existing = self.log_bytes(run, id)?;
         if existing > 0 { return Ok(existing); }
@@ -183,6 +185,7 @@ impl Store {
     /// The caller must hold the data-directory maintenance lease. Each execution
     /// commits independently; a restart can safely resume after any commit.
     pub fn migrate_legacy_logs(&self) -> Result<MigrationReport, String> {
+        let _write_guard = store_write_guard()?;
         let mut report = MigrationReport { backfilled_rows: self.backfill_event_index()?, ..Default::default() };
         let ids = {
             let mut stmt = self.connection.prepare(

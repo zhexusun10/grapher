@@ -1141,10 +1141,10 @@ fn run_pi_with_timeout(
     command.env_remove("PI_REASONING_LEVEL");
     command.env_remove("PI_SESSION_ID");
     command.env_remove("PI_SESSION_FILE");
+    crate::native::clear_git_environment(&mut command);
     for (key, value) in &request.environment {
         command.env(key, value);
     }
-    crate::native::clear_git_environment(&mut command);
     // The host owns the instance identity. Never inherit another agent's role
     // or directory mapping from the parent process or role-specific overrides.
     command.env(

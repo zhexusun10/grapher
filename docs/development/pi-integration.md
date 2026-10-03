@@ -18,7 +18,9 @@ Pi is Grapher's only production execution-instance engine. Grapher owns graph co
 | [native.rs](../../backend/src/native.rs) | Native launchers, preflight, prepared runtime, and agent directory |
 | [provider_auth.rs](../../backend/src/provider_auth.rs) | Rust provider/auth IPC bridge |
 
-The current baseline is **Pi 1.0.1**, official tag `v1.0.1`, commit `a7229ddc21810d6245105978033b7df645ecc2f7`. See the [compatibility report](pi-1.0.1-compatibility.md) for tested contracts and remaining limits.
+The current baseline is **Pi 1.0.1**, official tag `v1.0.1`, commit `a7229ddc21810d6245105978033b7df645ecc2f7`.
+
+The recorded validation ran on Windows x64 with Node.js 24.16.0, npm 12.1.0, Cargo 1.98.1, Git for Windows Bash, fd 10.5.0, and ripgrep 15.2.0. An isolated `CARGO_TARGET_DIR` was used because the existing backend process held `backend/target/debug/grapher.exe` open. The running service was not stopped or restarted.
 
 The lock manifest, submodule gitlink, and hydrated model data form one baseline. Runtime startup must not float to a different commit or silently use a global Pi. Catalog snapshots are not a separately maintained Grapher provider implementation.
 
@@ -62,6 +64,56 @@ Discovery uses Pi's package manager to resolve `~/.pi/agent/settings.json`, inst
 ### MCP project overrides in Pi 1.0.1
 
 Grapher merges external global and dedicated MCP definitions **before** applying trusted `.pi/mcp.json` entries. A project entry without `command`, `url`, or `type` may override only `enabled`, `exposure`, and `toolExposure`; connection settings and credentials stay in their original global definition. Full project definitions still replace matching servers, but cannot select provider credentials through `auth`. Untrusted project files are ignored. Validation and namespace rules come from the pinned Pi implementation.
+
+## Pi 1.0.1 compatibility validation
+
+The `pi/` submodule was upgraded from `v1.0.0` (`a13d35a742c6ef8462812a28fbe1d8c8b7431c32`) to the official `v1.0.1` commit above. The submodule remains unmodified. `engine/pi-lock.json` and the checksummed model catalog were updated together; the upstream Pi source and upstream dependency lockfile were not patched.
+
+The upgrade required these Grapher-side adaptations:
+
+1. **MCP project overrides:** Grapher merges external global and dedicated MCP definitions before applying trusted project entries, using Pi's validator. Project overrides can change only `enabled`, `exposure`, and `toolExposure`; global credentials and source provenance remain attached to the base definition. Tests cover precedence, trust restrictions, invalid patches, namespace collisions, and parity with Pi's single-directory loader.
+2. **Bash result contract:** Pi 1.0 returns nonzero commands as `isError: true` with structured exit status. Timeout and cancellation continue to throw. Grapher's smoke assertions now check the result shape without changing execution behavior.
+3. **Isolated integration builds:** Extension, project-binding, and Windows native tests honor `CARGO_TARGET_DIR`, so they can run while another backend binary is in use.
+4. **Windows planning history aliases:** `list_plannings` and `get_planning_snapshot` compare canonical directories and recognize Windows drive/device and UNC aliases for archived paths. Missing, unresolvable, unrelated, and unattributed paths remain fail-closed. Tests cover ordinary and `\\?\\` paths, case and separator aliases, Unicode names, UNC share boundaries, deleted directories, and failed history.
+5. **Reviewed dependency profile:** `pi:setup` installs the exact profile in [engine/pi-dependencies](../../engine/pi-dependencies/) instead of Pi's optional example workspaces. It excludes the Gondolin example and the `shx`/`shelljs`/`fast-glob`/`micromatch`/`braces` chain. [build-pi.mjs](../../scripts/build-pi.mjs) rebuilds the required core artifacts with Node filesystem operations. Runtime launchers verify the profile marker, lock versions, package graph, and workspace bindings before starting Pi.
+
+The validation results were:
+
+| Check | Result |
+| --- | --- |
+| `npm run pi:setup` | Passed; profile installation audited with 0 vulnerabilities and all Pi 1.0.1 core artifacts rebuilt |
+| `npm run pi:verify`, `npm run pi:build` | Passed; baseline, model catalog, profile, and workspace build checks |
+| `npm run pi -- --version` | Reports `1.0.1` |
+| `npm run test:pi` | Passed: 25 Pi CLI/SDK, provider/auth, extension, prompt, MCP, and adapter tests |
+| `npm run pi:upgrade-check` | Passed; Pi contracts, TypeScript, full Rust fixtures, extension tools, native launchers, and project bindings |
+| `npm run check`, `npm run build` | Passed; the production Vite build retains its normal large-chunk warning |
+| `npm run check:docs` and documentation tests | Passed; local Markdown links, anchors, and npm references checked |
+| `npm test` | Passed; full Rust fixture suite, with the existing synthetic performance test intentionally ignored |
+| Targeted repository-binding Rust tests | Passed: four alias/Windows path tests plus the legacy fail-closed filtering test |
+| `npm run test:windows-native` | Passed: native Planner Bash, concurrent Graph execution, inheritance/publication, cancellation, and crash recovery |
+| `npm run test:merger` | Passed: source-native Planner writes/revisions, failed-revision persistence, retained dependency composition, node/source conflict repair, publication, and ordinary/extended Windows bindings |
+| `npm audit --prefix engine/pi-dependencies --audit-level=high` | Passed with 0 info, low, moderate, high, or critical vulnerabilities |
+
+The official upstream Pi lockfile still reports seven high-severity entries if audited directly with `npm audit --prefix pi`: five entries are the unused development `shx` chain and two are the optional Gondolin example's `node-forge` chain. Grapher's default setup does not install that graph, and the production launcher refuses to run an unreviewed Pi installation. The official source and checksum-verified upstream lockfile remain unchanged for baseline provenance.
+
+The remaining acceptance limits are host and provider boundaries: paid provider calls and interactive OAuth were not performed; Linux bubblewrap and macOS Seatbelt were not exercised on this Windows host; and the documented Node.js 22.19 minimum was not separately exercised on this Node.js 24 host. Saved provider/model selections are not rewritten automatically after catalog refreshes. Already running or prewarmed agents and prepared native-runtime copies retain their loaded engine and adapter code, so the backend must be restarted after an engine or adapter upgrade.
+
+To reproduce the recorded validation on Windows, use an isolated Cargo directory when a backend is running:
+
+```powershell
+$env:CARGO_TARGET_DIR = Join-Path $PWD '.grapher/pi-1.0.1-target'
+$env:PI_OFFLINE = '1'
+npm run pi:setup
+npm run pi:verify
+npm run pi:build
+npm run pi -- --version
+npm run test:pi
+npm run test:windows-native
+npm run test:merger
+npm audit --prefix engine/pi-dependencies --audit-level=high
+```
+
+See [Testing](testing.md) for the responsibility of each suite and the platform-specific acceptance boundaries.
 
 ## Updating pi-trim independently
 
