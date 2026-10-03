@@ -6,6 +6,10 @@ import { EditableUserBubble } from "../../src/components/views/ChatBubbles";
 import { PromptBox } from "../../src/components/ui/chatgpt-prompt-input";
 import { useSnapshotPolling } from "../../src/hooks/useSnapshotPolling";
 import { runtimeService } from "../../src/services/runtime";
+import { ThinkingCard } from "../../src/components/ThinkingCard";
+import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
+import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../../src/services/thinkingTranscript";
+import type { TranscriptItem } from "../../src/types";
 import { defaultConfig, emptyGraph, emptySnapshot, type Snapshot } from "../../src/types";
 import "../../src/styles.css";
 import "../../src/styles-workbench.css";
@@ -70,8 +74,36 @@ function PollingFixture() {
   audit.removeBroken = () => setIds(["background", "view"]);
   return <output data-viewed-goal>{snapshot.graph.originalGoal}</output>;
 }
+function ThinkingFixture() {
+  const [output, setOutput] = useState("");
+  const [items, setItems] = useState<TranscriptItem[]>([]);
+  const messageStart = React.useRef(0);
+  audit.append = (event: any) => {
+    setOutput(previous => previous + JSON.stringify(event) + "\n");
+    setItems(previous => {
+      if (event.type === "message_start" && event.message?.role === "assistant") {
+        messageStart.current = previous.length;
+        return closeThinkingItems(previous);
+      }
+      if (event.type === "message_update" && event.assistantMessageEvent.type.startsWith("thinking_")) {
+        return updateThinkingItems(previous, event.assistantMessageEvent, messageStart.current);
+      }
+      if (event.type === "message_end" && event.message?.role === "assistant") {
+        const next = finalizeThinkingItems(previous, event.message.content, messageStart.current);
+        messageStart.current = next.length;
+        return next;
+      }
+      return previous;
+    });
+  };
+  return <>
+    <section data-thinking-view="live">{items.map(item => <div key={item.id} data-transcript-id={item.id}><ThinkingCard item={item} /></div>)}</section>
+    <section data-thinking-view="history"><VirtualizedTranscript output={output} inline /></section>
+  </>;
+}
 const cases: Record<string, React.ComponentType> = {
   settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, prompt: PromptFixture, polling: PollingFixture,
+  thinking: ThinkingFixture,
 };
 const Component = cases[new URLSearchParams(location.search).get("case") || "settings"];
 createRoot(document.getElementById("root")!).render(<Component />);

@@ -14,9 +14,12 @@ const CHECKPOINT_INTERVAL: usize = 128;
 /// filter without parsing the payload it is stored next to.
 fn event_kind_name(kind: &EventKind) -> &'static str {
     match kind {
+        EventKind::PlanningStarted { .. } => "planning_started",
+        EventKind::PlanningFailed { .. } => "planning_failed",
         EventKind::Created { .. } => "created",
         EventKind::Routed { .. } => "routed",
         EventKind::Approved { .. } => "approved",
+        EventKind::SourceSnapshotted { .. } => "source_snapshotted",
         EventKind::GraphRevised { .. } => "graph_revised",
         EventKind::DraftEdited { .. } => "draft_edited",
         EventKind::Paused { .. } => "paused",
@@ -63,18 +66,15 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
 }
 
 fn created_planning_ids(kind: &EventKind) -> (Option<&str>, Option<&str>) {
-    if let EventKind::Created {
-        planning_id,
-        planning,
-        ..
-    } = kind
-    {
-        (
+    match kind {
+        EventKind::Created { planning_id, planning, .. } => (
             planning_id.as_deref(),
             planning.as_ref().map(|p| p.planning_id.as_str()),
-        )
-    } else {
-        (None, None)
+        ),
+        EventKind::PlanningStarted { planning, .. }
+        | EventKind::PlanningFailed { planning }
+        | EventKind::GraphRevised { planning, .. } => (Some(&planning.planning_id), None),
+        _ => (None, None),
     }
 }
 
@@ -101,7 +101,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, timestamp INTEGER NOT NULL, payload TEXT NOT NULL, planning_id TEXT, nested_planning_id TEXT, kind TEXT, execution_id TEXT);
             CREATE INDEX IF NOT EXISTS events_run ON events(run_id, sequence);
             CREATE TABLE IF NOT EXISTS checkpoints (run_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, payload TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS workspace_selection (id INTEGER PRIMARY KEY CHECK(id=1), run_id TEXT);")
+            CREATE TABLE IF NOT EXISTS workspace_selection (id INTEGER PRIMARY KEY CHECK(id=1), run_id TEXT);
+            CREATE TABLE IF NOT EXISTS deleted_runs (run_id TEXT PRIMARY KEY);")
             .map_err(|error| error.to_string())?;
         let columns = {
             let mut stmt = connection
@@ -353,6 +354,20 @@ impl Store {
         Ok(())
     }
 
+    pub fn run_was_deleted(&self, run_id: &str) -> Result<bool, String> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_runs WHERE run_id=?1)",
+            [run_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())
+    }
+
+    pub fn run_for_planning_id(&self, planning_id: &str) -> Result<Option<String>, String> {
+        self.connection.query_row(
+            "SELECT run_id FROM events WHERE planning_id=?1 OR nested_planning_id=?1 ORDER BY sequence DESC LIMIT 1",
+            [planning_id], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())
+    }
+
     pub fn contains_run(&self, run_id: &str) -> Result<bool, String> {
         self.connection
             .query_row(
@@ -505,6 +520,10 @@ impl Store {
             .connection
             .unchecked_transaction()
             .map_err(|e| e.to_string())?;
+        // Saved planning files outlive their Run; startup must not import an
+        // explicitly deleted conversation from those files again.
+        tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)", [run_id])
+            .map_err(|e| e.to_string())?;
         tx.execute("UPDATE workspace_selection SET run_id=NULL WHERE run_id=?1", [run_id])
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM checkpoints WHERE run_id=?1", [run_id])
@@ -522,6 +541,8 @@ impl Store {
         let tx = self
             .connection
             .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) SELECT DISTINCT run_id FROM events", [])
             .map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO workspace_selection(id,run_id) VALUES(1,NULL) ON CONFLICT(id) DO UPDATE SET run_id=NULL", [])
             .map_err(|e| e.to_string())?;

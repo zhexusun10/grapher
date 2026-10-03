@@ -15,6 +15,7 @@ export default defineConfig({
         manualChunks: {
           xyflow: ["@xyflow/react"],
           marked: ["marked"],
+          motion: ["motion"],
         },
       },
     },

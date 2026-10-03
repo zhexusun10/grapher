@@ -27,7 +27,8 @@ try {
   await once(listener, 'listening');
   const port = listener.address().port;
   await new Promise(done => listener.close(done));
-  child = spawn(`${resolve('backend/target/debug/grapher')}${process.platform === 'win32' ? '.exe' : ''}`, [], {
+  const target = resolve(process.env.CARGO_TARGET_DIR || 'backend/target');
+  child = spawn(join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`), [], {
     env: { ...process.env, GRAPHER_DATA_DIR: join(root, 'data'), GRAPHER_PORT: String(port) },
     stdio: ['ignore', 'ignore', 'pipe'],
   });

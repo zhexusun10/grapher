@@ -1,0 +1,69 @@
+name: Planner Source Contract
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 2'
+
+permissions:
+  contents: read
+
+jobs:
+  planner-source:
+    name: Planner source / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux tools and verify Graph namespace support
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap build-essential git ripgrep fd-find
+          /usr/bin/bwrap --die-with-parent --unshare-user --unshare-pid --cap-drop ALL --bind / / --dev-bind /dev /dev --proc /proc -- /bin/sh -c ': <>/dev/null'
+      - name: Install macOS tools and verify Seatbelt support
+        if: runner.os == 'macOS'
+        run: |
+          brew install ripgrep fd
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)' /bin/sh -c ': <>/dev/null'
+      - name: Install Windows native tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ripgrep fd --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Failed to install ripgrep/fd" }
+          rg --version
+          if ($LASTEXITCODE -ne 0) { throw "ripgrep is not executable on PATH" }
+          fd --version
+          if ($LASTEXITCODE -ne 0) { throw "fd is not executable on PATH" }
+      - name: Install Grapher and pinned Pi
+        run: npm ci --ignore-scripts
+      - run: npm run pi:setup
+      - name: Verify snapshot inheritance, failed revisions and event replay
+        run: npm test
+      - name: Verify production HTTP paths and safe workspace cleanup
+        run: npm run test:hardening
+      - name: Verify the same unmodified Planner Bash on every host
+        run: npm run test:planner-bash
+      - name: Verify production native launchers and filesystem boundaries
+        timeout-minutes: 8
+        run: npm run test:native
+      - name: Verify macOS filesystem policy with real child processes
+        if: runner.os == 'macOS'
+        run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --test sandbox
+      - name: Verify production Planner revisions, dependency composition and Merger (local model)
+        timeout-minutes: 8
+        run: npm run test:merger

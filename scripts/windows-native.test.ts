@@ -10,9 +10,6 @@ import { join, resolve } from 'node:path';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createBashToolDefinition } from '../pi/packages/coding-agent/src/core/tools/bash.ts';
-import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
-import { getShellConfig } from '../pi/packages/coding-agent/src/utils/shell.ts';
 
 const windows = process.platform === 'win32';
 const root = resolve('.');
@@ -22,57 +19,6 @@ const safeRm = async (target: string) => {
   // Forty linearly backed-off retries can spend 205 seconds on one busy path.
   await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
 };
-
-test('Planner uses the same unmodified Bash definition and semantics as pinned Pi', { skip: !windows }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'grapher-bash-'));
-  const workspace = join(directory, '中文 space');
-  const previous = process.cwd();
-  try {
-    await mkdir(workspace);
-    process.chdir(workspace);
-    const loaded = await loadExtensions([join(root, 'backend/resources/planner.ts')], workspace);
-    process.chdir(previous);
-    assert.deepEqual(loaded.errors, []);
-    const planner = loaded.extensions[0].tools.get('bash')!.definition;
-    const builtin = createBashToolDefinition(workspace);
-    assert.equal(planner.execute.toString(), builtin.execute.toString());
-    const shell = getShellConfig();
-    assert.match(shell.shell.replaceAll('\\', '/'), /\/Git\/bin\/bash\.exe$/i);
-    const cases = [
-      ["values=(alpha beta); printf '%s ' \"${values[@]}\"", 'alpha beta'],
-      ["printf 'b\\na\\n' | sort | tr '\\n' ','", 'a,b,'],
-      ['value=$(printf substitution); printf %s "$value"', 'substitution'],
-      ['(printf subshell)', 'subshell'],
-      ['printf background > background.txt & child=$!; wait "$child"; cat background.txt', 'background'],
-      ['bash -c \'sh -c "printf nested"\'', 'nested'],
-      ['printf redirected > redirected.txt; cat < redirected.txt', 'redirected'],
-      ['false | true; false; printf native', 'native'],
-      ['printf stdout; printf stderr >&2', /stdout.*stderr|stderr.*stdout/s],
-      [`${quote(process.execPath)} -e 'process.stdout.write("node-ok")'`, 'node-ok'],
-      ['git --version', /^git version /],
-      ['rustc --version', /^rustc /],
-    ] as const;
-    const context = { cwd: workspace, sessionManager: { getSessionId: () => 'bash-test', getSessionFile: () => undefined } } as any;
-    for (const tool of [builtin, planner]) {
-      for (const [command, expected] of cases) {
-        const input = { command };
-        const response = await tool.execute('bash-test', input, undefined, undefined, context);
-        const output = response.content.filter(part => part.type === 'text').map(part => part.text).join('\n').trim();
-        if (typeof expected === 'string') assert.equal(output, expected);
-        else assert.match(output, expected);
-        assert.equal(input.command, command);
-      }
-      const nonzero = await tool.execute('nonzero', { command: 'exit 7' }, undefined, undefined, context);
-      assert.equal(nonzero.isError, true);
-      assert.match(nonzero.content.find((p): p is { type: 'text'; text: string } => p.type === 'text')?.text || '', /exited with code 7/);
-      await assert.rejects(() => tool.execute('timeout', { command: 'sleep 2', timeout: 0.1 }, undefined, undefined, context), /timed out/i);
-    }
-  } finally {
-    process.chdir(previous);
-    await delay(200);
-    await safeRm(directory);
-  }
-});
 
 // Leave time inside CI's five-minute step for cancellation and cleanup.
 test('production Windows Planner/Graph: concurrent runs, dependencies, publication, cancellation and crash recovery', { skip: !windows, timeout: 240000 }, async t => {
@@ -166,7 +112,8 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       PLANNER_MODEL: 'windows-test/native', NODE_AGENT_MODEL: 'windows-test/native', PARTITIONER_MODEL: 'windows-test/native', MERGER_MODEL: 'windows-test/native',
       PLANNER_THINKING: 'off', NODE_AGENT_THINKING: 'off', PARTITIONER_THINKING: 'off', MERGER_THINKING: 'off' };
     const startBackend = () => {
-      backend = spawn(join(root, 'backend/target/debug/grapher.exe'), [], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
+      backend = spawn(join(target, 'debug/grapher.exe'), [], { env, stdio: ['ignore', 'ignore', 'pipe'] });
       backend.stderr!.on('data', value => { diagnostics += value.toString(); });
       backend.on('error', error => { diagnostics += `${error}\n`; });
       progress(`Backend started: PID ${backend.pid}`);

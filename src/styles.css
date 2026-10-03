@@ -959,11 +959,6 @@ a,
   color: var(--text-primary);
 }
 
-.run-item.active-running {
-  border-color: rgba(6, 182, 212, 0.35);
-  background: rgba(6, 182, 212, 0.06);
-}
-
 .run-title-text {
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1000,14 +995,14 @@ a,
 }
 
 .run-dot.running-pulse {
-  background: #06b6d4;
-  box-shadow: 0 0 8px rgba(6, 182, 212, 0.6);
+  background: var(--brand-default);
+  box-shadow: 0 0 8px rgba(37, 99, 235, 0.5);
   animation: pulse-glow 1.5s infinite ease-in-out;
 }
 
 .run-dot.approval-pulse {
-  background: var(--brand-default, #06b6d4);
-  box-shadow: 0 0 8px var(--brand-default, #06b6d4);
+  background: var(--brand-default);
+  box-shadow: 0 0 8px rgba(37, 99, 235, 0.5);
   animation: pulse-glow 1.5s infinite ease-in-out;
 }
 
@@ -1022,13 +1017,8 @@ a,
   50% {
     transform: scale(1.4);
     opacity: 1;
-    box-shadow: 0 0 12px var(--brand-default, #06b6d4);
+    box-shadow: 0 0 10px rgba(37, 99, 235, 0.6);
   }
-}
-
-.run-item.active-running small {
-  color: var(--brand-default, #06b6d4);
-  font-weight: 600;
 }
 
 @keyframes banner-slide-down {

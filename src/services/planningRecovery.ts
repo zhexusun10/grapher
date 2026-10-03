@@ -2,7 +2,7 @@ import type { PlanningSummary, Snapshot } from "../types";
 
 export function hasCurrentPlanningRun(snapshot: Snapshot, repository: string) {
   return snapshot.config?.repository === repository && !!snapshot.runId &&
-    ["awaiting_approval", "running", "completed", "publishing", "merging"].includes(snapshot.phase);
+    ["planning", "planning_failed", "awaiting_approval", "running", "completed", "publishing", "merging"].includes(snapshot.phase);
 }
 
 export function planningRecoveryDelay(planningId: string | undefined, idleAttempts: number) {

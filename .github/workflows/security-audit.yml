@@ -1,0 +1,72 @@
+name: Dependency Security Audit
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '43 4 * * 2'
+
+permissions:
+  contents: read
+
+jobs:
+  npm-audit:
+    name: npm audit / ${{ matrix.scope }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [grapher, pi]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Install the locked Pi baseline and reviewed dependency profile
+        id: pi-setup
+        if: matrix.scope == 'pi'
+        run: npm run pi:setup
+      - name: Audit all installed dependencies without changing locks
+        env:
+          SCOPE: ${{ matrix.scope }}
+        run: |
+          if [ "$SCOPE" = pi ]; then
+            npm audit --prefix engine/pi-dependencies --audit-level=high --json > npm-audit.json
+          else
+            npm audit --audit-level=high --json > npm-audit.json
+          fi
+      - name: Also report the Pi profile's production dependency view
+        if: always() && matrix.scope == 'pi' && steps.pi-setup.outcome == 'success'
+        run: npm audit --prefix engine/pi-dependencies --omit=dev --audit-level=high --json > npm-audit-production.json
+      - name: Retain audit evidence even when advisories fail the job
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-${{ matrix.scope }}
+          path: npm-audit*.json
+          if-no-files-found: warn
+
+  rust-audit:
+    name: Rust locked-dependency audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install a pinned audit client
+        run: cargo install cargo-audit --version 0.22.0 --locked
+      - name: Audit the backend lock against current RustSec advisories
+        run: cargo audit --file backend/Cargo.lock --json > rust-audit.json
+      - name: Retain Rust audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-audit
+          path: rust-audit.json
+          if-no-files-found: warn

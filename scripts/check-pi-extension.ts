@@ -29,7 +29,7 @@ writeFileSync(join(repository, "sample.txt"), "planner fixture\n");
 writeFileSync(join(root, "rubric.json"), "hidden criteria");
 symlinkSync(root, join(repository, "outside"), process.platform === "win32" ? "junction" : "dir");
 process.env.GRAPHER_GRAPH_PATH = join(root, "graph.json");
-process.env.GRAPHER_COMPILER_PATH ||= resolve(`backend/target/debug/grapher${process.platform === "win32" ? ".exe" : ""}`);
+process.env.GRAPHER_COMPILER_PATH ||= join(resolve(process.env.CARGO_TARGET_DIR || 'backend/target'), `debug/grapher${process.platform === "win32" ? ".exe" : ""}`);
 process.env.GRAPHER_MODE = "planner";
 // Planner behavior must not depend on the host's feedback retry setting.
 process.env.GRAPHER_MAX_FEEDBACK = "0";
@@ -475,8 +475,15 @@ fn main() {
       assert.equal(input.command, command, "Caller parameters remain unchanged");
       assert.equal(result.details?.exitCode, 0);
     }
-    await assert.rejects(() => bash.execute(`${mode}-failure`, { command: "exit 17" }, undefined, undefined, context), /code 17/);
-    await assert.rejects(() => bash.execute(`${mode}-strict`, { command: "set -e; false; printf unreachable" }, undefined, undefined, context), /code 1/);
+    // Pi 1.0 returns nonzero exits as error results; only timeout/abort throws.
+    for (const [command, exitCode] of [["exit 17", 17], ["set -e; false; printf unreachable", 1]] as const) {
+      const result = await bash.execute(`${mode}-failure-${exitCode}`, { command }, undefined, undefined, context);
+      assert.equal(result.isError, true);
+      assert.equal(result.details?.exitCode, exitCode);
+      assert.equal((result.structuredContent as { exit_code: number }).exit_code, exitCode);
+      assert.match(JSON.stringify(result.content), new RegExp(`exited with code ${exitCode}`));
+      assert.doesNotMatch(JSON.stringify(result.content), /unreachable/);
+    }
     await assert.rejects(() => bash.execute(`${mode}-timeout`, { command: "sleep 5", timeout: 0.1 }, undefined, undefined, context), /timed out/);
     const controller = new AbortController();
     controller.abort();

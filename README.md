@@ -93,7 +93,7 @@ Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo com
 3. For Graph, inspect and **approve** the plan. Follow node logs, pause new dispatches, or send instructions.
 4. Graph work is complete only after valid results are published to your project. Publication failures preserve state for inspection or retry.
 
-**Use trusted projects; start with a disposable one.** Successful planning can merge Planner changes into the source before approval, and snapshots can stage/commit existing non-ignored changes. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read the [execution model](docs/architecture/execution-model.md) and [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.
+**Use trusted projects; start with a disposable one.** Planner Bash writes directly to the source before approval, even if planning fails or is cancelled; snapshots can stage/commit existing non-ignored changes. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read the [execution model](docs/architecture/execution-model.md) and [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.
 
 For an existing clone, first run `git submodule update --init --recursive`. Pi is pinned; a global Pi installation is not substituted.
 

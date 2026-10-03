@@ -1119,20 +1119,17 @@ fn run_pi_with_timeout(
             fs::write(&path, system_prompt).map_err(|error| error.to_string())?;
             path
         };
-        command.args([
-            if request.role == PiRole::Merger {
-                "--append-system-prompt"
-            } else {
-                "--system-prompt"
-            },
-            prompt_path.to_str().ok_or("Invalid system prompt path")?,
-        ]);
+        command.arg(if request.role == PiRole::Merger {
+            "--append-system-prompt"
+        } else {
+            "--system-prompt"
+        }).arg(crate::native::host_path(&prompt_path));
     }
     let session_dir = request.session_dir;
     command
         .arg("--session-dir")
-        .arg(session_dir)
-        .current_dir(request.cwd)
+        .arg(crate::native::host_path(session_dir))
+        .current_dir(crate::native::host_path(request.cwd))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1147,6 +1144,7 @@ fn run_pi_with_timeout(
     for (key, value) in &request.environment {
         command.env(key, value);
     }
+    crate::native::clear_git_environment(&mut command);
     // The host owns the instance identity. Never inherit another agent's role
     // or directory mapping from the parent process or role-specific overrides.
     command.env(

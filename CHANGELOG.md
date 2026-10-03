@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the pinned Pi engine to upstream 1.0.1 and refreshed the checksummed model catalog.
+
+### Fixed
+
+- Apply Pi 1.0.1 project MCP overrides after merging global and Grapher-specific definitions, preserving credentials and project trust restrictions.
+- Align Bash smoke assertions with Pi's nonzero-exit error results and honor `CARGO_TARGET_DIR` in integration checks.
+- Match planning history across equivalent Windows repository bindings while keeping missing and unrelated paths fail-closed.
+- Install Pi through the audited core dependency profile and build required artifacts without the vulnerable optional-example and shelljs dependency chains.
+
 ## [0.1.0-alpha.1] - TBD
 
 ### What is Grapher?

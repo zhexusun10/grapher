@@ -54,7 +54,7 @@ Installing the package does not enable namespaces prohibited by the host/contain
 5. For Graph, review node tasks, dependencies, and feedback, then approve the plan.
 6. Inspect node logs and the publication result. A Graph is not complete until valid results reach the project.
 
-**Planning and approval can change your project.** Planner runs in a private copy, but successful planning merges its changes to the source before graph approval. Snapshots can stage and commit existing non-ignored user changes. Rejecting the plan does not roll back those merges or side effects. See [Planning and approval](../architecture/execution-model.md#planning-and-approval).
+**Planning and approval can change your project.** Planner runs directly in the source, and native Bash writes are immediately visible before graph approval, even if planning fails or is cancelled. Snapshots can stage and commit existing non-ignored user changes. Rejecting the plan does not roll back those writes or side effects. See [Planning and approval](../architecture/execution-model.md#planning-and-approval).
 
 Graph node dependencies are not automatically installed. Ignored, untracked dependency files are not automatically included in inherited workspace snapshots; tasks must prepare the dependencies they need.
 

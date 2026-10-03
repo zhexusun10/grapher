@@ -298,12 +298,21 @@ impl Runtime {
         if !repository.is_absolute() {
             return Ok(());
         }
+        // Workspaces were allocated beside the physical source, not a source
+        // alias. Missing bindings can be reset, but cannot authorize deletion.
+        let repository = match repository.canonicalize() {
+            Ok(path) if path.is_dir() => path,
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
         let Some(parent) = repository.parent() else {
             return Ok(());
         };
+        let mut removals = Vec::new();
         let dir = parent.join(".grapher-worktrees").join(&self.state.run_id);
-        if dir.is_dir() && !dir.is_symlink() {
-            fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        if let Some(dir) = crate::path_safety::real_child_path(parent, &dir, false)? {
+            removals.push(dir);
         }
         let workspaces = parent.join(".grapher-workspaces");
         let mut owners = vec![self.state.run_id.clone()];
@@ -322,7 +331,8 @@ impl Runtime {
                     .and_then(|name| name.to_str())
                 {
                     if Uuid::parse_str(owner).is_ok()
-                        && Path::new(&path).parent() == Some(workspaces.join(owner).as_path())
+                        && Path::new(&path).parent().and_then(|path| path.canonicalize().ok())
+                            .is_some_and(|actual| workspaces.join(owner).canonicalize().ok().as_ref() == Some(&actual))
                     {
                         owners.push(owner.to_owned());
                     }
@@ -331,9 +341,13 @@ impl Runtime {
         }
         for owner in owners {
             let path = workspaces.join(owner);
-            if path.is_dir() && !path.is_symlink() && !workspaces.is_symlink() {
-                fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+            if let Some(path) = crate::path_safety::real_child_path(parent, &path, false)? {
+                if !removals.contains(&path) { removals.push(path); }
             }
+        }
+        // Validate every ownership path before the first destructive operation.
+        for path in removals {
+            fs::remove_dir_all(path).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -471,16 +485,17 @@ impl Runtime {
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
             return Err("Test process command is required".into());
         }
-        let run_id = if self.state.events.is_empty() && !self.state.run_id.is_empty() {
-            self.state.run_id.clone()
-        } else {
-            Uuid::new_v4().to_string()
-        };
-        self.state = Snapshot {
-            run_id,
-            ..Snapshot::default()
-        };
-        self.touch();
+        let completing_planning = self.state.phase == "planning"
+            && planning_id.is_some() && self.state.planning_id == planning_id;
+        if !completing_planning {
+            let run_id = if self.state.events.is_empty() && !self.state.run_id.is_empty() {
+                self.state.run_id.clone()
+            } else {
+                Uuid::new_v4().to_string()
+            };
+            self.state = Snapshot { run_id, ..Snapshot::default() };
+            self.touch();
+        }
         self.emit(EventKind::Created {
             graph,
             config,
@@ -512,6 +527,27 @@ impl Runtime {
             Some(mode) => mode == "serial",
             None => self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task",
         }
+    }
+
+    /// Approval stays immutable; later Planner writes/publications advance the
+    /// inputs of future jobs without replacing an in-flight node's workspace.
+    fn latest_source_head(&self) -> &str {
+        self.state.events.iter().rev().find_map(|event| match &event.kind {
+            EventKind::GraphRevised { source_head: Some(head), .. }
+            | EventKind::SourceSnapshotted { head }
+            | EventKind::PublicationCompleted { head } => Some(head.as_str()),
+            EventKind::Approved { base } => Some(base.as_str()),
+            _ => None,
+        }).unwrap_or_else(|| self.state.published_head.as_deref().unwrap_or(&self.state.base))
+    }
+
+    pub(crate) fn capture_planner_source(&mut self) -> Result<(), String> {
+        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let head = workspace::snapshot_repository(&repository)?;
+        if head != self.latest_source_head() {
+            self.emit(EventKind::SourceSnapshotted { head })?;
+        }
+        Ok(())
     }
 
     pub fn approve(&mut self) -> Result<(), String> {
@@ -576,6 +612,7 @@ impl Runtime {
             planning_id,
             planning,
             invalidated: vec![],
+            source_head: None,
         })
     }
 
@@ -632,7 +669,7 @@ impl Runtime {
                 "Wait for active executions/publication before revising the approved graph".into(),
             );
         }
-        resolve_repository(
+        let repository = resolve_repository(
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
@@ -662,11 +699,15 @@ impl Runtime {
             .into_iter()
             .filter(|name| names.contains(name.as_str()))
             .collect();
+        // Capture the real source after Planner's native writes. Persist the
+        // input head with the revision so reloads cannot fall back to old files.
+        let source_head = workspace::snapshot_repository(&repository)?;
         self.emit(EventKind::GraphRevised {
             graph,
             planning_id: planning.planning_id.clone(),
             planning,
             invalidated,
+            source_head: Some(source_head),
         })
     }
 
@@ -881,10 +922,7 @@ impl Runtime {
         if !self.is_serial() && !workspace::is_standard_git(&repository) {
             workspace::check_shadow_source(
                 &repository,
-                self.state
-                    .published_head
-                    .as_deref()
-                    .unwrap_or(&self.state.base),
+                self.latest_source_head(),
             )?;
         }
         Ok(())
@@ -1085,15 +1123,14 @@ impl Runtime {
         let mut jobs = Vec::new();
         for node in ready {
             let id = Uuid::new_v4().to_string();
-            // A node with no retained head starts from the current source state.
-            // After publication that is the published commit, not the approval
-            // base: Planner revisions and newly added roots/terminals must build
-            // on and merge back into the workspace users already received.
+            // New/replanned nodes use the latest recorded source, including
+            // Planner writes after approval. Retained node results are composed
+            // with that source during preparation, not discarded.
+            let source_head = self.latest_source_head().to_owned();
             let before = self.state.nodes[&node.name]
                 .head
                 .clone()
-                .or_else(|| self.state.published_head.clone())
-                .unwrap_or_else(|| self.state.base.clone());
+                .unwrap_or_else(|| source_head.clone());
             let resume = if self.state.nodes[&node.name].human_instruction {
                 let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
                 Some(
@@ -1201,11 +1238,7 @@ impl Runtime {
                 images,
                 resume_execution_id,
                 feedback_source,
-                expected_source_head: self
-                    .state
-                    .published_head
-                    .clone()
-                    .unwrap_or_else(|| self.state.base.clone()),
+                expected_source_head: source_head,
             });
         }
         if allow_publication
@@ -1514,11 +1547,20 @@ pub fn perform_with_merger(
     } else {
         &job.parent_heads
     };
+    let mut input_heads = parent_refs.to_vec();
+    if path != repository && job.execution.before != job.expected_source_head {
+        // Continuations keep their own result and dependency inputs, while also
+        // receiving source files written by a subsequent Planner turn.
+        workspace::pin_repository_head(&repository, &job.expected_source_head)?;
+        if !input_heads.contains(&job.expected_source_head) {
+            input_heads.push(job.expected_source_head.clone());
+        }
+    }
     let before = workspace::prepare_with_merger_expected_for_run(
         &repository,
         path,
         &job.execution.before,
-        parent_refs,
+        &input_heads,
         &job.expected_source_head,
         Some(&job.run_id),
         || {

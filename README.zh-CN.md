@@ -70,7 +70,7 @@ npm run dev
 3. Graph 模式下查看并**批准**计划。执行中可查看节点日志、暂停新任务派发，或追加指令。
 4. Graph 的有效结果成功发布回项目后才算完成；发布失败会保留状态供检查或重试。
 
-**只在可信项目上使用，首次体验建议用可丢弃的项目。** 成功规划可能在审批前将 Planner 修改合并到源项目，快照也可能暂存并提交已有非忽略变更。拒绝计划不等于回滚。Windows 工作区不是文件系统沙箱。在重要代码上运行前，请阅读[执行模型](docs/architecture/execution-model.md)和[文件系统边界](docs/architecture/filesystem-isolation.md)。
+**只在可信项目上使用，首次体验建议用可丢弃的项目。** Planner 的 Bash 写入会在审批前直接修改源项目，规划失败或取消也不会回滚；快照可能暂存并提交已有非忽略变更。拒绝计划不等于回滚。Windows 工作区不是文件系统沙箱。在重要代码上运行前，请阅读[执行模型](docs/architecture/execution-model.md)和[文件系统边界](docs/architecture/filesystem-isolation.md)。
 
 已有克隆仓库请先运行 `git submodule update --init --recursive`。Pi 是锁定版本，不会使用全局 Pi 替代。
 

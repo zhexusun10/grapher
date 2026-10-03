@@ -18,6 +18,7 @@ import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
 import { executionIdForMessage, executionIdForVersion } from "./services/conversationBranch";
+import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./services/thinkingTranscript";
 
 import { TaskNode } from "./components/graph/TaskNode";
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
@@ -272,7 +273,8 @@ export default function App() {
   const publicationFailed = state.phase === "publication_failed";
   const active = publishing || publicationFailed || Object.values(state.nodes).some((node) => node.status === "running");
   const locked = busy || !!recoveredPlanning || repositoryBlocked;
-  const isAgentWorking = active || isPlanning;
+  const backendPlanning = state.phase === "planning";
+  const isAgentWorking = active || isPlanning || backendPlanning;
 
   const effectiveMessages = useMemo<ChatMessage[]>(() => {
     if (sessionEntries.length > 0) return sessionEntries;
@@ -309,6 +311,7 @@ export default function App() {
     runId: "",
     stage: "idle" as "idle" | "partitioning" | "planning" | "done" | "error",
     items: [] as TranscriptItem[],
+    plannerMessageStart: 0,
     representedPlanningIds: [] as string[],
     isContinuation: false,
     partitionerThinking: "",
@@ -434,7 +437,7 @@ export default function App() {
       const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`, "steered", execution.id);
       return submitNodeMessage("steer", message, execution.id);
     }
-    if (isPlanning || recoveredPlanning?.status === "running") {
+    if (isPlanning || backendPlanning || recoveredPlanning?.status === "running") {
       const planningRunId = plannerStream.runId || state.runId;
       if (plannerStream.stage === "partitioning" || !planningRunId || planningRunId.startsWith("pending-")) {
         setError(t("任务路由器仍在工作，请等待 Planner 启动后再追加消息。"));
@@ -465,7 +468,7 @@ export default function App() {
     if (targetNodeName) {
       return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg));
     }
-    if ((routeType === "graph" || state.graph.nodes.length > 0) && state.runId) {
+    if ((routeType === "graph" || state.graph.nodes.length > 0) && state.runId && state.phase !== "planning_failed") {
       void handlePlanGoal(text, options, "graph", state.runId);
     } else {
       const baseGoal = state.graph.originalGoal || goal;
@@ -985,14 +988,7 @@ export default function App() {
     return nextItems;
   };
 
-  const closeRunningThinkingItem = (prevItems: TranscriptItem[]): TranscriptItem[] => {
-    const nextItems = prevItems.map((item) => ({ ...item }));
-    const last = nextItems[nextItems.length - 1];
-    if (last && last.type === "thinking" && last.status === "running") {
-      last.status = "success";
-    }
-    return nextItems;
-  };
+  const closeRunningThinkingItem = closeThinkingItems;
 
   const handlePlanGoal = (
     inputGoal?: string,
@@ -1067,6 +1063,7 @@ export default function App() {
         runId: provisionalRunId,
         stage: effectiveMode === "auto" ? "partitioning" : effectiveMode === "graph" ? "planning" : "idle",
         items: [],
+        plannerMessageStart: 0,
         representedPlanningIds: [],
         isContinuation: false,
         partitionerThinking: "",
@@ -1113,6 +1110,7 @@ export default function App() {
         ...prev,
         stage: "planning",
         isContinuation: true,
+        plannerMessageStart: editedMessage ? 1 : prev.items.length + 1,
         items: [
           ...(editedMessage ? [] : prev.items),
           {
@@ -1337,45 +1335,21 @@ export default function App() {
           } else if (event.type === "planner") {
             setPlannerStream((prev) => (prev.stage !== "planning" ? { ...prev, stage: "planning" } : prev));
             const pEvent = event.event;
-            if (pEvent?.type === "message_update") {
+            if (pEvent?.type === "message_start" && pEvent.message?.role === "assistant") {
+              setPlannerStream(prev => ({
+                ...prev, items: closeThinkingItems(prev.items), plannerMessageStart: prev.items.length,
+              }));
+            } else if (pEvent?.type === "message_update") {
               const aEvent = pEvent.assistantMessageEvent;
-              if (aEvent?.type === "thinking_start") {
-                setPlannerStream((prev) => {
-                  let items = prev.items;
-                  const last = items[items.length - 1];
-                  if (!last || last.type !== "thinking" || last.status !== "running") {
-                    items = [
-                      ...items,
-                      {
-                        id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-                        type: "thinking",
-                        role: "assistant",
-                        content: "",
-                        status: "running",
-                        timestamp: Date.now(),
-                      },
-                    ];
-                  }
+              if (["thinking_start", "thinking_delta", "thinking_end"].includes(aEvent?.type)) {
+                setPlannerStream(prev => {
+                  const items = updateThinkingItems(prev.items, aEvent, prev.plannerMessageStart);
                   return {
-                    ...prev,
-                    items,
-                    plannerThinkingActive: true,
+                    ...prev, items,
+                    plannerThinking: items.filter(item => item.type === "thinking" && item.content).map(item => item.content).join("\n\n"),
+                    plannerThinkingActive: items.some(item => item.type === "thinking" && item.status === "running"),
                   };
                 });
-              } else if (aEvent?.type === "thinking_delta") {
-                const delta = aEvent.delta || "";
-                setPlannerStream((prev) => ({
-                  ...prev,
-                  items: appendItemDelta(prev.items, "thinking", delta, true),
-                  plannerThinking: prev.plannerThinking + delta,
-                  plannerThinkingActive: true,
-                }));
-              } else if (aEvent?.type === "thinking_end") {
-                setPlannerStream((prev) => ({
-                  ...prev,
-                  items: closeRunningThinkingItem(prev.items),
-                  plannerThinkingActive: false,
-                }));
               } else if (aEvent?.type === "text_delta") {
                 const delta = aEvent.delta || "";
                 if (planInTag || delta.includes("<think>") || delta.includes("<thought>")) {
@@ -1439,35 +1413,13 @@ export default function App() {
                   }));
                 }
               }
-            } else if (pEvent?.type === "message_end") {
-              setPlannerStream((prev) => {
-                let items = closeRunningThinkingItem(prev.items);
-                let thinking = prev.plannerThinking;
-                if (Array.isArray(pEvent.message?.content)) {
-                  for (const c of pEvent.message.content) {
-                    if (c.type === "thinking" && c.thinking) {
-                      if (!thinking) thinking = c.thinking;
-                      const hasThinking = items.some((i) => i.type === "thinking" && i.content === c.thinking);
-                      if (!hasThinking) {
-                        items = [
-                          ...items,
-                          {
-                            id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-                            type: "thinking",
-                            role: "assistant",
-                            content: c.thinking,
-                            status: "success",
-                            timestamp: Date.now(),
-                          },
-                        ];
-                      }
-                    }
-                  }
-                }
+            } else if (pEvent?.type === "message_end" && pEvent.message?.role === "assistant") {
+              setPlannerStream(prev => {
+                const items = finalizeThinkingItems(prev.items,
+                  Array.isArray(pEvent.message.content) ? pEvent.message.content : [], prev.plannerMessageStart);
                 return {
-                  ...prev,
-                  items,
-                  plannerThinking: thinking,
+                  ...prev, items, plannerMessageStart: items.length,
+                  plannerThinking: items.filter(item => item.type === "thinking" && item.content).map(item => item.content).join("\n\n"),
                   plannerThinkingActive: false,
                 };
               });
@@ -2371,7 +2323,7 @@ export default function App() {
                     routeType={routeType}
                     selected={selected}
                     setSelected={setSelected}
-                    failedPlanning={failedPlanning}
+                    failedPlanning={failedPlanning || (state.phase === "planning_failed" ? state.planning : null)}
                     effectiveMessages={effectiveMessages}
                     onEditMessage={handleStartEditMessage}
                     editingMessage={editingMessage}
@@ -2381,9 +2333,9 @@ export default function App() {
                     onEditMessageSubmit={handleEditMessageSubmit}
                     onSwitchMessageVersion={handleSwitchMessageVersion}
                     onInterrupt={handleInterrupt}
-                    isPlanning={isPlanning || !!recoveredPlanning}
+                    isPlanning={isPlanning || backendPlanning || !!recoveredPlanning}
                     plannerStream={plannerStream}
-                    recoveredPlanningId={recoveredPlanning?.planningId}
+                    recoveredPlanningId={recoveredPlanning?.planningId || (!isPlanning && backendPlanning ? state.planningId : undefined)}
                     onSendMessage={handleSendMessage}
                     onRequestConfirmation={setConfirmModal}
                     onControl={control}
@@ -2420,7 +2372,6 @@ export default function App() {
                 config={config}
                 dataPath={dataPath}
                 envOverrides={envOverrides}
-                error={error}
                 onSaveConfig={handleSaveConfig}
               />
             )}

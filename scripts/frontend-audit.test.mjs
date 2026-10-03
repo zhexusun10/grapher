@@ -46,7 +46,7 @@ async function fixture(name, handler = async () => false) {
     const command = new URL(route.request().url()).pathname.slice(5);
     const body = route.request().postDataJSON();
     if (await handler(route, command, body)) return;
-    const defaults = { provider_auth: catalog, list_files: { files: [] }, list_skills: { skills: [] } };
+    const defaults = { provider_auth: catalog, pi_extensions: { globalDirectory: "mock", extensions: [] }, list_files: { files: [] }, list_skills: { skills: [] } };
     if (Object.hasOwn(defaults, command)) return route.fulfill({ json: { result: defaults[command] } });
     errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ status: 500, json: { error: `Unexpected API: ${command}` } });
@@ -289,6 +289,85 @@ test("one unavailable Run cannot starve other polls, and a stale poll cannot ove
   } finally { gate.resolve(); await context.close(); }
 });
 
+test("recovered planning polls activity before route discovery and opens the completed graph", { timeout: 45_000 }, async () => {
+  const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const running = { planningId: "recovered-plan", repository: "/a", status: "running", createdAt: Date.now(),
+    modelDuration: 0, totalPlanningDuration: 0, roles: { partition: {}, planner: {} } };
+  const info = { path: "/a", name: "Alpha", branch: "main", head: "", clean: true };
+  const bootstrap = { config, snapshot: empty, runs: [], repositoryInfo: info, dataPath: "/mock" };
+  const completed = { ...empty, runId: "recovered-run", config, planType: "graph", phase: "awaiting_approval",
+    planningId: running.planningId, planning: { ...running, status: "success" },
+    graph: { originalGoal: "Recovered goal", nodes: [], edges: [] } };
+  const line = event => JSON.stringify(event) + "\n";
+  const first = line({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "Recovered goal" }] } }) +
+    line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Recovered activity 中文🚀" } });
+  const appended = line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "\n\nAutomatically appended activity" } });
+  let output = "", finished = false;
+  const offsets = [], errors = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = bootstrap; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = [finished ? completed.planning : running]; break;
+      case "get_planning": result = finished ? completed.planning : running; break;
+      case "get_planning_output": {
+        assert.equal(body.planningId, running.planningId);
+        assert.equal(body.role, "planner");
+        offsets.push(body.offset);
+        const bytes = Buffer.from(output);
+        result = { planningId: running.planningId, role: "planner", content: bytes.subarray(body.offset).toString(),
+          nextOffset: bytes.length, totalBytes: bytes.length, complete: true, running: !finished };
+        break;
+      }
+      case "get_planning_snapshot":
+        assert.equal(body.planningId, running.planningId);
+        assert.equal(body.repository, "/a");
+        result = completed; break;
+      case "history": case "snapshot": result = completed; break;
+      case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
+      case "provider_auth": result = catalog; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      default:
+        errors.push(`Unexpected API: ${command}`);
+        await route.fulfill({ status: 400, json: { error: `Unexpected API: ${command}` } }); return;
+    }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.locator(".floating-recovered-banner").waitFor();
+    await waitFor(() => offsets.length > 0);
+    assert.equal(await page.locator(".route-decision-pill").innerText(), "Evaluating task routing...");
+    assert.equal(offsets[0], 0, "missing initial output must keep polling instead of settling the cache");
+
+    output = first;
+    const activity = page.getByRole("region", { name: "Planning activity" });
+    await activity.getByText("Recovered activity 中文🚀", { exact: true }).waitFor();
+    await activity.getByText("Recovered goal", { exact: true }).waitFor();
+    output += appended;
+    await activity.getByText("Automatically appended activity", { exact: true }).waitFor();
+    assert.ok(offsets.includes(Buffer.byteLength(first)), "append polling resumes at the UTF-8 byte offset");
+    assert.equal(await activity.getByText("Recovered activity 中文🚀", { exact: true }).count(), 1);
+    assert.equal(await page.locator(".floating-recovered-banner").count(), 1);
+
+    finished = true;
+    await page.locator(".floating-recovered-banner").waitFor({ state: "detached" });
+    await page.locator('.run-item.chosen[data-run-id="recovered-run"]').waitFor();
+    await activity.getByText("Automatically appended activity", { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("late node sends and edits cannot overwrite another workspace or its composer draft", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const base = { plan: null, events: [], approved: true, paused: false, phase: "completed", base: "", feedbackCounts: {} };
@@ -390,4 +469,58 @@ test("late node sends and edits cannot overwrite another workspace or its compos
     assert.ok(!(await page.locator(".chat-messages-stream").innerText()).includes("Edited Alpha"));
     assert.deepEqual(errors, []);
   } finally { sendGate.resolve(); editGate.resolve(); await context.close(); }
+});
+
+test("thinking cards settle without a shimmer and backfill summaries in place in live and replay views", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("thinking");
+  const append = event => page.evaluate(event => window.audit.append(event), event);
+  const update = (type, contentIndex, extra = {}) => append({
+    type: "message_update", assistantMessageEvent: { type, contentIndex, ...extra },
+  });
+  const views = [page.locator('[data-thinking-view="live"]'), page.locator('[data-thinking-view="history"]')];
+  try {
+    await append({ type: "message_start", message: { role: "assistant", content: [] } });
+    await update("thinking_start", 0);
+    for (const view of views) await view.locator(".thinking-shimmer").waitFor();
+    const ids = await Promise.all(views.map(view => view.locator("[data-transcript-id]").first().getAttribute("data-transcript-id")));
+    await update("thinking_end", 0, { content: "" });
+    for (const view of views) {
+      await view.locator(".thinking-empty").waitFor();
+      assert.equal(await view.locator(".thinking-shimmer").count(), 0);
+      assert.equal(await view.locator(".thinking-status.completed").count(), 1);
+    }
+    await update("thinking_start", 1);
+    for (const view of views) {
+      await view.locator(".thinking-shimmer").waitFor();
+      assert.equal(await view.locator(".thinking-empty").count(), 1);
+    }
+    await update("thinking_end", 1, { content: "End-only summary 中文🚀" });
+    await update("thinking_start", 2);
+    await update("thinking_delta", 2, { delta: "Unnormalized partial" });
+    await update("thinking_end", 2, { content: "Normalized final summary" });
+    await append({ type: "message_end", message: { role: "assistant", content: [
+      { type: "thinking", thinking: "Backfilled first summary" },
+      { type: "thinking", thinking: "End-only summary 中文🚀" },
+      { type: "thinking", thinking: "Normalized final summary" },
+    ] } });
+    for (let i = 0; i < views.length; i++) {
+      const view = views[i];
+      await view.locator(".thinking-card-body", { hasText: "Backfilled first summary" }).waitFor();
+      assert.equal(await view.locator(".thinking-card").count(), 3);
+      assert.equal(await view.locator(".thinking-status.completed").count(), 3);
+      assert.equal(await view.locator(".thinking-shimmer, .thinking-empty").count(), 0);
+      assert.equal(await view.locator("[data-transcript-id]").first().getAttribute("data-transcript-id"), ids[i]);
+      assert.ok((await view.innerText()).includes("End-only summary 中文🚀"));
+      assert.ok(!(await view.innerText()).includes("Unnormalized partial"));
+    }
+    await append({ type: "message_start", message: { role: "assistant", content: [] } });
+    await update("thinking_start", 0);
+    await update("thinking_end", 0, { content: "End-only summary 中文🚀" });
+    for (const view of views) {
+      await view.locator(".thinking-card").nth(3).waitFor();
+      assert.equal(await view.locator(".thinking-card-body", { hasText: "End-only summary 中文🚀" }).count(), 2);
+      assert.equal(await view.locator(".thinking-shimmer").count(), 0);
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
 });

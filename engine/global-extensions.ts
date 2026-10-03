@@ -3,7 +3,8 @@ import { readFileSync, existsSync, realpathSync, writeFileSync, renameSync, unli
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DefaultPackageManager, SettingsManager, createMcpExtension, loadMcpConfig, type InlineExtension } from './pi-compat.ts';
+import { DefaultPackageManager, SettingsManager, createMcpExtension, type InlineExtension } from './pi-compat.ts';
+import { loadGrapherMcpConfig } from './mcp-config.ts';
 
 const builtins = ['llama.cpp', 'codemode', 'tool-search', 'mcp'];
 export const trimId = 'npm:pi-trim';
@@ -133,11 +134,9 @@ export async function executionResources(args: string[], directory: string, role
     if (extensions.includes('builtin:mcp')) {
       extensions.splice(extensions.indexOf('builtin:mcp'), 1);
       extensionFactories.push({ name: 'grapher-mcp', factory: createMcpExtension({
-        loadConfig: ctx => {
-          const user = loadMcpConfig({ agentDir: globalAgentDir(), cwd: ctx.cwd, projectTrusted: false });
-          const own = loadMcpConfig({ agentDir: directory, cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
-          return { ...user, ...own, servers: [...new Map([...user.servers, ...own.servers].map(server => [server.name, server])).values()], errors: [...user.errors, ...own.errors] };
-        },
+        loadConfig: ctx => loadGrapherMcpConfig({
+          globalDir: globalAgentDir(), agentDir: directory, cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(),
+        }),
       }) });
     }
   }

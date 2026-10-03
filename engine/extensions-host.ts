@@ -2,10 +2,12 @@
 import { readFileSync } from 'node:fs';
 import { configureAgentDir } from './agent-dir.mjs';
 import { extensionCatalog, setExtensionEnabled } from './global-extensions.ts';
-import { verifyBaseline } from '../scripts/pi-baseline.mjs';
+import { root, verifyBaseline } from '../scripts/pi-baseline.mjs';
+import { verifyPiDependencies } from '../scripts/pi-dependencies.mjs';
 
 try {
   verifyBaseline();
+  verifyPiDependencies(root);
   const directory = configureAgentDir();
   const request = JSON.parse(readFileSync(0, 'utf8'));
   if (request.version !== 1) throw new Error('Invalid extension request');

@@ -274,6 +274,16 @@ impl Default for NodeState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
+    /// A conversation exists before its graph has been compiled.
+    PlanningStarted {
+        goal: String,
+        config: Config,
+        planning: PlanningSummary,
+        plan_type: Option<String>,
+    },
+    PlanningFailed {
+        planning: PlanningSummary,
+    },
     Created {
         graph: Graph,
         config: Config,
@@ -290,11 +300,18 @@ pub enum EventKind {
     Approved {
         base: String,
     },
+    /// Native Planner writes survive a failed/cancelled revision too.
+    SourceSnapshotted {
+        head: String,
+    },
     GraphRevised {
         graph: Graph,
         planning_id: String,
         planning: PlanningSummary,
         invalidated: Vec<String>,
+        /// Source files after this approved Planner turn; absent in legacy/draft events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_head: Option<String>,
     },
     /// A manual edit of an unapproved draft. Keep its Run and Planner history.
     DraftEdited {
@@ -662,6 +679,18 @@ pub fn append_live_output(execution: &mut Execution, text: &str) {
 
 pub fn apply(state: &mut Snapshot, event: &Event) {
     match &event.kind {
+        EventKind::PlanningStarted { goal, config, planning, plan_type } => {
+            state.graph.original_goal = goal.clone();
+            state.config = Some(config.clone());
+            state.planning_id = Some(planning.planning_id.clone());
+            state.planning = Some(planning.clone());
+            state.plan_type = plan_type.clone();
+            state.phase = "planning".into();
+        }
+        EventKind::PlanningFailed { planning } => {
+            state.planning = Some(planning.clone());
+            state.phase = "planning_failed".into();
+        }
         EventKind::Created {
             graph,
             config,
@@ -688,7 +717,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.base = base.clone();
             state.phase = "running".into();
         }
-        EventKind::GraphRevised { graph, planning_id, planning, invalidated } => {
+        EventKind::GraphRevised { graph, planning_id, planning, invalidated, .. } => {
             state.stop_requested = false;
             let changed = state.graph != *graph;
             state.graph = graph.clone();
@@ -753,7 +782,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.error = None;
             state.executions.push(execution.clone());
         }
-        EventKind::Steered { .. } | EventKind::NodeMessaged { .. } => {}
+        EventKind::SourceSnapshotted { .. } | EventKind::Steered { .. } | EventKind::NodeMessaged { .. } => {}
         EventKind::Output { execution_id, text } => {
             if let Some(execution) = state
                 .executions

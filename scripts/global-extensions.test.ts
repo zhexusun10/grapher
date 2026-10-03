@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bundledTrim, extensionCatalog, executionResources, setExtensionEnabled, trimId } from '../engine/global-extensions.ts';
+import { loadGrapherMcpConfig } from '../engine/mcp-config.ts';
+import { loadMcpConfig } from '../engine/pi-compat.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 function fixture() {
@@ -128,6 +130,122 @@ test('globally installed pi-trim is deduplicated with the bundled package, inclu
     assert.equal(resources.args.filter(arg => arg === bundledTrim).length, 1);
     assert.ok(!resources.args.includes(join(pkg, 'a.ts')));
     assert.ok(!resources.args.includes(join(pkg, 'b.ts')));
+  } finally { f.close(); }
+});
+
+test('Pi 1.0.1 project MCP overrides apply to external globals without moving credentials or editing files', () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.workspace, '.pi'));
+    const globalConfig = { mcpServers: { docs: { url: 'https://example.com/mcp', auth: { provider: 'anthropic' },
+      headers: { Authorization: 'Bearer ${DOCS_TOKEN}' }, exposure: 'direct', toolExposure: { read: 'direct' },
+      oauth: { clientRegistration: 'cimd' } } } };
+    const projectConfig = { mcpServers: { docs: { enabled: false, exposure: 'hidden', toolExposure: { read: 'hidden' } } } };
+    const globalFile = join(f.global, 'mcp.json');
+    const projectFile = join(f.workspace, '.pi/mcp.json');
+    writeFileSync(globalFile, JSON.stringify(globalConfig));
+    writeFileSync(projectFile, JSON.stringify(projectConfig));
+    const options = { globalDir: f.global, agentDir: f.own, cwd: f.workspace, projectTrusted: true };
+    const loaded = loadGrapherMcpConfig(options);
+    assert.deepEqual(loaded.errors, []);
+    assert.equal(loaded.projectConfig, projectFile);
+    assert.deepEqual(loaded.servers, [{ name: 'docs', config: { ...globalConfig.mcpServers.docs, ...projectConfig.mcpServers.docs },
+      scope: 'global', source: globalFile, override: projectFile }]);
+    const untrusted = loadGrapherMcpConfig({ ...options, projectTrusted: false });
+    assert.equal(untrusted.projectConfig, undefined);
+    assert.deepEqual(untrusted.servers[0].config, globalConfig.mcpServers.docs);
+    assert.equal(readFileSync(globalFile, 'utf8'), JSON.stringify(globalConfig));
+    assert.equal(readFileSync(projectFile, 'utf8'), JSON.stringify(projectConfig));
+    assert.equal(existsSync(join(f.own, 'mcp.json')), false, 'global credentials must not be copied into Grapher config');
+  } finally { f.close(); }
+});
+
+test('MCP precedence is global, dedicated, then trusted project; overrides inherit the dedicated definition', () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.workspace, '.pi'));
+    writeFileSync(join(f.global, 'mcp.json'), JSON.stringify({ autoEnableCodemode: true, mcpServers: {
+      shared: { command: 'global', args: ['global-arg'] }, globalOnly: { command: 'global-only' },
+    } }));
+    writeFileSync(join(f.own, 'mcp.json'), JSON.stringify({ autoEnableCodemode: false, mcpServers: {
+      shared: { command: 'dedicated', args: ['own-arg'], env: { TOKEN: '${TOKEN}' } }, ownOnly: { command: 'own-only' },
+    } }));
+    const projectFile = join(f.workspace, '.pi/mcp.json');
+    writeFileSync(projectFile, JSON.stringify({ autoEnableCodemode: true, mcpServers: {
+      shared: { enabled: false }, globalOnly: { command: 'project-replacement' }, ownOnly: { exposure: 'direct' },
+    } }));
+    const loaded = loadGrapherMcpConfig({ globalDir: f.global, agentDir: f.own, cwd: f.workspace, projectTrusted: true });
+    assert.deepEqual(loaded.errors, []);
+    assert.equal(loaded.autoEnableCodemode, true);
+    assert.deepEqual(loaded.servers[0].config, { command: 'dedicated', args: ['own-arg'], env: { TOKEN: '${TOKEN}' }, enabled: false });
+    assert.equal(loaded.servers[0].source, join(f.own, 'mcp.json'));
+    assert.equal(loaded.servers[0].override, projectFile);
+    assert.equal(loaded.servers[1].scope, 'project');
+    assert.deepEqual(loaded.servers[1].config, { command: 'project-replacement' });
+    assert.equal(loaded.servers[2].config.exposure, 'direct');
+    const untrusted = loadGrapherMcpConfig({ globalDir: f.global, agentDir: f.own, cwd: f.workspace, projectTrusted: false });
+    assert.equal(untrusted.autoEnableCodemode, false);
+    assert.equal(untrusted.servers[0].config.enabled, undefined);
+  } finally { f.close(); }
+});
+
+test('MCP rejects invalid project overrides and provider-auth injection without changing global definitions', () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.workspace, '.pi'));
+    const base = { url: 'https://example.com/mcp', auth: { provider: 'anthropic' } };
+    writeFileSync(join(f.global, 'mcp.json'), JSON.stringify({ mcpServers: { docs: base } }));
+    const cases = [
+      { mcpServers: { docs: { enabled: 'false' } } },
+      { mcpServers: { docs: { exposure: 'invalid' } } },
+      { mcpServers: { docs: { toolExposure: { read: 'invalid' } } } },
+      { mcpServers: { docs: { auth: { provider: 'openai' } } } },
+      { mcpServers: { docs: { headers: { Authorization: 'injected' } } } },
+      { mcpServers: { docs: { args: ['injected'] } } },
+      { mcpServers: { docs: { url: 'https://untrusted.example/mcp', auth: { provider: 'anthropic' } } } },
+      { mcpServers: { missing: { enabled: false } } },
+      { mcpServers: [] }, null,
+    ];
+    for (const config of cases) {
+      writeFileSync(join(f.workspace, '.pi/mcp.json'), JSON.stringify(config));
+      const loaded = loadGrapherMcpConfig({ globalDir: f.global, agentDir: f.own, cwd: f.workspace, projectTrusted: true });
+      assert.equal(loaded.errors.length, 1, JSON.stringify(config));
+      assert.deepEqual(loaded.servers.map(server => server.config), [base]);
+      assert.equal(loaded.servers[0].override, undefined);
+    }
+    writeFileSync(join(f.workspace, '.pi/mcp.json'), '{');
+    assert.equal(loadGrapherMcpConfig({ globalDir: f.global, agentDir: f.own, cwd: f.workspace, projectTrusted: true }).errors.length, 1);
+  } finally { f.close(); }
+});
+
+test('MCP namespace collisions across global and dedicated directories are rejected', () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.global, 'mcp.json'), JSON.stringify({ mcpServers: { 'my-server': { command: 'global' } } }));
+    writeFileSync(join(f.own, 'mcp.json'), JSON.stringify({ mcpServers: { my_server: { command: 'dedicated' } } }));
+    const loaded = loadGrapherMcpConfig({ globalDir: f.global, agentDir: f.own, cwd: f.workspace, projectTrusted: false });
+    assert.equal(loaded.servers.length, 1);
+    assert.match(loaded.errors[0], /conflicts with "my-server"/);
+  } finally { f.close(); }
+});
+
+test('layered MCP loading matches upstream for a single agent directory, including errors and exposure aliases', () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.workspace, '.pi'));
+    writeFileSync(join(f.global, 'mcp.json'), JSON.stringify({ autoEnableCodemode: false, mcpServers: { docs: {
+      command: 'probe', exposure: 'codemode-deferred', toolExposure: { read: 'direct' },
+    } } }));
+    for (const projectTrusted of [false, true]) {
+      for (const patch of [{ enabled: false }, { exposure: 'codemode-deferred' }, { toolExposure: { read: 'hidden' } },
+        { enabled: true }, { enabled: 'bad' }, { description: 'not an override' }]) {
+        writeFileSync(join(f.workspace, '.pi/mcp.json'), JSON.stringify({ autoEnableCodemode: true, mcpServers: {
+          docs: patch, extra: { command: 'extra' }, missing: { enabled: false },
+        } }));
+        assert.deepEqual(loadGrapherMcpConfig({ globalDir: f.global, agentDir: f.global, cwd: f.workspace, projectTrusted }),
+          loadMcpConfig({ agentDir: f.global, cwd: f.workspace, projectTrusted }));
+      }
+    }
   } finally { f.close(); }
 });
 

@@ -17,16 +17,16 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 ## Planning and approval
 
 1. The Partitioner selects a route, unless the user explicitly selects Serial or Graph.
-2. For Graph, the backend copies the project into a private Planner repository under `<project-parent>/.grapher-workspaces/<owner>/<planning-id>/`.
-3. The Planner uses `node`, `edge`, `read`, and native `bash`. It can change files in that copy; it is not a read-only inspector.
-4. After a successful planning session, the host snapshots and merges Planner changes into the source. A preview merge detects conflicts and invokes the Merger in that private workspace. The repaired snapshot is then published; a late source conflict invokes the Merger in the source. Failure retains the affected workspace and logs.
+2. For Graph, the Planner runs directly in the bound source project directory, not a private copy.
+3. The Planner uses `node`, `edge`, `read`, and native `bash`. Bash writes are not filtered, and files appear in the source immediately, even if planning fails or is cancelled.
+4. Planning output and Graph IR are kept in the runtime/session directories. There is no separate Planner publication or preview merge.
 5. The graph is validated and presented for approval. Approval snapshots the source's current non-ignored changes as the execution baseline; node workspaces are then allocated.
 
-**Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Successful planning can merge changes before approval. Reject does not undo those changes, Git commits, or external command side effects. Existing user changes can also be staged and committed during source snapshots.
+**Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Planner commands change the source before approval. Reject, failure, and cancellation do not undo those changes, Git commits, or external command side effects. Existing user changes can also be staged and committed during source snapshots.
 
-The Planner copy includes project files needed for inspection, including ignored dependencies where supported, but excludes Git internals and Grapher runtime data. That is distinct from node baseline propagation: ignored, untracked dependencies do not automatically become node Git snapshots.
+Planner can inspect and write ignored files in the source, but ignored, untracked dependencies do not automatically become node Git snapshots.
 
-Source locks protect Planner copying/publication and approval. Planner inspection runs unlocked, but Planner publication holds the lock through any Merger conflict repair. Node model sessions and final Graph publication do not hold a project-wide execution lock; concurrent Runs can still conflict.
+Source locks protect approval and snapshots taken after approved Planner revisions, not the Planner's Bash/model session. During a live revision, already-running nodes drain, while new nodes in that Run wait for its complete source snapshot. Failed/cancelled approved revisions keep the previous graph but record their surviving source writes for future jobs; a snapshot failure pauses the Run instead of scheduling stale inputs. Concurrent Planners still share the source and can overwrite one another's files; there is no private merge protecting those writes. Node model sessions and final Graph publication do not hold a project-wide execution lock.
 
 ## Node workspaces and inheritance
 
@@ -36,8 +36,8 @@ Source locks protect Planner copying/publication and approval. Planner inspectio
 
 Each node has its own working directory and private Git metadata; these are not `git worktree` checkouts.
 
-1. A root starts from the approved source baseline (or the current published baseline after a successful publication).
-2. A child waits for its ordinary dependencies to finish successfully. The backend prepares its workspace from their recorded filesystem states, combining multiple parents before the task runs.
+1. A root starts from the latest recorded source snapshot: approval, a subsequent approved Planner revision, or successful publication. Approval history remains immutable.
+2. A child waits for its ordinary dependencies to finish successfully. The backend combines the latest recorded source with those parents' filesystem states before the task runs. Retained node results likewise receive subsequent Planner source changes through composition; already-running workspaces are not overwritten.
 3. The agent performs its task in that workspace with its own session. It does not receive parent conversations or exchange commits with other agents.
 4. After execution, the backend snapshots the result for downstream inheritance and final publication.
 
@@ -88,7 +88,7 @@ Only a real Git conflict invokes a dedicated Merger in the source directory. A m
 
 `retry_publication` reuses the retained heads and current merge state. It does not rerun the graph. Completion requires the heads to be ancestors of the final source HEAD and the directory to be clean.
 
-After an earlier successful publication, new and revised nodes build on the currently published HEAD rather than overlaying a stale approval baseline.
+After an earlier successful publication or Planner revision, new and revised nodes build on the latest recorded source snapshot rather than overlaying a stale approval baseline.
 
 ## Storage and cleanup
 
@@ -104,7 +104,7 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
   shadow_repos/          # Git metadata for ordinary folders
 ```
 
-Graph workspaces and Planner copies live beside the project, not inside this data tree. Successful final publication attempts to clean that Run's workspaces; failed Runs retain their checkouts for inspection. Explicit reset/deletion also cleans owned Run directories. Session history and the shared prepared Pi runtime have separate lifecycles; do not assume deleting a workspace removes all history or secrets.
+Graph workspaces live beside the project, not inside this data tree. Planner uses the source directory; legacy private Planner directories may remain until Run cleanup. Successful final publication attempts to clean that Run's workspaces; failed Runs retain their checkouts for inspection. Explicit reset/deletion also cleans owned Run directories. Session history and the shared prepared Pi runtime have separate lifecycles; do not assume deleting a workspace removes all history or secrets.
 
 Project dependencies are not automatically installed for node tasks. Shared HOME, temporary files, external services, and global environment state are outside Git version isolation.
 

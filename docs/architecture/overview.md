@@ -32,7 +32,7 @@ Goal -> Partitioner --serial--> one Pi agent in the user's project
 ```
 
 - **Partitioner:** a tool-free classifier. Its `parallel` response maps to the internal `graph` route. A provider failure is a failure, not an auto-approved Serial fallback.
-- **Planner:** inspects a private project copy and defines self-contained tasks and edges. It stops after planning and can be called again for an explicit graph revision.
+- **Planner:** runs in the source project, can write files directly with native Bash, and defines self-contained tasks and edges. It stops after planning and can be called again for an explicit graph revision.
 - **Compiler:** validates graph structure and produces roots, terminals, and dependency batches.
 - **Runtime:** dispatches ready tasks, tracks executions, handles bounded feedback, invalidation, pause, and publication.
 - **Pi:** the pinned production coding-agent engine, responsible for model calls, tools, and provider authentication.
@@ -83,7 +83,7 @@ Node completion is not Graph completion. Valid terminal heads must be published 
 
 Failed publication preserves the working state and heads. Retrying publication does not rerun completed nodes. A successful publication emits `PublicationCompleted`; interrupted work does not silently restart.
 
-Planner changes are a separate earlier merge: after the planning session succeeds, the backend merges its private changes into the source **before graph approval**. Rejecting a graph is not a rollback. See [Execution model](execution-model.md#planning-and-approval).
+Planner writes reach the source immediately, **before graph approval**, without a separate merge. Approval and approved revisions snapshot the source for later node inputs. Rejecting a graph, planning failure, and cancellation are not rollbacks. See [Execution model](execution-model.md#planning-and-approval).
 
 ## Invariants
 

@@ -21,7 +21,7 @@ Open <http://127.0.0.1:1420> and configure a provider in Settings.
 ## What Windows provides
 
 - Stock Node, pinned Pi, and Git for Windows Bash; no patched Node/MSYS binaries.
-- A private Planner repository and independent Graph node repositories.
+- Source-native Planner execution with immediate Bash writes, and independent Graph node repositories derived from source snapshots.
 - Graph compilation, approval, concurrent branches, parent-to-child workspace inheritance, bounded feedback, and final publication.
 - Process-tree management through Windows Job Objects. A child is attached while suspended, then resumed; kill-on-close supports termination with its owning backend.
 

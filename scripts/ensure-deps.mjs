@@ -8,6 +8,7 @@ export const root = fileURLToPath(new URL("../", import.meta.url));
 export const piSource = join(root, "pi");
 export const viteBin = join(root, "node_modules", "vite", "bin", "vite.js");
 export const piPackageJson = join(piSource, "package.json");
+export const piDependencyMarker = join(piSource, "node_modules", ".grapher-pi-dependencies.json");
 export const piDist = join(piSource, "packages", "ai", "dist");
 
 /**
@@ -40,6 +41,7 @@ export function checkDependenciesFast() {
   const missingSubmodule = !existsSync(piPackageJson);
   const missingRootModules = !existsSync(viteBin);
   const missingPiDist = !existsSync(piDist);
+  const missingPiDependencies = !existsSync(piDependencyMarker);
   const cargoPath = findCargoExecutable();
   const missingCargo = !cargoPath;
 
@@ -47,9 +49,10 @@ export function checkDependenciesFast() {
     missingSubmodule,
     missingRootModules,
     missingPiDist,
+    missingPiDependencies,
     missingCargo,
     cargoPath,
-    allReady: !missingSubmodule && !missingRootModules && !missingPiDist && !missingCargo,
+    allReady: !missingSubmodule && !missingRootModules && !missingPiDist && !missingPiDependencies && !missingCargo,
   };
 }
 
@@ -110,7 +113,7 @@ export async function ensureDependencies() {
   }
 
   // 3. 检查并初始化 Pi 引擎依赖与离线构建
-  if (status.missingPiDist || !existsSync(join(piSource, "node_modules"))) {
+  if (status.missingPiDist || status.missingPiDependencies) {
     console.log("[dev] [3/3] 未检测到 Pi 引擎构建产物，正在执行 npm run pi:setup...");
     try {
       const piBaselineScript = join(root, "scripts", "pi-baseline.mjs");

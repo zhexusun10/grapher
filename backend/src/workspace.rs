@@ -127,24 +127,61 @@ pub fn shadow_repo_dir(target: &Path) -> Result<PathBuf, String> {
         .join(format!("{}_{:016x}.git", safe_name, hash)))
 }
 
+fn checked_shadow_directory(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "Refusing shadow repository symlink {}",
+            path.display()
+        )),
+        Ok(metadata) if !metadata.is_dir() => Err(format!(
+            "Shadow repository path is not a directory: {}",
+            path.display()
+        )),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod shadow_safety_tests {
+    use super::*;
+
+    #[test]
+    fn shadow_directory_validation_rejects_links_and_non_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        let linked = temp.path().join("linked-shadow.git");
+        fs::create_dir(&outside).unwrap();
+        crate::path_safety::directory_link(&outside, &linked);
+        assert!(checked_shadow_directory(&linked).unwrap_err().contains("symlink"));
+        let file = temp.path().join("file");
+        fs::write(&file, "not a directory").unwrap();
+        assert!(checked_shadow_directory(&file).unwrap_err().contains("not a directory"));
+        let real = temp.path().join("real-shadow.git");
+        fs::create_dir(&real).unwrap();
+        assert!(checked_shadow_directory(&real).unwrap());
+    }
+}
+
 pub fn remove_shadow_repo(target: &Path) -> Result<(), String> {
     let canonical = canonical_workspace_path(target)?;
     if is_standard_git(&canonical) {
         return Ok(());
     }
     let shadow = shadow_repo_dir(&canonical)?;
-    let metadata = match fs::symlink_metadata(&shadow) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.to_string()),
-    };
-    if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "Refusing to remove shadow repository symlink {}",
-            shadow.display()
-        ));
+    if !checked_shadow_directory(&shadow)? {
+        return Ok(());
     }
-    if metadata.is_dir() {
+    if let Some(metadata) = fs::symlink_metadata(&shadow).ok() {
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to remove shadow repository symlink {}",
+                shadow.display()
+            ));
+        }
+    }
+    if shadow.is_dir() {
         fs::remove_dir_all(shadow).map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -153,8 +190,15 @@ pub fn remove_shadow_repo(target: &Path) -> Result<(), String> {
 pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
     let canonical_target = canonical_workspace_path(target)?;
     let shadow_dir = shadow_repo_dir(&canonical_target)?;
-    if !shadow_dir.exists() {
+    let shadow_parent = data_root().join("shadow_repos");
+    if !checked_shadow_directory(&shadow_parent)? {
+        fs::create_dir_all(&shadow_parent).map_err(|e| e.to_string())?;
+        checked_shadow_directory(&shadow_parent)?;
+    }
+    let initialize = !checked_shadow_directory(&shadow_dir)?;
+    if initialize {
         fs::create_dir_all(&shadow_dir).map_err(|e| e.to_string())?;
+        checked_shadow_directory(&shadow_dir)?;
         let git_dir_str = shadow_dir.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical_target.to_str().ok_or("Invalid target path")?;
 
@@ -192,6 +236,10 @@ pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
                 "Initial shadow snapshot by Grapher",
             ],
         );
+    }
+    if !checked_shadow_directory(&shadow_dir)? {
+
+        return Err(format!("Shadow repository is missing: {}", shadow_dir.display()));
     }
     Ok(shadow_dir)
 }
@@ -549,7 +597,9 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let cli_args = args;
     let hooks_path = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let hooks_config = format!("core.hooksPath={hooks_path}");
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    crate::native::clear_git_environment(&mut command);
+    let output = command
         .args([
             "-c",
             hooks_config.as_str(),
@@ -604,7 +654,7 @@ pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String
         return git(&repository, args);
     }
     let shadow = shadow_repo_dir(&repository)?;
-    if !shadow.is_dir() {
+    if !checked_shadow_directory(&shadow)? {
         return Err(
             "Shadow repository is missing; retained node results have not been published".into(),
         );
@@ -1598,8 +1648,18 @@ pub fn snapshot_node_for_run(
     unreachable!()
 }
 
-/// Snapshot the user-owned Serial workspace. Graph workspaces must use
-/// `snapshot_node` so their commits are imported into Grapher-owned host refs.
+/// Pin an immutable source input for composition with a retained node result.
+/// This changes only Grapher-owned refs, never the source working files.
+pub fn pin_repository_head(repository: &Path, head: &str) -> Result<(), String> {
+    let repository = canonical_workspace_path(repository)?;
+    let lock = host_ref_lock(&repository)?;
+    let _guard = lock.lock().map_err(|error| error.to_string())?;
+    repository_git(&repository, &["update-ref", &format!("refs/grapher/heads/{head}"), head])?;
+    Ok(())
+}
+
+/// Snapshot the user-owned source workspace (Planner or Serial). Graph workspaces
+/// must use `snapshot_node` to import their commits into Grapher-owned host refs.
 pub fn snapshot_repository(path: &Path) -> Result<String, String> {
     if is_standard_git(path) {
         if !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {

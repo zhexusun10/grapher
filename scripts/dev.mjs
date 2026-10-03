@@ -154,8 +154,21 @@ backend.on("exit", (code) => {
   }
 });
 
-// Vite only proxies /api lazily, so it can boot while Cargo compiles and the
-// backend warms up instead of starting after the readiness poll.
+console.log(`[dev] Waiting for backend to listen on port ${backendPort}...`);
+try {
+  await waitForBackend(backendPort, 60000);
+} catch (error) {
+  if (!stopping) {
+    console.error(`[dev] Backend startup failed or timed out: ${error.message}`);
+    await stop(1);
+  }
+  process.exit(process.exitCode ?? 1);
+}
+
+if (stopping) process.exit(process.exitCode ?? 0);
+
+console.log(`[dev] Backend ready on http://127.0.0.1:${backendPort}.`);
+
 console.log(`[dev] Starting frontend (vite)...`);
 const frontend = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1"], childOptions());
 children.push(frontend);
@@ -171,18 +184,3 @@ frontend.on("exit", (code) => {
     void stop(code ?? 1);
   }
 });
-
-console.log(`[dev] Waiting for backend to listen on port ${backendPort}...`);
-try {
-  await waitForBackend(backendPort, 60000);
-} catch (error) {
-  if (!stopping) {
-    console.error(`[dev] Backend startup failed or timed out: ${error.message}`);
-    await stop(1);
-  }
-  process.exit(process.exitCode ?? 1);
-}
-
-if (stopping) process.exit(process.exitCode ?? 0);
-
-console.log(`[dev] Backend ready on http://127.0.0.1:${backendPort}.`);

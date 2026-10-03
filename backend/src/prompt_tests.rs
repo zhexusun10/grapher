@@ -1409,7 +1409,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 
 #[cfg(feature = "fixture")]
 #[test]
-fn partitioner_failure_does_not_create_or_approve_a_run() {
+fn partitioner_failure_persists_history_without_compiling_or_approving_a_run() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = temp.path().join("repository");
     fs::create_dir_all(&repo).unwrap();
@@ -1449,7 +1449,11 @@ fn partitioner_failure_does_not_create_or_approve_a_run() {
     );
     assert!(result.unwrap_err().0.contains("Partitioner failed"));
     let runtime = service.runtime.lock().unwrap();
-    assert_eq!(runtime.state.run_id, before);
+    assert_ne!(runtime.state.run_id, before);
+    assert_eq!(runtime.state.phase, "planning_failed");
+    assert!(runtime.store.contains_run(&runtime.state.run_id).unwrap());
+    assert!(runtime.state.plan.is_none());
+    assert!(runtime.state.graph.nodes.is_empty());
     assert!(runtime.state.executions.is_empty());
     assert!(!runtime.state.approved);
     assert!(!service.planning.load(Ordering::SeqCst));
@@ -1585,7 +1589,162 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn same_project_planners_run_together_and_merge_disjoint_files() {
+fn legacy_planner_session_rebinds_only_its_cwd_and_preserves_history() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repository = temp.path().join("source");
+    let private = temp.path().join("private");
+    let session = temp.path().join("session");
+    for path in [&repository, &private, &session] { fs::create_dir(path).unwrap(); }
+    let id = Uuid::new_v4().to_string();
+    let file = session.join(format!("session_{id}.jsonl"));
+    let history = "{\"type\":\"message\",\"id\":\"old\",\"message\":{\"role\":\"user\",\"content\":\"历史 中文🚀\"}}\n";
+    fs::write(&file, format!("{}\n{history}", serde_json::json!({ "type": "session", "id": id, "cwd": private }))).unwrap();
+    assert_eq!(stored_planner_session_id(&session, &repository, &private, &id).unwrap(), Some(id.clone()));
+    rebind_planner_session(&session, &id, &repository).unwrap();
+    let content = fs::read_to_string(&file).unwrap();
+    let (header, tail) = content.split_once('\n').unwrap();
+    let header: serde_json::Value = serde_json::from_str(header).unwrap();
+    assert_eq!(header["id"], id);
+    assert_eq!(PathBuf::from(header["cwd"].as_str().unwrap()).canonicalize().unwrap(), repository.canonicalize().unwrap());
+    assert_eq!(tail, history);
+    fs::remove_dir(&private).unwrap();
+    assert_eq!(stored_planner_session_id(&session, &repository, &private, &id).unwrap(), Some(id.clone()),
+        "migrated history remains usable after private workspace cleanup");
+    assert_eq!(stored_planner_session_id(&session, &repository, &repository, &id).unwrap(), Some(id.clone()));
+    rebind_planner_session(&session, &id, &repository).unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), content, "rebinding is idempotent");
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
+    for standard_git in [true, false] {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repository = temp.path().join("source");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("tracked.txt"), "original").unwrap();
+        if standard_git {
+            crate::workspace::git(&repository, &["init", "-q"]).unwrap();
+            crate::workspace::snapshot_repository(&repository).unwrap();
+        }
+        let script = temp.path().join("failed-revision.sh");
+        fs::write(&script, "cat >/dev/null\nprintf 'failed revision source' > tracked.txt\nprintf 'new file' > new.txt\nexit 1\n").unwrap();
+        let config = Config {
+            repository: repository.to_string_lossy().into(), engine: "pi".into(),
+            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
+            max_parallel: 1, max_feedback: 0, auto_approve: false,
+        };
+        let graph = Graph { original_goal: "original graph".into(),
+            nodes: vec![Node { name: "worker".into(), task: "original task".into() }], edges: vec![] };
+        let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+        runtime.create(graph.clone(), config.clone()).unwrap();
+        runtime.set_route("graph").unwrap();
+        runtime.approve().unwrap();
+        runtime.pause(true).unwrap(); // Keep the driver out of this snapshot assertion.
+        let run_id = runtime.state.run_id.clone();
+        let approval = runtime.state.base.clone();
+        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+            drive_signal: (Mutex::new(0), std::sync::Condvar::new()), planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts") });
+        assert!(plan_goal_internal("revision".into(), config, Some("graph"), None, Some(run_id.clone()),
+            &service, |_| {}, |_| {}, |_| {}).is_err());
+        let mut runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.state.graph, graph);
+        assert_eq!(runtime.state.base, approval);
+        assert!(runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. })));
+        runtime.state = runtime.store.load(&run_id).unwrap();
+        runtime.pause(false).unwrap();
+        let job = runtime.jobs().unwrap().remove(0);
+        assert_ne!(job.execution.before, approval);
+        let node = std::path::Path::new(&job.execution.worktree);
+        crate::workspace::prepare_with_merger_expected_for_run(&repository, node, &job.execution.before, &[],
+            &job.expected_source_head, Some(&run_id), || Err("unexpected conflict".into())).unwrap();
+        assert_eq!(fs::read_to_string(node.join("tracked.txt")).unwrap(), "failed revision source");
+        assert_eq!(fs::read_to_string(node.join("new.txt")).unwrap(), "new file");
+        if !standard_git { fs::remove_dir_all(crate::workspace::shadow_repo_dir(&repository).unwrap()).unwrap(); }
+    }
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn planner_writes_source_immediately_and_nodes_inherit_the_approved_snapshot() {
+    for standard_git in [true, false] {
+        for fail in [false, true] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let repository = temp.path().join("source");
+            fs::create_dir(&repository).unwrap();
+            fs::write(repository.join("tracked.txt"), "original").unwrap();
+            fs::write(repository.join("deleted.txt"), "delete me").unwrap();
+            if standard_git {
+                crate::workspace::git(&repository, &["init", "-q"]).unwrap();
+                crate::workspace::snapshot_repository(&repository).unwrap();
+            }
+            let started = temp.path().join("started");
+            let release = temp.path().join("release");
+            let script = temp.path().join("planner.sh");
+            fs::write(&script, format!(r#"cat >/dev/null
+pwd > cwd.txt
+printf 'planner edit' > tracked.txt
+mkdir -p nested
+printf 'planner new file' > nested/new.txt
+rm deleted.txt
+touch '{}'
+while [ ! -f '{}' ]; do sleep 0.02; done
+{}
+printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}],"edges":[]}}' > "$GRAPHER_GRAPH_PATH"
+printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
+"#, started.display(), release.display(), if fail { "exit 1" } else { ":" })).unwrap();
+            let config = Config {
+                repository: repository.to_string_lossy().into(), engine: "pi".into(),
+                pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+                model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
+                max_parallel: 1, max_feedback: 0, auto_approve: false,
+            };
+            let service = Arc::new(Service {
+                runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+                driving: AtomicBool::new(false), drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+                planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+            });
+            let worker_service = service.clone();
+            let worker = thread::spawn(move || plan_goal_internal("test".into(), config, Some("graph"), None, None,
+                &worker_service, |_| {}, |_| {}, |_| {}));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !started.exists() && std::time::Instant::now() < deadline {
+                thread::sleep(std::time::Duration::from_millis(20));
+            }
+            // Check while Planner is still running, not after a deferred merge.
+            let contents = fs::read_to_string(repository.join("tracked.txt"));
+            fs::write(&release, "go").unwrap();
+            let result = worker.join().unwrap();
+            assert!(started.exists(), "Planner did not start");
+            assert_eq!(contents.unwrap(), "planner edit");
+            assert_eq!(fs::read_to_string(repository.join("nested/new.txt")).unwrap(), "planner new file");
+            assert!(!repository.join("deleted.txt").exists());
+            assert!(!temp.path().join(".grapher-workspaces").exists());
+            if fail {
+                assert!(result.is_err()); // Failed planning does not roll back native writes.
+                continue;
+            }
+            assert_eq!(result.unwrap().phase, "awaiting_approval");
+            let mut runtime = service.runtime.lock().unwrap();
+            runtime.approve().unwrap();
+            let job = runtime.jobs().unwrap().remove(0);
+            let node = std::path::Path::new(&job.execution.worktree);
+            crate::workspace::prepare(&repository, node, &job.execution.before, &[]).unwrap();
+            assert_eq!(fs::read_to_string(node.join("tracked.txt")).unwrap(), "planner edit");
+            assert_eq!(fs::read_to_string(node.join("nested/new.txt")).unwrap(), "planner new file");
+            assert!(!node.join("deleted.txt").exists());
+            if !standard_git {
+                fs::remove_dir_all(crate::workspace::shadow_repo_dir(&repository).unwrap()).unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn same_project_planners_run_together_and_write_disjoint_source_files() {
     let temp = tempfile::TempDir::new().unwrap();
     let project = temp.path().join("project");
     fs::create_dir(&project).unwrap();

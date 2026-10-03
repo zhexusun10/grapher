@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } fr
 import type { Snapshot } from "../types";
 import { runtimeService } from "../services/runtime";
 
-const livePhases = ["running", "awaiting_approval", "publishing", "merging", "paused"];
+const livePhases = ["planning", "running", "awaiting_approval", "publishing", "merging", "paused"];
 
 /** Poll all indexed workspaces, but publish only the selected conversation. */
 export function useSnapshotPolling(
@@ -38,7 +38,7 @@ export function useSnapshotPolling(
       revisions.current.delete(id);
     }
     if (!ids.length && !viewedRunId) ids.push("");
-    const hasLiveRun = () => ids.some(id => ["running", "publishing", "merging"].includes(phases.current.get(id) ?? ""));
+    const hasLiveRun = () => ids.some(id => ["planning", "running", "publishing", "merging"].includes(phases.current.get(id) ?? ""));
     const poll = async () => {
       try {
         for (const id of ids) {

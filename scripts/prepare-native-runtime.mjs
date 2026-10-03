@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { root, source, verifyBaseline } from './pi-baseline.mjs';
+import { verifyPiDependencies } from './pi-dependencies.mjs';
 
 verifyBaseline();
+verifyPiDependencies(root);
 const runtimeParent = process.env.GRAPHER_NATIVE_RUNTIME_PARENT
   ? resolve(process.env.GRAPHER_NATIVE_RUNTIME_PARENT)
   : tmpdir();
@@ -37,7 +39,7 @@ try {
   // Preserve the installation's ESM boundary in the copy.
   cpSync(join(root, 'package.json'), join(destination, 'package.json'));
   mkdirSync(join(destination, 'scripts'));
-  for (const script of ['pi-baseline.mjs', 'cargo.mjs']) {
+  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'cargo.mjs']) {
     cpSync(join(root, 'scripts', script), join(destination, 'scripts', script));
   }
   execFileSync('git', ['-C', gitPath(join(destination, 'pi')), 'reset', '--mixed', 'HEAD'], { env, stdio: ['ignore', 'ignore', 'pipe'] });

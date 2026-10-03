@@ -2,6 +2,7 @@ import { t } from "../i18n";
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
 import { TranscriptItem } from "../types";
+import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../services/thinkingTranscript";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
@@ -142,8 +143,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     lastProcessedPosRef.current += chunkToProcess.length;
 
     const lines = chunkToProcess.split("\n");
-    const currentItems = itemsRef.current.map(item => ({ ...item }));
-    itemsRef.current = currentItems;
+    let currentItems = itemsRef.current.map(item => ({ ...item }));
     const pendingTools = new Map(currentItems
       .filter(item => item.type === "tool_call" && item.status === "running" && item.toolCallId)
       .map(item => [item.toolCallId!, item]));
@@ -188,41 +188,15 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         }
 
         if (event.type === "message_start" && event.message?.role === "assistant") {
+          currentItems = closeThinkingItems(currentItems);
           assistantStartIndexRef.current = currentItems.length;
           continue;
         }
 
-        // Assistant streaming thinking delta (native protocol)
-        if (
-          event.type === "message_update" &&
-          (event.assistantMessageEvent?.type === "thinking_start" ||
-            event.assistantMessageEvent?.type === "thinking_delta")
-        ) {
-          const delta = event.assistantMessageEvent.delta || "";
-          const lastItem = currentItems[currentItems.length - 1];
-          if (lastItem && lastItem.type === "thinking" && lastItem.status === "running") {
-            lastItem.content = (lastItem.content || "") + delta;
-          } else {
-            currentItems.push({
-              id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-              type: "thinking",
-              role: "assistant",
-              content: delta,
-              status: "running",
-              timestamp: Date.now(),
-            });
-          }
-          continue;
-        }
-
-        if (
-          event.type === "message_update" &&
-          event.assistantMessageEvent?.type === "thinking_end"
-        ) {
-          const lastItem = currentItems[currentItems.length - 1];
-          if (lastItem && lastItem.type === "thinking") {
-            lastItem.status = "success";
-          }
+        const thinkingEvent = event.assistantMessageEvent;
+        if (event.type === "message_update" &&
+          ["thinking_start", "thinking_delta", "thinking_end"].includes(thinkingEvent?.type)) {
+          currentItems = updateThinkingItems(currentItems, thinkingEvent, assistantStartIndexRef.current);
           continue;
         }
 
@@ -412,24 +386,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           }
           inTagThinkingRef.current = false;
 
-          // Backfill thinking if message has thinking content and it wasn't captured from stream deltas
           const message = event.message;
           if (message?.role === "assistant" && Array.isArray(message.content)) {
-            for (const c of message.content) {
-              if (c.type === "thinking" && c.thinking) {
-                const hasThinking = currentItems.some((i) => i.type === "thinking" && i.content === c.thinking);
-                if (!hasThinking) {
-                  currentItems.push({
-                    id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-                    type: "thinking",
-                    role: "assistant",
-                    content: c.thinking,
-                    status: "success",
-                    timestamp: Date.now(),
-                  });
-                }
-              }
-            }
+            currentItems = finalizeThinkingItems(currentItems, message.content, assistantStartIndexRef.current);
             // Some saved sessions have only message_end (no text_delta), or
             // were interrupted mid-stream. Recover the final assistant text.
             const fullText = message.content.filter((c: { type: string }) => c.type === "text")
@@ -443,7 +402,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
               type: "text", role: "assistant", content: missing, timestamp: Date.now(),
             });
           }
-          assistantStartIndexRef.current = currentItems.length;
+          if (message?.role === "assistant") assistantStartIndexRef.current = currentItems.length;
           continue;
         }
 
@@ -454,6 +413,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
         // Grapher process lifecycle - kept in workspace details, not in chat transcript
         if (event.type === "grapher_process_started" || event.type === "grapher_process_exited") {
+          if (event.type === "grapher_process_exited") currentItems = closeThinkingItems(currentItems);
           continue;
         }
 
@@ -492,6 +452,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       }
     }
 
+    itemsRef.current = currentItems;
     return true;
   }, [showUserTurns, skipFirstUser]);
 

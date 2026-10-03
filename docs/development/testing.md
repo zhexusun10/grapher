@@ -24,8 +24,10 @@ npm test
 | `npm run test:pi` | Pinned Pi CLI/SDK and provider/auth transport; isolated auth; no paid model |
 | `npm run test:extensions` | Real Pi extension tools and Planner graph mutations; compatible `rg`/`fd` required |
 | `npm run test:native` | Path adaptation plus native launcher/platform filesystem tests; actual pinned Pi and host tools |
+| `npm run test:planner-bash` | Shared macOS/Windows/Linux Planner contract: pinned Pi's unmodified Bash, direct source writes, absolute/Unicode/space paths, pipelines, nested shells, errors and timeouts |
+| `npm run test:hardening` | Production static-file path traversal, Windows drive/UNC/alternate-stream paths, linked web roots/children, and linked workspace cleanup |
 | `npm run test:windows-native` | Windows production backend + real Pi/Bash; model responses served locally |
-| `npm run test:merger` | Production backend + pinned Pi/Git; local-model node, Planner-preview, and source conflict repair, including shadow folders and retained failures; native Graph prerequisites apply |
+| `npm run test:merger` | Production backend + pinned Pi/Git; local-model source-native Planner writes/revisions, failed-revision persistence, latest-source + retained-dependency composition, node/source conflict repair, and shadow folders; native Graph prerequisites apply |
 | `npm run test:bindings` | Local HTTP project binding/lifecycle and execution-route behavior |
 | `npm run test:concurrent` | Fixture HTTP multi-Run regression; requires `/bin/sh`, skips on Windows |
 | `npm run test:conversation-acceptance` | Legacy-history copies, log migration, browser/HTTP/process stress; see prerequisites below |
@@ -37,7 +39,10 @@ Local deterministic model responses exercise production integration without paid
 
 - [Linux CI](../../.github/workflows/linux-native.yml) checks bubblewrap preflight, real namespace boundaries, pinned Pi/native tools, Harbor import-path integration, and fixture regressions.
 - [Windows CI](../../.github/workflows/windows-native.yml) checks native Bash/Pi, independent workspaces, lifecycle, bindings, and extension tools. It does not expect filesystem permission rejection from Windows Graph.
-- macOS native checks require working Seatbelt/`sandbox-exec` on an actual host.
+- [Planner source CI](../../.github/workflows/planner-source.yml) runs the same snapshot/replay fixtures, real Planner Bash contract, native launcher tests, and production Planner/Merger acceptance on macOS, Windows, and Linux. It also runs macOS Seatbelt child-process tests. Windows acceptance includes extended-drive-prefix paths; shared tests use Unicode and spaces.
+- [Dependency Security Audit](../../.github/workflows/security-audit.yml) runs scheduled and change-triggered npm audits for Grapher and the reviewed Pi dependency profile, plus RustSec auditing for `backend/Cargo.lock`. Audit evidence is uploaded even when a high-severity finding fails the job. The current Grapher root and reviewed Pi profile audits are clean; a direct audit of the upstream `pi/` tree reports optional/example `node-forge`/Gondolin and dev-only `braces`/`micromatch`/`fast-glob`/`shelljs`/`shx` findings, which are excluded from the runtime profile. Treat any new finding in the reviewed profile as an open baseline risk until it is reviewed.
+
+macOS native checks require working Seatbelt/`sandbox-exec` on an actual host. A configured CI matrix is not evidence that its jobs passed; check the individual platform results. Windows drive/UNC prefix normalization tests do not establish access to a real network share.
 
 Linux container tests need permitted unprivileged user/mount/PID namespaces. A failed preflight must remain a failure, not be bypassed with Serial or an unisolated substitute.
 

@@ -7,22 +7,22 @@
 | Role | Working directory | Tool policy |
 | --- | --- | --- |
 | Partitioner | Source project | Classification only; `pi-trim` only, no user extensions/MCP/skills or tools |
-| Planner | Private project copy | `node`, `edge`, native `read`/`bash`, selected global extensions/MCP/skills |
+| Planner | Source project | `node`, `edge`, native `read`/`bash`, selected global extensions/MCP/skills |
 | Serial agent | Source project | Pi tools and trusted skills/extensions |
 | Graph node | Independent node repository | Pi tools with Graph path adaptation |
-| Merger | Conflicted node workspace, Planner preview, or source project | Conflict-repair tools and `pi-trim`; no user extensions/MCP/skills or automatic context |
+| Merger | Conflicted node workspace or source project | Conflict-repair tools and `pi-trim`; no user extensions/MCP/skills or automatic context |
 
-Planner and private Merger filesystem permissions follow the private-workspace platform policy below. A private Merger does not gain source/sibling access merely because it repairs conflicts. Its Bash is still Pi's native tool, not a read-only command filter. Successful Planner changes can be merged into the source before approval; Reject does not roll them back. See [Planning and approval](execution-model.md#planning-and-approval).
+Planner runs with source-native permissions, without a write-command filter or private-workspace source boundary. Its Bash writes affect the source immediately; Reject, failure, and cancellation do not roll them back. Private Merger filesystem permissions follow the platform policy below; conflict repair does not grant source/sibling access. See [Planning and approval](execution-model.md#planning-and-approval).
 
 ## Platform boundaries
 
 ### macOS
 
-Private Planner and Graph executions use Seatbelt through `sandbox-exec`. The execution profile restricts ordinary access to the source, sibling workspaces, and other sessions while permitting its current workspace/session and required host resources. The shared engine copy is protected from writes.
+Private Graph executions and Mergers use Seatbelt through `sandbox-exec`. Planner executes directly in the source with host-user permissions. The execution profile restricts ordinary access to the source, sibling workspaces, and other sessions while permitting its current workspace/session and required host resources. The shared engine copy is protected from writes.
 
 ### Linux
 
-Private executions use bubblewrap. The host/task container must allow unprivileged user, mount, and PID namespaces plus required bind/proc mounts. Graph preflight fails closed; it does not replace a rejected Graph with an unisolated execution or test fixture.
+Private Graph executions and Mergers use bubblewrap. Source-native Planner execution does not use these private-workspace mounts. The host/task container must allow unprivileged user, mount, and PID namespaces plus required bind/proc mounts. Graph preflight fails closed; it does not replace a rejected Graph with an unisolated execution or test fixture.
 
 The mount layout exposes the current private repository/session, masks source and unrelated workspace/data paths, and makes the shared engine and original installation read-only, including linked dependency targets. The container's `/dev` is explicitly mounted and `/dev/null` read/write is checked. Network access remains available for configured providers.
 
@@ -67,7 +67,7 @@ Use real host absolute paths for external resources. Within a Graph node, relati
 
 This is finite tool/text adaptation, **not kernel-level transparent remapping for arbitrary programs**. On macOS/Linux, unsupported direct source access may be denied; on Windows it may access the real source under host permissions. Do not relax source permissions to hide a mapping failure.
 
-The Planner uses native `read`/`bash` in its actual private cwd; do not assume Graph-node tool adaptation applies identically to it.
+The Planner uses native `read`/`bash` in the actual source cwd. Paths are not adapted to a private copy, and writes are not blocked by Graph-node source boundaries.
 
 Model-visible normalization is not a byte-for-byte file representation or a data-loss-prevention system. Images, thinking content, provider signatures, unknown encodings, and extension channels are not universally sanitized. Perform exact byte processing inside programs rather than relying on normalized model-visible text.
 

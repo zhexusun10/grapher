@@ -8,6 +8,7 @@ pub mod fixture;
 pub mod graph_merge;
 pub mod model;
 pub mod process_control;
+mod path_safety;
 pub mod provider_auth;
 pub mod pi_extensions;
 pub mod runtime;

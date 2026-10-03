@@ -126,9 +126,9 @@ fn service_for_run(
     if let Some(service) = runs.get(run_id).and_then(Weak::upgrade) {
         return Ok(cache_service(&root, run_id, service));
     }
-    // A new planning request starts in a provisional service. Its durable Run
-    // ID is assigned when the plan is committed, so resolve by the runtime's
-    // current identity rather than relying only on the provisional map key.
+    // Planning persists the provisional ID before publishing it to clients.
+    // Other callers can still replace a Run in the same service, so resolve
+    // its current identity rather than relying only on the original map key.
     if let Some(service) = runs.values().filter_map(Weak::upgrade).find(|service| {
         service
             .runtime
@@ -222,8 +222,14 @@ const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
 #[cfg(test)]
+#[path = "planning_repository_tests.rs"]
+mod planning_repository_tests;
+#[cfg(test)]
 #[path = "service_cache_tests.rs"]
 mod service_cache_tests;
+#[cfg(test)]
+#[path = "planning_lifecycle_tests.rs"]
+mod planning_lifecycle_tests;
 
 fn load_env_file() {
     let candidates = [
@@ -482,7 +488,7 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
             continue;
         }
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(ts) = value.get("timestamp") {
+            if let Some(ts) = value.get("grapherReceivedAt").or_else(|| value.get("timestamp")) {
                 let ts_str = if let Some(s) = ts.as_str() {
                     s.to_string()
                 } else if let Some(n) = ts.as_u64() {
@@ -549,6 +555,14 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
         }
     }
 
+    if duration_seconds == 0.0 {
+        if let (Some(start), Some(end)) = (
+            session_start.as_deref().and_then(|s| s.parse::<u64>().ok()),
+            last_event.as_deref().and_then(|s| s.parse::<u64>().ok()),
+        ) {
+            duration_seconds = end.saturating_sub(start) as f64 / 1000.0;
+        }
+    }
     PlanningRoleMetrics {
         model: model.to_string(),
         session_start,
@@ -779,9 +793,9 @@ fn stored_planner_session_id(
     let repository = repository
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    let workspace = workspace
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
+    // A migrated session already uses source cwd; its old private checkout
+    // may have been removed by successful Run cleanup.
+    let workspace = workspace.canonicalize().ok();
     let mut ids = std::collections::BTreeSet::new();
     let mut found_file = false;
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
@@ -814,7 +828,7 @@ fn stored_planner_session_id(
             .ok_or("Missing Planner session repository")?;
         if value.get("type").and_then(|kind| kind.as_str()) != Some("session")
             || Uuid::parse_str(id).is_err()
-            || !matches!(std::path::Path::new(cwd).canonicalize().ok().as_deref(), Some(path) if path == repository || path == workspace)
+            || !matches!(std::path::Path::new(cwd).canonicalize().ok().as_deref(), Some(path) if path == repository || workspace.as_deref() == Some(path))
         {
             return Err("Planner session belongs to another repository or is invalid".into());
         }
@@ -830,6 +844,42 @@ fn stored_planner_session_id(
         return Ok(ids.into_iter().next());
     } // Legacy session with a random Pi ID.
     Err("Multiple Planner conversations found for one run; cannot select one safely".into())
+}
+
+/// Keep the same Pi identity/history when moving a legacy private Planner
+/// session to source-native execution. Pi discovers sessions by both ID and cwd.
+fn rebind_planner_session(directory: &std::path::Path, id: &str, repository: &std::path::Path) -> Result<(), String> {
+    if !directory.is_dir() { return Ok(()); }
+    let repository = repository.canonicalize().map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") { continue; }
+        let mut input = BufReader::new(fs::File::open(&path).map_err(|error| error.to_string())?);
+        let mut line = String::new();
+        input.read_line(&mut line).map_err(|error| error.to_string())?;
+        let mut header: serde_json::Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        if header["id"].as_str() != Some(id) { continue; }
+        if header["cwd"].as_str().and_then(|cwd| PathBuf::from(cwd).canonicalize().ok()).as_ref() == Some(&repository) {
+            continue;
+        }
+        // Ownership was validated by planner_session_directory_for_workspace.
+        // Stream the unchanged history instead of allocating the entire JSONL.
+        header["cwd"] = serde_json::json!(crate::native::host_path(&repository));
+        let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+        let result = (|| -> Result<(), String> {
+            let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|error| error.to_string())?;
+            serde_json::to_writer(&mut output, &header).map_err(|error| error.to_string())?;
+            output.write_all(b"\n").map_err(|error| error.to_string())?;
+            std::io::copy(&mut input, &mut output).map_err(|error| error.to_string())?;
+            output.sync_all().map_err(|error| error.to_string())?;
+            drop(output);
+            drop(input);
+            fs::rename(&temporary, &path).map_err(|error| error.to_string())
+        })();
+        if result.is_err() { let _ = fs::remove_file(&temporary); }
+        result?;
+    }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "fixture"))]
@@ -877,8 +927,11 @@ fn planner_session_directory_for_workspace(
             continue;
         }
         prior_planner_attempt = true;
-        let session = root.join("planning").join(id).join("planner-session");
-        if let Some(pi_id) = stored_planner_session_id(&session, repository, workspace, id)? {
+        let previous = root.join("planning").join(id);
+        let session = previous.join("planner-session");
+        let previous_workspace = fs::read_to_string(previous.join("planner-workspace"))
+            .map(PathBuf::from).unwrap_or_else(|_| workspace.to_path_buf());
+        if let Some(pi_id) = stored_planner_session_id(&session, repository, &previous_workspace, id)? {
             return Ok((session, pi_id));
         }
     }
@@ -902,6 +955,22 @@ fn plan_goal_internal(
     images: Option<Vec<crate::model::ImageAttachment>>,
     revision_run_id: Option<String>,
     service: &Arc<Service>,
+    on_partitioner_line: impl FnMut(&str),
+    on_route: impl FnMut(&Route),
+    on_planner_line: impl FnMut(&str),
+) -> Result<Snapshot, (String, Option<PlanningSummary>)> {
+    plan_goal_internal_with_started(goal, config, mode, images, revision_run_id, service,
+        |_| {}, on_partitioner_line, on_route, on_planner_line)
+}
+
+fn plan_goal_internal_with_started(
+    goal: String,
+    config: Config,
+    mode: Option<&str>,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+    revision_run_id: Option<String>,
+    service: &Arc<Service>,
+    mut on_started: impl FnMut(&str),
     mut on_partitioner_line: impl FnMut(&str),
     mut on_route: impl FnMut(&Route),
     mut on_planner_line: impl FnMut(&str),
@@ -937,7 +1006,15 @@ fn plan_goal_internal(
     let cleanup = service.clone();
     let mut resume_after = false;
     let owner = match service.runtime.lock() {
-        Ok(runtime) => runtime.state.run_id.clone(),
+        Ok(runtime) => {
+            if revision_run_id.is_none()
+                && (runtime.state.run_id.is_empty() || !runtime.state.events.is_empty())
+            {
+                Uuid::new_v4().to_string()
+            } else {
+                runtime.state.run_id.clone()
+            }
+        },
         Err(error) => {
             cleanup.planning.store(false, Ordering::SeqCst);
             return Err((error.to_string(), None));
@@ -997,7 +1074,8 @@ fn plan_goal_internal(
             fs::write(
                 directory.join("request.json"),
                 serde_json::to_vec(&serde_json::json!({
-                    "goal": goal, "config": config, "mode": mode, "revisionRunId": revision_run_id
+                    "goal": goal, "config": config, "mode": mode, "revisionRunId": revision_run_id,
+                    "runId": owner
                 }))
                 .map_err(|e| (e.to_string(), None))?,
             )
@@ -1015,6 +1093,17 @@ fn plan_goal_internal(
                 ..Default::default()
             };
             write_planning_summary(&directory, &running).map_err(|error| (error, None))?;
+            if revision_run_id.is_none() {
+                let mut runtime = service.runtime.lock().map_err(|e| (e.to_string(), None))?;
+                runtime.state = Snapshot { run_id: owner.clone(), ..Default::default() };
+                runtime.emit(EventKind::PlanningStarted {
+                    goal: goal.clone(), config: config.clone(), planning: running,
+                    plan_type: mode.filter(|mode| matches!(*mode, "graph" | "serial")).map(str::to_owned),
+                }).map_err(|error| (error, None))?;
+                runtime.store.select_run(Some(&owner)).map_err(|error| (error, None))?;
+            }
+            // Publish only an identity whose request and initial event are durable.
+            on_started(&owner);
             let mut image_file_args: Vec<String> = Vec::new();
             if let Some(ref imgs) = images {
                 if !imgs.is_empty() {
@@ -1126,6 +1215,10 @@ fn plan_goal_internal(
                         (route, partition_metrics)
                     }
                 };
+                if revision_run_id.is_none() {
+                    service.runtime.lock().map_err(|e| e.to_string())?
+                        .emit(EventKind::Routed { plan_type: route.plan_type.clone() })?;
+                }
                 // Do not spend Planner tokens on a Graph that cannot run in this
                 // environment (e.g. a Harbor container without user namespaces).
                 #[cfg(not(feature = "fixture"))]
@@ -1133,7 +1226,6 @@ fn plan_goal_internal(
                     crate::native::require_graph_execution()?;
                 }
                 let mut planner_metrics = None;
-                let mut merger_log = String::new();
                 let graph = match route.plan_type.as_str() {
                     "serial" => Graph {
                         original_goal: goal.clone(),
@@ -1144,65 +1236,12 @@ fn plan_goal_internal(
                         edges: Vec::new(),
                     },
                     "graph" => {
-                        // Persist a private checkout across revisions of this Run.
-                        // The source is locked for copying and publication,
-                        // including any conflict repair, not Planner inspection.
-                        let workspace_file = directory.join("planner-workspace");
-                        let previous_workspace = {
-                            let runtime =
-                                service.runtime.lock().map_err(|error| error.to_string())?;
-                            runtime.state.planning_id.as_ref().and_then(|id| {
-                                fs::read_to_string(
-                                    root.join("planning").join(id).join("planner-workspace"),
-                                )
-                                .ok()
-                            })
-                        };
-                        let workspaces = repository
-                            .parent()
-                            .ok_or("Invalid source directory")?
-                            .join(".grapher-workspaces");
-                        let workspace_root = workspaces.join(if owner.is_empty() {
-                            &planning_id
-                        } else {
-                            &owner
-                        });
-                        let planner_workspace = previous_workspace
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| workspace_root.join(&planning_id));
-                        let workspace_root = planner_workspace
-                            .parent()
-                            .ok_or("Invalid private Planner workspace")?
-                            .to_path_buf();
-                        if planner_workspace.exists() {
-                            let canonical = planner_workspace
-                                .canonicalize()
-                                .map_err(|e| e.to_string())?;
-                            let root = workspace_root.canonicalize().map_err(|e| e.to_string())?;
-                            if canonical.parent() != Some(root.as_path())
-                                || root.parent()
-                                    != Some(
-                                        workspaces
-                                            .canonicalize()
-                                            .map_err(|e| e.to_string())?
-                                            .as_path(),
-                                    )
-                                || !root
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .is_some_and(|name| Uuid::parse_str(name).is_ok())
-                                || !canonical.join(".git").is_dir()
-                            {
-                                return Err("Invalid private Planner workspace".into());
-                            }
-                        } else {
-                            let _source_guard = lock.lock().map_err(|e| e.to_string())?;
-                            check_planning_cancelled(&owner)?;
-                            crate::workspace::prepare_planner(&repository, &planner_workspace)?;
-                        }
+                        // Planner uses the real source cwd. Native Bash writes are
+                        // immediately visible, even if planning fails or is rejected.
+                        // Keep the marker for session ownership/legacy recovery only.
                         fs::write(
-                            &workspace_file,
-                            planner_workspace.to_string_lossy().as_bytes(),
+                            directory.join("planner-workspace"),
+                            repository.to_string_lossy().as_bytes(),
                         )
                         .map_err(|e| e.to_string())?;
                         let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
@@ -1235,13 +1274,12 @@ fn plan_goal_internal(
                                 &root,
                                 &directory,
                                 &repository,
-                                &planner_workspace,
+                                &repository,
                                 original_graph.as_ref().map(|_| &runtime.state),
                             )?
                         };
-                        // Private Planner sandboxes can only access their session
-                        // directory in Grapher's data tree. Keep the graph tool's
-                        // mutable file there, then persist an attempt copy below.
+                        rebind_planner_session(&planner_session_dir, &planner_session_id, &repository)?;
+                        // Keep Graph IR and conversation logs out of the source snapshot.
                         fs::create_dir_all(&planner_session_dir).map_err(|e| e.to_string())?;
                         let graph_path =
                             planner_session_dir.join(format!("graph-{planning_id}.json"));
@@ -1266,7 +1304,7 @@ fn plan_goal_internal(
                             PiRequest {
                                 role: PiRole::Planner,
                                 config: &planner_config,
-                                cwd: &planner_workspace,
+                                cwd: &repository,
                                 task: &task,
                                 session_dir: &planner_session_dir,
                                 extension: Some(&service.extension),
@@ -1314,44 +1352,6 @@ fn plan_goal_internal(
                         planner_result.map_err(|error| {
                             check_planning_cancelled(&owner).err().unwrap_or(error)
                         })?;
-                        {
-                            let _source_guard = lock.lock().map_err(|e| e.to_string())?;
-                            check_planning_cancelled(&owner)?;
-                            let mut merger_events = fs::File::create(directory.join("merger-events.jsonl"))
-                                .map_err(|error| error.to_string())?;
-                            let mut merger_output = fs::File::create(directory.join("merger.jsonl"))
-                                .map_err(|error| error.to_string())?;
-                            crate::workspace::publish_planner_with_merger(
-                                &repository,
-                                &planner_workspace,
-                                &workspace_root.join(format!("{planning_id}-preview")),
-                                if owner.is_empty() {
-                                    &planning_id
-                                } else {
-                                    &owner
-                                },
-                                &planning_id,
-                                |cwd| {
-                                    check_planning_cancelled(&owner)?;
-                                    crate::graph_merge::resolve_with_merger_for_node(
-                                        cwd, &goal, &config, &root, 1,
-                                        &format!("merge:planner-{planning_id}"),
-                                        |event| {
-                                            serde_json::to_writer(&mut merger_events, &event)
-                                                .map_err(|error| error.to_string())?;
-                                            merger_events.write_all(b"\n").map_err(|error| error.to_string())?;
-                                            if let EventKind::Output { text, .. } = event {
-                                                merger_output.write_all(text.as_bytes()).map_err(|error| error.to_string())?;
-                                                merger_log.push_str(&text);
-                                                on_planner_line(&text);
-                                            }
-                                            Ok(())
-                                        },
-                                    )?;
-                                    check_planning_cancelled(&owner)
-                                },
-                            )?;
-                        }
                         serde_json::from_str(
                             &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
                         )
@@ -1360,12 +1360,7 @@ fn plan_goal_internal(
                     _ => return Err("Partitioner returned an invalid route".into()),
                 };
                 let total_planning_duration = planning_start.elapsed().as_secs_f64();
-                let merger_metrics = (!merger_log.is_empty()).then(|| {
-                    let model = PiModelConfig::resolve(PiRole::Merger, &config);
-                    parse_planning_role_metrics(&model.model, &merger_log)
-                });
-                let model_duration = merger_metrics.as_ref().map(|m| m.duration_seconds).unwrap_or(0.0)
-                    + partition_metrics.duration_seconds
+                let model_duration = partition_metrics.duration_seconds
                     + planner_metrics
                         .as_ref()
                         .map(|p| p.duration_seconds)
@@ -1374,9 +1369,6 @@ fn plan_goal_internal(
                 roles.insert("partition".to_string(), partition_metrics);
                 if let Some(m) = planner_metrics {
                     roles.insert("planner".to_string(), m);
-                }
-                if let Some(m) = merger_metrics {
-                    roles.insert("merger".to_string(), m);
                 }
                 if let Some(m) = roles.get("planner") {
                     eprintln!(
@@ -1430,7 +1422,7 @@ fn plan_goal_internal(
                         }
                     }
                 }
-                let _source_guard = if route.plan_type == "serial" || config.auto_approve {
+                let _source_guard = if route.plan_type == "serial" || config.auto_approve || revision_run_id.is_some() {
                     Some(lock.lock().map_err(|e| e.to_string())?)
                 } else {
                     None
@@ -1521,6 +1513,33 @@ fn plan_goal_internal(
                     if let Err(error) = write_planning_summary(&directory, &failure_summary) {
                         eprintln!("Cannot persist planning failure: {error}");
                     }
+                    if revision_run_id.is_none() {
+                        let persisted = service.runtime.lock().map_err(|e| e.to_string())
+                            .and_then(|mut runtime| runtime.emit(EventKind::PlanningFailed {
+                                planning: failure_summary.clone(),
+                            }));
+                        if let Err(error) = persisted {
+                            eprintln!("Cannot persist failed planning Run: {error}");
+                        }
+                    } else {
+                        // Failed/cancelled revisions keep the old graph, but their
+                        // native source writes still belong to subsequent jobs.
+                        let captured = (|| -> Result<(), String> {
+                            let _guard = lock.lock().map_err(|e| e.to_string())?;
+                            let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                            if runtime.state.approved && revision_run_id.as_deref() == Some(&runtime.state.run_id) {
+                                if let Err(error) = runtime.capture_planner_source() {
+                                    if !runtime.state.paused { let _ = runtime.pause(true); }
+                                    return Err(error);
+                                }
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = captured {
+                            resume_after = false; // Do not undo the safety pause below.
+                            eprintln!("Cannot snapshot Planner writes after failed revision: {error}");
+                        }
+                    }
                     Err((err, Some(failure_summary)))
                 }
             }
@@ -1575,17 +1594,87 @@ fn write_planning_summary(
     Ok(())
 }
 
-fn recover_plannings(root: &std::path::Path) -> Result<(), String> {
-    if let Ok(entries) = fs::read_dir(root.join("planning")) {
-        for entry in entries.flatten() {
-            if let Ok(content) = fs::read(entry.path().join("summary.json")) {
-                if let Ok(mut summary) = serde_json::from_slice::<PlanningSummary>(&content) {
-                    if summary.status.as_deref() == Some("running") {
-                        summary.status = Some("failed".into());
-                        summary.error = Some("Backend stopped during planning. Saved output is preserved; start a new planning attempt.".into());
-                        write_planning_summary(&entry.path(), &summary)?;
+fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
+    let mut primary = service.runtime.lock().map_err(|e| e.to_string())?;
+    let Ok(entries) = fs::read_dir(primary.root.join("planning")) else { return Ok(()); };
+    for entry in entries.flatten() {
+        let directory = entry.path();
+        let Some(mut summary) = fs::read(directory.join("summary.json")).ok()
+            .and_then(|bytes| serde_json::from_slice::<PlanningSummary>(&bytes).ok()) else { continue; };
+        if !is_valid_planning_id(&summary.planning_id)
+            || directory.file_name().and_then(|s| s.to_str()) != Some(&summary.planning_id)
+        { continue; }
+        let recorded = primary.store.run_for_planning_id(&summary.planning_id)?;
+        let interrupted = summary.status.as_deref() == Some("running");
+        if interrupted {
+            // The graph commit may have reached SQLite just before shutdown,
+            // while the terminal sidecar rename had not happened yet.
+            if let Some(saved) = recorded.as_deref().and_then(|id| primary.store.load(id).ok()) {
+                if saved.planning_id.as_ref() == Some(&summary.planning_id) {
+                    if let Some(committed) = saved.planning.filter(|p| p.status.as_deref() == Some("success")) {
+                        write_planning_summary(&directory, &committed)?;
+                        continue;
                     }
                 }
+            }
+            summary.status = Some("failed".into());
+            summary.error = Some("Backend stopped during planning. Saved output is preserved; start a new planning attempt.".into());
+        }
+        if summary.status.as_deref() != Some("failed") { continue; }
+        let request = fs::read(directory.join("request.json")).ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        if let Some(request) = &request {
+            if let Ok(config) = argument::<Config>(request, "config") {
+                // Interrupted summaries used to retain zero metrics despite saved JSONL.
+                if interrupted || summary.roles.values().all(|m| m.session_start.is_none()) {
+                    summary.roles.clear();
+                    summary.model_duration = 0.0;
+                    for (role, pi_role) in [("partition", PiRole::Partitioner), ("planner", PiRole::Planner), ("merger", PiRole::Merger)] {
+                        if let Ok(log) = fs::read_to_string(directory.join(format!("{role}.jsonl"))) {
+                            let model = PiModelConfig::resolve(pi_role, &config);
+                            let metrics = parse_planning_role_metrics(&model.model, &log);
+                            summary.model_duration += metrics.duration_seconds;
+                            summary.roles.insert(role.into(), metrics);
+                        }
+                    }
+                    summary.total_planning_duration = summary.model_duration;
+                }
+            }
+        }
+        write_planning_summary(&directory, &summary)?;
+        let Some(request) = request else { continue; };
+        // A failed revision must not replace its existing compiled graph.
+        if !request["revisionRunId"].is_null() { continue; }
+        let run_id = recorded.or_else(|| request["runId"].as_str().map(str::to_owned))
+            .or_else(|| {
+                // Legacy requests omitted the provisional Run ID. The private
+                // workspace preserves it as .grapher-workspaces/<runId>/<attempt>.
+                let path = PathBuf::from(fs::read_to_string(directory.join("planner-workspace")).ok()?);
+                let id = path.parent()?.file_name()?.to_str()?;
+                Uuid::parse_str(id).ok().map(|_| id.to_owned())
+            }).unwrap_or_else(|| summary.planning_id.clone());
+        if !is_valid_planning_id(&run_id) || primary.store.run_was_deleted(&run_id)? { continue; }
+        let exists = primary.store.contains_run(&run_id)?;
+        let mut recovered = primary.open_run(if exists { &run_id } else { "" })?;
+        if !exists {
+            let (Ok(goal), Ok(config)) = (argument::<String>(&request, "goal"), argument::<Config>(&request, "config")) else { continue; };
+            recovered.state.run_id = run_id.clone();
+            recovered.emit(EventKind::PlanningStarted {
+                goal, config, planning: summary.clone(),
+                plan_type: fs::read(directory.join("route.json")).ok()
+                    .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
+                    .map(|route| route.plan_type),
+            })?;
+        }
+        if recovered.state.planning_id.as_ref() == Some(&summary.planning_id)
+            && matches!(recovered.state.phase.as_str(), "planning" | "planning_failed")
+        {
+            if recovered.state.phase != "planning_failed" || recovered.state.planning.as_ref() != Some(&summary) {
+                recovered.emit(EventKind::PlanningFailed { planning: summary })?;
+            }
+            if primary.state.run_id == run_id {
+                primary.state = recovered.state;
+                primary.touch();
             }
         }
     }
@@ -1672,10 +1761,14 @@ fn drive(service: Arc<Service>) {
                         .iter()
                         .map(|(from, _)| from.as_str())
                         .collect();
-                    let jobs = runtime.jobs_with_pending_feedback(
-                        !service.planning.load(Ordering::SeqCst),
-                        &pending_sources,
-                    )?;
+                    // Source-native Planner writes may still be in progress.
+                    // Drain existing nodes, but dispatch new work only after the
+                    // turn records its complete source snapshot and graph.
+                    let jobs = if service.planning.load(Ordering::SeqCst) {
+                        Vec::new()
+                    } else {
+                        runtime.jobs_with_pending_feedback(true, &pending_sources)?
+                    };
                     let parents: Vec<_> = jobs
                         .iter()
                         .map(|job| runtime.parents(&job.execution.node))
@@ -2424,6 +2517,39 @@ fn get_planning_output(
         "complete": next_offset >= total_bytes, "running": running }))
 }
 
+// History keeps the original binding string. Compare resolved directories when
+// available; on Windows also recognize lexical aliases for archived/deleted paths.
+// Never treat two failed canonicalizations (or an unattributed record) as equal.
+fn same_repository_binding(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.trim().is_empty() { return false; }
+    if left == right { return true; }
+    let left = std::path::Path::new(left);
+    let right = std::path::Path::new(right);
+    if !left.is_absolute() || !right.is_absolute() { return false; }
+    if let (Ok(left), Ok(right)) = (left.canonicalize(), right.canonicalize()) {
+        return left == right;
+    }
+    #[cfg(windows)]
+    if let (Some(left), Some(right)) = (windows_repository_key(left), windows_repository_key(right)) {
+        return left == right;
+    }
+    false
+}
+
+#[cfg(windows)]
+fn windows_repository_key(path: &std::path::Path) -> Option<String> {
+    if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+        return None;
+    }
+    let value = path.to_str()?.replace('/', "\\").to_lowercase();
+    let value = if let Some(unc) = value.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{unc}")
+    } else {
+        value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+    };
+    Some(value.trim_end_matches('\\').to_owned())
+}
+
 fn list_plannings(
     service: &Arc<Service>,
     repository_filter: Option<String>,
@@ -2433,6 +2559,8 @@ fn list_plannings(
     if !planning_dir.exists() {
         return Ok(Vec::new());
     }
+    let filter = repository_filter.as_deref().map(str::trim);
+    if filter == Some("") { return Ok(Vec::new()); }
     let mut summaries = Vec::new();
     if let Ok(entries) = fs::read_dir(planning_dir) {
         for entry in entries.flatten() {
@@ -2454,13 +2582,9 @@ fn list_plannings(
                         }
 
                         // Filter by repository if requested (fail closed)
-                        if let Some(ref repo) = repository_filter {
-                            let filter = repo.trim();
-                            if !filter.is_empty() {
-                                match &summary.repository {
-                                    Some(summary_repo) if summary_repo == filter => {}
-                                    _ => continue, // Fail closed: reject mismatched or unattributed summaries
-                                }
+                        if let Some(filter) = filter {
+                            if !summary.repository.as_deref().is_some_and(|repo| same_repository_binding(repo, filter)) {
+                                continue; // Reject unrelated or unattributed history.
                             }
                         }
                         summaries.push(summary);
@@ -3042,7 +3166,7 @@ pub fn dispatch(
                     .ok_or("Planning run not found")?;
                 snapshot_metadata(&run)?
             };
-            if state["config"]["repository"].as_str() != Some(repository.as_str()) {
+            if !state["config"]["repository"].as_str().is_some_and(|saved| same_repository_binding(saved, &repository)) {
                 return Err("Planning repository mismatch".into());
             }
             return Ok(state);
@@ -3342,7 +3466,7 @@ pub fn run() -> Result<(), String> {
     });
     #[cfg(not(feature = "fixture"))]
     crate::native::check_retired_leases(&root)?;
-    recover_plannings(&root)?;
+    recover_plannings(&service)?;
     // Warm Auto's idle RPC Partitioner and Graph's verified native runtime
     // while the frontend starts, not on the first planning request.
     #[cfg(not(feature = "fixture"))]
@@ -3436,6 +3560,26 @@ pub fn run() -> Result<(), String> {
     }
     Ok(())
 }
+
+fn static_asset_path(web_root: &std::path::Path, url: &str) -> Option<PathBuf> {
+    let root_metadata = fs::symlink_metadata(web_root).ok()?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return None;
+    }
+    let relative = url.trim_start_matches('/');
+    // Reject Windows separators, drive/UNC/device paths and alternate streams
+    // on every host, before filesystem access (including network shares).
+    if relative.contains(['\\', ':']) || relative.chars().any(char::is_control)
+        || relative.split('/').any(|part| part == "..") {
+        return None;
+    }
+    let path = web_root.join(if relative.is_empty() { "index.html" } else { relative });
+    crate::path_safety::real_child_path(web_root, &path, true).ok().flatten()
+}
+
+#[cfg(test)]
+#[path = "http_file_tests.rs"]
+mod http_file_tests;
 
 fn handle_http_request(
     mut request: tiny_http::Request,
@@ -3591,24 +3735,18 @@ fn handle_http_request(
                 }
             };
 
-            if let Ok(runtime) = service_clone.runtime.lock() {
-                send_sse_event(
-                    &tx,
-                    "run_started",
-                    &serde_json::json!({"runId": runtime.state.run_id}),
-                );
-            }
             thread::spawn(move || {
                 let tx_part = tx.clone();
                 let tx_route = tx.clone();
                 let tx_plan = tx.clone();
-                let result = plan_goal_internal(
+                let result = plan_goal_internal_with_started(
                     goal,
                     config,
                     plan_mode.as_deref(),
                     images,
                     revision_run_id,
                     &service_clone,
+                    |run_id| send_sse_event(&tx, "run_started", &serde_json::json!({"runId": run_id})),
                     |line| {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
                             send_sse_event(
@@ -3720,16 +3858,10 @@ fn handle_http_request(
         }
         let _ = request.respond(response);
     } else {
-        let relative = url.trim_start_matches('/');
-        if relative.split('/').any(|part| part == "..") {
+        let Some(path) = static_asset_path(web_root, &url) else {
             let _ = request.respond(Response::empty(404));
             return;
-        }
-        let path = web_root.join(if relative.is_empty() {
-            "index.html"
-        } else {
-            relative
-        });
+        };
         let mime = match path.extension().and_then(|s| s.to_str()) {
             Some("html") => "text/html; charset=utf-8",
             Some("js") => "text/javascript",

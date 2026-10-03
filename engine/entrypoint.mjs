@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { root, source, verifyBaseline } from "../scripts/pi-baseline.mjs";
+import { verifyPiDependencies } from "../scripts/pi-dependencies.mjs";
 import { configureAgentDir } from "./agent-dir.mjs";
 
 const KNOWN_PROVIDER_ENV_VARS = {
@@ -25,6 +26,7 @@ const KNOWN_PROVIDER_ENV_VARS = {
 try {
   configureAgentDir();
   verifyBaseline();
+  verifyPiDependencies(root);
   const dir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".grapher", "pi-agent");
   let disabled = [];
   try {

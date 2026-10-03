@@ -19,6 +19,9 @@ export type { ExtensionAPI, BashOperations } from '../pi/packages/coding-agent/s
 
 // Private path, MCP-config and CLI-setup touchpoints remain centralized here.
 export { loadMcpConfig } from '../pi/packages/coding-agent/src/extensions/mcp/config.ts';
+export type { LoadedMcpConfig, McpServerEntry } from '../pi/packages/coding-agent/src/index.ts';
+export { mcpNamespace, validateMcpServerConfig } from '../pi/packages/coding-agent/src/core/mcp-servers.ts';
+export { CONFIG_DIR_NAME } from '../pi/packages/coding-agent/src/config.ts';
 export { resolveToCwd } from '../pi/packages/coding-agent/src/core/tools/path-utils.ts';
 import type { MainOptions } from '../pi/packages/coding-agent/src/index.ts';
 export type { InlineExtension } from '../pi/packages/coding-agent/src/index.ts';

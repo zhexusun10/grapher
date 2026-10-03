@@ -139,6 +139,22 @@ pub(crate) fn host_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+pub(crate) fn clear_git_environment(command: &mut Command) {
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_COUNT",
+    ] {
+        command.env_remove(key);
+    }
+}
+
 pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result<(), String> {
     crate::workspace::validate_binding(repository)?;
     let repository = repository.canonicalize().map_err(|e| e.to_string())?;
@@ -149,20 +165,11 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         // Conflict repair belongs in the checkout containing the merge, not
         // necessarily the source. Private Mergers retain the same workspace
         // validation and platform boundaries as other private executions.
-        if role == PiRole::Partitioner {
-            return Err("Partitioner must use the bound source directory".into());
+        if matches!(role, PiRole::Partitioner | PiRole::Planner) {
+            return Err(format!("{} must use the bound source directory", if role == PiRole::Planner { "Planner" } else { "Partitioner" }));
         }
         if cwd.starts_with(&repository) || repository.starts_with(&cwd) {
             return Err("Graph workspace must not overlap the source directory".into());
-        }
-        if role == PiRole::Planner
-            && cwd
-                .parent()
-                .and_then(Path::parent)
-                .and_then(|root| root.file_name())
-                != Some(std::ffi::OsStr::new(".grapher-workspaces"))
-        {
-            return Err("Planner requires a private planning workspace".into());
         }
         if !cwd.join(".git").is_dir()
             || !cwd
@@ -193,10 +200,11 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
         return Err("Private workspaces require execution_command and its platform context".into());
     }
     let mut command = Command::new("node");
-    command.arg(installation_root().join("engine/entrypoint.mjs"));
-    command.current_dir(cwd);
-    command.env("PI_CODING_AGENT_DIR", agent_dir()?);
+    command.arg(host_path(&installation_root().join("engine/entrypoint.mjs")));
+    command.current_dir(host_path(cwd));
+    command.env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     command.env_remove("GRAPHER_EXECUTION_KIND");
+    clear_git_environment(&mut command);
     Ok(command)
 }
 
@@ -245,6 +253,7 @@ pub fn execution_command(
         command
             .current_dir(&current)
             .env("PI_CODING_AGENT_DIR", agent_dir()?);
+        clear_git_environment(&mut command);
         return Ok(command);
     }
     #[cfg(target_os = "windows")]
@@ -255,12 +264,13 @@ pub fn execution_command(
             .arg(host_path(&engine.join("engine/entrypoint.mjs")))
             .current_dir(host_path(&current))
             .env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
+        clear_git_environment(&mut command);
         return Ok(command);
     }
     #[cfg(target_os = "linux")]
     {
         let pi_dir = agent_dir()?;
-        crate::linux_sandbox::execution_command(
+        let mut command = crate::linux_sandbox::execution_command(
             &source,
             worktree_root,
             &current,
@@ -268,7 +278,9 @@ pub fn execution_command(
             session,
             &engine,
             &pi_dir,
-        )
+        )?;
+        clear_git_environment(&mut command);
+        Ok(command)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
@@ -368,7 +380,41 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    fn native_child_commands_clear_external_git_path_overrides() {
+        let mut command = Command::new("node");
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_COUNT",
+        ] {
+            command.env(key, "external");
+        }
+        clear_git_environment(&mut command);
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_COUNT",
+        ] {
+            assert!(command
+                .get_envs()
+                .any(|(name, value)| name == std::ffi::OsStr::new(key) && value.is_none()));
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     fn source_role_launches_the_pinned_native_entrypoint() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -401,14 +447,8 @@ mod tests {
         let private = temp.path().join(".grapher-workspaces/run/planner");
         fs::create_dir_all(&private).unwrap();
         crate::workspace::git(&private, &["init", "-q"]).unwrap();
-        let planner = validate_workspace(PiRole::Planner, &source, &private);
-        #[cfg(not(windows))]
-        assert!(planner.is_ok());
-        #[cfg(windows)]
-        match require_graph_execution() {
-            Ok(()) => assert!(planner.is_ok()),
-            Err(error) => assert_eq!(planner.unwrap_err(), error),
-        }
+        assert!(validate_workspace(PiRole::Planner, &source, &private)
+            .unwrap_err().contains("Planner must use the bound source directory"));
         assert!(validate_workspace(PiRole::Partitioner, &source, &private).is_err());
         #[cfg(unix)]
         {
@@ -448,75 +488,69 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn private_planner_can_write_its_graph_but_not_the_source() {
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn source_planner_launcher_keeps_source_writes_and_graph_output() {
         let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let source = base.join("source");
-        let workspace = base.join(".grapher-workspaces/run/planner");
+        let base = host_path(&temp.path().canonicalize().unwrap());
+        let source = base.join("源项目 space # %");
         let data = base.join("data");
         let session = data.join("planner-session");
-        for path in [&source, &workspace, &session] {
-            fs::create_dir_all(path).unwrap();
-        }
-        crate::workspace::git(&workspace, &["init", "-q"]).unwrap();
-        crate::workspace::git(&source, &["init", "-q"]).unwrap();
-        fs::write(source.join("marker"), "original").unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&session).unwrap();
         let graph_path = session.join("graph.json");
         let probe = base.join("planner-probe.ts");
-        fs::write(
-            &probe,
-            r#"import * as fs from 'node:fs';
+        fs::write(&probe, r#"import * as fs from 'node:fs';
 export default function () {
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH!, 'graph');
-  fs.writeFileSync('private-output', 'private');
-  try { fs.writeFileSync(process.env.GRAPHER_ORIGINAL_ROOT + '/marker', 'bad'); }
-  catch { fs.writeFileSync('source-blocked', 'yes'); return; }
-  throw new Error('Planner was allowed to overwrite source');
+  fs.writeFileSync('planner-output', 'source content');
 }
-"#,
-        )
-        .unwrap();
-        let mut command =
-            execution_command(PiRole::Planner, &source, &workspace, &data, &session).unwrap();
-        let output = command
-            .args([
-                "--mode",
-                "json",
-                "--print",
-                "--no-session",
-                "--no-skills",
-                "--no-extensions",
-                "--extension",
-            ])
-            .arg(&probe)
-            .arg("--session-dir")
-            .arg(&session)
-            .env("GRAPHER_MODE", "planner")
-            .env("GRAPHER_GRAPH_PATH", &graph_path)
-            .env("GRAPHER_ORIGINAL_ROOT", &source)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+"#).unwrap();
+        // Windows canonical paths use the extended prefix; macOS commonly
+        // canonicalizes /var to /private/var. Both identities must stay native.
+        let canonical_source = source.canonicalize().unwrap();
+        let mut command = execution_command(PiRole::Planner, &canonical_source, &canonical_source, &data, &session).unwrap();
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("node"));
+        assert_eq!(command.get_current_dir(), Some(host_path(&canonical_source).as_path()));
+        let output = command.args(["--mode", "json", "--print", "--no-session", "--no-skills", "--no-extensions", "--extension"])
+            .arg(&probe).arg("--session-dir").arg(&session)
+            .env("GRAPHER_MODE", "planner").env("GRAPHER_GRAPH_PATH", &graph_path)
+            .stdin(std::process::Stdio::null()).output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         assert_eq!(fs::read_to_string(&graph_path).unwrap(), "graph");
-        assert_eq!(
-            fs::read_to_string(workspace.join("private-output")).unwrap(),
-            "private"
-        );
-        assert_eq!(
-            fs::read_to_string(workspace.join("source-blocked")).unwrap(),
-            "yes"
-        );
-        assert_eq!(
-            fs::read_to_string(source.join("marker")).unwrap(),
-            "original"
-        );
+        assert_eq!(fs::read_to_string(source.join("planner-output")).unwrap(), "source content");
+    }
+
+    #[test]
+    fn planner_source_aliases_do_not_select_a_private_launcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source space");
+        fs::create_dir(&source).unwrap();
+        let canonical = source.canonicalize().unwrap();
+        let mut aliases = vec![source.clone(), canonical.clone()];
+        #[cfg(unix)]
+        {
+            let alias = temp.path().join("source-link");
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+            aliases.push(alias);
+        }
+        for cwd in aliases.drain(..) {
+            let command = execution_command(PiRole::Planner, &source, &cwd, temp.path(), temp.path()).unwrap();
+            assert_eq!(command.get_program(), std::ffi::OsStr::new("node"));
+            assert_eq!(command.get_current_dir().unwrap().canonicalize().unwrap(), canonical);
+            assert!(!temp.path().join(".grapher-workspaces").exists());
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn source_launcher_normalizes_windows_drive_and_unc_prefixes_only() {
+        for (input, expected) in [
+            (r"\\?\C:\源项目 space\src", r"C:\源项目 space\src"),
+            (r"\\?\UNC\server\share\源项目 space", r"\\server\share\源项目 space"),
+            (r"C:\source\file", r"C:\source\file"),
+        ] {
+            assert_eq!(host_path(Path::new(input)), PathBuf::from(expected));
+        }
     }
 
     #[test]

@@ -35,6 +35,74 @@ fn single() -> Graph {
 }
 
 #[test]
+fn cleanup_refuses_linked_workspace_roots_without_deleting_external_data() {
+    for name in [".grapher-worktrees", ".grapher-workspaces"] {
+        let (temp, _source, runtime) = setup(true, single());
+        let outside = temp.path().join("external");
+        let retained = outside.join(&runtime.state.run_id);
+        fs::create_dir_all(&retained).unwrap();
+        fs::write(retained.join("marker"), "external data").unwrap();
+        crate::path_safety::directory_link(&outside, &temp.path().join(name));
+        let own_node = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+        if name == ".grapher-workspaces" {
+            fs::create_dir_all(&own_node).unwrap();
+            fs::write(own_node.join("marker"), "keep on rejected cleanup").unwrap();
+        }
+        assert!(runtime.cleanup_worktrees().unwrap_err().contains("Refusing"));
+        assert_eq!(fs::read_to_string(retained.join("marker")).unwrap(), "external data");
+        if name == ".grapher-workspaces" {
+            assert_eq!(fs::read_to_string(own_node.join("marker")).unwrap(), "keep on rejected cleanup");
+        }
+    }
+}
+
+#[test]
+fn cleanup_uses_physical_source_parent_and_preserves_alias_parent_workspaces() {
+    let (temp, source, mut runtime) = setup(true, single());
+    let alias_parent = temp.path().join("alias-parent");
+    fs::create_dir(&alias_parent).unwrap();
+    let alias = alias_parent.join("source-alias");
+    crate::path_safety::directory_link(&source, &alias);
+    runtime.state.config.as_mut().unwrap().repository = alias.to_string_lossy().into();
+    let actual = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+    let decoy = alias_parent.join(".grapher-worktrees").join(&runtime.state.run_id);
+    let other = temp.path().join(".grapher-worktrees").join(Uuid::new_v4().to_string());
+    for path in [&actual, &decoy, &other] {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("marker"), "retained").unwrap();
+    }
+    runtime.cleanup_worktrees().unwrap();
+    assert!(!actual.exists());
+    assert_eq!(fs::read_to_string(decoy.join("marker")).unwrap(), "retained");
+    assert_eq!(fs::read_to_string(other.join("marker")).unwrap(), "retained");
+}
+
+#[test]
+fn cleanup_unlinks_nested_directory_links_without_following_their_targets() {
+    let (temp, _source, runtime) = setup(true, single());
+    let owned = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+    let outside = temp.path().join("external");
+    fs::create_dir_all(&owned).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("marker"), "external data").unwrap();
+    crate::path_safety::directory_link(&outside, &owned.join("nested-link"));
+    runtime.cleanup_worktrees().unwrap();
+    assert!(!owned.exists());
+    assert_eq!(fs::read_to_string(outside.join("marker")).unwrap(), "external data");
+}
+
+#[test]
+fn missing_source_binding_can_reset_but_does_not_authorize_directory_deletion() {
+    let (temp, source, mut runtime) = setup(true, single());
+    let retained = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+    fs::create_dir_all(&retained).unwrap();
+    fs::write(retained.join("marker"), "retained").unwrap();
+    fs::rename(&source, temp.path().join("moved-source")).unwrap();
+    runtime.reset_workspace().unwrap();
+    assert_eq!(fs::read_to_string(retained.join("marker")).unwrap(), "retained");
+}
+
+#[test]
 fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
     let graph = Graph {
         original_goal: "parallel".into(),
@@ -595,6 +663,101 @@ fn resolved_preparation_is_not_a_completed_node_execution() {
     assert_eq!(replayed.executions[0].status, "resolved");
     assert_eq!(replayed.nodes["task"].status, "dirty");
     assert_eq!(runtime.jobs().unwrap().remove(0).execution.before, head);
+}
+
+#[test]
+fn planner_revision_refreshes_future_node_inputs_without_replacing_running_workspaces() {
+    for standard_git in [true, false] {
+        let graph = Graph {
+            original_goal: "test".into(),
+            nodes: ["parent", "running", "child"].into_iter()
+                .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+            edges: vec![Edge { from: "parent".into(), to: "child".into(), relation: "files".into(), feedback: false }],
+        };
+        let (_temp, source, mut runtime) = setup(standard_git, graph.clone());
+        let mut config = runtime.state.config.clone().unwrap();
+        config.max_parallel = 3;
+        runtime.edit_draft_graph(graph.clone(), config).unwrap();
+        runtime.approve().unwrap();
+        let approval = runtime.state.base.clone();
+        let roots = runtime.jobs().unwrap();
+        let parent = roots.iter().find(|job| job.execution.node == "parent").unwrap();
+        let running = roots.iter().find(|job| job.execution.node == "running").unwrap();
+        let parent_path = Path::new(&parent.execution.worktree);
+        workspace::prepare(&source, parent_path, &parent.execution.before, &[]).unwrap();
+        fs::write(parent_path.join("parent.txt"), "parent result").unwrap();
+        let head = workspace::snapshot_node_for_run(parent_path, &source, "parent", Some(&runtime.state.run_id)).unwrap();
+        runtime.finish(&parent.execution, Ok((head, "done".into()))).unwrap();
+        let running_path = Path::new(&running.execution.worktree);
+        workspace::prepare(&source, running_path, &running.execution.before, &[]).unwrap();
+        fs::write(running_path.join("in-flight.txt"), "do not overwrite").unwrap();
+
+        // Planner's next turn writes directly into the source after approval.
+        fs::write(source.join("tracked.txt"), "latest planner content").unwrap();
+        fs::write(source.join("planner.txt"), "new source file").unwrap();
+        fs::remove_file(source.join("deleted.txt")).unwrap();
+        let mut revised = graph;
+        revised.nodes.push(Node { name: "added".into(), task: "new task".into() });
+        runtime.revise_graph(revised, PlanningSummary { planning_id: "revision".into(), ..Default::default() }).unwrap();
+        let source_head = runtime.latest_source_head().to_owned();
+        assert_ne!(source_head, approval);
+        assert_eq!(runtime.state.base, approval, "approval history stays immutable");
+        assert_eq!(runtime.state.nodes["running"].status, "running");
+        assert_eq!(fs::read_to_string(running_path.join("tracked.txt")).unwrap(), "original");
+        assert_eq!(fs::read_to_string(running_path.join("in-flight.txt")).unwrap(), "do not overwrite");
+
+        let run_id = runtime.state.run_id.clone();
+        runtime.state = runtime.store.load(&run_id).unwrap(); // Replay without interrupting the running node.
+        assert_eq!(runtime.latest_source_head(), source_head);
+        let jobs = runtime.jobs().unwrap();
+        assert_eq!(jobs.len(), 2);
+        for job in jobs {
+            assert_eq!(job.execution.before, source_head);
+            assert_eq!(job.expected_source_head, source_head);
+            let path = Path::new(&job.execution.worktree);
+            workspace::prepare_with_merger_expected_for_run(&source, path, &job.execution.before,
+                &job.parent_heads, &job.expected_source_head, Some(&run_id), || Err("unexpected conflict".into())).unwrap();
+            assert_eq!(fs::read_to_string(path.join("tracked.txt")).unwrap(), "latest planner content");
+            assert_eq!(fs::read_to_string(path.join("planner.txt")).unwrap(), "new source file");
+            assert!(!path.join("deleted.txt").exists());
+            if job.execution.node == "child" {
+                assert_eq!(fs::read_to_string(path.join("parent.txt")).unwrap(), "parent result");
+            } else {
+                assert_eq!(job.execution.node, "added");
+                assert!(!path.join("parent.txt").exists(), "unrelated node results must not leak");
+            }
+        }
+        if !standard_git { fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap(); }
+    }
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn retained_node_result_is_composed_with_subsequent_planner_source_writes() {
+    for standard_git in [true, false] {
+        let (temp, source, mut runtime) = setup(standard_git, single());
+        runtime.approve().unwrap();
+        let first = runtime.jobs().unwrap().remove(0);
+        let path = Path::new(&first.execution.worktree);
+        workspace::prepare(&source, path, &first.execution.before, &[]).unwrap();
+        fs::write(path.join("node.txt"), "retained node result").unwrap();
+        let node_head = workspace::snapshot_node_for_run(path, &source, "task", Some(&runtime.state.run_id)).unwrap();
+        runtime.finish(&first.execution, Ok((node_head.clone(), "done".into()))).unwrap();
+        fs::write(source.join("planner.txt"), "latest source").unwrap();
+        runtime.revise_graph(single(), PlanningSummary { planning_id: "revision".into(), ..Default::default() }).unwrap();
+        runtime.intervene("task", "continue").unwrap();
+        let mut job = runtime.jobs().unwrap().remove(0);
+        assert_eq!(job.execution.before, node_head);
+        assert_ne!(job.expected_source_head, node_head);
+        let script = temp.path().join("node.sh");
+        fs::write(&script, "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}'\n").unwrap();
+        job.config.pi_command = "/bin/sh".into();
+        job.config.pi_args = vec![script.to_string_lossy().into()];
+        perform(&job, &runtime.root, &[], |_| {}, |_| Ok(())).unwrap();
+        assert_eq!(fs::read_to_string(path.join("node.txt")).unwrap(), "retained node result");
+        assert_eq!(fs::read_to_string(path.join("planner.txt")).unwrap(), "latest source");
+        if !standard_git { fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap(); }
+    }
 }
 
 #[test]

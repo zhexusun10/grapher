@@ -4,6 +4,7 @@ import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { toolchainEnv } from "./cargo.mjs";
+import { installPiDependencies, verifyPiDependencies } from "./pi-dependencies.mjs";
 
 export const root = fileURLToPath(new URL("../", import.meta.url));
 export const source = join(root, "pi");
@@ -42,26 +43,26 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     verifyBaseline();
     const action = process.argv[2] ?? "verify";
-    // npm on Windows is a .cmd shim, which execFileSync cannot launch. npm run
-    // provides the actual JS CLI path; invoke it through the current Node.
-    const run = (...args) => {
+    const runNpm = (cwd, ...args) => {
       const npmCli = process.env.npm_execpath;
       if (process.platform === "win32" && !npmCli) {
         throw new Error("Run Pi setup/build via npm run so npm_execpath is available");
       }
-      execFileSync(npmCli ? process.execPath : "npm", npmCli ? [npmCli, ...args, "--prefix", source] : [...args, "--prefix", source], {
+      execFileSync(npmCli ? process.execPath : "npm", npmCli ? [npmCli, ...args, "--prefix", cwd] : [...args, "--prefix", cwd], {
         stdio: "inherit", env: toolchainEnv(),
       });
     };
+    const runBuild = () => execFileSync(process.execPath, [join(root, "scripts/build-pi.mjs")], {
+      stdio: "inherit", cwd: root, env: toolchainEnv(),
+    });
     if (action === "setup") {
-      run("ci");
+      installPiDependencies(root, runNpm);
       restoreModelData();
-      // Pi source imports sibling workspaces via their built dist/ exports.
-      // Validating model data alone leaves a fresh installation unable to run.
-      run("run", "build:offline");
+      runBuild();
     } else if (action === "build") {
+      verifyPiDependencies(root);
       restoreModelData();
-      run("run", "build:offline");
+      runBuild();
     } else if (action !== "verify") throw new Error(`Unknown action: ${action}`);
     console.log(`Pi baseline verified: ${lock.forkCommit}`);
   } catch (error) {

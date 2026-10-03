@@ -69,7 +69,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     };
 
     // Calculate approximate token/char stats
-    const charCount = (isStreaming && smoothContent ? smoothContent : rawContent).length;
+    const charCount = rawContent.trim() ? (isStreaming && smoothContent ? smoothContent : rawContent).length : 0;
 
     return (
       <div className={`thinking-card ${isStreaming ? "streaming" : "settled"} ${isExpanded ? "expanded" : "collapsed"} ${className}`}>
@@ -126,16 +126,18 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             className="thinking-card-body"
             onScroll={handleScroll}
           >
-            {smoothContent ? (
+            {smoothContent.trim() ? (
               <div className="thinking-content-container">
                 <MarkdownRenderer content={smoothContent} isStreaming={isStreaming} className="thinking-markdown" />
                 {isStreaming && <span className="thinking-streaming-cursor" />}
               </div>
-            ) : (
+            ) : isStreaming ? (
               <div className="thinking-shimmer">
                 <span className="shimmer-line" />
                 <span className="thinking-shimmer-text">{t("模型正在生成分析与推演逻辑...")}</span>
               </div>
+            ) : (
+              <p className="thinking-empty">{t("本段思考已结束，模型未返回可展示的推理摘要。")}</p>
             )}
           </div>
         )}

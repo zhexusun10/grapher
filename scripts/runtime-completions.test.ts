@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runtimeService } from "../src/services/runtime.ts";
+import { hasCurrentPlanningRun } from "../src/services/planningRecovery.ts";
+import type { Snapshot } from "../src/types.ts";
 
 const response = (result: unknown) => new Response(JSON.stringify({ result }), {
   headers: { "Content-Type": "application/json" },
@@ -50,5 +52,29 @@ test("aborted requests retain their cancellation error instead of reporting a ba
   try {
     globalThis.fetch = async () => { throw cancellation; };
     await assert.rejects(runtimeService.snapshot(controller.signal), error => error === cancellation);
+  } finally { globalThis.fetch = original; }
+});
+
+test("a durable planning or failed planning Run stays attached to its workspace", () => {
+  for (const phase of ["planning", "planning_failed"]) {
+    const snapshot = { runId: "saved-run", phase, config: { repository: "/project" } } as Snapshot;
+    assert.equal(hasCurrentPlanningRun(snapshot, "/project"), true);
+    assert.equal(hasCurrentPlanningRun(snapshot, "/other-project"), false);
+    assert.equal(hasCurrentPlanningRun({ ...snapshot, runId: "" }, "/project"), false);
+  }
+});
+
+test("planning stream preserves the persisted Run identity through completion", async () => {
+  const original = globalThis.fetch;
+  const snapshot = { runId: "saved-run", phase: "awaiting_approval" } as Snapshot;
+  const events: string[] = [];
+  try {
+    globalThis.fetch = async () => new Response(
+      `event: run_started\ndata: {"runId":"saved-run"}\n\nevent: complete\ndata: ${JSON.stringify({ snapshot })}\n\n`,
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+    const result = await runtimeService.planGoalStream("Goal", {} as import("../src/types.ts").Config,
+      event => { if (event.type === "run_started") events.push(event.runId!); });
+    assert.deepEqual(events, [result.runId]);
   } finally { globalThis.fetch = original; }
 });

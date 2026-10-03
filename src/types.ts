@@ -196,6 +196,8 @@ export interface TranscriptItem {
   type: "text" | "thinking" | "tool_call" | "system";
   role?: "user" | "assistant" | "system";
   content?: string;
+  // Native reasoning block identity, scoped to its assistant message.
+  thinkingContentIndex?: number;
   // Raw stdout is displayed as text but is not assistant RPC stream content.
   rawOutput?: boolean;
   toolName?: string;

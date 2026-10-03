@@ -404,7 +404,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // its own durable output log. Replay every committed turn after a reload;
   // exclude turns already present in the live SSE transcript.
   const savedPlannerIds = useMemo(() => {
-    if (routeType !== "graph" || (isPlanning && !recoveredPlanningId && !plannerStream.runId && !plannerStream.isContinuation)) return [];
+    // Recovery discovers the planning ID before the route is known. Mount the
+    // durable activity poller now, rather than waiting for the finished graph.
+    if ((!recoveredPlanningId && routeType !== "graph") ||
+        (isPlanning && !recoveredPlanningId && !plannerStream.runId && !plannerStream.isContinuation)) return [];
     const ids = state.events
       .filter((event) => event.type === "created" || event.type === "graph_revised")
       .map((event) => event.planning_id)
@@ -1443,7 +1446,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         ) : (
                           <>
                             <Compass size={13} />
-                            <span>{t("任务路线决策：多节点依赖拓扑图架构（并行独立沙箱）")}</span>
+                            <span>{t("任务路线决策：多节点依赖拓扑图架构")}</span>
                           </>
                         )}
                       </motion.div>
@@ -1455,7 +1458,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <PlanningActivity
                           key={savedPlannerKey}
                           planningIds={savedPlannerIds}
-                          showUserTurns={!isPlanning}
+                          showUserTurns={!isPlanning || !!recoveredPlanningId}
                           skipFirstUser={effectiveMessages.length > 0}
                           onReady={() => {
                             setReadySavedPlannerKey(savedPlannerKey);

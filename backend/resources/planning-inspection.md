@@ -58,15 +58,15 @@ The feedback protocol uses an exact standalone final line: `<ACCEPT>` sends no a
 
 `read` uses Pi's native implementation, description, and offset/limit behavior. `bash` uses Pi's native backend without write-command filtering or implicit `errexit`/`pipefail`. The base tool set has no file `edit`/`write` tools or automatic project context files. Selected global Pi extensions, MCP tools and skills may additionally be available to the Planner.
 
-The native tools run in the **private Planner repository's actual cwd**. Commands and file contents are not transparently rewritten to the source directory. Required PATH/HOME/temp/external resources remain subject to the host and private-workspace platform policy. Native Bash and user extensions can write files in that workspace; the base tool policy is not read-only inspection.
+The native tools run in the **bound source project's actual cwd**. Commands and file contents are passed unchanged, without mapping to a private copy. Native Bash and user extensions can write files directly into the source immediately; the base tool policy is not read-only inspection. Access to external resources is subject to host-user permissions.
 
 ## Source effects and approval
 
-After the planning session succeeds, the host snapshots and merges private Planner changes into the source. Preview conflicts invoke the Merger in the private preview; the repaired snapshot is published, and any late source conflict invokes the Merger in the source. Source locks protect copying and publication, including conflict repair, not the Planner's inspection session. A failed merge preserves the affected workspace and logs.
+Planner writes are immediate source changes, not a deferred merge. No Planner preview or publication Merger runs. The same applies to a failed or cancelled planning session.
 
-This happens before graph approval. Approval snapshots the resulting current source, including existing non-ignored user changes, and can stage/commit those changes before node workspaces are allocated. **Reject does not undo already-merged changes or external command side effects.**
+Approval snapshots the current source, including existing non-ignored user changes, before node workspaces are allocated. Approved Planner revisions snapshot their updated source and persist that input head for future nodes and event replay. Failed/cancelled revisions retain the previous graph but likewise snapshot their surviving source writes; snapshot errors pause execution. New jobs in that Run wait until the live revision ends; existing node workspaces are not overwritten. Source locks protect snapshots, not the Planner's model/Bash session. **Reject, failure, and cancellation do not undo file writes or external command side effects.**
 
-A Planner-generated single `task` graph remains Graph because routing is persisted independently. First node executions get fresh sessions: roots start from the source baseline, and children inherit completed parents' workspace state. Continuations can reuse the same node session. Planner/parent conversations are not copied into downstream agents.
+A Planner-generated single `task` graph remains Graph because routing is persisted independently. First node executions get fresh sessions: roots start from the latest recorded source snapshot, and children compose that snapshot with completed parents' workspace state. Continuations can reuse the same node session. Planner/parent conversations are not copied into downstream agents.
 
 ## Boundaries
 
