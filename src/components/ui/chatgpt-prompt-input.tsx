@@ -198,7 +198,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const [workspaceSkills, setWorkspaceSkills] = useState<SkillItem[]>([]);
     const [cursorPos, setCursorPos] = useState<number>(0);
     const [activeIndex, setActiveIndex] = useState<number>(0);
-    const [dismissedTrigger, setDismissedTrigger] = useState<number | null>(null);
+    const [dismissedTrigger, setDismissedTrigger] = useState<{ start: number; query: string } | null>(null);
     const activeItemRef = useRef<HTMLDivElement | null>(null);
     const suggestionsListRef = useRef<HTMLDivElement | null>(null);
 
@@ -270,8 +270,21 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       triggerStart = slashMatch.index + (slashMatch[0].startsWith("/") ? 0 : 1);
     }
 
-    const isDismissed = dismissedTrigger === triggerStart;
+    const isDismissed =
+      dismissedTrigger !== null &&
+      dismissedTrigger.start === triggerStart &&
+      dismissedTrigger.query === triggerQuery;
     const showSuggestions = triggerMode !== null && !isDismissed && !disabled && !isBusy;
+
+    // 当触发词位置变动或查询内容变化时，重置 dismissedTrigger
+    useEffect(() => {
+      if (
+        dismissedTrigger !== null &&
+        (triggerStart !== dismissedTrigger.start || triggerQuery !== dismissedTrigger.query)
+      ) {
+        setDismissedTrigger(null);
+      }
+    }, [triggerStart, triggerQuery, dismissedTrigger]);
 
     useEffect(() => {
       const currentKey = repository || "__default__";
@@ -414,7 +427,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         if (onChange) {
           onChange({ target: { value: nextText } } as any);
         }
-        setDismissedTrigger(triggerStart);
+        setDismissedTrigger(triggerStart !== -1 ? { start: triggerStart, query: triggerQuery } : null);
 
         requestAnimationFrame(() => {
           const textarea = internalTextareaRef.current;
@@ -441,9 +454,23 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     }, [currentText, compact]);
 
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-      setInternalValue(e.target.value);
-      setCursorPos(e.target.selectionStart ?? e.target.value.length);
-      if (dismissedTrigger !== null && triggerStart !== dismissedTrigger) {
+      const nextVal = e.target.value;
+      const nextPos = e.target.selectionStart ?? nextVal.length;
+      setInternalValue(nextVal);
+      setCursorPos(nextPos);
+      const textBefore = nextVal.slice(0, nextPos);
+      const nextAt = textBefore.match(/(?:^|\s)@([^\s@/]*)$/);
+      const nextSlash = textBefore.match(/(?:^|\s)\/([^\s@/]*)$/);
+      const nextTriggerStart = nextAt && nextAt.index !== undefined
+        ? nextAt.index + (nextAt[0].startsWith("@") ? 0 : 1)
+        : nextSlash && nextSlash.index !== undefined
+        ? nextSlash.index + (nextSlash[0].startsWith("/") ? 0 : 1)
+        : -1;
+      const nextTriggerQuery = nextAt ? nextAt[1] : nextSlash ? nextSlash[1] : "";
+      if (
+        dismissedTrigger !== null &&
+        (nextTriggerStart !== dismissedTrigger.start || nextTriggerQuery !== dismissedTrigger.query)
+      ) {
         setDismissedTrigger(null);
       }
       if (onChange) {
@@ -652,29 +679,33 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       restProps.onKeyDown?.(e);
       if (e.defaultPrevented) return;
-      if (showSuggestions && suggestions.length > 0) {
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          setActiveIndex((prev) => (prev + 1) % suggestions.length);
-          return;
-        }
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          setActiveIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
-          return;
-        }
-        if (e.key === "Enter" || e.key === "Tab") {
+      if (showSuggestions) {
+        if (e.key === "Escape") {
           if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
           e.preventDefault();
-          if (suggestions[activeIndex]) {
-            applySuggestion(suggestions[activeIndex]);
-          }
+          e.stopPropagation();
+          setDismissedTrigger({ start: triggerStart, query: triggerQuery });
           return;
         }
-        if (e.key === "Escape") {
-          e.preventDefault();
-          setDismissedTrigger(triggerStart);
-          return;
+        if (suggestions.length > 0) {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setActiveIndex((prev) => (prev + 1) % suggestions.length);
+            return;
+          }
+          if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setActiveIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
+            return;
+          }
+          if (e.key === "Enter" || e.key === "Tab") {
+            if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
+            e.preventDefault();
+            if (suggestions[activeIndex]) {
+              applySuggestion(suggestions[activeIndex]);
+            }
+            return;
+          }
         }
       }
 
@@ -748,8 +779,22 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                     </>
                   )}
                 </span>
-                <span className="suggestions-header-hints">
-                  <span className="key-hint">↑↓</span>{t(" 选择 ")}<span className="key-hint">↵ / Tab</span>{t(" 确认 ")}<span className="key-hint">Esc</span>{t(" 关闭")}</span>
+                <button
+                  type="button"
+                  className="suggestions-header-close-btn"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDismissedTrigger({ start: triggerStart, query: triggerQuery });
+                  }}
+                  title={t("关闭 (Esc)")}
+                  aria-label={t("关闭 (Esc)")}
+                >
+                  <span className="suggestions-header-hints">
+                    <span className="key-hint">↑↓</span>{t(" 选择 ")}<span className="key-hint">↵ / Tab</span>{t(" 确认 ")}<span className="key-hint">Esc</span>{t(" 关闭")}
+                  </span>
+                  <X size={12} className="suggestions-close-icon" />
+                </button>
               </div>
               <div className="prompt-box-suggestions-list" ref={suggestionsListRef}>
                 {suggestions.length === 0 ? (
@@ -885,7 +930,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               restProps.onFocus?.(e);
             }}
             onBlur={(e) => {
-              setDismissedTrigger(triggerStart);
+              if (triggerMode !== null) {
+                setDismissedTrigger({ start: triggerStart, query: triggerQuery });
+              }
               restProps.onBlur?.(e);
             }}
             onCompositionStart={() => { composingRef.current = true; }}

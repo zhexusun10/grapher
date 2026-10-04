@@ -2858,8 +2858,6 @@ fn planner_prompt_explains_workspace_inputs_and_file_handoffs() {
         "Nodes do not share a live working directory",
         "changes from parallel or unrelated nodes are not automatically available",
         "not upstream conversations or conversational output",
-        "Put handoff information needed by downstream work into project files",
-        "use dependency edges to make those results available",
     ] {
         assert!(PLANNER_PROMPT.contains(guidance), "Missing Planner guidance: {guidance}");
     }

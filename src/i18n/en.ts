@@ -387,6 +387,7 @@ export const en: Record<string, string> = {
   "点击打断执行": "Click to interrupt execution",
   "发送消息": "Send message",
   "取消修改 (Esc)": "Cancel edit (Esc)",
+  "关闭 (Esc)": "Close (Esc)",
   "取消修改": "Cancel edit",
   "回退并重试 (Enter)": "Rewind and retry (Enter)",
   "回退并重试": "Rewind and retry",

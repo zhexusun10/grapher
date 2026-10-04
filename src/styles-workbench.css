@@ -66,6 +66,36 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
+.suggestions-header-close-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #64748b;
+  font-family: inherit;
+  font-size: inherit;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.suggestions-header-close-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: #0f172a;
+}
+
+.suggestions-close-icon {
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+
+.suggestions-header-close-btn:hover .suggestions-close-icon {
+  opacity: 1;
+}
+
 .prompt-box-suggestions-list {
   max-height: 250px;
   overflow-y: auto;

@@ -535,17 +535,28 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }
 
   const centerGraph = useCallback((instance: ReactFlowInstance<any, any>, targetKey = currentRunKey) => {
+    if (graphRunRef.current !== targetKey) return;
     graphFlowRef.current = instance;
     if (graphFitFrameRef.current !== null) cancelAnimationFrame(graphFitFrameRef.current);
 
-    graphFitFrameRef.current = requestAnimationFrame(() => {
-      graphFitFrameRef.current = requestAnimationFrame(() => {
-        graphFitFrameRef.current = null;
-        if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
-        void instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6, duration: 0 });
-        setReadyGraphRunKey(targetKey);
-      });
-    });
+    // Two animation frames do not guarantee that ReactFlow's ResizeObserver
+    // has measured every node. Fitting early can use only part of the graph.
+    const fitWhenMeasured = async () => {
+      graphFitFrameRef.current = null;
+      if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
+      const flowNodes = instance.getNodes();
+      if (flowNodes.some(node => {
+        const measured = instance.getInternalNode(node.id)?.measured;
+        return !measured?.width || !measured?.height;
+      })) {
+        graphFitFrameRef.current = requestAnimationFrame(fitWhenMeasured);
+        return;
+      }
+      await instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6, duration: 0 });
+      if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
+      setReadyGraphRunKey(targetKey);
+    };
+    graphFitFrameRef.current = requestAnimationFrame(fitWhenMeasured);
   }, [currentRunKey]);
 
   const handleChatScroll = useCallback(() => {
@@ -725,6 +736,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (graphFitFrameRef.current !== null) {
       cancelAnimationFrame(graphFitFrameRef.current);
     }
+    graphFlowRef.current = null;
   }, []);
 
   const workspaceDetailsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -926,7 +938,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     )) ||
     (routeType === "serial" && state.phase === "completed")
   );
-  // A session switch keeps ReactFlow mounted; refit after the new nodes arrive.
+  // Each conversation owns a fresh ReactFlow store and measured viewport.
   const hasGraphToolCalled =
     (plannerStream.items || []).some((t: any) => t.toolName === "node" || t.toolName === "edge") ||
     (plannerStream.tools || []).some((t: any) => t.toolName === "node" || t.toolName === "edge");
@@ -940,10 +952,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   useLayoutEffect(() => {
     if (graphRunRef.current === currentRunKey) return;
     graphRunRef.current = currentRunKey;
+    graphFlowRef.current = null;
+    if (graphFitFrameRef.current !== null) cancelAnimationFrame(graphFitFrameRef.current);
+    graphFitFrameRef.current = null;
+    setReadyGraphRunKey("");
     prevNodesCountRef.current = nodes.length;
     prevEdgesCountRef.current = edges.length;
-    if (showGraphPane && graphFlowRef.current) centerGraph(graphFlowRef.current, currentRunKey);
-  }, [currentRunKey, nodes.length, edges.length, showGraphPane, centerGraph]);
+  }, [currentRunKey, nodes.length, edges.length]);
 
   useEffect(() => {
     if (nodes.length > 0 && nodes.length !== prevNodesCountRef.current) {
@@ -1878,6 +1893,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </svg>
 
                 <ReactFlow
+                  key={currentRunKey}
                   fitView
                   fitViewOptions={{ padding: 0.24, minZoom: 0.3, maxZoom: 1.6 }}
                   onInit={(instance) => centerGraph(instance, currentRunKey)}
