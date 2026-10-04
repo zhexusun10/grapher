@@ -4,7 +4,7 @@ import { piExtensions } from '../src/services/piExtensions.ts';
 
 test('extension settings use local JSON POSTs and return the persisted remove/add catalogs', async () => {
   const original = globalThis.fetch;
-  const extension = { id: 'global/probe.ts', name: 'probe', enabled: true, bundled: false, source: 'auto', path: 'global/probe.ts' };
+  const extension = { id: 'global/probe.ts', name: 'probe', enabled: true, bundled: false, required: false, source: 'auto', path: 'global/probe.ts' };
   const requests: any[] = [];
   globalThis.fetch = (async (url, init) => {
     assert.equal(url, '/api/pi_extensions');

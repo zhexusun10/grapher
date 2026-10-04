@@ -7,12 +7,16 @@ import './ExtensionSettings.css';
 export function ExtensionItem({ extension, disabled, onToggle }: {
   extension: PiExtension; disabled: boolean; onToggle: (extension: PiExtension) => void;
 }) {
+  const isContinuity = extension.bundled && extension.id === 'npm:pi-continuity';
+  const description = isContinuity
+    ? `${extension.source} · extension for more robust loop engineering`
+    : extension.bundled ? extension.source : `${extension.source} · ${extension.path}`;
   return <li className="extension-settings-row">
     <div>
       <strong>{extension.name}</strong>
-      <code title={extension.path}>{extension.bundled ? extension.source : `${extension.source} · ${extension.path}`}</code>
+      <code title={isContinuity ? description : extension.path}>{description}</code>
     </div>
-    {extension.bundled ? <span className="extension-settings-required" role="img" aria-label={t('始终启用，不可删除')} title={t('始终启用，不可删除')}>
+    {extension.required ? <span className="extension-settings-required" role="img" aria-label={t('始终启用，不可删除')} title={t('始终启用，不可删除')}>
       <LockKeyhole size={14} aria-hidden="true" />
     </span> : <button type="button" className="secondary" disabled={disabled} onClick={() => onToggle(extension)}
       aria-label={t('{0}扩展 {1}', extension.enabled ? t('删除') : t('添加'), extension.name)}>
@@ -36,7 +40,7 @@ export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) 
     return () => { cancelled = true; mounted.current = false; };
   }, []);
   const update = async (extension?: PiExtension) => {
-    if (inFlight.current || extension?.bundled) return;
+    if (inFlight.current || extension?.required) return;
     inFlight.current = true;
     setBusy(true);
     setError('');

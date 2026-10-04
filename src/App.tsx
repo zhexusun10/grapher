@@ -1078,7 +1078,9 @@ export default function App() {
         ...prev,
         runId: provisionalRunId!,
         config: { ...config, repository: targetRepo },
-        phase: "running",
+        approved: false,
+        paused: false,
+        phase: "draft",
         graph: {
           ...prev.graph,
           nodes: [],
@@ -1089,7 +1091,8 @@ export default function App() {
       }));
     } else {
       setIsPlanning(true);
-      setState((prev) => ({ ...prev, phase: "running" }));
+      // A Planner turn does not change the draft/runtime phase. The workbench
+      // displays planning separately, including while old snapshots are polled.
       const parentId = sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null;
       const newMsg: ChatMessage = {
         ...editedMessage,

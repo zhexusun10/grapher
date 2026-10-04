@@ -15,6 +15,7 @@ export const statusText: Record<Status, string> = {
 
 export const phaseText: Record<string, string> = {
   draft: t("草稿"),
+  planning: t("规划中"),
   awaiting_approval: t("等待审批"),
   running: t("执行中"),
   paused: t("已暂停"),

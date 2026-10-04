@@ -289,6 +289,81 @@ test("one unavailable Run cannot starve other polls, and a stale poll cannot ove
   } finally { gate.resolve(); await context.close(); }
 });
 
+for (const approved of [false, true]) {
+  test(`planner revision ${approved ? "preserves a paused runtime" : "hides approval without claiming execution"}`, { timeout: 30_000 }, async () => {
+    const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+    const draft = { runId: "draft-run", config, planType: "graph",
+      graph: { originalGoal: "Draft goal", nodes: [{ name: "task", task: "Draft task" }], edges: [] },
+      nodes: { task: { status: "waiting", revision: 0, attempts: 0, instruction: "", error: null } },
+      plan: null, executions: [], events: [], approved, paused: approved,
+      phase: approved ? "paused" : "awaiting_approval", base: "", feedbackCounts: {} };
+    const empty = { ...draft, runId: "", config: null, approved: false, paused: false, phase: "draft",
+      graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {} };
+    const info = { path: "/a", name: "Alpha", branch: "main", head: "", clean: true };
+    const gate = deferred();
+    let requested = false, polls = 0;
+    const errors = [];
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      let result;
+      switch (command) {
+        case "bootstrap": result = { config, snapshot: empty, runs: [draft.runId], repositoryInfo: info, dataPath: "/mock" }; break;
+        case "history": case "snapshot": result = draft; break;
+        case "snapshot_if_changed":
+          if (requested) polls += 1;
+          result = { version: `poll-${polls}`, snapshot: draft }; break;
+        case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+        case "list_plannings": result = []; break;
+        case "list_files": result = { files: [] }; break;
+        case "list_skills": result = { skills: [] }; break;
+        case "provider_auth": result = catalog; break;
+        case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "plan_goal_stream":
+          assert.equal(body.revisionRunId, draft.runId);
+          requested = true;
+          await gate.promise;
+          await route.fulfill({ contentType: "text/event-stream", body:
+            `event: complete\ndata: ${JSON.stringify({ snapshot: draft })}\n\n` });
+          return;
+        default:
+          errors.push(`Unexpected API: ${command}`);
+          await route.fulfill({ status: 400, json: { error: `Unexpected API: ${command}` } }); return;
+      }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage();
+    page.setDefaultTimeout(10_000);
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      await page.goto(origin, { waitUntil: "networkidle" });
+      await page.locator(`[data-run-id="${draft.runId}"]`).click();
+      const bottom = page.locator(".graph-bottom");
+      await bottom.waitFor();
+      if (!approved) await bottom.getByRole("button", { name: "Approve", exact: true }).waitFor();
+      const composer = page.locator(".pane-bottom-chat textarea");
+      await composer.fill("Revise this graph");
+      await composer.press("Enter");
+      await waitFor(() => requested);
+      const checkPlanning = async () => {
+        assert.equal(await bottom.getByRole("button", { name: "Approve", exact: true }).count(), 0);
+        assert.equal(await bottom.getByRole("button", { name: "Reject", exact: true }).count(), 0);
+        assert.equal(await bottom.locator(".progress-label > span").last().innerText(), approved ? "Paused" : "Planning");
+        assert.ok(!(await bottom.innerText()).includes("Running"));
+        assert.ok(!(await bottom.innerText()).includes("Deterministic runtime"));
+      };
+      await checkPlanning();
+      // Even an old awaiting_approval poll cannot bring the buttons back mid-turn.
+      if (!approved) { await waitFor(() => polls > 0); await page.waitForTimeout(100); await checkPlanning(); }
+      gate.resolve();
+      if (!approved) await bottom.getByRole("button", { name: "Approve", exact: true }).waitFor();
+      else await page.locator(".planner-off", { hasText: "Offline" }).waitFor();
+      assert.deepEqual(errors, []);
+    } finally { gate.resolve(); await context.close(); }
+  });
+}
+
 test("recovered planning polls activity before route discovery and opens the completed graph", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},

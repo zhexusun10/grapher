@@ -34,8 +34,10 @@ try {
   execFileSync('git', ['clone', '--local', '--no-hardlinks', '--no-checkout', gitPath(source), gitPath(join(destination, 'pi'))], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   cpSync(source, join(destination, 'pi'), { ...options, filter: path => resolve(path) !== join(source, '.git') });
   cpSync(join(root, 'engine'), join(destination, 'engine'), options);
-  // pi-trim has only type-only peer imports. Copy the package, not another Pi runtime.
-  cpSync(join(root, 'node_modules/pi-trim'), join(destination, 'node_modules/pi-trim'), options);
+  // Bundled extensions have only type-only peer imports; do not copy another Pi runtime.
+  for (const name of ['pi-trim', 'pi-continuity']) {
+    cpSync(join(root, 'node_modules', name), join(destination, 'node_modules', name), options);
+  }
   // Preserve the installation's ESM boundary in the copy.
   cpSync(join(root, 'package.json'), join(destination, 'package.json'));
   mkdirSync(join(destination, 'scripts'));

@@ -4,7 +4,7 @@ import { accessSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
-import { bundledTrim } from '../engine/global-extensions.ts';
+import { bundledTrim, bundledContinuity } from '../engine/global-extensions.ts';
 import { buildSystemPromptState } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
 import {
   ModelRuntime, SettingsManager, resolveToCwd,
@@ -13,19 +13,33 @@ import {
   createLsToolDefinition, createFindToolDefinition, createGrepToolDefinition,
 } from '../engine/pi-compat.ts';
 
-test('bundled pi-trim matches the selected exact release, manifest and lock integrity', () => {
-  const installed = JSON.parse(readFileSync(new URL('../node_modules/pi-trim/package.json', import.meta.url), 'utf8'));
-  const project = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
-  const spec: string = project.dependencies['pi-trim'];
-  const pinned = lock.packages['node_modules/pi-trim'];
-  assert.equal(lock.packages[''].dependencies['pi-trim'], spec);
-  assert.equal(pinned.version, installed.version);
-  assert.deepEqual(installed.pi.extensions, ['./extensions/index.ts'], 'Review the launcher if the upstream entrypoint changes');
-  assert.deepEqual(Object.keys(installed.dependencies ?? {}), [], 'Graph copies only pi-trim; review new runtime dependencies before upgrading');
-  assert.match(pinned.integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
-  assert.equal(spec, installed.version, 'Registry updates must pin an exact release, not latest or a version range');
-  assert.equal(pinned.resolved, `https://registry.npmjs.org/pi-trim/-/pi-trim-${installed.version}.tgz`);
+for (const name of ['pi-trim', 'pi-continuity']) {
+  test(`bundled ${name} matches the selected exact release, manifest and lock integrity`, () => {
+    const installed = JSON.parse(readFileSync(new URL(`../node_modules/${name}/package.json`, import.meta.url), 'utf8'));
+    const project = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+    const spec: string = project.dependencies[name];
+    const pinned = lock.packages[`node_modules/${name}`];
+    assert.equal(lock.packages[''].dependencies[name], spec);
+    assert.equal(pinned.version, installed.version);
+    assert.deepEqual(installed.pi.extensions, ['./extensions/index.ts'], 'Review the launcher if the upstream entrypoint changes');
+    assert.deepEqual(Object.keys(installed.dependencies ?? {}), [], 'Graph copies bundled packages without peers; review new runtime dependencies before upgrading');
+    assert.match(pinned.integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
+    assert.equal(spec, installed.version, 'Registry updates must pin an exact release, not latest or a version range');
+    assert.equal(pinned.resolved, `https://registry.npmjs.org/${name}/-/${name}-${installed.version}.tgz`);
+  });
+}
+
+test('bundled continuity loads against the pinned Pi public boundary API', async () => {
+  const loaded = await loadExtensions([bundledContinuity], process.cwd());
+  assert.deepEqual(loaded.errors, []);
+  assert.equal(loaded.extensions.length, 1);
+  const extension = loaded.extensions[0];
+  for (const event of ['session_start', 'turn_end', 'agent_before_settle', 'agent_settled', 'context']) {
+    assert.ok(extension.handlers.has(event), `${event}: recovery boundary registered`);
+  }
+  assert.ok(extension.commands.has('pi-continuity'));
+  assert.ok(extension.flags.has('continuity'));
 });
 
 test('bundled pi-trim replaces Grapher prompt trimming', async () => {

@@ -237,12 +237,253 @@
   overflow-x: hidden;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
+  scrollbar-gutter: stable;
   padding: 16px 18px calc(var(--composer-height, 100px) + 16px);
   display: flex;
   flex-direction: column;
   gap: 16px;
   box-sizing: border-box;
   min-height: 0;
+}
+
+/* 节点系统任务目标卡片 (Node Task Directive Card) */
+.node-task-card {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-surface, #F8FAFC);
+  border: 1px solid var(--border-default, #E2E8F0);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.node-task-card:hover {
+  border-color: var(--border-hover, #CBD5E1);
+}
+
+.node-task-card.editing {
+  background: var(--bg-canvas, #FFFFFF);
+  border-color: var(--brand-default, #2563EB);
+  box-shadow: 0 0 0 1px var(--brand-default, #2563EB), 0 4px 14px rgba(37, 99, 235, 0.08);
+}
+
+.node-task-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.06));
+}
+
+.node-task-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.node-task-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--brand-default, #2563EB);
+  background: var(--brand-subtle, #EFF6FF);
+  border: 1px solid var(--brand-border, #BFDBFE);
+  padding: 2px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.node-task-badge-icon {
+  flex-shrink: 0;
+}
+
+.node-task-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary, #64748B);
+  font-family: var(--font-mono, monospace);
+  background: var(--bg-canvas, #FFFFFF);
+  border: 1px solid var(--border-default, #E2E8F0);
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.node-task-version-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg-canvas, #FFFFFF);
+  border: 1px solid var(--border-default, #E2E8F0);
+  border-radius: 6px;
+  padding: 1px 4px;
+}
+
+.node-task-version-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #64748B);
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0;
+}
+
+.node-task-version-btn:hover:not(:disabled) {
+  background: var(--bg-surface-hover, #F1F5F9);
+  color: var(--text-primary, #0F172A);
+}
+
+.node-task-version-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.node-task-version-text {
+  font-size: 11px;
+  color: var(--text-secondary, #64748B);
+  font-family: var(--font-mono, monospace);
+  padding: 0 2px;
+}
+
+.node-task-card-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.node-task-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--border-default, #E2E8F0);
+  background: var(--bg-canvas, #FFFFFF);
+  color: var(--text-secondary, #64748B);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.node-task-tool-btn:hover:not(:disabled) {
+  background: var(--bg-surface-hover, #F1F5F9);
+  color: var(--text-primary, #0F172A);
+  border-color: var(--border-hover, #CBD5E1);
+}
+
+.node-task-tool-btn.copied {
+  background: var(--status-success-subtle, #ECFDF5);
+  border-color: var(--status-success-border, #A7F3D0);
+  color: var(--status-success, #10B981);
+}
+
+.node-task-tool-btn.save {
+  background: var(--brand-default, #2563EB);
+  border-color: var(--brand-default, #2563EB);
+  color: white;
+}
+
+.node-task-tool-btn.save:hover:not(:disabled) {
+  background: var(--brand-hover, #1D4ED8);
+  border-color: var(--brand-hover, #1D4ED8);
+}
+
+.node-task-tool-btn.cancel:hover:not(:disabled) {
+  color: var(--status-danger, #EF4444);
+}
+
+.node-task-tool-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.node-task-content {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-primary, #0F172A);
+  word-break: break-word;
+}
+
+.node-task-content .markdown-content {
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.node-task-content .markdown-content p:first-child {
+  margin-top: 0;
+}
+
+.node-task-content .markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.node-task-content .markdown-content pre {
+  margin: 8px 0;
+  border-radius: 8px;
+}
+
+.node-task-edit-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.node-task-edit-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 120px;
+  max-height: 480px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  font-family: inherit;
+  color: var(--text-primary, #0F172A);
+  background: var(--bg-surface, #F8FAFC);
+  border: 1px solid var(--border-default, #E2E8F0);
+  border-radius: 8px;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.node-task-edit-textarea:focus {
+  border-color: var(--brand-default, #2563EB);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+  background: var(--bg-canvas, #FFFFFF);
+}
+
+.node-task-edit-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.node-task-edit-hint {
+  font-size: 11.5px;
+  color: var(--text-secondary, #64748B);
+  opacity: 0.8;
 }
 
 /* 对话流与 Chatbot 消息样式（无生硬卡片，靠右展示） */

@@ -9,6 +9,12 @@ import { loadGrapherMcpConfig } from './mcp-config.ts';
 const builtins = ['llama.cpp', 'codemode', 'tool-search', 'mcp'];
 export const trimId = 'npm:pi-trim';
 export const bundledTrim = fileURLToPath(new URL('../node_modules/pi-trim/extensions/index.ts', import.meta.url));
+export const continuityId = 'npm:pi-continuity';
+export const bundledContinuity = fileURLToPath(new URL('../node_modules/pi-continuity/extensions/index.ts', import.meta.url));
+const bundledExtensions = [
+  { id: trimId, name: 'pi-trim', path: bundledTrim, required: true },
+  { id: continuityId, name: 'pi-continuity', path: bundledContinuity, required: false },
+];
 export const globalAgentDir = () => {
   const path = process.env.GRAPHER_GLOBAL_PI_AGENT_DIR || join(homedir(), '.pi', 'agent');
   return resolve(path === '~' || path.startsWith('~/') ? homedir() + path.slice(1) : path);
@@ -17,10 +23,14 @@ const identity = (path: string) => {
   const value = existsSync(path) ? realpathSync(path) : resolve(path);
   return process.platform === 'win32' ? value.toLowerCase() : value;
 };
-function isTrim(resource: { path: string; metadata: { source: string; packageRoot?: string } }) {
-  if (/^npm:pi-trim(?:@|$)/.test(resource.metadata.source) || identity(resource.path) === identity(bundledTrim)) return true;
+function isBundled(resource: { path: string; metadata: { source: string; packageRoot?: string } }) {
+  if (bundledExtensions.some(extension => resource.metadata.source === extension.id ||
+    resource.metadata.source.startsWith(`${extension.id}@`) || identity(resource.path) === identity(extension.path))) return true;
   if (resource.metadata.packageRoot) {
-    try { return JSON.parse(readFileSync(join(resource.metadata.packageRoot, 'package.json'), 'utf8')).name === 'pi-trim'; } catch {}
+    try {
+      const name = JSON.parse(readFileSync(join(resource.metadata.packageRoot, 'package.json'), 'utf8')).name;
+      return bundledExtensions.some(extension => extension.name === name);
+    } catch {}
   }
   return false;
 }
@@ -59,19 +69,21 @@ export interface PiExtension {
   path: string;
   enabled: boolean;
   bundled: boolean;
+  required: boolean;
 }
 export async function extensionCatalog(directory: string) {
   const state = overrides(directory);
   const resources = await resolveGlobal();
-  const extensions: PiExtension[] = [{ id: trimId, name: 'pi-trim', source: trimId, path: bundledTrim, enabled: true, bundled: true }];
-  const seen = new Set([trimId]);
+  const extensions: PiExtension[] = bundledExtensions.map(extension => ({ ...extension, source: extension.id,
+    enabled: extension.required || (state[extension.id] ?? true), bundled: true }));
+  const seen = new Set(extensions.map(extension => extension.id));
   for (const resource of resources.extensions) {
-    if (resource.path.startsWith('builtin:') || isTrim(resource)) continue;
+    if (resource.path.startsWith('builtin:') || isBundled(resource)) continue;
     const id = identity(resource.path);
     if (seen.has(id)) continue;
     seen.add(id);
     extensions.push({ id, name: extensionName(resource), source: resource.metadata.source,
-      path: resource.path, enabled: state[id] ?? resource.enabled, bundled: false });
+      path: resource.path, enabled: state[id] ?? resource.enabled, bundled: false, required: false });
   }
   return { globalDirectory: globalAgentDir(), extensions };
 }
@@ -105,10 +117,10 @@ export async function executionResources(args: string[], directory: string, role
     const settingsManager = SettingsManager.create(process.cwd(), directory, { projectTrusted: args.includes('--approve') });
     const manager = new DefaultPackageManager({ cwd: process.cwd(), agentDir: directory, settingsManager, builtinExtensions: builtins });
     const local = await manager.resolve(async () => 'skip');
-    const globalById = new Map(global.extensions.filter(r => !r.path.startsWith('builtin:') && !isTrim(r)).map(r => [identity(r.path), r]));
+    const globalById = new Map(global.extensions.filter(r => !r.path.startsWith('builtin:') && !isBundled(r)).map(r => [identity(r.path), r]));
     const seenExtensions = new Set<string>();
     for (const resource of discoverExtensions ? [...local.extensions, ...global.extensions] : []) {
-      if (isTrim(resource)) continue; // Always use the bundled, pinned pi-trim exactly once.
+      if (isBundled(resource)) continue; // Use only the selected bundled copies, never global/project duplicates.
       const builtin = resource.path.startsWith('builtin:');
       const id = builtin ? resource.path : identity(resource.path);
       const original = builtin ? global.extensions.find(r => r.path === id) : globalById.get(id);
@@ -119,6 +131,7 @@ export async function executionResources(args: string[], directory: string, role
       seenExtensions.add(id);
       extensions.push(resource.path);
     }
+    if (discoverExtensions && (state[continuityId] ?? true)) extensions.push(bundledContinuity);
     if (discoverSkills) {
       const seenSkills = new Set<string>();
       for (const resource of [...local.skills, ...global.skills]) {

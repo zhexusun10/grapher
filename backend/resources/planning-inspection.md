@@ -42,6 +42,8 @@ A successful call returns `applied: true` and the saved topology. It includes `w
 
 A rejected call returns `applied: false`, the **unchanged saved topology**, and `diagnostics` as readable strings. The diagnostics describe the rejected candidate edits, not the returned topology. This also applies to duplicate-target errors and compiler failures; reporting the saved topology does not invoke the compiler a second time. Rejections are marked as tool errors; successful calls with warnings are not.
 
+`E208` also suggests reconsidering feedback ownership instead of merely dropping routes. Separate feedback sources for independent workstreams and a shared rework owner are examples, not required graph shapes. The Planner should choose what fits the task and check that node tasks still match the resulting routes; these suggestions add no validation rules.
+
 The compiler's execution plan stays internal. Derived dependency layers, roots, and terminals are not repeated in tool results; the topology already contains the graph structure.
 
 Compiler warnings are advisory and do not reject otherwise valid edits:

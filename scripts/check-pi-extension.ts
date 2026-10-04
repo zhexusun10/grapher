@@ -47,7 +47,9 @@ try {
   const bashDescription = extension.tools.get("bash")!.definition.description;
   assert.match(bashDescription, /Execute a bash command/);
   assert.equal(extension.handlers.has("tool_call"), false, "Planner has no path or read guards");
-  assert.doesNotMatch(extension.tools.get("edge")!.definition.description, /maxFeedback|retry budget|reviewer/i);
+  const edgeDescription = extension.tools.get("edge")!.definition.description;
+  assert.match(edgeDescription, /Each feedback source may have at most one feedback target\./);
+  assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer/i);
   const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = extension.tools.get(name)!.definition;
@@ -272,6 +274,12 @@ fn main() {
     assert.equal(rejectedBatch.applied, false);
     assert.equal(typeof rejectedBatch.diagnostics[0], "string");
     assert.equal(response.details.diagnosticCodes[0], code);
+    if (code === "E208") {
+      assert.match(rejectedBatch.diagnostics[0], /Consider restructuring feedback ownership rather than merely dropping routes/);
+      assert.match(rejectedBatch.diagnostics[0], /possible approaches include separate feedback sources/);
+      assert.match(rejectedBatch.diagnostics[0], /a shared owner responsible for reworking the combined result/);
+      assert.match(rejectedBatch.diagnostics[0], /node tasks remain consistent with the resulting feedback routes/);
+    }
     assert.deepEqual(Object.keys(rejectedBatch), ["applied", "topology", "diagnostics"]);
     assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
     assert.deepEqual(await toolResultHook({ toolName, details: response.details, isError: false }), { isError: true });

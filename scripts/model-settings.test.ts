@@ -104,7 +104,7 @@ test("credential catalog updates remove and restore choices without changing sav
   assert.deepEqual(config.roleModels?.planner, { model: "example/default", thinkingLevel: "low" });
 });
 
-test('required pi-trim has no remove/add button; user extensions remain selectable', async () => {
+test('only required pi-trim is locked; bundled continuity and user extensions remain selectable', async () => {
   const { createServer } = await import('vite');
   const vite = await createServer({
     configFile: false, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] },
@@ -112,8 +112,9 @@ test('required pi-trim has no remove/add button; user extensions remain selectab
   });
   try {
     const { ExtensionItem } = await vite.ssrLoadModule('/src/components/ExtensionSettings.tsx');
-    const render = (bundled: boolean, enabled = true) => renderToStaticMarkup(React.createElement(ExtensionItem, {
-      extension: { id: bundled ? 'npm:pi-trim' : 'probe.ts', name: bundled ? 'pi-trim' : 'probe', bundled, enabled, path: 'probe.ts', source: 'auto' },
+    const render = (bundled: boolean, enabled = true, required = bundled) => renderToStaticMarkup(React.createElement(ExtensionItem, {
+      extension: { id: bundled ? (required ? 'npm:pi-trim' : 'npm:pi-continuity') : 'probe.ts',
+        name: bundled ? (required ? 'pi-trim' : 'pi-continuity') : 'probe', bundled, required, enabled, path: 'probe.ts', source: 'auto' },
       disabled: false, onToggle() {},
     }));
     const required = render(true);
@@ -124,6 +125,20 @@ test('required pi-trim has no remove/add button; user extensions remain selectab
     assert.equal(required.replace(/<[^>]*>/g, ''), 'pi-trimauto', 'bundled extension shows no badge or lock text');
     assert.ok(render(false).includes(t('{0}扩展 {1}', t('删除'), 'probe')));
     assert.ok(render(false, false).includes(t('{0}扩展 {1}', t('添加'), 'probe')));
+    assert.ok(render(true, true, false).includes(t('{0}扩展 {1}', t('删除'), 'pi-continuity')));
+    assert.ok(render(true, false, false).includes(t('{0}扩展 {1}', t('添加'), 'pi-continuity')));
+    assert.ok(!render(true, true, false).includes(t('始终启用，不可删除')));
+    for (const enabled of [true, false]) {
+      const path = '/Users/jerry/.pi/agent/npm/node_modules/pi-continuity/extensions/index.ts';
+      const markup = renderToStaticMarkup(React.createElement(ExtensionItem, {
+        extension: { id: 'npm:pi-continuity', name: 'pi-continuity', source: 'npm:pi-continuity',
+          path, bundled: true, required: false, enabled },
+        disabled: false, onToggle() {},
+      }));
+      assert.match(markup, />npm:pi-continuity · extension for more robust loop engineering<\/code>/);
+      assert.ok(!markup.includes(path), 'bundled continuity describes its purpose instead of exposing a local path');
+      assert.ok(markup.includes(t('{0}扩展 {1}', enabled ? t('删除') : t('添加'), 'pi-continuity')));
+    }
   } finally { await vite.close(); }
 });
 

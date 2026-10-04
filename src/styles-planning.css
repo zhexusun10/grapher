@@ -18,6 +18,7 @@
   width: 100%;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
+  scrollbar-gutter: stable;
   padding: 24px 20px calc(var(--composer-height, 100px) + 20px);
 }
 

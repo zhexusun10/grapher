@@ -2851,6 +2851,21 @@ fn planning_prompts_separate_user_query_from_system() {
 }
 
 #[test]
+fn planner_prompt_explains_workspace_inputs_and_file_handoffs() {
+    for guidance in [
+        "first execution starts in a fresh session and its own workspace",
+        "recorded source state and completed dependencies' filesystem snapshots",
+        "Nodes do not share a live working directory",
+        "changes from parallel or unrelated nodes are not automatically available",
+        "not upstream conversations or conversational output",
+        "Put handoff information needed by downstream work into project files",
+        "use dependency edges to make those results available",
+    ] {
+        assert!(PLANNER_PROMPT.contains(guidance), "Missing Planner guidance: {guidance}");
+    }
+}
+
+#[test]
 fn planning_attachment_ignores_client_filename() {
     let image = ImageAttachment {
         r#type: "image".into(),

@@ -358,9 +358,15 @@ fn compiler_rejects_multiple_feedback_targets_from_one_source() {
     assert!(error.message.contains("review"));
     assert!(error.message.contains("backend, frontend"));
     assert!(error.message.contains("at most one feedback target"));
-    assert!(!error.message.contains("integration owner"));
-    assert!(!error.message.contains("separate review nodes"));
+    assert!(error.message.contains("Consider restructuring feedback ownership rather than merely dropping routes"));
+    assert!(error.message.contains("possible approaches include separate feedback sources"));
+    assert!(error.message.contains("a shared owner responsible for reworking the combined result"));
+    assert!(error.message.contains("node tasks remain consistent with the resulting feedback routes"));
+    // The suggestions add no graph-shape or task-wording requirements.
     assert!(compile(&graph(), true).is_ok());
+    let mut retargeted = graph();
+    retargeted.edges.iter_mut().find(|edge| edge.feedback).unwrap().to = "backend".into();
+    assert!(compile(&retargeted, true).is_ok());
 }
 
 #[test]

@@ -17,6 +17,7 @@ import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-inp
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
+import { NodeTaskCard } from "./NodeTaskCard";
 import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
 import { isNodeWorking } from "../../lib/nodeWorking";
 import { ToolCallCard } from "../ToolCallCard";
@@ -916,6 +917,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined);
   const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialWorking) : isPlanning;
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
+  // A poll can return the old draft while the Planner is revising it.
+  const graphPhase = isPlanning && !state.approved ? "planning" : state.phase;
   const isWorkspaceWritten = !isPlanning && (
     (routeType === "graph" && (
       state.publication?.status === "completed" ||
@@ -983,16 +986,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         revealChatFrameRef.current = null;
         if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
         const el = chatScrollRef.current;
-        if (el && !isUserScrolledUpRef.current) {
+        const isGraphNodeView = Boolean(selectedNode && routeType === "graph");
+        if (el && !isUserScrolledUpRef.current && !isGraphNodeView) {
           el.scrollTop = el.scrollHeight;
           lastScrollTopRef.current = el.scrollTop;
         }
         isPreparingConversationRef.current = false;
-        setScrollBottomVisible(false);
+        if (isGraphNodeView && el) {
+          const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+          setScrollBottomVisible(distanceFromBottom > el.clientHeight / 2);
+        } else {
+          setScrollBottomVisible(false);
+        }
         setReadyConversationKey(key);
       });
     });
-  }, [conversationViewKey]);
+  }, [conversationViewKey, selectedNode, routeType, setScrollBottomVisible]);
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -1001,26 +1010,37 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     prevViewKeyRef.current = conversationViewKey;
 
     if (isNewView) {
-      // 进入新对话视图（Node Agent 或 Planner）时直接聚焦到底部最新内容，避免从顶部生硬滑动到底部
       suppressAutoScrollRef.current = false;
       isPreparingConversationRef.current = true;
-      isUserScrolledUpRef.current = false;
       isScrollingToBottomRef.current = false;
-      el.scrollTop = el.scrollHeight;
-      lastScrollTopRef.current = el.scrollTop;
-      prevScrollHeightRef.current = el.scrollHeight;
-      setScrollBottomVisible(false);
 
-      if (resetChatScrollFrameRef.current !== null) {
-        cancelAnimationFrame(resetChatScrollFrameRef.current);
-      }
-      resetChatScrollFrameRef.current = requestAnimationFrame(() => {
-        resetChatScrollFrameRef.current = null;
-        if (chatScrollRef.current && !isUserScrolledUpRef.current) {
-          chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-          lastScrollTopRef.current = chatScrollRef.current.scrollTop;
+      const isGraphNodeView = Boolean(selectedNode && routeType === "graph");
+      if (isGraphNodeView) {
+        // 进入 Node Agent 视图时，默认展示顶部节点任务目标 (Task)，避免 1s 后日志加载造成突兀跳跃或重排
+        isUserScrolledUpRef.current = true;
+        el.scrollTop = 0;
+        lastScrollTopRef.current = 0;
+        prevScrollHeightRef.current = el.scrollHeight;
+        setScrollBottomVisible(false);
+      } else {
+        // 进入 Planner 或 Serial 线性对话时直接聚焦到底部最新内容
+        isUserScrolledUpRef.current = false;
+        el.scrollTop = el.scrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
+        prevScrollHeightRef.current = el.scrollHeight;
+        setScrollBottomVisible(false);
+
+        if (resetChatScrollFrameRef.current !== null) {
+          cancelAnimationFrame(resetChatScrollFrameRef.current);
         }
-      });
+        resetChatScrollFrameRef.current = requestAnimationFrame(() => {
+          resetChatScrollFrameRef.current = null;
+          if (chatScrollRef.current && !isUserScrolledUpRef.current) {
+            chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+            lastScrollTopRef.current = chatScrollRef.current.scrollTop;
+          }
+        });
+      }
     }
 
     // If no execution or planning output needed to trigger onReady, reveal after layout settle
@@ -1090,58 +1110,72 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 {nodeTurns.map((turn) => (
                   <React.Fragment key={turn.id}>
                     {turn.isInitial ? (
-                      <div className="chat-message-row user">
-                        <EditableUserBubble
-                          text={turn.taskText || selectedNode.task}
-                          versions={initialTaskVersions}
-                          currentVersionIndex={initialTaskVersions ? (initialTaskEdit?.selected_version ?? initialTaskVersions.length - 1) : undefined}
-                          onSwitchVersion={(index) => {
-                            const version = initialTaskVersions?.[index];
-                            const first = attempts[0];
-                            if (version && first && onEditMessageSubmit) {
-                              void onEditMessageSubmit({ id: `task-${selectedNode.name}`, role: "user", text: version.text,
-                                node: selectedNode.name, executionId: version.executionId ?? first.id, runId: state.runId }, version.text, index);
-                            }
-                          }}
-                          editing={editingTaskNode === selectedNode.name}
-                          draft={taskDraft}
-                          onDraftChange={setTaskDraft}
-                          onEdit={(!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "running") ? () => {
-                            onCancelEditMessage?.();
-                            setEditingTaskNode(selectedNode.name);
-                            setTaskDraft(selectedNode.task);
-                          } : undefined}
-                          onCancel={() => setEditingTaskNode("")}
-                          disabled={locked || (state.approved && selectedState?.status === "dirty") || taskDraft.trim() === selectedNode.task}
-                          onSend={(value) => {
-                            const saveTask = () => {
-                              onSave({ ...state.graph, nodes: state.graph.nodes.map((node) =>
+                      <NodeTaskCard
+                        nodeName={selectedNode.name}
+                        taskText={turn.taskText || selectedNode.task}
+                        versions={initialTaskVersions}
+                        currentVersionIndex={initialTaskVersions ? (initialTaskEdit?.selected_version ?? initialTaskVersions.length - 1) : undefined}
+                        onSwitchVersion={(index) => {
+                          const version = initialTaskVersions?.[index];
+                          const first = attempts[0];
+                          if (version && first && onEditMessageSubmit) {
+                            void onEditMessageSubmit({
+                              id: `task-${selectedNode.name}`,
+                              role: "user",
+                              text: version.text,
+                              node: selectedNode.name,
+                              executionId: version.executionId ?? first.id,
+                              runId: state.runId,
+                            }, version.text, index);
+                          }
+                        }}
+                        editing={editingTaskNode === selectedNode.name}
+                        draft={taskDraft}
+                        onDraftChange={setTaskDraft}
+                        onEdit={(!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "running") ? () => {
+                          onCancelEditMessage?.();
+                          setEditingTaskNode(selectedNode.name);
+                          setTaskDraft(selectedNode.task);
+                        } : undefined}
+                        onCancel={() => setEditingTaskNode("")}
+                        disabled={locked || (state.approved && selectedState?.status === "dirty") || taskDraft.trim() === selectedNode.task}
+                        onSave={(value) => {
+                          const saveTask = () => {
+                            onSave({
+                              ...state.graph,
+                              nodes: state.graph.nodes.map((node) =>
                                 node.name === selectedNode.name ? { ...node, task: value } : node
-                              ) });
-                              setEditingTaskNode("");
-                            };
-                            if (state.approved) {
-                              const first = attempts[0];
-                              if (first && onEditMessageSubmit) {
-                                void Promise.resolve(onEditMessageSubmit({
-                                  id: `task-${selectedNode.name}`, role: "user", text: selectedNode.task,
-                                  node: selectedNode.name, executionId: first.id, runId: state.runId,
-                                }, value)).then((accepted) => { if (accepted !== false) setEditingTaskNode(""); });
-                              } else {
-                                onRequestConfirmation({
-                                  title: t("修改未执行的 Task？"),
-                                  message: t("此节点尚无 Pi 对话可分支，将创建新的待审批运行。"),
-                                  confirmText: t("确认修改"),
-                                  danger: true,
-                                  onConfirm: saveTask,
-                                });
-                              }
-                              return false;
+                              ),
+                            });
+                            setEditingTaskNode("");
+                          };
+                          if (state.approved) {
+                            const first = attempts[0];
+                            if (first && onEditMessageSubmit) {
+                              void Promise.resolve(onEditMessageSubmit({
+                                id: `task-${selectedNode.name}`,
+                                role: "user",
+                                text: selectedNode.task,
+                                node: selectedNode.name,
+                                executionId: first.id,
+                                runId: state.runId,
+                              }, value)).then((accepted) => {
+                                if (accepted !== false) setEditingTaskNode("");
+                              });
+                            } else {
+                              onRequestConfirmation({
+                                title: t("修改未执行的 Task？"),
+                                message: t("此节点尚无 Pi 对话可分支，将创建新的待审批运行。"),
+                                confirmText: t("确认修改"),
+                                danger: true,
+                                onConfirm: saveTask,
+                              });
                             }
-                            saveTask();
-                          }}
-                        />
-                      </div>
+                            return;
+                          }
+                          saveTask();
+                        }}
+                      />
                     ) : turn.userMessage ? (
                       <div key={turn.userMessage.id} className="chat-message-row user">
                         <EditableUserBubble
@@ -1907,7 +1941,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <span>
                       <span className="progress-dot" />
                       {completed} / {state.graph.nodes.length}{t(" 节点完成")}</span>
-                    <span>{phaseText[state.phase] ?? state.phase}</span>
+                    <span>{phaseText[graphPhase] ?? graphPhase}</span>
                   </div>
                   <div className="progress-track">
                     <div style={{ width: `${(completed / Math.max(1, state.graph.nodes.length)) * 100}%` }} />
@@ -1915,14 +1949,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                   <div className="approval-row">
                     <span>
-                      {state.phase === "running" ? t("确定性运行时正在推进")
-                        : state.phase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
-                        : state.phase === "paused" ? t("已暂停后续派发")
-                        : state.phase === "completed" ? t("运行已完成")
-                        : state.approved ? phaseText[state.phase] ?? state.phase : ""}
+                      {graphPhase === "planning" ? t("规划中")
+                        : graphPhase === "running" ? t("确定性运行时正在推进")
+                        : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
+                        : graphPhase === "paused" ? t("已暂停后续派发")
+                        : graphPhase === "completed" ? t("运行已完成")
+                        : state.approved ? phaseText[graphPhase] ?? graphPhase : ""}
                     </span>
                     <div>
-                      {state.phase === "awaiting_approval" ? (
+                      {graphPhase === "awaiting_approval" ? (
                         <>
                           <button type="button" className="text-button" disabled={locked} onClick={() => onControl("reject")}>
                             Reject

@@ -5,6 +5,7 @@ export interface PiExtension {
   path: string;
   enabled: boolean;
   bundled: boolean;
+  required: boolean;
 }
 export interface ExtensionCatalog { globalDirectory: string; extensions: PiExtension[] }
 async function call(operation: string, fields: Record<string, unknown> = {}): Promise<ExtensionCatalog> {

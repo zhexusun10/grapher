@@ -7,12 +7,13 @@ import { fileURLToPath } from "node:url";
 export const root = fileURLToPath(new URL("../", import.meta.url));
 export const piSource = join(root, "pi");
 export const viteBin = join(root, "node_modules", "vite", "bin", "vite.js");
+export const tsxCli = join(root, "node_modules", "tsx", "dist", "cli.mjs");
 export const piPackageJson = join(piSource, "package.json");
 export const piDependencyMarker = join(piSource, "node_modules", ".grapher-pi-dependencies.json");
 export const piDist = join(piSource, "packages", "ai", "dist");
 
 /**
- * 快速检查 Cargo 是否安装，纯同步文件路径检查，耗时 < 0.1ms。
+ * Fast synchronous check for Cargo installation (< 0.1ms).
  */
 export function findCargoExecutable() {
   if (process.env.CARGO && existsSync(process.env.CARGO)) {
@@ -35,11 +36,11 @@ export function findCargoExecutable() {
 }
 
 /**
- * 纯内存与同步快速检查状态，零子进程开销，通常耗时 < 0.5ms。
+ * Synchronous in-memory check with zero subprocess overhead (< 0.5ms).
  */
 export function checkDependenciesFast() {
   const missingSubmodule = !existsSync(piPackageJson);
-  const missingRootModules = !existsSync(viteBin);
+  const missingRootModules = !existsSync(viteBin) || !existsSync(tsxCli);
   const missingPiDist = !existsSync(piDist);
   const missingPiDependencies = !existsSync(piDependencyMarker);
   const cargoPath = findCargoExecutable();
@@ -57,7 +58,7 @@ export function checkDependenciesFast() {
 }
 
 /**
- * 跨平台执行 npm 指令
+ * Cross-platform npm execution.
  */
 function runNpm(args, options = {}) {
   const npmCli = process.env.npm_execpath;
@@ -71,50 +72,50 @@ function runNpm(args, options = {}) {
 }
 
 /**
- * 确保所有依赖已就绪。
- * 若依赖已齐全，耗时 < 2ms 直接返回。
- * 若有缺失，按顺序自动拉取并安装。
+ * Ensure all dependencies are ready.
+ * If dependencies are already satisfied, returns in < 2ms.
+ * If any are missing, automatically fetches and installs them in order.
  */
 export async function ensureDependencies() {
   const status = checkDependenciesFast();
 
-  // 依赖全齐时的极速路径：零子进程，耗时 < 2ms
+  // Fast path when all dependencies are ready: zero subprocesses, < 2ms
   if (status.allReady) {
     return;
   }
 
-  console.log("\n[dev] 正在检查并自动安装缺失的依赖...");
+  console.log("\n[dev] Checking and installing missing dependencies...");
 
-  // 1. 检查并拉取 Git Submodule (pi)
+  // 1. Check and initialize Git submodule (pi)
   if (status.missingSubmodule) {
-    console.log("[dev] [1/3] 未检测到 pi 引擎子模块，正在执行 git submodule update --init --recursive...");
+    console.log("[dev] [1/3] Pi engine submodule not found. Running git submodule update --init --recursive...");
     try {
       execFileSync("git", ["submodule", "update", "--init", "--recursive"], {
         stdio: "inherit",
         cwd: root,
       });
-      console.log("[dev] [1/3] pi 引擎子模块拉取完成。");
+      console.log("[dev] [1/3] Pi engine submodule initialized.");
     } catch (error) {
-      console.error("[dev] ❌ 拉取 git submodule 失败:", error.message);
+      console.error("[dev] ❌ Failed to update git submodule:", error.message);
       throw error;
     }
   }
 
-  // 2. 检查并安装根目录依赖 (前端与开发工具)
+  // 2. Check and install root dependencies (frontend & dev tools)
   if (status.missingRootModules) {
-    console.log("[dev] [2/3] 未检测到根目录依赖 (node_modules)，正在执行 npm ci --ignore-scripts...");
+    console.log("[dev] [2/3] Root dependencies (node_modules) not found. Running npm ci --ignore-scripts...");
     try {
       runNpm(["ci", "--ignore-scripts"], { cwd: root });
     } catch (err) {
-      console.warn("[dev] npm ci 失败，尝试执行 npm install --ignore-scripts...");
+      console.warn("[dev] npm ci failed, falling back to npm install --ignore-scripts...");
       runNpm(["install", "--ignore-scripts"], { cwd: root });
     }
-    console.log("[dev] [2/3] 根目录依赖安装完成。");
+    console.log("[dev] [2/3] Root dependencies installed.");
   }
 
-  // 3. 检查并初始化 Pi 引擎依赖与离线构建
+  // 3. Check and initialize Pi engine dependencies and offline build
   if (status.missingPiDist || status.missingPiDependencies) {
-    console.log("[dev] [3/3] 未检测到 Pi 引擎构建产物，正在执行 npm run pi:setup...");
+    console.log("[dev] [3/3] Pi engine build artifacts not found. Running npm run pi:setup...");
     try {
       const piBaselineScript = join(root, "scripts", "pi-baseline.mjs");
       execFileSync(process.execPath, [piBaselineScript, "setup"], {
@@ -122,30 +123,30 @@ export async function ensureDependencies() {
         cwd: root,
         env: { ...process.env, npm_execpath: process.env.npm_execpath },
       });
-      console.log("[dev] [3/3] Pi 引擎依赖与构建完成。");
+      console.log("[dev] [3/3] Pi engine dependencies and build complete.");
     } catch (error) {
-      console.error("[dev] ❌ Pi 引擎初始化失败:", error.message);
+      console.error("[dev] ❌ Failed to initialize Pi engine:", error.message);
       throw error;
     }
   }
 
-  // 4. Rust / Cargo 环境检查与友好提示
+  // 4. Rust / Cargo environment check and guidance
   if (status.missingCargo) {
     console.error("\n" + "=".repeat(70));
-    console.error("[dev] ❌ 未检测到 Rust/Cargo 编译工具链！");
-    console.error("[dev] 本项目后端服务由 Rust 编写，开发与运行必须依赖 Cargo。");
-    console.error("[dev] 请先安装 Rust 环境：");
+    console.error("[dev] ❌ Rust/Cargo toolchain not found!");
+    console.error("[dev] The backend service is written in Rust; Cargo is required to build and run Grapher.");
+    console.error("[dev] Please install Rust:");
     if (process.platform === "win32") {
-      console.error("[dev]   👉 Windows 请访问: https://rustup.rs/ 下载并安装 rustup-init.exe");
+      console.error("[dev]   👉 Windows: visit https://rustup.rs/ to download and install rustup-init.exe");
     } else {
-      console.error("[dev]   👉 请在终端运行: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh");
+      console.error("[dev]   👉 Run in terminal: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh");
     }
-    console.error("[dev] 安装完成后，请重启终端并重新执行 npm run dev。");
+    console.error("[dev] After installation, restart your terminal and run npm run dev again.");
     console.error("=".repeat(70) + "\n");
     process.exit(1);
   }
 
-  console.log("[dev] ✅ 依赖检查完成，继续启动服务...\n");
+  console.log("[dev] ✅ Dependencies verified, continuing startup...\n");
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

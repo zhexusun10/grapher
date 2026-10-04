@@ -37,7 +37,24 @@ impl Bridge {
             } else if pi_tsx.exists() {
                 pi_tsx
             } else {
-                return Err("Cannot start Provider/Auth Adapter: tsx not found. Run npm ci.".into());
+                let ensure_script = root.join("scripts/ensure-deps.mjs");
+                if ensure_script.exists() {
+                    eprintln!("[provider_auth] tsx not found. Automatically installing missing dependencies...");
+                    let mut cmd = Command::new("node");
+                    cmd.arg(crate::native::host_path(&ensure_script))
+                        .current_dir(&root);
+                    crate::process_control::configure_command(&mut cmd);
+                    if let Ok(mut child) = cmd.spawn() {
+                        let _ = child.wait();
+                    }
+                }
+                if root_tsx.exists() {
+                    root_tsx
+                } else if pi_tsx.exists() {
+                    pi_tsx
+                } else {
+                    return Err("Cannot start Provider/Auth Adapter: tsx not found. Run npm ci.".into());
+                }
             }
         };
         let mut command = Command::new("node");

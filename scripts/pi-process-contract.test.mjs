@@ -41,7 +41,15 @@ test('Settings IPC discovers extensions and persists removal/restoration without
       encoding: 'utf8', timeout: 30000, input: JSON.stringify({ version: 1, ...fields }),
       env: { ...process.env, PI_CODING_AGENT_DIR: join(dir, 'own'), GRAPHER_GLOBAL_PI_AGENT_DIR: global, GRAPHER_ISOLATED_PI_MODELS: '1' },
     })).result;
-    const extension = call({ operation: 'catalog' }).extensions.find(extension => !extension.bundled);
+    const catalog = call({ operation: 'catalog' });
+    const continuity = catalog.extensions.find(extension => extension.id === 'npm:pi-continuity');
+    assert.ok(continuity?.bundled);
+    assert.equal(continuity.required, false);
+    assert.equal(continuity.enabled, true);
+    assert.equal(call({ operation: 'set_enabled', id: continuity.id, enabled: false }).extensions.find(value => value.id === continuity.id).enabled, false);
+    assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === continuity.id).enabled, false);
+    assert.equal(call({ operation: 'set_enabled', id: continuity.id, enabled: true }).extensions.find(value => value.id === continuity.id).enabled, true);
+    const extension = catalog.extensions.find(extension => !extension.bundled);
     assert.ok(extension);
     assert.equal(call({ operation: 'set_enabled', id: extension.id, enabled: false }).extensions.find(value => value.id === extension.id).enabled, false);
     assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === extension.id).enabled, false);
@@ -153,6 +161,97 @@ test('pi-trim transforms actual provider requests for every role without removin
       else assert.ok(tools.includes('read') && tools.includes('bash'), `${role}: retain provider tool schemas`);
       assert.ok(events.some(event => event.type === 'message_end' && event.message?.role === 'assistant' &&
         event.message.content.some(part => part.type === 'text' && part.text === 'audit complete')), `${role}: request completes successfully`);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('bundled continuity recovers capped provider turns only while selected for allowed roles', { timeout: 90000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-continuity-provider-'));
+  const agent = join(directory, 'agent');
+  const global = join(directory, 'global');
+  for (const path of [agent, global]) mkdirSync(path);
+  const requests = [];
+  const serverErrors = [];
+  const server = createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+      const first = requests.length === 1;
+      const chunk = (delta, finish_reason) => ({ id: 'continuity-audit', object: 'chat.completion.chunk', created: 1, model: 'local',
+        choices: [{ index: 0, delta, finish_reason }] });
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(`data: ${JSON.stringify(chunk({ role: 'assistant', content: first ? 'partial progress' : 'recovered final' }, null))}\n\ndata: ${JSON.stringify(chunk({}, first ? 'length' : 'stop'))}\n\ndata: [DONE]\n\n`);
+    } catch (error) {
+      serverErrors.push(error);
+      response.writeHead(500);
+      response.end('Audit server failed');
+    }
+  });
+  const run = (role, noExtensions) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-session',
+      '--no-context-files', '--no-skills', '--no-tools', '--model', 'continuity-audit/local', '--thinking', 'off',
+      ...(noExtensions ? ['--no-extensions'] : [])], {
+      cwd: directory, stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PI_CODING_AGENT_DIR: agent, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
+        GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: 'source', PI_OFFLINE: '1' },
+    });
+    let stderr = '';
+    const events = [];
+    child.stderr.on('data', value => { stderr += value.toString(); });
+    child.stdin.on('error', () => {});
+    const lines = createInterface({ input: child.stdout });
+    lines.on('line', line => {
+      try {
+        const event = JSON.parse(line);
+        events.push(event);
+        // agent_end can precede extension recovery; wait for the public settled boundary.
+        if (event.type === 'agent_settled') child.stdin.end();
+      } catch {}
+    });
+    const timeout = setTimeout(() => {
+      if (process.platform === 'win32' && child.pid) {
+        try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      } else child.kill('SIGTERM');
+      reject(new Error(`${role} continuity audit timed out: ${stderr}`));
+    }, 20000);
+    child.once('error', error => { clearTimeout(timeout); lines.close(); reject(error); });
+    child.once('close', code => {
+      clearTimeout(timeout);
+      lines.close();
+      if (code !== 0) reject(new Error(`${role} exited ${code}: ${stderr}`));
+      else resolve(events);
+    });
+    child.stdin.write(`${JSON.stringify({ id: role, type: 'prompt', message: 'Complete CONTINUITY_AUDIT' })}\n`);
+  });
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { 'continuity-audit': {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'local-audit-only',
+      models: [{ id: 'local', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    } } }));
+    for (const [role, enabled, noExtensions] of [
+      ['planner', true, false], ['node', true, false], ['planner', false, false], ['node', false, false],
+      ['node', true, false], ['node', true, true], ['partition', true, true], ['merger', true, true],
+    ]) {
+      writeFileSync(join(agent, 'extensions.json'), JSON.stringify({ overrides: { 'npm:pi-continuity': enabled } }));
+      requests.length = 0;
+      const events = await run(role, noExtensions);
+      assert.deepEqual(serverErrors, []);
+      const recover = enabled && !noExtensions && (role === 'planner' || role === 'node');
+      assert.equal(requests.length, recover ? 2 : 1, `${role}: selected=${enabled}, noExtensions=${noExtensions}`);
+      const assistants = events.filter(event => event.type === 'message_end' && event.message?.role === 'assistant');
+      assert.equal(assistants.at(-1)?.message.stopReason, recover ? 'stop' : 'length');
+      assert.ok(events.some(event => event.type === 'agent_settled'));
+      if (recover) {
+        assert.ok(JSON.stringify(requests[1].messages).includes('partial progress'), 'bounded checkpoint reaches the recovery request');
+        assert.ok(!requests[1].messages.some(message => message.role === 'assistant'), 'interrupted assistant protocol is omitted');
+      }
     }
   } finally {
     server.closeAllConnections();

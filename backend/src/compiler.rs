@@ -180,7 +180,7 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         add(
             "E208",
             format!(
-                "Feedback source {source} has multiple targets: {}. A feedback verdict does not identify a target, so each source may have at most one feedback target.",
+                "Feedback source {source} has multiple targets: {}. A feedback verdict does not identify a target, so each source may have at most one feedback target. Consider restructuring feedback ownership rather than merely dropping routes: possible approaches include separate feedback sources for independent workstreams or a shared owner responsible for reworking the combined result. Choose what fits the task, and check that node tasks remain consistent with the resulting feedback routes.",
                 targets.into_iter().collect::<Vec<_>>().join(", ")
             ),
         );
