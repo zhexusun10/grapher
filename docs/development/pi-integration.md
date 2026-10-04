@@ -9,7 +9,7 @@ Pi is Grapher's only production execution-instance engine. Grapher owns graph co
 | [pi/](../../pi/) | Unmodified upstream submodule |
 | [pi-compat.ts](../../engine/pi-compat.ts) | Central SDK/private-path/CLI compatibility boundary |
 | [mcp-config.ts](../../engine/mcp-config.ts) | Global/dedicated/project MCP layering using Pi validation |
-| [entrypoint.mjs](../../engine/entrypoint.mjs) | Verified entrypoint using repository-local tsx; no global fallback |
+| [entrypoint.mjs](../../engine/entrypoint.mjs) | Verified entrypoint using Pi's source resolver; no global fallback |
 | [pi-lock.json](../../engine/pi-lock.json) | Upstream commit, lockfile, and model-data checksums |
 | [pi-dependencies/](../../engine/pi-dependencies/) | Reviewed, exact runtime/build dependency profile and lock |
 | [model-data/](../../engine/model-data/) | Upstream-hydrated catalog plus checksum manifest |

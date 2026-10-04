@@ -3,7 +3,6 @@
 use serde_json::Value;
 use std::{
     io::{BufRead, BufReader, Write},
-    path::Path,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{mpsc, Mutex, OnceLock},
     thread,
@@ -28,40 +27,13 @@ impl Drop for Bridge {
 
 impl Bridge {
     fn start() -> Result<Self, String> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let tsx_cli = {
-            let root_tsx = root.join("node_modules/tsx/dist/cli.mjs");
-            let pi_tsx = root.join("pi/node_modules/tsx/dist/cli.mjs");
-            if root_tsx.exists() {
-                root_tsx
-            } else if pi_tsx.exists() {
-                pi_tsx
-            } else {
-                let ensure_script = root.join("scripts/ensure-deps.mjs");
-                if ensure_script.exists() {
-                    eprintln!("[provider_auth] tsx not found. Automatically installing missing dependencies...");
-                    let mut cmd = Command::new("node");
-                    cmd.arg(crate::native::host_path(&ensure_script))
-                        .current_dir(&root);
-                    crate::process_control::configure_command(&mut cmd);
-                    if let Ok(mut child) = cmd.spawn() {
-                        let _ = child.wait();
-                    }
-                }
-                if root_tsx.exists() {
-                    root_tsx
-                } else if pi_tsx.exists() {
-                    pi_tsx
-                } else {
-                    return Err("Cannot start Provider/Auth Adapter: tsx not found. Run npm ci.".into());
-                }
-            }
-        };
+        let root = crate::native::installation_root();
         let mut command = Command::new("node");
         command
-            .arg(crate::native::host_path(&tsx_cli))
-            .arg("--tsconfig")
-            .arg(crate::native::host_path(&root.join("pi/tsconfig.json")))
+            // Use the same audited Pi source loader as the execution and
+            // extension hosts; no tsx install/download on the startup path.
+            .arg("--import")
+            .arg("./pi/packages/coding-agent/src/experimental/source-resolver.ts")
             .arg(crate::native::host_path(&root.join("engine/provider-host.ts")))
             .current_dir(&root)
             .env("PI_CODING_AGENT_DIR", crate::native::agent_dir()?)

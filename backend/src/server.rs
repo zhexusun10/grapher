@@ -234,8 +234,8 @@ mod planning_lifecycle_tests;
 fn load_env_file() {
     let candidates = [
         PathBuf::from(".env"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.env"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"),
+        crate::native::installation_root().join(".env"),
+        crate::native::installation_root().join("backend/.env"),
     ];
     for path in &candidates {
         if let Ok(content) = fs::read_to_string(path) {
@@ -285,7 +285,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
     };
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(feature = "fixture")]
-    let entrypoint = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/entrypoint.mjs");
+    let entrypoint = crate::native::installation_root().join("engine/entrypoint.mjs");
     let detected_repo = crate::workspace::detect(None).ok().flatten();
     let saved_config_on_disk = {
         let path = runtime.root.join("config.json");
@@ -2788,10 +2788,9 @@ fn resolve_repo_path(service: &Arc<Service>, repository_param: Option<String>) -
             }
         }
     }
-    if let Some(parent) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent() {
-        if parent.exists() {
-            return parent.to_path_buf();
-        }
+    let installation = crate::native::installation_root();
+    if installation.exists() {
+        return installation;
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -2934,7 +2933,8 @@ fn list_skills(
     search_dirs.push((repo_path.join("skills"), "workspace"));
 
     // 2. Grapher 宿主内置技能规范 (Grapher Host App: .agents/skills, .pi/skills, skills)
-    if let Some(grapher_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent() {
+    {
+        let grapher_root = crate::native::installation_root();
         if grapher_root != repo_path {
             search_dirs.push((grapher_root.join(".agents").join("skills"), "builtin"));
             search_dirs.push((grapher_root.join(".pi").join("skills"), "builtin"));
@@ -3563,7 +3563,7 @@ pub fn run() -> Result<(), String> {
         "Grapher backend: http://127.0.0.1:{port} (data: {})",
         root.display()
     );
-    let web_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist");
+    let web_root = crate::native::installation_root().join("dist");
     // Bounded workers keep slow HTTP clients (including SSE streams) from
     // creating an unbounded number of OS threads.
     let (tx, rx) = std::sync::mpsc::sync_channel::<tiny_http::Request>(128);

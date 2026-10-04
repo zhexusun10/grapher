@@ -48,12 +48,7 @@ pub struct PickResult {
 pub fn data_root() -> PathBuf {
     let path = std::env::var_os("GRAPHER_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap_or(Path::new(env!("CARGO_MANIFEST_DIR")))
-                .join(".grapher")
-        });
+        .unwrap_or_else(|| crate::native::installation_root().join(".grapher"));
     let path = if path.is_relative() {
         std::env::current_dir()
             .map(|cwd| cwd.join(&path))

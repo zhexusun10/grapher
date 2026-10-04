@@ -33,7 +33,12 @@ try {
   // Independent metadata; never retain the submodule's pointer into source/.git.
   execFileSync('git', ['clone', '--local', '--no-hardlinks', '--no-checkout', gitPath(source), gitPath(join(destination, 'pi'))], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   cpSync(source, join(destination, 'pi'), { ...options, filter: path => resolve(path) !== join(source, '.git') });
-  cpSync(join(root, 'engine'), join(destination, 'engine'), options);
+  cpSync(join(root, 'engine'), join(destination, 'engine'), {
+    ...options,
+    // Only the profile manifests are needed at runtime; Pi has the audited
+    // dependency copy already. Avoid doubling the install in every Graph copy.
+    filter: path => resolve(path) !== join(root, 'engine/pi-dependencies/node_modules'),
+  });
   // Bundled extensions have only type-only peer imports; do not copy another Pi runtime.
   for (const name of ['pi-trim', 'pi-continuity']) {
     cpSync(join(root, 'node_modules', name), join(destination, 'node_modules', name), options);
@@ -41,7 +46,7 @@ try {
   // Preserve the installation's ESM boundary in the copy.
   cpSync(join(root, 'package.json'), join(destination, 'package.json'));
   mkdirSync(join(destination, 'scripts'));
-  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'cargo.mjs']) {
+  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'cargo.mjs', 'prepare-native-runtime.mjs']) {
     cpSync(join(root, 'scripts', script), join(destination, 'scripts', script));
   }
   execFileSync('git', ['-C', gitPath(join(destination, 'pi')), 'reset', '--mixed', 'HEAD'], { env, stdio: ['ignore', 'ignore', 'pipe'] });

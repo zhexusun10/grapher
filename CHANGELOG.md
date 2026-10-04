@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-10-05
+
+### Added
+
+- Bundle pi-trim 0.2.0 and pi-continuity 0.1.0 with extension discovery and workbench settings.
+- Provide separate macOS ARM64 and Intel x64 archives alongside Linux and Windows x64 packages.
+- Smoke-test extracted release archives outside the build checkout, covering real Pi CLI/IPC and local-provider contracts, Graph runtime preparation, backend startup, provider discovery, extensions, and frontend assets.
+
 ### Changed
 
 - Updated the pinned Pi engine to upstream 1.0.1 and refreshed the checksummed model catalog.
 
 ### Fixed
 
+- Include runtime scripts, bundled extension dependencies, the ESM package boundary, and independent Pi Git metadata in relocatable distributions.
+- Resolve runtime, frontend, configuration, and data paths relative to packaged executables instead of the CI checkout.
+- Use Pi's audited source resolver for Provider/Auth without downloading tsx at startup.
+- Fix graph display across sessions, planner state handling, and thinking transcript rendering.
 - Apply Pi 1.0.1 project MCP overrides after merging global and Grapher-specific definitions, preserving credentials and project trust restrictions.
 - Align Bash smoke assertions with Pi's nonzero-exit error results and honor `CARGO_TARGET_DIR` in integration checks.
 - Match planning history across equivalent Windows repository bindings while keeping missing and unrelated paths fail-closed.
@@ -86,5 +98,6 @@ None (initial alpha release)
 
 ---
 
-[Unreleased]: https://github.com/zhexusun10/grapher/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/zhexusun10/grapher/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/zhexusun10/grapher/releases/tag/v0.1.0-alpha.1

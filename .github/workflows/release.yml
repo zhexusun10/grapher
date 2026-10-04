@@ -10,16 +10,21 @@ permissions:
 
 jobs:
   build-release:
-    name: Build and Release
+    name: Build and smoke-test release
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             platform: linux
             arch: x64
             artifact: grapher-linux-x64.tar.gz
-          - os: macos-latest
+          - os: macos-15
+            platform: macos
+            arch: arm64
+            artifact: grapher-macos-arm64.tar.gz
+          - os: macos-15-intel
             platform: macos
             arch: x64
             artifact: grapher-macos-x64.tar.gz
@@ -27,97 +32,41 @@ jobs:
             platform: windows
             arch: x64
             artifact: grapher-windows-x64.zip
-    
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22.19.0'
           cache: npm
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.platform == 'windows' && 'stable-x86_64-pc-windows-msvc' || 'stable' }}
-
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y bubblewrap build-essential git
-
       - name: Install Windows native tools
         if: matrix.platform == 'windows'
         shell: pwsh
-        run: |
-          choco install ripgrep fd --yes --no-progress
-
+        run: choco install ripgrep fd --yes --no-progress
       - name: Install Node dependencies
         run: npm ci --ignore-scripts
-
       - name: Install and build Pi
         run: npm run pi:setup
-
       - name: Build frontend
         run: npm run build
-
       - name: Build release binary
         run: cargo build --release --manifest-path backend/Cargo.toml --bin grapher
-
-      - name: Create distribution package (Linux/macOS)
-        if: matrix.platform != 'windows'
-        run: |
-          mkdir -p grapher-${{ matrix.platform }}-${{ matrix.arch }}
-          cp backend/target/release/grapher grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cp -r dist grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cp -r pi grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cp -r engine grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cp README.md LICENSE grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cat > grapher-${{ matrix.platform }}-${{ matrix.arch }}/start.sh << 'EOF'
-          #!/bin/bash
-          cd "$(dirname "$0")"
-          ./grapher
-          EOF
-          chmod +x grapher-${{ matrix.platform }}-${{ matrix.arch }}/start.sh
-          tar czf ${{ matrix.artifact }} grapher-${{ matrix.platform }}-${{ matrix.arch }}
-
-      - name: Create distribution package (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          mkdir grapher-${{ matrix.platform }}-${{ matrix.arch }}
-          cp backend/target/release/grapher.exe grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cp -r dist grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cp -r pi grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cp -r engine grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          cp README.md,LICENSE grapher-${{ matrix.platform }}-${{ matrix.arch }}/
-          @'
-          @echo off
-          cd /d "%~dp0"
-          grapher.exe
-          '@ | Out-File -FilePath grapher-${{ matrix.platform }}-${{ matrix.arch }}/start.bat -Encoding ASCII
-          Compress-Archive -Path grapher-${{ matrix.platform }}-${{ matrix.arch }} -DestinationPath ${{ matrix.artifact }}
-
-      - name: Generate checksum (Linux/macOS)
-        if: matrix.platform != 'windows'
-        run: |
-          if [ "${{ matrix.platform }}" = "linux" ]; then
-            sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
-          else
-            shasum -a 256 ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
-          fi
-
-      - name: Generate checksum (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          $hash = Get-FileHash ${{ matrix.artifact }} -Algorithm SHA256
-          "$($hash.Hash.ToLower())  ${{ matrix.artifact }}" | Out-File -FilePath ${{ matrix.artifact }}.sha256 -Encoding ASCII
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Create relocatable distribution
+        run: node scripts/package-release.mjs ${{ matrix.platform }} ${{ matrix.arch }} ${{ matrix.artifact }}
+      - name: Smoke-test extracted archive outside the checkout
+        run: node scripts/smoke-release.mjs ${{ matrix.artifact }} ${{ matrix.platform }} ${{ matrix.arch }}
+      - name: Generate checksum
+        run: node --input-type=module -e "import {createHash} from 'node:crypto'; import {readFileSync,writeFileSync} from 'node:fs'; const file='${{ matrix.artifact }}'; writeFileSync(file+'.sha256', createHash('sha256').update(readFileSync(file)).digest('hex')+'  '+file+'\n');"
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-${{ matrix.arch }}
           path: |
@@ -125,98 +74,41 @@ jobs:
             ${{ matrix.artifact }}.sha256
 
   create-release:
-    name: Create GitHub Release
+    name: Create GitHub Release draft
     needs: build-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: artifacts
-
-      - name: Prepare release assets
-        run: |
-          mkdir -p release-assets
-          find artifacts -type f -exec cp {} release-assets/ \;
-          ls -lh release-assets/
-
-      - name: Create release notes
-        run: |
-          cat > release-notes.md << 'EOF'
-          # Grapher ${{ github.ref_name }}
-
-          ## What is Grapher?
-
-          Grapher is a local coding-agent workbench that compiles complex work into inspectable execution graphs.
-
-          Built on [Pi](https://github.com/earendil-works/pi). Simple tasks run as a single agent; complex work is compiled into an execution graph and scheduled by a deterministic Rust runtime.
-
-          ## What's working
-
-          - Serial coding-agent workflow
-          - Graph planning and approval
-          - Dependency-aware execution
-          - Workspace inheritance
-          - Bounded feedback edges
-          - Result publication
-          - Linux sandbox (bubblewrap) and macOS sandbox (sandbox-exec)
-
-          ## Current limitations
-
-          - Requires Node.js, Rust, and build environment (not a single-binary installer)
-          - Windows filesystem sandboxing is process isolation only
-          - This is alpha software
-
-          ## Installation
-
-          Download the appropriate package for your platform below, extract it, and run:
-
-          **Linux/macOS:**
-          ```sh
-          tar xzf grapher-*.tar.gz
-          cd grapher-*
-          ./start.sh
-          ```
-
-          **Windows:**
-          ```
-          Extract grapher-windows-x64.zip
-          cd grapher-windows-x64
-          start.bat
-          ```
-
-          Open http://127.0.0.1:1421 in your browser.
-
-          See the [Installation Guide](https://github.com/zhexusun10/grapher/blob/main/docs/guides/installation.md) for prerequisites and troubleshooting.
-
-          ## Platform support
-
-          | Platform | Status | Notes |
-          |----------|--------|-------|
-          | Linux (Ubuntu 22.04+) | ✅ Tested | Requires bubblewrap for Graph sandbox |
-          | macOS | ✅ Experimental | Uses sandbox-exec/Seatbelt for Graph isolation |
-          | Windows | ⚠️ Experimental | Graph uses process isolation only (no filesystem sandbox) |
-
-          ## Checksums
-
-          SHA256 checksums are provided for each package.
-
-          ## Full Changelog
-
-          See [CHANGELOG.md](https://github.com/zhexusun10/grapher/blob/main/CHANGELOG.md) for detailed changes.
-          EOF
-
-      - name: Create Release
+          path: release-assets
+          merge-multiple: true
+      - name: Prepare release notes
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create ${{ github.ref_name }} \
-            --draft \
-            --title "Grapher ${{ github.ref_name }}" \
-            --notes-file release-notes.md \
-            ${{ contains(github.ref, 'alpha') && '--prerelease' || '' }} \
-            ${{ contains(github.ref, 'beta') && '--prerelease' || '' }} \
-            ${{ contains(github.ref, 'rc') && '--prerelease' || '' }} \
-            release-assets/*
+          if [ -f "docs/releases/$RELEASE_TAG.md" ]; then
+            cp "docs/releases/$RELEASE_TAG.md" release-notes.md
+          else
+            printf '# Grapher %s\n\nSee CHANGELOG.md for changes. Download the archive for your platform and verify its SHA256 checksum.\n' "$RELEASE_TAG" > release-notes.md
+          fi
+      - name: Create or refresh unpublished release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=()
+          case "$RELEASE_TAG" in *alpha*|*beta*|*rc*) prerelease=(--prerelease);; esac
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > is-draft.txt 2>/dev/null; then
+            # Never overwrite assets on a published release.
+            [ "$(cat is-draft.txt)" = true ] || { echo 'Refusing to modify a published release'; exit 1; }
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+              if [ ! -f "release-assets/$asset" ]; then
+                gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+              fi
+            done
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            gh release edit "$RELEASE_TAG" --draft --title "Grapher $RELEASE_TAG" --notes-file release-notes.md "${prerelease[@]}"
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Grapher $RELEASE_TAG" --notes-file release-notes.md "${prerelease[@]}" release-assets/*
+          fi

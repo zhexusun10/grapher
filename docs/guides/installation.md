@@ -4,17 +4,25 @@ Grapher runs locally with a browser UI and Rust backend. Model calls use your co
 
 ## Requirements
 
-- Node.js **22.19+** and npm.
-- Stable Rust/Cargo and the native compiler/linker required by your host toolchain.
+- Node.js **22.19+**; npm is needed for source installation.
+- For source builds only: stable Rust/Cargo and the native compiler/linker required by your host toolchain. Release archives include the compiled backend.
 - Git and network access for dependency installation and provider requests.
 - A supported provider account/API key. See [Providers and models](providers.md).
-- **Windows:** Git for Windows Bash and the Rust host build prerequisites; see [Windows](windows.md).
+- **Windows:** Git for Windows Bash; source builds also need the Rust host build prerequisites. See [Windows](windows.md).
 - **Linux Graph:** `/usr/bin/bwrap` from bubblewrap and permitted unprivileged user/mount/PID namespaces.
 - **macOS Graph:** working `sandbox-exec`/Seatbelt support.
 
 Only use projects, extensions, and tools you trust. Before important work, read the [execution model](../architecture/execution-model.md) and [filesystem boundaries](../architecture/filesystem-isolation.md).
 
-## Install
+## Install a release archive
+
+Download the archive for your operating system and CPU from [GitHub Releases](https://github.com/zhexusun10/grapher/releases) and verify its accompanying SHA256 checksum. macOS has separate `arm64` (Apple Silicon) and `x64` (Intel) packages; the macOS packages are built and smoke-tested on macOS 15.
+
+Extract the entire archive into a writable directory, preserving its directory structure and hidden Pi Git metadata. On Linux/macOS run `./start.sh` inside the extracted directory; on Windows run `start.bat`. Open **<http://127.0.0.1:1421>**.
+
+Archives include the backend, frontend, pinned Pi runtime, and bundled extensions. You still need Node.js and Git on `PATH`, platform sandbox prerequisites, provider authentication, and any tools required by your tasks (including Git Bash on Windows). No Rust build or npm installation is needed to start an archive. Runtime data defaults to `.grapher/` inside the extracted installation; back it up before replacing an installation.
+
+## Install from source
 
 Run from a terminal; on Windows these shell commands can be used in Git Bash.
 

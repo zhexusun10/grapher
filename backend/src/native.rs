@@ -94,7 +94,7 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
                 .join(".grapher-workspaces")
         });
     let output = Command::new("node")
-        .arg(installation_root().join("scripts/prepare-native-runtime.mjs"))
+        .arg(host_path(&installation_root().join("scripts/prepare-native-runtime.mjs")))
         .env("GRAPHER_NATIVE_RUNTIME_PARENT", &runtime_parent)
         .output()
         .map_err(|error| format!("Cannot start native runtime preparation with Node: {error}"))?;
@@ -120,8 +120,23 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
     Ok(root)
 }
 
+fn installation_root_for(executable: Option<&Path>, source_root: &Path) -> PathBuf {
+    // Distributions are relocatable; never use the CI checkout embedded by Cargo
+    // when the executable has its own runtime alongside it. Dev/test binaries
+    // under backend/target still use the source checkout.
+    if let Some(parent) = executable.and_then(Path::parent) {
+        if parent.join("engine/entrypoint.mjs").is_file() {
+            return parent.to_path_buf();
+        }
+    }
+    source_root.to_path_buf()
+}
+
 pub fn installation_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+    installation_root_for(
+        std::env::current_exe().ok().as_deref(),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join(".."),
+    )
 }
 
 /// Rust's extended Windows paths are valid filesystem identities, but stock
@@ -411,6 +426,19 @@ mod tests {
                 .get_envs()
                 .any(|(name, value)| name == std::ffi::OsStr::new(key) && value.is_none()));
         }
+    }
+
+    #[test]
+    fn installation_root_prefers_relocated_package_and_retains_dev_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let packaged = temp.path().join("Grapher 安装 # %");
+        let source = temp.path().join("source");
+        let executable = packaged.join("grapher");
+        assert_eq!(installation_root_for(Some(&executable), &source), source);
+        fs::create_dir_all(packaged.join("engine")).unwrap();
+        fs::write(packaged.join("engine/entrypoint.mjs"), "").unwrap();
+        assert_eq!(installation_root_for(Some(&executable), &source), packaged);
+        assert_eq!(installation_root_for(None, &source), source);
     }
 
     #[test]
