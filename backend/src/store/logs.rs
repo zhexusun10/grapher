@@ -65,6 +65,7 @@ impl Store {
     pub(super) fn append_logs(&self, state: &mut Snapshot, kinds: Vec<EventKind>) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
         if kinds.is_empty() { return Ok(()); }
+        self.ensure_not_deleted(&state.run_id)?;
         let count = kinds.len();
         // Coalesce tiny stdout packets within the bounded writer batch; one
         // character per event must not become one database row per character.

@@ -38,7 +38,7 @@ try {
     execFileSync('tar', ['xzf', resolve(artifact), '-C', extracted], { stdio: 'inherit' });
   }
   for (const file of ['scripts/pi-baseline.mjs', 'scripts/pi-dependencies.mjs', 'scripts/prepare-native-runtime.mjs',
-    'scripts/cargo.mjs', 'package.json', 'dist/index.html', 'pi/.git/HEAD',
+    'scripts/cargo.mjs', 'scripts/bundled-extensions.mjs', 'package.json', 'dist/index.html', 'pi/.git/HEAD',
     'node_modules/pi-trim/extensions/index.ts', 'node_modules/pi-continuity/extensions/index.ts']) {
     assert.ok(existsSync(join(installation, file)), `Missing package file: ${file}`);
   }

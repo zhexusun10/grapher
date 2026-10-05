@@ -97,6 +97,7 @@ Node workspaces live beside the project in `.grapher-worktrees`; Planner copies 
 | Symptom | Check |
 | --- | --- |
 | Missing Pi entrypoint or baseline mismatch | Initialize submodules, then run `npm run pi:setup` and `npm run pi:verify`; do not substitute global Pi |
+| Graph runtime prewarm reports missing/outdated `pi-trim` or `pi-continuity` | For a source checkout, run `npm ci --ignore-scripts` from the Grapher root and restart the backend; `pi:setup` installs Pi dependencies, not these bundled extensions. For a release, re-extract the complete archive |
 | First build exceeds dev startup timeout | Build the backend first with `node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher`, then rerun `npm run dev` |
 | Port already in use | Stop the process that owns it or change the backend port consistently; dev does not kill unrelated listeners |
 | Provider/model unavailable | Authenticate in Settings, refresh the provider catalog, and select an available model |

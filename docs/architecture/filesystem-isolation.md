@@ -73,7 +73,7 @@ Model-visible normalization is not a byte-for-byte file representation or a data
 
 ## Shared runtime and external state
 
-The backend prepares and verifies a shared Pi engine copy outside the source using [prepare-native-runtime.mjs](../../scripts/prepare-native-runtime.mjs). This permits self-hosted Graph execution without requiring write access to protected source engine files. Restart the backend after adapter changes; the prepared copy is cached and has no general automatic cleanup policy.
+Partitioner and Planner launch the installed entrypoint directly in the source cwd; their launchers do not create project copies or require a private engine copy. Graph preflight/startup may separately prewarm one shared Pi engine/dependency copy for later private node execution using [prepare-native-runtime.mjs](../../scripts/prepare-native-runtime.mjs). This is a backend-process cache, not a Partitioner/Planner project workspace, and permits self-hosted Graph execution without write access to protected source engine files. Restart after adapter changes. Process leases, preparation-failure/shutdown removal and abandoned-copy recovery follow the [runtime cleanup lifecycle](execution-model.md#storage-and-cleanup).
 
 `GRAPHER_NATIVE_RUNTIME_PARENT` selects the runtime-copy parent. Pi authentication uses its dedicated configuration directory, not a per-node credential vault. Model tools may still read authentication material available to their process. Shared HOME, temporary files, hard links, services, and global configuration are outside Git node-version isolation.
 

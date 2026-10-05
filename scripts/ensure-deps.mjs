@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { missingBundledExtensions } from "./bundled-extensions.mjs";
 
 export const root = fileURLToPath(new URL("../", import.meta.url));
 export const piSource = join(root, "pi");
@@ -35,12 +36,18 @@ export function findCargoExecutable() {
   return null;
 }
 
+export function rootDependenciesReady(installationRoot = root) {
+  return existsSync(join(installationRoot, "node_modules/vite/bin/vite.js")) &&
+    existsSync(join(installationRoot, "node_modules/tsx/dist/cli.mjs")) &&
+    missingBundledExtensions(installationRoot).length === 0;
+}
+
 /**
- * Synchronous in-memory check with zero subprocess overhead (< 0.5ms).
+ * Synchronous filesystem check with zero subprocess overhead.
  */
 export function checkDependenciesFast() {
   const missingSubmodule = !existsSync(piPackageJson);
-  const missingRootModules = !existsSync(viteBin) || !existsSync(tsxCli);
+  const missingRootModules = !rootDependenciesReady();
   const missingPiDist = !existsSync(piDist);
   const missingPiDependencies = !existsSync(piDependencyMarker);
   const cargoPath = findCargoExecutable();
@@ -101,9 +108,9 @@ export async function ensureDependencies() {
     }
   }
 
-  // 2. Check and install root dependencies (frontend & dev tools)
+  // 2. Check root dependencies, including the bundled runtime extensions.
   if (status.missingRootModules) {
-    console.log("[dev] [2/3] Root dependencies (node_modules) not found. Running npm ci --ignore-scripts...");
+    console.log("[dev] [2/3] Root dependencies are missing or outdated. Running npm ci --ignore-scripts...");
     try {
       runNpm(["ci", "--ignore-scripts"], { cwd: root });
     } catch (err) {

@@ -8,6 +8,7 @@ use std::{
 };
 
 mod logs;
+mod cleanup;
 pub use logs::{LogPage, MigrationReport};
 const CHECKPOINT_INTERVAL: usize = 128;
 
@@ -113,7 +114,13 @@ impl Store {
             CREATE INDEX IF NOT EXISTS events_run ON events(run_id, sequence);
             CREATE TABLE IF NOT EXISTS checkpoints (run_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS workspace_selection (id INTEGER PRIMARY KEY CHECK(id=1), run_id TEXT);
-            CREATE TABLE IF NOT EXISTS deleted_runs (run_id TEXT PRIMARY KEY);")
+            CREATE TABLE IF NOT EXISTS deleted_runs (run_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS run_owned_directories (run_id TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY(run_id,target));
+            CREATE INDEX IF NOT EXISTS run_owned_target ON run_owned_directories(target,run_id);
+            CREATE TABLE IF NOT EXISTS cleanup_tasks (run_id TEXT PRIMARY KEY, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);
+            CREATE TABLE IF NOT EXISTS workspace_cleanup_done (run_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS cleanup_sources (path TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS cleanup_state (key TEXT PRIMARY KEY);")
             .map_err(|error| error.to_string())?;
         let columns = {
             let mut stmt = connection
@@ -194,6 +201,7 @@ impl Store {
             return self.append_logs(state, vec![kind]);
         }
         let _write_guard = store_write_guard()?;
+        self.ensure_not_deleted(&state.run_id)?;
         if let EventKind::Finished { execution_id, output, output_bytes, metrics, .. } = &mut kind {
             if !output.is_empty() {
                 let started = state.executions.iter().chain(&state.mergers)
@@ -258,6 +266,7 @@ impl Store {
         }
         let count = kinds.len();
         let _write_guard = store_write_guard()?;
+        self.ensure_not_deleted(&state.run_id)?;
         let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
         let mut events = Vec::with_capacity(count);
         for kind in kinds {
@@ -373,6 +382,15 @@ impl Store {
             "SELECT EXISTS(SELECT 1 FROM deleted_runs WHERE run_id=?1)",
             [run_id], |row| row.get(0),
         ).map_err(|e| e.to_string())
+    }
+
+    pub fn deleted_runs(&self) -> Result<Vec<String>, String> {
+        let mut statement = self.connection.prepare("SELECT run_id FROM deleted_runs")
+            .map_err(|error| error.to_string())?;
+        let runs = statement.query_map([], |row| row.get(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+        Ok(runs)
     }
 
     pub fn run_for_planning_id(&self, planning_id: &str) -> Result<Option<String>, String> {
@@ -530,13 +548,18 @@ impl Store {
     }
 
     pub fn delete_run(&self, run_id: &str) -> Result<(), String> {
+        self.delete_run_with_cleanup(run_id, None)
+    }
+
+    pub fn delete_run_with_cleanup(&self, run_id: &str, cleanup: Option<&crate::cleanup::Manifest>) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
         let tx = self
             .connection
             .unchecked_transaction()
             .map_err(|e| e.to_string())?;
-        // Saved planning files outlive their Run; startup must not import an
-        // explicitly deleted conversation from those files again.
+        // The cleanup manifest commits with the tombstone and event deletion.
+        // A crash or locked file after commit cannot erase cleanup ownership.
+        if let Some(cleanup) = cleanup { self.insert_cleanup(&tx, run_id, cleanup)?; }
         tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)", [run_id])
             .map_err(|e| e.to_string())?;
         tx.execute("UPDATE workspace_selection SET run_id=NULL WHERE run_id=?1", [run_id])
@@ -553,11 +576,19 @@ impl Store {
     }
 
     pub fn clear(&self) -> Result<(), String> {
+        self.clear_with_cleanup(&[])
+    }
+
+    pub fn clear_with_cleanup(&self, cleanups: &[(String, crate::cleanup::Manifest)]) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
         let tx = self
             .connection
             .unchecked_transaction()
             .map_err(|e| e.to_string())?;
+        for (run_id, cleanup) in cleanups {
+            self.insert_cleanup(&tx, run_id, cleanup)?;
+            tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)", [run_id]).map_err(|e| e.to_string())?;
+        }
         tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) SELECT DISTINCT run_id FROM events", [])
             .map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO workspace_selection(id,run_id) VALUES(1,NULL) ON CONFLICT(id) DO UPDATE SET run_id=NULL", [])

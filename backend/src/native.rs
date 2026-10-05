@@ -5,16 +5,27 @@ use crate::engine::PiRole;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Mutex, OnceLock},
+    process::{Command, Stdio},
+    sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
 };
 #[cfg(any(not(feature = "fixture"), test))]
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
     thread,
 };
 
-static RUNTIME: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static RUNTIME: OnceLock<Mutex<Option<crate::native_runtime_storage::NativeRuntime>>> = OnceLock::new();
+static RUNTIME_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn begin_shutdown() { RUNTIME_SHUTTING_DOWN.store(true, Ordering::SeqCst); }
+
+pub(crate) fn shutdown_runtime() {
+    begin_shutdown();
+    if let Some(cache) = RUNTIME.get() {
+        if let Err(error) = crate::native_runtime_storage::release(cache) {
+            eprintln!("[Grapher] Native runtime cleanup deferred: {error}");
+        }
+    }
+}
 #[cfg(not(feature = "fixture"))]
 static RUNTIME_PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -79,8 +90,9 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|e| e.to_string())?;
-    if let Some(root) = &*cached {
-        return Ok(root.clone());
+    if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) { return Err("Backend is shutting down".into()); }
+    if let Some(runtime) = &*cached {
+        return Ok(runtime.directory.clone());
     }
     let installation = installation_root()
         .canonicalize()
@@ -93,11 +105,33 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
                 .unwrap_or_else(|| Path::new("."))
                 .join(".grapher-workspaces")
         });
-    let output = Command::new("node")
-        .arg(host_path(&installation_root().join("scripts/prepare-native-runtime.mjs")))
-        .env("GRAPHER_NATIVE_RUNTIME_PARENT", &runtime_parent)
-        .output()
-        .map_err(|error| format!("Cannot start native runtime preparation with Node: {error}"))?;
+    // Reclaim copies left by earlier backends, including crashes. Each live
+    // backend holds its own copy's lease, even when it uses another data root.
+    match crate::native_runtime_storage::unused(&runtime_parent, false) {
+        Ok(copies) => for copy in copies {
+            if let Err(error) = crate::native_runtime_storage::remove(&copy) {
+                eprintln!("[Grapher] {error}");
+            }
+        },
+        Err(error) => eprintln!("[Grapher] Cannot clean old native runtimes: {error}"),
+    }
+    let preparation = crate::native_runtime_storage::Preparation::new(&runtime_parent)?;
+    let mut command = Command::new("node");
+    command.arg(host_path(&installation_root().join("scripts/prepare-native-runtime.mjs")))
+        .env("GRAPHER_NATIVE_RUNTIME_PARENT", host_path(&runtime_parent))
+        .env("GRAPHER_NATIVE_RUNTIME_DIR", host_path(preparation.directory()))
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::process_control::configure_command(&mut command);
+    // Shared preparation is backend-owned, not cancelled with one particular
+    // Run. Track its copier/Git descendants so exit cannot leave them writing.
+    let output = crate::process_control::with_owner("native-runtime", || {
+        let mut child = command.spawn().map_err(|error| format!("Cannot start native runtime preparation with Node: {error}"))?;
+        let tree = crate::process_control::track(&child).map_err(|error| {
+            let _ = child.kill(); let _ = child.wait(); error
+        })?;
+        if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) { tree.terminate(); }
+        child.wait_with_output().map_err(|error| error.to_string())
+    })?;
     if !output.status.success() {
         return Err(format!(
             "Cannot prepare native Pi runtime (exit {}): {}",
@@ -113,10 +147,14 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
             root.display()
         )
     })?;
+    if root != preparation.directory() {
+        return Err("Native runtime preparation returned a different destination".into());
+    }
     if !root.join("engine/entrypoint.mjs").is_file() {
         return Err("Incomplete native runtime: engine entrypoint is missing".into());
     }
-    *cached = Some(root.clone());
+    if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) { return Err("Backend is shutting down".into()); }
+    *cached = Some(preparation.commit());
     Ok(root)
 }
 
@@ -549,23 +587,22 @@ export default function () {
     }
 
     #[test]
-    fn planner_source_aliases_do_not_select_a_private_launcher() {
+    fn planning_roles_use_source_aliases_without_private_workspaces_or_engine_copies() {
         let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source space");
+        let source = temp.path().join("源项目 space # %");
         fs::create_dir(&source).unwrap();
         let canonical = source.canonicalize().unwrap();
-        let mut aliases = vec![source.clone(), canonical.clone()];
-        #[cfg(unix)]
-        {
-            let alias = temp.path().join("source-link");
-            std::os::unix::fs::symlink(&source, &alias).unwrap();
-            aliases.push(alias);
-        }
-        for cwd in aliases.drain(..) {
-            let command = execution_command(PiRole::Planner, &source, &cwd, temp.path(), temp.path()).unwrap();
-            assert_eq!(command.get_program(), std::ffi::OsStr::new("node"));
-            assert_eq!(command.get_current_dir().unwrap().canonicalize().unwrap(), canonical);
-            assert!(!temp.path().join(".grapher-workspaces").exists());
+        let alias = temp.path().join("source-link");
+        crate::path_safety::directory_link(&source, &alias);
+        for role in [PiRole::Partitioner, PiRole::Planner] {
+            for cwd in [&source, &canonical, &alias] {
+                let command = execution_command(role, &source, cwd, temp.path(), temp.path()).unwrap();
+                assert_eq!(command.get_program(), std::ffi::OsStr::new("node"));
+                assert_eq!(command.get_current_dir().unwrap().canonicalize().unwrap(), canonical);
+                assert_eq!(command.get_args().next(), Some(host_path(&installation_root().join("engine/entrypoint.mjs")).as_os_str()));
+                assert!(!temp.path().join(".grapher-workspaces").exists());
+                assert!(!temp.path().join(".grapher-worktrees").exists());
+            }
         }
     }
 

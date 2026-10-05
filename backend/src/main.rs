@@ -32,6 +32,13 @@ fn main() {
         println!("{}", result.unwrap_or_else(|error| serde_json::json!({ "diagnostics": [{ "code": "E000", "message": error.to_string() }] })));
         return;
     }
+    if std::env::args().nth(1).as_deref() == Some("--cleanup-workspaces") {
+        if let Err(error) = grapher::maintenance::cleanup_workspaces(std::env::args().skip(2).collect()) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if matches!(std::env::args().nth(1).as_deref(), Some("--compact" | "--migrate")) {
         if let Err(error) = grapher::server::compact_output_chunks() {
             eprintln!("{error}");

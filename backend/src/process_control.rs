@@ -35,6 +35,11 @@ static PROCESSES: OnceLock<Mutex<Vec<(String, Weak<ProcessTreeInner>)>>> = OnceL
 thread_local! { static OWNER: RefCell<String> = const { RefCell::new(String::new()) }; }
 
 /// Bind process launches in this thread to an individual Run.
+#[cfg(not(feature = "fixture"))]
+pub(crate) fn current_owner() -> Option<String> {
+    OWNER.with(|owner| { let owner = owner.borrow(); (!owner.is_empty()).then(|| owner.clone()) })
+}
+
 pub fn with_owner<T>(run_id: &str, work: impl FnOnce() -> T) -> T {
     struct Restore(String);
     impl Drop for Restore {

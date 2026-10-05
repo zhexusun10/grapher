@@ -102,12 +102,8 @@ pub fn resolve_with_merger_for_node(
     let id = Uuid::new_v4().to_string();
     let incoming = pending(repository).ok_or("No pending merge to resolve")?;
     let directory = root.join("mergers").join(&id);
-    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    let mut log = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(directory.join("output.jsonl"))
-        .map_err(|e| e.to_string())?;
+    // Commit ownership before allocation; even a failed mkdir/open belongs to
+    // this Run and can be reclaimed when the conversation is deleted.
     emit(EventKind::MergerStarted {
         execution: Execution {
             id: id.clone(),
@@ -125,6 +121,17 @@ pub fn resolve_with_merger_for_node(
             metrics: None,
         },
     })?;
+    let mut log = match (|| -> Result<_, String> {
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        OpenOptions::new().create_new(true).write(true).open(directory.join("output.jsonl"))
+            .map_err(|error| error.to_string())
+    })() {
+        Ok(log) => log,
+        Err(error) => {
+            emit(EventKind::MergerFailed { execution_id: id, error: error.clone(), output_bytes: 0, metrics: None })?;
+            return Err(error);
+        }
+    };
     let prompt = merger_prompt(query);
     // Make native Git commands work in a plain folder without adding a .git
     // entry there. This environment is scoped to the merger process tree;

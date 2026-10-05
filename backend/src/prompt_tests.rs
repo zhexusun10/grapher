@@ -1366,6 +1366,62 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
 
 #[cfg(feature = "fixture")]
 #[test]
+fn partitioner_and_planner_share_source_cwd_and_create_only_session_data_before_approval() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let repo = crate::fixture::repository(&project).unwrap();
+    fs::write(repo.join("source-marker"), "source only").unwrap();
+    let script = temp.path().join("planning-source.sh");
+    fs::write(&script, r#"cat >/dev/null
+test -f source-marker || exit 17
+case "$GRAPHER_MODE" in
+  partition)
+    printf '%s' "$GRAPHER_WORKSPACE_ROOT" > partition-cwd.txt
+    printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"parallel"}]}}'
+    ;;
+  planner)
+    printf '%s' "$GRAPHER_WORKSPACE_ROOT" > planner-cwd.txt
+    printf '%s' '{"originalGoal":"test","nodes":[{"name":"worker","task":"test"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+    printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
+    ;;
+  *) exit 18 ;;
+esac
+"#).unwrap();
+    let root = temp.path().join("runtime");
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&root).unwrap()),
+        driving: AtomicBool::new(false), drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+    });
+    let config = Config {
+        repository: repo.to_string_lossy().into(), engine: "pi".into(),
+        pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
+        model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
+        max_parallel: 1, max_feedback: 0, auto_approve: false,
+    };
+    let snapshot = plan_goal_internal("test".into(), config, None, None, None, &service,
+        |_| {}, |_| {}, |_| {}).unwrap();
+    assert_eq!(snapshot.phase, "awaiting_approval");
+    assert!(snapshot.executions.is_empty());
+    let canonical = repo.canonicalize().unwrap();
+    for role in ["partition", "planner"] {
+        let cwd = fs::read_to_string(repo.join(format!("{role}-cwd.txt"))).unwrap();
+        assert_eq!(PathBuf::from(cwd).canonicalize().unwrap(), canonical);
+    }
+    let attempt = root.join("planning").join(snapshot.planning_id.as_ref().unwrap());
+    assert!(attempt.join("partition-session").is_dir());
+    assert!(attempt.join("planner-session").is_dir());
+    assert!(attempt.join("graph.json").is_file());
+    assert_eq!(PathBuf::from(fs::read_to_string(attempt.join("planner-workspace")).unwrap()).canonicalize().unwrap(), canonical);
+    for parent in [temp.path(), repo.parent().unwrap()] {
+        assert!(!parent.join(".grapher-workspaces").exists());
+        assert!(!parent.join(".grapher-worktrees").exists());
+    }
+    assert!(!repo.join("graph.json").exists());
+}
+
+#[cfg(feature = "fixture")]
+#[test]
 fn partitioner_receives_unmodified_goal() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = crate::fixture::repository(temp.path()).unwrap();
@@ -1588,6 +1644,28 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
 }
 
 #[cfg(feature = "fixture")]
+#[test]
+fn legacy_planner_identity_survives_its_already_cleaned_private_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source");
+    let session = temp.path().join("session");
+    fs::create_dir(&repository).unwrap();
+    fs::create_dir(&session).unwrap();
+    let id = Uuid::new_v4().to_string();
+    let private = temp.path().join(".grapher-workspaces").join(Uuid::new_v4().to_string()).join(&id);
+    let history = "{\"type\":\"message\",\"opaque\":\"preserve exactly\"}\n";
+    fs::write(session.join("conversation.jsonl"), format!("{}\n{history}", serde_json::json!({"type":"session","id":id,"cwd":private}))).unwrap();
+    assert_eq!(stored_planner_session_id(&session, &repository, &private, &id).unwrap(), Some(id.clone()));
+    let foreign = temp.path().join(".grapher-workspaces").join(Uuid::new_v4().to_string()).join(&id);
+    assert!(stored_planner_session_id(&session, &repository, &foreign, &id).is_err());
+    rebind_planner_session(&session, &id, &repository).unwrap();
+    let text = fs::read_to_string(session.join("conversation.jsonl")).unwrap();
+    assert!(text.ends_with(history));
+    let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(header["id"], id);
+    assert_eq!(PathBuf::from(header["cwd"].as_str().unwrap()).canonicalize().unwrap(), repository.canonicalize().unwrap());
+}
+
 #[test]
 fn legacy_planner_session_rebinds_only_its_cwd_and_preserves_history() {
     let temp = tempfile::TempDir::new().unwrap();

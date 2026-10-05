@@ -1021,6 +1021,9 @@ mod planner_symlink_tests {
     }
 }
 
+/// Legacy private-Planner checkout helper (not used by current planning).
+/// Current Partitioner/Planner sessions run in source; these helpers remain for
+/// legacy checkout/publication compatibility tests.
 /// Snapshot the source into a private Planner checkout. The source lock is held
 /// only while taking this copy, never while Pi is running. Include ignored
 /// project files (e.g. dependencies), but never Git internals or Grapher data.

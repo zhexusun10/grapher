@@ -188,6 +188,7 @@ impl Runtime {
     }
 
     pub fn emit(&mut self, mut kind: EventKind) -> Result<(), String> {
+        crate::cleanup::remember_event(&self.store, &self.state, &kind)?;
         if let EventKind::MergerFailed { execution_id, error, .. } = &kind {
             self.store.ensure_legacy_logs(&self.state.run_id, execution_id)?;
             self.store.append(&mut self.state, EventKind::Output {
@@ -285,69 +286,38 @@ impl Runtime {
                 .any(|node| node.status == "running")
     }
 
-    /// Remove only the worktree directory owned by this run. Failed runs retain
-    /// their checkout until explicitly reset/deleted so conflicts can be inspected.
+    /// Keep sessions for follow-ups, but persist workspace cleanup before any
+    /// removal. Failed cleanup is retried without relying on a source binding.
     pub fn cleanup_worktrees(&self) -> Result<(), String> {
-        if self.is_serial() || Uuid::parse_str(&self.state.run_id).is_err() {
-            return Ok(());
-        }
-        let Some(config) = &self.state.config else {
-            return Ok(());
+        if self.state.run_id.is_empty() { return Ok(()); }
+        let mut targets = self.store.owned_cleanup_targets(&self.state.run_id)?;
+        targets.retain(|target| matches!(target, crate::cleanup::Target::Workspace { .. }));
+        // Queue before collecting/validating filesystem metadata. A temporarily
+        // unreadable legacy marker or linked root must not lose the retry.
+        let manifest = crate::cleanup::Manifest {
+            targets, sequence: Some(self.state.events.last().map_or(0, |event| event.sequence)),
+            ..Default::default()
         };
-        let repository = Path::new(&config.repository);
-        if !repository.is_absolute() {
-            return Ok(());
+        self.store.enqueue_cleanup(&self.state.run_id, &manifest)?;
+        self.retry_cleanup(&self.state.run_id)
+    }
+
+    pub fn retry_cleanup(&self, run_id: &str) -> Result<(), String> {
+        if let Some(task) = self.store.cleanup_task(run_id)? {
+            crate::cleanup::attempt(&self.root, &self.store, &task)?;
         }
-        // Workspaces were allocated beside the physical source, not a source
-        // alias. Missing bindings can be reset, but cannot authorize deletion.
-        let repository = match repository.canonicalize() {
-            Ok(path) if path.is_dir() => path,
-            Ok(_) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.to_string()),
-        };
-        let Some(parent) = repository.parent() else {
-            return Ok(());
-        };
-        let mut removals = Vec::new();
-        let dir = parent.join(".grapher-worktrees").join(&self.state.run_id);
-        if let Some(dir) = crate::path_safety::real_child_path(parent, &dir, false)? {
-            removals.push(dir);
-        }
-        let workspaces = parent.join(".grapher-workspaces");
-        let mut owners = vec![self.state.run_id.clone()];
-        // The original primary Run may have allocated its UUID after planning.
-        // Its private checkout is named by the first planning attempt instead.
-        if let Some(planning_id) = &self.state.planning_id {
-            if let Ok(path) = fs::read_to_string(
-                self.root
-                    .join("planning")
-                    .join(planning_id)
-                    .join("planner-workspace"),
-            ) {
-                if let Some(owner) = Path::new(&path)
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|name| name.to_str())
-                {
-                    if Uuid::parse_str(owner).is_ok()
-                        && Path::new(&path).parent().and_then(|path| path.canonicalize().ok())
-                            .is_some_and(|actual| workspaces.join(owner).canonicalize().ok().as_ref() == Some(&actual))
-                    {
-                        owners.push(owner.to_owned());
-                    }
+        Ok(())
+    }
+
+    /// Safe without another Run's runtime mutex: deleted IDs cannot be reused,
+    /// and stale writers are rejected by the store's deletion tombstones.
+    pub fn retry_deleted_cleanups(&self) -> Result<(), String> {
+        for task in self.store.pending_cleanups()? {
+            if task.manifest.sequence.is_none() {
+                if let Err(error) = crate::cleanup::attempt(&self.root, &self.store, &task) {
+                    eprintln!("[Grapher] Pending cleanup {}: {error}", task.run_id);
                 }
             }
-        }
-        for owner in owners {
-            let path = workspaces.join(owner);
-            if let Some(path) = crate::path_safety::real_child_path(parent, &path, false)? {
-                if !removals.contains(&path) { removals.push(path); }
-            }
-        }
-        // Validate every ownership path before the first destructive operation.
-        for path in removals {
-            fs::remove_dir_all(path).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -371,57 +341,53 @@ impl Runtime {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());
         }
-        self.cleanup_worktrees()?;
-        self.store.clear()?;
+        let mut cleanups = Vec::new();
+        for run_id in self.store.runs()? {
+            let stored;
+            let state = if run_id == self.state.run_id { &self.state } else {
+                stored = self.store.load(&run_id)?;
+                &stored
+            };
+            if matches!(state.phase.as_str(), "planning" | "publishing" | "merging")
+                || state.nodes.values().any(|node| node.status == "running") {
+                return Err("Cannot clear history while another Run is active; reopen interrupted Runs first".into());
+            }
+            cleanups.push((run_id, crate::cleanup::manifest(&self.root, &self.store, state, true)?));
+        }
+        // Validate every directory first, then atomically transfer ownership to
+        // the cleanup queue with deletion. Filesystem failure cannot orphan it.
+        self.store.clear_with_cleanup(&cleanups)?;
         let current_config = self.state.config.clone();
-        self.state = Snapshot {
-            config: current_config,
-            ..Snapshot::default()
-        };
+        self.state = Snapshot { config: current_config, ..Snapshot::default() };
         self.touch();
+        if let Err(error) = self.retry_deleted_cleanups() {
+            eprintln!("[Grapher] History cleared; filesystem cleanup remains queued: {error}");
+        }
         Ok(())
     }
 
     pub fn delete_run(&mut self, run_id: &str) -> Result<(), String> {
-        if self.state.run_id == run_id && self.active() {
-            return Err("Cannot delete the currently running execution".into());
-        }
-        let target_config = if self.state.run_id == run_id {
-            self.state.config.clone()
-        } else {
-            self.store.load(run_id).ok().and_then(|state| state.config)
+        let stored;
+        let target = if self.state.run_id == run_id { &self.state } else {
+            stored = self.store.load(run_id)?;
+            &stored
         };
-        let repository = target_config
-            .as_ref()
-            .map(|config| PathBuf::from(&config.repository));
+        if matches!(target.phase.as_str(), "planning" | "publishing" | "merging")
+            || target.nodes.values().any(|node| node.status == "running") {
+            return Err("Cannot delete a running execution".into());
+        }
+        let manifest = crate::cleanup::manifest(&self.root, &self.store, target, true)?;
         let deleting_current = self.state.run_id == run_id;
-        let remove_shadow = if let Some(repository) = repository.as_deref() {
-            if repository.is_dir() && !workspace::is_standard_git(repository) {
-                !self
-                    .store
-                    .has_other_run_for_repository(run_id, repository)?
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if deleting_current {
-            self.cleanup_worktrees()?;
-        }
-        if remove_shadow {
-            if let Some(repository) = repository.as_deref() {
-                workspace::remove_shadow_repo(repository)?;
-            }
-        }
-        self.store.delete_run(run_id)?;
+        self.store.delete_run_with_cleanup(run_id, Some(&manifest))?;
         if deleting_current {
             let current_config = self.state.config.clone();
-            self.state = Snapshot {
-                config: current_config,
-                ..Snapshot::default()
-            };
+            self.state = Snapshot { config: current_config, ..Snapshot::default() };
             self.touch();
+        }
+        // Logical deletion has committed. Report filesystem failures through
+        // the durable queue, not an error that would retain a stale UI/service.
+        if let Err(error) = self.retry_cleanup(run_id) {
+            eprintln!("[Grapher] Run {run_id} deleted; filesystem cleanup remains queued: {error}");
         }
         Ok(())
     }

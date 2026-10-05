@@ -92,14 +92,150 @@ fn cleanup_unlinks_nested_directory_links_without_following_their_targets() {
 }
 
 #[test]
-fn missing_source_binding_can_reset_but_does_not_authorize_directory_deletion() {
+fn missing_source_binding_still_cleans_previously_recorded_workspace_ownership() {
     let (temp, source, mut runtime) = setup(true, single());
     let retained = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
     fs::create_dir_all(&retained).unwrap();
     fs::write(retained.join("marker"), "retained").unwrap();
     fs::rename(&source, temp.path().join("moved-source")).unwrap();
     runtime.reset_workspace().unwrap();
-    assert_eq!(fs::read_to_string(retained.join("marker")).unwrap(), "retained");
+    assert!(!retained.exists());
+    assert_eq!(fs::read_to_string(temp.path().join("moved-source/tracked.txt")).unwrap(), "original");
+}
+
+#[test]
+fn deleting_a_historical_run_recursively_cleans_its_nodes_without_changing_selection() {
+    for git in [false, true] {
+        let (temp, source, mut runtime) = setup(git, single());
+        let historical = runtime.state.run_id.clone();
+        let config = runtime.state.config.clone().unwrap();
+        runtime.create(single(), config).unwrap();
+        runtime.set_route("graph").unwrap();
+        let current = runtime.state.run_id.clone();
+        for name in [".grapher-worktrees", ".grapher-workspaces"] {
+            for id in [&historical, &current] {
+                let path = temp.path().join(name).join(id).join("node/retry/dependencies");
+                fs::create_dir_all(&path).unwrap();
+                fs::write(path.join("large-file"), "owned node data").unwrap();
+            }
+        }
+        runtime.delete_run(&historical).unwrap();
+        for name in [".grapher-worktrees", ".grapher-workspaces"] {
+            assert!(!temp.path().join(name).join(&historical).exists());
+            assert!(temp.path().join(name).join(&current).join("node/retry/dependencies/large-file").is_file());
+        }
+        assert_eq!(runtime.state.run_id, current);
+        assert_eq!(runtime.store.selected_run().unwrap().as_deref(), Some(current.as_str()));
+        assert!(!runtime.store.contains_run(&historical).unwrap());
+        assert!(source.join("tracked.txt").is_file());
+    }
+}
+
+#[test]
+fn deleting_a_run_cleans_earlier_planner_copies_and_uncommitted_revision_attempts() {
+    let (temp, source, mut runtime) = setup(true, single());
+    let first = Uuid::new_v4().to_string();
+    let latest = Uuid::new_v4().to_string();
+    let failed_revision = Uuid::new_v4().to_string();
+    let owner = Uuid::new_v4().to_string();
+    runtime.create_with_planning(single(), runtime.state.config.clone().unwrap(),
+        Some(first.clone()), None).unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let legacy = temp.path().join(".grapher-workspaces").join(&owner).join(&first);
+    let failed = temp.path().join(".grapher-workspaces").join(&owner).join(&failed_revision);
+    let sibling = temp.path().join(".grapher-workspaces").join(&owner).join(Uuid::new_v4().to_string());
+    for path in [&legacy, &failed, &sibling] {
+        fs::create_dir_all(path.join("node/dependencies")).unwrap();
+        fs::write(path.join("node/dependencies/marker"), "owned").unwrap();
+    }
+    for (id, workspace) in [(&first, &legacy), (&latest, &source), (&failed_revision, &failed)] {
+        let attempt = runtime.root.join("planning").join(id);
+        fs::create_dir_all(&attempt).unwrap();
+        fs::write(attempt.join("planner-workspace"), workspace.to_string_lossy().as_bytes()).unwrap();
+    }
+    fs::write(runtime.root.join("planning").join(&failed_revision).join("request.json"),
+        serde_json::json!({"revisionRunId": run_id}).to_string()).unwrap();
+    runtime.emit(EventKind::GraphRevised {
+        graph: single(), planning_id: latest.clone(), planning: PlanningSummary {
+            planning_id: latest.clone(), ..Default::default()
+        }, invalidated: Vec::new(), source_head: None,
+    }).unwrap();
+    assert_eq!(runtime.state.planning_id.as_deref(), Some(latest.as_str()));
+    runtime.delete_run(&run_id).unwrap();
+    assert!(!legacy.exists(), "Created's earlier planning marker must not be forgotten");
+    assert!(!failed.exists(), "failed revision requests also own their private copies");
+    assert!(sibling.join("node/dependencies/marker").is_file(), "do not remove another owner's siblings");
+    assert!(source.join("tracked.txt").is_file(), "modern source cwd is not a deletion target");
+}
+
+#[test]
+fn serial_cleanup_removes_owned_private_leftovers_but_never_the_source_cwd() {
+    let (temp, source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    for name in [".grapher-worktrees", ".grapher-workspaces"] {
+        fs::create_dir_all(temp.path().join(name).join(&runtime.state.run_id).join("old-node/dependencies")).unwrap();
+    }
+    let id = runtime.state.run_id.clone();
+    runtime.delete_run(&id).unwrap();
+    for name in [".grapher-worktrees", ".grapher-workspaces"] {
+        assert!(!temp.path().join(name).join(&id).exists());
+    }
+    assert_eq!(fs::read_to_string(source.join("tracked.txt")).unwrap(), "original");
+}
+
+#[test]
+fn clearing_history_cleans_every_saved_run_and_preserves_unknown_directories() {
+    let (temp, source, mut runtime) = setup(true, single());
+    let mut ids = vec![runtime.state.run_id.clone()];
+    for _ in 0..2 {
+        runtime.create(single(), runtime.state.config.clone().unwrap()).unwrap();
+        ids.push(runtime.state.run_id.clone());
+    }
+    let unknown = Uuid::new_v4().to_string();
+    for name in [".grapher-worktrees", ".grapher-workspaces"] {
+        for id in ids.iter().chain(std::iter::once(&unknown)) {
+            let path = temp.path().join(name).join(id).join("nested/node");
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("marker"), "workspace").unwrap();
+        }
+    }
+    runtime.clear_history().unwrap();
+    for name in [".grapher-worktrees", ".grapher-workspaces"] {
+        for id in &ids { assert!(!temp.path().join(name).join(id).exists()); }
+        assert!(temp.path().join(name).join(&unknown).join("nested/node/marker").is_file());
+    }
+    assert!(runtime.store.runs().unwrap().is_empty());
+    assert!(source.join("tracked.txt").is_file());
+}
+
+#[test]
+fn failed_historical_cleanup_keeps_database_ownership_for_retry() {
+    let (temp, _source, mut runtime) = setup(true, single());
+    let old_id = runtime.state.run_id.clone();
+    runtime.create(single(), runtime.state.config.clone().unwrap()).unwrap();
+    let retained = temp.path().join(".grapher-worktrees").join(&old_id);
+    fs::create_dir_all(&retained).unwrap();
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(outside.join(&old_id)).unwrap();
+    crate::path_safety::directory_link(&outside, &temp.path().join(".grapher-workspaces"));
+    assert!(runtime.delete_run(&old_id).is_err());
+    assert!(runtime.store.contains_run(&old_id).unwrap());
+    assert!(retained.is_dir(), "validate all targets before deleting the first one");
+    assert!(outside.join(&old_id).is_dir());
+}
+
+#[test]
+fn deleting_a_noncurrent_running_run_is_rejected() {
+    let (temp, _source, mut worker) = setup(true, single());
+    worker.approve().unwrap();
+    worker.jobs().unwrap();
+    let id = worker.state.run_id.clone();
+    let path = temp.path().join(".grapher-worktrees").join(&id);
+    fs::create_dir_all(&path).unwrap();
+    let mut idle = worker.open_run("").unwrap();
+    assert!(idle.delete_run(&id).unwrap_err().contains("running"));
+    assert!(path.is_dir());
+    assert!(worker.store.contains_run(&id).unwrap());
 }
 
 #[test]

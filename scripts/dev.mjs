@@ -138,7 +138,7 @@ const backend = spawn(findCargoExecutable() ?? "cargo", ["run", "--manifest-path
   ...childOptions(),
   // Dev restarts must not replay a settled Run's multi-hundred-MB transcript
   // log before the server is reachable. The browser loads Runs on demand.
-  env: { ...process.env, GRAPHER_DEV_LAZY_PRIMARY: "1" },
+  env: { ...process.env, GRAPHER_DEV_LAZY_PRIMARY: "1", GRAPHER_DEV_HIDE_BACKEND_URL: "1" },
 });
 children.push(backend);
 
@@ -166,8 +166,6 @@ try {
 }
 
 if (stopping) process.exit(process.exitCode ?? 0);
-
-console.log(`[dev] Backend ready on http://127.0.0.1:${backendPort}.`);
 
 console.log(`[dev] Starting frontend (vite)...`);
 const frontend = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1"], childOptions());

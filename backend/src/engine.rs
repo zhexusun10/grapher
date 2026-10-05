@@ -136,7 +136,19 @@ fn start_warm_partitioner_at(config: &Config, data: &Path) -> Result<(), String>
     let session_dir = data
         .join("partition-workers")
         .join(uuid::Uuid::new_v4().to_string());
+    struct PendingDirectory(PathBuf, bool);
+    impl Drop for PendingDirectory {
+        fn drop(&mut self) {
+            if !self.1 {
+                if let Err(error) = fs::remove_dir_all(&self.0) {
+                    if error.kind() != std::io::ErrorKind::NotFound { eprintln!("[Grapher] Partitioner cleanup deferred: {error}"); }
+                }
+            }
+        }
+    }
+    let mut pending = PendingDirectory(session_dir.clone(), false);
     fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
+    fs::write(session_dir.join(".grapher-partition-worker.json"), r#"{"kind":"grapher-partition-worker","version":1}"#).map_err(|e| e.to_string())?;
     let prompt_path = session_dir.join("system-prompt.md");
     fs::write(&prompt_path, &key.3).map_err(|e| e.to_string())?;
     let mut command = crate::native::command(PiRole::Partitioner, &key.0, &key.0)?;
@@ -186,12 +198,8 @@ fn start_warm_partitioner_at(config: &Config, data: &Path) -> Result<(), String>
         let _ = child.wait();
         error
     })?;
-    *slot = Some(WarmPartitioner {
-        child,
-        tree,
-        session_dir,
-        key,
-    });
+    *slot = Some(WarmPartitioner { child, tree, session_dir, key });
+    pending.1 = true;
     Ok(())
 }
 
@@ -226,6 +234,16 @@ fn claim_warm_partitioner(config: &Config) -> Option<WarmPartitioner> {
     if slot.as_mut()?.child.try_wait().ok().flatten().is_some() {
         return None;
     }
+    // A failed copy-back must retain the actual Pi conversation with its Run,
+    // not strand it as an unowned idle-worker directory.
+    let directory = &slot.as_ref()?.session_dir;
+    let owner = process_control::current_owner()?;
+    let id = directory.file_name()?.to_str()?;
+    let data = directory.parent()?.parent()?;
+    let store = crate::store::Store::open(&data.join("events.sqlite")).ok()?;
+    store.remember_cleanup_targets(&owner, &std::collections::BTreeSet::from([
+        crate::cleanup::Target::data("partition-workers", id),
+    ])).ok()?;
     let worker = slot.take()?;
     if process_control::assign_to_current_owner(&worker.tree).is_err() {
         *slot = Some(worker);

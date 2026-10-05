@@ -16,10 +16,10 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 
 ## Planning and approval
 
-1. The Partitioner selects a route, unless the user explicitly selects Serial or Graph.
+1. The Partitioner classifies the goal directly in the bound source cwd, with no tools and no separate project checkout. It selects a route unless the user explicitly selects Serial or Graph.
 2. For Graph, the Planner runs directly in the bound source project directory, not a private copy.
 3. The Planner uses `node`, `edge`, `read`, and native `bash`. Bash writes are not filtered, and files appear in the source immediately, even if planning fails or is cancelled.
-4. Planning output and Graph IR are kept in the runtime/session directories. There is no separate Planner publication or preview merge.
+4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records the source path for session/legacy compatibility; it is not a directory allocation.
 5. The graph is validated and presented for approval. Approval snapshots the source's current non-ignored changes as the execution baseline; node workspaces are then allocated.
 
 **Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Planner commands change the source before approval. Reject, failure, and cancellation do not undo those changes, Git commits, or external command side effects. Existing user changes can also be staged and committed during source snapshots.
@@ -96,15 +96,19 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
 
 ```text
 .grapher/
-  events.sqlite          # Events, execution-log chunks, and metadata
+  events.sqlite          # Events, log chunks, ownership and durable cleanup tasks
   runtime.lock           # One backend writer per data directory
   planning/              # Planning attempts and JSONL output
   sessions/              # Node Pi sessions
+  planner-sessions/      # Planner history for manually created Runs
+  partition-workers/     # Temporary idle Partitioner sessions
   mergers/               # Merger sessions/output (including composition attempts)
   shadow_repos/          # Git metadata for ordinary folders
 ```
 
-Graph workspaces live beside the project, not inside this data tree. Planner uses the source directory; legacy private Planner directories may remain until Run cleanup. Successful final publication attempts to clean that Run's workspaces; failed Runs retain their checkouts for inspection. Explicit reset/deletion also cleans owned Run directories. Session history and the shared prepared Pi runtime have separate lifecycles; do not assume deleting a workspace removes all history or secrets.
+Graph workspaces live beside the project. Successful publication/reset cleans owned workspaces but keeps Pi histories for follow-ups; failed Runs retain checkouts for recovery. Conversation deletion/clearing history also cleans owned Node/Planner/Merger histories, attachments and all historical planning attempts, preserving shared resources and source projects. Physical parents are recorded before allocation; legacy cleanup falls back to the saved absolute project's parent when the source is missing. A moved/deleted source therefore does not block cleanup of its exact Run workspace roots. Deletion and its cleanup manifest commit atomically; failed filesystem operations remain queued for startup/periodic retries. Workspace-only retries are event-generation guarded against follow-ups.
+
+Backend-created Pi runtime copies hold process-lifetime file leases. Failed preparations and graceful shutdown remove the copy after its process trees stop. Unused marked copies are reclaimed before the next preparation, including crash leftovers. Unknown legacy directories with lost ownership are retained rather than guessed away.
 
 Project dependencies are not automatically installed for node tasks. Shared HOME, temporary files, external services, and global environment state are outside Git version isolation.
 

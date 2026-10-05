@@ -795,6 +795,19 @@ fn stored_planner_session_id(
         .map_err(|error| error.to_string())?;
     // A migrated session already uses source cwd; its old private checkout
     // may have been removed by successful Run cleanup.
+    let erased_workspace = (|| -> Result<Option<String>, String> {
+        let Some(leaf) = workspace.file_name().and_then(|name| name.to_str()) else { return Ok(None); };
+        let Some(owner_dir) = workspace.parent() else { return Ok(None); };
+        let Some(owner) = owner_dir.file_name().and_then(|name| name.to_str()) else { return Ok(None); };
+        let Some(bucket) = owner_dir.parent() else { return Ok(None); };
+        if leaf != expected || Uuid::parse_str(leaf).is_err() || Uuid::parse_str(owner).is_err()
+            || bucket.file_name().is_none_or(|name| name != ".grapher-workspaces") { return Ok(None); }
+        let Some(parent) = bucket.parent().and_then(|parent| parent.canonicalize().ok()) else { return Ok(None); };
+        if crate::path_safety::real_child_path(&parent, &parent.join(".grapher-workspaces").join(owner).join(leaf), false)?.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(session_path_identity(workspace)))
+    })()?;
     let workspace = workspace.canonicalize().ok();
     let mut ids = std::collections::BTreeSet::new();
     let mut found_file = false;
@@ -828,7 +841,8 @@ fn stored_planner_session_id(
             .ok_or("Missing Planner session repository")?;
         if value.get("type").and_then(|kind| kind.as_str()) != Some("session")
             || Uuid::parse_str(id).is_err()
-            || !matches!(std::path::Path::new(cwd).canonicalize().ok().as_deref(), Some(path) if path == repository || workspace.as_deref() == Some(path))
+            || !(matches!(std::path::Path::new(cwd).canonicalize().ok().as_deref(), Some(path) if path == repository || workspace.as_deref() == Some(path))
+                || erased_workspace.as_ref().is_some_and(|path| *path == session_path_identity(std::path::Path::new(cwd))))
         {
             return Err("Planner session belongs to another repository or is invalid".into());
         }
@@ -844,6 +858,11 @@ fn stored_planner_session_id(
         return Ok(ids.into_iter().next());
     } // Legacy session with a random Pi ID.
     Err("Multiple Planner conversations found for one run; cannot select one safely".into())
+}
+
+fn session_path_identity(path: &std::path::Path) -> String {
+    let path = crate::native::host_path(path).to_string_lossy().into_owned();
+    if cfg!(windows) { path.replace('\\', "/").to_lowercase() } else { path }
 }
 
 /// Keep the same Pi identity/history when moving a legacy private Planner
@@ -1070,6 +1089,12 @@ fn plan_goal_internal_with_started(
             validate_planning_preflight(&config, mode).map_err(|error| (error, None))?;
             let planning_id = Uuid::new_v4().to_string();
             let directory = root.join("planning").join(&planning_id);
+            // Persist provisional ownership before the first filesystem write.
+            // Startup can reclaim an attempt that never reached PlanningStarted.
+            service.runtime.lock().map_err(|error| (error.to_string(), None))?.store
+                .remember_cleanup_targets(&owner, &std::collections::BTreeSet::from([
+                    crate::cleanup::Target::data("planning", &planning_id),
+                ])).map_err(|error| (error, None))?;
             fs::create_dir_all(&directory).map_err(|error| (error.to_string(), None))?;
             fs::write(
                 directory.join("request.json"),
@@ -2384,6 +2409,56 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     Ok(())
 }
 
+fn retry_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
+    let tasks = service.runtime.lock().map_err(|error| error.to_string())?.store.pending_cleanups()?;
+    for task in tasks {
+        let target = if task.manifest.sequence.is_some() {
+            match service_for_run(service, &task.run_id, false) {
+                Ok(target) => target,
+                Err(_) => service.clone(),
+            }
+        } else { service.clone() };
+        if task.manifest.sequence.is_some()
+            && (target.driving.load(Ordering::SeqCst) || target.planning.load(Ordering::SeqCst)) { continue; }
+        let runtime = target.runtime.lock().map_err(|error| error.to_string())?;
+        if task.manifest.sequence.is_some()
+            && (target.driving.load(Ordering::SeqCst) || target.planning.load(Ordering::SeqCst)) { continue; }
+        if let Err(error) = runtime.retry_cleanup(&task.run_id) {
+            eprintln!("[Grapher] Pending cleanup {}: {error}", task.run_id);
+        }
+    }
+    Ok(())
+}
+
+fn recover_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
+    {
+        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        runtime.store.backfill_cleanup_sources()?;
+        for id in runtime.store.orphaned_cleanup_owners()? {
+            let manifest = crate::cleanup::Manifest {
+                targets: runtime.store.owned_cleanup_targets(&id)?, ..Default::default()
+            };
+            runtime.store.delete_run_with_cleanup(&id, Some(&manifest))?;
+        }
+        for task in crate::cleanup::idle_partitioners(&runtime.root, &runtime.store)? {
+            runtime.store.delete_run_with_cleanup(&task.run_id, Some(&task.manifest))?;
+        }
+        // Catch successful publications whose cleanup was interrupted before
+        // queueing, including workspaces left by older versions.
+        for id in runtime.store.completed_workspace_runs()? {
+            if runtime.store.cleanup_task(&id)?.is_none() {
+                let state = runtime.store.load(&id)?;
+                runtime.store.enqueue_cleanup(&id, &crate::cleanup::Manifest {
+                    targets: runtime.store.owned_cleanup_targets(&id)?,
+                    sequence: Some(state.events.last().map_or(0, |event| event.sequence)),
+                    ..Default::default()
+                })?;
+            }
+        }
+    }
+    retry_cleanup_tasks(service)
+}
+
 fn planning_attachment_path(
     dir: &std::path::Path,
     index: usize,
@@ -3253,6 +3328,7 @@ pub fn dispatch(
         "reset_workspace" => to_value(reset_workspace(service)?),
         "clear_history" => to_value(clear_history(service)?),
         "delete_run" => to_value(delete_run(argument(&body, "runId")?, service)?),
+        "get_cleanup_status" => to_value(service.runtime.lock().map_err(|error| error.to_string())?.store.pending_cleanups()?),
         _ => return Err("Unknown command".into()),
     };
     let mut value = result.map_err(|error| error.to_string())?;
@@ -3498,6 +3574,7 @@ pub fn run() -> Result<(), String> {
     #[cfg(not(feature = "fixture"))]
     crate::native::check_retired_leases(&root)?;
     recover_plannings(&service)?;
+    recover_cleanup_tasks(&service)?;
     // Warm Auto's idle RPC Partitioner and Graph's verified native runtime
     // while the frontend starts, not on the first planning request.
     #[cfg(not(feature = "fixture"))]
@@ -3527,6 +3604,20 @@ pub fn run() -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         requested
     };
+    let cleanup_stopped = Arc::new(AtomicBool::new(false));
+    let cleanup_stop = cleanup_stopped.clone();
+    let cleanup_service = Arc::downgrade(&service);
+    thread::spawn(move || {
+        while !cleanup_stop.load(Ordering::SeqCst) {
+            for _ in 0..300 {
+                if cleanup_stop.load(Ordering::SeqCst) { return; }
+                thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if let Some(service) = cleanup_service.upgrade() {
+                if let Err(error) = retry_cleanup_tasks(&service) { eprintln!("[Grapher] Cleanup retry failed: {error}"); }
+            } else { break; }
+        }
+    });
     let shutdown_service = service.clone();
     let shutdown_server = server.clone();
     thread::spawn(move || {
@@ -3540,6 +3631,8 @@ pub fn run() -> Result<(), String> {
             true
         };
         if stop {
+            cleanup_stopped.store(true, Ordering::SeqCst);
+            crate::native::begin_shutdown();
             #[cfg(not(feature = "fixture"))]
             crate::engine::stop_partition_prewarm();
             if let Ok(mut runtime) = shutdown_service.runtime.lock() {
@@ -3555,14 +3648,18 @@ pub fn run() -> Result<(), String> {
                 }
             }
             crate::engine::terminate_all();
+            crate::native::shutdown_runtime();
             crate::provider_auth::shutdown();
             shutdown_server.unblock();
         }
     });
-    eprintln!(
-        "Grapher backend: http://127.0.0.1:{port} (data: {})",
-        root.display()
-    );
+    // Dev uses Vite's frontend URL; do not invite users into stale dist assets.
+    if std::env::var_os("GRAPHER_DEV_HIDE_BACKEND_URL").is_none() {
+        eprintln!(
+            "Grapher backend: http://127.0.0.1:{port} (data: {})",
+            root.display()
+        );
+    }
     let web_root = crate::native::installation_root().join("dist");
     // Bounded workers keep slow HTTP clients (including SSE streams) from
     // creating an unbounded number of OS threads.

@@ -10,6 +10,41 @@ fn service(root: &std::path::Path) -> Arc<Service> {
     })
 }
 
+#[test]
+fn startup_cleanup_recovers_unqueued_completed_workspaces_and_provisional_attempts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("data");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let primary = service(&root);
+    let id = {
+        let mut runtime = primary.runtime.lock().unwrap();
+        runtime.create(Graph { original_goal: "test".into(), nodes: vec![Node { name: "task".into(), task: "test".into() }], edges: vec![] }, config(&source)).unwrap();
+        runtime.emit(EventKind::PublicationCompleted { head: "test".into() }).unwrap();
+        runtime.state.run_id.clone()
+    };
+    let workspace = temp.path().join(".grapher-worktrees").join(&id).join("node/dependencies");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("file"), "owned").unwrap();
+    let owner = Uuid::new_v4().to_string();
+    let planning = Uuid::new_v4().to_string();
+    let provisional = root.join("planning").join(&planning);
+    primary.runtime.lock().unwrap().store.remember_cleanup_targets(&owner, &std::collections::BTreeSet::from([
+        crate::cleanup::Target::data("planning", &planning),
+    ])).unwrap();
+    fs::create_dir_all(&provisional).unwrap();
+    fs::write(provisional.join("partial-output"), "incomplete request").unwrap();
+    recover_cleanup_tasks(&primary).unwrap();
+    assert!(!workspace.exists());
+    assert!(!provisional.exists());
+    let runtime = primary.runtime.lock().unwrap();
+    assert!(runtime.store.contains_run(&id).unwrap());
+    assert!(runtime.store.run_was_deleted(&owner).unwrap());
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+    drop(runtime);
+    invalidate_service_cache(&root, None);
+}
+
 fn config(repository: &std::path::Path) -> Config {
     serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "mock/model", "maxParallel": 1
