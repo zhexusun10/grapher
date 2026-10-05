@@ -353,7 +353,7 @@ fn committed_deletion_keeps_cleanup_on_failure_and_retries_after_restart() {
         )
         .unwrap_err()
         .contains("deleted"));
-    fs::remove_dir(&session).unwrap();
+    crate::path_safety::remove_directory_link(&session);
     directory(&session);
     drop(runtime);
     let runtime = Runtime::open_lazy(&root).unwrap();
@@ -386,7 +386,7 @@ fn failed_completed_run_cleanup_is_durable_and_stale_generations_are_cancelled()
         .last_error
         .is_some());
     assert!(workspace.is_dir());
-    fs::remove_dir(&root).unwrap();
+    crate::path_safety::remove_directory_link(&root);
     runtime.retry_cleanup(&id).unwrap();
     assert!(!workspace.exists());
     assert!(runtime.store.completed_workspace_runs().unwrap().is_empty());

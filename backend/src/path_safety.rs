@@ -86,6 +86,16 @@ pub(crate) fn directory_link(target: &Path, link: &Path) {
     }
 }
 
+/// Unlink a test directory link without removing its target.
+#[cfg(test)]
+pub(crate) fn remove_directory_link(link: &Path) {
+    // Unix directory symlinks are unlinked as files; Windows junctions as directories.
+    #[cfg(unix)]
+    fs::remove_file(link).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(link).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +117,27 @@ mod tests {
         }
         assert_eq!(
             fs::read_to_string(outside.join("run/marker")).unwrap(),
+            "must survive"
+        );
+    }
+
+    #[test]
+    fn removing_directory_links_preserves_their_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("marker"), "must survive").unwrap();
+        directory_link(&target, &link);
+
+        remove_directory_link(&link);
+
+        assert_eq!(
+            fs::symlink_metadata(&link).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("marker")).unwrap(),
             "must survive"
         );
     }
