@@ -19,19 +19,27 @@ test('production HTTP confines static paths and refuses linked workspace cleanup
   await new Promise(done => listener.close(done));
   const target = resolve(process.env.CARGO_TARGET_DIR || 'backend/target');
   const agent = join(directory, 'agent');
+  const source = join(directory, 'source');
+  const external = join(directory, 'external');
   await mkdir(agent);
+  await mkdir(source);
+  await mkdir(external);
+  await writeFile(join(source, 'file.txt'), 'source');
   const backend = spawn(join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`), [], {
+    // Keep automatic repository discovery scoped to the small test project.
+    cwd: source,
     env: { ...process.env, GRAPHER_DATA_DIR: join(directory, 'data'), GRAPHER_PORT: String(port),
       PI_CODING_AGENT_DIR: agent, GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime') },
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   let diagnostics = '';
   let spawnError;
+  backend.stdout.on('data', bytes => { diagnostics += bytes; });
   backend.stderr.on('data', bytes => { diagnostics += bytes; });
   backend.on('error', error => { spawnError = error; });
-  const api = async (command, body = {}) => {
+  const api = async (command, body = {}, timeoutMs = 5000) => {
     const response = await fetch(`http://127.0.0.1:${port}/api/${command}`, { method: 'POST',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) });
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
     const payload = await response.json();
     if (!response.ok || payload.error) throw new Error(payload.error || String(response.status));
     return payload.result;
@@ -47,10 +55,23 @@ test('production HTTP confines static paths and refuses linked workspace cleanup
     req.end();
   });
   try {
-    for (let attempt = 0; ; attempt++) {
+    const startupTimeoutMs = 30_000;
+    const startupDeadline = Date.now() + startupTimeoutMs;
+    let lastProbeError = 'No HTTP probe completed';
+    for (;;) {
       if (spawnError) throw spawnError;
-      assert.ok(backend.exitCode === null && attempt < 100, diagnostics || 'Backend did not start');
-      try { await api('snapshot'); break; } catch {}
+      if (backend.exitCode !== null || backend.signalCode !== null) {
+        throw new Error(`Backend exited before becoming ready (code: ${backend.exitCode}, signal: ${backend.signalCode})\n${diagnostics}`);
+      }
+      const remainingMs = startupDeadline - Date.now();
+      assert.ok(remainingMs > 0,
+        `Backend did not become ready within ${startupTimeoutMs}ms (PID: ${backend.pid}, port: ${port})\nLast HTTP probe: ${lastProbeError}\n${diagnostics}`);
+      try {
+        await api('snapshot', {}, Math.min(1000, remainingMs));
+        break;
+      } catch (error) {
+        lastProbeError = `${error}${error.cause ? `; ${error.cause}` : ''}`;
+      }
       await delay(50);
     }
     const failures = [];
@@ -58,11 +79,6 @@ test('production HTTP confines static paths and refuses linked workspace cleanup
       const status = await rawGet(path);
       if (status !== 404) failures.push(`Static path escaped the web root (${status}): ${path}`);
     }
-    const source = join(directory, 'source');
-    const external = join(directory, 'external');
-    await mkdir(source);
-    await mkdir(external);
-    await writeFile(join(source, 'file.txt'), 'source');
     const state = await api('save_graph', { graph: { originalGoal: 'hardening',
       nodes: [{ name: 'worker', task: 'never executed' }], edges: [] },
       config: { repository: source, model: 'unused', maxParallel: 1, maxFeedback: 0 } });
@@ -80,7 +96,7 @@ test('production HTTP confines static paths and refuses linked workspace cleanup
   } finally {
     if (backend.pid && backend.exitCode === null && backend.signalCode === null) {
       const exited = once(backend, 'exit');
-      if (process.platform === 'win32') execFileSync('taskkill', ['/PID', String(backend.pid), '/F'], { stdio: 'ignore' });
+      if (process.platform === 'win32') execFileSync('taskkill', ['/PID', String(backend.pid), '/T', '/F'], { stdio: 'ignore' });
       else backend.kill('SIGTERM');
       await exited;
     }
