@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import { useMemo } from "react";
 import type { Edge } from "@xyflow/react";
-import type { Graph, Plan, Snapshot } from "../types";
+import type { FeedbackExhaustion, Graph, Plan, Snapshot } from "../types";
 import { tokens } from "../tokens";
 import type { WorkNode } from "../components/graph/TaskNode";
 
@@ -26,6 +26,26 @@ export function indexGraphInputs(graph: Graph, executions: Snapshot["executions"
   }
   for (const execution of executions) add(attempts, execution.node, execution);
   return { incoming, outgoing, hints, attempts };
+}
+
+/** Show skipped verdicts only for the current completed execution and route. */
+export function indexFeedbackExhaustion(state: Pick<Snapshot, "graph" | "nodes" | "executions" | "events" | "supersededExecutionIds">) {
+  const latest = new Map<string, Snapshot["executions"][number]>();
+  const superseded = new Set(state.supersededExecutionIds ?? []);
+  for (const execution of state.executions) {
+    if (!superseded.has(execution.id)) latest.set(execution.node, execution);
+  }
+  const routes = new Set(state.graph.edges.filter(edge => edge.feedback).map(graphEdgeId));
+  const exhausted = new Map<string, FeedbackExhaustion>();
+  for (const event of state.events) {
+    if (event.type !== "feedback_exhausted" || !event.from || !event.to || event.count === undefined || event.limit === undefined) continue;
+    const execution = latest.get(event.from);
+    if (state.nodes[event.from]?.status === "done" && execution?.status === "completed" && execution.id === event.execution_id &&
+        routes.has(graphEdgeId({ from: event.from, to: event.to, feedback: true }))) {
+      exhausted.set(event.from, { from: event.from, to: event.to, count: event.count, limit: event.limit });
+    }
+  }
+  return exhausted;
 }
 
 export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string[][] {
@@ -134,6 +154,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
   }, [state.graph.edges, graphLayout]);
 
   const indexes = useMemo(() => indexGraphInputs(state.graph, state.executions), [state.graph, state.executions]);
+  const feedbackExhaustion = useMemo(() => indexFeedbackExhaustion(state), [state.graph, state.nodes, state.executions, state.events, state.supersededExecutionIds]);
   const mergerAttempts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const merger of state.mergers ?? []) counts.set(merger.node, (counts.get(merger.node) ?? 0) + 1);
@@ -161,6 +182,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
             .map((edge) => `${edge.from} → ${edge.to}: ${edge.relation}${edge.feedback ? " (feedback)" : ""}`)
             .join("\n"),
           reviewer: outgoing.some((edge) => edge.feedback),
+          feedbackExhaustion: feedbackExhaustion.get(node.name),
           selected: selected === node.name,
           worktree: nodeAttempts.at(-1)?.worktree ?? "",
           hasTop: incoming.some((edge) => route(edge)?.targetHandle === "top") || mergeTargets.has(node.name),
@@ -190,7 +212,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         },
       };
     })];
-  }, [state.graph, state.nodes, indexes, mergerAttempts, selected, graphLayout, edgeRouting, mergeTargets]);
+  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, selected, graphLayout, edgeRouting, mergeTargets]);
 
   const edges = useMemo<Edge[]>(() => {
     const graphEdges = state.graph.edges.map((edge) => {

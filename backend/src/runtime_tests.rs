@@ -35,6 +35,26 @@ fn single() -> Graph {
 }
 
 #[test]
+fn cached_graph_workspaces_keep_durable_cleanup_when_the_source_moves() {
+    let (temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    let checkout = PathBuf::from(&job.execution.worktree);
+    assert!(checkout.starts_with(crate::native::host_path(&workspace::workspaces_parent(&runtime.root)).join(".grapher-worktrees").join(&runtime.state.run_id)));
+    assert!(!temp.path().join(".grapher-worktrees").exists(), "new workspaces are not project-adjacent");
+    workspace::prepare(&source, &checkout, &job.execution.before, &[]).unwrap();
+    assert!(runtime.store.owned_cleanup_targets(&runtime.state.run_id).unwrap().iter().any(|target| {
+        matches!(target, crate::cleanup::Target::Workspace { parent, bucket, .. }
+            if parent == &runtime.root.join("workspaces").canonicalize().unwrap() && bucket == ".grapher-worktrees")
+    }));
+    runtime.finish(&job.execution, Err("stopped".into())).unwrap();
+    fs::rename(&source, temp.path().join("moved-source")).unwrap();
+    runtime.cleanup_worktrees().unwrap();
+    assert!(!checkout.exists());
+    assert!(temp.path().join("moved-source/tracked.txt").is_file());
+}
+
+#[test]
 fn cleanup_refuses_linked_workspace_roots_without_deleting_external_data() {
     for name in [".grapher-worktrees", ".grapher-workspaces"] {
         let (temp, _source, runtime) = setup(true, single());

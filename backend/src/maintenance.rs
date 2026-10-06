@@ -158,21 +158,19 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
     crate::native::check_retired_leases(&root)?;
     let store = Store::open(&database)?;
     store.backfill_cleanup_sources()?;
-    let parent = match parent {
-        Some(parent) => parent,
-        None => crate::native::installation_root()
-            .canonicalize()
-            .map_err(|error| error.to_string())?
-            .parent()
-            .ok_or("Grapher installation has no parent directory")?
-            .to_path_buf(),
+    let explicit_parent = parent.is_some();
+    let parent = parent.unwrap_or_else(|| crate::workspace::workspaces_parent(&root));
+    if !explicit_parent {
+        fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
     }
-    .canonicalize()
-    .map_err(|error| format!("Cannot resolve project parent: {error}"))?;
+    let parent = parent.canonicalize()
+        .map_err(|error| format!("Cannot resolve workspace parent: {error}"))?;
     let plan = workspace_plan(&root, &store, &parent)?;
-    let engine_parent = std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| parent.join(".grapher-workspaces"));
+    let engine_parent = if explicit_parent && std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT").is_none() {
+        parent.join(".grapher-workspaces") // Explicit legacy/project-parent inspection.
+    } else {
+        crate::workspace::native_runtime_parent()
+    };
     let sources = store.cleanup_sources()?;
     let engines: Vec<_> = crate::native_runtime_storage::unused(&engine_parent, legacy)?
         .into_iter()

@@ -420,6 +420,14 @@ pub enum EventKind {
         to: String,
         accepted: bool,
     },
+    /// Warning metadata only: no rework, failure, or downstream text injection.
+    FeedbackExhausted {
+        from: String,
+        to: String,
+        execution_id: String,
+        count: usize,
+        limit: usize,
+    },
     PublicationStarted {
         repository: String,
         heads: Vec<String>,
@@ -1047,6 +1055,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     .or_default() += 1;
             }
         }
+        // Exhaustion is a warning, not acceptance, failure, or invalidation.
+        EventKind::FeedbackExhausted { .. } => {}
         EventKind::PublicationStarted { repository, heads } => {
             state.publication = Some(Publication {
                 repository: repository.clone(),

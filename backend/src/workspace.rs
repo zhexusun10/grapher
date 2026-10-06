@@ -62,6 +62,89 @@ pub fn data_root() -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
+/// Large disposable workspace/engine caches must not live beside the checkout.
+/// Runtime records stay at data_root() so existing conversations remain visible.
+fn default_cache_root(platform: &str, env: impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
+    let home = if platform == "windows" {
+        env("USERPROFILE").or_else(|| env("HOME"))
+    } else {
+        env("HOME").or_else(|| env("USERPROFILE"))
+    }.unwrap_or_else(std::env::temp_dir);
+    match platform {
+        "windows" => env("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData/Local")).join("Grapher"),
+        "macos" => home.join("Library/Caches/Grapher"),
+        _ => env("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache")).join("grapher"),
+    }
+}
+
+fn absolute_path(path: PathBuf) -> PathBuf {
+    if path.is_relative() {
+        std::env::current_dir().map(|cwd| cwd.join(&path)).unwrap_or(path)
+    } else { path }
+}
+
+fn absolute_cache_path(path: PathBuf) -> PathBuf {
+    let path = absolute_path(path);
+    path.canonicalize().unwrap_or(path)
+}
+
+pub fn cache_root() -> PathBuf {
+    absolute_cache_path(std::env::var_os("GRAPHER_CACHE_DIR").map(PathBuf::from).unwrap_or_else(|| {
+        default_cache_root(std::env::consts::OS, |name| std::env::var_os(name).map(PathBuf::from))
+    }))
+}
+
+pub(crate) fn native_runtime_parent() -> PathBuf {
+    // Keep the leaf spelling so storage can reject a linked/redirected parent.
+    absolute_path(std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT").map(PathBuf::from)
+        .unwrap_or_else(|| cache_root().join("workspaces/.grapher-workspaces")))
+}
+
+pub(crate) fn workspaces_parent(data: &Path) -> PathBuf {
+    absolute_cache_path(std::env::var_os("GRAPHER_WORKSPACE_PARENT").map(PathBuf::from).unwrap_or_else(|| {
+        // Fixture/unit-test checkouts are disposable with their test data. Real
+        // execution must stay outside both source and protected session data.
+        if cfg!(any(test, feature = "fixture")) {
+            data.join("workspaces")
+        } else {
+            cache_root().join("workspaces")
+        }
+    }))
+}
+
+#[cfg(test)]
+mod cache_path_tests {
+    use super::*;
+
+    #[test]
+    fn windows_cache_defaults_to_local_appdata_not_desktop() {
+        let profile = PathBuf::from("C:/Users/test");
+        let local = PathBuf::from("D:/LocalAppData");
+        let root = default_cache_root("windows", |name| match name {
+            "USERPROFILE" => Some(profile.clone()),
+            "LOCALAPPDATA" => Some(local.clone()),
+            _ => None,
+        });
+        assert_eq!(root, local.join("Grapher"));
+        assert_eq!(default_cache_root("windows", |name| (name == "USERPROFILE").then(|| profile.clone())),
+            profile.join("AppData/Local/Grapher"));
+    }
+
+    #[test]
+    fn unix_caches_use_os_conventions() {
+        let home = PathBuf::from("/users/test");
+        let xdg = PathBuf::from("/custom/cache");
+        let env = |name: &str| match name {
+            "HOME" => Some(home.clone()),
+            "XDG_CACHE_HOME" => Some(xdg.clone()),
+            _ => None,
+        };
+        assert_eq!(default_cache_root("macos", env), home.join("Library/Caches/Grapher"));
+        assert_eq!(default_cache_root("linux", env), xdg.join("grapher"));
+        assert_eq!(default_cache_root("linux", |name| (name == "HOME").then(|| home.clone())), home.join(".cache/grapher"));
+    }
+}
+
 pub fn is_standard_git(path: &Path) -> bool {
     if !path.exists() {
         return false;
@@ -594,6 +677,8 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let hooks_config = format!("core.hooksPath={hooks_path}");
     let mut command = Command::new("git");
     crate::native::clear_git_environment(&mut command);
+    #[cfg(windows)]
+    command.args(["-c", "core.longpaths=true"]);
     let output = command
         .args([
             "-c",
@@ -1382,6 +1467,9 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         }
         _ => return Err(format!("Unsupported Git object format: {object_format}")),
     }
+    // Native agent Bash/Git must also handle the deeper AppData checkouts.
+    #[cfg(windows)]
+    git(path, &["config", "core.longpaths", "true"])?;
     // A source with its own alternates or promisor packs may need additional
     // object databases (or lazy network fetches). Exposing those paths to an
     // agent would bypass the sandbox's narrowly scoped object-store grant.

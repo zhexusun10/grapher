@@ -526,26 +526,143 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
 }
 
 #[test]
-fn retry_limit_halts_branch_without_halting_runtime() {
-    let temp = TempDir::new().unwrap();
-    let mut runtime = runtime(temp.path());
-    runtime
-        .emit(EventKind::Approved {
-            base: "base".into(),
-        })
-        .unwrap();
-    finish_wave(&mut runtime, "<ACCEPT>");
-    finish_wave(&mut runtime, "<ACCEPT>");
-    for _ in 0..3 {
-        finish_wave(&mut runtime, "<FEEDBACK>");
+fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
+    for configured_limit in [0, 1, 3, 8] {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = Runtime::open(temp.path()).unwrap();
+        let mut graph = graph();
+        for name in ["delivery", "also_delivery"] {
+            graph.nodes.push(Node { name: name.into(), task: format!("Implement {name}") });
+            graph.edges.push(Edge { from: "review".into(), to: name.into(), feedback: false, relation: String::new() });
+        }
+        let mut config = config();
+        config.max_feedback = configured_limit;
+        runtime.create(graph, config).unwrap();
+        runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
         finish_wave(&mut runtime, "<ACCEPT>");
+        finish_wave(&mut runtime, "<ACCEPT>");
+        let limit = configured_limit.min(3);
+        for _ in 0..limit {
+            finish_wave(&mut runtime, "Earlier rework\n<FEEDBACK>");
+            finish_wave(&mut runtime, "<ACCEPT>");
+        }
+        let review = runtime.jobs().unwrap().remove(0);
+        assert_eq!(review.execution.node, "review");
+        assert!(!runtime.feedback_source_busy("review"), "exhausted edges cannot invalidate running work");
+        // Even a large final response must not change consumers' task text.
+        let body = format!("请处理未解决的问题🚀\n{}\n── Final response ──\nLast instruction", "反馈内容🚀".repeat(6000));
+        let output = format!("{body}\n<FEEDBACK>\n");
+        runtime.emit(EventKind::Output { execution_id: review.execution.id.clone(), text: "Earlier stream text must not be forwarded\n".into() }).unwrap();
+        let (from, final_output) = runtime.finish(&review.execution, Ok(("review-head".into(), output.clone()))).unwrap().unwrap();
+        let counts = runtime.state.feedback_counts.clone();
+        let event_count = runtime.state.events.len();
+        let frontend_head = runtime.state.nodes["frontend"].head.clone();
+        runtime.apply_feedback(&from, &final_output).unwrap();
+        assert_eq!(runtime.state.nodes["review"].status, "done");
+        assert!(runtime.state.nodes["review"].error.is_none());
+        assert_eq!(runtime.state.nodes["frontend"].head, frontend_head);
+        assert_eq!(runtime.state.nodes["frontend"].status, "done");
+        assert_eq!(runtime.state.nodes["backend"].status, "done");
+        assert_eq!(runtime.state.feedback_counts, counts);
+        assert_eq!(runtime.state.feedback_counts.get("review->frontend").copied().unwrap_or(0), limit);
+        let warning = &runtime.state.events[event_count..];
+        assert_eq!(warning.len(), 1);
+        match &warning[0].kind {
+            EventKind::FeedbackExhausted { from, to, execution_id, count, limit: recorded_limit } => {
+                assert_eq!(from, "review");
+                assert_eq!(to, "frontend");
+                assert_eq!(execution_id, &review.execution.id);
+                assert_eq!((*count, *recorded_limit), (limit, limit));
+            }
+            other => panic!("Expected exhaustion warning, got {other:?}"),
+        }
+        assert!(!serde_json::to_string(&runtime.state).unwrap().contains("Last instruction"), "do not duplicate the body in node state or events");
+        // Event replay preserves the warning without altering task inputs.
+        runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+        let jobs = runtime.jobs().unwrap();
+        assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["delivery", "also_delivery"]);
+        for job in jobs {
+            assert_eq!(job.task, format!("Implement {}", job.execution.node), "dependency consumers receive no upstream text");
+            assert_eq!(job.parent_heads, vec!["review-head".to_string()]);
+            runtime.finish(&job.execution, Ok(("delivery-head".into(), "done".into()))).unwrap();
+        }
+        assert_eq!(runtime.state.feedback_counts, counts);
+        assert_eq!(runtime.state.executions.iter().filter(|execution| execution.node == "frontend").count(), limit + 1);
+        assert!(runtime.jobs().unwrap().is_empty());
+        assert_eq!(runtime.state.phase, "publishing");
     }
-    finish_wave(&mut runtime, "<FEEDBACK>");
-    assert_eq!(runtime.state.nodes["review"].status, "failed");
-    assert_eq!(runtime.state.nodes["backend"].status, "done");
-    assert_eq!(runtime.state.feedback_counts["review->frontend"], 3);
-    assert!(runtime.jobs().unwrap().is_empty());
-    assert_eq!(runtime.state.phase, "needs_attention");
+}
+
+#[test]
+fn exhausted_feedback_does_not_wait_for_running_siblings() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let graph = Graph {
+        original_goal: "exhausted feedback with a running sibling".into(),
+        nodes: ["owner", "review", "related", "consumer"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        edges: [("owner", "review", false), ("owner", "related", false), ("review", "consumer", false), ("review", "owner", true)]
+            .into_iter().map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback, relation: String::new() }).collect(),
+    };
+    let mut config = config();
+    config.max_feedback = 0;
+    runtime.create(graph, config).unwrap();
+    runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+    finish_wave(&mut runtime, "<ACCEPT>");
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 2);
+    let review = jobs.iter().find(|job| job.execution.node == "review").unwrap();
+    let (from, output) = runtime.finish(&review.execution, Ok(("review-head".into(), "Unresolved issue\n<FEEDBACK>".into()))).unwrap().unwrap();
+    assert_eq!(runtime.state.nodes["related"].status, "running");
+    assert!(!runtime.feedback_source_busy(&from));
+    runtime.apply_feedback(&from, &output).unwrap();
+    let consumer = runtime.jobs().unwrap().remove(0);
+    assert_eq!(consumer.execution.node, "consumer");
+    assert_eq!(consumer.task, "consumer");
+    assert_eq!(runtime.state.nodes["owner"].status, "done");
+    assert_eq!(runtime.state.nodes["related"].status, "running");
+    assert!(runtime.state.feedback_counts.is_empty());
+}
+
+#[test]
+fn exhausted_budget_does_not_mask_execution_or_protocol_failures() {
+    for result in [Err("Pi failed".into()), Ok(("review-head".into(), "Missing final marker".into()))] {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = Runtime::open(temp.path()).unwrap();
+        let mut graph = graph();
+        graph.nodes.push(Node { name: "consumer".into(), task: "consume".into() });
+        graph.edges.push(Edge { from: "review".into(), to: "consumer".into(), feedback: false, relation: String::new() });
+        let mut config = config();
+        config.max_feedback = 0;
+        runtime.create(graph, config).unwrap();
+        runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+        finish_wave(&mut runtime, "<ACCEPT>");
+        finish_wave(&mut runtime, "<ACCEPT>");
+        let review = runtime.jobs().unwrap().remove(0);
+        assert!(runtime.finish(&review.execution, result).unwrap().is_none());
+        assert_eq!(runtime.state.nodes["review"].status, "failed");
+        assert_eq!(runtime.state.executions.last().unwrap().status, "failed");
+        assert!(!runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })));
+        assert!(runtime.jobs().unwrap().is_empty());
+        assert_eq!(runtime.state.nodes["consumer"].status, "blocked");
+        assert_eq!(runtime.state.phase, "needs_attention");
+    }
+}
+
+#[test]
+fn acceptance_at_exhausted_budget_is_not_a_skipped_feedback_warning() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let mut config = config();
+    config.max_feedback = 0;
+    runtime.create(graph(), config).unwrap();
+    runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+    finish_wave(&mut runtime, "<ACCEPT>");
+    finish_wave(&mut runtime, "<ACCEPT>");
+    finish_wave(&mut runtime, "Summary\n<ACCEPT>");
+    assert_eq!(runtime.state.nodes["review"].status, "done");
+    assert!(runtime.state.feedback_counts.is_empty());
+    assert!(!runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })));
+    assert!(runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::Feedback { accepted: true, .. })));
 }
 
 #[test]

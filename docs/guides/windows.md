@@ -45,7 +45,7 @@ macOS/Linux have separate filesystem boundary policies; Windows matches the Grap
 
 Native Git Bash argv/escaping constraints still apply. Grapher does not alter shell semantics to conceal unsupported path behavior.
 
-The shared Pi runtime is prepared outside the source. `GRAPHER_NATIVE_RUNTIME_PARENT` changes its parent directory; restart the backend after adapter changes. Managed search-tool copies do not require administrator-only symlink creation and do not overwrite existing local tools.
+Node and engine caches default to `%LOCALAPPDATA%\Grapher\workspaces`, not the desktop/project parent. The Pi runtime is prepared outside the source and shared by content version across projects and backend restarts. `GRAPHER_CACHE_DIR` changes the cache root; `GRAPHER_WORKSPACE_PARENT` and `GRAPHER_NATIVE_RUNTIME_PARENT` override the node and engine parents. Cache placement is independent of `GRAPHER_DATA_DIR`. Existing histories and execution paths are not moved. Prepared Git metadata and new private checkouts enable `core.longpaths` to support deeper AppData paths without changing global Git settings. Restart the backend after adapter changes. Managed search-tool copies do not require administrator-only symlink creation and do not overwrite existing local tools.
 
 ## Verification
 

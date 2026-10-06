@@ -19,7 +19,7 @@ interface Graph {
 
 Names are semantic identifiers, not literal directory names. Edges are unique by ordered `(from, to)` pair. The compiler checks nonempty/unique nodes, valid endpoints, no self-edges, graph limits, and an acyclic ordinary dependency graph. A feedback source has at most one target, and that target must be its dependency ancestor.
 
-The compiler returns `executionBatches`, `roots`, `terminals`, and warnings. Batches describe topology; scheduling does not wait for every slow node in a batch before dispatching a ready descendant. See the [Planner contract](../../backend/resources/planning-inspection.md) for atomic edit behavior.
+The compiler returns `executionBatches`, `roots`, `terminals`, and warnings. Batches describe topology; scheduling does not wait for every slow node in a batch before dispatching a ready descendant.
 
 ## Node states
 
@@ -58,9 +58,10 @@ A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `
 - `<ACCEPT>` leaves the result accepted without sending an additional instruction.
 - `<FEEDBACK>` sends an additional instruction to the graph's one explicit target. That node continues its session/workspace; the target and its dependency descendants are invalidated, and completed results in that set are recomputed. Other branches remain valid.
 - A malformed verdict fails the execution.
-- Exceeding `maxFeedback` fails the source branch. The runtime caps the configured limit at 3; it does not allow an unbounded model loop.
+- Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains done; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
+- The runtime caps the configured limit at 3. A limit of 0 skips the first feedback request. Execution errors and malformed verdicts still fail normally.
 
-The runtime waits for running nodes that a pending verdict could invalidate. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable.
+While feedback budget remains, the runtime waits for running nodes that a pending verdict could invalidate. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable.
 
 Live steering does not itself mark a running node dirty. Completed-node follow-ups are new messages, not a rewrite of the original task text. See [Execution model](execution-model.md#sessions-follow-ups-and-history-edits).
 

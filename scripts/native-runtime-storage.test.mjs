@@ -29,7 +29,16 @@ export function verifyBaseline() {}
     env: { ...process.env, GRAPHER_NATIVE_RUNTIME_PARENT: runtimeParent, GRAPHER_NATIVE_RUNTIME_DIR: destination },
   });
   const child = () => join(parent, `grapher-native-engine-${randomUUID()}`);
-  return { root, parent, run, child };
+  const key = (installation = root, runtimeParent = parent, cachedCopy) => {
+    const result = spawnSync(process.execPath, [join(installation, 'scripts/prepare-native-runtime.mjs'), '--cache-key', ...(cachedCopy ? [cachedCopy] : [])], {
+      cwd: installation, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, GRAPHER_NATIVE_RUNTIME_PARENT: runtimeParent },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^[a-f0-9]{64}$/);
+    return result.stdout;
+  };
+  return { root, parent, run, child, key };
 }
 
 test('leased preparation rejects external, nonempty and linked destinations without deleting data', t => {
@@ -50,6 +59,37 @@ test('leased preparation rejects external, nonempty and linked destinations with
   assert.equal(result.status, 1);
   assert.match(result.stderr, /empty, leased child/);
   assert.equal(readFileSync(join(outside, 'keep'), 'utf8'), 'user data');
+});
+
+test('cache identity follows engine inputs, not workspace, cache parent or installation location', t => {
+  const f = fixture(t);
+  for (const path of ['engine', 'pi/packages/core/dist', 'node_modules/pi-trim']) mkdirSync(join(f.root, path), { recursive: true });
+  for (const path of ['engine/entrypoint.mjs', 'pi/package.json', 'pi/package-lock.json', 'pi/packages/core/dist/index.js', 'node_modules/pi-trim/index.js']) {
+    writeFileSync(join(f.root, path), '{}');
+  }
+  writeFileSync(join(f.root, 'scripts/bundled-extensions.mjs'), 'export const bundledExtensionNames = ["pi-trim"]; export function verifyBundledExtensions() {}');
+  const initial = f.key();
+  const otherParent = join(f.root, 'another-workspace-cache');
+  assert.equal(f.key(f.root, otherParent), initial);
+  assert.equal(existsSync(otherParent), false, 'computing identity does not allocate a cache');
+  writeFileSync(join(f.root, 'project.txt'), 'another project');
+  assert.equal(f.key(), initial);
+  const relocated = mkdtempSync(join(tmpdir(), 'grapher-runtime-relocated-'));
+  t.after(() => rmSync(relocated, { recursive: true, force: true }));
+  cpSync(f.root, relocated, { recursive: true });
+  assert.equal(f.key(relocated), initial);
+  assert.equal(f.key(f.root, f.parent, relocated), initial, 'cached artifacts are checked by the installed verifier');
+  mkdirSync(join(relocated, 'engine/.grapher-masks-active/empty'), { recursive: true });
+  assert.equal(f.key(f.root, f.parent, relocated), initial, 'Linux mount staging is not an engine input');
+  writeFileSync(join(relocated, 'engine/entrypoint.mjs'), 'modified cached adapter');
+  assert.notEqual(f.key(f.root, f.parent, relocated), initial, 'a changed cached engine must not be reused');
+  let previous = initial;
+  for (const path of ['engine/entrypoint.mjs', 'pi/packages/core/dist/index.js', 'pi/package-lock.json', 'node_modules/pi-trim/index.js', 'scripts/prepare-native-runtime.mjs']) {
+    writeFileSync(join(f.root, path), readFileSync(join(f.root, path), 'utf8') + '\n// changed runtime input');
+    const changed = f.key();
+    assert.notEqual(changed, previous, `${path} invalidates the engine cache`);
+    previous = changed;
+  }
 });
 
 test('preparation uses the already leased directory, including extended Windows parent paths', t => {
@@ -76,4 +116,5 @@ test('preparation uses the already leased directory, including extended Windows 
   assert.equal(readFileSync(join(destination, 'engine/entrypoint.mjs'), 'utf8'), 'export {};');
   assert.ok(existsSync(join(destination, '.grapher-native-runtime.json')));
   assert.ok(existsSync(join(destination, 'runtime.lock')));
+  assert.equal(execFileSync('git', ['-C', join(destination, 'pi'), 'config', '--get', 'core.longpaths'], { encoding: 'utf8', env }).trim(), 'true');
 });

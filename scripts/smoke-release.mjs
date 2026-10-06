@@ -20,7 +20,7 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
 Object.assign(env, {
   HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: join(directory, 'agent'),
   GRAPHER_GLOBAL_PI_AGENT_DIR: join(directory, 'global'), GRAPHER_ISOLATED_PI_MODELS: '1',
-  GRAPHER_DATA_DIR: join(directory, 'data'), GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtimes'),
+  GRAPHER_DATA_DIR: join(directory, 'data'), GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtimes'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces'),
   PI_OFFLINE: '1',
 });
 let child;

@@ -67,7 +67,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
     const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
     const env = { ...process.env, GRAPHER_DATA_DIR: data, GRAPHER_PORT: String(port), PI_CODING_AGENT_DIR: agent,
       GRAPHER_GLOBAL_PI_AGENT_DIR: join(directory, 'global-agent'), GRAPHER_ISOLATED_PI_MODELS: '1',
-      GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime'), PARTITIONER_MODEL: undefined,
+      GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces'), PARTITIONER_MODEL: undefined,
       NODE_AGENT_MODEL: 'prewarm-test/node', PLANNER_MODEL: 'prewarm-test/planner', MERGER_MODEL: 'prewarm-test/node',
       PARTITIONER_THINKING: 'off', NODE_AGENT_THINKING: 'off', PLANNER_THINKING: 'off', MERGER_THINKING: 'off' };
     backend = spawn(join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`), [], {

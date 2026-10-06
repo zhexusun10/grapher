@@ -120,7 +120,7 @@ test('production Planner writes source directly; Merger repairs node and publica
     const port = (listener.address() as AddressInfo).port;
     await new Promise<void>(done => listener.close(() => done()));
     const env = { ...process.env, GRAPHER_DATA_DIR: data, GRAPHER_PORT: String(port), PI_CODING_AGENT_DIR: agent,
-      GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime'),
+      GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces'),
       PLANNER_MODEL: 'merger-test/native', NODE_AGENT_MODEL: 'merger-test/native',
       PARTITIONER_MODEL: 'merger-test/native', MERGER_MODEL: 'merger-test/native',
       PLANNER_THINKING: 'off', NODE_AGENT_THINKING: 'off', PARTITIONER_THINKING: 'off', MERGER_THINKING: 'off' };

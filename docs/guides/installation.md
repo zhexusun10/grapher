@@ -86,11 +86,15 @@ Do not expose the API to untrusted clients or treat `GRAPHER_ALLOWED_ORIGINS` as
 | `GRAPHER_PORT` | Backend port; defaults to `1421` |
 | `GRAPHER_DATA_DIR` | Runtime database, planning records, and sessions; defaults to `.grapher/` |
 | `PI_CODING_AGENT_DIR` | Dedicated Pi configuration/credentials; defaults to `~/.grapher/pi-agent` |
-| `GRAPHER_NATIVE_RUNTIME_PARENT` | Parent directory for the prepared shared Pi runtime |
+| `GRAPHER_CACHE_DIR` | OS cache root; Windows defaults to `%LOCALAPPDATA%\Grapher`, macOS to `~/Library/Caches/Grapher`, Linux to `${XDG_CACHE_HOME:-~/.cache}/grapher` |
+| `GRAPHER_WORKSPACE_PARENT` | Node-workspace parent; defaults to the cache root's `workspaces/` |
+| `GRAPHER_NATIVE_RUNTIME_PARENT` | Shared engine-cache parent; defaults to the cache root's `workspaces/.grapher-workspaces/` |
 
 Copy [.env.example](../../.env.example) to the Git-ignored `.env` only if needed. Never commit real credentials. Restart the backend after changing startup environment or engine adapters.
 
-Node workspaces live beside the project in `.grapher-worktrees`; Planner copies use `.grapher-workspaces`. Keep enough disk space for Git snapshots, sessions, and logs. [Execution model](../architecture/execution-model.md#storage-and-cleanup) describes their lifecycles.
+Node checkouts live in the configured cache's `.grapher-worktrees`; modern Planners work directly in the source, without project copies. The verified Pi engine/dependencies are cached once per content/platform version and shared across projects and backend restarts, not copied per workspace. Runtime records and existing execution paths are unchanged. Keep enough disk space for Git snapshots, sessions, and logs. [Execution model](../architecture/execution-model.md#storage-and-cleanup) describes their lifecycles.
+
+To inspect old project-adjacent leftovers, stop the relevant backends and run `npm run cleanup:workspaces -- --parent /absolute/path/to/old/project-parent --legacy-engines`; add `--apply` only after reviewing the preview. Unmarked legacy engines require **all** backends stopped.
 
 ## Troubleshooting
 

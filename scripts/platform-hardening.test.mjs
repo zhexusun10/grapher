@@ -29,7 +29,7 @@ test('production HTTP confines static paths and refuses linked workspace cleanup
     // Keep automatic repository discovery scoped to the small test project.
     cwd: source,
     env: { ...process.env, GRAPHER_DATA_DIR: join(directory, 'data'), GRAPHER_PORT: String(port),
-      PI_CODING_AGENT_DIR: agent, GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime') },
+      PI_CODING_AGENT_DIR: agent, GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces') },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let diagnostics = '';

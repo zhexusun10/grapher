@@ -150,6 +150,7 @@ impl Target {
 /// Record physical workspace ownership while the source still exists, before
 /// any checkout is allocated. A moved/deleted source no longer loses this proof.
 pub(crate) fn configuration_targets(
+    root: &Path,
     run_id: &str,
     config: &Config,
 ) -> Result<BTreeSet<Target>, String> {
@@ -165,6 +166,12 @@ pub(crate) fn configuration_targets(
         Err(error) => return Err(error.to_string()),
     };
     if Uuid::parse_str(run_id).is_ok() {
+        let parent = crate::workspace::workspaces_parent(root);
+        fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
+        let parent = parent.canonicalize().map_err(|error| error.to_string())?;
+        targets.insert(Target::workspace(&parent, run_id, ".grapher-worktrees"));
+        // Keep legacy project-adjacent ownership; old executions can still be
+        // resumed/removed without moving their recorded paths.
         if let Some(parent) = source.parent() {
             for bucket in [".grapher-worktrees", ".grapher-workspaces"] {
                 targets.insert(Target::workspace(parent, run_id, bucket));
@@ -186,6 +193,7 @@ pub(crate) fn configuration_targets(
 }
 
 pub(crate) fn remember_event(
+    root: &Path,
     store: &Store,
     state: &Snapshot,
     kind: &EventKind,
@@ -203,7 +211,7 @@ pub(crate) fn remember_event(
     };
     if let Some(config) = config {
         store.remember_cleanup_source(Path::new(&config.repository))?;
-        targets.extend(configuration_targets(&state.run_id, config)?);
+        targets.extend(configuration_targets(root, &state.run_id, config)?);
     }
     match kind {
         EventKind::Started { execution } => {
@@ -304,7 +312,7 @@ pub(crate) fn manifest(
 ) -> Result<Manifest, String> {
     let mut targets = store.owned_cleanup_targets(&state.run_id)?;
     if let Some(config) = &state.config {
-        match configuration_targets(&state.run_id, config) {
+        match configuration_targets(root, &state.run_id, config) {
             Ok(current) => targets.extend(current),
             Err(_)
                 if targets
@@ -469,7 +477,7 @@ pub(crate) fn execute(root: &Path, store: &Store, task: &Task) -> Result<(), Str
                 serde_json::json!({"repository":repository,"model":"cleanup","maxParallel":1}),
             )
             .map_err(|error| error.to_string())?;
-            configuration_targets(&task.run_id, &config)?
+            configuration_targets(root, &task.run_id, &config)?
         } else {
             missing_source_workspaces(&task.run_id, repository, &manifest.targets)?
         };

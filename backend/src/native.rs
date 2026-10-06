@@ -97,30 +97,56 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
     let installation = installation_root()
         .canonicalize()
         .map_err(|error| format!("Cannot resolve Grapher installation root: {error}"))?;
-    let runtime_parent = std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            installation
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(".grapher-workspaces")
-        });
-    // Reclaim copies left by earlier backends, including crashes. Each live
-    // backend holds its own copy's lease, even when it uses another data root.
-    match crate::native_runtime_storage::unused(&runtime_parent, false) {
-        Ok(copies) => for copy in copies {
-            if let Err(error) = crate::native_runtime_storage::remove(&copy) {
-                eprintln!("[Grapher] {error}");
+    let runtime_parent = crate::workspace::native_runtime_parent();
+    // Recover marked, unused per-backend copies from the old desktop/project
+    // default too. Unmarked copies still require explicit offline opt-in.
+    if std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT").is_none() {
+        if let Some(parent) = installation.parent() {
+            match crate::native_runtime_storage::unused_with_cancel(&parent.join(".grapher-workspaces"), false,
+                || RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst)) {
+                Ok(copies) => for copy in copies {
+                    if let Err(error) = crate::native_runtime_storage::remove(&copy) { eprintln!("[Grapher] {error}"); }
+                },
+                Err(error) => eprintln!("[Grapher] Cannot clean legacy native runtimes: {error}"),
+            }
+        }
+    }
+    let key = run_runtime_preparation(&installation, &runtime_parent, None, None)?;
+    let runtime = crate::native_runtime_storage::get_or_prepare_verified(
+        &runtime_parent,
+        key.trim(),
+        || RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst),
+        |destination| {
+            let output = run_runtime_preparation(&installation, &runtime_parent, Some(destination), None)?;
+            let returned = PathBuf::from(output.trim()).canonicalize().map_err(|error| error.to_string())?;
+            if returned != destination { return Err("Native runtime preparation returned a different destination".into()); }
+            Ok(())
+        },
+        |directory| match run_runtime_preparation(&installation, &runtime_parent, None, Some(directory)) {
+            Ok(actual) => Ok(actual.trim() == key.trim()),
+            Err(error) => {
+                eprintln!("[Grapher] Native runtime verification failed: {error}");
+                Ok(false)
             }
         },
-        Err(error) => eprintln!("[Grapher] Cannot clean old native runtimes: {error}"),
-    }
-    let preparation = crate::native_runtime_storage::Preparation::new(&runtime_parent)?;
+    )?;
+    let root = runtime.directory.clone();
+    eprintln!("[Grapher] Shared Graph runtime ready: {}", host_path(&root).display());
+    *cached = Some(runtime);
+    Ok(root)
+}
+
+fn run_runtime_preparation(installation: &Path, parent: &Path, destination: Option<&Path>, key_for: Option<&Path>) -> Result<String, String> {
     let mut command = Command::new("node");
-    command.arg(host_path(&installation_root().join("scripts/prepare-native-runtime.mjs")))
-        .env("GRAPHER_NATIVE_RUNTIME_PARENT", host_path(&runtime_parent))
-        .env("GRAPHER_NATIVE_RUNTIME_DIR", host_path(preparation.directory()))
+    command.arg(host_path(&installation.join("scripts/prepare-native-runtime.mjs")))
+        .env("GRAPHER_NATIVE_RUNTIME_PARENT", host_path(parent))
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(destination) = destination {
+        command.env("GRAPHER_NATIVE_RUNTIME_DIR", host_path(destination));
+    } else {
+        command.arg("--cache-key").env_remove("GRAPHER_NATIVE_RUNTIME_DIR");
+        if let Some(directory) = key_for { command.arg(host_path(directory)); }
+    }
     crate::process_control::configure_command(&mut command);
     // Shared preparation is backend-owned, not cancelled with one particular
     // Run. Track its copier/Git descendants so exit cannot leave them writing.
@@ -139,23 +165,7 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let raw_root = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
-    let root = PathBuf::from(raw_root.trim());
-    let root = root.canonicalize().map_err(|error| {
-        format!(
-            "Cannot resolve prepared native runtime {}: {error}",
-            root.display()
-        )
-    })?;
-    if root != preparation.directory() {
-        return Err("Native runtime preparation returned a different destination".into());
-    }
-    if !root.join("engine/entrypoint.mjs").is_file() {
-        return Err("Incomplete native runtime: engine entrypoint is missing".into());
-    }
-    if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) { return Err("Backend is shutting down".into()); }
-    *cached = Some(preparation.commit());
-    Ok(root)
+    String::from_utf8(output.stdout).map_err(|error| error.to_string())
 }
 
 fn installation_root_for(executable: Option<&Path>, source_root: &Path) -> PathBuf {

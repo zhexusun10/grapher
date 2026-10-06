@@ -46,7 +46,7 @@ The graph contains named tasks, ordinary dependency edges, and explicit feedback
 
 Planner tool mutations compile atomically: invalid changes leave the saved candidate graph unchanged. Graph execution requires final validation and approval. Independent roots do not need artificial connecting edges.
 
-The [Planner contract](../../backend/resources/planning-inspection.md) describes the mutation schema. The production [Planner prompt](../../backend/resources/prompts/planner.md) and [Partitioner prompt](../../backend/resources/prompts/partitioner.md) stay beside the implementation.
+The production [Planner prompt](../../backend/resources/prompts/planner.md) and [Partitioner prompt](../../backend/resources/prompts/partitioner.md) stay beside the implementation.
 
 ## Runtime
 

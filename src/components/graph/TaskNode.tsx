@@ -1,8 +1,8 @@
 import { t } from "../../i18n";
 import React from "react";
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
-import { ShieldCheck, Code2, LoaderCircle, Check, Circle } from "lucide-react";
-import { type Status } from "../../types";
+import { ShieldCheck, Code2, LoaderCircle, Check, Circle, AlertTriangle } from "lucide-react";
+import { type FeedbackExhaustion, type Status } from "../../types";
 
 export const statusText: Record<Status, string> = {
   waiting: "WAITING",
@@ -34,6 +34,7 @@ export type WorkNode = Node<{
   attempts: number;
   hint: string;
   reviewer: boolean;
+  feedbackExhaustion?: FeedbackExhaustion;
   selected: boolean;
   worktree: string;
   hasTop: boolean;
@@ -75,6 +76,14 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
           {data.attempts > 0 ? t("#{0} 尝试", data.attempts) : t("尚未执行")}
         </span>
       </div>
+      {data.feedbackExhaustion && (
+        <div className="node-feedback-exhausted" role="note"
+          title={t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", data.feedbackExhaustion.to)}
+          aria-label={t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", data.feedbackExhaustion.to)}>
+          <AlertTriangle size={12} />
+          <span>{t("反馈预算耗尽 {0}/{1}", data.feedbackExhaustion.count, data.feedbackExhaustion.limit)}</span>
+        </div>
+      )}
       <Handle id="bottom" type="source" position={Position.Bottom}
         className={`react-flow__handle ${data.hasBottom ? "connected" : ""}`} />
       <Handle id="left-target" type="target" position={Position.Left} style={{ top: "35%" }}

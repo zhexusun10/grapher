@@ -21,7 +21,6 @@ English is the canonical documentation language. The product overview is [README
 - [Testing and validation](development/testing.md)
 - [Pi integration and upgrades](development/pi-integration.md)
 - [Conversation-log maintenance and acceptance](testing/conversation-logs.md)
-- [Planner tool contract](../backend/resources/planning-inspection.md) (implementation-adjacent)
 
 ## Evaluate
 

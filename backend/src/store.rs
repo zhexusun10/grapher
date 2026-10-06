@@ -49,6 +49,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::ConversationEdited { .. } => "conversation_edited",
         EventKind::PlannerConversationEdited { .. } => "planner_conversation_edited",
         EventKind::Feedback { .. } => "feedback",
+        EventKind::FeedbackExhausted { .. } => "feedback_exhausted",
         EventKind::PublicationStarted { .. } => "publication_started",
         EventKind::PublicationCompleted { .. } => "publication_completed",
         EventKind::PublicationFailed { .. } => "publication_failed",
@@ -68,6 +69,7 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
         | EventKind::Steered { execution_id, .. }
         | EventKind::Output { execution_id, .. }
         | EventKind::Finished { execution_id, .. }
+        | EventKind::FeedbackExhausted { execution_id, .. }
         | EventKind::WorkspaceResolved { execution_id, .. }
         | EventKind::MergerFinished { execution_id, .. }
         | EventKind::MergerFailed { execution_id, .. } => Some(execution_id),

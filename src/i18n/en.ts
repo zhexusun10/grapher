@@ -463,6 +463,8 @@ export const en: Record<string, string> = {
   "全部事件": "All events",
   "节点执行": "Node execution",
   "反馈复审": "Feedback review",
+  "反馈预算耗尽 {0}/{1}": "Feedback budget exhausted {0}/{1}",
+  "反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。": "Feedback retry limit reached; this feedback was not applied to {0}. Downstream nodes continue.",
   "人工介入": "Manual intervention",
   "计划审批": "Plan approval",
   "暂无事件记录": "No events yet",

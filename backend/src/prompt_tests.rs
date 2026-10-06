@@ -2412,7 +2412,7 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
 
 #[cfg(feature = "fixture")]
 #[test]
-fn feedback_drains_its_component_but_not_unrelated_siblings_or_stale_consumers() {
+fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
     let repository = crate::fixture::repository(root).unwrap();
@@ -2474,12 +2474,12 @@ fn feedback_drains_its_component_but_not_unrelated_siblings_or_stale_consumers()
     }
 
     let script = root.join("worker.sh");
-    fs::write(&script, format!(r#"cat >/dev/null
+    fs::write(&script, format!(r#"task=$(cat)
 case "$PWD" in
   *slow-*) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo done > slow.txt ;;
   *related-*) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo done > related.txt ;;
   *review-*) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
-  *consumer-*) echo invalid > stale.txt ;;
+  *consumer-*) printf '%s\n' "$task" > consumer-input.txt; echo done > consumer.txt ;;
   *) echo done > owner.txt ;;
 esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
@@ -2607,12 +2607,21 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             .count(),
         2
     );
-    assert!(!runtime
-        .state
-        .executions
-        .iter()
-        .any(|e| e.node == "consumer"));
-    assert_eq!(runtime.state.phase, "needs_attention");
+    let consumers: Vec<_> = runtime.state.executions.iter().filter(|execution| execution.node == "consumer").collect();
+    assert_eq!(consumers.len(), 1, "the consumer runs once after feedback is skipped, not on the stale verdict");
+    assert_eq!(consumers[0].status, "completed");
+    assert_eq!(runtime.state.nodes["review"].status, "done");
+    assert_eq!(runtime.state.feedback_counts.get("review->owner"), Some(&1));
+    let skipped = runtime.state.events.iter().find(|event| matches!(&event.kind,
+        EventKind::FeedbackExhausted { from, to, count: 1, limit: 1, .. } if from == "review" && to == "owner"
+    )).expect("exhaustion must be recorded, not accepted or failed");
+    let consumer_started = runtime.state.events.iter().find(|event| matches!(&event.kind,
+        EventKind::Started { execution } if execution.node == "consumer"
+    )).unwrap();
+    assert!(skipped.sequence < consumer_started.sequence);
+    assert_eq!(runtime.state.phase, "completed");
+    let input = fs::read_to_string(repository.join("consumer-input.txt")).unwrap();
+    assert_eq!(input.trim_end(), "Work", "the consumer receives only its own task, not upstream feedback or budget warnings");
 }
 
 #[test]

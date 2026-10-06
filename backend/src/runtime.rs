@@ -188,7 +188,7 @@ impl Runtime {
     }
 
     pub fn emit(&mut self, mut kind: EventKind) -> Result<(), String> {
-        crate::cleanup::remember_event(&self.store, &self.state, &kind)?;
+        crate::cleanup::remember_event(&self.root, &self.store, &self.state, &kind)?;
         if let EventKind::MergerFailed { execution_id, error, .. } = &kind {
             self.store.ensure_legacy_logs(&self.state.run_id, execution_id)?;
             self.store.append(&mut self.state, EventKind::Output {
@@ -932,14 +932,20 @@ impl Runtime {
         })
     }
 
+    fn feedback_budget_available(&self, edge: &Edge) -> bool {
+        let limit = self.state.config.as_ref().map(|config| config.max_feedback.min(3)).unwrap_or(0);
+        self.state.feedback_counts.get(&format!("{}->{}", edge.from, edge.to)).copied().unwrap_or(0) < limit
+    }
+
     /// A feedback verdict can only invalidate the target and its dependency
-    /// descendants. A shared ancestor's other branches are safe to schedule.
+    /// descendants while budget remains. A shared ancestor's other branches
+    /// are safe to schedule, and an exhausted edge cannot invalidate anything.
     fn feedback_scope(&self, source: &str) -> BTreeSet<String> {
         self.state
             .graph
             .edges
             .iter()
-            .filter(|edge| edge.feedback && edge.from == source)
+            .filter(|edge| edge.feedback && edge.from == source && self.feedback_budget_available(edge))
             .flat_map(|edge| downstream(&self.state.graph, &edge.to))
             .collect()
     }
@@ -1143,19 +1149,12 @@ impl Runtime {
                         .to_string_lossy()
                         .into()
                 } else {
-                    // Graph worktrees belong beside the user's repository. Keeping
-                    // them under Grapher's runtime directory makes the process
-                    // discover a path that is unrelated to the project it edits.
-                    let repository = resolve_repository(&self.root, &config)?;
-                    let parent = repository
-                        .parent()
-                        .ok_or("Repository has no parent directory")?;
-                    parent
+                    // Project identity is bound explicitly; physical checkouts
+                    // belong in the OS cache, not beside the user's project.
+                    workspace::normalize_workspace_display_path(&workspace::workspaces_parent(&self.root)
                         .join(".grapher-worktrees")
                         .join(&self.state.run_id)
-                        .join(format!("{}-{id}", crate::compiler::node_id(&node.name)))
-                        .to_string_lossy()
-                        .into()
+                        .join(format!("{}-{id}", crate::compiler::node_id(&node.name))))
                 },
                 before,
                 after: None,
@@ -1431,32 +1430,20 @@ impl Runtime {
             .cloned()
             .collect();
         for edge in edges {
-            if send_feedback
-                && self
-                    .state
-                    .feedback_counts
-                    .get(&format!("{}->{}", edge.from, edge.to))
-                    .copied()
-                    .unwrap_or(0)
-                    >= self.state.config.as_ref().unwrap().max_feedback.min(3)
-            {
-                self.emit(EventKind::Failed {
-                    node: from.into(),
-                    execution_id: None,
-                    error: "Feedback retry limit exhausted; unrelated branches continue".into(), output_bytes: 0, metrics: None,
+            if send_feedback && !self.feedback_budget_available(&edge) {
+                let execution_id = self.state.executions.iter().rev().find(|execution| {
+                    execution.node == from && execution.status == "completed"
+                        && !self.state.superseded_execution_ids.contains(&execution.id)
+                }).ok_or("Feedback source has no completed execution")?.id.clone();
+                self.emit(EventKind::FeedbackExhausted {
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                    execution_id,
+                    count: self.state.feedback_counts.get(&format!("{}->{}", edge.from, edge.to)).copied().unwrap_or(0),
+                    limit: self.state.config.as_ref().ok_or("Missing config")?.max_feedback.min(3),
                 })?;
-                return Ok(());
+                continue;
             }
-        }
-        let edges: Vec<_> = self
-            .state
-            .graph
-            .edges
-            .iter()
-            .filter(|edge| edge.feedback && edge.from == from)
-            .cloned()
-            .collect();
-        for edge in edges {
             self.emit(EventKind::Feedback {
                 from: edge.from,
                 to: edge.to.clone(),

@@ -13,7 +13,7 @@
     "pi:adopt": "node scripts/adopt-pi.mjs",
     "pi": "node engine/entrypoint.mjs",
     "test:native": "node --test scripts/workspace-paths.test.mjs scripts/native-runtime-storage.test.mjs && node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --lib native::tests && node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --lib native_runtime_storage::tests && node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --lib linux_sandbox::tests && npm run test:prewarm",
-    "test:prewarm": "node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --lib prewarm -- --include-ignored --test-threads=1 && node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --no-default-features --bin grapher && node --test scripts/prewarm-http.test.mjs scripts/prepared-host.test.mjs scripts/probe-prewarm.test.mjs",
+    "test:prewarm": "node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --lib prewarm -- --include-ignored --test-threads=1 && node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --no-default-features --bin grapher && node --test scripts/prewarm-http.test.mjs scripts/prepared-host.test.mjs scripts/probe-prewarm.test.mjs scripts/shared-native-runtime.test.mjs",
     "probe:prewarm": "node scripts/probe-prewarm.mjs",
     "probe:file-mapping": "node scripts/node-ts.mjs scripts/check-file-tool-mapping.ts",
     "probe:native-mapping": "python3 scripts/probe-native-mapping.py --output .grapher/probes/native-mapping.json",
