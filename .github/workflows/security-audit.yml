@@ -32,18 +32,22 @@ jobs:
         id: pi-setup
         if: matrix.scope == 'pi'
         run: npm run pi:setup
+      - name: Check audit logging and failure propagation
+        run: node --test scripts/security-audit.test.mjs
       - name: Audit all installed dependencies without changing locks
+        shell: bash
         env:
           SCOPE: ${{ matrix.scope }}
         run: |
           if [ "$SCOPE" = pi ]; then
-            npm audit --prefix engine/pi-dependencies --audit-level=high --json > npm-audit.json
+            npm audit --prefix engine/pi-dependencies --audit-level=high --json | tee npm-audit.json
           else
-            npm audit --audit-level=high --json > npm-audit.json
+            npm audit --audit-level=high --json | tee npm-audit.json
           fi
       - name: Also report the Pi profile's production dependency view
         if: always() && matrix.scope == 'pi' && steps.pi-setup.outcome == 'success'
-        run: npm audit --prefix engine/pi-dependencies --omit=dev --audit-level=high --json > npm-audit-production.json
+        shell: bash
+        run: npm audit --prefix engine/pi-dependencies --omit=dev --audit-level=high --json | tee npm-audit-production.json
       - name: Retain audit evidence even when advisories fail the job
         if: always()
         uses: actions/upload-artifact@v4
@@ -62,7 +66,8 @@ jobs:
       - name: Install a pinned audit client
         run: cargo install cargo-audit --version 0.22.0 --locked
       - name: Audit the backend lock against current RustSec advisories
-        run: cargo audit --file backend/Cargo.lock --json > rust-audit.json
+        shell: bash
+        run: cargo audit --file backend/Cargo.lock --json | tee rust-audit.json
       - name: Retain Rust audit evidence
         if: always()
         uses: actions/upload-artifact@v4
