@@ -1,6 +1,10 @@
 use super::*;
 use tempfile::TempDir;
 
+#[cfg(feature = "fixture")]
+#[path = "feedback_workspace_tests.rs"]
+mod feedback_workspace;
+
 fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
@@ -712,6 +716,12 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
+    // This reducer-focused test synthesizes Finished, so record the filesystem
+    // checkpoint that a real perform would create before opening the session.
+    workspace::prepare(&_source, Path::new(&first.execution.worktree), &first.execution.before, &[]).unwrap();
+    let files = crate::workspace_files::Files::new(&runtime.root, &runtime.state.run_id).unwrap();
+    files.capture(Path::new(&first.execution.worktree), &format!("before-{}", first.execution.id),
+        &first.execution.before, &first.file_versions).unwrap();
     runtime.emit(EventKind::Finished {
         execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(), output_bytes: 0, metrics: None,
     }).unwrap();
@@ -757,7 +767,129 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
 }
 
 #[test]
-fn graph_followup_propagates_only_when_the_result_changes() {
+fn dependency_chain_hands_off_one_workspace_and_earlier_node_messages_use_the_terminal_tree() {
+    let graph = Graph {
+        original_goal: "chain".into(),
+        nodes: ["a", "b", "c"].into_iter().map(|name| Node {
+            name: name.into(), task: name.into(),
+        }).collect(),
+        edges: [("a", "b"), ("b", "c")].into_iter().map(|(from, to)| Edge {
+            from: from.into(), to: to.into(), relation: String::new(), feedback: false,
+        }).collect(),
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    let script = _temp.path().join("chain-agent.sh");
+    fs::write(&script, r#"task=$(cat)
+echo "$GRAPHER_NODE_NAME" > "$GRAPHER_NODE_NAME.txt"
+if printf '%s' "$task" | grep -q 'add a final adjustment'; then echo 'shared final tree' > from-a-followup.txt; fi
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Completed"}]}}'
+"#).unwrap();
+    let config = runtime.state.config.as_mut().unwrap();
+    config.engine = "pi".into();
+    config.pi_command = "/bin/sh".into();
+    config.pi_args = vec![script.to_string_lossy().into()];
+    runtime.approve().unwrap();
+    let mut shared_path = None;
+    let mut terminal_head = None;
+    for name in ["a", "b", "c"] {
+        let job = runtime.jobs().unwrap().remove(0);
+        assert_eq!(job.execution.node, name);
+        if let Some(path) = &shared_path {
+            assert_eq!(&job.execution.worktree, path, "a dependency must take over its parent's directory");
+            assert!(job.inherit_workspace);
+        }
+        let root_dir = runtime.root.clone();
+        let result = perform(&job, &root_dir, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
+            execution_id: job.execution.id.clone(), head,
+        }));
+        let head = result.as_ref().unwrap().0.clone();
+        runtime.finish(&job.execution, result).unwrap();
+        shared_path = Some(job.execution.worktree.clone());
+        terminal_head = Some(head);
+    }
+    let path = PathBuf::from(shared_path.unwrap());
+    assert!(path.join("a.txt").exists() && path.join("b.txt").exists() && path.join("c.txt").exists());
+    let root = runtime.run_workspace_root();
+    let worktree_count = fs::read_dir(root).unwrap().filter_map(Result::ok)
+        .filter(|entry| entry.file_name() != ".files" && entry.file_type().unwrap().is_dir()).count();
+    assert_eq!(worktree_count, 1, "linear dependencies should retain exactly one physical worktree");
+
+    let old_session = runtime.latest_node_execution("a").unwrap().session_id.clone();
+    runtime.intervene("a", "add a final adjustment").unwrap();
+    let reply = runtime.jobs().unwrap().remove(0);
+    assert_eq!(reply.execution.node, "a");
+    assert_eq!(reply.execution.worktree, path.to_string_lossy());
+    assert_eq!(reply.execution.before, terminal_head.unwrap());
+    assert_eq!(reply.execution.session_id, old_session);
+    assert!(reply.inherit_workspace);
+    let root_dir = runtime.root.clone();
+    let result = perform(&reply, &root_dir, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
+        execution_id: reply.execution.id.clone(), head,
+    }));
+    let new_head = result.as_ref().unwrap().0.clone();
+    runtime.finish(&reply.execution, result).unwrap();
+    for name in ["a", "b", "c"] {
+        assert_eq!(runtime.state.nodes[name].status, "done");
+        assert_eq!(runtime.state.nodes[name].head.as_deref(), Some(new_head.as_str()));
+    }
+    assert!(runtime.jobs().unwrap().is_empty(), "editing a node in the terminal workspace must not rerun descendants");
+    assert!(path.join("from-a-followup.txt").exists());
+}
+
+#[test]
+fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras() {
+    let graph = Graph {
+        original_goal: "fanout".into(),
+        nodes: ["root", "left", "right", "join"].into_iter().map(|name| Node {
+            name: name.into(), task: name.into(),
+        }).collect(),
+        edges: [("root", "left"), ("root", "right"), ("left", "join"), ("right", "join")]
+            .into_iter().map(|(from, to)| Edge {
+                from: from.into(), to: to.into(), relation: String::new(), feedback: false,
+            }).collect(),
+    };
+    let (_temp, source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let root_job = runtime.jobs().unwrap().remove(0);
+    let root_path = PathBuf::from(&root_job.execution.worktree);
+    workspace::prepare(&source, &root_path, &root_job.execution.before, &[]).unwrap();
+    fs::write(root_path.join("root.txt"), "root").unwrap();
+    let root_head = workspace::snapshot_node_for_run(&root_path, &source, "root", Some(&runtime.state.run_id)).unwrap();
+    runtime.finish(&root_job.execution, Ok((root_head, "done".into()))).unwrap();
+
+    let branches = runtime.jobs().unwrap();
+    assert_eq!(branches.len(), 2);
+    assert_ne!(branches[0].execution.worktree, branches[1].execution.worktree);
+    assert!(branches.iter().any(|job| Path::new(&job.execution.worktree) == root_path));
+    let mut branch_count = 0;
+    for job in &branches {
+        let path = Path::new(&job.execution.worktree);
+        workspace::prepare(&source, path, &job.execution.before, &job.parent_heads).unwrap();
+        fs::write(path.join(format!("{}.txt", job.execution.node)), &job.execution.node).unwrap();
+        let head = workspace::snapshot_node_for_run(path, &source, &job.execution.node, Some(&runtime.state.run_id)).unwrap();
+        branch_count += 1;
+        runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
+    }
+    let join = runtime.jobs().unwrap().remove(0);
+    assert_eq!(join.execution.node, "join");
+    let path = Path::new(&join.execution.worktree);
+    workspace::prepare(&source, path, &join.execution.before, &join.parent_heads).unwrap();
+    for name in ["root", "left", "right"] {
+        assert!(path.join(format!("{name}.txt")).exists());
+    }
+    fs::write(path.join("join.txt"), "joined").unwrap();
+    let head = workspace::snapshot_node_for_run(path, &source, "join", Some(&runtime.state.run_id)).unwrap();
+    runtime.finish(&join.execution, Ok((head, "done".into()))).unwrap();
+    let worktree_count = fs::read_dir(runtime.run_workspace_root()).unwrap().filter_map(Result::ok)
+        .filter(|entry| entry.file_name() != ".files" && entry.file_type().unwrap().is_dir()).count();
+    assert_eq!(worktree_count, 1, "after fan-in only its final workspace remains");
+    assert_eq!(runtime.state.nodes["left"].head, runtime.state.nodes["join"].head);
+    assert_eq!(runtime.state.nodes["right"].head, runtime.state.nodes["join"].head);
+    assert_eq!(branch_count, 2);
+}
+
+#[test]
+fn graph_followup_on_terminal_workspace_updates_without_rerunning_descendants() {
     let graph = Graph {
         original_goal: "graph".into(),
         nodes: ["parent", "child", "independent"].into_iter().map(|name| Node {
@@ -790,8 +922,10 @@ fn graph_followup_propagates_only_when_the_result_changes() {
         execution_id: next.execution.id.clone(), head: "changed-parent".into(), output: "done".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "done");
-    assert_eq!(runtime.state.nodes["child"].status, "dirty");
+    assert_eq!(runtime.state.nodes["child"].status, "done");
+    assert_eq!(runtime.state.nodes["child"].head.as_deref(), Some("changed-parent"));
     assert_eq!(runtime.state.nodes["independent"].status, "done");
+    assert!(runtime.jobs().unwrap().is_empty(), "the terminal descendant is not rerun after a shared-workspace reply");
 }
 
 #[test]
@@ -1239,7 +1373,7 @@ fn shadow_prepare_refuses_user_edits_after_approval() {
 }
 
 #[test]
-fn feedback_continues_the_owner_session_and_worktree() {
+fn feedback_transfers_the_review_workspace_and_forks_the_owner_history() {
     let graph = Graph {
         original_goal: "feedback rework".into(),
         nodes: ["owner", "review"]
@@ -1269,17 +1403,30 @@ fn feedback_continues_the_owner_session_and_worktree() {
 
     let review = runtime.jobs().unwrap().remove(0);
     assert_eq!(review.execution.node, "review");
-    runtime.finish(&review.execution, Ok((runtime.state.base.clone(), "please adjust\n<FEEDBACK>".into()))).unwrap();
+    let review_path = Path::new(&review.execution.worktree);
+    workspace::prepare(&source, review_path, &review.execution.before, &review.parent_heads).unwrap();
+    fs::create_dir(review_path.join("reports")).unwrap();
+    fs::write(review_path.join("reports/audit.json"), "review evidence").unwrap();
+    let review_head = workspace::snapshot_node_for_run(review_path, &source, "review", Some(&runtime.state.run_id)).unwrap();
+    runtime.finish(&review.execution, Ok((review_head.clone(), "please adjust\n<FEEDBACK>".into()))).unwrap();
     runtime.apply_feedback("review", "please adjust\n<FEEDBACK>").unwrap();
 
     assert_eq!(runtime.state.nodes["owner"].status, "dirty");
     assert!(runtime.state.nodes["review"].head.is_none());
     let jobs = runtime.jobs_with_pending_feedback(true, &[]).unwrap();
     let rework = jobs.iter().find(|job| job.execution.node == "owner").unwrap();
-    assert_eq!(rework.execution.session_id, owner_session);
-    assert_eq!(rework.resume_execution_id.as_deref(), Some(owner_id.as_str()));
-    assert_eq!(rework.execution.worktree, owner_path.to_string_lossy());
-    assert_eq!(rework.task, "Feedback from review:\nplease adjust\n<FEEDBACK>");
+    assert_ne!(rework.execution.session_id, owner_session);
+    assert!(rework.resume_execution_id.is_none());
+    assert_eq!(rework.session_fork.as_ref().unwrap().id, owner_id);
+    assert_eq!(rework.execution.worktree, review.execution.worktree);
+    assert_eq!(rework.execution.before, review_head);
+    assert_eq!(rework.task, "Feedback from review:\nplease adjust");
+    assert!(!rework.task.contains("<FEEDBACK>"));
+    let before = workspace::prepare_with_merger_expected_for_run(&source, review_path, &rework.execution.before,
+        &rework.parent_heads, &runtime.state.base, Some(&runtime.state.run_id), || Err("unexpected merge".into())).unwrap();
+    assert_eq!(before, review_head);
+    assert_eq!(fs::read_to_string(review_path.join("reports/audit.json")).unwrap(), "review evidence");
+    assert!(runtime.state.pending_feedback.is_empty());
 }
 
 #[test]
@@ -1370,7 +1517,7 @@ fn child_inherits_parent_files_with_a_fresh_task_and_session() {
         .unwrap();
     let child = runtime.jobs().unwrap().remove(0);
     assert_ne!(child.execution.session_id, parent.execution.session_id);
-    assert_ne!(child.execution.worktree, parent.execution.worktree);
+    assert_eq!(child.execution.worktree, parent.execution.worktree);
     assert_eq!(child.task.trim(), "child task");
     let path = Path::new(&child.execution.worktree);
     workspace::prepare(

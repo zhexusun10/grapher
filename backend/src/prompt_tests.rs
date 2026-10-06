@@ -303,6 +303,7 @@ fn buffered_output_flushes_before_finish_and_replays() {
         session_id: id.clone(),
         worktree: "".into(),
         before: "".into(),
+        workspace_lineage: vec![],
         after: None,
         status: "running".into(),
         output: String::new(), output_bytes: 0, pid: None,
@@ -2302,6 +2303,7 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         session_id: "fresh".into(),
         worktree: String::new(),
         before: String::new(),
+        workspace_lineage: vec![],
         after: None,
         status: "running".into(),
         output: String::new(), output_bytes: 0, pid: None,
@@ -2475,11 +2477,11 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
 
     let script = root.join("worker.sh");
     fs::write(&script, format!(r#"task=$(cat)
-case "$PWD" in
-  *slow-*) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo done > slow.txt ;;
-  *related-*) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo done > related.txt ;;
-  *review-*) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
-  *consumer-*) printf '%s\n' "$task" > consumer-input.txt; echo done > consumer.txt ;;
+case "$GRAPHER_NODE_NAME" in
+  slow) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo done > slow.txt ;;
+  related) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo done > related.txt ;;
+  review) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
+  consumer) printf '%s\n' "$task" > consumer-input.txt; echo done > consumer.txt ;;
   *) echo done > owner.txt ;;
 esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
@@ -2758,6 +2760,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         session_id: "session-1".into(),
         worktree: "".into(),
         before: "base-head".into(),
+        workspace_lineage: vec![],
         after: None,
         status: "running".into(),
         output: String::new(), output_bytes: 0, pid: None,
@@ -3010,6 +3013,9 @@ fn planner_prompt_explains_workspace_inputs_and_file_handoffs() {
         "not upstream conversations or conversational output",
     ] {
         assert!(PLANNER_PROMPT.contains(guidance), "Missing Planner guidance: {guidance}");
+    }
+    for runtime_detail in ["ignored", "non-Git", "drains", ".venv", "python -m pip", "Applied feedback transfers"] {
+        assert!(!PLANNER_PROMPT.contains(runtime_detail), "Runtime details must not become Planner instructions: {runtime_detail}");
     }
 }
 

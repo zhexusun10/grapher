@@ -49,21 +49,27 @@ There is no global pool limiting nodes across Runs, and no shared cap for Planne
 
 Failure blocks dependent branches; unrelated work continues. Pause stops new dispatches without forcibly terminating active model calls. Stop/cancel is a separate process-lifecycle action.
 
-Source locks cover Planner preparation/publication and approval, including conflict repair during Planner publication. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce conflicts, surfaced by each execution/publication result.
+Workspace allocation is single-writer per physical Run directory. Ordinary chains normally hand off completed directories; fan-out uses distinct directories for concurrent branches, and fan-in composes recorded inputs in an available slot. Idle directories can be reused and retired ones reclaimed while Git refs and ignored snapshots remain available. Directory names and historical execution paths are not permanent node ownership. Pending feedback and repair inputs retain their required directories until delivery.
+
+Source locks cover approval and recorded source snapshots after approved Planner revisions, not the Planner's live Bash/model session. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce conflicts, surfaced by each execution/publication result.
 
 ## Bounded feedback
 
 A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `<FEEDBACK>`:
 
 - `<ACCEPT>` leaves the result accepted without sending an additional instruction.
-- `<FEEDBACK>` sends an additional instruction to the graph's one explicit target. That node continues its session/workspace; the target and its dependency descendants are invalidated, and completed results in that set are recomputed. Other branches remain valid.
+- `<FEEDBACK>` queues a versioned request for the graph's one explicit target. After affected running work drains, the target receives the sender's completed physical workspace and feedback text. It continues its own conversation history through an explicit Pi session fork, even if the physical path is unchanged; the sender's conversation is not copied. The target and its dependency descendants are invalidated, and completed results in that set are recomputed. Other branches remain valid.
 - A malformed verdict fails the execution.
 - Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains done; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
 - The runtime caps the configured limit at 3. A limit of 0 skips the first feedback request. Execution errors and malformed verdicts still fail normally.
 
-While feedback budget remains, the runtime waits for running nodes that a pending verdict could invalidate. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable.
+While feedback budget remains, the runtime waits for running nodes that a pending verdict could invalidate; it does not forcibly suspend their processes. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable.
 
-Live steering does not itself mark a running node dirty. Completed-node follow-ups are new messages, not a rewrite of the original task text. See [Execution model](execution-model.md#sessions-follow-ups-and-history-edits).
+`Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, target execution/head/revision, and the final response's log-byte range before invalidation clears heads. Restart replays that exact request. Duplicate deliveries are idempotent; a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership. Completion heads, Git ancestry/cleanliness and ignored snapshots are checked before the first handoff execution; drift blocks execution rather than silently using changed evidence. Forwarded text excludes the final control marker.
+
+Applied feedback transfers a completed directory exclusively, using the same Git and ignored-file inheritance channels as ordinary dependencies; it is not a writable link to an active parent. Recomputed descendants follow the ordinary handoff, fan-out, and fan-in rules. A later continuation keeps its own node history and may reuse the current shared terminal tree when eligible; otherwise it reconstructs its inputs in an unoccupied directory and forks its session if cwd changes. It cannot rewind another active writer's files. See [Workspace snapshots and feedback](workspace-snapshots-and-feedback.md).
+
+Live steering does not itself mark a running node dirty. Completed-node follow-ups are new messages, not a rewrite of the original task text. A follow-up on a node represented in a unique terminal workspace edits that combined state; successful completion advances represented nodes' current heads/resource versions while completed descendants stay done. Other changed-result continuations, explicit history edits, and applied feedback still use their invalidation rules. See [Execution model](execution-model.md#sessions-follow-ups-and-history-edits).
 
 ## Event and output storage
 
@@ -84,6 +90,7 @@ After interruption:
 - Interrupted planning becomes failed, preserving available output.
 - Interrupted publication or its Merger becomes `publication_failed` for explicit retry.
 - An interrupted node-composition Merger is recorded as failed without entering the publication phase; inspect the node workspace and rerun or resolve it.
+- Committed pending feedback remains queued. Resume drains and validates it before related dispatch; an uncommitted finish cannot leave a half-persisted handoff.
 
 Old executor leases block startup until the old execution is confirmed stopped; the native backend does not silently discard them or take over background writers.
 

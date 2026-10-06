@@ -41,6 +41,7 @@ fn execution(runtime: &Runtime, id: &str) -> Execution {
         session_id: id.into(),
         worktree: runtime.state.config.as_ref().unwrap().repository.clone(),
         before: "base".into(),
+        workspace_lineage: vec![],
         after: None,
         status: "running".into(),
         output: String::new(),

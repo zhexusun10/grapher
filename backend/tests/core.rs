@@ -296,10 +296,10 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
     assert_eq!(plan.warnings.len(), 2);
     assert!(plan.warnings.iter().all(|warning| warning.starts_with("W303:")));
     assert!(plan.warnings.iter().any(|warning| warning ==
-        "W303: If <FEEDBACK> from review to frontend is applied, the target and dependency descendants will be invalidated: delivery, frontend, inspect, review. Completed results must be recomputed; frontend continues its session/workspace. Nodes outside this set are unaffected."
+        "W303: If <FEEDBACK> from review to frontend is applied, the target and dependency descendants will be invalidated: delivery, frontend, inspect, review. Completed results must be recomputed; frontend continues its conversation. Nodes outside this set are unaffected."
     ));
     assert!(plan.warnings.iter().any(|warning| warning ==
-        "W303: If <FEEDBACK> from inspect to spec is applied, the target and dependency descendants will be invalidated: backend, delivery, frontend, inspect, review, spec. Completed results must be recomputed; spec continues its session/workspace. Nodes outside this set are unaffected."
+        "W303: If <FEEDBACK> from inspect to spec is applied, the target and dependency descendants will be invalidated: backend, delivery, frontend, inspect, review, spec. Completed results must be recomputed; spec continues its conversation. Nodes outside this set are unaffected."
     ));
     // Compare the reported set to the actual event, not a size heuristic or
     // merely the dependency path from the target to the feedback source.
@@ -307,15 +307,29 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
     let mut runtime = Runtime::open(temp.path()).unwrap();
     runtime.create(candidate, config()).unwrap();
     runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
-    let unaffected = ["backend", "spec"].map(|name| serde_json::to_value(&runtime.state.nodes[name]).unwrap());
-    runtime.apply_feedback("review", "Additional instruction\n<FEEDBACK>").unwrap();
+    finish_wave(&mut runtime, "<ACCEPT>");
+    finish_wave(&mut runtime, "<ACCEPT>");
+    let unaffected = ["backend", "spec"].map(|name| {
+        let node = &runtime.state.nodes[name];
+        (node.status.clone(), node.revision)
+    });
+    let jobs = runtime.jobs().unwrap();
+    for job in jobs {
+        let output = if job.execution.node == "review" { "Additional instruction\n<FEEDBACK>" } else { "<ACCEPT>" };
+        let verdict = runtime.finish(&job.execution, Ok(("fake-head".into(), output.into()))).unwrap();
+        if let Some((from, output)) = verdict { runtime.apply_feedback(&from, &output).unwrap(); }
+    }
+    runtime.jobs().unwrap();
     let invalidated = runtime.state.events.iter().rev().find_map(|event| match &event.kind {
         EventKind::Invalidated { nodes, target, .. } if target == "frontend" => Some(nodes),
         _ => None,
     }).unwrap();
     assert_eq!(invalidated, &vec!["delivery", "frontend", "inspect", "review"]);
     assert_eq!(
-        ["backend", "spec"].map(|name| serde_json::to_value(&runtime.state.nodes[name]).unwrap()),
+        ["backend", "spec"].map(|name| {
+            let node = &runtime.state.nodes[name];
+            (node.status.clone(), node.revision)
+        }),
         unaffected
     );
 }
@@ -510,10 +524,11 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
         .filter(|execution| execution.node == "frontend")
         .collect();
     assert_eq!(frontend.len(), 2);
-    // Feedback continues the owner's Pi session and worktree in place.
-    assert_eq!(frontend[0].session_id, frontend[1].session_id);
-    assert_eq!(frontend[0].worktree, frontend[1].worktree);
-    assert_eq!(frontend[1].before, frontend[0].after.clone().unwrap());
+    // The owner's history is forked, but the reviewer's completed tree is used.
+    assert_ne!(frontend[0].session_id, frontend[1].session_id);
+    let review = runtime.state.executions.iter().find(|execution| execution.node == "review").unwrap();
+    assert_eq!(frontend[1].worktree, review.worktree);
+    assert_eq!(frontend[1].before, review.after.clone().unwrap());
     assert_eq!(
         runtime
             .state
@@ -565,7 +580,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         assert_eq!(runtime.state.nodes["backend"].status, "done");
         assert_eq!(runtime.state.feedback_counts, counts);
         assert_eq!(runtime.state.feedback_counts.get("review->frontend").copied().unwrap_or(0), limit);
-        let warning = &runtime.state.events[event_count..];
+        let warning: Vec<_> = runtime.state.events[event_count..].iter().filter(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })).collect();
         assert_eq!(warning.len(), 1);
         match &warning[0].kind {
             EventKind::FeedbackExhausted { from, to, execution_id, count, limit: recorded_limit } => {

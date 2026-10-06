@@ -9,7 +9,7 @@
 | Partitioner | Source project | Classification only; `pi-trim` only, no user extensions/MCP/skills or tools |
 | Planner | Source project | `node`, `edge`, native `read`/`bash`, selected global extensions/MCP/skills |
 | Serial agent | Source project | Pi tools and trusted skills/extensions |
-| Graph node | Independent node repository | Pi tools with Graph path adaptation |
+| Graph node | Private Run repository with one active writer; ordinary dependencies and applied feedback may hand off a completed directory | Pi tools with Graph path adaptation |
 | Merger | Conflicted node workspace or source project | Conflict-repair tools and `pi-trim`; no user extensions/MCP/skills or automatic context |
 
 Planner runs with source-native permissions, without a write-command filter or private-workspace source boundary. Its Bash writes affect the source immediately; Reject, failure, and cancellation do not roll them back. Private Merger filesystem permissions follow the platform policy below; conflict repair does not grant source/sibling access. See [Planning and approval](execution-model.md#planning-and-approval).
@@ -34,7 +34,7 @@ On macOS/Linux, a workspace using Git alternates also has read access to the bou
 
 Private workspaces run stock Node, pinned Pi, and Git for Windows Bash with the host user's permissions. There is **no VM, per-node filesystem sandbox, custom isolation driver, or patched Node/MSYS binary**.
 
-Processes may access the source, siblings, other sessions, engine files, HOME, and credentials where the host user can. Separate node workspaces and Git metadata isolate edits and inherited snapshots, not access rights. See the [Windows guide](../guides/windows.md).
+Processes may access the source, siblings, other sessions, engine files, HOME, and credentials where the host user can. Separate parallel workspaces, exclusive directory handoff, and private Git metadata organize edits and inherited snapshots, not access rights. See the [Windows guide](../guides/windows.md).
 
 ## Path convention
 
@@ -70,6 +70,14 @@ This is finite tool/text adaptation, **not kernel-level transparent remapping fo
 The Planner uses native `read`/`bash` in the actual source cwd. Paths are not adapted to a private copy, and writes are not blocked by Graph-node source boundaries.
 
 Model-visible normalization is not a byte-for-byte file representation or a data-loss-prevention system. Images, thinking content, provider signatures, unknown encodings, and extension channels are not universally sanitized. Perform exact byte processing inside programs rather than relying on normalized model-visible text.
+
+## Inherited project resources
+
+Ordinary dependencies and applied feedback use the same project-state channels: Git snapshots plus separately recorded ignored files. A linear ordinary chain can pass one completed directory between writers; applied feedback transfers the sender's completed directory to its target. Fan-out materializes independent writable state for concurrent branches, and fan-in composes recorded inputs in an available directory. Neither inheritance route assigns an active writer's directory to a second execution or requires additional sibling-write permissions; the platform access boundaries above remain unchanged. The backend prepares state and any required session-history forks before launching the private process, so macOS/Linux executors do not need new source/sibling write permissions.
+
+Runtime/Git internals are excluded. Internal directory links are rebased to the destination (Windows uses junctions); external directory links are rejected rather than copied or granted broad access. External file links still need their targets permitted by the existing platform policy. Source-local ignored secrets are project files too; inheritance is not a credential filter.
+
+Copied `.venv` files can reuse installed packages when invoked through the current workspace's interpreter, but activation/launcher paths and code-internal absolute paths are not transparently relocated. A copied environment is not a process-level namespace or a stable-path shared volume. Use relative resource paths and the current interpreter; the path-adapter limitations above still apply.
 
 ## Shared runtime and external state
 

@@ -23,5 +23,6 @@ pub mod server;
 pub mod snapshot_view;
 pub mod store;
 pub mod workspace;
+mod workspace_files;
 mod workspace_cleanup;
 pub mod maintenance;

@@ -48,7 +48,7 @@ Built on [Pi](https://github.com/earendil-works/pi).
 
 - **Integrated coding-agent environment** — Chat with coding agents, manage provider authentication and model settings, inspect tool calls and logs, and intervene from the same UI.
 - **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions.
-- **Workspace inheritance** — Child nodes start from their completed parents' workspace state, combined when there are multiple parents. Each node works in its own workspace.
+- **Workspace inheritance** — Children inherit completed parent state, including ignored project resources; multiple parents are combined. Ordinary dependencies and applied feedback can hand off a completed directory, with one writer at a time and independent parallel branches. Conversations stay with their own nodes.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
@@ -69,7 +69,7 @@ For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph
 | Coding agents | One | One or more task nodes |
 | Planning | Direct | Compiled execution graph |
 | Approval | Automatic | User approval by default |
-| Workspace | Your project | Private node workspaces with dependency-based inheritance |
+| Workspace | Your project | Private Run workspaces with state inheritance and exclusive handoff |
 | Scheduling | Sequential | Dependency-aware, bounded parallelism |
 
 See the [execution model](docs/architecture/execution-model.md) for planning side effects and publication semantics. Graph is a route, not a minimum agent count; it can contain a single node.
@@ -157,11 +157,11 @@ Partitioner
                                   Publish to project
 ```
 
-Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits their workspace state. Explicit feedback edges send bounded rework instructions to a fixed target; they do not copy conversations or supply filesystem input.
+Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits their workspace state. Applied feedback sends bounded rework instructions and hands the sender's completed workspace to a fixed target, which continues its own conversation. Ordinary dependencies and feedback inherit project file state, not other nodes' conversations; feedback still has separate budget, generation, and invalidation rules.
 
 ## Architecture
 
-The Rust backend and SQLite event log own runtime state; the React UI displays projections. Graph nodes have their own workspaces and Git metadata. The backend prepares inherited workspace state and records results as Git snapshots; agents do not exchange commits. Delivery requires successful publication—not merely finished model calls.
+The Rust backend and SQLite event log own runtime state; the React UI displays projections. Graph executions use private Run repositories with one writer per directory; completed directories can pass between nodes rather than being permanently assigned to one node. The backend prepares inherited state and records Git snapshots plus versioned ignored files; agents do not exchange commits. Delivery requires successful publication—not merely finished model calls.
 
 Read [Architecture](docs/architecture/overview.md) for motivation and invariants, or [Execution model](docs/architecture/execution-model.md) for planning, sessions, workspace inheritance, Git snapshots, and publication semantics. Low-level runtime, isolation, and Pi contracts are linked from those pages rather than duplicated here.
 

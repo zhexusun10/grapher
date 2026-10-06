@@ -50,7 +50,7 @@ The production [Planner prompt](../../backend/resources/prompts/planner.md) and 
 
 ## Runtime
 
-A node is a stable task definition; an execution is one recorded attempt. The first attempt starts a fresh Pi session. Feedback and node follow-ups continue that node's existing session and workspace; other agents' conversations are not copied.
+A node is a stable task definition; an execution is one recorded attempt. The first attempt starts a fresh Pi session, even when it takes over a parent's physical directory. Node follow-ups continue that node's own history; when its result is represented in a unique terminal workspace, a follow-up updates that combined tree without rerunning completed descendants. Applied feedback transfers the sender's completed workspace while continuing the target's own history through an explicit session fork; other agents' conversations are not copied.
 
 Ready nodes dispatch when dependencies and concurrency slots permit. Failure blocks dependent branches, not unrelated work. Feedback explicitly invalidates affected results rather than asking a coordinator to reinterpret the conversation.
 
@@ -58,9 +58,9 @@ The same backend can drive multiple Runs. Concurrency and pause are Run-scoped; 
 
 ## Workspace inheritance
 
-Ordinary dependency edges define one-way workspace inheritance. Roots start from the source baseline; a child waits for its parents to complete and starts from their resulting filesystem state. Multiple parents' states are combined before the child runs. Agents do not exchange workspaces, commits, or conversation histories with one another.
+Ordinary dependency edges define one-way workspace inheritance. Roots start from the latest recorded source; a child waits for its parents to complete and starts from their resulting filesystem state, including versioned ignored files. Multiple parents' states are combined before the child runs. Both ordinary dependencies and applied feedback can exclusively hand off a completed physical directory. Linear chains normally reuse one directory; fan-out gives concurrent branches independent writable views, and fan-in combines their recorded results in an available directory. Feedback retains its separate verdict, budget, generation, drain, and invalidation rules. Conversations are never inherited.
 
-Each node has its own workspace and private `.git` directory, despite the `.grapher-worktrees` directory name. The backend uses Git snapshots and merges to implement inheritance and publication; committing or sending a result is not an agent-to-agent protocol. These repositories normally borrow the source Git object store rather than copy all history. Ordinary project folders use external shadow Git metadata rather than receiving a new `.git` directory. See [Execution model](execution-model.md#node-workspaces-and-inheritance) for the storage mechanism and conflict-recovery limits.
+Each active writer uses a private repository with its own `.git` directory, despite the `.grapher-worktrees` directory name. Directories are reusable Run execution slots, not permanent node identities. The backend uses Git snapshots and merges to implement inheritance and publication; committing or sending a result is not an agent-to-agent protocol. These repositories normally borrow the source Git object store rather than copy all history. Ordinary project folders use external shadow Git metadata rather than receiving a new `.git` directory. See [Execution model](execution-model.md#node-workspaces-and-inheritance) for the storage mechanism and conflict-recovery limits.
 
 ## Feedback
 
@@ -91,7 +91,7 @@ Planner writes reach the source immediately, **before graph approval**, without 
 2. Scheduling does not depend on a persistent LLM coordinator.
 3. Ordinary dependencies form a DAG; cycles require explicit bounded feedback.
 4. A new node starts a fresh session; continuation never imports another agent's chat history.
-5. Ordinary dependencies pass workspace state from completed parents to children, not conversations or agent-to-agent messages.
+5. Ordinary dependencies and applied feedback inherit completed workspace state, not conversations; each physical directory has at most one active writer.
 6. Backend state and append-only events are authoritative; the UI is a projection.
 7. Graph completion requires successful publication, not merely finished model calls.
 8. Independent Git repositories are not, by themselves, security sandboxes.
@@ -102,7 +102,8 @@ Planner writes reach the source immediately, **before graph approval**, without 
 | --- | --- |
 | [compiler.rs](../../backend/src/compiler.rs) | Graph validation and execution plan |
 | [runtime.rs](../../backend/src/runtime.rs) | Scheduling, feedback, revisions, and events |
-| [workspace.rs](../../backend/src/workspace.rs) | Private repositories, snapshots, Planner copy/merge, and refs |
+| [workspace.rs](../../backend/src/workspace.rs) | Private repositories, Git snapshots, composition, and refs |
+| [workspace_files.rs](../../backend/src/workspace_files.rs) | Ignored-file snapshots, composition, verification, and materialization |
 | [graph_merge.rs](../../backend/src/graph_merge.rs) | Workspace conflict Merger and final publication |
 | [engine.rs](../../backend/src/engine.rs) | Role configuration and Pi process protocol |
 | [native.rs](../../backend/src/native.rs) | Native launchers and platform preflight |

@@ -62,6 +62,7 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "publication": state.publication, "events": [], "approved": state.approved,
         "paused": state.paused, "stopRequested": state.stop_requested, "phase": state.phase, "base": state.base,
         "publishedHead": state.published_head, "feedbackCounts": state.feedback_counts,
+        "pendingFeedback": state.pending_feedback, "sourceFiles": state.source_files,
         "runMetrics": state.run_metrics
     })
 }
@@ -117,6 +118,7 @@ mod tests {
         state.executions.push(Execution {
             id: "worker".into(), node: "n".into(), revision: 1, attempt: 1,
             session_id: "s".into(), worktree: String::new(), before: String::new(),
+            workspace_lineage: vec![],
             after: None, status: "running".into(), started_at: 42,
             completed_at: None, metrics: None, output_bytes: 0, pid: Some(123),
             output: "{\"type\":\"grapher_process_started\",\"pid\":123,\"cwd\":\"x\"}\nsecret".into(),

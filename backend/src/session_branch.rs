@@ -17,6 +17,71 @@ impl PreparedBranch {
     }
 }
 
+fn open_session(source_dir: &Path, source_id: &str, source_cwd: &Path)
+    -> Result<(PathBuf, std::io::BufReader<fs::File>, Value), String>
+{
+    use std::io::{BufRead, BufReader, Read, Seek};
+    Uuid::parse_str(source_id).map_err(|_| "Invalid source session ID")?;
+    let suffix = format!("_{source_id}.jsonl");
+    let files: Vec<_> = fs::read_dir(source_dir).map_err(|error| format!("Cannot open node session: {error}"))?
+        .filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().ends_with(&suffix) && entry.path().is_file()).collect();
+    if files.len() != 1 { return Err("Persisted node conversation is missing or ambiguous".into()); }
+    let source = files[0].path();
+    let mut file = fs::File::open(&source).map_err(|error| error.to_string())?;
+    if file.metadata().map_err(|error| error.to_string())?.len() == 0 { return Err("Empty node session".into()); }
+    file.seek(std::io::SeekFrom::End(-1)).map_err(|error| error.to_string())?;
+    let mut last = [0];
+    file.read_exact(&mut last).map_err(|error| error.to_string())?;
+    if last != [b'\n'] { return Err("Node session has an incomplete last entry".into()); }
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(file);
+    let mut first = String::new();
+    reader.read_line(&mut first).map_err(|error| error.to_string())?;
+    let header: Value = serde_json::from_str(&first).map_err(|error| error.to_string())?;
+    let expected = crate::native::host_path(source_cwd);
+    let matches_cwd = header.get("cwd").and_then(Value::as_str).is_some_and(|cwd| {
+        let actual = crate::native::host_path(Path::new(cwd));
+        actual == expected || actual.canonicalize().ok().zip(expected.canonicalize().ok()).is_some_and(|(actual, expected)| actual == expected)
+    });
+    if header["type"] != "session" || header["id"] != source_id || !matches_cwd {
+        return Err("Node session history belongs to another workspace or identity".into());
+    }
+    Ok((source, reader, header))
+}
+
+pub(crate) fn validate_session(directory: &Path, id: &str, cwd: &Path) -> Result<(), String> {
+    open_session(directory, id, cwd).map(|_| ())
+}
+
+/// Move a node's own conversation to a new cwd without rewriting the original
+/// history or loading its transcript into memory. Pi discovers this new binding
+/// by its new session ID and cwd; parentSession keeps the lineage inspectable.
+pub fn fork_session(
+    source_dir: &Path, source_id: &str, source_cwd: &Path,
+    target_dir: &Path, target_id: &str, target_cwd: &Path,
+) -> Result<(), String> {
+    Uuid::parse_str(target_id).map_err(|_| "Invalid target session ID")?;
+    if target_id == source_id { return Err("A forked node session needs a new identity".into()); }
+    let (source, mut reader, mut header) = open_session(source_dir, source_id, source_cwd)?;
+    header["id"] = json!(target_id);
+    header["cwd"] = json!(crate::native::host_path(target_cwd));
+    header["parentSession"] = json!(crate::native::host_path(&source));
+    fs::create_dir_all(target_dir).map_err(|error| error.to_string())?;
+    let target = target_dir.join(format!("grapher_{target_id}.jsonl"));
+    if target.exists() { return Err("Cannot overwrite an existing forked node session".into()); }
+    let temporary = target_dir.join(format!("fork-{}.pending", Uuid::new_v4()));
+    let result = (|| {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|error| error.to_string())?;
+        writeln!(file, "{header}").map_err(|error| error.to_string())?;
+        std::io::copy(&mut reader, &mut file).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        fs::rename(&temporary, &target).map_err(|error| error.to_string())
+    })();
+    let _ = fs::remove_file(temporary);
+    result
+}
+
 fn user_text(value: &Value) -> Option<String> {
     let message = value.get("message")?;
     if value.get("type")?.as_str()? != "message" || message.get("role")?.as_str()? != "user" {
@@ -59,10 +124,15 @@ fn branch_before_user_matching(
     let values: Vec<Value> = contents.lines().map(|line| serde_json::from_str(line)
         .map_err(|_| "Invalid Pi session entry".to_string())).collect::<Result<_, _>>()?;
     let header = values.first().ok_or("Empty Pi session")?;
+    let actual_cwd = header.get("cwd").and_then(Value::as_str).map(Path::new);
+    let cwd_matches = actual_cwd.is_some_and(|actual| {
+        let actual = crate::native::host_path(actual);
+        let expected = crate::native::host_path(cwd);
+        actual == expected || actual.canonicalize().ok().zip(expected.canonicalize().ok()).is_some_and(|(a, b)| a == b)
+    });
     if header.get("type").and_then(Value::as_str) != Some("session")
         || header.get("id").and_then(Value::as_str) != Some(session_id)
-        || header.get("cwd").and_then(Value::as_str).and_then(|s| Path::new(s).canonicalize().ok())
-            != Some(cwd.canonicalize().map_err(|error| error.to_string())?)
+        || !cwd_matches
     { return Err("Pi session belongs to another workspace or execution".into()); }
     let entries: HashMap<&str, &Value> = values.iter().skip(1).map(|entry| {
         entry.get("id").and_then(Value::as_str).map(|id| (id, entry))
@@ -84,6 +154,7 @@ fn branch_before_user_matching(
     for entry in values.iter().skip(1) {
         let content = user_text(entry);
         let matches_text = content.as_deref().is_some_and(|text| text == old_text ||
+            (!planner && text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS) == Some(old_text)) ||
             (planner && text.ends_with(&format!("\n{old_text}")) &&
                 (text.starts_with("Current graph node status:\n") || text.starts_with("User query:\n"))));
         if !matches_text { continue; }
@@ -129,6 +200,48 @@ fn branch_before_user_matching(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workspace_transfer_forks_only_the_owners_history_and_preserves_original_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("owner");
+        let new = temp.path().join("review");
+        let source = temp.path().join("source-session");
+        let target = temp.path().join("target-session");
+        for path in [&old, &new, &source] { fs::create_dir(path).unwrap(); }
+        let id = Uuid::new_v4().to_string();
+        let next = Uuid::new_v4().to_string();
+        let body = "{\"type\":\"message\",\"id\":\"turn\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"OWNER HISTORY\"}}\n";
+        let bytes = format!("{}\n{body}", json!({"type":"session", "version":3, "id":id, "cwd":old}));
+        let path = source.join(format!("test_{id}.jsonl"));
+        fs::write(&path, &bytes).unwrap();
+        fork_session(&source, &id, &old, &target, &next, &new).unwrap();
+        let result = fs::read_to_string(target.join(format!("grapher_{next}.jsonl"))).unwrap();
+        let (header, preserved) = result.split_once('\n').unwrap();
+        let header: Value = serde_json::from_str(header).unwrap();
+        assert_eq!(header["id"], next);
+        assert_eq!(header["cwd"], json!(crate::native::host_path(&new)));
+        assert_eq!(header["parentSession"], json!(crate::native::host_path(&path)));
+        assert_eq!(preserved, body);
+        assert_eq!(fs::read_to_string(path).unwrap(), bytes);
+        assert!(fork_session(&source, &id, &new, &target, &Uuid::new_v4().to_string(), &old).is_err());
+    }
+
+    #[test]
+    fn feedback_source_history_edits_match_the_original_task_without_protocol_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4().to_string();
+        let path = dir.path().join(format!("test_{id}.jsonl"));
+        fs::write(&path, [
+            json!({"type":"session", "id":id, "cwd":dir.path()}),
+            json!({"type":"message", "id":"task", "parentId":null,
+                "message":{"role":"user", "content":format!("Review code{}", crate::engine::FEEDBACK_INSTRUCTIONS), "timestamp":1}}),
+        ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+        let branch = branch_before_user(dir.path(), &id, dir.path(), "Review code", 0, 2).unwrap();
+        let marker: Value = serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap()).unwrap();
+        assert_eq!(marker["parentId"], Value::Null);
+        branch.rollback().unwrap();
+    }
+
     #[test]
     fn planner_turn_with_dynamic_status_can_branch_without_matching_a_node_turn() {
         let dir = tempfile::tempdir().unwrap();

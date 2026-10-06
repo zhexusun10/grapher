@@ -64,7 +64,7 @@ Installing the package does not enable namespaces prohibited by the host/contain
 
 **Planning and approval can change your project.** Planner runs directly in the source, and native Bash writes are immediately visible before graph approval, even if planning fails or is cancelled. Snapshots can stage and commit existing non-ignored user changes. Rejecting the plan does not roll back those writes or side effects. See [Planning and approval](../architecture/execution-model.md#planning-and-approval).
 
-Graph node dependencies are not automatically installed. Ignored, untracked dependency files are not automatically included in inherited workspace snapshots; tasks must prepare the dependencies they need.
+Graph node dependencies are not automatically installed. Existing project-local environments, caches, data, and weights are included in recorded source/parent state even when Git ignores them. Ordinary dependencies and applied feedback can reuse a completed directory; parallel branches materialize independent copies. Copies do not make every environment relocatable: use the current workspace's interpreter, and prepare any missing dependencies. See [Workspace snapshots and feedback](../architecture/workspace-snapshots-and-feedback.md).
 
 ## Local production mode
 
@@ -92,7 +92,7 @@ Do not expose the API to untrusted clients or treat `GRAPHER_ALLOWED_ORIGINS` as
 
 Copy [.env.example](../../.env.example) to the Git-ignored `.env` only if needed. Never commit real credentials. Restart the backend after changing startup environment or engine adapters.
 
-Node checkouts live in the configured cache's `.grapher-worktrees`; modern Planners work directly in the source, without project copies. The verified Pi engine/dependencies are cached once per content/platform version and shared across projects and backend restarts, not copied per workspace. Runtime records and existing execution paths are unchanged. Keep enough disk space for Git snapshots, sessions, and logs. [Execution model](../architecture/execution-model.md#storage-and-cleanup) describes their lifecycles.
+Node checkouts live in the configured cache's `.grapher-worktrees`; modern Planners work directly in the source, without project copies. The verified Pi engine/dependencies are cached once per content/platform version and shared across projects and backend restarts, not copied per workspace. Runtime records and existing execution paths are unchanged. Keep enough disk space for Git snapshots, ignored-file blobs, independently writable parallel copies, sessions, and logs. Linear handoff and reclaimed workspace slots avoid retaining a separate checkout for every historical node. [Execution model](../architecture/execution-model.md#storage-and-cleanup) describes their lifecycles.
 
 To inspect old project-adjacent leftovers, stop the relevant backends and run `npm run cleanup:workspaces -- --parent /absolute/path/to/old/project-parent --legacy-engines`; add `--apply` only after reviewing the preview. Unmarked legacy engines require **all** backends stopped.
 

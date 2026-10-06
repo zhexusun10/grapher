@@ -1779,39 +1779,21 @@ fn drive(service: Arc<Service>) {
         let result = (|| -> Result<(), String> {
             let (completed_tx, completed_rx) = std::sync::mpsc::channel();
             let mut in_flight = 0usize;
-            let mut feedback_results: Vec<(String, String)> = Vec::new();
             loop {
                 let observed = *service.drive_signal.0.lock().map_err(|e| e.to_string())?;
-                // Apply a completed review before exposing its descendants to
-                // the scheduler. Otherwise a consumer can start in the gap
-                // between the last sibling finishing and feedback invalidation.
-                if !feedback_results.is_empty() {
-                    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                    let mut pending = Vec::new();
-                    for (from, output) in feedback_results.drain(..) {
-                        if runtime.feedback_source_busy(&from) {
-                            pending.push((from, output));
-                        } else if runtime.state.nodes.get(&from).is_some_and(|node| node.status == "done") {
-                            runtime.apply_feedback(&from, &output)?;
-                        }
-                    }
-                    feedback_results = pending;
-                }
+                // Pending verdicts are durable. The scheduler applies them
+                // after affected workers drain, including after a restart.
                 let (jobs, root, parents) = {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                     // Only nodes that a pending feedback verdict could invalidate
                     // must drain. Independent branches may fill available slots.
-                    let pending_sources: Vec<_> = feedback_results
-                        .iter()
-                        .map(|(from, _)| from.as_str())
-                        .collect();
                     // Source-native Planner writes may still be in progress.
                     // Drain existing nodes, but dispatch new work only after the
                     // turn records its complete source snapshot and graph.
                     let jobs = if service.planning.load(Ordering::SeqCst) {
                         Vec::new()
                     } else {
-                        runtime.jobs_with_pending_feedback(true, &pending_sources)?
+                        runtime.jobs_with_pending_feedback(true, &[])?
                     };
                     let parents: Vec<_> = jobs
                         .iter()
@@ -1847,7 +1829,9 @@ fn drive(service: Arc<Service>) {
                         // a per-project lock. Concurrent Runs are allowed to reach
                         // Git publication; any resulting repository conflict is left
                         // for the existing publication state to expose.
-                        let result = crate::process_control::with_owner(&run_id, || {
+                        let preflight = service.runtime.lock().map_err(|error| error.to_string())?
+                            .validate_publication_files(&repository, &publication.heads);
+                        let result = preflight.and_then(|()| crate::process_control::with_owner(&run_id, || {
                             crate::graph_merge::merge_graph(&repository, &publication.heads, || {
                                 let attempt = service
                                     .runtime
@@ -1872,8 +1856,12 @@ fn drive(service: Arc<Service>) {
                                     },
                                 )
                             })
-                        });
+                        }));
                         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                        let result = result.and_then(|head| {
+                            runtime.publish_workspace_files(&repository, &publication.heads)?;
+                            Ok(head)
+                        });
                         match result {
                             Ok(head) => {
                                 eprintln!(
@@ -1986,14 +1974,7 @@ fn drive(service: Arc<Service>) {
                         Ok((execution, result)) => {
                             drop(generation);
                             in_flight -= 1;
-                            let feedback = service
-                                .runtime
-                                .lock()
-                                .map_err(|e| e.to_string())?
-                                .finish(&execution, result)?;
-                            if let Some(feedback) = feedback {
-                                feedback_results.push(feedback);
-                            }
+                            service.runtime.lock().map_err(|e| e.to_string())?.finish(&execution, result)?;
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => {
                             if *generation != observed {

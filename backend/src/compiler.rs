@@ -292,7 +292,7 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         // Match the runtime's invalidation set exactly: target plus dependency
         // descendants, without following other feedback edges or judging size.
         warnings.push(format!(
-            "W303: If <FEEDBACK> from {} to {} is applied, the target and dependency descendants will be invalidated: {}. Completed results must be recomputed; {} continues its session/workspace. Nodes outside this set are unaffected.",
+            "W303: If <FEEDBACK> from {} to {} is applied, the target and dependency descendants will be invalidated: {}. Completed results must be recomputed; {} continues its conversation. Nodes outside this set are unaffected.",
             edge.from,
             edge.to,
             downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", "),

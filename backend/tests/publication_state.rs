@@ -72,6 +72,7 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
         session_id: "merger-session".into(),
         worktree: source.to_string_lossy().into(),
         before: head.clone(),
+        workspace_lineage: vec![],
         after: None,
         status: "running".into(),
         output: String::new(), output_bytes: 0, pid: None,

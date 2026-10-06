@@ -712,7 +712,13 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         };
         return Err(msg);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+    // NUL-delimited paths can legally start with whitespace. Never trim or
+    // lossily decode them into a different filename.
+    if args.contains(&"-z") {
+        String::from_utf8(output.stdout).map_err(|_| "Non-UTF-8 Git paths are unsupported".into())
+    } else {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+    }
 }
 
 /// Guard a shadow checkout against edits outside this run without creating a

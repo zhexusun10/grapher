@@ -113,6 +113,7 @@ pub fn resolve_with_merger_for_node(
             session_id: id.clone(),
             worktree: repository.to_string_lossy().into(),
             before: git(repository, &["rev-parse", "HEAD"])?,
+            workspace_lineage: vec![],
             after: None,
             status: "running".into(),
             output: String::new(), output_bytes: 0, pid: None,

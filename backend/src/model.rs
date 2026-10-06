@@ -226,6 +226,9 @@ pub struct Execution {
     pub session_id: String,
     pub worktree: String,
     pub before: String,
+    /// Nodes whose results are represented by this live, inherited workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_lineage: Vec<String>,
     pub after: Option<String>,
     pub status: String,
     #[serde(default)]
@@ -241,6 +244,37 @@ pub struct Execution {
     pub metrics: Option<ExecutionMetrics>,
 }
 
+/// A feedback input is pinned to an execution, never to a movable node ref.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackWorkspace {
+    pub source_execution_id: String,
+    pub target_execution_id: String,
+    pub worktree: String,
+    pub head: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingFeedback {
+    pub execution_id: String,
+    pub from: String,
+    pub to: String,
+    pub source_head: String,
+    pub target_head: Option<String>,
+    pub target_revision: usize,
+    pub accepted: bool,
+    pub output_offset: usize,
+    pub output_bytes: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFiles {
+    pub head: String,
+    pub version: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeState {
@@ -254,10 +288,24 @@ pub struct NodeState {
     pub edit_execution_id: Option<String>,
     #[serde(default)]
     pub human_instruction: bool,
-    /// Result the node held when a follow-up/edit started. A finished run that
-    /// produces a different head invalidates this node's dependency descendants.
+    /// Continue this node's conversation in the current terminal workspace
+    /// without invalidating already-completed descendants.
+    #[serde(default)]
+    pub shared_workspace: bool,
+    /// Result the node held when a non-shared follow-up/edit started. A finished
+    /// run that produces a different head invalidates dependency descendants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_workspace: Option<FeedbackWorkspace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_files_version: Option<String>,
+    #[serde(default)]
+    pub files_changed: bool,
     pub error: Option<String>,
 }
 
@@ -271,7 +319,13 @@ impl Default for NodeState {
             instruction_images: None,
             edit_execution_id: None,
             human_instruction: false,
+            shared_workspace: false,
             baseline_head: None,
+            feedback_workspace: None,
+            files_override: None,
+            files_version: None,
+            baseline_files_version: None,
+            files_changed: false,
             error: None,
         }
     }
@@ -309,6 +363,12 @@ pub enum EventKind {
     /// Native Planner writes survive a failed/cancelled revision too.
     SourceSnapshotted {
         head: String,
+    },
+    SourceFilesRecorded {
+        files: SourceFiles,
+    },
+    WorkspaceFilesChanged {
+        execution_id: String,
     },
     GraphRevised {
         graph: Graph,
@@ -382,6 +442,8 @@ pub enum EventKind {
         execution_id: String,
         head: String,
         nodes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files_version: Option<String>,
     },
     Invalidated {
         nodes: Vec<String>,
@@ -390,6 +452,11 @@ pub enum EventKind {
         human: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<Vec<ImageAttachment>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<FeedbackWorkspace>,
+        /// The message runs on the final inherited workspace; descendants stay valid.
+        #[serde(default)]
+        shared_workspace: bool,
     },
     /// Move Pi's active leaf before an earlier user turn. Old executions and
     /// transcript entries remain durable but no longer belong to this branch.
@@ -414,6 +481,13 @@ pub enum EventKind {
         first_turn: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         selected_version: Option<usize>,
+    },
+    FeedbackQueued {
+        feedback: PendingFeedback,
+    },
+    FeedbackResolved {
+        execution_id: String,
+        disposition: String,
     },
     Feedback {
         from: String,
@@ -514,6 +588,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub published_head: Option<String>,
     pub feedback_counts: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_feedback: Vec<PendingFeedback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_files: Option<SourceFiles>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_metrics: Option<RunMetrics>,
 }
@@ -756,6 +834,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.instruction_images = None;
                 node.edit_execution_id = None;
                 node.human_instruction = false;
+                node.feedback_workspace = None;
+                node.files_override = None;
+                node.files_version = None;
+                node.baseline_files_version = None;
                 if node.status == "dirty" { node.revision += 1; }
             }
             state.feedback_counts.retain(|key, _| graph.edges.iter().any(|edge| edge.feedback && key == &format!("{}->{}", edge.from, edge.to)));
@@ -793,10 +875,17 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             let node = state.nodes.get_mut(&execution.node).unwrap();
             node.edit_execution_id = None;
             node.status = "running".into();
+            node.files_changed = false;
             node.error = None;
             state.executions.push(execution.clone());
         }
         EventKind::SourceSnapshotted { .. } | EventKind::Steered { .. } | EventKind::NodeMessaged { .. } => {}
+        EventKind::SourceFilesRecorded { files } => state.source_files = Some(files.clone()),
+        EventKind::WorkspaceFilesChanged { execution_id } => {
+            if let Some(execution) = state.executions.iter().find(|execution| execution.id == *execution_id && execution.status == "running") {
+                if let Some(node) = state.nodes.get_mut(&execution.node) { node.files_changed = true; }
+            }
+        }
         EventKind::Output { execution_id, text } => {
             if let Some(execution) = state
                 .executions
@@ -834,6 +923,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .find(|item| item.id == *execution_id)
                 .map(|execution| {
                     let node_name = execution.node.clone();
+                    let lineage = execution.workspace_lineage.clone();
                     execution.status = "completed".into();
                     execution.after = Some(head.clone());
                     execution.completed_at = Some(event.timestamp);
@@ -841,16 +931,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     execution.metrics = metrics.clone().or_else(|| (!output.is_empty()).then(||
                         parse_execution_metrics(output, execution.started_at, event.timestamp)));
                     execution.output = String::new();
-                    node_name
+                    (node_name, lineage)
                 });
-            if let Some(node_name) = completed {
+            if let Some((node_name, lineage)) = completed {
                 if !superseded {
                     let changed = state
                         .nodes
                         .get(&node_name)
                         .and_then(|node| node.baseline_head.as_deref())
-                        .is_some_and(|baseline| baseline != head.as_str());
-                    let dependents: Vec<String> = if changed {
+                        .is_some_and(|baseline| baseline != head.as_str() || state.nodes[&node_name].files_changed);
+                    let dependents: Vec<String> = if changed && !state.nodes[&node_name].shared_workspace {
                         crate::compiler::downstream(&state.graph, &node_name)
                             .into_iter()
                             .filter(|name| name != &node_name)
@@ -863,6 +953,26 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         node.head = Some(head.clone());
                         node.instruction_images = None;
                         node.baseline_head = None;
+                        node.shared_workspace = false;
+                        node.feedback_workspace = None;
+                        node.files_override = None;
+                        node.files_version = Some(format!("after-{execution_id}"));
+                        node.baseline_files_version = None;
+                        node.files_changed = false;
+                    }
+                    // A downstream execution on the inherited workspace advances
+                    // the live result for every node represented by that workspace.
+                    // This is metadata-only: their conversations and task results
+                    // remain intact, and no dependent node needs to run again.
+                    for inherited in lineage.into_iter().filter(|name| name != &node_name) {
+                        if let Some(node) = state.nodes.get_mut(&inherited) {
+                            if node.status == "done" {
+                                node.head = Some(head.clone());
+                                node.files_version = Some(format!("after-{execution_id}"));
+                                node.files_override = None;
+                                node.files_changed = false;
+                            }
+                        }
                     }
                     // A follow-up that changed the result makes every descendant
                     // recompute from it. Unrelated branches stay valid.
@@ -880,6 +990,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                             node.instruction_images = None;
                             node.edit_execution_id = None;
                             node.human_instruction = false;
+                            node.feedback_workspace = None;
+                            node.files_override = None;
+                            node.files_version = None;
+                            node.baseline_files_version = None;
                             if !unstarted {
                                 node.revision += 1;
                             }
@@ -906,6 +1020,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.status = "failed".into();
                 node.error = Some(error.clone());
                 node.baseline_head = None;
+                node.baseline_files_version = None;
             }
             if let Some(execution) = state
                 .executions
@@ -925,7 +1040,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.status = "blocked".into();
             node.error = Some(error.clone());
         }
-        EventKind::WorkspaceResolved { execution_id, head, nodes } => {
+        EventKind::WorkspaceResolved { execution_id, head, nodes, files_version } => {
             let execution = state.executions.iter_mut().find(|item| item.id == *execution_id).unwrap();
             execution.status = "resolved".into();
             execution.completed_at = Some(event.timestamp);
@@ -941,10 +1056,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.head = if *name == target { Some(head.clone()) } else { None };
                 if !unstarted { node.revision += 1; }
                 if *name == target {
-                    node.instruction.clear();
-                    node.instruction_images = None;
-                    node.edit_execution_id = None;
-                    node.human_instruction = false;
+                    node.files_override = files_version.clone();
+                    node.files_version = files_version.clone();
+                    node.baseline_files_version = None;
+                    if let Some(input) = &mut node.feedback_workspace {
+                        input.head = head.clone();
+                    } else if !node.human_instruction {
+                        node.instruction.clear();
+                        node.instruction_images = None;
+                        node.edit_execution_id = None;
+                    }
                 }
             }
             state.phase = if state.paused { "paused" } else { "running" }.into();
@@ -955,6 +1076,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             instruction,
             human,
             images,
+            workspace,
+            shared_workspace,
         } => {
             state.stop_requested = false;
             state.publication = None;
@@ -969,32 +1092,50 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if name != target {
                     node.head = None;
                     node.baseline_head = None;
+                    node.instruction.clear();
+                    node.instruction_images = None;
+                    node.edit_execution_id = None;
+                    node.human_instruction = false;
+                    node.feedback_workspace = None;
+                    node.files_override = None;
+                    node.files_version = None;
+                    node.baseline_files_version = None;
                 }
                 if *human && !unstarted {
                     node.revision += 1;
                 }
             }
             let target_node = state.nodes.get_mut(target).unwrap();
+            target_node.shared_workspace = false;
+            if workspace.is_some() || !*human { target_node.feedback_workspace = workspace.clone(); }
+            if let Some(input) = workspace {
+                target_node.head = Some(input.head.clone());
+                target_node.files_override = None;
+                target_node.files_version = Some(format!("after-{}", input.source_execution_id));
+            }
             if *human && !instruction.is_empty() {
                 // A user follow-up continues from the target's current result.
-                // Descendants are recomputed only if that result changes.
+                // A shared-workspace follow-up already edits the terminal result,
+                // so completed descendants remain valid and are not rescheduled.
                 target_node.baseline_head = target_node.head.clone();
+                target_node.baseline_files_version = target_node.files_version.clone();
                 target_node.instruction = instruction.clone();
                 target_node.instruction_images = images.clone();
                 target_node.edit_execution_id = None;
                 target_node.human_instruction = true;
+                target_node.shared_workspace = *shared_workspace;
             } else if !instruction.is_empty() {
-                // Automated feedback continues the target's existing Pi session:
-                // the reviewer's message is appended as the next user turn, and
-                // the node keeps its previous result and worktree.
+                // Feedback retains the target's conversation, but a pinned
+                // workspace input can transfer the reviewer's completed tree.
                 target_node.baseline_head = None;
+                target_node.baseline_files_version = None;
                 target_node.instruction = instruction.clone();
                 target_node.instruction_images = None;
                 target_node.edit_execution_id = None;
                 target_node.human_instruction = true;
             } else {
-                // Downstream-only invalidation: the target keeps its result.
                 target_node.baseline_head = None;
+                target_node.shared_workspace = false;
             }
             state.phase = if state.paused { "paused" } else { "running" }.into();
         }
@@ -1025,8 +1166,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.status = "dirty".into();
                 node.error = None;
                 node.revision += 1;
+                node.feedback_workspace = None;
+                node.files_override = None;
                 if name == target {
                     node.baseline_head = node.head.clone();
+                    node.baseline_files_version = node.files_version.clone();
+                    node.files_version = Some(format!("before-{}", anchor.id));
                     node.head = Some(anchor.before.clone());
                     node.instruction = instruction.clone();
                     node.instruction_images = images.clone();
@@ -1046,6 +1191,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::PlannerConversationEdited { instruction, first_turn, .. } => {
             state.stop_requested = false;
             if *first_turn { state.graph.original_goal = instruction.clone(); }
+        }
+        EventKind::FeedbackQueued { feedback } => {
+            if !state.pending_feedback.iter().any(|item| item.execution_id == feedback.execution_id) {
+                state.pending_feedback.push(feedback.clone());
+            }
+        }
+        EventKind::FeedbackResolved { execution_id, .. } => {
+            state.pending_feedback.retain(|item| item.execution_id != *execution_id);
         }
         EventKind::Feedback { from, to, accepted } => {
             if !accepted {

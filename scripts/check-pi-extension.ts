@@ -49,7 +49,7 @@ try {
   assert.equal(extension.handlers.has("tool_call"), false, "Planner has no path or read guards");
   const edgeDescription = extension.tools.get("edge")!.definition.description;
   assert.match(edgeDescription, /Each feedback source may have at most one feedback target\./);
-  assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer/i);
+  assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork|workspace/i);
   const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = extension.tools.get(name)!.definition;
@@ -78,7 +78,7 @@ try {
   const node = (edit: Record<string, unknown>) => call("node", { nodes: [edit] });
   const edge = (edit: Record<string, unknown>) => call("edge", { edges: [edit] });
   const feedbackWarning = (from: string, to: string, nodes: string[]) =>
-    `W303: If <FEEDBACK> from ${from} to ${to} is applied, the target and dependency descendants will be invalidated: ${nodes.join(", ")}. Completed results must be recomputed; ${to} continues its session/workspace. Nodes outside this set are unaffected.`;
+    `W303: If <FEEDBACK> from ${from} to ${to} is applied, the target and dependency descendants will be invalidated: ${nodes.join(", ")}. Completed results must be recomputed; ${to} continues its conversation. Nodes outside this set are unaffected.`;
   // Regression: run 72feb3ad repeatedly supplied both single and batch fields.
   // Verify the actual provider schema, then exercise nullable wire arguments
   // through Pi's validator and the real compiler (not direct execute alone).

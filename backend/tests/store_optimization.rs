@@ -19,6 +19,7 @@ fn execution(id: &str) -> Execution {
     Execution {
         id: id.into(), node: id.into(), revision: 1, attempt: 1,
         session_id: id.into(), worktree: String::new(), before: String::new(),
+        workspace_lineage: vec![],
         after: None, status: "running".into(), output: String::new(), output_bytes: 0, pid: None,
         started_at: 1, completed_at: None, metrics: None,
     }

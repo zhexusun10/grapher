@@ -23,6 +23,13 @@ pub struct Job {
     pub task: String,
     pub images: Option<Vec<ImageAttachment>>,
     pub resume_execution_id: Option<String>,
+    pub session_fork: Option<Execution>,
+    pub feedback_workspace: Option<FeedbackWorkspace>,
+    /// The selected worktree already contains the inherited commit; do not rebuild it from refs.
+    pub inherit_workspace: bool,
+    pub file_versions: Vec<String>,
+    pub previous_file_version: Option<String>,
+    pub history_edit: bool,
     pub feedback_source: bool,
     pub expected_source_head: String,
 }
@@ -510,10 +517,21 @@ impl Runtime {
     pub(crate) fn capture_planner_source(&mut self) -> Result<(), String> {
         let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
         let head = workspace::snapshot_repository(&repository)?;
+        self.record_source_files(&repository, &head)?;
         if head != self.latest_source_head() {
             self.emit(EventKind::SourceSnapshotted { head })?;
         }
         Ok(())
+    }
+
+    fn record_source_files(&mut self, repository: &Path, head: &str) -> Result<(), String> {
+        if self.is_serial() { return Ok(()); }
+        let files = crate::workspace_files::Files::new(&self.root, &self.state.run_id)?;
+        let parents = self.state.source_files.as_ref().filter(|source| files.exists(&source.version))
+            .map(|source| vec![source.version.clone()]).unwrap_or_default();
+        let version = Uuid::new_v4().to_string();
+        files.capture(repository, &version, head, &parents)?;
+        self.emit(EventKind::SourceFilesRecorded { files: SourceFiles { head: head.into(), version } })
     }
 
     pub fn approve(&mut self) -> Result<(), String> {
@@ -530,6 +548,7 @@ impl Runtime {
         // Planning writes directly to source. Freeze the actual files only now,
         // after planning and approval, before any node workspace is allocated.
         let base = workspace::snapshot_repository(&repository)?;
+        self.record_source_files(&repository, &base)?;
         self.emit(EventKind::Approved { base })
     }
 
@@ -668,6 +687,7 @@ impl Runtime {
         // Capture the real source after Planner's native writes. Persist the
         // input head with the revision so reloads cannot fall back to old files.
         let source_head = workspace::snapshot_repository(&repository)?;
+        self.record_source_files(&repository, &source_head)?;
         self.emit(EventKind::GraphRevised {
             graph,
             planning_id: planning.planning_id.clone(),
@@ -744,15 +764,18 @@ impl Runtime {
             return Err("No previous node session to continue; revise the plan instead".into());
         }
         // Failed executions also retain a session, even without a result head.
-        // A follow-up continues this node's session; its descendants are only
-        // recomputed if this run actually changes the node's result.
+        // Replies on a node's unique terminal workspace update that shared tree
+        // directly, so completed descendants remain valid and stay done.
         self.validate_invalidation(node)?;
+        let shared_workspace = self.terminal_workspace_for(node).is_some();
         self.emit(EventKind::Invalidated {
             nodes: vec![node.into()],
             target: node.into(),
             instruction: instruction.trim().into(),
             human: true,
             images,
+            workspace: None,
+            shared_workspace,
         })
     }
 
@@ -795,6 +818,12 @@ impl Runtime {
             })
             .ok_or("Select an active node message to edit")?
             .clone();
+        if !self.is_serial() && self.state.source_files.is_some() {
+            let files = crate::workspace_files::Files::new(&self.root, &self.state.run_id)?;
+            if !files.exists(&format!("before-{}", anchor.id)) {
+                return Err("Historical ignored-file snapshot is unavailable; use a new follow-up from the current source instead".into());
+            }
+        }
         let start = self
             .state
             .events
@@ -923,12 +952,32 @@ impl Runtime {
         workspace::verify_prepared_ancestor(path, &execution.before)?;
         let head =
             workspace::snapshot_node_for_run(path, &repository, node, Some(&self.state.run_id))?;
+        let mut files_version = None;
+        if self.state.nodes[node].error.as_deref().is_some_and(|error| error.contains("ignored")) {
+            let files = crate::workspace_files::Files::new(&self.root, &self.state.run_id)?;
+            let mut parents = self.state.source_files.as_ref().map(|source| vec![source.version.clone()]).unwrap_or_default();
+            let mut inputs = self.parents(node);
+            inputs.push(node.into());
+            for name in inputs {
+                if let Some(version) = &self.state.nodes[&name].files_version {
+                    if files.exists(version) { parents.push(version.clone()); }
+                }
+            }
+            if let Some(input) = &self.state.nodes[node].feedback_workspace {
+                let version = format!("after-{}", input.source_execution_id);
+                if files.exists(&version) { parents.push(version); }
+            }
+            let version = Uuid::new_v4().to_string();
+            files.capture(path, &version, &head, &parents)?;
+            files_version = Some(version);
+        }
         // This was a preparation failure, not a completed node task. Commit
         // the resolved inputs without emitting a fictitious Finished event.
         self.emit(EventKind::WorkspaceResolved {
             execution_id: execution.id,
             head,
             nodes: downstream(&self.state.graph, node).into_iter().collect(),
+            files_version,
         })
     }
 
@@ -998,7 +1047,16 @@ impl Runtime {
         {
             return Ok(Vec::new());
         }
+        self.drain_feedback()?;
         let config = self.state.config.clone().ok_or("Missing config")?;
+        if !self.is_serial() {
+            let files = crate::workspace_files::Files::new(&self.root, &self.state.run_id)?;
+            if self.state.source_files.as_ref().is_none_or(|source| source.head != self.latest_source_head() || !files.exists(&source.version)) {
+                let repository = resolve_repository(&self.root, &config)?;
+                let head = self.latest_source_head().to_owned();
+                self.record_source_files(&repository, &head)?;
+            }
+        }
         // Check before emitting Started or allocating workspaces, including jobs
         // resumed without a UI request. perform() checks again before filesystem work.
         resolve_repository(&self.root, &config)?;
@@ -1031,7 +1089,7 @@ impl Runtime {
         // branch to drain. Its consumers must not start on the stale verdict.
         // This is distinct from the feedback target's scope: a consumer of
         // the review is not necessarily downstream of that target.
-        for source in pending_sources {
+        for source in pending_sources.iter().copied().chain(self.state.pending_feedback.iter().map(|item| item.from.as_str())) {
             busy_feedback.extend(downstream(&self.state.graph, source));
         }
         loop {
@@ -1095,38 +1153,130 @@ impl Runtime {
         let mut jobs = Vec::new();
         for node in ready {
             let id = Uuid::new_v4().to_string();
-            // New/replanned nodes use the latest recorded source, including
-            // Planner writes after approval. Retained node results are composed
-            // with that source during preparation, not discarded.
+            // Dependency nodes normally take over their parent's physical workspace.
             let source_head = self.latest_source_head().to_owned();
-            let before = self.state.nodes[&node.name]
-                .head
-                .clone()
-                .unwrap_or_else(|| source_head.clone());
+            let parent_names = self.parents(&node.name);
+            let parent_heads = parent_names.iter().map(|parent| {
+                self.state.nodes[parent].head.clone().ok_or("Ready node has no completed parent head")
+            }).collect::<Result<Vec<_>, _>>()?;
+            let mut before = self.state.nodes[&node.name]
+                .head.clone().unwrap_or_else(|| source_head.clone());
             let resume = if self.state.nodes[&node.name].human_instruction {
                 let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
-                Some(
-                    self.state
-                        .executions
-                        .iter()
-                        .rev()
-                        .find(|execution| {
-                            execution.node == node.name
-                                && execution.completed_at.is_some()
-                                && anchor.is_none_or(|id| execution.id == id)
-                        })
-                        .ok_or("No previous node session to continue")?,
-                )
+                let previous = self.state.executions.iter().rev().find(|execution| execution.node == node.name
+                    && execution.completed_at.is_some() && anchor.is_none_or(|id| execution.id == id))
+                    .ok_or("No previous node session to continue")?;
+                let origin = self.state.executions.iter().find(|execution| execution.session_id == previous.session_id).unwrap_or(previous);
+                let suffix = format!("_{}.jsonl", previous.session_id);
+                let persisted = fs::read_dir(self.root.join("sessions").join(&origin.id)).ok()
+                    .is_some_and(|entries| entries.filter_map(Result::ok).any(|entry| entry.file_name().to_string_lossy().ends_with(&suffix)));
+                if !persisted && self.state.nodes[&node.name].feedback_workspace.is_some() {
+                    let input = self.state.nodes[&node.name].feedback_workspace.as_ref().ok_or("Missing feedback input")?;
+                    Some(self.state.executions.iter().find(|execution| execution.id == input.target_execution_id).ok_or("Missing original target session")?)
+                } else { Some(previous) }
             } else {
                 None
             };
-            let resume_execution_id = resume.map(|previous| {
-                self.state
-                    .executions
-                    .iter()
-                    .find(|execution| execution.session_id == previous.session_id)
-                    .map(|execution| execution.id.clone())
-                    .unwrap_or_else(|| previous.id.clone())
+            let feedback_workspace = self.state.nodes[&node.name].feedback_workspace.clone();
+            let fresh_path = || workspace::normalize_workspace_display_path(&self.run_workspace_root()
+                .join(format!("{}-{id}", crate::compiler::node_id(&node.name))));
+            let busy = |path: &Path| self.state.executions.iter().any(|execution|
+                execution.status == "running" && Path::new(&execution.worktree) == path);
+            let shared_terminal = self.state.nodes[&node.name].shared_workspace
+                .then(|| self.terminal_workspace_for(&node.name)).flatten();
+            let mut inherit_workspace = false;
+            let mut workspace_lineage = BTreeSet::new();
+            let worktree = if let Some(input) = &self.state.nodes[&node.name].feedback_workspace {
+                if let Some(source) = self.state.executions.iter().find(|execution| execution.id == input.source_execution_id) {
+                    workspace_lineage.extend(source.workspace_lineage.iter().cloned());
+                }
+                input.worktree.clone()
+            } else if self.is_serial() {
+                resolve_repository(&self.root, &config)?.to_string_lossy().into()
+            } else if let Some(terminal) = shared_terminal {
+                before = self.state.nodes.get(&terminal.node).and_then(|state| state.head.clone())
+                    .or_else(|| terminal.after.clone()).unwrap_or_else(|| source_head.clone());
+                workspace_lineage.extend(terminal.workspace_lineage.iter().cloned());
+                let path = Path::new(&terminal.worktree);
+                if !busy(path) {
+                    if path.is_dir() {
+                        inherit_workspace = self.workspace_has_head(path, &before);
+                        terminal.worktree.clone()
+                    } else if let Some(idle) = self.idle_workspace_path() {
+                        idle.to_string_lossy().into()
+                    } else {
+                        terminal.worktree.clone()
+                    }
+                } else {
+                    self.idle_workspace_path().map(|path| path.to_string_lossy().into()).unwrap_or_else(fresh_path)
+                }
+            } else if let Some(previous) = resume {
+                let path = Path::new(&previous.worktree);
+                workspace_lineage.extend(previous.workspace_lineage.iter().cloned());
+                if !busy(path) {
+                    if path.is_dir() {
+                        inherit_workspace = self.workspace_has_head(path, &before);
+                        previous.worktree.clone()
+                    } else if let Some(idle) = self.idle_workspace_path() {
+                        idle.to_string_lossy().into()
+                    } else {
+                        previous.worktree.clone()
+                    }
+                } else {
+                    self.idle_workspace_path().map(|path| path.to_string_lossy().into()).unwrap_or_else(fresh_path)
+                }
+            } else {
+                let parent_executions: Vec<_> = parent_names.iter()
+                    .filter_map(|parent| self.latest_node_execution(parent)).collect();
+                let inherited_parent = parent_executions.iter().find(|execution| {
+                    let path = Path::new(&execution.worktree);
+                    path.is_dir() && !busy(path)
+                });
+                let available_parent = inherited_parent.or_else(|| parent_executions.iter().find(|execution| {
+                    !busy(Path::new(&execution.worktree))
+                }));
+                if let Some(parent) = available_parent {
+                    // A one-to-one edge is a physical handoff. Fan-in folds all
+                    // dependency lineages into the selected parent's live slot.
+                    if parent_executions.len() > 1 {
+                        workspace_lineage.extend(self.dependency_ancestors(&node.name));
+                    } else if self.has_single_consumer(&parent.node) {
+                        workspace_lineage.extend(parent.workspace_lineage.iter().cloned());
+                        workspace_lineage.insert(parent.node.clone());
+                    }
+                    let selected_path = if inherited_parent.is_some() {
+                        parent.worktree.clone()
+                    } else {
+                        self.idle_workspace_path().map(|path| path.to_string_lossy().into()).unwrap_or_else(|| parent.worktree.clone())
+                    };
+                    let parent_head = self.state.nodes[&parent.node].head.clone()
+                        .or_else(|| parent.after.clone()).unwrap_or_else(|| source_head.clone());
+                    inherit_workspace = parent_names.len() == 1
+                        && self.workspace_has_head(Path::new(&selected_path), &parent_head);
+                    selected_path
+                } else {
+                    if parent_executions.len() > 1 {
+                        workspace_lineage.extend(self.dependency_ancestors(&node.name));
+                    }
+                    self.idle_workspace_path().map(|path| path.to_string_lossy().into()).unwrap_or_else(fresh_path)
+                }
+            };
+            workspace_lineage.insert(node.name.clone());
+            if self.state.executions.iter().any(|execution| execution.status == "running" && execution.worktree == worktree) {
+                continue;
+            }
+            let workspace_lineage: Vec<_> = workspace_lineage.into_iter().collect();
+            let session_fork = resume.filter(|previous| previous.worktree != worktree || feedback_workspace.is_some()).map(|previous| {
+                let mut source = previous.clone();
+                source.id = self.state.executions.iter()
+                    .find(|execution| execution.node == node.name && execution.session_id == previous.session_id)
+                    .map(|execution| execution.id.clone()).unwrap_or_else(|| previous.id.clone());
+                source
+            });
+            let resume_execution_id = resume.filter(|_| session_fork.is_none()).map(|previous| {
+                self.state.executions.iter()
+                    .find(|execution| execution.node == node.name && execution.session_id == previous.session_id)
+                    .map(|execution| execution.id.clone()).unwrap_or_else(|| previous.id.clone())
             });
             let execution = Execution {
                 id: id.clone(),
@@ -1139,24 +1289,11 @@ impl Runtime {
                     .filter(|execution| execution.node == node.name)
                     .count()
                     + 1,
-                session_id: resume
-                    .map(|previous| previous.session_id.clone())
-                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                worktree: if let Some(previous) = resume {
-                    previous.worktree.clone()
-                } else if self.is_serial() {
-                    resolve_repository(&self.root, &config)?
-                        .to_string_lossy()
-                        .into()
-                } else {
-                    // Project identity is bound explicitly; physical checkouts
-                    // belong in the OS cache, not beside the user's project.
-                    workspace::normalize_workspace_display_path(&workspace::workspaces_parent(&self.root)
-                        .join(".grapher-worktrees")
-                        .join(&self.state.run_id)
-                        .join(format!("{}-{id}", crate::compiler::node_id(&node.name))))
-                },
+                session_id: resume.filter(|_| session_fork.is_none())
+                    .map(|previous| previous.session_id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string()),
+                worktree,
                 before,
+                workspace_lineage,
                 after: None,
                 status: "running".into(),
                 output: String::new(), output_bytes: 0, pid: None,
@@ -1181,16 +1318,43 @@ impl Runtime {
                 .edges
                 .iter()
                 .any(|edge| edge.feedback && edge.from == node.name);
-            let parent_heads = self
-                .parents(&node.name)
-                .iter()
-                .map(|parent| {
-                    self.state.nodes[parent]
-                        .head
-                        .clone()
-                        .ok_or("Ready node has no completed parent head")
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut file_versions = Vec::new();
+            let mut previous_file_version = None;
+            let history_edit = state.edit_execution_id.is_some();
+            if !self.is_serial() {
+                let files = crate::workspace_files::Files::new(&self.root, &self.state.run_id)?;
+                if let Some(source) = &self.state.source_files { file_versions.push(source.version.clone()); }
+                for parent in self.parents(&node.name) {
+                    if let Some(version) = &self.state.nodes[&parent].files_version {
+                        if files.exists(version) { file_versions.push(version.clone()); }
+                    }
+                }
+                previous_file_version = if let Some(version) = &state.files_override {
+                    Some(version.clone())
+                } else if let Some(input) = &feedback_workspace {
+                    Some(format!("after-{}", input.source_execution_id))
+                } else if let Some(input) = &state.feedback_workspace {
+                    self.state.executions.iter().rev().find(|previous| previous.node == node.name
+                        && previous.worktree == input.worktree && previous.completed_at.is_some())
+                        .map(|previous| {
+                            let after = format!("after-{}", previous.id);
+                            if files.exists(&after) { after } else { format!("before-{}", previous.id) }
+                        }).filter(|version| files.exists(version))
+                        .or_else(|| Some(format!("after-{}", input.source_execution_id)))
+                } else if let Some(previous) = resume {
+                    let after = format!("after-{}", previous.id);
+                    if state.edit_execution_id.is_some() || !files.exists(&after) { Some(format!("before-{}", previous.id)) }
+                    else { Some(after) }
+                } else { None }.filter(|version| files.exists(version));
+                if previous_file_version.is_none() {
+                    previous_file_version = state.files_version.clone().filter(|version| files.exists(version));
+                }
+                if previous_file_version.is_none() {
+                    previous_file_version = state.feedback_workspace.as_ref().map(|input| format!("after-{}", input.source_execution_id))
+                        .filter(|version| files.exists(version));
+                }
+                if let Some(version) = &previous_file_version { file_versions.push(version.clone()); }
+            }
             self.emit(EventKind::Started {
                 execution: execution.clone(),
             })?;
@@ -1202,12 +1366,19 @@ impl Runtime {
                 task,
                 images,
                 resume_execution_id,
+                session_fork,
+                feedback_workspace,
+                inherit_workspace,
+                file_versions,
+                previous_file_version,
+                history_edit,
                 feedback_source,
                 expected_source_head: source_head,
             });
         }
         if allow_publication
             && pending_sources.is_empty()
+            && self.state.pending_feedback.is_empty()
             && jobs.is_empty()
             && !self.active()
             && !matches!(self.state.phase.as_str(), "completed" | "needs_attention")
@@ -1326,6 +1497,111 @@ impl Runtime {
             .collect()
     }
 
+    fn latest_node_execution(&self, node: &str) -> Option<&Execution> {
+        self.state.executions.iter().rev().find(|execution| {
+            execution.node == node
+                && execution.status == "completed"
+                && execution.completed_at.is_some()
+                && !self.state.superseded_execution_ids.contains(&execution.id)
+        })
+    }
+
+    fn dependency_ancestors(&self, node: &str) -> BTreeSet<String> {
+        let mut result = BTreeSet::new();
+        let mut pending = vec![node.to_owned()];
+        while let Some(current) = pending.pop() {
+            if !result.insert(current.clone()) { continue; }
+            pending.extend(self.parents(&current));
+        }
+        result
+    }
+
+    fn has_single_consumer(&self, node: &str) -> bool {
+        self.state.graph.edges.iter().filter(|edge| !edge.feedback && edge.from == node).count() == 1
+    }
+
+    fn terminal_workspace_for(&self, node: &str) -> Option<&Execution> {
+        let terminal_nodes = self.state.graph.nodes.iter()
+            .filter(|candidate| !self.state.graph.edges.iter().any(|edge| !edge.feedback && edge.from == candidate.name));
+        let executions: Vec<_> = terminal_nodes
+            .filter_map(|candidate| self.latest_node_execution(&candidate.name))
+            .filter(|execution| execution.workspace_lineage.iter().any(|name| name == node))
+            .collect();
+        if executions.is_empty() { return None; }
+        let path = &executions[0].worktree;
+        if executions.iter().any(|execution| &execution.worktree != path) { return None; }
+        executions.into_iter().max_by_key(|execution| execution.completed_at.unwrap_or(execution.started_at))
+    }
+
+    fn run_workspace_root(&self) -> PathBuf {
+        workspace::workspaces_parent(&self.root).join(".grapher-worktrees").join(&self.state.run_id)
+    }
+
+    fn existing_workspace_paths(&self) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(self.run_workspace_root()) else { return Vec::new() };
+        entries.filter_map(Result::ok).filter_map(|entry| {
+            let name = entry.file_name();
+            if name == ".files" { return None; }
+            entry.file_type().ok().filter(|kind| kind.is_dir()).map(|_| {
+                PathBuf::from(workspace::normalize_workspace_display_path(&entry.path()))
+            })
+        }).collect()
+    }
+
+    fn path_is_running(&self, path: &Path) -> bool {
+        self.state.executions.iter().any(|execution| execution.status == "running"
+            && Path::new(&execution.worktree) == path)
+    }
+
+    fn workspace_has_head(&self, path: &Path, head: &str) -> bool {
+        path.is_dir() && workspace::git(path, &["rev-parse", "HEAD"]).is_ok_and(|actual| actual == head)
+    }
+
+    fn idle_workspace_path(&self) -> Option<PathBuf> {
+        self.existing_workspace_paths().into_iter().find(|path| !self.path_is_running(path))
+    }
+
+    /// Keep only live worker workspaces and the just-completed handoff workspace.
+    /// Git refs and ignored-file snapshots are durable, so retired branches can
+    /// be recreated from those inputs if they are needed again.
+    fn reclaim_workspace_slots(&self, completed: &Execution) -> Result<(), String> {
+        let root = self.run_workspace_root();
+        let Ok(metadata) = fs::symlink_metadata(&root) else { return Ok(()) };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("Refusing linked Run workspace root".into());
+        }
+        let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
+        let mut keep = BTreeSet::new();
+        for execution in self.state.executions.iter().filter(|execution| execution.status == "running")
+            .chain(std::iter::once(completed))
+        {
+            if let Ok(path) = Path::new(&execution.worktree).canonicalize() {
+                keep.insert(path);
+            }
+        }
+        for pending in &self.state.pending_feedback {
+            if let Some(execution) = self.state.executions.iter().find(|execution| execution.id == pending.execution_id) {
+                if let Ok(path) = Path::new(&execution.worktree).canonicalize() { keep.insert(path); }
+            }
+        }
+        for node in self.state.nodes.values() {
+            if let Some(input) = &node.feedback_workspace {
+                if let Ok(path) = Path::new(&input.worktree).canonicalize() { keep.insert(path); }
+            }
+        }
+        for entry in fs::read_dir(&canonical_root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if !entry.file_type().map_err(|error| error.to_string())?.is_dir() { continue; }
+            let path = entry.path();
+            if entry.file_name() == ".files" { continue; }
+            let Some(path) = crate::path_safety::real_child_path(&canonical_root, &path, false)? else { continue };
+            if !keep.contains(&path) {
+                fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn finish(
         &mut self,
         execution: &Execution,
@@ -1352,18 +1628,47 @@ impl Runtime {
                 // The driver has already awaited the writer's Flush. Commit
                 // the tail synchronously under this same runtime lock: waiting
                 // for a writer ACK here would deadlock on the lock we hold.
+                let prefix = "\n── Final response ──\n";
+                let output_offset = self.state.executions.iter().find(|item| item.id == execution.id)
+                    .ok_or("Execution not found")?.output_bytes + prefix.len();
                 self.emit_outputs(vec![EventKind::Output {
                     execution_id: execution.id.clone(),
-                    text: format!("\n── Final response ──\n{output}\n"),
+                    text: format!("{prefix}{output}\n"),
                 }])?;
                 let live = self.state.executions.iter().find(|item| item.id == execution.id)
                     .ok_or("Execution not found")?;
                 let output_bytes = live.output.len();
                 let metrics = Some(parse_execution_metrics(&live.output, live.started_at, now()));
-                self.emit(EventKind::Finished {
+                let mut terminal = Vec::new();
+                if !self.is_serial() && self.state.nodes[&execution.node].baseline_head.is_some() {
+                    let files = crate::workspace_files::Files::new(&self.root, &self.state.run_id)?;
+                    let baseline = self.state.nodes[&execution.node].baseline_files_version.clone().filter(|version| files.exists(version))
+                        .or_else(|| self.state.source_files.as_ref().map(|source| source.version.clone()).filter(|version| files.exists(version)))
+                        .unwrap_or_else(|| format!("before-{}", execution.id));
+                    let after = format!("after-{}", execution.id);
+                    if files.exists(&baseline) && files.exists(&after) && !files.same_contents(&baseline, &after)? {
+                        terminal.push(EventKind::WorkspaceFilesChanged { execution_id: execution.id.clone() });
+                    }
+                }
+                terminal.push(EventKind::Finished {
                     execution_id: execution.id.clone(), head: head.clone(),
                     output: String::new(), output_bytes, metrics,
-                })?;
+                });
+                if let Some(edge) = self.state.graph.edges.iter().find(|edge| edge.feedback && edge.from == execution.node) {
+                    let target = &self.state.nodes[&edge.to];
+                    terminal.push(EventKind::FeedbackQueued { feedback: PendingFeedback {
+                        execution_id: execution.id.clone(), from: edge.from.clone(), to: edge.to.clone(),
+                        source_head: head.clone(),
+                        target_head: if execution.workspace_lineage.contains(&edge.to) { Some(head.clone()) } else { target.head.clone() },
+                        target_revision: target.revision,
+                        accepted: !engine::feedback(&output)?, output_offset, output_bytes: output.len(),
+                    } });
+                }
+                // Completion and its pending verdict must survive/replay together.
+                self.emit_outputs(terminal)?;
+                if let Err(error) = self.reclaim_workspace_slots(execution) {
+                    eprintln!("Cannot reclaim retired node workspaces: {error}");
+                }
                 #[cfg(not(feature = "fixture"))]
                 self.warm_completed_serial_node();
                 if let Some(exec) = self
@@ -1420,46 +1725,102 @@ impl Runtime {
     }
 
     pub fn apply_feedback(&mut self, from: &str, output: &str) -> Result<(), String> {
-        let send_feedback = engine::feedback(output)?;
-        let edges: Vec<_> = self
-            .state
-            .graph
-            .edges
-            .iter()
-            .filter(|edge| edge.feedback && edge.from == from)
-            .cloned()
-            .collect();
-        for edge in edges {
-            if send_feedback && !self.feedback_budget_available(&edge) {
-                let execution_id = self.state.executions.iter().rev().find(|execution| {
-                    execution.node == from && execution.status == "completed"
-                        && !self.state.superseded_execution_ids.contains(&execution.id)
-                }).ok_or("Feedback source has no completed execution")?.id.clone();
-                self.emit(EventKind::FeedbackExhausted {
-                    from: edge.from.clone(),
-                    to: edge.to.clone(),
-                    execution_id,
-                    count: self.state.feedback_counts.get(&format!("{}->{}", edge.from, edge.to)).copied().unwrap_or(0),
-                    limit: self.state.config.as_ref().ok_or("Missing config")?.max_feedback.min(3),
-                })?;
-                continue;
+        let accepted = !engine::feedback(output)?;
+        let source = self.state.executions.iter().rev().find(|execution| execution.node == from
+            && execution.status == "completed" && !self.state.superseded_execution_ids.contains(&execution.id))
+            .ok_or("Feedback source has no completed execution")?;
+        if self.state.events.iter().any(|event| matches!(&event.kind, EventKind::FeedbackResolved { execution_id, .. } if execution_id == &source.id)) {
+            return Ok(());
+        }
+        let pending = if let Some(pending) = self.state.pending_feedback.iter().find(|pending| pending.execution_id == source.id) {
+            pending.clone()
+        } else {
+            let edge = self.state.graph.edges.iter().find(|edge| edge.feedback && edge.from == from).ok_or("No feedback edge")?;
+            let target = &self.state.nodes[&edge.to];
+            PendingFeedback { execution_id: source.id.clone(), from: from.into(), to: edge.to.clone(),
+                source_head: source.after.clone().ok_or("Feedback source has no result")?, target_head: target.head.clone(),
+                target_revision: target.revision, accepted, output_offset: 0, output_bytes: output.len() }
+        };
+        self.resolve_feedback(&pending, Some(output))
+    }
+
+    pub(crate) fn drain_feedback(&mut self) -> Result<(), String> {
+        for pending in self.state.pending_feedback.clone() { self.resolve_feedback(&pending, None)?; }
+        Ok(())
+    }
+
+    fn resolve_feedback(&mut self, pending: &PendingFeedback, output: Option<&str>) -> Result<(), String> {
+        let edge = self.state.graph.edges.iter().find(|edge| edge.feedback && edge.from == pending.from && edge.to == pending.to).cloned();
+        let valid = edge.is_some() && self.state.nodes.get(&pending.from).is_some_and(|node| node.status == "done" && node.head.as_deref() == Some(&pending.source_head))
+            && self.state.nodes.get(&pending.to).is_some_and(|node| node.head == pending.target_head && node.revision == pending.target_revision)
+            && !self.state.superseded_execution_ids.contains(&pending.execution_id);
+        if !valid {
+            return self.emit(EventKind::FeedbackResolved { execution_id: pending.execution_id.clone(), disposition: "superseded".into() });
+        }
+        let edge = edge.ok_or("No feedback edge")?;
+        if self.feedback_source_busy(&pending.from) { return Ok(()); }
+        let mut events = Vec::new();
+        let disposition;
+        if !pending.accepted && !self.feedback_budget_available(&edge) {
+            disposition = "exhausted";
+            events.push(EventKind::FeedbackExhausted { from: pending.from.clone(), to: pending.to.clone(), execution_id: pending.execution_id.clone(),
+                count: self.state.feedback_counts.get(&format!("{}->{}", pending.from, pending.to)).copied().unwrap_or(0),
+                limit: self.state.config.as_ref().ok_or("Missing config")?.max_feedback.min(3) });
+        } else {
+            disposition = if pending.accepted { "accepted" } else { "applied" };
+            events.push(EventKind::Feedback { from: pending.from.clone(), to: pending.to.clone(), accepted: pending.accepted });
+            if !pending.accepted {
+                let stored;
+                let output = if let Some(output) = output { output } else {
+                    stored = self.store.execution_log_page(&self.state.run_id, &pending.execution_id, pending.output_offset, pending.output_bytes)?.content;
+                    if stored.len() != pending.output_bytes { return Err("Feedback output range is incomplete".into()); }
+                    &stored
+                };
+                let body = engine::feedback_body(output)?;
+                let source = self.state.executions.iter().find(|execution| execution.id == pending.execution_id).ok_or("Missing feedback execution")?;
+                let target = self.state.executions.iter().rev().find(|execution| execution.node == pending.to && execution.completed_at.is_some()).ok_or("Missing feedback target session")?;
+                events.push(EventKind::Invalidated {
+                    nodes: downstream(&self.state.graph, &pending.to).into_iter().collect(), target: pending.to.clone(),
+                    instruction: format!("Feedback from {}:\n{body}", pending.from),
+                    human: false, images: None,
+                    workspace: Some(FeedbackWorkspace { source_execution_id: source.id.clone(), target_execution_id: target.id.clone(), worktree: source.worktree.clone(), head: pending.source_head.clone() }),
+                    shared_workspace: false,
+                });
             }
-            self.emit(EventKind::Feedback {
-                from: edge.from,
-                to: edge.to.clone(),
-                accepted: !send_feedback,
-            })?;
-            if send_feedback {
-                self.emit(EventKind::Invalidated {
-                    nodes: downstream(&self.state.graph, &edge.to)
-                        .into_iter()
-                        .collect(),
-                    target: edge.to,
-                    instruction: format!("Feedback from {from}:\n{output}"),
-                    human: false,
-                    images: None,
-                })?;
-            }
+        }
+        events.push(EventKind::FeedbackResolved { execution_id: pending.execution_id.clone(), disposition: disposition.into() });
+        self.emit_outputs(events)
+    }
+
+    fn publication_file_inputs(&self, repository: &Path, heads: &[String])
+        -> Result<Option<(crate::workspace_files::Files, Vec<String>, String)>, String>
+    {
+        let files = crate::workspace_files::Files::new(&self.root, &self.state.run_id)?;
+        // Git heads are not resource identities: ignored-only attempts can all
+        // share one head. Select current terminal outputs, never old attempts.
+        let mut versions: Vec<_> = self.state.graph.nodes.iter().filter(|node|
+            !self.state.graph.edges.iter().any(|edge| !edge.feedback && edge.from == node.name))
+            .filter(|node| self.state.nodes[&node.name].head.as_ref().is_some_and(|head| heads.contains(head)))
+            .filter_map(|node| self.state.nodes[&node.name].files_version.clone())
+            .filter(|version| files.exists(version)).collect();
+        if versions.is_empty() { return Ok(None); }
+        let parents = self.state.source_files.as_ref().filter(|source| files.exists(&source.version))
+            .map(|source| vec![source.version.clone()]).unwrap_or_default();
+        let current = Uuid::new_v4().to_string();
+        let head = workspace::repository_git(repository, &["rev-parse", "HEAD"])?;
+        files.capture(repository, &current, &head, &parents)?;
+        versions.push(current.clone());
+        Ok(Some((files, versions, current)))
+    }
+
+    pub(crate) fn validate_publication_files(&self, repository: &Path, heads: &[String]) -> Result<(), String> {
+        if let Some((files, versions, _)) = self.publication_file_inputs(repository, heads)? { files.validate(&versions)?; }
+        Ok(())
+    }
+
+    pub(crate) fn publish_workspace_files(&self, repository: &Path, heads: &[String]) -> Result<(), String> {
+        if let Some((files, versions, current)) = self.publication_file_inputs(repository, heads)? {
+            files.materialize(repository, &versions, Some(&current), true)?;
         }
         Ok(())
     }
@@ -1491,6 +1852,26 @@ pub fn perform_with_merger(
 ) -> Result<(String, String), String> {
     let repository = resolve_repository(root, &job.config)?;
     let path = Path::new(&job.execution.worktree);
+    let reused = path.is_dir();
+    let files = if path != repository { Some(crate::workspace_files::Files::new(root, &job.run_id)?) } else { None };
+    if let Some(input) = &job.feedback_workspace {
+        let owner = path.parent().and_then(Path::file_name).and_then(|name| name.to_str());
+        let bucket = path.parent().and_then(Path::parent).and_then(Path::file_name).and_then(|name| name.to_str());
+        if owner != Some(&job.run_id) || bucket != Some(".grapher-worktrees") || !reused {
+            return Err("Feedback requires an existing worktree owned by this Run".into());
+        }
+        let feedback_head = workspace::git(path, &["rev-parse", "HEAD"])?;
+        let feedback_status = workspace::git(path, &["status", "--porcelain"])?;
+        if feedback_head != input.head || !feedback_status.is_empty() {
+            return Err("Feedback workspace changed after completion".into());
+        }
+        if let Some(target) = &job.session_fork {
+            if let Some(head) = &target.after { workspace::verify_prepared_ancestor(path, head)?; }
+        }
+        if let Some(version) = &job.previous_file_version {
+            files.as_ref().ok_or("Missing feedback file store")?.verify(path, version, &input.head)?;
+        }
+    }
     #[cfg(not(feature = "fixture"))]
     if path != repository {
         crate::native::require_graph_execution()?;
@@ -1509,27 +1890,71 @@ pub fn perform_with_merger(
             input_heads.push(job.expected_source_head.clone());
         }
     }
-    let before = workspace::prepare_with_merger_expected_for_run(
-        &repository,
-        path,
-        &job.execution.before,
-        &input_heads,
-        &job.expected_source_head,
-        Some(&job.run_id),
-        || {
-            let attempt = job.execution.attempt;
-            crate::graph_merge::resolve_with_merger_for_node(
-                path,
-                &job.task,
-                &job.config,
-                root,
-                attempt,
-                &format!("merge:{}", job.execution.node),
-                &mut on_merger_event,
-            )
-        },
-    )?;
+    let inherited_head = workspace::git(path, &["rev-parse", "HEAD"]).ok();
+    let can_inherit = job.inherit_workspace
+        && inherited_head.as_deref().is_some_and(|head| {
+            (!job.parent_heads.is_empty() && job.parent_heads.iter().any(|parent| parent == head)
+                || job.execution.workspace_lineage.len() > 1 && job.parent_heads.is_empty())
+                && job.parent_heads.iter().all(|parent| workspace::git(path, &["merge-base", "--is-ancestor", parent, head]).is_ok())
+                && workspace::git(path, &["merge-base", "--is-ancestor", &job.expected_source_head, head]).is_ok()
+        })
+        && workspace::git(path, &["status", "--porcelain"]).is_ok_and(|status| status.is_empty())
+        && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err();
+    let before = if can_inherit {
+        inherited_head.unwrap_or_else(|| job.execution.before.clone())
+    } else {
+        workspace::prepare_with_merger_expected_for_run(
+            &repository,
+            path,
+            &job.execution.before,
+            &input_heads,
+            &job.expected_source_head,
+            Some(&job.run_id),
+            || {
+                let attempt = job.execution.attempt;
+                crate::graph_merge::resolve_with_merger_for_node(
+                    path,
+                    &job.task,
+                    &job.config,
+                    root,
+                    attempt,
+                    &format!("merge:{}", job.execution.node),
+                    &mut on_merger_event,
+                )
+            },
+        )?
+    };
+    let before_files = format!("before-{}", job.execution.id);
+    if let Some(files) = &files {
+        let mut versions = job.file_versions.clone();
+        let editing = job.history_edit;
+        let mut previous = job.previous_file_version.clone();
+        // Keep partial ignored work on an ordinary continuation. History edits
+        // instead restore the selected pre-execution file snapshot exactly.
+        let preserve = reused && !editing && (job.inherit_workspace || job.resume_execution_id.is_some() || job.session_fork.is_some() || job.feedback_workspace.is_some());
+        if preserve {
+            let live = Uuid::new_v4().to_string();
+            let parents = previous.clone().map(|version| vec![version]).unwrap_or_else(|| versions.clone());
+            files.capture(path, &live, &before, &parents)?;
+            versions.push(live.clone());
+            previous = Some(live);
+        }
+        files.materialize(path, &versions, previous.as_deref(), preserve)?;
+        files.capture(path, &before_files, &before, &versions)?;
+    }
     on_prepared(before.clone())?;
+    if let Some(source) = &job.session_fork {
+        let source_dir = root.join("sessions").join(&source.id);
+        // Synthetic fixture agents have no Pi JSONL. Real executions always
+        // fail closed when the target's persisted history cannot be migrated.
+        let suffix = format!("_{}.jsonl", source.session_id);
+        let persisted = fs::read_dir(&source_dir).ok().is_some_and(|entries| entries.filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(&suffix)));
+        if !cfg!(feature = "fixture") || persisted {
+            crate::session_branch::fork_session(&source_dir, &source.session_id, Path::new(&source.worktree),
+                &root.join("sessions").join(&job.execution.id), &job.execution.session_id, path)?;
+        }
+    }
     let output = engine::execute(
         &job.config,
         &job.execution,
@@ -1549,5 +1974,8 @@ pub fn perform_with_merger(
         &job.execution.node,
         Some(&job.run_id),
     )?;
+    if let Some(files) = &files {
+        files.capture(path, &format!("after-{}", job.execution.id), &head, &[before_files])?;
+    }
     Ok((head, output))
 }

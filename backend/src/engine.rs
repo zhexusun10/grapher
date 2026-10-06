@@ -1376,6 +1376,8 @@ fn run_pi_with_timeout(
     Ok(final_text)
 }
 
+pub(crate) const FEEDBACK_INSTRUCTIONS: &str = "\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.";
+
 pub fn execute(
     config: &Config,
     execution: &Execution,
@@ -1391,7 +1393,7 @@ pub fn execute(
         return crate::fixture::execute(execution, task, feedback_source, on_output);
     }
     let task = if feedback_source {
-        format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.")
+        format!("{task}{FEEDBACK_INSTRUCTIONS}")
     } else {
         task.into()
     };
@@ -1399,14 +1401,8 @@ pub fn execute(
         .join("sessions")
         .join(resume_execution_id.unwrap_or(&execution.id));
     if resume_execution_id.is_some() && !cfg!(feature = "fixture") {
-        let suffix = format!("_{}.jsonl", execution.session_id);
-        let found = fs::read_dir(&session_dir)
-            .map_err(|error| format!("Cannot resume node session: {error}"))?
-            .flatten()
-            .any(|entry| entry.file_name().to_string_lossy().ends_with(&suffix));
-        if !found {
-            return Err("Cannot resume node session: persisted Pi conversation is missing".into());
-        }
+        crate::session_branch::validate_session(&session_dir, &execution.session_id, Path::new(&execution.worktree))
+            .map_err(|error| format!("Cannot resume node session: {error}"))?;
     }
     let model_config = PiModelConfig::resolve(PiRole::NodeAgent, config);
     let effective_config = model_config.effective_config(config);
@@ -1429,12 +1425,20 @@ pub fn execute(
             environment: vec![
                 ("GRAPHER_MODE", "node".into()),
                 ("GRAPHER_NODE_EXECUTION_ID", execution.id.clone()),
+                ("GRAPHER_NODE_NAME", execution.node.clone()),
             ],
             system_prompt: None,
             images,
         },
         on_output,
     )
+}
+
+pub fn feedback_body(output: &str) -> Result<&str, String> {
+    feedback(output)?;
+    let text = output.trim_end();
+    let marker = text.rsplit_once('\n').map_or(0, |(body, _)| body.len());
+    Ok(text[..marker].trim_end())
 }
 
 pub fn feedback(output: &str) -> Result<bool, String> {
@@ -1510,7 +1514,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         let execution = Execution {
             id: "feedback-prompt".into(), node: "review".into(), revision: 1, attempt: 1,
             session_id: "feedback-prompt".into(), worktree: temp.path().to_string_lossy().into(),
-            before: String::new(), after: None, status: "running".into(),
+            before: String::new(), workspace_lineage: vec![], after: None, status: "running".into(),
             output: String::new(), output_bytes: 0, pid: None, started_at: 0,
             completed_at: None, metrics: None,
         };

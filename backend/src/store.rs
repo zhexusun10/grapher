@@ -31,6 +31,8 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::Routed { .. } => "routed",
         EventKind::Approved { .. } => "approved",
         EventKind::SourceSnapshotted { .. } => "source_snapshotted",
+        EventKind::SourceFilesRecorded { .. } => "source_files_recorded",
+        EventKind::WorkspaceFilesChanged { .. } => "workspace_files_changed",
         EventKind::GraphRevised { .. } => "graph_revised",
         EventKind::DraftEdited { .. } => "draft_edited",
         EventKind::Paused { .. } => "paused",
@@ -48,6 +50,8 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::Invalidated { .. } => "invalidated",
         EventKind::ConversationEdited { .. } => "conversation_edited",
         EventKind::PlannerConversationEdited { .. } => "planner_conversation_edited",
+        EventKind::FeedbackQueued { .. } => "feedback_queued",
+        EventKind::FeedbackResolved { .. } => "feedback_resolved",
         EventKind::Feedback { .. } => "feedback",
         EventKind::FeedbackExhausted { .. } => "feedback_exhausted",
         EventKind::PublicationStarted { .. } => "publication_started",
@@ -70,6 +74,8 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
         | EventKind::Output { execution_id, .. }
         | EventKind::Finished { execution_id, .. }
         | EventKind::FeedbackExhausted { execution_id, .. }
+        | EventKind::FeedbackResolved { execution_id, .. }
+        | EventKind::WorkspaceFilesChanged { execution_id, .. }
         | EventKind::WorkspaceResolved { execution_id, .. }
         | EventKind::MergerFinished { execution_id, .. }
         | EventKind::MergerFailed { execution_id, .. } => Some(execution_id),
@@ -262,7 +268,8 @@ impl Store {
         if kinds.iter().all(|kind| matches!(kind, EventKind::Output { .. })) {
             return self.append_logs(state, kinds);
         }
-        if kinds.iter().any(|kind| matches!(kind, EventKind::Output { .. } | EventKind::Finished { .. } | EventKind::Started { .. } | EventKind::MergerStarted { .. })) {
+        if kinds.iter().any(|kind| matches!(kind, EventKind::Output { .. } | EventKind::Started { .. } | EventKind::MergerStarted { .. })
+            || matches!(kind, EventKind::Finished { output, .. } if !output.is_empty())) {
             for kind in kinds { self.append(state, kind)?; }
             return Ok(());
         }
@@ -288,9 +295,14 @@ impl Store {
             });
         }
         transaction.commit().map_err(|e| e.to_string())?;
+        let terminal = events.iter().any(|event| matches!(event.kind, EventKind::Finished { .. }));
         for event in events {
             apply(state, &event);
+            if matches!(event.kind, EventKind::Finished { .. }) {
+                if let Some(id) = event_execution_id(&event.kind) { self.forget_log_cursor(id); }
+            }
         }
+        if terminal { self.save_checkpoint(state); }
         self.note_appended(state, count);
         Ok(())
     }
