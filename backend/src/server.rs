@@ -1110,11 +1110,14 @@ fn plan_goal_internal_with_started(
             )
             .map_err(|e| (e.to_string(), None))?;
             // Publish identity before launching Pi; a browser connection does not own planning.
-            let running = PlanningSummary {
+            let mut running = PlanningSummary {
                 planning_id: planning_id.clone(),
                 status: Some("running".into()),
                 created_at: Some(now_ms),
                 repository: Some(repo_str.clone()),
+                plan_type: mode.filter(|mode| matches!(*mode, "graph" | "serial")).map(str::to_owned),
+                goal: Some(goal.clone()),
+                run_id: Some(owner.clone()),
                 roles: ["partition", "planner"]
                     .into_iter()
                     .map(|role| (role.to_string(), PlanningRoleMetrics::default()))
@@ -1126,7 +1129,7 @@ fn plan_goal_internal_with_started(
                 let mut runtime = service.runtime.lock().map_err(|e| (e.to_string(), None))?;
                 runtime.state = Snapshot { run_id: owner.clone(), ..Default::default() };
                 runtime.emit(EventKind::PlanningStarted {
-                    goal: goal.clone(), config: config.clone(), planning: running,
+                    goal: goal.clone(), config: config.clone(), planning: running.clone(),
                     plan_type: mode.filter(|mode| matches!(*mode, "graph" | "serial")).map(str::to_owned),
                 }).map_err(|error| (error, None))?;
                 runtime.store.select_run(Some(&owner)).map_err(|error| (error, None))?;
@@ -1244,6 +1247,8 @@ fn plan_goal_internal_with_started(
                         (route, partition_metrics)
                     }
                 };
+                running.plan_type = Some(route.plan_type.clone());
+                let _ = write_planning_summary(&directory, &running);
                 if revision_run_id.is_none() {
                     service.runtime.lock().map_err(|e| e.to_string())?
                         .emit(EventKind::Routed { plan_type: route.plan_type.clone() })?;
@@ -1420,6 +1425,9 @@ fn plan_goal_internal_with_started(
                     error: None,
                     created_at: Some(now_ms),
                     repository: Some(repo_str.clone()),
+                    plan_type: Some(route.plan_type.clone()),
+                    goal: Some(goal.clone()),
+                    run_id: Some(owner.clone()),
                 };
 
                 if let Some(ref run_id) = revision_run_id {
@@ -1538,6 +1546,12 @@ fn plan_goal_internal_with_started(
                         error: Some(err.clone()),
                         created_at: Some(now_ms),
                         repository: Some(repo_str.clone()),
+                        plan_type: fs::read(directory.join("route.json")).ok()
+                            .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
+                            .map(|route| route.plan_type)
+                            .or_else(|| mode.filter(|m| matches!(*m, "graph" | "serial")).map(str::to_owned)),
+                        goal: Some(goal.clone()),
+                        run_id: Some(owner.clone()),
                     };
                     if let Err(error) = write_planning_summary(&directory, &failure_summary) {
                         eprintln!("Cannot persist planning failure: {error}");
@@ -1670,6 +1684,7 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
                 }
             }
         }
+        enrich_planning_summary(&mut summary, &directory);
         write_planning_summary(&directory, &summary)?;
         let Some(request) = request else { continue; };
         // A failed revision must not replace its existing compiled graph.
@@ -2489,6 +2504,26 @@ fn is_valid_planning_id(id: &str) -> bool {
         && id != ".."
 }
 
+fn enrich_planning_summary(summary: &mut PlanningSummary, directory: &std::path::Path) {
+    if summary.plan_type.is_none() {
+        summary.plan_type = fs::read(directory.join("route.json")).ok()
+            .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
+            .map(|route| route.plan_type);
+    }
+    if summary.goal.is_none() || summary.run_id.is_none() {
+        if let Ok(bytes) = fs::read(directory.join("request.json")) {
+            if let Ok(req) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if summary.goal.is_none() {
+                    summary.goal = req["goal"].as_str().map(str::to_owned);
+                }
+                if summary.run_id.is_none() {
+                    summary.run_id = req["runId"].as_str().map(str::to_owned);
+                }
+            }
+        }
+    }
+}
+
 fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningSummary, String> {
     if !is_valid_planning_id(&planning_id) {
         return Err(format!("Invalid planning ID: {planning_id}"));
@@ -2520,6 +2555,7 @@ fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningS
                 }
             }
         }
+        enrich_planning_summary(&mut summary, &planning_dir.join(&planning_id));
         Ok(summary)
     } else {
         Err(format!("Planning summary not found: {planning_id}"))
@@ -2697,6 +2733,7 @@ fn list_plannings(
                                 continue; // Reject unrelated or unattributed history.
                             }
                         }
+                        enrich_planning_summary(&mut summary, &entry.path());
                         summaries.push(summary);
                     }
                 }

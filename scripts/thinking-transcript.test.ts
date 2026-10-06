@@ -18,7 +18,7 @@ const render = (events: unknown[]) => renderToStaticMarkup(createElement(Virtual
 }));
 const cardCount = (html: string) => (html.match(/class="thinking-card /g) || []).length;
 
-test("thinking_end fills the original card with its authoritative summary without mutating state", () => {
+test("thinking_end settles the original card without replacing captured thinking or mutating state", () => {
   let items = updateThinkingItems([], { type: "thinking_start", contentIndex: 0 });
   const empty = items;
   items = updateThinkingItems(items, { type: "thinking_delta", contentIndex: 0, delta: "partial  " });
@@ -26,11 +26,57 @@ test("thinking_end fills the original card with its authoritative summary withou
   items = updateThinkingItems(items, { type: "thinking_end", contentIndex: 0, content: "Final summary 中文🚀" });
   assert.equal(items.length, 1);
   assert.equal(items[0].id, empty[0].id);
-  assert.equal(items[0].content, "Final summary 中文🚀");
+  assert.equal(items[0].content, "partial  ");
   assert.equal(items[0].status, "success");
   assert.equal(empty[0].content, "");
   assert.equal(partial[0].content, "partial  ");
   assert.equal(partial[0].status, "running");
+});
+
+test("final thinking backfills missing text and extends captured prefixes without duplicating them", () => {
+  let items = updateThinkingItems([], { type: "thinking_delta", contentIndex: 0, delta: "完整思考" });
+  const id = items[0].id;
+  items = updateThinkingItems(items, { type: "thinking_end", contentIndex: 0, content: "完整思考：先检查数据，再验证结果。" });
+  items = finalizeThinkingItems(items, [{ type: "thinking", thinking: "完整思考：先检查数据，再验证结果。补齐末尾。" }]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, id);
+  assert.equal(items[0].content, "完整思考：先检查数据，再验证结果。补齐末尾。");
+  assert.equal(items[0].status, "success");
+});
+
+test("empty, shorter, or different end summaries cannot discard streamed thinking", () => {
+  const captured = "Streamed thinking 中文🚀\nFirst step, then a detailed second step.\n\n";
+  for (const content of [undefined, "", " \n\t", "Streamed thinking", "Different end summary"]) {
+    for (const thinking of [undefined, "", " \n\t", "Streamed thinking", "Different final summary"]) {
+      const streamed = updateThinkingItems([], { type: "thinking_delta", contentIndex: 0, delta: captured });
+      let items = updateThinkingItems(streamed, { type: "thinking_end", contentIndex: 0, content });
+      items = finalizeThinkingItems(items, [{ type: "thinking", thinking }]);
+      assert.equal(items.length, 1);
+      assert.equal(items[0].id, streamed[0].id);
+      assert.equal(items[0].content, captured);
+      assert.equal(items[0].status, "success");
+      assert.equal(streamed[0].status, "running");
+    }
+  }
+});
+
+test("compact thinking_start snapshots are retained through deltas and empty finals", () => {
+  const content = { type: "thinking", thinking: "Start snapshot 中文🚀", thinkingSignature: "PRIVATE_SIGNATURE_MUST_NOT_APPEAR" };
+  const snapshot = updateThinkingItems([], { type: "thinking_start", contentIndex: 0, content });
+  assert.equal(snapshot[0].content, content.thinking);
+  let items = updateThinkingItems(snapshot, { type: "thinking_delta", contentIndex: 0, delta: " plus remaining delta" });
+  items = updateThinkingItems(items, { type: "thinking_end", contentIndex: 0, content: "" });
+  items = finalizeThinkingItems(items, [{ type: "thinking", thinking: "" }]);
+  assert.equal(items[0].content, "Start snapshot 中文🚀 plus remaining delta");
+  assert.equal(snapshot[0].content, content.thinking);
+  const html = render([
+    start(), update("thinking_start", 0, { content }),
+    update("thinking_delta", 0, { delta: " plus remaining delta" }),
+    update("thinking_end", 0, { content: "" }), end([{ type: "thinking", thinking: "" }]),
+  ]);
+  assert.equal(cardCount(html), 1);
+  assert.match(html, /Start snapshot 中文🚀 plus remaining delta/);
+  assert.doesNotMatch(html, /thinking-empty|thinking-shimmer|PRIVATE_SIGNATURE_MUST_NOT_APPEAR/);
 });
 
 test("end-only events can recover text, while empty end events never erase streamed text", () => {
@@ -86,7 +132,7 @@ test("reused indices and identical summaries in later assistant turns never matc
 
 test("legacy unindexed deltas are reconciled rather than duplicated", () => {
   let items = updateThinkingItems([], { type: "thinking_start" });
-  items = updateThinkingItems(items, { type: "thinking_delta", delta: "partial" });
+  items = updateThinkingItems(items, { type: "thinking_delta", delta: "Fir" });
   items = updateThinkingItems(items, { type: "thinking_end", content: "First" });
   items = updateThinkingItems(items, { type: "thinking_start" });
   items = updateThinkingItems(items, { type: "thinking_end", content: "Second" });
@@ -107,20 +153,17 @@ test("closing a turn settles all pending cards, including cards before a tool", 
   assert.ok(items.every(item => item.status === "running"));
 });
 
-test("settled empty cards show an honest empty state instead of an infinite shimmer", () => {
+test("settled empty blocks render no misleading card while pending blocks still show progress", () => {
   for (const content of ["", " \n\t"]) {
     const html = renderToStaticMarkup(createElement(ThinkingCard, { content, isStreaming: false }));
-    assert.match(html, /thinking-status completed/);
-    assert.match(html, /thinking-empty/);
-    assert.doesNotMatch(html, /thinking-shimmer/);
-    assert.doesNotMatch(html, /thinking-streaming-cursor/);
+    assert.equal(html, "");
   }
   const running = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true }));
   assert.match(running, /thinking-shimmer/);
   assert.doesNotMatch(running, /thinking-empty/);
 });
 
-test("history replay recovers end-only summaries and normalized finals without duplicate cards", () => {
+test("history replay retains streamed thinking, recovers end-only text, and hides truly empty blocks", () => {
   const html = render([
     start(),
     update("thinking_start", 0),
@@ -136,11 +179,10 @@ test("history replay recovers end-only summaries and normalized finals without d
       { type: "thinking", thinking: "Normalized summary" },
     ]),
   ]);
-  assert.equal(cardCount(html), 3);
+  assert.equal(cardCount(html), 2);
   assert.match(html, /End-only summary 中文🚀/);
-  assert.match(html, /Normalized summary/);
-  assert.equal((html.match(/thinking-empty/g) || []).length, 1);
-  assert.doesNotMatch(html, /thinking-shimmer|Non-normalized delta|PRIVATE_SIGNATURE_MUST_NOT_APPEAR/);
+  assert.match(html, /Non-normalized delta/);
+  assert.doesNotMatch(html, /thinking-empty|thinking-shimmer|Normalized summary|PRIVATE_SIGNATURE_MUST_NOT_APPEAR/);
 });
 
 test("message_end backfills the empty card and separate turns retain repeated summaries", () => {
@@ -155,9 +197,14 @@ test("message_end backfills the empty card and separate turns retain repeated su
   assert.doesNotMatch(html, /thinking-empty|thinking-shimmer/);
 });
 
-test("a process exit settles an unfinished empty card in saved output", () => {
-  const html = render([start(), update("thinking_start", 0), { type: "grapher_process_exited", success: false }]);
-  assert.equal(cardCount(html), 1);
-  assert.match(html, /thinking-status completed/);
-  assert.doesNotMatch(html, /thinking-shimmer/);
+test("process exit hides an unfinished empty block but preserves captured thinking", () => {
+  const exited = { type: "grapher_process_exited", success: false };
+  const empty = render([start(), update("thinking_start", 0), exited]);
+  assert.equal(cardCount(empty), 0);
+  assert.doesNotMatch(empty, /thinking-empty|thinking-shimmer/);
+  const captured = render([start(), update("thinking_delta", 0, { delta: "Captured before exit" }), exited]);
+  assert.equal(cardCount(captured), 1);
+  assert.match(captured, /Captured before exit/);
+  assert.match(captured, /thinking-status completed/);
+  assert.doesNotMatch(captured, /thinking-empty|thinking-shimmer/);
 });

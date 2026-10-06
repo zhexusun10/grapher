@@ -442,10 +442,9 @@ test("recovered planning polls activity before route discovery and opens the com
     await activity.getByText("Automatically appended activity", { exact: true }).waitFor();
     assert.ok(offsets.includes(Buffer.byteLength(first)), "append polling resumes at the UTF-8 byte offset");
     assert.equal(await activity.getByText("Recovered activity 中文🚀", { exact: true }).count(), 1);
-    assert.equal(await page.locator(".floating-recovered-banner").count(), 1);
+    await page.locator(".floating-recovered-banner").waitFor({ state: "detached" });
 
     finished = true;
-    await page.locator(".floating-recovered-banner").waitFor({ state: "detached" });
     await page.locator('.run-item.chosen[data-run-id="recovered-run"]').waitFor();
     await activity.getByText("Automatically appended activity", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
@@ -555,7 +554,7 @@ test("late node sends and edits cannot overwrite another workspace or its compos
   } finally { sendGate.resolve(); editGate.resolve(); await context.close(); }
 });
 
-test("thinking cards settle without a shimmer and backfill summaries in place in live and replay views", { timeout: 30_000 }, async () => {
+test("thinking cards hide empty blocks and backfill text in place in live and replay views", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("thinking");
   const append = event => page.evaluate(event => window.audit.append(event), event);
   const update = (type, contentIndex, extra = {}) => append({
@@ -569,18 +568,17 @@ test("thinking cards settle without a shimmer and backfill summaries in place in
     const ids = await Promise.all(views.map(view => view.locator("[data-transcript-id]").first().getAttribute("data-transcript-id")));
     await update("thinking_end", 0, { content: "" });
     for (const view of views) {
-      await view.locator(".thinking-empty").waitFor();
-      assert.equal(await view.locator(".thinking-shimmer").count(), 0);
-      assert.equal(await view.locator(".thinking-status.completed").count(), 1);
+      await view.locator(".thinking-card").waitFor({ state: "detached" });
+      assert.equal(await view.locator(".thinking-shimmer, .thinking-empty").count(), 0);
     }
     await update("thinking_start", 1);
     for (const view of views) {
       await view.locator(".thinking-shimmer").waitFor();
-      assert.equal(await view.locator(".thinking-empty").count(), 1);
+      assert.equal(await view.locator(".thinking-empty").count(), 0);
     }
     await update("thinking_end", 1, { content: "End-only summary 中文🚀" });
     await update("thinking_start", 2);
-    await update("thinking_delta", 2, { delta: "Unnormalized partial" });
+    await update("thinking_delta", 2, { delta: "Normalized " });
     await update("thinking_end", 2, { content: "Normalized final summary" });
     await append({ type: "message_end", message: { role: "assistant", content: [
       { type: "thinking", thinking: "Backfilled first summary" },
@@ -595,7 +593,7 @@ test("thinking cards settle without a shimmer and backfill summaries in place in
       assert.equal(await view.locator(".thinking-shimmer, .thinking-empty").count(), 0);
       assert.equal(await view.locator("[data-transcript-id]").first().getAttribute("data-transcript-id"), ids[i]);
       assert.ok((await view.innerText()).includes("End-only summary 中文🚀"));
-      assert.ok(!(await view.innerText()).includes("Unnormalized partial"));
+      assert.ok((await view.innerText()).includes("Normalized final summary"));
     }
     await append({ type: "message_start", message: { role: "assistant", content: [] } });
     await update("thinking_start", 0);
@@ -605,6 +603,65 @@ test("thinking cards settle without a shimmer and backfill summaries in place in
       assert.equal(await view.locator(".thinking-card-body", { hasText: "End-only summary 中文🚀" }).count(), 2);
       assert.equal(await view.locator(".thinking-shimmer").count(), 0);
     }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("completed thinking stays visible and copyable through empty or replacement summaries", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("thinking");
+  const append = event => page.evaluate(event => window.audit.append(event), event);
+  const update = (type, extra = {}) => append({
+    type: "message_update", assistantMessageEvent: { type, contentIndex: 0, ...extra },
+  });
+  const views = [page.locator('[data-thinking-view="live"]'), page.locator('[data-thinking-view="history"]')];
+  const turns = [
+    { seed: "", delta: "Streamed thinking 中文🚀: keep the first step and the detailed second step.", ending: "", final: "" },
+    { seed: "Start snapshot 中文🚀: ", delta: "retain this text together with the remaining delta.", ending: "Brief final", final: "Different final summary" },
+  ];
+  try {
+    await page.evaluate(() => {
+      window.audit.copied = [];
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+        writeText: async text => { window.audit.copied.push(text); },
+      } });
+    });
+    for (const [turn, data] of turns.entries()) {
+      const captured = data.seed + data.delta;
+      await append({ type: "message_start", message: { role: "assistant", content: [] } });
+      await update("thinking_start", data.seed ? { content: { type: "thinking", thinking: data.seed } } : {});
+      await update("thinking_delta", { delta: data.delta });
+      const ids = [];
+      for (const view of views) {
+        const card = view.locator(".thinking-card").nth(turn);
+        await card.locator(".thinking-card-body", { hasText: captured }).waitFor();
+        ids.push(await card.locator("xpath=ancestor::*[@data-transcript-id][1]").getAttribute("data-transcript-id"));
+        await card.locator(".thinking-card-header").click();
+      }
+      await update("thinking_end", { content: data.ending });
+      await append({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: data.final }] } });
+      for (const [i, view] of views.entries()) {
+        const card = view.locator(".thinking-card").nth(turn);
+        await card.locator(".thinking-status.completed").waitFor();
+        assert.match(await card.getAttribute("class"), /settled collapsed/);
+        assert.equal(await card.locator("xpath=ancestor::*[@data-transcript-id][1]").getAttribute("data-transcript-id"), ids[i]);
+        assert.ok((await card.locator(".thinking-status.completed").innerText()).includes(`${captured.length} characters`));
+        await card.locator(".thinking-card-header").click();
+        await card.locator(".thinking-card-body", { hasText: captured }).waitFor();
+        assert.equal(await view.locator(".thinking-empty, .thinking-shimmer").count(), 0);
+        await card.locator(".thinking-copy-btn").click();
+        assert.equal(await page.evaluate(() => window.audit.copied.at(-1)), captured);
+      }
+    }
+    await append({ type: "message_start", message: { role: "assistant", content: [] } });
+    await update("thinking_start");
+    await update("thinking_end", { content: "" });
+    for (const view of views) {
+      await view.locator(".thinking-shimmer").waitFor({ state: "detached" });
+      assert.equal(await view.locator(".thinking-card").count(), 2);
+      assert.equal(await view.locator(".thinking-empty").count(), 0);
+      for (const data of turns) assert.ok((await view.innerText()).includes(data.seed + data.delta));
+    }
+    assert.equal(await views[1].locator("[data-transcript-id]").count(), 2, "empty history blocks reserve no rows");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

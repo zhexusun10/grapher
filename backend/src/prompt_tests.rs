@@ -2418,17 +2418,73 @@ fn feedback_drains_its_component_but_not_unrelated_siblings_or_stale_consumers()
     let repository = crate::fixture::repository(root).unwrap();
     let release = root.join("release-slow");
     let release_related = root.join("release-related");
+    let slow_started = root.join("slow-started");
+    let related_started = root.join("related-started");
+
+    // This is an ordering/barrier contract, not a wall-clock performance test.
+    // Workspace preparation and unrelated parallel tests must not consume the
+    // next phase's budget. Never release `slow` merely to satisfy a timeout.
+    fn wait_for_state(
+        service: &Arc<Service>,
+        label: &str,
+        ready: impl Fn(&Snapshot) -> bool,
+    ) -> Snapshot {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let state = service.runtime.lock().unwrap().state.clone();
+            if ready(&state) {
+                return state;
+            }
+            let nodes: Vec<_> = state.nodes.iter().map(|(name, node)| (name, &node.status)).collect();
+            let executions: Vec<_> = state.executions.iter().map(|e| (&e.node, e.attempt, &e.status)).collect();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Timed out waiting for {label}: phase={}, driving={}, nodes={nodes:?}, executions={executions:?}, feedback={:?}",
+                state.phase, service.driving.load(Ordering::SeqCst), state.feedback_counts
+            );
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    struct Cleanup {
+        service: Arc<Service>,
+        gates: Vec<PathBuf>,
+        run_id: String,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            // Also run on assertion failure, before TempDir removes the gates.
+            for gate in &self.gates {
+                let _ = fs::write(gate, "release");
+            }
+            if thread::panicking() {
+                let _ = control(
+                    "stop".into(), None, None, Some(self.run_id.clone()), None, None, &self.service,
+                );
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while self.service.driving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                thread::sleep(std::time::Duration::from_millis(20));
+            }
+            if self.service.driving.load(Ordering::SeqCst) {
+                crate::engine::terminate_run(&self.run_id);
+                eprintln!("Feedback test cleanup: driver for {} did not settle", self.run_id);
+            }
+        }
+    }
+
     let script = root.join("worker.sh");
     fs::write(&script, format!(r#"cat >/dev/null
 case "$PWD" in
-  *slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > slow.txt ;;
-  *related-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > related.txt ;;
+  *slow-*) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo done > slow.txt ;;
+  *related-*) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo done > related.txt ;;
   *review-*) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
   *consumer-*) echo invalid > stale.txt ;;
   *) echo done > owner.txt ;;
 esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
-"#, release.display(), release_related.display())).unwrap();
+"#, release = release.display(), release_related = release_related.display(),
+        slow_started = slow_started.display(), related_started = related_started.display())).unwrap();
     let mut runtime = Runtime::open(root).unwrap();
     runtime
         .create(
@@ -2478,56 +2534,60 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         planning: AtomicBool::new(false),
         extension: root.join("unused"),
     });
-    drive(service.clone());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let before_release = loop {
-        let state = service.runtime.lock().unwrap().state.clone();
-        if state
-            .executions
-            .iter()
-            .any(|e| e.node == "review" && e.status == "completed")
-            || std::time::Instant::now() > deadline
-        {
-            break state;
-        }
-        thread::sleep(std::time::Duration::from_millis(20));
+    let _cleanup = Cleanup {
+        service: service.clone(),
+        gates: vec![release.clone(), release_related.clone()],
+        run_id: service.runtime.lock().unwrap().state.run_id.clone(),
     };
+    drive(service.clone());
+    let before_release = wait_for_state(
+        &service,
+        "completed review with both workers at their gates",
+        |state| {
+            state.executions.iter().any(|e| e.node == "review" && e.status == "completed")
+                && slow_started.is_file()
+                && related_started.is_file()
+        },
+    );
+    assert!(!release.is_file());
+    assert!(!release_related.is_file());
+    assert_eq!(before_release.nodes["slow"].status, "running");
     assert_eq!(before_release.nodes["related"].status, "running");
     assert_eq!(
         before_release.feedback_counts.get("review->owner"),
         None,
         "feedback must wait for affected running nodes"
     );
-    fs::write(&release_related, "release").unwrap();
-    let observed = loop {
-        let state = service.runtime.lock().unwrap().state.clone();
-        if state
-            .feedback_counts
-            .get("review->owner")
-            .copied()
-            .unwrap_or(0)
-            >= 1
-            || std::time::Instant::now() > deadline
-        {
-            break state;
-        }
-        thread::sleep(std::time::Duration::from_millis(20));
-    };
-    assert_eq!(observed.nodes["slow"].status, "running");
     assert!(
-        observed
-            .feedback_counts
-            .get("review->owner")
-            .copied()
-            .unwrap_or(0)
-            >= 1,
-        "unrelated sibling delayed feedback"
+        !before_release.executions.iter().any(|e| e.node == "consumer"),
+        "stale review consumers must remain blocked"
+    );
+    fs::write(&release_related, "release").unwrap();
+    let observed = wait_for_state(
+        &service,
+        "feedback after the affected worker drains, while slow remains gated",
+        |state| state.feedback_counts.get("review->owner").copied().unwrap_or(0) >= 1,
+    );
+    assert!(
+        !release.is_file(),
+        "feedback must not require releasing the unrelated sibling"
+    );
+    assert_eq!(observed.nodes["slow"].status, "running");
+    assert_eq!(observed.feedback_counts.get("review->owner"), Some(&1));
+    assert!(
+        observed.executions.iter().any(|e| e.node == "related" && e.status == "completed"),
+        "feedback must follow the affected worker's completion"
+    );
+    assert!(
+        !observed.executions.iter().any(|e| e.node == "consumer"),
+        "feedback must not expose stale consumers"
     );
     fs::write(&release, "release").unwrap();
-    while service.driving.load(Ordering::SeqCst) {
-        assert!(std::time::Instant::now() < deadline);
-        thread::sleep(std::time::Duration::from_millis(20));
-    }
+    wait_for_state(
+        &service,
+        "driver settlement after releasing the unrelated sibling",
+        |_| !service.driving.load(Ordering::SeqCst),
+    );
     let runtime = service.runtime.lock().unwrap();
     assert_eq!(
         runtime
@@ -2603,6 +2663,7 @@ fn planning_metrics_parsing_and_persistence() {
         error: None,
         created_at: None,
         repository: None,
+        ..Default::default()
     };
     runtime
         .create_with_planning(
@@ -2765,6 +2826,7 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
         error: None,
         created_at: Some(100),
         repository: None, // legacy: missing repository
+        ..Default::default()
     };
     runtime
         .create_with_planning(
@@ -2798,6 +2860,7 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
         error: Some("Planner crashed".into()),
         created_at: Some(200),
         repository: None,
+        ..Default::default()
     };
     let unattr_dir = temp.path().join("planning").join("unattributed-plan");
     fs::create_dir_all(&unattr_dir).unwrap();

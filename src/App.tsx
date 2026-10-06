@@ -8,8 +8,9 @@ import {
   type Config, type Graph, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType, type TranscriptItem,
   type PlanningSummary, type PlanMode, type ChatMessage,
-  type ImageAttachment, type ChatMessageVersion
+  type ImageAttachment, type FileAttachment, type ChatMessageVersion
 } from "./types";
+import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
 import { providerAuth } from "./services/providerAuth";
@@ -146,6 +147,37 @@ export default function App() {
   const [dataPath, setDataPath] = useState("");
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
   const [dismissedRecoveryId, setDismissedRecoveryId] = useState<string | null>(null);
+  const autoDismissTimerRef = useRef<number | null>(null);
+
+  const handleConversationReady = useCallback(() => {
+    if (!recoveredPlanning) return;
+    const planningId = recoveredPlanning.planningId;
+    if (dismissedRecoveryId === planningId) return;
+
+    if (autoDismissTimerRef.current !== null) {
+      window.clearTimeout(autoDismissTimerRef.current);
+    }
+    autoDismissTimerRef.current = window.setTimeout(() => {
+      setDismissedRecoveryId(planningId);
+      autoDismissTimerRef.current = null;
+    }, 1500);
+  }, [recoveredPlanning, dismissedRecoveryId]);
+
+  useEffect(() => {
+    if (!recoveredPlanning && autoDismissTimerRef.current !== null) {
+      window.clearTimeout(autoDismissTimerRef.current);
+      autoDismissTimerRef.current = null;
+    }
+  }, [recoveredPlanning]);
+
+  useEffect(() => {
+    return () => {
+      if (autoDismissTimerRef.current !== null) {
+        window.clearTimeout(autoDismissTimerRef.current);
+      }
+    };
+  }, []);
+
   const [isPlanning, setIsPlanning] = useState(false);
   // Recover an orphaned Planner only on initial load, not after the user
   // intentionally opens a different Conversation in this repository.
@@ -278,7 +310,7 @@ export default function App() {
 
   const effectiveMessages = useMemo<ChatMessage[]>(() => {
     if (sessionEntries.length > 0) return sessionEntries;
-    const initialGoal = state.graph.originalGoal || goal || (state.runId ? runLabels[state.runId] : "");
+    const initialGoal = state.graph.originalGoal || goal || recoveredPlanning?.goal || (state.runId ? runLabels[state.runId] : "");
     if (initialGoal) {
       return [
         {
@@ -290,15 +322,16 @@ export default function App() {
       ];
     }
     return [];
-  }, [sessionEntries, state.graph.originalGoal, goal, state.runId, runLabels]);
+  }, [sessionEntries, state.graph.originalGoal, goal, recoveredPlanning?.goal, state.runId, runLabels]);
 
   const [routeType, setRouteType] = useState<PlanRouteType>(() => deduceRouteType(emptySnapshot));
 
   // 开始编辑消息
   const handleStartEditMessage = useCallback((msg: ChatMessage) => {
     setEditingMessage(msg);
-    // 剥离可能存在的 [@node] 格式前缀以便用户编辑纯指令
-    const cleanText = msg.text.replace(/^\[@[^\]]+\]\s*/, "");
+    // 剥离可能存在的 [@node] 格式前缀与附件块以便用户编辑纯指令
+    const parsed = parseMessageAttachmentsAndText(msg.text, msg.files, msg.images);
+    const cleanText = parsed.cleanText.replace(/^\[@[^\]]+\]\s*/, "");
     setEditPrefillText(cleanText);
   }, []);
 
@@ -376,7 +409,7 @@ export default function App() {
 
   const handleSendMessage = (
     val: string,
-    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: File[]; images?: ImageAttachment[] }
+    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: Array<File | FileAttachment>; images?: ImageAttachment[] }
   ): boolean | Promise<boolean> => {
     const text = val.trim();
     if (!text) return false;
@@ -392,11 +425,14 @@ export default function App() {
     const isCurrent = () => generation === foregroundGeneration.current;
     const selectedNode = state.graph.nodes.find(item => item.name === selected);
     const targetNodeName = selectedNode?.name || (routeType === "serial" ? state.graph.nodes[0]?.name : undefined);
-    const displayMsg = options?.displayText || text;
+    const displayMsg = options?.displayText !== undefined ? options.displayText : text;
+    const fileAttachments: FileAttachment[] | undefined = options?.files && options.files.length > 0
+      ? options.files.map(f => ({ name: f.name, size: f.size, type: f.type }))
+      : undefined;
     const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"], executionId?: string) => {
       const message: ChatMessage = {
         id: `msg-${crypto.randomUUID()}`, parentId: (sessionEntries.at(-1) || effectiveMessages.at(-1))?.id ?? null,
-        role: "user", text: textToRecord, images: options?.images, timestamp: Date.now(),
+        role: "user", text: textToRecord, images: options?.images, files: fileAttachments, timestamp: Date.now(),
         runId: state.runId || plannerStream.runId, node: targetNodeName, delivery, executionId,
       };
       setSessionEntries(prev => [...(prev.length ? prev : effectiveMessages), message]);
@@ -610,8 +646,14 @@ export default function App() {
       snapshotBelongsToWorkspace(data.snapshot, activeRepo) &&
       currentRuns.includes(data.snapshot.runId)
     );
+    const isActivelyPlanning = Boolean(
+      data.snapshot.runId &&
+      data.snapshot.phase === "planning" &&
+      activeRepo &&
+      snapshotBelongsToWorkspace(data.snapshot, activeRepo)
+    );
 
-    if (isActivelyRunning) {
+    if (isActivelyRunning || isActivelyPlanning) {
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       markSnapshotRead(data.snapshot);
@@ -619,6 +661,9 @@ export default function App() {
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
       setSelected("");
+      if (isActivelyPlanning && data.snapshot.planning) {
+        setRecoveredPlanning(data.snapshot.planning);
+      }
     } else {
       // Opening the UI must not reset or delete another Run's checkout.
       setState(emptySnapshot);
@@ -992,7 +1037,7 @@ export default function App() {
 
   const handlePlanGoal = (
     inputGoal?: string,
-    options?: { displayText?: string; rawText?: string; files?: File[]; images?: ImageAttachment[] },
+    options?: { displayText?: string; rawText?: string; files?: Array<File | FileAttachment>; images?: ImageAttachment[] },
     mode?: PlanMode,
     revisionRunId?: string,
     forceFresh?: boolean,
@@ -1035,13 +1080,18 @@ export default function App() {
       recordRunToWorkspace(provisionalRunId, targetRepo);
       setRunLabels((prev) => ({ ...prev, [provisionalRunId!]: targetGoal }));
 
+      const fileAttachments: FileAttachment[] | undefined = options?.files && options.files.length > 0
+        ? options.files.map(f => ({ name: f.name, size: f.size, type: f.type }))
+        : undefined;
+
       const newMsg: ChatMessage = {
         ...editedMessage,
         id: editedMessage?.id || `msg-${Date.now()}`,
         parentId: null,
         role: "user",
-        text: options?.displayText || targetGoal,
+        text: options?.displayText !== undefined ? options.displayText : targetGoal,
         images: options?.images,
+        files: fileAttachments || editedMessage?.files,
         timestamp: Date.now(),
         runId: provisionalRunId,
       };
@@ -1052,6 +1102,7 @@ export default function App() {
             ...prev[0],
             text: newMsg.text,
             images: newMsg.images,
+            files: newMsg.files,
             timestamp: newMsg.timestamp,
             runId: newMsg.runId,
           }];
@@ -1093,14 +1144,18 @@ export default function App() {
       setIsPlanning(true);
       // A Planner turn does not change the draft/runtime phase. The workbench
       // displays planning separately, including while old snapshots are polled.
+      const fileAttachments: FileAttachment[] | undefined = options?.files && options.files.length > 0
+        ? options.files.map(f => ({ name: f.name, size: f.size, type: f.type }))
+        : undefined;
       const parentId = sessionEntries.length > 0 ? sessionEntries[sessionEntries.length - 1].id : null;
       const newMsg: ChatMessage = {
         ...editedMessage,
         id: editedMessage?.id || `msg-${Date.now()}`,
         parentId,
         role: "user",
-        text: options?.displayText || targetGoal,
+        text: options?.displayText !== undefined ? options.displayText : targetGoal,
         images: options?.images,
+        files: fileAttachments || editedMessage?.files,
         timestamp: Date.now(),
         runId: effectiveRevisionRunId,
       };
@@ -1712,12 +1767,17 @@ export default function App() {
       return false;
     }
 
-    const cleanExisting = targetMsg.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
+    const parsedExisting = parseMessageAttachmentsAndText(targetMsg.text, targetMsg.files, targetMsg.images);
+    const cleanExisting = parsedExisting.cleanText.replace(/^\[@[^\]]+\]\s*/, "").trim();
     if (selectedVersion === undefined && cleanText === cleanExisting) {
       setEditingMessage(null);
       setEditPrefillText("");
       return;
     }
+
+    const fileTagsMatch = targetMsg.text.match(/(?:<file name="[^"]+">[\s\S]*?<\/file>\s*)+/);
+    const fileTags = fileTagsMatch ? fileTagsMatch[0] : "";
+    const backendGoal = fileTags ? `${fileTags}${cleanText}` : cleanText;
 
     const isPlannerHistoryInitial = routeType === "graph" && !targetMsg.node &&
       targetMsg.id.startsWith("planner-history-") &&
@@ -1805,17 +1865,17 @@ export default function App() {
       try {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({
-          runId: state.runId, oldText: cleanExisting, instruction: cleanText,
+          runId: state.runId, oldText: cleanExisting, instruction: backendGoal,
         });
         if (!applyForegroundSnapshot(snap, generation)) return false;
-        const updated: ChatMessage = { ...targetMsg, text: cleanText, runId: state.runId,
-          versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, timestamp: Date.now() }]),
-            { id: `v${Date.now()}`, text: cleanText, timestamp: Date.now() }],
+        const updated: ChatMessage = { ...targetMsg, text: cleanText, files: parsedExisting.attachments, runId: state.runId,
+          versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, timestamp: Date.now() }]),
+            { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, timestamp: Date.now() }],
           currentVersionIndex: (targetMsg.versions?.length ?? 1),
         };
         setSessionEntries([updated]);
         setGoal(cleanText);
-        await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updated);
+        await handlePlanGoal(backendGoal, { displayText: cleanText, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updated);
         return true;
       } catch (error) { return reportEditError(error); }
     }
@@ -1829,25 +1889,25 @@ export default function App() {
         : (sessionEntries[0] ? [sessionEntries[0]] : []);
       const previousEntry = previous[previous.length - 1];
       const versions = [
-        ...(current.versions ?? [{ id: "v1", text: current.text, images: current.images, timestamp: current.timestamp || Date.now() }]),
-        { id: `v${Date.now()}`, text: cleanText, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
+        ...(current.versions ?? [{ id: "v1", text: current.text, files: current.files, images: current.images, timestamp: current.timestamp || Date.now() }]),
+        { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
       ];
       const updatedPlannerMessage: ChatMessage = {
         ...current, id: current.id || targetMsg.id, parentId: previousEntry?.id ?? null,
-        text: cleanText, images: targetMsg.images, runId: state.runId,
+        text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, runId: state.runId,
         timestamp: Date.now(), versions, currentVersionIndex: versions.length - 1,
       };
       try {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({
-          runId: state.runId, oldText: cleanExisting, instruction: cleanText,
+          runId: state.runId, oldText: cleanExisting, instruction: backendGoal,
         });
         if (!applyForegroundSnapshot(snap, generation)) return false;
         // Planner history is rendered from the durable Pi transcript. Keep only
         // the local prefix here; inserting a historical follow-up as the first
         // effective message would place it above the route decision card.
         setSessionEntries(previous);
-        await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updatedPlannerMessage);
+        await handlePlanGoal(backendGoal, { displayText: cleanText, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updatedPlannerMessage);
         return true;
       } catch (error) { return reportEditError(error); }
     }
@@ -1867,13 +1927,13 @@ export default function App() {
           if (!await requireEditRepository()) return false;
           const snap = await runtimeService.editNode({
             runId: state.runId, node, executionId: first.id,
-            oldText: state.graph.originalGoal, instruction: cleanText, images: targetMsg.images,
+            oldText: state.graph.originalGoal, instruction: backendGoal, images: targetMsg.images,
           });
           if (!await acceptNodeEdit(snap)) return false;
           setGoal(cleanText);
-          setSessionEntries([{ ...targetMsg, id: "msg-initial-goal", node: undefined, text: cleanText,
-            versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, images: targetMsg.images, timestamp: Date.now() }]),
-              { id: `v${Date.now()}`, text: cleanText, images: targetMsg.images, timestamp: Date.now() }],
+          setSessionEntries([{ ...targetMsg, id: "msg-initial-goal", node: undefined, text: cleanText, files: parsedExisting.attachments,
+            versions: [...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, images: targetMsg.images, timestamp: Date.now() }]),
+              { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now() }],
             currentVersionIndex: (targetMsg.versions?.length ?? 1),
           }]);
           setEditingMessage(null);
@@ -1895,6 +1955,7 @@ export default function App() {
       const initialVersion: ChatMessageVersion = {
         id: "v1",
         text: currentInitial.text,
+        files: currentInitial.files,
         images: currentInitial.images,
         timestamp: currentInitial.timestamp || Date.now(),
         subsequentEntries: sessionEntries.slice(1),
@@ -1902,6 +1963,7 @@ export default function App() {
       const newVersion: ChatMessageVersion = {
         id: `v${Date.now()}`,
         text: cleanText,
+        files: parsedExisting.attachments,
         images: targetMsg.images,
         timestamp: Date.now(),
         subsequentEntries: [],
@@ -1913,6 +1975,7 @@ export default function App() {
         parentId: null,
         role: "user",
         text: cleanText,
+        files: parsedExisting.attachments,
         images: targetMsg.images,
         timestamp: Date.now(),
         versions,
@@ -1923,8 +1986,8 @@ export default function App() {
       setGoal(cleanText);
 
       await handlePlanGoal(
-        cleanText,
-        { images: targetMsg.images },
+        backendGoal,
+        { displayText: cleanText, files: parsedExisting.attachments, images: targetMsg.images },
         routeType === "undecided" ? "auto" : routeType,
         undefined,
         true
@@ -1946,6 +2009,7 @@ export default function App() {
       const initialVersion: ChatMessageVersion = {
         id: "v1",
         text: current.text,
+        files: current.files,
         images: current.images,
         timestamp: current.timestamp || Date.now(),
         subsequentEntries: sessionEntries.slice(targetIndex + 1),
@@ -1953,6 +2017,7 @@ export default function App() {
       const newVersion: ChatMessageVersion = {
         id: `v${Date.now()}`,
         text: cleanText,
+        files: parsedExisting.attachments,
         images: targetMsg.images,
         timestamp: Date.now(),
         subsequentEntries: [],
@@ -1963,6 +2028,7 @@ export default function App() {
         ...current,
         delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? undefined : current.delivery,
         text: cleanText,
+        files: parsedExisting.attachments,
         timestamp: Date.now(),
         parentId,
         versions,
@@ -1971,13 +2037,14 @@ export default function App() {
       rolledBackEntries = [...prevEntries, updatedMsg];
     } else {
       const versions = [
-        ...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, images: targetMsg.images, timestamp: targetMsg.timestamp || Date.now() }]),
-        { id: `v${Date.now()}`, text: cleanText, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
+        ...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, images: targetMsg.images, timestamp: targetMsg.timestamp || Date.now() }]),
+        { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
       ];
       updatedMsg = {
         ...targetMsg,
         delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? undefined : targetMsg.delivery,
         text: cleanText,
+        files: parsedExisting.attachments,
         timestamp: Date.now(),
         versions,
         currentVersionIndex: versions.length - 1,
@@ -1998,10 +2065,10 @@ export default function App() {
       try {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({ runId: state.runId,
-          oldText: cleanExisting, instruction: cleanText });
+          oldText: cleanExisting, instruction: backendGoal });
         if (!applyForegroundSnapshot(snap, generation)) return false;
         setSessionEntries(rolledBackEntries);
-        await handlePlanGoal(cleanText, { images: targetMsg.images }, "graph", state.runId, false, updatedMsg);
+        await handlePlanGoal(backendGoal, { displayText: cleanText, files: parsedExisting.attachments, images: targetMsg.images }, "graph", state.runId, false, updatedMsg);
         return true;
       } catch (error) { return reportEditError(error); }
     }
@@ -2025,7 +2092,7 @@ export default function App() {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editNode({
           runId: state.runId, node: targetNodeName, executionId: execution.id,
-          oldText: cleanExisting, instruction: cleanText, images: targetMsg.images,
+          oldText: cleanExisting, instruction: backendGoal, images: targetMsg.images,
         });
         if (!await acceptNodeEdit(snap)) return false;
         setSessionEntries(rolledBackEntries);
@@ -2090,6 +2157,37 @@ export default function App() {
           if (summary.status === "running") {
             setRecoveredPlanning(summary);
             setSelected("");
+            if (summary.goal) {
+              setGoal(prev => prev || summary.goal!);
+            }
+            if (summary.planType && summary.planType !== "undecided") {
+              setRouteType(summary.planType);
+            }
+            if (summary.runId || summary.goal || summary.planType) {
+              setState(prev => {
+                const nextRunId = summary.runId || prev.runId;
+                const nextGoal = summary.goal || prev.graph.originalGoal;
+                const nextPlanType = (summary.planType && summary.planType !== "undecided") ? summary.planType : prev.planType;
+                if (
+                  prev.runId === nextRunId &&
+                  prev.graph.originalGoal === nextGoal &&
+                  prev.planType === nextPlanType &&
+                  prev.planningId === summary.planningId
+                ) {
+                  return prev;
+                }
+                return {
+                  ...prev,
+                  runId: nextRunId,
+                  planningId: summary.planningId,
+                  planType: nextPlanType,
+                  graph: {
+                    ...prev.graph,
+                    originalGoal: nextGoal,
+                  },
+                };
+              });
+            }
           } else {
             if (summary.status === "success") {
               const snapshot = await runtimeService.getPlanningSnapshot(planningId, repository, abort.signal);
@@ -2268,7 +2366,7 @@ export default function App() {
                     </div>
                     <div className="floating-recovered-content">
                       <p role="status" className="floating-recovered-text">
-                        {t("已连接正在进行的规划，活动会自动更新。")}
+                        {t("已连接正在进行的规划，活动会自动更新")}
                       </p>
                     </div>
                     <button
@@ -2339,6 +2437,7 @@ export default function App() {
                     isPlanning={isPlanning || backendPlanning || !!recoveredPlanning}
                     plannerStream={plannerStream}
                     recoveredPlanningId={recoveredPlanning?.planningId || (!isPlanning && backendPlanning ? state.planningId : undefined)}
+                    onConversationReady={handleConversationReady}
                     onSendMessage={handleSendMessage}
                     onRequestConfirmation={setConfirmModal}
                     onControl={control}

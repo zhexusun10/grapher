@@ -1614,21 +1614,21 @@ a,
 
 .prompt-box-file-badge {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  padding: 5px 10px 5px 8px;
-  background: var(--bg-surface-elevated, rgba(255, 255, 255, 0.06));
-  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  padding: 6px 10px 6px 8px;
+  background: #ffffff;
+  border: 1px solid var(--border-default, #E2E8F0);
   border-radius: 10px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-  backdrop-filter: blur(8px);
-  max-width: 100%;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  max-width: min(360px, 100%);
   transition: all 0.15s ease;
 }
 
 .prompt-box-file-badge:hover {
-  border-color: var(--border-default, rgba(255, 255, 255, 0.2));
-  background: var(--bg-surface-hover, rgba(255, 255, 255, 0.08));
+  border-color: #CBD5E1;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
 .prompt-box-file-icon {
@@ -1641,6 +1641,7 @@ a,
   background: rgba(99, 102, 241, 0.14);
   color: #818cf8;
   flex-shrink: 0;
+  margin-top: 1px;
 }
 
 .prompt-box-file-icon .prompt-box-file-icon-code {
@@ -1658,25 +1659,25 @@ a,
 .prompt-box-file-info {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
-  max-width: 240px;
+  flex: 1;
 }
 
 .prompt-box-file-name {
   font-size: 12.5px;
   font-weight: 500;
   color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.2;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .prompt-box-file-size {
   font-size: 10.5px;
   color: var(--text-secondary);
-  line-height: 1;
+  line-height: 1.2;
 }
 
 .prompt-box-file-remove-btn {
@@ -1691,12 +1692,13 @@ a,
   color: var(--text-secondary);
   cursor: pointer;
   margin-left: 2px;
+  margin-top: 2px;
   flex-shrink: 0;
   transition: all 0.15s ease;
 }
 
 .prompt-box-file-remove-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.06);
   color: var(--text-primary);
 }
 

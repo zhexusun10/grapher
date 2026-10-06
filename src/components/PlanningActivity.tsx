@@ -61,6 +61,7 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
       timer = setTimeout(() => { wake = undefined; resolve(); }, 1000);
     });
     const poll = async () => {
+      let notifiedReady = false;
       try {
         let text = "";
         let bytes = 0;
@@ -84,6 +85,11 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
             }
             offset = page.nextOffset;
             if (page.complete) {
+              if (!notifiedReady && (offset > 0 || !page.running)) {
+                notifiedReady = true;
+                setLoading(false);
+                onReadyRef.current?.();
+              }
               if (!page.running) {
                 // A stopped process may leave its last JSONL record without a
                 // newline; the transcript parser waits for a complete line.
@@ -104,7 +110,10 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
       } finally {
         if (!abort.signal.aborted) {
           setLoading(false);
-          onReadyRef.current?.();
+          if (!notifiedReady) {
+            notifiedReady = true;
+            onReadyRef.current?.();
+          }
         }
       }
     };

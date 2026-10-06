@@ -1,9 +1,10 @@
 import { t } from "../../i18n";
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
 import { ArrowUp, Check, Copy, Pencil, X } from "lucide-react";
-import type { ChatMessageVersion, ImageAttachment } from "../../types";
+import type { ChatMessageVersion, ImageAttachment, FileAttachment } from "../../types";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
+import { parseMessageAttachmentsAndText, AttachmentCard } from "../../utils/attachmentUtils";
 
 function copyFallback(text: string, onSuccess: () => void) {
   try {
@@ -35,6 +36,7 @@ StreamingAssistantBubble.displayName = "StreamingAssistantBubble";
 export function EditableUserBubble({
   text,
   images,
+  files,
   editing,
   draft,
   onDraftChange,
@@ -48,6 +50,7 @@ export function EditableUserBubble({
 }: {
   text: string;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
   editing: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
@@ -69,6 +72,10 @@ export function EditableUserBubble({
   const submittingRef = useRef(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const { cleanText, attachments, images: allImages } = useMemo(() => {
+    return parseMessageAttachmentsAndText(text, files, images);
+  }, [text, files, images]);
+
   useEffect(() => {
     return () => {
       if (copyTimeoutRef.current) {
@@ -79,7 +86,8 @@ export function EditableUserBubble({
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!text) return;
+    const targetText = cleanText || text;
+    if (!targetText) return;
     if (copyTimeoutRef.current) {
       clearTimeout(copyTimeoutRef.current);
     }
@@ -91,11 +99,11 @@ export function EditableUserBubble({
     };
 
     if (navigator?.clipboard?.writeText) {
-      navigator.clipboard.writeText(text).then(onSuccess).catch(() => {
-        copyFallback(text, onSuccess);
+      navigator.clipboard.writeText(targetText).then(onSuccess).catch(() => {
+        copyFallback(targetText, onSuccess);
       });
     } else {
-      copyFallback(text, onSuccess);
+      copyFallback(targetText, onSuccess);
     }
   };
 
@@ -146,10 +154,14 @@ export function EditableUserBubble({
       const { width, height } = bubbleRef.current.getBoundingClientRect();
       setInitialSize({ width, height });
     }
+    if (cleanText) {
+      onDraftChange(cleanText);
+    }
     onEdit?.();
   };
 
-  const isShorter = draft.trim().length < text.trim().length;
+  const targetText = cleanText || text;
+  const isShorter = draft.trim().length < targetText.trim().length;
   const isLongDraft = draft.trim().length > 40 || draft.includes("\n") || (initialSize ? initialSize.width > 420 : false);
 
   return (
@@ -203,20 +215,23 @@ export function EditableUserBubble({
             ) : null}
           </div>
         )}
-        <div
-          ref={bubbleRef}
-          className={`chat-bubble-user${editing ? " editing" : ""}${editing && isLongDraft ? " expanded" : ""}`}
-          style={editing && initialSize && !isShorter && !isLongDraft ? {
-            minWidth: `${initialSize.width}px`,
-            minHeight: `${initialSize.height}px`,
-          } : undefined}
-        >
-          {images && images.length > 0 && (
+        <div className="chat-user-bubble-stack">
+          {/* 附件卡片（完全复用与输入框一致的预览卡片） */}
+          {attachments.length > 0 && (
+            <div className="chat-user-attachments-stack">
+              {attachments.map((att, idx) => (
+                <AttachmentCard key={idx} file={att} />
+              ))}
+            </div>
+          )}
+
+          {/* 图片附件 */}
+          {allImages && allImages.length > 0 && (
             <div className="chat-user-images-preview">
-              {images.map((img, idx) => (
+              {allImages.map((img, idx) => (
                 <div key={idx} className="chat-user-image-thumb">
                   <img
-                    src={`data:${img.mimeType};base64,${img.data}`}
+                    src={img.data.startsWith("data:") ? img.data : `data:${img.mimeType || "image/png"};base64,${img.data}`}
                     alt={img.name || t("图片 {0}", idx + 1)}
                     className="chat-user-img"
                   />
@@ -224,57 +239,70 @@ export function EditableUserBubble({
               ))}
             </div>
           )}
-          {editing ? (
-            <div className="chat-bubble-edit-grid">
-              <span className="chat-bubble-edit-mirror" aria-hidden="true">
-                {draft ? (draft.endsWith("\n") ? `${draft} ` : draft) : " "}
-              </span>
-              <textarea
-                ref={textareaRef}
-                className="chat-bubble-edit-textarea"
-                aria-label={t("修改消息内容")}
-                disabled={submitting}
-                value={draft}
-                onChange={(event) => onDraftChange(event.target.value)}
-                onCompositionStart={() => {
-                  composingRef.current = true;
-                }}
-                onCompositionEnd={() => {
-                  composingRef.current = false;
-                  compositionEndedAtRef.current = Date.now();
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
-                    event.stopPropagation();
-                    if (!submittingRef.current) onCancel();
-                  } else if (event.key === "Enter" && !event.shiftKey) {
-                    if (
-                      event.nativeEvent.isComposing ||
-                      composingRef.current ||
-                      event.keyCode === 229 ||
-                      Date.now() - compositionEndedAtRef.current < 50
-                    ) {
-                      return;
-                    }
-                    event.preventDefault();
-                    submit();
-                  } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                    if (
-                      event.nativeEvent.isComposing ||
-                      composingRef.current ||
-                      event.keyCode === 229 ||
-                      Date.now() - compositionEndedAtRef.current < 50
-                    ) {
-                      return;
-                    }
-                    event.preventDefault();
-                    submit();
-                  }
-                }}
-                rows={1}
-              />
+
+          {/* 用户气泡：有文字内容或正在编辑时呈现 */}
+          {(cleanText || editing) ? (
+            <div
+              ref={bubbleRef}
+              className={`chat-bubble-user${editing ? " editing" : ""}${editing && isLongDraft ? " expanded" : ""}`}
+              style={editing && initialSize && !isShorter && !isLongDraft ? {
+                minWidth: `${initialSize.width}px`,
+                minHeight: `${initialSize.height}px`,
+              } : undefined}
+            >
+              {editing ? (
+                <div className="chat-bubble-edit-grid">
+                  <span className="chat-bubble-edit-mirror" aria-hidden="true">
+                    {draft ? (draft.endsWith("\n") ? `${draft} ` : draft) : " "}
+                  </span>
+                  <textarea
+                    ref={textareaRef}
+                    className="chat-bubble-edit-textarea"
+                    aria-label={t("修改消息内容")}
+                    disabled={submitting}
+                    value={draft}
+                    onChange={(event) => onDraftChange(event.target.value)}
+                    onCompositionStart={() => {
+                      composingRef.current = true;
+                    }}
+                    onCompositionEnd={() => {
+                      composingRef.current = false;
+                      compositionEndedAtRef.current = Date.now();
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.stopPropagation();
+                        if (!submittingRef.current) onCancel();
+                      } else if (event.key === "Enter" && !event.shiftKey) {
+                        if (
+                          event.nativeEvent.isComposing ||
+                          composingRef.current ||
+                          event.keyCode === 229 ||
+                          Date.now() - compositionEndedAtRef.current < 50
+                        ) {
+                          return;
+                        }
+                        event.preventDefault();
+                        submit();
+                      } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                        if (
+                          event.nativeEvent.isComposing ||
+                          composingRef.current ||
+                          event.keyCode === 229 ||
+                          Date.now() - compositionEndedAtRef.current < 50
+                        ) {
+                          return;
+                        }
+                        event.preventDefault();
+                        submit();
+                      }
+                    }}
+                    rows={1}
+                  />
+                </div>
+              ) : cleanText}
             </div>
-          ) : text}
+          ) : null}
         </div>
       </div>
     </div>

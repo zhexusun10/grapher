@@ -330,12 +330,6 @@
   font-style: italic;
 }
 
-.thinking-empty {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
 .thinking-content-container {
   display: block;
   position: relative;

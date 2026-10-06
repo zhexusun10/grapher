@@ -4,12 +4,19 @@ export interface ThinkingUpdate {
   type: "thinking_start" | "thinking_delta" | "thinking_end";
   contentIndex?: number;
   delta?: string;
-  content?: string;
+  // Compact frames can carry the already-generated text on thinking_start.
+  content?: string | MessageContent;
 }
 
 interface MessageContent {
   type: string;
   thinking?: string;
+}
+
+/** Captured thinking is not a disposable preview; finals may only backfill or extend it. */
+function backfillThinkingContent(captured = "", incoming?: string): string {
+  if (incoming?.trim() && (!captured.trim() || incoming.startsWith(captured))) return incoming;
+  return captured;
 }
 
 function thinkingItem(contentIndex?: number): TranscriptItem {
@@ -48,15 +55,14 @@ export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpd
     next.push(thinkingItem(update.contentIndex));
   }
   const item = { ...next[index] };
-  if (update.type === "thinking_delta") item.content = (item.content || "") + (update.delta || "");
-  if (update.type === "thinking_end") {
-    // The end event is authoritative (providers may normalize their deltas),
-    // but an empty private block must not erase text that was actually streamed.
-    if (update.content?.trim()) item.content = update.content;
-    item.status = "success";
+  if (update.type === "thinking_delta") {
+    item.content = (item.content || "") + (update.delta || "");
   } else {
-    item.status = "running";
+    const content = typeof update.content === "string" ? update.content
+      : update.content?.type === "thinking" ? update.content.thinking : undefined;
+    item.content = backfillThinkingContent(item.content, content);
   }
+  item.status = update.type === "thinking_end" ? "success" : "running";
   next[index] = item;
   return next;
 }
@@ -73,7 +79,7 @@ export function finalizeThinkingItems(items: TranscriptItem[], content: MessageC
     if (index >= 0) {
       next[index] = {
         ...next[index], thinkingContentIndex: contentIndex, status: "success",
-        content: part.thinking?.trim() ? part.thinking : next[index].content,
+        content: backfillThinkingContent(next[index].content, part.thinking),
       };
     } else {
       next = updateThinkingItems(next, { type: "thinking_end", contentIndex, content: part.thinking }, messageStart);

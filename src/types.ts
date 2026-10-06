@@ -61,6 +61,9 @@ export interface PlanningSummary {
   error?: string;
   createdAt?: number;
   repository?: string;
+  planType?: PlanRouteType;
+  goal?: string;
+  runId?: string;
 }
 
 export interface SkillItem {
@@ -155,10 +158,18 @@ export interface ImageAttachment {
   name?: string;
 }
 
+export interface FileAttachment {
+  name: string;
+  size?: number;
+  type?: string;
+  content?: string;
+}
+
 export interface ChatMessageVersion {
   id: string;
   text: string;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
   timestamp: number;
   executionId?: string;
   subsequentEntries?: ChatMessage[];
@@ -170,6 +181,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
   timestamp?: number;
   runId?: string;
   node?: string;

@@ -71,6 +71,7 @@ interface GraphWorkbenchProps {
   edgeTypes: any;
   tokens: any;
   failedPlanning?: PlanningSummary | null;
+  onConversationReady?: () => void;
 }
 
 interface WorkspaceDetailsPanelProps {
@@ -286,6 +287,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   nodeTypes,
   edgeTypes,
   tokens,
+  onConversationReady,
 }) => {
   const [attemptId, setAttemptId] = useState("");
   const [editingTaskNode, setEditingTaskNode] = useState("");
@@ -443,6 +445,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   for (const text of persistedUserTurns) {
     remainingPersistedTurns.set(text, (remainingPersistedTurns.get(text) ?? 0) + 1);
   }
+  const effectiveRouteType = useMemo(() => {
+    if (routeType !== "undecided") return routeType;
+    if (state.planType) return state.planType;
+    return "undecided";
+  }, [routeType, state.planType]);
   const useSavedPlanner = savedPlannerIds.length > 0 &&
     (!isPlanning || !showLivePlanner || readySavedPlannerKey === savedPlannerKey);
   const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
@@ -1014,9 +1021,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           setScrollBottomVisible(false);
         }
         setReadyConversationKey(key);
+        onConversationReady?.();
       });
     });
-  }, [conversationViewKey, selectedNode, routeType, setScrollBottomVisible]);
+  }, [conversationViewKey, selectedNode, routeType, setScrollBottomVisible, onConversationReady]);
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -1195,6 +1203,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <div key={turn.userMessage.id} className="chat-message-row user">
                         <EditableUserBubble
                           text={turn.userMessage.text.replace(/^\[@[^\]]+\]\s*/, "")}
+                          images={turn.userMessage.images}
+                          files={turn.userMessage.files}
                           editing={editingMessage?.id === turn.userMessage.id}
                           draft={editPrefillText ?? ""}
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}
@@ -1360,6 +1370,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             <EditableUserBubble
                               text={turn.userMessage.text.trim()}
                               images={turn.userMessage.images}
+                              files={turn.userMessage.files}
                               editing={editingMessage?.id === turn.userMessage.id}
                               draft={editPrefillText ?? ""}
                               onDraftChange={onEditPrefillTextChange ?? (() => {})}
@@ -1460,6 +1471,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           <EditableUserBubble
                             text={effectiveMessages[0].text.trim()}
                             images={effectiveMessages[0].images}
+                            files={effectiveMessages[0].files}
                             editing={editingMessage?.id === effectiveMessages[0].id}
                             draft={editPrefillText ?? ""}
                             onDraftChange={onEditPrefillTextChange ?? (() => {})}
@@ -1480,14 +1492,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
 
                     {/* 任务路线决策结果或评估中加载状态 */}
-                    {((isPlanning && routeType === "undecided") || routeType !== "undecided") && (
+                    {((isPlanning && effectiveRouteType === "undecided") || effectiveRouteType !== "undecided") && (
                       <motion.div
-                        className={`route-decision-pill ${routeType}`}
+                        className={`route-decision-pill ${effectiveRouteType}`}
                         initial={isPlanning ? { opacity: 0, scale: 0.96, y: 10 } : false}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         transition={{ duration: isPlanning ? 0.42 : 0, ease: [0.16, 1, 0.3, 1] }}
                       >
-                        {routeType === "undecided" ? (
+                        {effectiveRouteType === "undecided" ? (
                           <>
                             <Loader2 size={13} className="spin" />
                             <span>{t("正在评估任务路线决策...")}</span>
@@ -1542,6 +1554,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <EditableUserBubble
                           text={msg.text.trim()}
                           images={msg.images}
+                          files={msg.files}
                           editing={editingMessage?.id === msg.id}
                           draft={editPrefillText ?? ""}
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}

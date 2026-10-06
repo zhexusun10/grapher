@@ -71,6 +71,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // Calculate approximate token/char stats
     const charCount = rawContent.trim() ? (isStreaming && smoothContent ? smoothContent : rawContent).length : 0;
 
+    // An empty provider block says nothing about the other thinking already received.
+    // Keep its item for possible backfill, but do not render a misleading completion card.
+    if (!isStreaming && !rawContent.trim()) return null;
+
     return (
       <div className={`thinking-card ${isStreaming ? "streaming" : "settled"} ${isExpanded ? "expanded" : "collapsed"} ${className}`}>
         <div
@@ -131,13 +135,11 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
                 <MarkdownRenderer content={smoothContent} isStreaming={isStreaming} className="thinking-markdown" />
                 {isStreaming && <span className="thinking-streaming-cursor" />}
               </div>
-            ) : isStreaming ? (
+            ) : (
               <div className="thinking-shimmer">
                 <span className="shimmer-line" />
                 <span className="thinking-shimmer-text">{t("模型正在生成分析与推演逻辑...")}</span>
               </div>
-            ) : (
-              <p className="thinking-empty">{t("本段思考已结束，模型未返回可展示的推理摘要。")}</p>
             )}
           </div>
         )}

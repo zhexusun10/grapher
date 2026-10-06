@@ -7,12 +7,11 @@ import {
   X,
   LoaderCircle,
   Square,
-  FileCode,
   FileText,
-  File,
   Sparkles,
 } from "lucide-react";
 import { runtimeService } from "../../services/runtime";
+import { formatFileSize, getFileIcon } from "../../utils/attachmentUtils";
 import type { SkillItem, ImageAttachment } from "../../types";
 
 export interface PromptBoxSubmitOptions {
@@ -54,92 +53,6 @@ interface PromptBoxProps
   repository?: string;
 }
 
-function getFileIcon(fileName: string) {
-  const ext = fileName.split(".").pop()?.toLowerCase() || "";
-  const codeExts = [
-    "py",
-    "ipynb",
-    "js",
-    "jsx",
-    "ts",
-    "tsx",
-    "json",
-    "yaml",
-    "yml",
-    "sh",
-    "bash",
-    "zsh",
-    "rs",
-    "go",
-    "cpp",
-    "c",
-    "h",
-    "hpp",
-    "java",
-    "html",
-    "css",
-    "scss",
-    "sql",
-    "xml",
-    "toml",
-  ];
-  if (codeExts.includes(ext)) {
-    return <FileCode size={15} className="prompt-box-file-icon-code" />;
-  }
-  const textExts = ["txt", "md", "csv", "tsv", "log", "pdf", "doc", "docx", "rtf"];
-  if (textExts.includes(ext)) {
-    return <FileText size={15} className="prompt-box-file-icon-text" />;
-  }
-  return <File size={15} className="prompt-box-file-icon-generic" />;
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes === 0) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getLanguageForExt(fileName: string): string {
-  const ext = fileName.split(".").pop()?.toLowerCase() || "";
-  switch (ext) {
-    case "py":
-      return "python";
-    case "ipynb":
-      return "json";
-    case "js":
-      return "javascript";
-    case "jsx":
-      return "jsx";
-    case "ts":
-      return "typescript";
-    case "tsx":
-      return "tsx";
-    case "json":
-      return "json";
-    case "md":
-      return "markdown";
-    case "html":
-      return "html";
-    case "css":
-      return "css";
-    case "sh":
-    case "bash":
-    case "zsh":
-      return "bash";
-    case "rs":
-      return "rust";
-    case "go":
-      return "go";
-    case "sql":
-      return "sql";
-    case "yaml":
-    case "yml":
-      return "yaml";
-    default:
-      return ext || "text";
-  }
-}
 
 const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string; title: string }> = [
   { id: "auto", label: "Auto", title: t("智能路由：由 Partitioner 评估任务并自动选择单 Agent 或拓扑图架构") },
@@ -609,11 +522,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               },
             ];
 
-            const promptText = trimmed || t("请分析并处理此图片中的需求与内容。");
-            combinedPrompt = t("{0}\n\n[附件图片: {1}]", promptText, currentAttachment.name);
-            displayText = trimmed
-              ? t("{0} [图片: {1}]", trimmed, currentAttachment.name)
-              : t("[图片: {0}]", currentAttachment.name);
+            // Mimic Pi's native file attachment format (<file name="...">...</file>)
+            const fileTag = `<file name="${currentAttachment.name}"></file>\n`;
+            combinedPrompt = trimmed ? `${fileTag}${trimmed}` : fileTag.trim();
+            displayText = trimmed;
           } else {
             let fileContent = "";
             try {
@@ -626,14 +538,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 reader.readAsText(currentAttachment);
               });
             }
-            const lang = getLanguageForExt(currentAttachment.name);
-            const promptHeader = trimmed
-              ? `${trimmed}\n\n`
-              : t("请分析并处理以下附件文件：{0}\n\n", currentAttachment.name);
-            combinedPrompt = t("{0}---\n### 附件文件: {1}\n```{2}\n{3}\n```", promptHeader, currentAttachment.name, lang, fileContent);
-            displayText = trimmed
-              ? t("{0} [附件: {1}]", trimmed, currentAttachment.name)
-              : t("[附件: {0}]", currentAttachment.name);
+            // Strip BOM if present (matching Pi's stripBom in file-processor.ts)
+            if (fileContent.charCodeAt(0) === 0xfeff) {
+              fileContent = fileContent.slice(1);
+            }
+            // Mimic Pi's native file attachment format (<file name="...">\n${content}\n</file>\n)
+            const fileTag = `<file name="${currentAttachment.name}">\n${fileContent}\n</file>\n`;
+            combinedPrompt = trimmed ? `${fileTag}${trimmed}` : fileTag.trim();
+            displayText = trimmed;
           }
         } catch (err) {
           console.error("Failed to process attached file:", err);

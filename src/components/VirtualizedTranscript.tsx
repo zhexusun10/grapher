@@ -469,7 +469,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     }
   }, [output, parseAvailableOutput]);
 
-  const items = itemsRef.current;
+  const parsedItems = itemsRef.current;
+  // Retain empty blocks in the parser for later backfill, but exclude them from
+  // layout so virtualized history does not reserve space for invisible cards.
+  const items = useMemo(() => parsedItems.filter(item => item.type !== "thinking" ||
+    item.status === "running" || item.content?.trim()), [parsedItems]);
 
   const lastScrollTopRef = useRef(0);
   const prevItemsVersionRef = useRef(itemsVersion);
@@ -696,15 +700,21 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                 );
               }
 
-              if (item.role === "user" && onEditUser) {
-                return <div key={item.id} className="transcript-row text-row user">
-                  <EditableUserBubble text={item.content || ""} editing={editingUser === item.id}
-                    draft={userDraft} onDraftChange={setUserDraft}
-                    onEdit={() => { setEditingUser(item.id); setUserDraft(item.content || ""); }}
-                    onCancel={() => setEditingUser(null)}
-                    onSend={(text) => { void Promise.resolve(onEditUser(item.content || "", text))
-                      .then((accepted) => { if (accepted !== false) setEditingUser(null); }); }} />
-                </div>;
+              if (item.role === "user") {
+                return (
+                  <div key={item.id} className="transcript-row text-row user">
+                    <EditableUserBubble
+                      text={item.content || ""}
+                      editing={editingUser === item.id}
+                      draft={userDraft}
+                      onDraftChange={setUserDraft}
+                      onEdit={onEditUser ? () => { setEditingUser(item.id); setUserDraft(item.content || ""); } : undefined}
+                      onCancel={() => setEditingUser(null)}
+                      onSend={onEditUser ? (text) => { void Promise.resolve(onEditUser(item.content || "", text))
+                        .then((accepted) => { if (accepted !== false) setEditingUser(null); }); } : () => {}}
+                    />
+                  </div>
+                );
               }
               return (
                 <div key={item.id} className={`transcript-row text-row ${item.role || "assistant"}`}>
