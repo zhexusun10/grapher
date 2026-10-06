@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { accessSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { InMemoryCredentialStore } from '../pi/packages/ai/src/auth/credential-store.ts';
 import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
 import { bundledTrim, bundledContinuity } from '../engine/global-extensions.ts';
 import { buildSystemPromptState } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
@@ -128,4 +129,36 @@ test('Pi SDK surface required by Grapher remains available', () => {
   // This private upstream entrypoint is invoked only after the host retry
   // policy is installed; importing it in a test would start the CLI.
   accessSync(fileURLToPath(new URL('../pi/packages/coding-agent/src/cli.ts', import.meta.url)));
+});
+
+test('Azure provider rename requires credential migration while preserving its environment variable and API ids', async () => {
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify('azure-openai-responses', async () => ({ type: 'api_key', key: 'legacy-test-key' }));
+  const runtime = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false });
+  assert.deepEqual(runtime.getModels('azure-openai-responses'), [], 'no implicit legacy provider alias');
+  assert.equal(runtime.getModel('azure', 'gpt-4o-mini')?.api, 'azure-openai-responses');
+  assert.equal(runtime.getModel('azure', 'deepseek-v4-pro')?.api, 'openai-completions');
+  assert.equal(await runtime.getAuth('azure', { env: { AZURE_OPENAI_API_KEY: '' } }), undefined,
+    'credentials stored under the old provider id do not authenticate the renamed provider');
+  const fromEnv = await runtime.getAuth('azure', { env: { AZURE_OPENAI_API_KEY: 'env-test-key' } });
+  assert.equal(fromEnv?.auth.apiKey, 'env-test-key');
+  await credentials.modify('azure', async () => ({ type: 'api_key', key: 'migrated-test-key' }));
+  const migrated = await runtime.getAuth('azure', { env: { AZURE_OPENAI_API_KEY: '' } });
+  assert.equal(migrated?.auth.apiKey, 'migrated-test-key');
+  assert.deepEqual(await credentials.read('azure-openai-responses'), { type: 'api_key', key: 'legacy-test-key' },
+    'upgrading must not rewrite user credentials');
+});
+
+test('refreshed catalog exposes reviewed API changes and does not resurrect retired models', async () => {
+  const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
+  for (const id of ['qwen3.7-plus', 'qwen3.8-max']) {
+    assert.equal(runtime.getModel('opencode-go', id)?.api, 'anthropic-messages', `opencode-go/${id}`);
+  }
+  for (const [provider, id] of [
+    ['openrouter', 'qwen/qwen3.8-27b:free'],
+    ['openrouter', 'stealth/space-bunny-alpha'],
+    ['vercel-ai-gateway', 'inclusionai/ling-3.0-flash-sante-free'],
+  ]) {
+    assert.equal(runtime.getModel(provider, id), undefined, `${provider}/${id}: saved selections need replacement`);
+  }
 });

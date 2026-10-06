@@ -14,6 +14,13 @@ import { root, lock } from './pi-baseline.mjs';
 // CLI flags and DTO drift that a types-only compatibility probe cannot see.
 const resolverUrl = pathToFileURL(join(root, 'pi/packages/coding-agent/src/experimental/source-resolver.ts')).href;
 
+function settleRpc(child, role) {
+  // Match Rust's Planner/Node handoff window. Immediate EOF can race extension
+  // and source-loader cleanup on Windows/Node 24 (UV_HANDLE_CLOSING assertion).
+  const timer = setTimeout(() => child.stdin.end(), ['planner', 'node'].includes(role) ? 500 : 0);
+  child.once('close', () => clearTimeout(timer));
+}
+
 test('production Pi CLI reports the pinned version', () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-pi-cli-'));
   try {
@@ -26,6 +33,40 @@ test('production Pi CLI reports the pinned version', () => {
     assert.equal(stdout.trim(), lock.packageVersion);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Provider/Auth private readiness loads code only and preserves authentication bytes', { timeout: 30000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-auth-prepared-'));
+  const auth = join(directory, 'auth.json');
+  const original = '{ "sentinel": { "type": "api_key", "key": "isolated-not-a-real-key" } }\n';
+  writeFileSync(auth, original);
+  const child = spawn(process.execPath, ['--import', resolverUrl, join(root, 'engine/provider-host.ts')], {
+    cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: directory, GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exit = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', code => resolve(code)); });
+  const lines = createInterface({ input: child.stdout });
+  let diagnostics = '';
+  child.stderr.on('data', bytes => { diagnostics += bytes; });
+  let timer;
+  try {
+    const reply = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`Provider/Auth readiness timed out: ${diagnostics}`)), 20000);
+      lines.once('line', line => { try { resolve(JSON.parse(line)); } catch (error) { reject(error); } });
+    });
+    child.stdin.write(`${JSON.stringify({ version: 1, operation: 'grapher_prepare', id: 'isolated-ready' })}\n`);
+    const ready = await Promise.race([reply, exit.then(code => { throw new Error(`Provider/Auth exited before readiness: ${code}: ${diagnostics}`); })]);
+    assert.deepEqual(ready, { version: 1, id: 'isolated-ready', result: { ready: true } });
+    assert.equal(readFileSync(auth, 'utf8'), original);
+    child.stdin.end();
+    assert.equal(await exit, 0, diagnostics);
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exit;
+    lines.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -99,7 +140,7 @@ test('pi-trim transforms actual provider requests for every role without removin
       try {
         const event = JSON.parse(line);
         events.push(event);
-        if (event.type === 'agent_end') child.stdin.end();
+        if (event.type === 'agent_settled') settleRpc(child, role);
       } catch {}
     });
     const timeout = setTimeout(() => {
@@ -210,7 +251,7 @@ test('bundled continuity recovers capped provider turns only while selected for 
         const event = JSON.parse(line);
         events.push(event);
         // agent_end can precede extension recovery; wait for the public settled boundary.
-        if (event.type === 'agent_settled') child.stdin.end();
+        if (event.type === 'agent_settled') settleRpc(child, role);
       } catch {}
     });
     const timeout = setTimeout(() => {
@@ -271,6 +312,8 @@ test('Provider/Auth IPC returns a catalog after input EOF without exposing crede
       SystemRoot: process.env.SystemRoot,
       windir: process.env.windir,
       PI_CODING_AGENT_DIR: dir,
+      GRAPHER_ISOLATED_PI_MODELS: '1',
+      PI_OFFLINE: '1',
     };
     const output = execFileSync(process.execPath, ['--import', resolverUrl, join(root, 'engine/provider-host.ts')], {
       cwd: root,
@@ -293,6 +336,11 @@ test('Provider/Auth IPC returns a catalog after input EOF without exposing crede
     assert.ok(catalog.result.providers.every(p => typeof p.id === 'string' && Array.isArray(p.methods)));
     assert.ok(Array.isArray(catalog.result.models) && catalog.result.models.length > 0);
     assert.ok(catalog.result.models.every(m => typeof m.id === 'string' && typeof m.provider === 'string' && typeof m.available === 'boolean'));
+    assert.ok(catalog.result.providers.some(provider => provider.id === 'azure'));
+    assert.ok(!catalog.result.providers.some(provider => provider.id === 'azure-openai-responses'));
+    const azure = catalog.result.models.filter(model => model.provider === 'azure');
+    assert.ok(azure.some(model => model.api === 'azure-openai-responses'), 'Responses API id is unchanged');
+    assert.ok(azure.some(model => model.id === 'deepseek-v4-pro' && model.api === 'openai-completions'));
     assert.deepEqual(replies.find(reply => reply.error), { version: 1, error: 'Provider/Auth operation failed. Refresh providers or restart login.' });
   } finally {
     rmSync(dir, { recursive: true, force: true });

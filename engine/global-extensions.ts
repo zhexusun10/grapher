@@ -5,6 +5,12 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DefaultPackageManager, SettingsManager, createMcpExtension, type InlineExtension } from './pi-compat.ts';
 import { loadGrapherMcpConfig } from './mcp-config.ts';
+import workspacePolicy from './prompt-extension.ts';
+
+// Native ESM reuses the already loaded Pi SDK. Passing this mandatory adapter
+// through jiti would load its relative SDK dependency graph a second time.
+// Import only code here: the factory captures task paths/role after binding.
+export const workspacePolicyName = 'grapher-workspace-policy';
 
 const builtins = ['llama.cpp', 'codemode', 'tool-search', 'mcp'];
 export const trimId = 'npm:pi-trim';
@@ -106,7 +112,7 @@ export async function setExtensionEnabled(directory: string, id: string, enabled
 
 export async function executionResources(args: string[], directory: string, role = process.env.GRAPHER_MODE) {
   const state = overrides(directory);
-  const extensionFactories: InlineExtension[] = [];
+  const extensionFactories: InlineExtension[] = [{ name: workspacePolicyName, factory: workspacePolicy }];
   const extensions: string[] = [];
   const skills: string[] = [];
   const discoverExtensions = !args.includes('--no-extensions') && !args.includes('-ne');
@@ -154,7 +160,6 @@ export async function executionResources(args: string[], directory: string, role
     }
   }
   extensions.push(bundledTrim);
-  extensions.push(fileURLToPath(new URL('./prompt-extension.ts', import.meta.url)));
   return {
     // Only explicit, selected resources reach Pi; no automatic second loading.
     args: [...args, '--no-extensions', '--no-skills', ...extensions.flatMap(path => ['--extension', path]), ...skills.flatMap(path => ['--skill', path])],

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Upgrade the pinned Pi engine from 1.0.1 to the official stable 1.0.3 release, refreshing the checksummed model catalog and reviewed dependency profile.
+- Add Azure provider/API, credential-migration and retired-model/API-change regression coverage; validate existing extensions, prepared hosts and Windows production execution against Pi 1.0.3.
+
+### Breaking Changes
+
+- Pi's Azure provider ID changes from `azure-openai-responses` to `azure`. Existing credentials, custom provider definitions and saved model references require [migration](docs/guides/providers.md#azure-migration-for-pi-103); the Responses API ID and `AZURE_OPENAI_*` environment variables are unchanged.
+- The refreshed snapshot retires three OpenRouter/Vercel offerings and switches two `opencode-go` models to the Anthropic API; see the [catalog compatibility findings](docs/development/pi-integration.md#compatibility-findings) before continuing saved selections.
+
 ## [0.1.0-alpha.2] - 2026-10-05
 
 ### Added

@@ -20,237 +20,63 @@ use std::process::Command;
 use std::{
     hash::{Hash, Hasher},
     process::Child,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[cfg(not(feature = "fixture"))]
-struct WarmPartitioner {
-    child: Child,
-    tree: process_control::ProcessTree,
-    session_dir: PathBuf,
-    key: (PathBuf, String, String, String),
-}
+pub(crate) mod prewarm;
+#[cfg(not(feature = "fixture"))]
+mod process_prewarm;
+#[cfg(not(feature = "fixture"))]
+use prewarm::{Pool, ReadyProcess, Ticket, Worker};
+#[cfg(not(feature = "fixture"))]
+type NodeKey = (PathBuf, PathBuf, String, String, String, String);
 
 #[cfg(not(feature = "fixture"))]
 struct WarmNode {
     child: Child,
     tree: process_control::ProcessTree,
-    key: (PathBuf, PathBuf, String, String, String, String),
-    session_hash: u64,
     startup_output: Vec<String>,
+    ready_ms: u128,
 }
 
 #[cfg(not(feature = "fixture"))]
-static WARM_PARTITIONER: OnceLock<Mutex<Option<WarmPartitioner>>> = OnceLock::new();
+impl Worker for WarmNode {
+    fn alive(&mut self) -> bool { matches!(self.child.try_wait(), Ok(None)) }
+    fn ready_ms(&self) -> u128 { self.ready_ms }
+    fn retire(mut self) {
+        self.tree.terminate();
+        let _ = self.child.wait();
+    }
+}
+
 #[cfg(not(feature = "fixture"))]
-static WARM_NODE: OnceLock<Mutex<Option<WarmNode>>> = OnceLock::new();
-#[cfg(not(feature = "fixture"))]
-static NODE_WARM_GENERATION: AtomicU64 = AtomicU64::new(0);
+static WARM_NODE: OnceLock<Pool<(NodeKey, u64), WarmNode>> = OnceLock::new();
 #[cfg(not(feature = "fixture"))]
 static PREWARM_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
-#[cfg(not(feature = "fixture"))]
-fn partitioner_key(config: &Config) -> Result<(PathBuf, String, String, String), String> {
-    let model = PiModelConfig::resolve(PiRole::Partitioner, config);
-    let repo = Path::new(&config.repository)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let prompt = std::env::var("PARTITIONER_SYSTEM_PROMPT").unwrap_or_else(|_| {
-        include_str!("../resources/prompts/partitioner.md")
-            .trim()
-            .to_string()
-    });
-    let prompt = if Path::new(&prompt).is_file() {
-        fs::read_to_string(&prompt).map_err(|e| e.to_string())?
-    } else {
-        prompt
-    };
-    Ok((
-        repo,
-        model.model,
-        model.thinking.unwrap_or_else(|| "off".into()),
-        prompt,
-    ))
-}
-
-/// Warm both Auto routing and Graph's shared native engine off the request path.
+/// Prepare all three source roles concurrently, without constructing a Run.
 #[cfg(not(feature = "fixture"))]
 pub fn warm_planning_engines(config: Config) {
-    if cfg!(test)
-        || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
-        || config.repository.trim().is_empty()
-    {
-        return;
-    }
+    if cfg!(test) || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) || config.repository.trim().is_empty() { return; }
     crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
-    warm_partitioner(config);
-}
-
-/// Start a single idle, no-tools RPC Partitioner for the selected repository.
-/// The worker never receives a goal until a matching planning request claims
-/// it; mismatched configurations continue through the normal cold path.
-#[cfg(not(feature = "fixture"))]
-pub fn warm_partitioner(config: Config) {
-    if cfg!(test)
-        || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
-        || config.repository.trim().is_empty()
-        || PiModelConfig::resolve(PiRole::Partitioner, &config)
-            .model
-            .trim()
-            .is_empty()
-    {
-        return;
+    for role in [PiRole::Partitioner, PiRole::Planner, PiRole::NodeAgent] {
+        process_prewarm::request(&config, role, false);
     }
-    thread::spawn(move || {
-        if let Err(error) = start_warm_partitioner(&config) {
-            eprintln!("[Grapher] Partitioner prewarm unavailable: {error}");
-        }
-    });
-}
-
-#[cfg(not(feature = "fixture"))]
-fn start_warm_partitioner(config: &Config) -> Result<(), String> {
-    start_warm_partitioner_at(config, &crate::workspace::data_root())
-}
-
-#[cfg(not(feature = "fixture"))]
-fn start_warm_partitioner_at(config: &Config, data: &Path) -> Result<(), String> {
-    crate::workspace::validate_binding(Path::new(&config.repository))?;
-    let key = partitioner_key(config)?;
-    let pool = WARM_PARTITIONER.get_or_init(Default::default);
-    let mut slot = pool.lock().map_err(|e| e.to_string())?;
-    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    if slot
-        .as_mut()
-        .is_some_and(|worker| worker.key == key && worker.child.try_wait().ok().flatten().is_none())
-    {
-        return Ok(());
-    }
-    if let Some(mut old) = slot.take() {
-        old.tree.terminate();
-        let _ = old.child.wait();
-        let _ = fs::remove_dir_all(old.session_dir);
-    }
-    let session_dir = data
-        .join("partition-workers")
-        .join(uuid::Uuid::new_v4().to_string());
-    struct PendingDirectory(PathBuf, bool);
-    impl Drop for PendingDirectory {
-        fn drop(&mut self) {
-            if !self.1 {
-                if let Err(error) = fs::remove_dir_all(&self.0) {
-                    if error.kind() != std::io::ErrorKind::NotFound { eprintln!("[Grapher] Partitioner cleanup deferred: {error}"); }
-                }
-            }
-        }
-    }
-    let mut pending = PendingDirectory(session_dir.clone(), false);
-    fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
-    fs::write(session_dir.join(".grapher-partition-worker.json"), r#"{"kind":"grapher-partition-worker","version":1}"#).map_err(|e| e.to_string())?;
-    let prompt_path = session_dir.join("system-prompt.md");
-    fs::write(&prompt_path, &key.3).map_err(|e| e.to_string())?;
-    let mut command = crate::native::command(PiRole::Partitioner, &key.0, &key.0)?;
-    command.args([
-        "--mode",
-        "rpc",
-        "--no-prompt-templates",
-        "--no-themes",
-        "--no-extensions",
-        "--no-skills",
-        "--no-approve",
-        "--no-tools",
-        "--no-context-files",
-        "--model",
-        &key.1,
-        "--thinking",
-        &key.2,
-        "--system-prompt",
-        prompt_path
-            .to_str()
-            .ok_or("Invalid Partitioner prompt path")?,
-        "--session-dir",
-        session_dir
-            .to_str()
-            .ok_or("Invalid Partitioner session path")?,
-    ]);
-    command
-        .env_remove("PI_MODEL")
-        .env_remove("PI_THINKING")
-        .env_remove("PI_PROVIDER")
-        .env_remove("PI_REASONING_LEVEL")
-        .env_remove("PI_SESSION_ID")
-        .env_remove("PI_SESSION_FILE")
-        .env("GRAPHER_MODE", "partition")
-        .env("GRAPHER_EXECUTION_KIND", "source")
-        .env("GRAPHER_SOURCE_ALIAS", &key.0)
-        .env("GRAPHER_WORKSPACE_ROOT", &key.0)
-        .env("GRAPHER_ORIGINAL_ROOT", &key.0);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    process_control::configure_command(&mut command);
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    let tree = process_control::track(&child).map_err(|error| {
-        let _ = child.kill();
-        let _ = child.wait();
-        error
-    })?;
-    *slot = Some(WarmPartitioner { child, tree, session_dir, key });
-    pending.1 = true;
-    Ok(())
 }
 
 #[cfg(not(feature = "fixture"))]
 pub fn stop_partition_prewarm() {
     PREWARM_SHUTTING_DOWN.store(true, Ordering::SeqCst);
-    invalidate_warm_partitioner();
-    invalidate_warm_node();
-}
-
-#[cfg(not(feature = "fixture"))]
-pub fn invalidate_warm_partitioner() {
-    if let Some(pool) = WARM_PARTITIONER.get() {
-        if let Ok(mut slot) = pool.lock() {
-            if let Some(mut old) = slot.take() {
-                old.tree.terminate();
-                let _ = old.child.wait();
-                let _ = fs::remove_dir_all(old.session_dir);
-            }
-        }
+    process_prewarm::shutdown();
+    if let Some(pool) = WARM_NODE.get() {
+        pool.shutdown();
+        if !pool.wait_idle(Duration::from_secs(5)) { eprintln!("[Grapher] Node prewarm shutdown timed out"); }
     }
 }
 
 #[cfg(not(feature = "fixture"))]
-fn claim_warm_partitioner(config: &Config) -> Option<WarmPartitioner> {
-    let key = partitioner_key(config).ok()?;
-    let pool = WARM_PARTITIONER.get()?;
-    let mut slot = pool.lock().ok()?;
-    if slot.as_ref()?.key != key {
-        return None;
-    }
-    if slot.as_mut()?.child.try_wait().ok().flatten().is_some() {
-        return None;
-    }
-    // A failed copy-back must retain the actual Pi conversation with its Run,
-    // not strand it as an unowned idle-worker directory.
-    let directory = &slot.as_ref()?.session_dir;
-    let owner = process_control::current_owner()?;
-    let id = directory.file_name()?.to_str()?;
-    let data = directory.parent()?.parent()?;
-    let store = crate::store::Store::open(&data.join("events.sqlite")).ok()?;
-    store.remember_cleanup_targets(&owner, &std::collections::BTreeSet::from([
-        crate::cleanup::Target::data("partition-workers", id),
-    ])).ok()?;
-    let worker = slot.take()?;
-    if process_control::assign_to_current_owner(&worker.tree).is_err() {
-        *slot = Some(worker);
-        return None;
-    }
-    Some(worker)
-}
+pub fn invalidate_prepared_processes() { process_prewarm::invalidate(); }
 
 #[cfg(not(feature = "fixture"))]
 fn node_session_file(session_dir: &Path, session_id: &str) -> Result<PathBuf, String> {
@@ -314,7 +140,7 @@ fn node_key(
     cwd: &Path,
     session_dir: &Path,
     session_id: &str,
-) -> Result<((PathBuf, PathBuf, String, String, String, String), u64), String> {
+) -> Result<(NodeKey, u64), String> {
     let repo = Path::new(&config.repository)
         .canonicalize()
         .map_err(|e| e.to_string())?;
@@ -345,48 +171,28 @@ pub fn warm_node(config: Config, cwd: PathBuf, session_dir: PathBuf, session_id:
     if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) {
         return;
     }
-    let generation = NODE_WARM_GENERATION.load(Ordering::SeqCst);
-    thread::spawn(move || {
-        if let Err(error) = start_warm_node(&config, &cwd, &session_dir, &session_id, generation) {
-            eprintln!("[Grapher] Node prewarm unavailable: {error}");
+    match node_key(&config, &cwd, &session_dir, &session_id) {
+        Ok((key, hash)) => {
+            WARM_NODE.get_or_init(|| Pool::new("Node"))
+                .request((key.clone(), hash), move |ticket| prepare_warm_node(&config, key, hash, &ticket));
         }
-    });
+        Err(error) => eprintln!("[Grapher] Node prewarm unavailable: {error}"),
+    }
 }
 
 #[cfg(not(feature = "fixture"))]
-fn start_warm_node(
-    config: &Config,
-    cwd: &Path,
-    session_dir: &Path,
-    session_id: &str,
-    generation: u64,
-) -> Result<(), String> {
+fn prepare_warm_node(config: &Config, key: NodeKey, initial_hash: u64, ticket: &Ticket)
+    -> Result<((NodeKey, u64), WarmNode), String>
+{
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) || ticket.cancelled() {
+        return Err("Backend prewarm stopped".into());
+    }
     crate::workspace::validate_binding(Path::new(&config.repository))?;
-    let (key, initial_hash) = node_key(config, cwd, session_dir, session_id)?;
-    let session_file = node_session_file(&key.1, session_id)?;
+    let session_file = node_session_file(&key.1, &key.2)?;
     let before = fs::read(&session_file).map_err(|e| e.to_string())?;
     if session_hash(&before) != initial_hash {
-        return Ok(());
+        return Err("Node session changed before prewarm".into());
     }
-    let pool = WARM_NODE.get_or_init(Default::default);
-    let mut slot = pool.lock().map_err(|e| e.to_string())?;
-    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
-        || generation != NODE_WARM_GENERATION.load(Ordering::SeqCst)
-    {
-        return Ok(());
-    }
-    if slot.as_mut().is_some_and(|worker| {
-        worker.key == key
-            && worker.session_hash == initial_hash
-            && worker.child.try_wait().ok().flatten().is_none()
-    }) {
-        return Ok(());
-    }
-    if let Some(mut old) = slot.take() {
-        old.tree.terminate();
-        let _ = old.child.wait();
-    }
-    drop(slot);
     let mut command = crate::native::command(PiRole::NodeAgent, &key.0, &key.0)?;
     command.args([
         "--mode",
@@ -421,117 +227,19 @@ fn start_warm_node(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    process_control::configure_command(&mut command);
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    let tree = process_control::track(&child).map_err(|error| {
-        let _ = child.kill();
-        let _ = child.wait();
-        error
-    })?;
-    let probe = uuid::Uuid::new_v4().to_string();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Prewarmed node stdout unavailable")?;
-    let (tx, rx) = mpsc::channel();
-    let probe_id = probe.clone();
-    thread::spawn(move || {
-        let mut reader = BufReader::with_capacity(1, stdout);
-        let mut startup_output = Vec::new();
-        let ready = loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => break Err("Prewarmed node exited before RPC was ready".to_string()),
-                Err(error) => break Err(error.to_string()),
-                Ok(_) => {}
-            }
-            if let Ok(event) = serde_json::from_str::<Value>(&line) {
-                if event["id"] == probe_id {
-                    break if event["success"] == true {
-                        Ok(())
-                    } else {
-                        Err(format!("Prewarmed node rejected get_state: {event}"))
-                    };
-                }
-            }
-            startup_output.push(line);
-        };
-        let _ = tx.send((ready, reader.into_inner(), startup_output));
-    });
-    let ready = (|| -> Result<Vec<String>, String> {
-        writeln!(
-            child
-                .stdin
-                .as_mut()
-                .ok_or("Prewarmed node stdin unavailable")?,
-            "{}",
-            serde_json::json!({"id": probe, "type": "get_state"})
-        )
-        .map_err(|e| e.to_string())?;
-        child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .flush()
-            .map_err(|e| e.to_string())?;
-        let (result, stdout, startup_output) = rx
-            .recv_timeout(Duration::from_secs(30))
-            .map_err(|e| format!("Prewarmed node readiness timed out: {e}"))?;
-        child.stdout = Some(stdout);
-        result?;
-        Ok(startup_output)
-    })();
-    let startup_output = match ready {
-        Ok(output) => output,
-        Err(error) => {
-            tree.terminate();
-            let _ = child.wait();
-            return Err(error);
-        }
-    };
-    let ready_hash = fs::read(&session_file)
-        .map_err(|e| e.to_string())
-        .and_then(|after| startup_session_hash(&before, &after, &key.3, &key.4));
-    let session_hash = match ready_hash {
-        Ok(hash) => hash,
-        Err(error) => {
-            tree.terminate();
-            let _ = child.wait();
-            return Err(error);
-        }
-    };
-    let pool = WARM_NODE.get_or_init(Default::default);
-    let mut slot = pool.lock().map_err(|e| e.to_string())?;
-    if generation != NODE_WARM_GENERATION.load(Ordering::SeqCst) {
-        tree.terminate();
-        let _ = child.wait();
-        return Ok(());
+    let process = ReadyProcess::start(&mut command, ticket, Duration::from_secs(30))?;
+    let after = fs::read(&session_file).map_err(|error| error.to_string())?;
+    let hash = startup_session_hash(&before, &after, &key.3, &key.4)?;
+    if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) || ticket.cancelled() {
+        return Err("Backend prewarm stopped".into());
     }
-    if let Some(mut old) = slot.take() {
-        old.tree.terminate();
-        let _ = old.child.wait();
-    }
-    *slot = Some(WarmNode {
-        child,
-        tree,
-        key,
-        session_hash,
-        startup_output,
-    });
-    Ok(())
+    let (child, tree, startup_output, ready_ms) = process.commit();
+    Ok(((key, hash), WarmNode { child, tree, startup_output, ready_ms }))
 }
 
 #[cfg(not(feature = "fixture"))]
 pub fn invalidate_warm_node() {
-    NODE_WARM_GENERATION.fetch_add(1, Ordering::SeqCst);
-    if let Some(pool) = WARM_NODE.get() {
-        if let Ok(mut slot) = pool.lock() {
-            if let Some(mut old) = slot.take() {
-                old.tree.terminate();
-                let _ = old.child.wait();
-            }
-        }
-    }
+    if let Some(pool) = WARM_NODE.get() { pool.invalidate(); }
 }
 
 #[cfg(not(feature = "fixture"))]
@@ -541,25 +249,8 @@ fn claim_warm_node(
     session_dir: &Path,
     session_id: &str,
 ) -> Option<WarmNode> {
-    let (key, hash) = node_key(config, cwd, session_dir, session_id).ok()?;
-    let pool = WARM_NODE.get()?;
-    let mut slot = pool.lock().ok()?;
-    let worker = slot.as_mut()?;
-    if worker.key != key {
-        return None;
-    }
-    if worker.session_hash != hash || worker.child.try_wait().ok().flatten().is_some() {
-        let mut old = slot.take()?;
-        old.tree.terminate();
-        let _ = old.child.wait();
-        return None;
-    }
-    let worker = slot.take()?;
-    if process_control::assign_to_current_owner(&worker.tree).is_err() {
-        *slot = Some(worker);
-        return None;
-    }
-    Some(worker)
+    let key = node_key(config, cwd, session_dir, session_id).ok()?;
+    WARM_NODE.get()?.take_if(&key, |worker| process_control::assign_to_current_owner(&worker.tree).is_ok())
 }
 
 #[derive(Clone)]
@@ -1006,6 +697,7 @@ fn run_pi_with_timeout(
     mut on_output: impl FnMut(String),
     timeout: Option<Duration>,
 ) -> Result<String, String> {
+    let launch_started = Instant::now();
     let phase = request.role.name();
     let config = request.config;
     #[cfg(not(feature = "fixture"))]
@@ -1210,23 +902,6 @@ fn run_pi_with_timeout(
     process_control::configure_command(&mut command);
     let started = Instant::now();
     #[cfg(not(feature = "fixture"))]
-    let warm_compatible = request.role == PiRole::Partitioner
-        && request.tools == Some("")
-        && request.extension.is_none()
-        && request.session_id.is_none()
-        && request.images.is_none_or(<[_]>::is_empty)
-        // In particular, @image attachments require the per-request CLI args.
-        && request.extra_args.iter().all(|arg| matches!(
-            *arg, "--no-tools" | "--no-context-files" | "--thinking" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-        ))
-        && request.environment.iter().all(|(key, _)| {
-            matches!(*key, "GRAPHER_MODE" | "GRAPHER_GRAPH_PATH")
-        });
-    #[cfg(not(feature = "fixture"))]
-    let warm = warm_compatible
-        .then(|| claim_warm_partitioner(config))
-        .flatten();
-    #[cfg(not(feature = "fixture"))]
     let warm_node = (request.role == PiRole::NodeAgent
         && request.extension.is_none()
         && request.tools.is_none()
@@ -1252,19 +927,38 @@ fn run_pi_with_timeout(
         invalidate_warm_node();
     }
     #[cfg(not(feature = "fixture"))]
-    let warm_startup_output = warm_node
-        .as_ref()
-        .map(|worker| worker.startup_output.clone())
-        .unwrap_or_default();
+    let source_role = request.role != PiRole::Merger && request.cwd.canonicalize().ok()
+        == Path::new(&config.repository).canonicalize().ok();
     #[cfg(not(feature = "fixture"))]
-    let prewarmed = warm.is_some() || warm_node.is_some();
+    let prepared = if warm_node.is_none() && source_role {
+        process_prewarm::claim(config, request.role, request.cwd)
+    } else { None };
     #[cfg(not(feature = "fixture"))]
-    let warm_session = warm.as_ref().map(|worker| worker.session_dir.clone());
+    if source_role { process_prewarm::request(config, request.role, false); }
+    let launch_preparation_ms = launch_started.elapsed().as_millis();
+    #[cfg(not(feature = "fixture"))]
+    let (prepared, task_binding_ms) = if let Some(process) = prepared {
+        let (process, elapsed) = process_prewarm::bind(process, request.role, &command)?;
+        (Some(process), Some(elapsed))
+    } else { (None, None::<u128>) };
+    #[cfg(not(feature = "fixture"))]
+    let prewarm_stage = if warm_node.is_some() { "session" } else if prepared.is_some() { "process" } else { "cold" };
+    #[cfg(not(feature = "fixture"))]
+    let warm_startup_output = warm_node.as_ref().map(|worker| worker.startup_output.clone())
+        .or_else(|| prepared.as_ref().map(|worker| worker.startup_output.clone())).unwrap_or_default();
+    #[cfg(not(feature = "fixture"))]
+    let prewarm_ready_ms = warm_node.as_ref().map(|worker| worker.ready_ms)
+        .or_else(|| prepared.as_ref().map(|worker| worker.ready_ms));
+    #[cfg(feature = "fixture")]
+    let (prewarm_ready_ms, task_binding_ms, prewarm_stage) = (None::<u128>, None::<u128>, "cold");
+    #[cfg(not(feature = "fixture"))]
+    let prewarmed = warm_node.is_some() || prepared.is_some();
     #[cfg(not(feature = "fixture"))]
     let (mut child, process_tree) = if let Some(worker) = warm_node {
         (worker.child, worker.tree)
-    } else if let Some(worker) = warm {
-        (worker.child, worker.tree)
+    } else if let Some(process) = prepared {
+        let (child, tree, _, _) = process.commit();
+        (child, tree)
     } else {
         let mut child = command
             .spawn()
@@ -1293,7 +987,7 @@ fn run_pi_with_timeout(
     let prewarmed = false;
     on_output(format!(
         "{}\n",
-        serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "prewarmed":prewarmed, "timestamp":crate::model::now()})
+        serde_json::json!({"type":"grapher_process_started", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "prewarmed":prewarmed, "prewarmStage":prewarm_stage, "prewarmReadyMs":prewarm_ready_ms, "taskBindingMs":task_binding_ms, "launchPreparationMs":launch_preparation_ms, "timestamp":crate::model::now()})
     ));
     #[cfg(not(feature = "fixture"))]
     for line in warm_startup_output {
@@ -1426,6 +1120,7 @@ fn run_pi_with_timeout(
     let mut exited_at = None;
     let mut timed_out = false;
     let mut agent_ended = None::<Instant>;
+    let mut first_output_ms = None;
     loop {
         // Planners/nodes need a steer handoff window. The Partitioner has no
         // follow-up commands, so close RPC stdin as soon as its turn settles.
@@ -1468,6 +1163,7 @@ fn run_pi_with_timeout(
                     on_output(format!("[stderr] {line}\n"));
                     continue;
                 }
+                first_output_ms.get_or_insert_with(|| started.elapsed().as_millis());
                 let mut event = serde_json::from_str::<Value>(&line).ok();
                 if event.is_none() {
                     let trimmed = line.trim();
@@ -1617,30 +1313,7 @@ fn run_pi_with_timeout(
         }
     }
     #[cfg(not(feature = "fixture"))]
-    let copied_session = if let Some(warm_dir) = warm_session {
-        // Keep the per-attempt Pi conversation alongside partition.jsonl even
-        // when its process was started before the planning ID existed.
-        let copied = (|| -> Result<(), String> {
-            for entry in fs::read_dir(&warm_dir).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
-                    fs::copy(entry.path(), request.session_dir.join(entry.file_name()))
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            Ok(())
-        })();
-        if copied.is_ok() {
-            let _ = fs::remove_dir_all(&warm_dir);
-        }
-        copied
-    } else {
-        Ok(())
-    };
-    #[cfg(not(feature = "fixture"))]
-    if request.role == PiRole::Partitioner {
-        warm_partitioner(config.clone());
-    }
+    if source_role { process_prewarm::request(config, request.role, true); }
     // If the process completed successfully and emitted valid assistant text,
     // a BrokenPipe on writing stdin simply indicates that the process finished
     // its work and closed its stdin pipe early.
@@ -1651,10 +1324,8 @@ fn run_pi_with_timeout(
     // guaranteed to be covered; tasks must finish background work before returning.
     on_output(format!(
         "{}\n",
-        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success() && !timed_out && (input_error.is_none() || input_broken_pipe_on_success), "timedOut":timed_out, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "timestamp":crate::model::now()})
+        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success() && !timed_out && (input_error.is_none() || input_broken_pipe_on_success), "timedOut":timed_out, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "firstOutputMs":first_output_ms, "timestamp":crate::model::now()})
     ));
-    #[cfg(not(feature = "fixture"))]
-    copied_session?;
     if timed_out {
         return Err(format!(
             "{phase} timed out after {} seconds",
@@ -1781,7 +1452,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
@@ -1856,64 +1527,6 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
 
     #[cfg(not(feature = "fixture"))]
     #[test]
-    fn prestarted_partitioner_is_claimed_by_matching_repository_and_exits_on_eof() {
-        let _guard = lock_env();
-        invalidate_warm_partitioner();
-        let temp = tempfile::tempdir().unwrap();
-        let repository = temp.path().join("repository");
-        fs::create_dir(&repository).unwrap();
-        let config = Config {
-            repository: repository.to_string_lossy().into(),
-            model: "openai-codex/gpt-6-sol".into(),
-            thinking_level: "high".into(),
-            max_parallel: 1,
-            max_feedback: 0,
-            auto_approve: false,
-            role_models: Default::default(),
-        };
-        start_warm_partitioner_at(&config, temp.path()).unwrap();
-        let mut other = config.clone();
-        other.model = "other/model".into();
-        assert!(claim_warm_partitioner(&other).is_none());
-        let mut worker =
-            process_control::with_owner("prewarm-test", || claim_warm_partitioner(&config))
-            .expect("matching idle worker");
-        assert!(claim_warm_partitioner(&config).is_none());
-        let mut stdin = worker.child.stdin.take().unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            serde_json::json!({"id":"probe", "type":"get_state"})
-        )
-        .unwrap();
-        stdin.flush().unwrap();
-        let mut stdout = BufReader::new(worker.child.stdout.take().unwrap());
-        let response = (&mut stdout)
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
-            .find(|event| event["id"] == "probe")
-            .unwrap();
-        assert_eq!(response["success"], true);
-        assert_eq!(response["data"]["thinkingLevel"], "off");
-        drop(stdin);
-        use std::io::Read;
-        let mut tail = String::new();
-        stdout.read_to_string(&mut tail).unwrap();
-        let status = worker.child.wait().unwrap();
-        let mut stderr = String::new();
-        worker
-            .child
-            .stderr
-            .take()
-            .unwrap()
-            .read_to_string(&mut stderr)
-            .unwrap();
-        assert!(status.success(), "{status}: {stderr}");
-        let _ = fs::remove_dir_all(worker.session_dir);
-    }
-
-    #[cfg(not(feature = "fixture"))]
-    #[test]
     #[ignore = "requires an isolated real Pi process and warm-node slot"]
     fn serial_node_prewarm_reuses_session_and_rejects_modified_history() {
         use std::io::Read;
@@ -1944,8 +1557,8 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             auto_approve: false,
             role_models: Default::default(),
         };
-        let generation = NODE_WARM_GENERATION.load(Ordering::SeqCst);
-        start_warm_node(&config, &repository, &session_dir, &session_id, generation).unwrap();
+        warm_node(config.clone(), repository.clone(), session_dir.clone(), session_id.clone());
+        assert!(WARM_NODE.get().unwrap().wait_idle(Duration::from_secs(30)));
         let mut other = config.clone();
         other.model = "other/model".into();
         assert!(claim_warm_node(&other, &repository, &session_dir, &session_id).is_none());
@@ -1981,7 +1594,8 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             .unwrap();
         assert!(status.success(), "{status}: {stderr}");
 
-        start_warm_node(&config, &repository, &session_dir, &session_id, generation).unwrap();
+        warm_node(config.clone(), repository.clone(), session_dir.clone(), session_id.clone());
+        assert!(WARM_NODE.get().unwrap().wait_idle(Duration::from_secs(30)));
         fs::write(
             &session_file,
             format!(

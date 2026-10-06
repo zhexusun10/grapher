@@ -5,7 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bundledTrim, bundledContinuity, continuityId, extensionCatalog, executionResources, setExtensionEnabled, trimId } from '../engine/global-extensions.ts';
+import { bundledTrim, bundledContinuity, continuityId, extensionCatalog, executionResources, setExtensionEnabled, trimId, workspacePolicyName } from '../engine/global-extensions.ts';
+import workspacePolicy from '../engine/prompt-extension.ts';
 import { loadGrapherMcpConfig } from '../engine/mcp-config.ts';
 import { loadMcpConfig } from '../engine/pi-compat.ts';
 
@@ -66,8 +67,8 @@ test('only pi-trim and the host adapter reach Partitioner/Merger; trim is mandat
       assert.ok(resources.args.includes('--no-extensions'));
       assert.ok(resources.args.includes('--no-skills'));
       assert.ok(!resources.args.includes('--skill'));
-      assert.equal(resources.extensionFactories.length, 0, 'no MCP factory');
-      assert.equal(resources.args.filter(arg => arg === '--extension').length, 2);
+      assert.deepEqual(resources.extensionFactories, [{ name: workspacePolicyName, factory: workspacePolicy }], 'only the mandatory host policy, no MCP factory');
+      assert.equal(resources.args.filter(arg => arg === '--extension').length, 1);
     }
     writeFileSync(join(f.global, 'settings.json'), '{}');
     const legacy = JSON.stringify({ overrides: { [trimId]: false } });
@@ -81,6 +82,45 @@ test('only pi-trim and the host adapter reach Partitioner/Merger; trim is mandat
       assert.equal((await executionResources([], f.own, role)).args.filter(arg => arg === bundledTrim).length, 1);
     }
   } finally { f.close(); }
+});
+
+test('mandatory workspace policy reuses native ESM code but binds fresh tools and paths for each task', async () => {
+  const f = fixture();
+  const cwd = process.cwd();
+  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    const project = join(f.base, 'project');
+    const second = join(f.base, 'second-workspace');
+    mkdirSync(project);
+    mkdirSync(second);
+    writeFileSync(join(project, 'file.txt'), 'SOURCE MUST NOT BE READ');
+    writeFileSync(join(f.workspace, 'file.txt'), 'FIRST WORKSPACE');
+    writeFileSync(join(second, 'file.txt'), 'SECOND WORKSPACE');
+    Object.assign(process.env, { GRAPHER_MODE: 'node', GRAPHER_EXECUTION_KIND: 'graph', GRAPHER_ORIGINAL_ROOT: project, GRAPHER_SOURCE_ALIAS: project });
+    const bound = [];
+    for (const workspace of [f.workspace, second]) {
+      process.chdir(workspace);
+      const resources = await executionResources(['--no-extensions', '--no-skills'], f.own, 'node');
+      assert.ok(!resources.args.some(arg => arg.endsWith('prompt-extension.ts')), 'do not reload the SDK graph through jiti');
+      assert.deepEqual(resources.extensionFactories, [{ name: workspacePolicyName, factory: workspacePolicy }]);
+      const tools = [];
+      workspacePolicy({ registerTool: tool => tools.push(tool), on() {} } as any);
+      assert.equal(tools.filter(tool => tool.name === 'bash').length, 1);
+      bound.push(tools.find(tool => tool.name === 'read'));
+    }
+    // Execute after cwd/env changed: each factory retains only its own task root.
+    for (let index = 0; index < bound.length; index++) {
+      const output = await bound[index].execute('read', { path: join(project, 'file.txt') }, undefined, undefined, {});
+      const text = output.content.map(part => part.text ?? '').join('\n');
+      assert.match(text, index === 0 ? /FIRST WORKSPACE/ : /SECOND WORKSPACE/);
+      assert.ok(!text.includes('SOURCE MUST NOT BE READ'));
+    }
+  } finally {
+    process.chdir(cwd);
+    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+    f.close();
+  }
 });
 
 test('bundled continuity defaults on, supports persistent removal/restore and obeys role/CLI exclusions', async () => {
@@ -129,15 +169,15 @@ test('MCP is available only to allowed roles and respects global/dedicated built
     }
     writeFileSync(join(f.global, 'settings.json'), JSON.stringify({ extensions: ['-builtin:mcp'] }));
     for (const role of ['planner', 'node', 'partition', 'merger']) {
-      assert.equal((await executionResources([], f.own, role)).extensionFactories.length, 0);
+      assert.deepEqual((await executionResources([], f.own, role)).extensionFactories, [{ name: workspacePolicyName, factory: workspacePolicy }]);
     }
     writeFileSync(join(f.global, 'settings.json'), '{}');
     writeFileSync(join(f.own, 'settings.json'), JSON.stringify({ extensions: ['-builtin:mcp'] }));
-    assert.equal((await executionResources([], f.own, 'node')).extensionFactories.length, 0);
+    assert.deepEqual((await executionResources([], f.own, 'node')).extensionFactories, [{ name: workspacePolicyName, factory: workspacePolicy }]);
     const withoutExtensions = await executionResources(['--no-extensions'], f.own, 'node');
     assert.ok(!withoutExtensions.args.includes(f.extension));
     assert.ok(withoutExtensions.args.includes('--skill'), 'disabling extensions alone does not disable skills');
-    assert.equal(withoutExtensions.extensionFactories.length, 0);
+    assert.deepEqual(withoutExtensions.extensionFactories, [{ name: workspacePolicyName, factory: workspacePolicy }]);
   } finally { f.close(); }
 });
 

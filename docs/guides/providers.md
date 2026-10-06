@@ -34,6 +34,17 @@ Pi model configuration lives in its agent directory. For compatibility, when Gra
 
 `GRAPHER_ISOLATED_PI_MODELS=1` disables that inheritance. Benchmark runs use isolated model configuration so a hidden local endpoint cannot alter the evaluated model. See [Harbor](../benchmarks/harbor.md).
 
+### Azure migration for Pi 1.0.3
+
+Pi 1.0.3 renames the Azure **provider** from `azure-openai-responses` to `azure`. For example, select `azure/gpt-4o-mini` instead of `azure-openai-responses/gpt-4o-mini`. Old configuration is not migrated automatically.
+
+1. Finish or cancel active work and restart the backend after the upgrade. Back up the dedicated Pi configuration before manual edits.
+2. Sign in to **Azure** again in Settings or through `npm run pi` → `/login`. Alternatively, rename only the provider key in `auth.json` to `azure`, preserving its credential value.
+3. Rename the provider key in custom `models.json` definitions. **Do not rename `api: "azure-openai-responses"`** on Responses models: that API ID is unchanged. Chat Completions models such as `azure/deepseek-v4-pro` use `api: "openai-completions"`.
+4. Update Pi `settings.json` references (`defaultProvider`, `enabledModels`, `modelThinkingLevels`), Grapher's default/role model selections, and any `*_MODEL` environment overrides to `azure/...`. Reapply any Azure logout/disabled-provider selection under the new ID.
+
+`AZURE_OPENAI_*` environment variables, including the API key, endpoint and deployment-name map, are unchanged. Old sessions retain their provider metadata; upstream restoration can fall back to another model and does not reuse the old Azure prompt cache. Verify the selected model before continuing, or start a new conversation. The [upgrade validation](../development/pi-integration.md#pi-103-compatibility-validation) records the tested boundaries.
+
 ## Default and role-specific models
 
 A model identifier uses **`provider/model`**. In Settings, choose models and thinking levels separately for:
@@ -69,7 +80,7 @@ The backend removes inherited `PI_MODEL`, `PI_THINKING`, `PI_PROVIDER`, `PI_REAS
 ## Troubleshooting
 
 - **No available models:** authenticate the provider, refresh its status, and check environment credentials.
-- **Unavailable saved model:** choose another available model; a saved identifier alone does not establish provider access.
+- **Unavailable saved model:** choose another available model; a saved identifier alone does not establish provider access. Upgrades can retire models or change their API; see the [Pi 1.0.3 catalog findings](../development/pi-integration.md#compatibility-findings) and the Azure migration above.
 - **Unexpected endpoint/model:** inspect role environment overrides and Pi model configuration.
 - **Authentication failure during routing:** the Run fails explicitly; it is not silently converted into Serial.
 - **CLI login does not affect Grapher:** confirm you used `npm run pi` from this checkout and the same `PI_CODING_AGENT_DIR` as the backend.

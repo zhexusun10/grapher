@@ -23,7 +23,12 @@ input.on("line", async (line) => {
   let reply;
   try {
     if (line.length > 131072) throw new Error("Request too large");
-    reply = { version: 1, result: await adapter.dispatch(JSON.parse(line)) };
+    const request = JSON.parse(line);
+    // Private readiness probe: imports and baseline verification only. Do not
+    // construct ModelRuntime, check credentials, refresh tokens or call a model.
+    reply = request.version === 1 && request.operation === 'grapher_prepare' && typeof request.id === 'string'
+      ? { version: 1, id: request.id, result: { ready: true } }
+      : { version: 1, result: await adapter.dispatch(request) };
   } catch {
     // No raw exception, request body, or credential object crosses this boundary.
     reply = { version: 1, error: "Provider/Auth operation failed. Refresh providers or restart login." };

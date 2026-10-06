@@ -1,4 +1,4 @@
-// Equivalent Pi 1.0.1 offline build, using Node filesystem operations instead
+// Equivalent reviewed Pi offline build, using Node filesystem operations instead
 // of the vulnerable shx -> shelljs -> fast-glob -> micromatch -> braces chain.
 import { execFileSync } from 'node:child_process';
 import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';

@@ -230,6 +230,9 @@ mod service_cache_tests;
 #[cfg(test)]
 #[path = "planning_lifecycle_tests.rs"]
 mod planning_lifecycle_tests;
+#[cfg(test)]
+#[path = "startup_prewarm_tests.rs"]
+mod startup_prewarm_tests;
 
 fn load_env_file() {
     let candidates = [
@@ -468,6 +471,7 @@ fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, 
     #[cfg(not(feature = "fixture"))]
     {
         crate::engine::invalidate_warm_node();
+        crate::provider_auth::warm();
         crate::engine::warm_planning_engines(config);
     }
     bootstrap(service, false)
@@ -3207,8 +3211,9 @@ pub fn dispatch(
             let result = crate::pi_extensions::request(body)?;
             #[cfg(not(feature = "fixture"))]
             if changed {
-                crate::engine::invalidate_warm_partitioner();
+                crate::engine::invalidate_prepared_processes();
                 crate::engine::invalidate_warm_node();
+                warm_selected_engines(service);
             }
             #[cfg(feature = "fixture")]
             let _ = changed;
@@ -3222,11 +3227,10 @@ pub fn dispatch(
             if operation.as_deref() == Some("logout")
                 || (operation.as_deref() == Some("poll") && result["status"] == "complete")
             {
-                crate::engine::invalidate_warm_partitioner();
+                crate::engine::invalidate_prepared_processes();
+                crate::engine::invalidate_warm_node();
                 if operation.as_deref() == Some("poll") {
-                    if let Ok(bootstrap) = bootstrap(service, false) {
-                        crate::engine::warm_planning_engines(bootstrap.config);
-                    }
+                    warm_selected_engines(service);
                 }
             }
             to_value(result)
@@ -3543,6 +3547,37 @@ pub fn compact_output_chunks() -> Result<(), String> {
     Ok(())
 }
 
+/// Preload only an explicitly configured project. Repository discovery/status
+/// and large snapshot serialization are not prerequisites for warming engines.
+#[cfg(any(not(feature = "fixture"), test))]
+fn configured_prewarm_config(runtime: &Runtime) -> Option<Config> {
+    fs::read(runtime.root.join("config.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())
+        .or_else(|| {
+            let mut config = runtime.state.config.clone()?;
+            // Match bootstrap's treatment of legacy, unqualified model names.
+            if !config.model.is_empty() && !config.model.contains('/') {
+                config.model.clear();
+            }
+            Some(config)
+        })
+        .filter(|config| !config.repository.trim().is_empty())
+}
+
+#[cfg(not(feature = "fixture"))]
+fn warm_selected_engines(service: &Arc<Service>) {
+    crate::provider_auth::warm();
+    let config = {
+        let Ok(runtime) = service.runtime.lock() else { return; };
+        let config = configured_prewarm_config(&runtime);
+        runtime.warm_completed_serial_node();
+        config
+    };
+    if let Some(config) = config {
+        crate::engine::warm_planning_engines(config);
+    }
+}
+
 pub fn run() -> Result<(), String> {
     use tiny_http::{Response, Server};
     load_env_file();
@@ -3575,15 +3610,6 @@ pub fn run() -> Result<(), String> {
     crate::native::check_retired_leases(&root)?;
     recover_plannings(&service)?;
     recover_cleanup_tasks(&service)?;
-    // Warm Auto's idle RPC Partitioner and Graph's verified native runtime
-    // while the frontend starts, not on the first planning request.
-    #[cfg(not(feature = "fixture"))]
-    if let Ok(bootstrap) = bootstrap(&service, false) {
-        crate::engine::warm_planning_engines(bootstrap.config);
-        if let Ok(runtime) = service.runtime.lock() {
-            runtime.warm_completed_serial_node();
-        }
-    }
     let port: u16 = std::env::var("GRAPHER_PORT")
         .unwrap_or_else(|_| "1421".into())
         .parse()
@@ -3632,6 +3658,7 @@ pub fn run() -> Result<(), String> {
         };
         if stop {
             cleanup_stopped.store(true, Ordering::SeqCst);
+            crate::provider_auth::begin_shutdown();
             crate::native::begin_shutdown();
             #[cfg(not(feature = "fixture"))]
             crate::engine::stop_partition_prewarm();
@@ -3674,6 +3701,20 @@ pub fn run() -> Result<(), String> {
             match next {
                 Ok(request) => handle_http_request(request, &service, &web_root, port),
                 Err(_) => break,
+            }
+        });
+    }
+    // HTTP workers and shutdown handling are ready before any speculative work.
+    // Do not scan the installation cwd or serialize history just to choose a warm key.
+    #[cfg(not(feature = "fixture"))]
+    {
+        // Credential-host imports need no configured project. Do not enumerate
+        // providers or refresh tokens merely to make the first catalog fast.
+        crate::provider_auth::warm();
+        let warm_service = Arc::downgrade(&service);
+        thread::spawn(move || {
+            if let Some(service) = warm_service.upgrade() {
+                warm_selected_engines(&service);
             }
         });
     }
