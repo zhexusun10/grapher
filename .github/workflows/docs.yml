@@ -1,0 +1,26 @@
+name: Documentation Health
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - name: Install checker dependencies (no build hooks)
+        run: npm ci --ignore-scripts
+      - name: Check knowledge navigation and local references
+        run: npm run check:docs
+      - name: Test documentation checker
+        run: node --test scripts/check-docs.test.mjs

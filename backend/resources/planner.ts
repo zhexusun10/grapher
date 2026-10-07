@@ -3,10 +3,10 @@ import { defineTool, createBashToolDefinition, type ExtensionAPI } from "@earend
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
-type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; edges: { from: string; to: string; relation: string; feedback: boolean }[] };
+type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; edges: { from: string; to: string; feedback: boolean }[] };
 
 type NodeEdit = { name: string; task?: string; delete?: boolean };
-type EdgeEdit = { from: string; to: string; relation?: string; feedback?: boolean; delete?: boolean };
+type EdgeEdit = { from: string; to: string; feedback?: boolean; delete?: boolean };
 type Diagnostic = { code: string; message: string };
 
 function topology(graph: Graph) {
@@ -35,7 +35,7 @@ function applyNode(graph: Graph, edit: NodeEdit) {
 
 function applyEdge(graph: Graph, edit: EdgeEdit) {
   graph.edges = graph.edges.filter(edge => edge.from !== edit.from || edge.to !== edit.to);
-  if (!edit.delete) graph.edges.push({ from: edit.from, to: edit.to, relation: edit.relation ?? "", feedback: edit.feedback ?? false });
+  if (!edit.delete) graph.edges.push({ from: edit.from, to: edit.to, feedback: edit.feedback ?? false });
 }
 
 export default function grapherPlanner(pi: ExtensionAPI) {
@@ -112,7 +112,6 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       edges: Type.Array(Type.Object({
         from: Type.String({ description: "Source node name (must exist)" }),
         to: Type.String({ description: "Target node name (must exist and differ from source)" }),
-        relation: Type.Optional(Type.String({ description: "Brief description of what the target needs from the source or what feedback communicates" })),
         feedback: Type.Optional(Type.Boolean({ description: "True for a feedback edge (default: false)" })),
         delete: Type.Optional(Type.Boolean({ description: "Delete the edge (default: false)" })),
       }, { additionalProperties: false }), { minItems: 1, description: "One or more edge edits, applied in order" }),

@@ -1,5 +1,9 @@
 # Execution model
 
+> **Status:** active
+> **Scope:** User-visible planning, file/session inheritance, recovery and publication.
+> **Maintained with:** [server.rs](../../backend/src/server.rs), [workspace.rs](../../backend/src/workspace.rs), [graph_merge.rs](../../backend/src/graph_merge.rs) and [publication tests](../../backend/tests/publication.rs).
+
 This document describes what happens to your project, sessions, and files. [Runtime](runtime.md) covers scheduling; [Filesystem isolation](filesystem-isolation.md) covers permissions and path adaptation.
 
 ## Serial and Graph
@@ -34,24 +38,18 @@ Source locks protect approval and snapshots taken after approved Planner revisio
 <workspace-parent>/.grapher-worktrees/<run>/<node>-<execution>/
 ```
 
-Graph executions use Run-owned private repositories; these are not `git worktree` checkouts. Physical directories are reusable execution slots, not permanent per-node workspaces. Both ordinary dependencies and applied feedback can hand off a completed directory, with one writer at a time. A directory's allocation name does not identify its current node owner.
+Graph executions use Run-owned private repositories, not `git worktree` checkouts. A directory is a reusable single-writer execution slot; its allocation name does not identify its current node owner.
 
 1. A root starts from the latest recorded source snapshot: approval, a subsequent approved Planner revision, or successful publication. Approval history remains immutable.
 2. A child waits for its ordinary dependencies to finish successfully. The backend combines the latest recorded source with those parents' filesystem states before the task runs. Retained node results likewise receive subsequent Planner source changes through composition; already-running workspaces are not overwritten.
 3. The agent performs its task in that workspace with its own session. It does not receive parent conversations or exchange commits with other agents.
 4. After execution, the backend snapshots the result for downstream inheritance and final publication.
 
-Both ordinary dependencies and applied feedback inherit **recorded project state**: non-ignored files use Git snapshots; ignored project files use content-addressed blobs and version manifests. A linear A → B → C chain normally passes the same completed physical directory between writers. Fan-out can pass that directory to one branch while other concurrent branches get independently writable state from the recorded inputs; copies are not writable hard links. Fan-in combines all parents in an available parent or idle directory. Safe in-place reuse does not require a new checkout, but missing directories or additional inputs may require reconstruction/composition. The runtime never assigns one physical directory to two active executions; this scheduling rule is not an additional filesystem security boundary.
-
-Feedback uses the same filesystem-state channels and exclusive handoff model, but adds a verdict, budget/generation checks, drain, and target/descendant invalidation. The target receives the sender's completion state plus instruction and continues its own conversation. Completed execution snapshots remain historical records; current heads and ignored-file versions can advance together for nodes represented by the live workspace lineage. Retired directories can be reclaimed and reconstructed from retained snapshots. See [Workspace snapshots and feedback](workspace-snapshots-and-feedback.md).
+Inheritance includes non-ignored Git state and versioned ignored resources. Ordinary dependencies and applied feedback can exclusively hand off completed directories; concurrent branches remain independently writable. For the exact ownership, materialization, lineage and retention rules, see [Workspace snapshots and feedback](workspace-snapshots-and-feedback.md). Feedback's control flow is defined in [Runtime](runtime.md#bounded-feedback).
 
 ### Backend Git storage
 
-Git is the host's snapshot/composition mechanism, not an agent messaging protocol. The backend stages non-ignored changes and creates snapshot commits when needed; agents are not required to commit their work or send commits to one another.
-
-Node repositories normally borrow the source Git object database through `.git/objects/info/alternates` and pin the required baseline and parent refs locally. They are not fully self-contained copies of history. Sources with chained alternates or promisor packs use a `file://` fetch fallback instead. The host imports completed snapshots through `file://` fetches for later inheritance and publication.
-
-Host pins use `refs/grapher/heads/<sha>`; node results use Run-scoped `refs/grapher/runs/<run>/nodes/<node-id>`. The unscoped `refs/grapher/nodes/<node-id>` namespace remains for legacy/public helper calls. Inside a node, `refs/grapher/base` and `refs/grapher/parents/<parent-id>` pin its inputs. Fetches use `--no-write-fetch-head`; human-readable node names map to safe directory/ref identifiers.
+Git is the host's snapshot/composition mechanism, not an agent messaging protocol. Object borrowing, fetch fallbacks and ref namespaces are documented once in [Workspace Git storage](workspace-snapshots-and-feedback.md#backend-git-storage). This heading remains for existing links.
 
 ### Parent composition conflicts
 
@@ -115,8 +113,6 @@ Graph workspaces default to the OS cache: `%LOCALAPPDATA%\Grapher\workspaces\.gr
 
 All projects/backends with the same verified engine inputs share one content-keyed Pi runtime cache under the OS cache's `workspaces/.grapher-workspaces/` (override with `GRAPHER_NATIVE_RUNTIME_PARENT`). The key covers engine/adapters, Pi source/builds, dependency locks, bundled extensions and platform/Node ABI—not workspace/session paths. An exclusive cache lock serializes preparation; shared process-lifetime file leases protect active readers. Cached engine inputs are rechecked before reuse; damaged idle copies are rebuilt, never overwritten under live readers. Successful caches survive shutdown/restart. Failed preparations, abandoned per-backend copies and unused obsolete versions are reclaimed before preparation; live versions are never removed. Marked copies at the old project-adjacent default are also recovered. Unknown unmarked legacy directories require explicit offline cleanup rather than guessed deletion.
 
-Ignored project dependencies, caches, data and weights are inherited without installing them again. This does not guarantee arbitrary copied environments are relocatable: use the current workspace's `.venv/bin/python` or `.venv/Scripts/python.exe` directly and `python -m pip`; activation scripts, launcher shebangs and program-internal absolute paths are not rewritten. New dependencies are not automatically installed. Shared HOME, temporary files, external services, and global environment state are outside workspace version isolation.
-
-Run-owned ignored manifests/blobs live under `<workspace-parent>/.grapher-worktrees/<run>/.files/` and follow the same durable workspace cleanup ownership. Publication preserves their delivered source files, not the historical ignored snapshots. Pi histories survive workspace cleanup.
+Inherited resources do not install missing dependencies or guarantee environment relocation; see the [portability boundary](workspace-snapshots-and-feedback.md#environment-portability-boundary). Ignored snapshot retention and missing-history recovery are defined in [workspace composition and recovery](workspace-snapshots-and-feedback.md#composition-and-recovery). [Shared external state](filesystem-isolation.md#shared-runtime-and-external-state) is outside workspace version isolation.
 
 Before using important code, read [Filesystem isolation](filesystem-isolation.md). For log maintenance, see [Conversation logs](../testing/conversation-logs.md).

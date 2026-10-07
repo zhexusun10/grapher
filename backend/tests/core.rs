@@ -29,7 +29,6 @@ fn graph() -> Graph {
         .map(|(from, to, feedback)| Edge {
             from: (*from).into(),
             to: (*to).into(),
-            relation: "test".into(),
             feedback: *feedback,
         })
         .collect(),
@@ -166,7 +165,6 @@ fn feedback_is_edge_data_not_node_data() {
     let edge = serde_json::from_value::<Edge>(serde_json::json!({
         "from": "review",
         "to": "implementation",
-        "relation": "revision",
         "feedback": true
     }))
     .unwrap();
@@ -207,7 +205,6 @@ fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
         .map(|(from, to, feedback)| Edge {
             from: from.into(),
             to: to.into(),
-            relation: String::new(),
             feedback,
         })
         .collect(),
@@ -288,9 +285,9 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
         candidate.nodes.push(Node { name: name.into(), task: format!("Implement {name}") });
     }
     candidate.edges.extend([
-        Edge { from: "frontend".into(), to: "inspect".into(), relation: String::new(), feedback: false },
-        Edge { from: "inspect".into(), to: "spec".into(), relation: String::new(), feedback: true },
-        Edge { from: "review".into(), to: "delivery".into(), relation: String::new(), feedback: false },
+        Edge { from: "frontend".into(), to: "inspect".into(), feedback: false },
+        Edge { from: "inspect".into(), to: "spec".into(), feedback: true },
+        Edge { from: "review".into(), to: "delivery".into(), feedback: false },
     ]);
     let plan = compile(&candidate, true).unwrap();
     assert_eq!(plan.warnings.len(), 2);
@@ -364,7 +361,6 @@ fn compiler_rejects_multiple_feedback_targets_from_one_source() {
     candidate.edges.push(Edge {
         from: "review".into(),
         to: "backend".into(),
-        relation: "test both implementations".into(),
         feedback: true,
     });
     let errors = compile(&candidate, true).unwrap_err();
@@ -548,7 +544,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         let mut graph = graph();
         for name in ["delivery", "also_delivery"] {
             graph.nodes.push(Node { name: name.into(), task: format!("Implement {name}") });
-            graph.edges.push(Edge { from: "review".into(), to: name.into(), feedback: false, relation: String::new() });
+            graph.edges.push(Edge { from: "review".into(), to: name.into(), feedback: false });
         }
         let mut config = config();
         config.max_feedback = configured_limit;
@@ -616,7 +612,7 @@ fn exhausted_feedback_does_not_wait_for_running_siblings() {
         original_goal: "exhausted feedback with a running sibling".into(),
         nodes: ["owner", "review", "related", "consumer"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
         edges: [("owner", "review", false), ("owner", "related", false), ("review", "consumer", false), ("review", "owner", true)]
-            .into_iter().map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback, relation: String::new() }).collect(),
+            .into_iter().map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback }).collect(),
     };
     let mut config = config();
     config.max_feedback = 0;
@@ -645,7 +641,7 @@ fn exhausted_budget_does_not_mask_execution_or_protocol_failures() {
         let mut runtime = Runtime::open(temp.path()).unwrap();
         let mut graph = graph();
         graph.nodes.push(Node { name: "consumer".into(), task: "consume".into() });
-        graph.edges.push(Edge { from: "review".into(), to: "consumer".into(), feedback: false, relation: String::new() });
+        graph.edges.push(Edge { from: "review".into(), to: "consumer".into(), feedback: false });
         let mut config = config();
         config.max_feedback = 0;
         runtime.create(graph, config).unwrap();

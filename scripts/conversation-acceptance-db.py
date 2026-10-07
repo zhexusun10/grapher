@@ -206,7 +206,7 @@ def initialize(root, source):
         insert(db, run_id, {'type': 'settled'}, 4001)
         runs.append({'id': run_id, 'executionId': name + '-exec', 'marker': marker})
     run_id = 'acceptance-failed'
-    graph = {'originalGoal': 'Acceptance failed DAG', 'nodes': [{'name': name, 'task': name} for name in ['done', 'failed']], 'edges': [{'from': 'done', 'to': 'failed', 'relation': 'dependency', 'feedback': False}]}
+    graph = {'originalGoal': 'Acceptance failed DAG', 'nodes': [{'name': name, 'task': name} for name in ['done', 'failed']], 'edges': [{'from': 'done', 'to': 'failed', 'feedback': False}]}
     insert(db, run_id, {'type': 'created', 'graph': graph, 'config': config})
     insert(db, run_id, {'type': 'routed', 'plan_type': 'graph'})
     insert(db, run_id, {'type': 'approved', 'base': head})

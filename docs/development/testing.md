@@ -15,7 +15,7 @@ npm run test:frontend
 npm test
 ```
 
-`npm test` uses Rust fixtures; no paid model is required. Frontend tests exercise UI logic and isolated browser smoke cases, not provider quality. `check:docs` checks repository-owned Markdown links/anchors and npm command references; it does not fetch external websites or inspect upstream Pi documentation.
+`npm test` uses Rust fixtures; no paid model is required. Frontend tests exercise UI logic and isolated browser smoke cases, not provider quality. `check:docs` checks repository-owned Markdown links/anchors, npm command references, knowledge-index coverage, status-directory consistency and current-vs-historical routing. The independent [documentation CI](../../.github/workflows/docs.yml) runs it and the checker tests without building Pi or Rust. It does not fetch external websites, lint upstream Pi docs, verify prose against code, or certify freshness. See [Documentation maintenance](documentation.md) for the review and exploration checks.
 
 ## Suites by responsibility
 
@@ -41,6 +41,14 @@ Local deterministic model responses exercise production integration without paid
 - [Windows CI](../../.github/workflows/windows-native.yml) checks native Bash/Pi, independent workspaces, lifecycle, bindings, and extension tools. It does not expect filesystem permission rejection from Windows Graph.
 - [Planner source CI](../../.github/workflows/planner-source.yml) runs the same snapshot/replay fixtures, real Planner Bash contract, native launcher tests, and production Planner/Merger acceptance on macOS, Windows, and Linux. It also runs macOS Seatbelt child-process tests. Windows acceptance includes extended-drive-prefix paths; shared tests use Unicode and spaces.
 - [Dependency Security Audit](../../.github/workflows/security-audit.yml) runs scheduled and change-triggered npm audits for Grapher and the reviewed Pi dependency profile, plus RustSec auditing for `backend/Cargo.lock`. Audit evidence is uploaded even when a high-severity finding fails the job. The current Grapher root and reviewed Pi profile audits are clean; a direct audit of the upstream `pi/` tree reports optional/example `node-forge`/Gondolin and dev-only `braces`/`micromatch`/`fast-glob`/`shelljs`/`shx` findings, which are excluded from the runtime profile. Treat any new finding in the reviewed profile as an open baseline risk until it is reviewed.
+
+If a development backend binary is already running on Windows, isolate integration builds instead of stopping that service:
+
+```powershell
+$env:CARGO_TARGET_DIR = Join-Path $PWD '.grapher/verification-target'
+```
+
+Extension, project-binding and Windows native harnesses honor `CARGO_TARGET_DIR`. Select the relevant suites above; this setting is not permission to upgrade Pi or restart agents. Offline tool provisioning is described below.
 
 macOS native checks require working Seatbelt/`sandbox-exec` on an actual host. A configured CI matrix is not evidence that its jobs passed; check the individual platform results. Windows drive/UNC prefix normalization tests do not establish access to a real network share.
 

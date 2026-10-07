@@ -1,7 +1,7 @@
 import { t } from "./i18n/index.ts";
 export type Status = "waiting" | "running" | "blocked" | "done" | "failed" | "dirty";
 interface GraphNode { name: string; task: string }
-interface GraphEdge { from: string; to: string; relation: string; feedback: boolean }
+interface GraphEdge { from: string; to: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -141,11 +141,11 @@ export const example: Graph = {
     { name: "qa_review", task: t("执行端到端自动化测试与缺陷复核") },
   ],
   edges: [
-    { from: "api_spec", to: "frontend", relation: t("契约输入"), feedback: false },
-    { from: "api_spec", to: "backend", relation: t("契约输入"), feedback: false },
-    { from: "frontend", to: "qa_review", relation: t("提交验收"), feedback: false },
-    { from: "backend", to: "qa_review", relation: t("提交验收"), feedback: false },
-    { from: "qa_review", to: "frontend", relation: t("缺陷重构反馈"), feedback: true },
+    { from: "api_spec", to: "frontend", feedback: false },
+    { from: "api_spec", to: "backend", feedback: false },
+    { from: "frontend", to: "qa_review", feedback: false },
+    { from: "backend", to: "qa_review", feedback: false },
+    { from: "qa_review", to: "frontend", feedback: true },
   ],
 };
 

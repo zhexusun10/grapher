@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeExecutionLayers, graphEdgeId, indexFeedbackExhaustion, indexGraphInputs } from "../src/hooks/useGraphElements.ts";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { computeExecutionLayers, graphEdgeId, indexFeedbackExhaustion, indexGraphInputs, useGraphElements } from "../src/hooks/useGraphElements.ts";
 import { emptySnapshot, type Execution, type Graph, type Plan, type Snapshot } from "../src/types.ts";
 
-const graph = {
-  nodes: [{ name: "a" }, { name: "b" }, { name: "c" }],
-  edges: [{ from: "a", to: "b" }, { from: "b", to: "c" }],
-} as Graph;
+const graph: Graph = {
+  originalGoal: "Test graph projection",
+  nodes: ["a", "b", "c"].map(name => ({ name, task: name })),
+  edges: [{ from: "a", to: "b", feedback: false }, { from: "b", to: "c", feedback: false }],
+};
 
 test("edge identities are unambiguous and distinguish feedback", () => {
   const edges = [
@@ -31,6 +34,21 @@ test("node indexes match scans and preserve hint and attempt order", () => {
   }
 });
 
+test("graph projections use endpoints and feedback without relation labels", () => {
+  const state = { ...emptySnapshot, graph: { ...graph, edges: [...graph.edges, { from: "c", to: "a", feedback: true }] } };
+  let elements: ReturnType<typeof useGraphElements> | undefined;
+  function Projection() {
+    elements = useGraphElements(state, "", new Set());
+    return null;
+  }
+  renderToStaticMarkup(createElement(Projection));
+  assert.deepEqual(elements!.nodes.map(node => node.data.hint), [
+    "c → a (feedback)", "a → b", "b → c\nc → a (feedback)",
+  ]);
+  assert.ok(elements!.edges.every(edge => !Object.hasOwn(edge.data!, "relation")));
+  assert.equal(elements!.edges[2].markerEnd, "url(#workflow-arrow-feedback)");
+});
+
 test("dependency layers follow the DAG", () => {
   assert.deepEqual(computeExecutionLayers(graph), [["a"], ["b"], ["c"]]);
 });
@@ -48,7 +66,7 @@ test("explicit plan batches include unscheduled nodes", () => {
 function skippedFeedbackState(): Snapshot {
   return {
     ...emptySnapshot,
-    graph: { ...graph, edges: [...graph.edges, { from: "c", to: "a", feedback: true, relation: "rework" }] },
+    graph: { ...graph, edges: [...graph.edges, { from: "c", to: "a", feedback: true }] },
     nodes: { c: { status: "done", revision: 1, head: "head", instruction: "", error: null } },
     executions: [{ node: "c", id: "review-1", status: "completed" } as Execution],
     feedbackCounts: { "c->a": 3 },

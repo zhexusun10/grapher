@@ -1,5 +1,9 @@
 # Runtime and persistence
 
+> **Status:** active
+> **Scope:** Scheduling, durable events, feedback and interruption recovery.
+> **Maintained with:** [runtime.rs](../../backend/src/runtime.rs), [model.rs](../../backend/src/model.rs), [store.rs](../../backend/src/store.rs) and [runtime tests](../../backend/src/runtime_tests.rs).
+
 The Rust backend owns Run state. SQLite stores append-only business events; a reducer produces the current Snapshot. React displays that projection and submits commands—it does not simulate execution or invent authoritative status.
 
 ## Graph representation
@@ -11,13 +15,12 @@ interface Graph {
   edges: Array<{
     from: string;
     to: string;
-    relation: string;
     feedback: boolean;
   }>;
 }
 ```
 
-Names are semantic identifiers, not literal directory names. Edges are unique by ordered `(from, to)` pair. The compiler checks nonempty/unique nodes, valid endpoints, no self-edges, graph limits, and an acyclic ordinary dependency graph. A feedback source has at most one target, and that target must be its dependency ancestor.
+Names are semantic identifiers, not literal directory names. Edges contain only `from`, `to`, and `feedback` and are unique by ordered `(from, to)` pair. The backend ignores the removed `relation` field when reading historical graphs, events, or checkpoints, and never serializes it back. The compiler checks nonempty/unique nodes, valid endpoints, no self-edges, graph limits, and an acyclic ordinary dependency graph. A feedback source has at most one target, and that target must be its dependency ancestor.
 
 The compiler returns `executionBatches`, `roots`, `terminals`, and warnings. Batches describe topology; scheduling does not wait for every slow node in a batch before dispatching a ready descendant.
 
@@ -49,7 +52,7 @@ There is no global pool limiting nodes across Runs, and no shared cap for Planne
 
 Failure blocks dependent branches; unrelated work continues. Pause stops new dispatches without forcibly terminating active model calls. Stop/cancel is a separate process-lifecycle action.
 
-Workspace allocation is single-writer per physical Run directory. Ordinary chains normally hand off completed directories; fan-out uses distinct directories for concurrent branches, and fan-in composes recorded inputs in an available slot. Idle directories can be reused and retired ones reclaimed while Git refs and ignored snapshots remain available. Directory names and historical execution paths are not permanent node ownership. Pending feedback and repair inputs retain their required directories until delivery.
+Scheduling enforces one writer per physical Run directory and retains directories required by pending feedback/repair. Allocation, reuse and reclamation follow the [workspace ownership contract](workspace-snapshots-and-feedback.md#shared-inheritance-and-workspace-ownership).
 
 Source locks cover approval and recorded source snapshots after approved Planner revisions, not the Planner's live Bash/model session. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce conflicts, surfaced by each execution/publication result.
 
@@ -58,18 +61,18 @@ Source locks cover approval and recorded source snapshots after approved Planner
 A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `<FEEDBACK>`:
 
 - `<ACCEPT>` leaves the result accepted without sending an additional instruction.
-- `<FEEDBACK>` queues a versioned request for the graph's one explicit target. After affected running work drains, the target receives the sender's completed physical workspace and feedback text. It continues its own conversation history through an explicit Pi session fork, even if the physical path is unchanged; the sender's conversation is not copied. The target and its dependency descendants are invalidated, and completed results in that set are recomputed. Other branches remain valid.
+- `<FEEDBACK>` queues a versioned request for the graph's one explicit target. After affected running work drains, applying it invalidates the target and its ordinary dependency descendants; other branches remain valid. The target receives completed workspace state plus instruction, never the sender's conversation.
 - A malformed verdict fails the execution.
 - Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains done; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
 - The runtime caps the configured limit at 3. A limit of 0 skips the first feedback request. Execution errors and malformed verdicts still fail normally.
 
 While feedback budget remains, the runtime waits for running nodes that a pending verdict could invalidate; it does not forcibly suspend their processes. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable.
 
-`Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, target execution/head/revision, and the final response's log-byte range before invalidation clears heads. Restart replays that exact request. Duplicate deliveries are idempotent; a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership. Completion heads, Git ancestry/cleanliness and ignored snapshots are checked before the first handoff execution; drift blocks execution rather than silently using changed evidence. Forwarded text excludes the final control marker.
+`Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, target execution/head/revision, and the final response's log-byte range before invalidation clears heads. Restart replays that exact request. Duplicate deliveries are idempotent; a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership.
 
-Applied feedback transfers a completed directory exclusively, using the same Git and ignored-file inheritance channels as ordinary dependencies; it is not a writable link to an active parent. Recomputed descendants follow the ordinary handoff, fan-out, and fan-in rules. A later continuation keeps its own node history and may reuse the current shared terminal tree when eligible; otherwise it reconstructs its inputs in an unoccupied directory and forks its session if cwd changes. It cannot rewind another active writer's files. See [Workspace snapshots and feedback](workspace-snapshots-and-feedback.md).
+Completion-state verification, forwarded-message shape and session forks are specified in [Feedback workspace handoff](workspace-snapshots-and-feedback.md#feedback-is-an-exclusive-workspace-handoff).
 
-Live steering does not itself mark a running node dirty. Completed-node follow-ups are new messages, not a rewrite of the original task text. A follow-up on a node represented in a unique terminal workspace edits that combined state; successful completion advances represented nodes' current heads/resource versions while completed descendants stay done. Other changed-result continuations, explicit history edits, and applied feedback still use their invalidation rules. See [Execution model](execution-model.md#sessions-follow-ups-and-history-edits).
+Live steering does not itself mark a running node dirty. Completed-node follow-ups are new messages, not original-task rewrites; shared-terminal continuations, other changed results and history edits follow the distinct [session/invalidation rules](execution-model.md#sessions-follow-ups-and-history-edits).
 
 ## Event and output storage
 
@@ -98,6 +101,6 @@ Unix process groups and Windows kill-on-close Job Objects provide different life
 
 ## Delivery boundary
 
-A Graph is complete only after `PublicationCompleted`. A finished model response, successful node test, or rendered green graph is not sufficient without successful publication. Retrying delivery uses the retained heads rather than rerunning valid tasks.
+Only `PublicationCompleted` establishes Graph completion—not a finished model response or green UI. Retry/failure behavior is defined in [Final publication](execution-model.md#final-publication).
 
 Source references: [runtime.rs](../../backend/src/runtime.rs), [store.rs](../../backend/src/store.rs), [server.rs](../../backend/src/server.rs), and [process_control.rs](../../backend/src/process_control.rs).

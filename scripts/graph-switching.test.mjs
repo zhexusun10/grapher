@@ -9,7 +9,7 @@ test("graphs remain visible when repeatedly switching conversations", { timeout:
   const makeSnapshot = (runId, names) => ({
     runId, config, planType: "graph", phase: "completed", approved: true, paused: false,
     graph: { originalGoal: `Goal ${runId}`, nodes: names.map(name => ({ name, task: `Task ${name}` })),
-      edges: names.slice(1).map((name, index) => ({ from: names[index], to: name, relation: "dependency" })) },
+      edges: names.slice(1).map((name, index) => ({ from: names[index], to: name, feedback: false })) },
     nodes: Object.fromEntries(names.map(name => [name, { status: "done" }])),
     plan: null, executions: [], events: [], base: "", feedbackCounts: {},
   });

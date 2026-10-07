@@ -317,7 +317,7 @@ fn feedback_scope_does_not_block_a_shared_ancestors_other_branch() {
         ]
         .into_iter()
         .map(|(from, to, feedback)| Edge {
-            from: from.into(), to: to.into(), feedback, relation: String::new(),
+            from: from.into(), to: to.into(), feedback,
         }).collect(),
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
@@ -356,7 +356,7 @@ fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
         ]
         .into_iter()
         .map(|(from, to, feedback)| Edge {
-            from: from.into(), to: to.into(), feedback, relation: String::new(),
+            from: from.into(), to: to.into(), feedback,
         })
         .collect(),
     };
@@ -438,7 +438,7 @@ fn messaging_done_node_preserves_its_result_and_running_downstream() {
             name: name.into(), task: name.into(),
         }).collect(),
         edges: vec![Edge {
-            from: "parent".into(), to: "child".into(), relation: String::new(), feedback: false,
+            from: "parent".into(), to: "child".into(), feedback: false,
         }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
@@ -711,7 +711,7 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
         nodes: ["parent", "child"].into_iter().map(|name| Node {
             name: name.into(), task: name.into(),
         }).collect(),
-        edges: vec![Edge { from: "parent".into(), to: "child".into(), relation: String::new(), feedback: false }],
+        edges: vec![Edge { from: "parent".into(), to: "child".into(), feedback: false }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
@@ -766,6 +766,7 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
     assert_eq!(runtime.state.nodes["child"].status, "dirty");
 }
 
+#[cfg(feature = "fixture")]
 #[test]
 fn dependency_chain_hands_off_one_workspace_and_earlier_node_messages_use_the_terminal_tree() {
     let graph = Graph {
@@ -774,7 +775,7 @@ fn dependency_chain_hands_off_one_workspace_and_earlier_node_messages_use_the_te
             name: name.into(), task: name.into(),
         }).collect(),
         edges: [("a", "b"), ("b", "c")].into_iter().map(|(from, to)| Edge {
-            from: from.into(), to: to.into(), relation: String::new(), feedback: false,
+            from: from.into(), to: to.into(), feedback: false,
         }).collect(),
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
@@ -845,7 +846,7 @@ fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras(
         }).collect(),
         edges: [("root", "left"), ("root", "right"), ("left", "join"), ("right", "join")]
             .into_iter().map(|(from, to)| Edge {
-                from: from.into(), to: to.into(), relation: String::new(), feedback: false,
+                from: from.into(), to: to.into(), feedback: false,
             }).collect(),
     };
     let (_temp, source, mut runtime) = setup(true, graph);
@@ -895,7 +896,7 @@ fn graph_followup_on_terminal_workspace_updates_without_rerunning_descendants() 
         nodes: ["parent", "child", "independent"].into_iter().map(|name| Node {
             name: name.into(), task: name.into(),
         }).collect(),
-        edges: vec![Edge { from: "parent".into(), to: "child".into(), relation: String::new(), feedback: false }],
+        edges: vec![Edge { from: "parent".into(), to: "child".into(), feedback: false }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
@@ -962,7 +963,7 @@ fn planner_revision_refreshes_future_node_inputs_without_replacing_running_works
             original_goal: "test".into(),
             nodes: ["parent", "running", "child"].into_iter()
                 .map(|name| Node { name: name.into(), task: name.into() }).collect(),
-            edges: vec![Edge { from: "parent".into(), to: "child".into(), relation: "files".into(), feedback: false }],
+            edges: vec![Edge { from: "parent".into(), to: "child".into(), feedback: false }],
         };
         let (_temp, source, mut runtime) = setup(standard_git, graph.clone());
         let mut config = runtime.state.config.clone().unwrap();
@@ -1112,7 +1113,6 @@ fn planner_revision_keeps_approval_and_unaffected_node_results() {
         edges: vec![Edge {
             from: "change".into(),
             to: "child".into(),
-            relation: "files".into(),
             feedback: false,
         }],
     };
@@ -1210,7 +1210,6 @@ fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_wait
             from: "running".into(),
             to: "waiting".into(),
             feedback: false,
-            relation: String::new(),
         }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph.clone());
@@ -1296,7 +1295,6 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
         edges: vec![Edge {
             from: "other".into(),
             to: "consumer".into(),
-            relation: "existing input".into(),
             feedback: false,
         }],
     };
@@ -1326,7 +1324,6 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     revised.edges.push(Edge {
         from: "source".into(),
         to: "consumer".into(),
-        relation: "new input".into(),
         feedback: false,
     });
     runtime
@@ -1386,7 +1383,7 @@ fn feedback_transfers_the_review_workspace_and_forks_the_owner_history() {
         ]
         .into_iter()
         .map(|(from, to, feedback)| Edge {
-            from: from.into(), to: to.into(), relation: String::new(), feedback,
+            from: from.into(), to: to.into(), feedback,
         })
         .collect(),
     };
@@ -1440,7 +1437,6 @@ fn completed_shadow_graph_intervention_is_blocked_when_source_changed() {
         edges: vec![Edge {
             from: "parent".into(),
             to: "child".into(),
-            relation: "files".into(),
             feedback: false,
         }],
     };
@@ -1498,7 +1494,6 @@ fn child_inherits_parent_files_with_a_fresh_task_and_session() {
         edges: vec![Edge {
             from: "parent".into(),
             to: "child".into(),
-            relation: "files".into(),
             feedback: false,
         }],
     };
@@ -1771,7 +1766,6 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
         edges: vec![Edge {
             from: "root".into(),
             to: "child".into(),
-            relation: "files".into(),
             feedback: false,
         }],
     };

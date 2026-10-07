@@ -68,7 +68,7 @@ test('production Planner writes source directly; Merger repairs node and publica
           else if (!scenario.fail) tool = { name: 'node', arguments: { nodes: [{ name: revision ? 'late' : 'verify',
             task: `${label} ${revision ? 'VERIFY_PLANNER_REVISION' : 'VERIFY_PLANNER_SOURCE'}` }] } };
         } else if (revision && turnResults.length === 2) {
-          tool = { name: 'edge', arguments: { edges: [{ from: 'verify', to: 'late', relation: 'retain the verified dependency output' }] } };
+          tool = { name: 'edge', arguments: { edges: [{ from: 'verify', to: 'late' }] } };
         }
       } else if (merger) {
         const system = messages.filter((message: any) => message.role === 'system')
@@ -218,8 +218,8 @@ test('production Planner writes source directly; Merger repairs node and publica
         const nodes = [{ name: 'left', task: `${label} WRITE_LEFT` }, { name: 'right', task: `${label} WRITE_RIGHT` }];
         if (kind === 'node') nodes.push({ name: 'join', task: `${label} VERIFY_RESOLUTION` });
         initial = await api('save_graph', { config: config(repository), graph: { originalGoal: label, nodes,
-          edges: kind === 'node' ? [{ from: 'left', to: 'join', feedback: false, relation: '' },
-            { from: 'right', to: 'join', feedback: false, relation: '' }] : [] } });
+          edges: kind === 'node' ? [{ from: 'left', to: 'join', feedback: false },
+            { from: 'right', to: 'join', feedback: false }] : [] } });
       }
       await api('control', { action: 'approve', runId: initial.runId });
       const state = await until(async () => {

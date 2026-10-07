@@ -148,8 +148,8 @@ fn ignored_inputs_never_overwrite_conflicting_tracked_files() {
 
 #[cfg(unix)]
 #[test]
-fn unix_filename_bytes_and_executable_permissions_are_not_silently_rewritten() {
-    use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+fn unix_backslash_paths_and_executable_permissions_are_preserved() {
+    use std::os::unix::fs::PermissionsExt;
     let (temp, source, files, base, head) = setup();
     let name = ".cache/back\\slash";
     fs::write(source.join(name), "native path").unwrap();
@@ -160,8 +160,29 @@ fn unix_filename_bytes_and_executable_permissions_are_not_silently_rewritten() {
     child(&source, &target, &head, &files, &[version]);
     assert_eq!(fs::read_to_string(target.join(name)).unwrap(), "native path");
     assert_eq!(fs::metadata(target.join(name)).unwrap().permissions().mode() & 0o777, 0o750);
-    fs::write(source.join(std::ffi::OsString::from_vec(b"bad\xff.cache".to_vec())), "unsupported").unwrap();
-    assert!(files.capture(&source, &Uuid::new_v4().to_string(), &head, &[]).unwrap_err().contains("Non-UTF-8 Git paths"));
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_non_utf8_paths_are_rejected_without_lossy_decoding() {
+    use std::os::unix::ffi::OsStringExt;
+    let name = PathBuf::from(std::ffi::OsString::from_vec(b"bad\xff.cache".to_vec()));
+    // Validate rejection even on filesystems that cannot store these names.
+    assert_eq!(path_name(&name).unwrap_err(), "Workspace file paths must be UTF-8");
+    let (_temp, source, files, _, head) = setup();
+    match fs::write(source.join(&name), "unsupported") {
+        Ok(()) => {},
+        // macOS filesystems such as APFS reject invalid UTF-8 with EILSEQ.
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            eprintln!("Filesystem rejects non-UTF-8 names; skipping the Git capture probe: {error}");
+            return;
+        }
+        Err(error) => panic!("Cannot create non-UTF-8 filename for Git capture probe: {error}"),
+    }
+    let version = Uuid::new_v4().to_string();
+    assert!(files.capture(&source, &version, &head, &[]).unwrap_err().contains("Non-UTF-8 Git paths"));
+    assert!(!files.exists(&version));
+    assert_eq!(fs::read_to_string(source.join(name)).unwrap(), "unsupported");
 }
 
 #[test]

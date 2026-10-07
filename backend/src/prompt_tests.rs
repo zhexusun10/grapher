@@ -518,9 +518,9 @@ case "$GRAPHER_MODE" in
   planner)
     printf '%s|%s\n' "$session" "$identity" >> "$(dirname "$0")/session-trace.txt"
     if [ -f "$session/turns.jsonl" ]; then
-      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first v2"},{"name":"after","task":"after"},{"name":"extra","task":"extra"}],"edges":[{"from":"first","to":"after","relation":"files","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first v2"},{"name":"after","task":"after"},{"name":"extra","task":"extra"}],"edges":[{"from":"first","to":"after","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
     else
-      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first"},{"name":"after","task":"after"}],"edges":[{"from":"first","to":"after","relation":"files","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first"},{"name":"after","task":"after"}],"edges":[{"from":"first","to":"after","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
       mkdir -p "$session"
       cwd="$PWD"
       if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
@@ -906,7 +906,7 @@ fn planner_revises_waiting_node_while_unaffected_node_is_running() {
 printf '%s' "$input" | grep -q -- '- keep: running' || exit 11
 printf '%s' "$input" | grep -q -- '- pending: waiting' || exit 12
 printf '%s' "$input" | grep -q 'Update pending' || exit 13
-printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"pending","task":"updated"}],"edges":[{"from":"keep","to":"pending","relation":"files","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"pending","task":"updated"}],"edges":[{"from":"keep","to":"pending","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
 "#).unwrap();
     let config = Config {
@@ -939,7 +939,6 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
                 edges: vec![Edge {
                     from: "keep".into(),
                     to: "pending".into(),
-                    relation: "files".into(),
                     feedback: false,
                 }],
             },
@@ -2208,7 +2207,6 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     from: "z_fast".into(),
                     to: "after_fast".into(),
                     feedback: false,
-                    relation: String::new(),
                 }],
             },
             Config {
@@ -2510,7 +2508,6 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     from: from.into(),
                     to: to.into(),
                     feedback,
-                    relation: String::new(),
                 })
                 .collect(),
             },

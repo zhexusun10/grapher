@@ -1,155 +1,105 @@
 # Why compile agent work?
 
-## Two approaches to multi-agent orchestration
+> **Status:** active
+> **Scope:** Design rationale and trade-offs, not a duplicate runtime contract or performance guarantee.
+> **Maintained with:** [Architecture](overview.md), [compiler.rs](../../backend/src/compiler.rs) and [runtime.rs](../../backend/src/runtime.rs).
 
-When a coding task requires multiple agents, there are two fundamentally different ways to coordinate their work:
+## Two approaches to multi-agent orchestration
 
 ### Conversational orchestration
 
 ```text
-Goal
- ↓
-Supervisor Agent (LLM)
- ↓
-Worker Agent A
- ↓
-Supervisor Agent (LLM) ← decides next step
- ↓
-Worker Agent B
- ↓
-Supervisor Agent (LLM) ← decides next step
- ↓
-...
+Goal -> Supervisor LLM -> Worker A -> Supervisor LLM -> Worker B -> ...
 ```
 
-The supervisor stays in the execution loop, continuously deciding what to do next based on previous results. This is flexible and simple to implement, but:
-
-- **Scheduling is opaque** — The supervisor's next decision is hidden in an LLM conversation
-- **State management is implicit** — Dependencies and workspace state are managed through conversation context
-- **Execution is non-deterministic** — The same input can produce different execution paths
-- **Hard to inspect** — You see agent outputs, but the orchestration logic is in LLM weights
-- **Cannot pause/resume easily** — The supervisor conversation is the execution state
+The supervisor remains in the execution loop, deciding the next step from prior
+results. This suits exploration with an initially unknown structure, but routing,
+dependencies and retry decisions can be implicit in conversation. Inspectability
+and recovery depend on what the surrounding system records; they are not
+impossible, nor does every conversational system have the same limitations.
 
 ### Compiled orchestration (Grapher's approach)
 
 ```text
-Goal
- ↓
-Partitioner (LLM) ← decides: Serial or Graph?
- ↓
-[If Graph:]
-Planner (LLM) ← creates execution plan
- ↓
-Compiler (deterministic) ← validates and compiles
- ↓
-User approval
- ↓
-Rust Runtime (deterministic)
- ├─ Agent A (independent)
- ├─ Agent B (independent)
- └─ Agent C (depends on A + B)
-      ↓
-   Merge & Publish
+Goal -> Partitioner --serial--> one coding agent
+             |
+             '--graph--> Planner -> Compiler -> Approval -> Rust runtime
+                                                          |          |
+                                                        Agent A    Agent B
+                                                          \          /
+                                                            Agent C
+                                                               |
+                                                            Publish
 ```
 
-The planning phase creates an explicit execution graph. After compilation, the Planner stops: scheduling no longer depends on an LLM coordinator's next message.
+The Planner produces explicit tasks and edges, then leaves the scheduler. Runtime
+transitions no longer depend on a coordinator's next model response. Explicit
+revisions can still change the graph; compilation is not an immutable lifetime
+plan. See [Architecture](overview.md) for component boundaries.
 
 ## Key differences
 
-| Aspect | Conversational | Compiled |
-|--------|---------------|----------|
-| **Planning** | Continuous, interleaved with execution | Upfront, before execution |
-| **Scheduling** | LLM decides next step | Deterministic runtime |
-| **Dependencies** | Implicit in conversation | Explicit edges in graph |
-| **Parallelism** | Sequential or ad-hoc | Dependency-aware |
-| **Inspectability** | See outputs only | See graph, dependencies, workspace state |
-| **Approval** | Before each agent call | Before entire graph |
-| **State management** | Conversation context | Workspace snapshots + Git |
-| **Pause/resume** | Difficult | Natural |
+| Concern | Conversation-driven coordination | Compiled coordination |
+| --- | --- | --- |
+| Next action | Coordinator interprets previous results | Runtime applies recorded dependencies/state |
+| Inspection | Requires interpreting the coordination trace | Graph exposes dependencies before execution |
+| Parallelism | Depends on coordinator/tool support | Ready independent tasks can dispatch concurrently |
+| Recovery | Depends on stored conversation and host state | Explicit events, attempts and delivery state |
+| Cost | Less upfront structure | Planning, validation, snapshots and composition |
+
+**Deterministic orchestration is not deterministic model output or wall-clock
+execution order.** Ready branches can finish in different orders; provider calls,
+code quality and successful delivery still need separate verification.
 
 ## Why not always compile?
 
-**Compilation has overhead.** For simple, linear tasks, a single agent is faster and simpler:
-
-- No planning phase
-- No graph compilation
-- No approval step
-- No workspace inheritance complexity
-- Direct access to your project
-
-Grapher uses **Serial** for these cases. Only use **Graph** when you have genuinely independent workstreams:
-
-- Frontend + backend changes
-- Implementation + tests
-- Multiple independent modules
-- Implementation followed by bounded review/rework
-
-**Auto** mode lets the Partitioner choose based on task complexity.
+Small, linear or tightly coupled changes rarely justify graph-planning and
+workspace-composition overhead. Independent modules or implementation/integration/
+review stages may benefit from explicit dependencies. This is a structural choice,
+not a promise that more agents are faster. The [Serial/Graph contract](execution-model.md#serial-and-graph)
+owns the supported routing and approval behavior.
 
 ## Trade-offs
 
 ### Compiled orchestration advantages
 
-- **Explicit dependencies** — The graph shows what depends on what
-- **Deterministic scheduling** — Same graph, same execution order
-- **Inspectable before execution** — Review and approve the plan
-- **Workspace isolation** — Agents don't step on each other's changes
-- **Better parallelism** — True parallel execution when dependencies allow
-- **State is data** — Pause, resume, retry naturally
+Explicit dependencies, inspectable plans and recorded state make scheduling and
+bounded rework easier to test without a persistent model coordinator.
 
 ### Compiled orchestration costs
 
-- **Planning overhead** — Creating and compiling the graph takes time
-- **Upfront commitment** — Must plan entire graph before execution starts
-- **Workspace complexity** — Managing multiple workspaces and merging results
-- **Overkill for simple tasks** — Linear work doesn't benefit from graphs
+Planning takes time. Parallel branches can conflict, inherited environments may
+not relocate, and publication can fail. Private workspaces organize state; they
+do not universally provide a security sandbox.
 
 ### Conversational orchestration advantages
 
-- **Simplicity** — One agent, one conversation
-- **Adaptive** — Can change strategy mid-execution
-- **Low overhead** — No separate planning/compilation phase
-- **Good for exploration** — When you don't know the structure upfront
+A coordinator can adapt to emerging structure without first compiling a graph.
+For linear tasks, one agent also avoids multi-workspace overhead.
 
 ### Conversational orchestration costs
 
-- **Opaque execution** — Can't see or approve the orchestration plan
-- **Sequential bias** — Hard to exploit parallelism
-- **State in conversation** — Pause/resume requires managing conversation history
-- **Non-deterministic** — Same input, different execution paths
+Decisions encoded only in conversation are harder to inspect or validate as
+explicit dependencies. A capable surrounding runtime can mitigate this; the
+comparison is about where orchestration lives, not a blanket product ranking.
 
 ## When to use which
 
-**Use Serial (conversational):**
-- Small, linear coding tasks
-- Exploratory work where structure emerges
-- Tightly coupled changes
-- Quick fixes and iterations
-
-**Use Graph (compiled):**
-- Independent workstreams that can run in parallel
-- Complex dependencies you want to inspect
-- Tasks where workspace isolation prevents conflicts
-- Work you want to approve before full execution
-
-**Use Auto:**
-- Let the Partitioner decide based on task structure
-- Default choice when uncertain
+Use Serial for linear/exploratory work, Graph for useful independent workstreams,
+or Auto for intent-based classification. See [the product route comparison](../../README.md#when-should-i-use-grapher)
+instead of maintaining a second selection checklist here.
 
 ## Design philosophy
 
-Grapher treats multi-agent orchestration as a **compiler problem**, not a conversation problem:
-
-1. **Parse** the goal (Partitioner)
-2. **Plan** the execution structure (Planner)
-3. **Compile** and validate the graph (Compiler)
-4. **Execute** deterministically (Runtime)
-5. **Publish** the result (Merger)
-
-This separation makes the system inspectable, testable, and deterministic where it matters, while keeping model intelligence focused on the creative parts: understanding the goal and implementing solutions.
+Models classify, plan and implement; deterministic host code validates, schedules
+and publishes. The Merger is invoked for actual Git conflicts, not every delivery.
+This separation makes control flow inspectable while retaining model flexibility
+inside each task.
 
 ## Further reading
 
-- [Execution model](execution-model.md) — Planning, sessions, workspace inheritance, publication
-- [Architecture overview](overview.md) — System design and invariants
-- [Filesystem isolation](filesystem-isolation.md) — Workspace boundaries and sandboxing
+- [Architecture overview](overview.md) — Boundaries and invariants
+- [Execution model](execution-model.md) — Planning side effects, sessions and publication
+- [Workspace snapshots and feedback](workspace-snapshots-and-feedback.md) — File inheritance and portability
+- [Runtime](runtime.md) — Scheduling, bounded feedback and persistence
+- [Filesystem isolation](filesystem-isolation.md) — Actual platform permissions

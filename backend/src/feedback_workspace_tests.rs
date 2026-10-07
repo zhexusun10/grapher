@@ -4,9 +4,9 @@ fn graph(names: &[&str]) -> Graph {
     Graph { original_goal: "workspace feedback".into(),
         nodes: names.iter().map(|name| Node { name: (*name).into(), task: (*name).into() }).collect(),
         edges: names.iter().filter(|name| **name != "owner").map(|name| Edge {
-            from: "owner".into(), to: (*name).into(), relation: String::new(), feedback: false,
+            from: "owner".into(), to: (*name).into(), feedback: false,
         }).chain(names.iter().filter(|name| name.starts_with("review")).map(|name| Edge {
-            from: (*name).into(), to: "owner".into(), relation: String::new(), feedback: true,
+            from: (*name).into(), to: "owner".into(), feedback: true,
         })).collect() }
 }
 
@@ -276,7 +276,7 @@ fn missing_historical_ignored_snapshot_fails_before_mutating_the_conversation() 
 fn manually_resolved_ignored_fan_in_is_a_versioned_input() {
     let candidate = Graph { original_goal: "ignored conflict".into(),
         nodes: ["left", "right", "join"].iter().map(|name| Node { name: (*name).into(), task: (*name).into() }).collect(),
-        edges: ["left", "right"].iter().map(|name| Edge { from: (*name).into(), to: "join".into(), relation: String::new(), feedback: false }).collect() };
+        edges: ["left", "right"].iter().map(|name| Edge { from: (*name).into(), to: "join".into(), feedback: false }).collect() };
     let (temp, source, mut runtime) = setup(true, candidate.clone());
     fs::write(source.join(".gitignore"), ".cache/\n").unwrap();
     let script = temp.path().join("agent.sh");

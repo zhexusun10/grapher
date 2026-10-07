@@ -19,7 +19,6 @@ fn graphs_larger_than_64_nodes_compile() {
             .map(|i| Edge {
                 from: format!("node_{}", i - 1),
                 to: format!("node_{i}"),
-                relation: "dependency".into(),
                 feedback: false,
             })
             .collect(),

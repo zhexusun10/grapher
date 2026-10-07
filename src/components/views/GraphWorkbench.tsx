@@ -1,6 +1,5 @@
 import { t, localizeError } from "../../i18n";
 import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
-import { createPortal } from "react-dom";
 import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
 import {
   Code2, ArrowLeft, FolderGit2,
@@ -487,52 +486,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const graphRunRef = useRef(currentRunKey);
   const [readyGraphRunKey, setReadyGraphRunKey] = useState("");
   const isGraphMountedForRun = readyGraphRunKey === currentRunKey;
-
-  // Relation hover tooltip: only the hovered edge identity is React state; the
-  // position is written straight to the DOM node so mouse move never re-renders
-  // the workbench.
-  const [edgeTip, setEdgeTip] = useState<{ text: string } | null>(null);
-  const edgeTipElRef = useRef<HTMLDivElement | null>(null);
-  const edgeTipPointerRef = useRef({ x: 0, y: 0 });
-  const edgeTipFrameRef = useRef<number | null>(null);
-
-  const placeEdgeTip = useCallback((x: number, y: number) => {
-    const el = edgeTipElRef.current;
-    if (!el) return;
-    const pad = 14;
-    const rect = el.getBoundingClientRect();
-    let left = x + pad;
-    let top = y + pad;
-    if (left + rect.width > window.innerWidth - 8) left = x - rect.width - pad;
-    if (top + rect.height > window.innerHeight - 8) top = y - rect.height - pad;
-    el.style.transform = `translate(${Math.max(8, left)}px, ${Math.max(8, top)}px)`;
-  }, []);
-
-  const handleEdgeMouseEnter = useCallback((event: React.MouseEvent, edge: any) => {
-    const text = edge?.data?.relation;
-    edgeTipPointerRef.current = { x: event.clientX, y: event.clientY };
-    setEdgeTip(text ? { text } : null);
-  }, []);
-
-  const handleEdgeMouseMove = useCallback((event: React.MouseEvent) => {
-    edgeTipPointerRef.current = { x: event.clientX, y: event.clientY };
-    // Follow the cursor at most once per frame instead of on every mousemove.
-    if (edgeTipFrameRef.current !== null) return;
-    edgeTipFrameRef.current = requestAnimationFrame(() => {
-      edgeTipFrameRef.current = null;
-      placeEdgeTip(edgeTipPointerRef.current.x, edgeTipPointerRef.current.y);
-    });
-  }, [placeEdgeTip]);
-
-  const handleEdgeMouseLeave = useCallback(() => setEdgeTip(null), []);
-
-  useLayoutEffect(() => {
-    if (edgeTip) placeEdgeTip(edgeTipPointerRef.current.x, edgeTipPointerRef.current.y);
-  }, [edgeTip, placeEdgeTip]);
-
-  useEffect(() => () => {
-    if (edgeTipFrameRef.current !== null) cancelAnimationFrame(edgeTipFrameRef.current);
-  }, []);
 
   if (activeConversationViewRef.current !== conversationViewKey) {
     activeConversationViewRef.current = conversationViewKey;
@@ -1918,9 +1871,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   edges={edges}
                   nodeTypes={nodeTypes}
                   edgeTypes={edgeTypes}
-                  onEdgeMouseEnter={handleEdgeMouseEnter}
-                  onEdgeMouseMove={handleEdgeMouseMove}
-                  onEdgeMouseLeave={handleEdgeMouseLeave}
                   onNodeClick={(_, node) => {
                     if (node.id.startsWith("merger:")) {
                       const target = node.id.slice(7);
@@ -1944,13 +1894,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <Background color={tokens.graphGridDot} gap={20} size={1} />
                   <Controls showInteractive={false} />
                 </ReactFlow>
-
-                {edgeTip && createPortal(
-                  <div ref={edgeTipElRef} className="edge-tooltip" role="tooltip">
-                    {edgeTip.text}
-                  </div>,
-                  document.body,
-                )}
 
                 {state.graph.nodes.length > 0 && (
                   <>

@@ -179,6 +179,9 @@ See [Contributing](CONTRIBUTING.md) and the [testing guide](docs/development/tes
 
 ## Documentation
 
+Start with the [task-oriented documentation index](docs/index.md). Coding agents
+should use [AGENTS.md](AGENTS.md) for navigation and repository constraints.
+
 - [Architecture](docs/architecture/overview.md)
 - [Why compile agent work?](docs/architecture/why-compile.md)
 - [Execution model](docs/architecture/execution-model.md)

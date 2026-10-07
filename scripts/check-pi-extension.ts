@@ -58,6 +58,7 @@ try {
     if (name === "node" || name === "edge") {
       const feedback = JSON.parse(response.content[0].text);
       const saved = JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"));
+      for (const edge of saved.edges) assert.deepEqual(Object.keys(edge), ["from", "to", "feedback"]);
       assert.equal(typeof feedback.applied, "boolean");
       const hasWarnings = Object.hasOwn(feedback, "warnings");
       assert.deepEqual(Object.keys(feedback), feedback.applied
@@ -94,7 +95,8 @@ try {
     assert.equal(wire.parameters.additionalProperties, false);
     assert.equal(wire.parameters.properties[key].type, "array");
     const item = wire.parameters.properties[key].items;
-    for (const field of name === "node" ? ["task", "delete"] : ["relation", "feedback", "delete"]) {
+    assert.deepEqual(Object.keys(item.properties), name === "node" ? ["name", "task", "delete"] : ["from", "to", "feedback", "delete"]);
+    for (const field of name === "node" ? ["task", "delete"] : ["feedback", "delete"]) {
       assert.ok(item.properties[field].anyOf.some((variant: any) => variant.type === "null"));
     }
   }
@@ -103,12 +105,12 @@ try {
   })).content[0].text);
   assert.equal(nullableNodes.applied, true);
   const nullableEdge = JSON.parse((await call("edge", {
-    edges: [{ from: "nullable-build", to: "nullable-review", relation: null, feedback: null, delete: null }],
+    edges: [{ from: "nullable-build", to: "nullable-review", feedback: null, delete: null }],
   })).content[0].text);
   assert.equal(nullableEdge.applied, true);
   assert.equal(JSON.parse((await node({ name: "nullable-build", task: "Updated", delete: null })).content[0].text).applied, true);
   assert.equal(JSON.parse((await edge({
-    from: "nullable-build", to: "nullable-review", relation: null, feedback: null, delete: true,
+    from: "nullable-build", to: "nullable-review", feedback: null, delete: true,
   })).content[0].text).applied, true);
   await node({ name: "nullable-build", task: null, delete: true });
   const emptyGraph = JSON.parse((await node({ name: "nullable-review", delete: true })).content[0].text);
@@ -138,7 +140,7 @@ try {
     applied: true,
     topology: {
       nodes: ["build", "review"],
-      edges: [{ from: "build", to: "review", relation: "", feedback: false }],
+      edges: [{ from: "build", to: "review", feedback: false }],
     },
   });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges[0].feedback, false);
@@ -170,12 +172,12 @@ try {
   assert.equal(warningFeedback.applied, true);
   assert.deepEqual(warningFeedback.warnings, ["W302: review mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback."]);
   assert.equal(await toolResultHook({ toolName: "node", details: warning.details, isError: false }), undefined, "Warnings do not reject mutations");
-  const repaired = await edge({ from: "review", to: "build", relation: "Send an additional instruction", feedback: true });
+  const repaired = await edge({ from: "review", to: "build", feedback: true });
   const repairedFeedback = JSON.parse(repaired.content[0].text);
   assert.equal(repairedFeedback.applied, true);
   assert.deepEqual(repairedFeedback.topology.edges, [
-    { from: "build", to: "review", relation: "", feedback: false },
-    { from: "review", to: "build", relation: "Send an additional instruction", feedback: true },
+    { from: "build", to: "review", feedback: false },
+    { from: "review", to: "build", feedback: true },
   ]);
   assert.deepEqual(repairedFeedback.warnings, [feedbackWarning("review", "build", ["build", "review"])], "Adding a feedback route replaces the missing-route warning with its conditional invalidation scope");
   assert.equal(await toolResultHook({ toolName: "edge", details: repaired.details, isError: false }), undefined, "Feedback scope warnings do not reject mutations");
@@ -237,7 +239,7 @@ fn main() {
   assert.equal(batchResult.applied, true);
   assert.deepEqual(batchResult.topology, {
     nodes: batchNodes.map(node => node.name),
-    edges: batchEdges.map(edge => ({ ...edge, relation: "", feedback: false })),
+    edges: batchEdges.map(edge => ({ ...edge, feedback: false })),
   });
   assert.equal(batchResult.warnings, undefined);
   assert.equal(readFileSync(compilerCalls, "utf8"), "compile\ncompile\n");
@@ -245,8 +247,8 @@ fn main() {
   assert.equal(JSON.parse(batchSaved).originalGoal, "Batch fixture");
   assert.ok(JSON.parse(batchSaved).edges.every((edge: { feedback: boolean }) => edge.feedback === false));
   const redundant = await call("edge", { edges: [
-    { from: "contract", to: "integration", relation: "Integration uses the contract" },
-    { from: "contract", to: "verification", relation: "Verification uses the contract" },
+    { from: "contract", to: "integration" },
+    { from: "contract", to: "verification" },
   ] });
   const redundantResult = JSON.parse(redundant.content[0].text);
   assert.equal(redundantResult.applied, false);
@@ -318,7 +320,9 @@ fn main() {
     ["edge", { edges: null }],
     ["edge", { from: "contract", to: "parser" }],
     ["edge", { from: "contract", edges: batchEdges }],
-    ["edge", { from: "", to: "", relation: "", feedback: false, delete: false, edges: batchEdges }],
+    ["edge", { from: "", to: "", feedback: false, delete: false, edges: batchEdges }],
+    ["edge", { edges: [{ from: "contract", to: "parser", relation: "removed" }] }],
+    ["edge", { edges: [{ from: "contract", to: "parser", relation: null }] }],
     ["edge", { edges: [] }],
     ["edge", { edges: batchEdges, nodes: batchNodes }],
   ] as const) {
@@ -341,11 +345,11 @@ fn main() {
   assert.deepEqual(rewired.topology, {
     nodes: batchNodes.map(node => node.name),
     edges: [
-      { from: "contract", to: "search", relation: "", feedback: false },
-      { from: "search", to: "integration", relation: "", feedback: false },
-      { from: "integration", to: "verification", relation: "", feedback: false },
-      { from: "parser", to: "contract", relation: "", feedback: false },
-      { from: "verification", to: "parser", relation: "", feedback: true },
+      { from: "contract", to: "search", feedback: false },
+      { from: "search", to: "integration", feedback: false },
+      { from: "integration", to: "verification", feedback: false },
+      { from: "parser", to: "contract", feedback: false },
+      { from: "verification", to: "parser", feedback: true },
     ],
   });
   assert.deepEqual(rewired.warnings, [feedbackWarning("verification", "parser", ["contract", "integration", "parser", "search", "verification"])]);

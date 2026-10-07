@@ -1547,7 +1547,6 @@ export default function App() {
                             nextEdges.push({
                               from: e.from,
                               to: e.to,
-                              relation: e.relation || "",
                               feedback: Boolean(e.feedback),
                             });
                           }
@@ -1585,7 +1584,6 @@ export default function App() {
                           nextEdges.push({
                             from: e.from,
                             to: e.to,
-                            relation: e.relation || "",
                             feedback: Boolean(e.feedback),
                           });
                           addedIds.push(graphEdgeId(e));

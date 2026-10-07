@@ -179,7 +179,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
           status: state.nodes[node.name]?.status ?? "waiting",
           attempts: nodeAttempts.length,
           hint: (indexes.hints.get(node.name) ?? [])
-            .map((edge) => `${edge.from} → ${edge.to}: ${edge.relation}${edge.feedback ? " (feedback)" : ""}`)
+            .map((edge) => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`)
             .join("\n"),
           reviewer: outgoing.some((edge) => edge.feedback),
           feedbackExhaustion: feedbackExhaustion.get(node.name),
@@ -230,8 +230,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         className: isNew ? "edge-entering" : undefined,
         animated: !isFeedback && state.nodes[edge.from]?.status === "running",
         markerEnd: isFeedback ? "url(#workflow-arrow-feedback)" : "url(#workflow-arrow-default)",
-        // relation 通过跟随光标的悬浮提示展示，不再画在 SVG 里。
-        data: { isNew, routeX: routing?.routeX, routeSide: routing?.routeSide, relation: edge.relation },
+        data: { isNew, routeX: routing?.routeX, routeSide: routing?.routeSide },
         style: {
           stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
           strokeWidth: 1.5,

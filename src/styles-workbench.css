@@ -1784,41 +1784,6 @@
   border: none !important;
 }
 
-/* React Flow 在未注册边点击回调时会给边加上 .inactive 并设置 pointer-events: none，
-   这会让 hover 无法触发，relation 标签永远不显示。边无需可选中，但必须保留 hover。 */
-.react-flow__edge.inactive {
-  pointer-events: visibleStroke;
-}
-
-/* 边的 relation 跟随光标的悬浮提示。定位由 JS 直接写 transform，避免 mousemove 触发重渲染。 */
-.edge-tooltip {
-  position: fixed;
-  top: 0;
-  left: 0;
-  z-index: 10000;
-  max-width: min(340px, calc(100vw - 24px));
-  padding: 7px 11px;
-  background: var(--bg-canvas, #ffffff);
-  color: var(--text-primary, #0f172a);
-  border: 1px solid var(--border-default, #e2e8f0);
-  border-radius: 7px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
-  font-size: 13px;
-  line-height: 1.45;
-  font-weight: 500;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  pointer-events: none;
-  opacity: 0;
-  animation: edgeTipIn 0.12s ease forwards;
-  will-change: transform;
-}
-
-@keyframes edgeTipIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
 @keyframes edgeDrawIn {
   0% {
     stroke-dashoffset: 800;

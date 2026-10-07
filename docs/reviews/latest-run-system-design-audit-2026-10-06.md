@@ -1,5 +1,8 @@
 # Graph 运行记录与系统设计历史审计（2026-10-06）
 
+> **Status:** archived
+> **Scope:** 审查时的运行证据与建议；当前执行合同见下方警告中的链接。
+
 > **历史快照，不是当前执行合同。** 下文保留审查时的运行事实、实现状态与建议。工作区继承相关结论已被后续实现取代；当前行为以[执行模型](../architecture/execution-model.md)和[工作区快照与反馈](../architecture/workspace-snapshots-and-feedback.md)为准。
 >
 > - 普通依赖与已应用的 feedback 都继承 Git 文件和版本化 ignored 项目资源，并可独占交接已完成的物理目录；并行分支独立可写，节点对话不互相继承。

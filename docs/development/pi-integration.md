@@ -1,5 +1,9 @@
 # Pi integration and upgrades
 
+> **Status:** active
+> **Scope:** Current pinned Pi integration and upgrade procedure. Dated validation sections are revision/host-specific evidence, not blanket current guarantees.
+> **Maintained with:** [pi-compat.ts](../../engine/pi-compat.ts), [pi-lock.json](../../engine/pi-lock.json), [pi-baseline.mjs](../../scripts/pi-baseline.mjs) and [Pi contracts](../../scripts/pi-compat.test.ts).
+
 Pi is Grapher's only production execution-instance engine. Grapher owns graph compilation, orchestration, workspaces, platform boundaries, publication, and event persistence. Pi owns model calls, provider/auth behavior, CLI/SDK, tools, skills, and extensions.
 
 ## Ownership and pinned baseline
@@ -107,53 +111,11 @@ Paid provider calls, interactive OAuth, Linux bubblewrap, macOS Seatbelt and the
 
 ## Historical Pi 1.0.1 compatibility validation
 
-The earlier `pi/` submodule upgrade moved from `v1.0.0` (`a13d35a742c6ef8462812a28fbe1d8c8b7431c32`) to the official `v1.0.1` commit `a7229ddc21810d6245105978033b7df645ecc2f7`. The submodule remains unmodified. `engine/pi-lock.json` and the checksummed model catalog were updated together; the upstream Pi source and upstream dependency lockfile were not patched.
+Historical summary only: `v1.0.0` (`a13d35a742c6ef8462812a28fbe1d8c8b7431c32`) moved to official `v1.0.1` (`a7229ddc21810d6245105978033b7df645ecc2f7`); the gitlink, lock manifest and catalog advanced together without upstream patches. See [release notes](../releases/v0.1.0-alpha.2.md) for that release, not current setup.
 
-The upgrade required these Grapher-side adaptations:
+The upgrade introduced trusted MCP override handling and the reviewed dependency profile, now specified above. Distinct compatibility changes were structured Bash nonzero results (`isError: true`; timeout/cancellation still throw) and canonical Windows planning-history aliases, with missing/unrelated/unattributed paths fail-closed.
 
-1. **MCP project overrides:** Grapher merges external global and dedicated MCP definitions before applying trusted project entries, using Pi's validator. Project overrides can change only `enabled`, `exposure`, and `toolExposure`; global credentials and source provenance remain attached to the base definition. Tests cover precedence, trust restrictions, invalid patches, namespace collisions, and parity with Pi's single-directory loader.
-2. **Bash result contract:** Pi 1.0 returns nonzero commands as `isError: true` with structured exit status. Timeout and cancellation continue to throw. Grapher's smoke assertions now check the result shape without changing execution behavior.
-3. **Isolated integration builds:** Extension, project-binding, and Windows native tests honor `CARGO_TARGET_DIR`, so they can run while another backend binary is in use.
-4. **Windows planning history aliases:** `list_plannings` and `get_planning_snapshot` compare canonical directories and recognize Windows drive/device and UNC aliases for archived paths. Missing, unresolvable, unrelated, and unattributed paths remain fail-closed. Tests cover ordinary and `\\?\\` paths, case and separator aliases, Unicode names, UNC share boundaries, deleted directories, and failed history.
-5. **Reviewed dependency profile:** `pi:setup` installs the exact profile in [engine/pi-dependencies](../../engine/pi-dependencies/) instead of Pi's optional example workspaces. It excludes the Gondolin example and the `shx`/`shelljs`/`fast-glob`/`micromatch`/`braces` chain. [build-pi.mjs](../../scripts/build-pi.mjs) rebuilds the required core artifacts with Node filesystem operations. Runtime launchers verify the profile marker, lock versions, package graph, and workspace bindings before starting Pi.
-
-The validation results were:
-
-| Check | Result |
-| --- | --- |
-| `npm run pi:setup` | Passed; profile installation audited with 0 vulnerabilities and all Pi 1.0.1 core artifacts rebuilt |
-| `npm run pi:verify`, `npm run pi:build` | Passed; baseline, model catalog, profile, and workspace build checks |
-| `npm run pi -- --version` | Reports `1.0.1` |
-| `npm run test:pi` | Passed: 25 Pi CLI/SDK, provider/auth, extension, prompt, MCP, and adapter tests |
-| `npm run pi:upgrade-check` | Passed; Pi contracts, TypeScript, full Rust fixtures, extension tools, native launchers, and project bindings |
-| `npm run check`, `npm run build` | Passed; the production Vite build retains its normal large-chunk warning |
-| `npm run check:docs` and documentation tests | Passed; local Markdown links, anchors, and npm references checked |
-| `npm test` | Passed; full Rust fixture suite, with the existing synthetic performance test intentionally ignored |
-| Targeted repository-binding Rust tests | Passed: four alias/Windows path tests plus the legacy fail-closed filtering test |
-| `npm run test:windows-native` | Passed: native Planner Bash, concurrent Graph execution, inheritance/publication, cancellation, and crash recovery |
-| `npm run test:merger` | Passed: source-native Planner writes/revisions, failed-revision persistence, retained dependency composition, node/source conflict repair, publication, and ordinary/extended Windows bindings |
-| `npm audit --prefix engine/pi-dependencies --audit-level=high` | Passed with 0 info, low, moderate, high, or critical vulnerabilities |
-
-The official upstream Pi lockfile still reports seven high-severity entries if audited directly with `npm audit --prefix pi`: five entries are the unused development `shx` chain and two are the optional Gondolin example's `node-forge` chain. Grapher's default setup does not install that graph, and the production launcher refuses to run an unreviewed Pi installation. The official source and checksum-verified upstream lockfile remain unchanged for baseline provenance.
-
-The remaining acceptance limits are host and provider boundaries: paid provider calls and interactive OAuth were not performed; Linux bubblewrap and macOS Seatbelt were not exercised on this Windows host; and the documented Node.js 22.19 minimum was not separately exercised on this Node.js 24 host. Saved provider/model selections are not rewritten automatically after catalog refreshes. Already running or prewarmed agents and prepared native-runtime copies retain their loaded engine and adapter code, so the backend must be restarted after an engine or adapter upgrade.
-
-To rerun integration checks against the current checkout on Windows, use an isolated Cargo directory when a backend is running:
-
-```powershell
-$env:CARGO_TARGET_DIR = Join-Path $PWD '.grapher/pi-1.0.3-target'
-$env:PI_OFFLINE = '1'
-npm run pi:setup
-npm run pi:verify
-npm run pi:build
-npm run pi -- --version
-npm run test:pi
-npm run test:windows-native
-npm run test:merger
-npm audit --prefix engine/pi-dependencies --audit-level=high
-```
-
-See [Testing](testing.md) for the responsibility of each suite and the platform-specific acceptance boundaries.
+The recorded Windows validation passed setup/build/upgrade checks, 25 Pi contracts, four alias regressions plus the legacy filtering test, Rust fixtures, native/extension/binding and Merger suites, frontend builds, docs checks and a clean reviewed-profile audit. The synthetic performance test remained ignored; paid-provider/OAuth, Linux/macOS isolation and the Node 22.19 minimum were not exercised. These are historical results, not a fresh-checkout pass claim. The duplicated command receipts are omitted; current commands and isolated Windows builds are in [Testing](testing.md).
 
 ## Updating pi-trim independently
 

@@ -1,16 +1,22 @@
 # Filesystem isolation and path mapping
 
+> **Status:** active
+> **Scope:** Actual role/platform permissions and path-mapping limits, not a future isolation proposal.
+> **Maintained with:** [native.rs](../../backend/src/native.rs), [sandbox.rs](../../backend/src/sandbox.rs), [linux_sandbox.rs](../../backend/src/linux_sandbox.rs) and [native acceptance](../../scripts/windows-native.test.ts).
+
 **Use trusted projects, extensions, and tools.** Private Git state, filesystem access controls, and model-visible path adaptation are separate mechanisms. None is a general malicious-multi-tenant or credential-protection guarantee.
 
 ## Roles and permissions
 
-| Role | Working directory | Tool policy |
+| Role | Working directory | Access boundary |
 | --- | --- | --- |
-| Partitioner | Source project | Classification only; `pi-trim` only, no user extensions/MCP/skills or tools |
-| Planner | Source project | `node`, `edge`, native `read`/`bash`, selected global extensions/MCP/skills |
-| Serial agent | Source project | Pi tools and trusted skills/extensions |
-| Graph node | Private Run repository with one active writer; ordinary dependencies and applied feedback may hand off a completed directory | Pi tools with Graph path adaptation |
-| Merger | Conflicted node workspace or source project | Conflict-repair tools and `pi-trim`; no user extensions/MCP/skills or automatic context |
+| Partitioner | Source project | Host-user process; classification has no tools |
+| Planner | Source project | Host-user native Bash, without write-command filtering |
+| Serial agent | Source project | Host-user project access |
+| Graph node | Current private Run repository | Platform policy below; path adaptation is not additional permission |
+| Merger | Conflicted node workspace or source project | Follows that workspace's platform/source policy, without extra conflict-repair access |
+
+Exact tool, extension, MCP, skill and context loading belongs to the [Pi role policy](../development/pi-integration.md#role-loading-policy).
 
 Planner runs with source-native permissions, without a write-command filter or private-workspace source boundary. Its Bash writes affect the source immediately; Reject, failure, and cancellation do not roll them back. Private Merger filesystem permissions follow the platform policy below; conflict repair does not grant source/sibling access. See [Planning and approval](execution-model.md#planning-and-approval).
 
@@ -28,7 +34,7 @@ The mount layout exposes the current private repository/session, masks source an
 
 An outer Docker/Harbor container is **not** a substitute for these per-execution boundaries. See [Harbor requirements](../benchmarks/harbor.md#linux-task-environment).
 
-On macOS/Linux, a workspace using Git alternates also has read access to the bound source's Git object database. Source working files and unrelated refs remain restricted, but object-store access can expose historical file contents and other stored snapshots. This is not a history-confidentiality boundary. The object database is protected from writes by private executions; see [workspace storage](execution-model.md#backend-git-storage).
+On macOS/Linux, a workspace using Git alternates also has read access to the bound source's Git object database. Source working files and unrelated refs remain restricted, but object-store access can expose historical file contents and other stored snapshots. This is not a history-confidentiality boundary. The object database is protected from writes by private executions; see [workspace storage](workspace-snapshots-and-feedback.md#backend-git-storage).
 
 ### Windows
 
@@ -73,17 +79,17 @@ Model-visible normalization is not a byte-for-byte file representation or a data
 
 ## Inherited project resources
 
-Ordinary dependencies and applied feedback use the same project-state channels: Git snapshots plus separately recorded ignored files. A linear ordinary chain can pass one completed directory between writers; applied feedback transfers the sender's completed directory to its target. Fan-out materializes independent writable state for concurrent branches, and fan-in composes recorded inputs in an available directory. Neither inheritance route assigns an active writer's directory to a second execution or requires additional sibling-write permissions; the platform access boundaries above remain unchanged. The backend prepares state and any required session-history forks before launching the private process, so macOS/Linux executors do not need new source/sibling write permissions.
+[Workspace inheritance](workspace-snapshots-and-feedback.md) does not expand source/sibling write permissions. The backend prepares inherited files and session forks before launching the private process; the platform boundaries above remain unchanged.
 
-Runtime/Git internals are excluded. Internal directory links are rebased to the destination (Windows uses junctions); external directory links are rejected rather than copied or granted broad access. External file links still need their targets permitted by the existing platform policy. Source-local ignored secrets are project files too; inheritance is not a credential filter.
+Internal directory links are rebased (Windows uses junctions); external directory links are rejected rather than granted broad access. External file targets remain subject to platform permissions. Source-local ignored secrets can be inherited too: snapshots are not a credential filter.
 
-Copied `.venv` files can reuse installed packages when invoked through the current workspace's interpreter, but activation/launcher paths and code-internal absolute paths are not transparently relocated. A copied environment is not a process-level namespace or a stable-path shared volume. Use relative resource paths and the current interpreter; the path-adapter limitations above still apply.
+The [environment portability boundary](workspace-snapshots-and-feedback.md#environment-portability-boundary) and tool-mapping limits above apply to copied environments; copying is not a process namespace or stable-path volume.
 
 ## Shared runtime and external state
 
-Partitioner and Planner launch the installed entrypoint directly in the source cwd; their launchers do not create project copies or require a private engine copy. Graph preflight/startup may separately prewarm one shared Pi engine/dependency copy for later private node execution using [prepare-native-runtime.mjs](../../scripts/prepare-native-runtime.mjs). This is a content-keyed cache shared across workspaces and backend processes, not a Partitioner/Planner project workspace, and permits self-hosted Graph execution without write access to protected source engine files. Restart after adapter changes. Shared reader leases, preparation-failure removal, persistent reuse and obsolete-copy recovery follow the [runtime cleanup lifecycle](execution-model.md#storage-and-cleanup).
+Private executions load a verified shared engine copy prepared by [prepare-native-runtime.mjs](../../scripts/prepare-native-runtime.mjs), allowing self-hosting without source-engine write access. The copy holds engine/dependencies, not project snapshots or conversations. Cache paths, leases and reclamation belong to [Storage and cleanup](execution-model.md#storage-and-cleanup); role/process preparation belongs to [Pi prewarming](../development/pi-integration.md#prewarming-and-prepared-runtime).
 
-The runtime-copy parent defaults to the OS cache's `workspaces/.grapher-workspaces/` (Windows: `%LOCALAPPDATA%\Grapher\workspaces\.grapher-workspaces`). `GRAPHER_NATIVE_RUNTIME_PARENT` overrides it. Pi authentication uses its dedicated configuration directory, not a per-node credential vault. Model tools may still read authentication material available to their process. Shared HOME, temporary files, hard links, services, and global configuration are outside Git node-version isolation.
+Pi authentication uses its dedicated configuration directory, not a per-node credential vault. Model tools may read auth material available to their process. Shared HOME, temporary files, hard links, services and global configuration are outside Git node-version isolation.
 
 ## Process lifecycle
 

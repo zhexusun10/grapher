@@ -59,8 +59,8 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
           { name: 'join', task: `${label} JOIN_BRANCHES: verify a.txt and b.txt and create joined.txt containing alpha-beta.` },
         ] } };
         if (results === 2) tool = { name: 'edge', arguments: { edges: [
-          { from: 'alpha', to: 'join', relation: 'alpha result' },
-          { from: 'beta', to: 'join', relation: 'beta result' },
+          { from: 'alpha', to: 'join' },
+          { from: 'beta', to: 'join' },
         ] } };
       } else if (results === 0) {
         let command;

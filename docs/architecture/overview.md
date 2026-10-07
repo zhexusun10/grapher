@@ -1,5 +1,9 @@
 # Architecture
 
+> **Status:** active
+> **Scope:** System boundaries and invariants; detailed execution/runtime contracts are linked below.
+> **Maintained with:** [compiler.rs](../../backend/src/compiler.rs), [runtime.rs](../../backend/src/runtime.rs) and [core tests](../../backend/tests/core.rs).
+
 > Don't orchestrate agents. Compile work.
 
 Grapher is a local multi-agent coding system. Models route, plan, and perform coding tasks; a Rust compiler and runtime own validation, scheduling, state transitions, and delivery. The planner is not a persistent execution coordinator.
@@ -50,17 +54,15 @@ The production [Planner prompt](../../backend/resources/prompts/planner.md) and 
 
 ## Runtime
 
-A node is a stable task definition; an execution is one recorded attempt. The first attempt starts a fresh Pi session, even when it takes over a parent's physical directory. Node follow-ups continue that node's own history; when its result is represented in a unique terminal workspace, a follow-up updates that combined tree without rerunning completed descendants. Applied feedback transfers the sender's completed workspace while continuing the target's own history through an explicit session fork; other agents' conversations are not copied.
+A node is a stable task definition; an execution is a recorded attempt, not necessarily a new conversation. Ready nodes dispatch under Run-scoped limits; failure blocks dependent branches, not unrelated work.
 
-Ready nodes dispatch when dependencies and concurrency slots permit. Failure blocks dependent branches, not unrelated work. Feedback explicitly invalidates affected results rather than asking a coordinator to reinterpret the conversation.
-
-The same backend can drive multiple Runs. Concurrency and pause are Run-scoped; a runtime data directory has one backend writer. See [Runtime](runtime.md) for limits, feedback, events, and recovery.
+[Runtime](runtime.md) owns scheduling, feedback, events and recovery. [Session semantics](execution-model.md#sessions-follow-ups-and-history-edits) own new conversations, continuation and history edits.
 
 ## Workspace inheritance
 
-Ordinary dependency edges define one-way workspace inheritance. Roots start from the latest recorded source; a child waits for its parents to complete and starts from their resulting filesystem state, including versioned ignored files. Multiple parents' states are combined before the child runs. Both ordinary dependencies and applied feedback can exclusively hand off a completed physical directory. Linear chains normally reuse one directory; fan-out gives concurrent branches independent writable views, and fan-in combines their recorded results in an available directory. Feedback retains its separate verdict, budget, generation, drain, and invalidation rules. Conversations are never inherited.
+Ordinary dependencies and applied feedback inherit completed project state, including ignored resources—not other nodes' conversations. Private repositories are reusable single-writer execution slots, not permanent node identities or security sandboxes.
 
-Each active writer uses a private repository with its own `.git` directory, despite the `.grapher-worktrees` directory name. Directories are reusable Run execution slots, not permanent node identities. The backend uses Git snapshots and merges to implement inheritance and publication; committing or sending a result is not an agent-to-agent protocol. These repositories normally borrow the source Git object store rather than copy all history. Ordinary project folders use external shadow Git metadata rather than receiving a new `.git` directory. See [Execution model](execution-model.md#node-workspaces-and-inheritance) for the storage mechanism and conflict-recovery limits.
+[Workspace snapshots and feedback](workspace-snapshots-and-feedback.md) owns the Git/ignored channels, handoff/fan-out/fan-in rules, storage details and portability limits. [Execution model](execution-model.md#parent-composition-conflicts) owns user-facing conflict recovery.
 
 ## Feedback
 
@@ -75,15 +77,13 @@ backend ---/     ^            |
                  '--feedback--'
 ```
 
-Alternatively, give each implementation its own reviewer. One reviewer cannot dynamically choose between two feedback targets.
+Alternatively, give each implementation its own reviewer. One reviewer cannot dynamically choose between two feedback targets. See [bounded feedback](runtime.md#bounded-feedback) for verdicts, budgets and invalidation, and [workspace handoff](workspace-snapshots-and-feedback.md#feedback-is-an-exclusive-workspace-handoff) for file/session transfer.
 
 ## Publication
 
-Node completion is not Graph completion. Valid terminal heads must be published to the user's project. At final publication, only actual Git conflicts invoke a dedicated Merger; it does not wake the Planner. Other publication errors remain explicit failures.
+Node completion is not Graph completion: successful publication emits `PublicationCompleted`. The [publication contract](execution-model.md#final-publication) defines retained results, retries and conflict-only Merger use.
 
-Failed publication preserves the working state and heads. Retrying publication does not rerun completed nodes. A successful publication emits `PublicationCompleted`; interrupted work does not silently restart.
-
-Planner writes reach the source immediately, **before graph approval**, without a separate merge. Approval and approved revisions snapshot the source for later node inputs. Rejecting a graph, planning failure, and cancellation are not rollbacks. See [Execution model](execution-model.md#planning-and-approval).
+Planner writes reach the source **before graph approval**; rejection, failure and cancellation are not rollbacks. See [Planning and approval](execution-model.md#planning-and-approval).
 
 ## Invariants
 

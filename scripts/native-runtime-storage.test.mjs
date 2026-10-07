@@ -76,7 +76,12 @@ test('cache identity follows engine inputs, not workspace, cache parent or insta
   assert.equal(f.key(), initial);
   const relocated = mkdtempSync(join(tmpdir(), 'grapher-runtime-relocated-'));
   t.after(() => rmSync(relocated, { recursive: true, force: true }));
-  cpSync(f.root, relocated, { recursive: true });
+  // Node 22's native recursive copy can crash on Unicode Windows paths.
+  // Select the portable walker, matching prepare-native-runtime.mjs.
+  cpSync(f.root, relocated, {
+    recursive: true,
+    filter: process.platform === 'win32' ? () => true : undefined,
+  });
   assert.equal(f.key(relocated), initial);
   assert.equal(f.key(f.root, f.parent, relocated), initial, 'cached artifacts are checked by the installed verifier');
   mkdirSync(join(relocated, 'engine/.grapher-masks-active/empty'), { recursive: true });

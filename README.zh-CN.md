@@ -173,6 +173,7 @@ npm test                      # Rust 固定样例；无需付费模型
 ## 文档导航
 
 `docs/` 采用英文作为权威版本，中文 README 保留产品入口。
+先按任务查看[文档索引](docs/index.md)；Coding Agent 从 [AGENTS.md](AGENTS.md) 获取导航与开发约束。
 
 - [为什么编译 Agent 工作？](docs/architecture/why-compile.md)
 - [架构](docs/architecture/overview.md)

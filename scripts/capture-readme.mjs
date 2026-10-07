@@ -18,12 +18,12 @@ const graph = {
     { name: "review", task: "Check the integrated task board against the acceptance criteria. Accept it or request bounded rework from the integration node." },
   ],
   edges: [
-    { from: "api_contract", to: "frontend", relation: "Shared API contract", feedback: false },
-    { from: "api_contract", to: "backend", relation: "Shared API contract", feedback: false },
-    { from: "frontend", to: "integration", relation: "Frontend Git state", feedback: false },
-    { from: "backend", to: "integration", relation: "Backend Git state", feedback: false },
-    { from: "integration", to: "review", relation: "Integrated Git state", feedback: false },
-    { from: "review", to: "integration", relation: "Bounded revision request", feedback: true },
+    { from: "api_contract", to: "frontend", feedback: false },
+    { from: "api_contract", to: "backend", feedback: false },
+    { from: "frontend", to: "integration", feedback: false },
+    { from: "backend", to: "integration", feedback: false },
+    { from: "integration", to: "review", feedback: false },
+    { from: "review", to: "integration", feedback: true },
   ],
 };
 const config = {

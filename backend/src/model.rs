@@ -18,13 +18,28 @@ pub struct Node {
     pub task: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Edge {
     pub from: String,
     pub to: String,
-    pub relation: String,
     pub feedback: bool,
+}
+
+impl<'de> Deserialize<'de> for Edge {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct EdgeInput {
+            from: String,
+            to: String,
+            feedback: bool,
+            // Read historical graphs/events without retaining or re-emitting relation.
+            #[serde(default, rename = "relation")]
+            _legacy_relation: Option<serde::de::IgnoredAny>,
+        }
+        let input = EdgeInput::deserialize(deserializer)?;
+        Ok(Self { from: input.from, to: input.to, feedback: input.feedback })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
