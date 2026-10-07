@@ -14,7 +14,7 @@ const delay = ms => new Promise(done => setTimeout(done, ms));
 test('Windows projects/backends share a persistent engine and default workspaces to LocalAppData', {
   skip: process.platform !== 'win32', timeout: 180000,
 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'grapher-shared-runtime-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-shared-runtime-')));
   const backends = [];
   let modelCalls = 0;
   const modelServer = createServer(async (request, response) => {
@@ -113,7 +113,8 @@ test('Windows projects/backends share a persistent engine and default workspaces
       return completed.phase === 'completed';
     }, 'Graph did not publish');
     assert.equal(completed.executions.length, 1);
-    assert.ok(completed.executions[0].worktree.toLowerCase().startsWith(join(cache, '.grapher-worktrees', draft.runId).toLowerCase()));
+    const canonicalCache = await realpath(cache);
+    assert.ok(resolve(completed.executions[0].worktree).toLowerCase().startsWith(resolve(canonicalCache, '.grapher-worktrees', draft.runId).toLowerCase()));
     assert.equal(await readFile(join(first.source, 'base.txt'), 'utf8'), 'keep');
     await stop(first);
     assert.equal((await readdir(engines)).filter(name => name.startsWith('grapher-native-engine-')).length, 1);
