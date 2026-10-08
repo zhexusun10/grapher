@@ -28,6 +28,9 @@ jobs:
           node-version: '22.19.0'
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install Linux tools and verify Graph namespace support
         if: runner.os == 'Linux'
         run: |
@@ -64,6 +67,13 @@ jobs:
       - name: Verify macOS filesystem policy with real child processes
         if: runner.os == 'macOS'
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --test sandbox
+      - name: Select an explicit short Windows test parent (native package path limits)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"GRAPHER_ENV_TEST_PARENT=C:\g-env-tests" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+      - name: Verify managed E/L with real native Python, editable package and lifecycle
+        timeout-minutes: 45
+        run: npm run test:environment
       - name: Verify production Planner revisions, dependency composition and Merger (local model)
         timeout-minutes: 8
         run: npm run test:merger

@@ -7,8 +7,8 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
-mod logs;
 mod cleanup;
+mod logs;
 pub use logs::{LogPage, MigrationReport};
 const CHECKPOINT_INTERVAL: usize = 128;
 
@@ -32,6 +32,16 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::Approved { .. } => "approved",
         EventKind::SourceSnapshotted { .. } => "source_snapshotted",
         EventKind::SourceFilesRecorded { .. } => "source_files_recorded",
+        EventKind::EnvironmentPolicyRequested => "environment_policy_requested",
+        EventKind::EnvironmentPolicyResolved { .. } => "environment_policy_resolved",
+        EventKind::EnvironmentInitialized { .. } => "environment_initialized",
+        EventKind::ExecutionInputRecorded { .. } => "execution_input_recorded",
+        EventKind::ExecutionResultRecorded { .. } => "execution_result_recorded",
+        EventKind::ResultPublished { .. } => "result_published",
+        EventKind::ResultExecutionStarted { .. } => "result_execution_started",
+        EventKind::ResultExecutionPrepared { .. } => "result_execution_prepared",
+        EventKind::ResultExecutionFinished { .. } => "result_execution_finished",
+        EventKind::ResultExecutionFailed { .. } => "result_execution_failed",
         EventKind::WorkspaceFilesChanged { .. } => "workspace_files_changed",
         EventKind::GraphRevised { .. } => "graph_revised",
         EventKind::DraftEdited { .. } => "draft_edited",
@@ -70,6 +80,8 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
             Some(&execution.id)
         }
         EventKind::Prepared { execution_id, .. }
+        | EventKind::ExecutionInputRecorded { execution_id, .. }
+        | EventKind::ExecutionResultRecorded { execution_id, .. }
         | EventKind::Steered { execution_id, .. }
         | EventKind::Output { execution_id, .. }
         | EventKind::Finished { execution_id, .. }
@@ -80,13 +92,20 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
         | EventKind::MergerFinished { execution_id, .. }
         | EventKind::MergerFailed { execution_id, .. } => Some(execution_id),
         EventKind::Failed { execution_id, .. } => execution_id.as_deref(),
+        EventKind::ResultExecutionStarted { input, .. } => Some(&input.generation),
+        EventKind::ResultExecutionFinished { descriptor } => Some(&descriptor.result.generation),
+        EventKind::ResultExecutionFailed { generation, .. } => Some(generation),
         _ => None,
     }
 }
 
 fn created_planning_ids(kind: &EventKind) -> (Option<&str>, Option<&str>) {
     match kind {
-        EventKind::Created { planning_id, planning, .. } => (
+        EventKind::Created {
+            planning_id,
+            planning,
+            ..
+        } => (
             planning_id.as_deref(),
             planning.as_ref().map(|p| p.planning_id.as_str()),
         ),
@@ -201,7 +220,11 @@ impl Store {
         connection
             .execute_batch("COMMIT")
             .map_err(|e| e.to_string())?;
-        Ok(Self { connection, appended_since_checkpoint: Cell::new(0), execution_offsets: RefCell::new(HashMap::new()) })
+        Ok(Self {
+            connection,
+            appended_since_checkpoint: Cell::new(0),
+            execution_offsets: RefCell::new(HashMap::new()),
+        })
     }
 
     pub fn append(&self, state: &mut Snapshot, mut kind: EventKind) -> Result<(), String> {
@@ -210,24 +233,48 @@ impl Store {
         }
         let _write_guard = store_write_guard()?;
         self.ensure_not_deleted(&state.run_id)?;
-        if let EventKind::Finished { execution_id, output, output_bytes, metrics, .. } = &mut kind {
+        if let EventKind::Finished {
+            execution_id,
+            output,
+            output_bytes,
+            metrics,
+            ..
+        } = &mut kind
+        {
             if !output.is_empty() {
-                let started = state.executions.iter().chain(&state.mergers)
-                    .find(|e| e.id == *execution_id).map(|e| e.started_at).unwrap_or(0);
-                *metrics = metrics.take().or_else(|| Some(crate::model::parse_execution_metrics(output, started, now())));
+                let started = state
+                    .executions
+                    .iter()
+                    .chain(&state.mergers)
+                    .find(|e| e.id == *execution_id)
+                    .map(|e| e.started_at)
+                    .unwrap_or(0);
+                *metrics = metrics.take().or_else(|| {
+                    Some(crate::model::parse_execution_metrics(
+                        output,
+                        started,
+                        now(),
+                    ))
+                });
                 *output_bytes = output.len();
                 self.replace_logs(&state.run_id, execution_id, output)?;
                 *output = String::new();
             }
         }
-        let initial = if let EventKind::Started { execution } | EventKind::MergerStarted { execution } = &mut kind {
-            if execution.output.is_empty() { None } else {
+        let initial = if let EventKind::Started { execution }
+        | EventKind::MergerStarted { execution } = &mut kind
+        {
+            if execution.output.is_empty() {
+                None
+            } else {
                 let text = std::mem::take(&mut execution.output);
                 self.replace_logs(&state.run_id, &execution.id, &text)?;
                 execution.output_bytes = text.len();
                 Some((execution.id.clone(), text))
             }
-        } else { None };
+        } else {
+            None
+        };
         let timestamp = now();
         let payload = serde_json::to_string(&kind).map_err(|error| error.to_string())?;
         let (direct, nested) = created_planning_ids(&kind);
@@ -246,12 +293,25 @@ impl Store {
         };
         apply(state, &event);
         if let Some((id, text)) = initial {
-            if let Some(execution) = state.executions.iter_mut().chain(state.mergers.iter_mut()).find(|e| e.id == id) {
+            if let Some(execution) = state
+                .executions
+                .iter_mut()
+                .chain(state.mergers.iter_mut())
+                .find(|e| e.id == id)
+            {
                 crate::model::append_live_output(execution, &text);
             }
         }
-        if matches!(event.kind, EventKind::Finished { .. } | EventKind::Failed { .. } | EventKind::MergerFinished { .. } | EventKind::MergerFailed { .. }) {
-            if let Some(id) = event_execution_id(&event.kind) { self.forget_log_cursor(id); }
+        if matches!(
+            event.kind,
+            EventKind::Finished { .. }
+                | EventKind::Failed { .. }
+                | EventKind::MergerFinished { .. }
+                | EventKind::MergerFailed { .. }
+        ) {
+            if let Some(id) = event_execution_id(&event.kind) {
+                self.forget_log_cursor(id);
+            }
             self.save_checkpoint(state);
         }
         self.note_appended(state, 1);
@@ -265,12 +325,23 @@ impl Store {
         state: &mut Snapshot,
         kinds: Vec<EventKind>,
     ) -> Result<(), String> {
-        if kinds.iter().all(|kind| matches!(kind, EventKind::Output { .. })) {
+        if kinds
+            .iter()
+            .all(|kind| matches!(kind, EventKind::Output { .. }))
+        {
             return self.append_logs(state, kinds);
         }
-        if kinds.iter().any(|kind| matches!(kind, EventKind::Output { .. } | EventKind::Started { .. } | EventKind::MergerStarted { .. })
-            || matches!(kind, EventKind::Finished { output, .. } if !output.is_empty())) {
-            for kind in kinds { self.append(state, kind)?; }
+        if kinds.iter().any(|kind| {
+            matches!(
+                kind,
+                EventKind::Output { .. }
+                    | EventKind::Started { .. }
+                    | EventKind::MergerStarted { .. }
+            ) || matches!(kind, EventKind::Finished { output, .. } if !output.is_empty())
+        }) {
+            for kind in kinds {
+                self.append(state, kind)?;
+            }
             return Ok(());
         }
         let count = kinds.len();
@@ -295,14 +366,20 @@ impl Store {
             });
         }
         transaction.commit().map_err(|e| e.to_string())?;
-        let terminal = events.iter().any(|event| matches!(event.kind, EventKind::Finished { .. }));
+        let terminal = events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::Finished { .. }));
         for event in events {
             apply(state, &event);
             if matches!(event.kind, EventKind::Finished { .. }) {
-                if let Some(id) = event_execution_id(&event.kind) { self.forget_log_cursor(id); }
+                if let Some(id) = event_execution_id(&event.kind) {
+                    self.forget_log_cursor(id);
+                }
             }
         }
-        if terminal { self.save_checkpoint(state); }
+        if terminal {
+            self.save_checkpoint(state);
+        }
         self.note_appended(state, count);
         Ok(())
     }
@@ -350,7 +427,9 @@ impl Store {
     pub fn vacuum(&self) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
         self.connection
-            .execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute_batch(
+                "PRAGMA auto_vacuum=INCREMENTAL; VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
+            )
             .map_err(|error| error.to_string())
     }
 
@@ -373,9 +452,15 @@ impl Store {
 
     /// Missing row: legacy database (select latest). NULL: explicitly empty workspace.
     pub fn selected_run(&self) -> Result<Option<String>, String> {
-        let selection: Option<Option<String>> = self.connection.query_row(
-            "SELECT run_id FROM workspace_selection WHERE id=1", [], |row| row.get(0),
-        ).optional().map_err(|e| e.to_string())?;
+        let selection: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT run_id FROM workspace_selection WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
         match selection {
             Some(run) => Ok(run),
             None => Ok(self.runs()?.into_iter().next()),
@@ -392,18 +477,25 @@ impl Store {
     }
 
     pub fn run_was_deleted(&self, run_id: &str) -> Result<bool, String> {
-        self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM deleted_runs WHERE run_id=?1)",
-            [run_id], |row| row.get(0),
-        ).map_err(|e| e.to_string())
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM deleted_runs WHERE run_id=?1)",
+                [run_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())
     }
 
     pub fn deleted_runs(&self) -> Result<Vec<String>, String> {
-        let mut statement = self.connection.prepare("SELECT run_id FROM deleted_runs")
+        let mut statement = self
+            .connection
+            .prepare("SELECT run_id FROM deleted_runs")
             .map_err(|error| error.to_string())?;
-        let runs = statement.query_map([], |row| row.get(0))
+        let runs = statement
+            .query_map([], |row| row.get(0))
             .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         Ok(runs)
     }
 
@@ -546,7 +638,11 @@ impl Store {
         for row in rows {
             let (event_sequence, timestamp, payload) = row.map_err(|error| error.to_string())?;
             let kind = serde_json::from_str(&payload).map_err(|error| error.to_string())?;
-            let event = Event { sequence: event_sequence, timestamp, kind };
+            let event = Event {
+                sequence: event_sequence,
+                timestamp,
+                kind,
+            };
             if event_sequence > sequence {
                 apply(&mut state, &event);
             } else {
@@ -554,7 +650,9 @@ impl Store {
             }
         }
         for execution in state.executions.iter_mut().chain(state.mergers.iter_mut()) {
-            execution.output_bytes = execution.output_bytes.max(self.log_bytes(run_id, &execution.id)?);
+            execution.output_bytes = execution
+                .output_bytes
+                .max(self.log_bytes(run_id, &execution.id)?);
             execution.output = String::new();
         }
         state.run_metrics = Some(state.compute_run_metrics());
@@ -565,7 +663,11 @@ impl Store {
         self.delete_run_with_cleanup(run_id, None)
     }
 
-    pub fn delete_run_with_cleanup(&self, run_id: &str, cleanup: Option<&crate::cleanup::Manifest>) -> Result<(), String> {
+    pub fn delete_run_with_cleanup(
+        &self,
+        run_id: &str,
+        cleanup: Option<&crate::cleanup::Manifest>,
+    ) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
         let tx = self
             .connection
@@ -573,16 +675,25 @@ impl Store {
             .map_err(|e| e.to_string())?;
         // The cleanup manifest commits with the tombstone and event deletion.
         // A crash or locked file after commit cannot erase cleanup ownership.
-        if let Some(cleanup) = cleanup { self.insert_cleanup(&tx, run_id, cleanup)?; }
-        tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)", [run_id])
-            .map_err(|e| e.to_string())?;
-        tx.execute("UPDATE workspace_selection SET run_id=NULL WHERE run_id=?1", [run_id])
-            .map_err(|e| e.to_string())?;
+        if let Some(cleanup) = cleanup {
+            self.insert_cleanup(&tx, run_id, cleanup)?;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)",
+            [run_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE workspace_selection SET run_id=NULL WHERE run_id=?1",
+            [run_id],
+        )
+        .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM checkpoints WHERE run_id=?1", [run_id])
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM events WHERE run_id=?1", [run_id])
             .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM execution_logs WHERE run_id=?1", [run_id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM execution_logs WHERE run_id=?1", [run_id])
+            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         self.execution_offsets.borrow_mut().clear();
         self.reclaim_deleted_pages();
@@ -593,7 +704,10 @@ impl Store {
         self.clear_with_cleanup(&[])
     }
 
-    pub fn clear_with_cleanup(&self, cleanups: &[(String, crate::cleanup::Manifest)]) -> Result<(), String> {
+    pub fn clear_with_cleanup(
+        &self,
+        cleanups: &[(String, crate::cleanup::Manifest)],
+    ) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
         let tx = self
             .connection
@@ -601,17 +715,25 @@ impl Store {
             .map_err(|e| e.to_string())?;
         for (run_id, cleanup) in cleanups {
             self.insert_cleanup(&tx, run_id, cleanup)?;
-            tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)", [run_id]).map_err(|e| e.to_string())?;
-        }
-        tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) SELECT DISTINCT run_id FROM events", [])
+            tx.execute(
+                "INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)",
+                [run_id],
+            )
             .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO deleted_runs(run_id) SELECT DISTINCT run_id FROM events",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO workspace_selection(id,run_id) VALUES(1,NULL) ON CONFLICT(id) DO UPDATE SET run_id=NULL", [])
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM checkpoints", [])
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM events", [])
             .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM execution_logs", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM execution_logs", [])
+            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         self.execution_offsets.borrow_mut().clear();
         self.reclaim_deleted_pages();
@@ -621,7 +743,9 @@ impl Store {
     fn reclaim_deleted_pages(&self) {
         // Best effort after the delete commits: errors must not leave callers
         // believing a committed deletion failed (or retaining stale Services).
-        let _ = self.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let _ = self
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         // rusqlite::execute_batch steps a row-producing PRAGMA only once.
         // incremental_vacuum yields after EACH reclaimed page, so consume it
         // fully. Bound work to 4096 pages (~16 MiB at the default page size)
@@ -632,7 +756,9 @@ impl Store {
             }
         }
         // Promote the truncation from WAL to the physical database file.
-        let _ = self.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let _ = self
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 
     pub fn find_repository_by_planning_id(&self, target_planning_id: &str) -> Option<String> {

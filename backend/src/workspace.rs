@@ -69,18 +69,27 @@ fn default_cache_root(platform: &str, env: impl Fn(&str) -> Option<PathBuf>) -> 
         env("USERPROFILE").or_else(|| env("HOME"))
     } else {
         env("HOME").or_else(|| env("USERPROFILE"))
-    }.unwrap_or_else(std::env::temp_dir);
+    }
+    .unwrap_or_else(std::env::temp_dir);
     match platform {
-        "windows" => env("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData/Local")).join("Grapher"),
+        "windows" => env("LOCALAPPDATA")
+            .unwrap_or_else(|| home.join("AppData/Local"))
+            .join("Grapher"),
         "macos" => home.join("Library/Caches/Grapher"),
-        _ => env("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache")).join("grapher"),
+        _ => env("XDG_CACHE_HOME")
+            .unwrap_or_else(|| home.join(".cache"))
+            .join("grapher"),
     }
 }
 
 fn absolute_path(path: PathBuf) -> PathBuf {
     if path.is_relative() {
-        std::env::current_dir().map(|cwd| cwd.join(&path)).unwrap_or(path)
-    } else { path }
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    } else {
+        path
+    }
 }
 
 fn absolute_cache_path(path: PathBuf) -> PathBuf {
@@ -88,28 +97,48 @@ fn absolute_cache_path(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
-pub fn cache_root() -> PathBuf {
-    absolute_cache_path(std::env::var_os("GRAPHER_CACHE_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        default_cache_root(std::env::consts::OS, |name| std::env::var_os(name).map(PathBuf::from))
+/// Host-user resource locks must not follow a per-backend cache override.
+pub(crate) fn host_cache_root() -> PathBuf {
+    absolute_cache_path(default_cache_root(std::env::consts::OS, |name| {
+        std::env::var_os(name).map(PathBuf::from)
     }))
+}
+
+pub fn cache_root() -> PathBuf {
+    absolute_cache_path(
+        std::env::var_os("GRAPHER_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                default_cache_root(std::env::consts::OS, |name| {
+                    std::env::var_os(name).map(PathBuf::from)
+                })
+            }),
+    )
 }
 
 pub(crate) fn native_runtime_parent() -> PathBuf {
     // Keep the leaf spelling so storage can reject a linked/redirected parent.
-    absolute_path(std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT").map(PathBuf::from)
-        .unwrap_or_else(|| cache_root().join("workspaces/.grapher-workspaces")))
+    absolute_path(
+        std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cache_root().join("workspaces/.grapher-workspaces")),
+    )
 }
 
 pub(crate) fn workspaces_parent(data: &Path) -> PathBuf {
-    absolute_cache_path(std::env::var_os("GRAPHER_WORKSPACE_PARENT").map(PathBuf::from).unwrap_or_else(|| {
-        // Fixture/unit-test checkouts are disposable with their test data. Real
-        // execution must stay outside both source and protected session data.
-        if cfg!(any(test, feature = "fixture")) {
-            data.join("workspaces")
-        } else {
-            cache_root().join("workspaces")
-        }
-    }))
+    absolute_cache_path(
+        std::env::var_os("GRAPHER_WORKSPACE_PARENT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                // Fixture/unit-test checkouts are disposable with their test data. Real
+                // execution must stay outside both source and protected session data.
+                if cfg!(any(test, feature = "fixture")) {
+                    data.join("workspaces")
+                } else {
+                    cache_root().join("workspaces")
+                }
+            }),
+    )
 }
 
 #[cfg(test)]
@@ -126,8 +155,11 @@ mod cache_path_tests {
             _ => None,
         });
         assert_eq!(root, local.join("Grapher"));
-        assert_eq!(default_cache_root("windows", |name| (name == "USERPROFILE").then(|| profile.clone())),
-            profile.join("AppData/Local/Grapher"));
+        assert_eq!(
+            default_cache_root("windows", |name| (name == "USERPROFILE")
+                .then(|| profile.clone())),
+            profile.join("AppData/Local/Grapher")
+        );
     }
 
     #[test]
@@ -139,9 +171,15 @@ mod cache_path_tests {
             "XDG_CACHE_HOME" => Some(xdg.clone()),
             _ => None,
         };
-        assert_eq!(default_cache_root("macos", env), home.join("Library/Caches/Grapher"));
+        assert_eq!(
+            default_cache_root("macos", env),
+            home.join("Library/Caches/Grapher")
+        );
         assert_eq!(default_cache_root("linux", env), xdg.join("grapher"));
-        assert_eq!(default_cache_root("linux", |name| (name == "HOME").then(|| home.clone())), home.join(".cache/grapher"));
+        assert_eq!(
+            default_cache_root("linux", |name| (name == "HOME").then(|| home.clone())),
+            home.join(".cache/grapher")
+        );
     }
 }
 
@@ -232,10 +270,14 @@ mod shadow_safety_tests {
         let linked = temp.path().join("linked-shadow.git");
         fs::create_dir(&outside).unwrap();
         crate::path_safety::directory_link(&outside, &linked);
-        assert!(checked_shadow_directory(&linked).unwrap_err().contains("symlink"));
+        assert!(checked_shadow_directory(&linked)
+            .unwrap_err()
+            .contains("symlink"));
         let file = temp.path().join("file");
         fs::write(&file, "not a directory").unwrap();
-        assert!(checked_shadow_directory(&file).unwrap_err().contains("not a directory"));
+        assert!(checked_shadow_directory(&file)
+            .unwrap_err()
+            .contains("not a directory"));
         let real = temp.path().join("real-shadow.git");
         fs::create_dir(&real).unwrap();
         assert!(checked_shadow_directory(&real).unwrap());
@@ -316,8 +358,10 @@ pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
         );
     }
     if !checked_shadow_directory(&shadow_dir)? {
-
-        return Err(format!("Shadow repository is missing: {}", shadow_dir.display()));
+        return Err(format!(
+            "Shadow repository is missing: {}",
+            shadow_dir.display()
+        ));
     }
     Ok(shadow_dir)
 }
@@ -1245,7 +1289,8 @@ pub fn publish_planner_with_merger(
         resolve(preview)?;
         resolved_preview = true;
         Ok(())
-    }).map_err(|error| {
+    })
+    .map_err(|error| {
         format!(
             "Planner changes conflict with the source; the private workspace is retained: {error}"
         )
@@ -1254,7 +1299,10 @@ pub fn publish_planner_with_merger(
     // head. Otherwise the source would repeat the already-resolved conflict.
     let head = if resolved_preview {
         snapshot_node_for_run(
-            preview, repository, &format!("planner-{planning_id}-preview"), Some(run_id),
+            preview,
+            repository,
+            &format!("planner-{planning_id}-preview"),
+            Some(run_id),
         )?
     } else {
         head
@@ -1658,6 +1706,16 @@ pub fn snapshot_node_for_run(
     node_name: &str,
     run_id: Option<&str>,
 ) -> Result<String, String> {
+    snapshot_node_scoped(path, repository, node_name, run_id, &[])
+}
+
+pub(crate) fn snapshot_node_scoped(
+    path: &Path,
+    repository: &Path,
+    node_name: &str,
+    run_id: Option<&str>,
+    exclusions: &[String],
+) -> Result<String, String> {
     if let Some(id) = run_id {
         uuid::Uuid::parse_str(id).map_err(|_| "Invalid Run ID for node snapshot")?;
     }
@@ -1674,8 +1732,8 @@ pub fn snapshot_node_for_run(
     if !git(&canonical_path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
         return Err("Unresolved merge conflicts remain".into());
     }
-    git(&canonical_path, &["add", "-A"])?;
-    if !git(&canonical_path, &["status", "--porcelain"])?.is_empty() {
+    stage_scoped(&canonical_path, exclusions)?;
+    if !git(&canonical_path, &["diff", "--cached", "--name-only"])?.is_empty() {
         git(
             &canonical_path,
             &["commit", "-m", "Grapher execution snapshot"],
@@ -1746,19 +1804,108 @@ pub fn pin_repository_head(repository: &Path, head: &str) -> Result<(), String> 
     let repository = canonical_workspace_path(repository)?;
     let lock = host_ref_lock(&repository)?;
     let _guard = lock.lock().map_err(|error| error.to_string())?;
-    repository_git(&repository, &["update-ref", &format!("refs/grapher/heads/{head}"), head])?;
+    repository_git(
+        &repository,
+        &["update-ref", &format!("refs/grapher/heads/{head}"), head],
+    )?;
     Ok(())
 }
 
 /// Snapshot the user-owned source workspace (Planner or Serial). Graph workspaces
 /// must use `snapshot_node` to import their commits into Grapher-owned host refs.
 pub fn snapshot_repository(path: &Path) -> Result<String, String> {
+    snapshot_repository_scoped(path, &[])
+}
+
+pub(crate) fn scope_contains(path: &Path, scope: &Path) -> bool {
+    if cfg!(windows) {
+        Path::new(&path.to_string_lossy().to_lowercase())
+            .starts_with(Path::new(&scope.to_string_lossy().to_lowercase()))
+    } else {
+        path.starts_with(scope)
+    }
+}
+
+pub(crate) fn scoped_args<'a>(base: &[&'a str], exclusions: &'a [String]) -> Vec<String> {
+    let mut args: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+    if !exclusions.is_empty() {
+        args.extend(["--".into(), ".".into()]);
+        args.extend(exclusions.iter().map(|s| {
+            if cfg!(windows) {
+                format!(":(exclude,literal,icase){s}")
+            } else {
+                format!(":(exclude,literal){s}")
+            }
+        }));
+    }
+    args
+}
+
+pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<String, String> {
+    let args = scoped_args(&["status", "--porcelain"], exclusions);
+    repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+pub(crate) fn stage_scoped(path: &Path, exclusions: &[String]) -> Result<(), String> {
+    if exclusions.is_empty() {
+        repository_git(path, &["add", "-A"])?;
+        return Ok(());
+    }
+    // Git add's negative directory pathspec can still error on an ignored
+    // tree. Enumerate the ordinary channel, including tracked deletions, and
+    // pass literal NUL-delimited paths without shell/argv size constraints.
+    let names = repository_git(
+        path,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?;
+    let names: std::collections::BTreeSet<_> = names
+        .split('\0')
+        .filter(|name| {
+            !name.is_empty()
+                && !exclusions
+                    .iter()
+                    .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
+        })
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    let metadata = repository_git(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let temporary = PathBuf::from(metadata).join(format!("grapher-stage-{}", uuid::Uuid::new_v4()));
+    let bytes: Vec<u8> = names
+        .iter()
+        .flat_map(|name| format!(":(literal){name}\0").into_bytes())
+        .collect();
+    fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
+    let argument = format!(
+        "--pathspec-from-file={}",
+        crate::native::host_path(&temporary).to_string_lossy()
+    );
+    let result = repository_git(path, &["add", "-A", &argument, "--pathspec-file-nul"]);
+    let _ = fs::remove_file(temporary);
+    result.map(|_| ())
+}
+
+/// Exclusions never alter source .gitignore or unstage unrelated user changes.
+pub(crate) fn snapshot_repository_scoped(
+    path: &Path,
+    exclusions: &[String],
+) -> Result<String, String> {
     if is_standard_git(path) {
         if !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
             return Err("Unresolved merge conflicts remain".into());
         }
-        git(path, &["add", "-A"])?;
-        if !git(path, &["status", "--porcelain"])?.is_empty() {
+        stage_scoped(path, exclusions)?;
+        if !git(path, &["diff", "--cached", "--name-only"])?.is_empty() {
             git(path, &["commit", "-m", "Grapher execution snapshot"])?;
         }
         git(path, &["rev-parse", "HEAD"])
@@ -1767,17 +1914,7 @@ pub fn snapshot_repository(path: &Path) -> Result<String, String> {
         let shadow = ensure_shadow_repo(&canonical)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
-        git(
-            &canonical,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "add",
-                "-A",
-            ],
-        )?;
+        stage_scoped(&canonical, exclusions)?;
         let status = git(
             &canonical,
             &[
@@ -1785,8 +1922,9 @@ pub fn snapshot_repository(path: &Path) -> Result<String, String> {
                 git_dir_str,
                 "--work-tree",
                 work_tree_str,
-                "status",
-                "--porcelain",
+                "diff",
+                "--cached",
+                "--name-only",
             ],
         )?;
         if !status.trim().is_empty() {
@@ -1809,7 +1947,11 @@ pub fn snapshot_repository(path: &Path) -> Result<String, String> {
 
 /// Choose the Serial source/shadow or Graph isolated-node snapshot contract
 /// from canonical workspace identity.
-pub fn snapshot_execution(path: &Path, repository: &Path, node_name: &str) -> Result<String, String> {
+pub fn snapshot_execution(
+    path: &Path,
+    repository: &Path,
+    node_name: &str,
+) -> Result<String, String> {
     snapshot_execution_for_run(path, repository, node_name, None)
 }
 

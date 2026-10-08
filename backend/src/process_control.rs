@@ -4,8 +4,12 @@
 //! Node, Pi, shells, and their descendants share one lifecycle boundary.
 use std::{
     cell::RefCell,
+    collections::BTreeMap,
     process::{Child, Command},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock, Weak,
+    },
 };
 
 #[cfg(unix)]
@@ -32,12 +36,47 @@ unsafe impl Sync for ProcessTreeInner {}
 pub struct ProcessTree(Arc<ProcessTreeInner>);
 
 static PROCESSES: OnceLock<Mutex<Vec<(String, Weak<ProcessTreeInner>)>>> = OnceLock::new();
-thread_local! { static OWNER: RefCell<String> = const { RefCell::new(String::new()) }; }
+thread_local! {
+    static OWNER: RefCell<String> = const { RefCell::new(String::new()) };
+    static LIMITS: RefCell<NativeLimits> = const { RefCell::new(NativeLimits { memory_bytes: None, cpu_rate: None }) };
+}
+
+#[derive(Clone, Copy, Default)]
+struct NativeLimits {
+    memory_bytes: Option<u64>,
+    cpu_rate: Option<u32>,
+}
+
+/// Limits are attached while the Windows child is still suspended. The TLS
+/// binding is scoped to this writer, never leaked into another Run or metadata.
+pub(crate) fn with_resource_limits<T>(
+    resources: Option<&crate::environment_resources::Resources>,
+    work: impl FnOnce() -> T,
+) -> T {
+    struct Restore(NativeLimits);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LIMITS.with(|limits| *limits.borrow_mut() = self.0);
+        }
+    }
+    let selected = resources
+        .map(|r| NativeLimits {
+            memory_bytes: r.memory_bytes,
+            cpu_rate: r.cpu_rate,
+        })
+        .unwrap_or_default();
+    let previous = LIMITS.with(|limits| std::mem::replace(&mut *limits.borrow_mut(), selected));
+    let _restore = Restore(previous);
+    work()
+}
 
 /// Bind process launches in this thread to an individual Run.
 #[cfg(not(feature = "fixture"))]
 pub(crate) fn current_owner() -> Option<String> {
-    OWNER.with(|owner| { let owner = owner.borrow(); (!owner.is_empty()).then(|| owner.clone()) })
+    OWNER.with(|owner| {
+        let owner = owner.borrow();
+        (!owner.is_empty()).then(|| owner.clone())
+    })
 }
 
 pub fn with_owner<T>(run_id: &str, work: impl FnOnce() -> T) -> T {
@@ -55,6 +94,72 @@ pub fn with_owner<T>(run_id: &str, work: impl FnOnce() -> T) -> T {
 
 fn registry() -> &'static Mutex<Vec<(String, Weak<ProcessTreeInner>)>> {
     PROCESSES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+static RESULTS: OnceLock<Mutex<BTreeMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+fn results() -> &'static Mutex<BTreeMap<String, Arc<AtomicBool>>> {
+    RESULTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Cancellation also covers preparation and the spawn/registration gap. It is
+/// separate from the Run mutex so an HTTP cancel never waits for the writer.
+pub(crate) struct ResultControl {
+    run: String,
+    cancelled: Arc<AtomicBool>,
+}
+impl ResultControl {
+    pub(crate) fn begin(run: &str) -> Result<Self, String> {
+        let mut active = results().lock().map_err(|e| e.to_string())?;
+        if active.contains_key(run) {
+            return Err("A result execution is already active".into());
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        active.insert(run.into(), cancelled.clone());
+        Ok(Self {
+            run: run.into(),
+            cancelled,
+        })
+    }
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            Err("Native result execution cancelled; partial workspace retained".into())
+        } else {
+            Ok(())
+        }
+    }
+    pub(crate) fn finish<T>(
+        &self,
+        commit: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut active = results().lock().map_err(|e| e.to_string())?;
+        self.check()?;
+        let result = commit();
+        active.remove(&self.run);
+        result
+    }
+}
+impl Drop for ResultControl {
+    fn drop(&mut self) {
+        if let Ok(mut active) = results().lock() {
+            if active
+                .get(&self.run)
+                .is_some_and(|flag| Arc::ptr_eq(flag, &self.cancelled))
+            {
+                active.remove(&self.run);
+            }
+        }
+    }
+}
+pub(crate) fn cancel_result(run: &str) -> Result<(), String> {
+    {
+        let active = results().lock().map_err(|e| e.to_string())?;
+        active
+            .get(run)
+            .ok_or("No active result execution to cancel")?
+            .store(true, Ordering::SeqCst);
+    }
+    terminate_owner(run);
+    Ok(())
 }
 
 /// Configure the child before spawn. Unix process groups are created by the
@@ -84,10 +189,20 @@ pub fn track(child: &Child) -> Result<ProcessTree, String> {
         job: create_job(child)?,
     }));
 
-    registry().lock().map_err(|error| error.to_string())?.push((
-        OWNER.with(|owner| owner.borrow().clone()),
-        Arc::downgrade(&tree.0),
-    ));
+    let owner = OWNER.with(|owner| owner.borrow().clone());
+    registry()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .push((owner.clone(), Arc::downgrade(&tree.0)));
+    if results()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&owner)
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    {
+        tree.terminate();
+        return Err("Native result execution cancelled before process registration".into());
+    }
     Ok(tree)
 }
 
@@ -111,7 +226,10 @@ fn retry_termination(mut terminate: impl FnMut() -> std::io::Result<()>) -> std:
             Err(error) => {
                 // Drop must not panic, including when stderr is unavailable.
                 use std::io::Write;
-                let _ = writeln!(std::io::stderr(), "Process-tree termination attempt {attempt}/3 failed: {error}");
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Process-tree termination attempt {attempt}/3 failed: {error}"
+                );
                 if attempt == 3 {
                     return Err(error);
                 }
@@ -127,13 +245,22 @@ fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             let pid = i32::try_from(inner.pid)
-                .ok().filter(|pid| *pid > 1)
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid process group ID"))?;
+                .ok()
+                .filter(|pid| *pid > 1)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Invalid process group ID",
+                    )
+                })?;
             if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
                 let error = std::io::Error::last_os_error();
                 // A previously terminated group is already clean.
                 if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(std::io::Error::new(error.kind(), format!("kill process group {pid}: {error}")));
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("kill process group {pid}: {error}"),
+                    ));
                 }
             }
         }
@@ -148,6 +275,49 @@ fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
 }
 
 impl ProcessTree {
+    /// A successful model response is not a process-drain barrier. Managed
+    /// snapshots must fail while descendants remain in the lifecycle boundary.
+    pub fn ensure_drained(&self) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            #[cfg(windows)]
+            let active = unsafe {
+                let mut info: JobObjectBasicAccountingInformation = std::mem::zeroed();
+                if QueryInformationJobObject(
+                    self.0.job as RawHandle,
+                    1,
+                    &mut info as *mut _ as *mut std::ffi::c_void,
+                    std::mem::size_of_val(&info) as u32,
+                    std::ptr::null_mut(),
+                ) == 0
+                {
+                    return Err(windows_error("QueryInformationJobObject (drain)"));
+                }
+                info.active_processes > 0
+            };
+            #[cfg(unix)]
+            let active = unsafe {
+                let result = libc::kill(-(self.0.pid as i32), 0);
+                if result == 0 {
+                    true
+                } else {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(format!("Cannot confirm native process drain: {error}"));
+                    }
+                    false
+                }
+            };
+            if !active {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("Managed background writers have not drained; refusing unsafe environment seal/handoff".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     pub fn terminate(&self) {
         let _ = terminate_inner(&self.0); // Failures are retried and logged.
     }
@@ -161,7 +331,11 @@ impl Drop for ProcessTreeInner {
             if self.job != 0 {
                 if CloseHandle(self.job as RawHandle) == 0 {
                     use std::io::Write;
-                    let _ = writeln!(std::io::stderr(), "Closing process job failed: {}", std::io::Error::last_os_error());
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "Closing process job failed: {}",
+                        std::io::Error::last_os_error()
+                    );
                 }
             }
         }
@@ -250,6 +424,26 @@ struct JobObjectExtendedLimitInformation {
 }
 
 #[cfg(windows)]
+#[repr(C)]
+struct JobObjectBasicAccountingInformation {
+    total_user_time: i64,
+    total_kernel_time: i64,
+    this_period_user_time: i64,
+    this_period_kernel_time: i64,
+    total_page_fault_count: u32,
+    total_processes: u32,
+    active_processes: u32,
+    total_terminated_processes: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct JobObjectCpuRateControlInformation {
+    control_flags: u32,
+    cpu_rate: u32,
+}
+
+#[cfg(windows)]
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
 #[cfg(windows)]
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
@@ -268,6 +462,13 @@ extern "system" {
         length: u32,
     ) -> i32;
     fn TerminateJobObject(job: RawHandle, exit_code: u32) -> i32;
+    fn QueryInformationJobObject(
+        job: RawHandle,
+        class: u32,
+        information: *mut std::ffi::c_void,
+        length: u32,
+        returned: *mut u32,
+    ) -> i32;
 }
 
 #[cfg(windows)]
@@ -289,11 +490,17 @@ fn create_job(child: &Child) -> Result<usize, String> {
     if job.is_null() {
         return Err(windows_error("CreateJobObject"));
     }
+    let selected = LIMITS.with(|limits| *limits.borrow());
     let mut limits = JobObjectExtendedLimitInformation {
         basic: JobObjectBasicLimitInformation {
             per_process_user_time_limit: 0,
             per_job_user_time_limit: 0,
-            limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | if selected.memory_bytes.is_some() {
+                    0x0000_0200
+                } else {
+                    0
+                },
             minimum_working_set_size: 0,
             maximum_working_set_size: 0,
             active_process_limit: 0,
@@ -310,7 +517,7 @@ fn create_job(child: &Child) -> Result<usize, String> {
             other_bytes: 0,
         },
         process_memory_limit: 0,
-        job_memory_limit: 0,
+        job_memory_limit: selected.memory_bytes.unwrap_or(0) as usize,
         peak_process_memory_used: 0,
         peak_job_memory_used: 0,
     };
@@ -326,6 +533,25 @@ fn create_job(child: &Child) -> Result<usize, String> {
         let error = windows_error("SetInformationJobObject");
         unsafe { CloseHandle(job) };
         return Err(error);
+    }
+    if let Some(cpu_rate) = selected.cpu_rate {
+        let mut cpu = JobObjectCpuRateControlInformation {
+            control_flags: 0x1 | 0x4,
+            cpu_rate,
+        }; // ENABLE | HARD_CAP
+        if unsafe {
+            SetInformationJobObject(
+                job,
+                15,
+                (&mut cpu as *mut JobObjectCpuRateControlInformation).cast(),
+                std::mem::size_of_val(&cpu) as u32,
+            )
+        } == 0
+        {
+            let error = windows_error("SetInformationJobObject (CPU hard cap)");
+            unsafe { CloseHandle(job) };
+            return Err(error);
+        }
     }
     let assigned =
         unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as RawHandle) } != 0;
@@ -363,14 +589,41 @@ mod tests {
             } else {
                 Ok(())
             }
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(attempts, 3);
         attempts = 0;
         assert!(retry_termination(|| {
             attempts += 1;
             Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-        }).is_err());
+        })
+        .is_err());
         assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn result_cancellation_covers_preparation_and_is_linearized_with_commit() {
+        let run = "result-cancel-barrier-test";
+        let control = ResultControl::begin(run).unwrap();
+        assert!(ResultControl::begin(run).is_err());
+        cancel_result(run).unwrap();
+        assert!(control.check().is_err());
+        let mut committed = false;
+        assert!(control
+            .finish(|| {
+                committed = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!committed);
+        drop(control);
+        let retry = ResultControl::begin(run).unwrap();
+        retry.check().unwrap();
+        retry.finish(|| Ok(())).unwrap();
+        assert!(
+            cancel_result(run).is_err(),
+            "completed scopes cannot acknowledge a fictitious cancellation"
+        );
     }
 
     #[test]

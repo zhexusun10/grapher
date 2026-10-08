@@ -6,6 +6,17 @@
 
 This document describes what happens to your project, sessions, and files. [Runtime](runtime.md) covers scheduling; [Filesystem isolation](filesystem-isolation.md) covers permissions and path adaptation.
 
+Backend-admitted [Native workspace environments](native-environments.md) add E/L
+evidence to standard Git Graph projects, starting with no business binding and
+no precreated environment. Supported business-created private venv/Conda
+bindings are discovered and verified without user choices or changes to
+allocation, conversation and feedback. Projects needing no environment stay
+unbound; ordinary parallel allocation remains available. Managed scopes/caches
+are excluded from source publication; Graph publishes a launchable descriptor.
+Serial and shadow projects retain their native contract. Legacy Runs
+are not reinterpreted; unsupported toolchains or stronger capabilities fail
+without asking for an environment or execution fallback.
+
 ## Serial and Graph
 
 | | Serial | Graph |

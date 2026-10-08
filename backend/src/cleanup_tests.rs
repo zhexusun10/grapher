@@ -43,6 +43,7 @@ fn execution(runtime: &Runtime, id: &str) -> Execution {
         before: "base".into(),
         workspace_lineage: vec![],
         after: None,
+        input: None, result: None,
         status: "running".into(),
         output: String::new(),
         output_bytes: 0,

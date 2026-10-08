@@ -31,6 +31,7 @@ import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
 import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 import { PublicationCompletedCard } from "../PublicationCompletedCard";
+import { EnvironmentResult } from "../EnvironmentResult";
 
 interface GraphWorkbenchProps {
   state: Snapshot;
@@ -891,12 +892,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
   // A poll can return the old draft while the Planner is revising it.
   const graphPhase = isPlanning && !state.approved ? "planning" : state.phase;
-  const isWorkspaceWritten = !isPlanning && (
-    (routeType === "graph" && (
-      state.publication?.status === "completed" ||
-      (state.phase === "completed" && state.publication?.status !== "failed" && state.publication?.status !== "publishing" && state.publication?.status !== "merging")
-    )) ||
-    (routeType === "serial" && state.phase === "completed")
+  const isWorkspaceWritten = !isPlanning && routeType === "graph" && (
+    state.publication?.status === "completed" ||
+    (state.phase === "completed" && state.publication?.status !== "failed" && state.publication?.status !== "publishing" && state.publication?.status !== "merging")
   );
   // Each conversation owns a fresh ReactFlow store and measured viewport.
   const hasGraphToolCalled =
@@ -1652,7 +1650,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
 
-              {!isPlanning && ((routeType === "graph" && state.graph.nodes.length > 0) || (routeType === "serial" && state.graph.nodes.length > 0 && (state.phase === "completed" || serialExecutions.length > 0))) && (
+              {!isPlanning && routeType === "graph" && state.graph.nodes.length > 0 && (
                 <motion.div
                   className="plan-summary-card"
                   initial={false}
@@ -1666,22 +1664,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                   <div className="plan-stats-row">
                     <div className="plan-stat">
-                      <span className="stat-num">{routeType === "graph" ? state.graph.nodes.length : 1}</span>
-                      <span className="stat-lbl">{routeType === "graph" ? t("规划节点") : t("串行节点")}</span>
+                      <span className="stat-num">{state.graph.nodes.length}</span>
+                      <span className="stat-lbl">{t("规划节点")}</span>
                     </div>
                     <div className="plan-stat">
-                      <span className="stat-num">{routeType === "graph" ? (state.plan?.executionBatches.length ?? 1) : 1}</span>
+                      <span className="stat-num">{state.plan?.executionBatches.length ?? 1}</span>
                       <span className="stat-lbl">{t("执行批次")}</span>
                     </div>
                     <div className="plan-stat">
-                      <span className="stat-num">{routeType === "graph" ? state.graph.edges.length : 0}</span>
+                      <span className="stat-num">{state.graph.edges.length}</span>
                       <span className="stat-lbl">{t("拓扑边")}</span>
                     </div>
                     <div className="plan-stat">
                       <span className="stat-num">
-                        {routeType === "graph"
-                          ? `${completed}/${state.graph.nodes.length}`
-                          : (state.phase === "completed" ? "1/1" : (isSerialWorking ? t("0/1 (执行中)") : "0/1"))}
+                        {`${completed}/${state.graph.nodes.length}`}
                       </span>
                       <span className="stat-lbl">{t("已完成")}</span>
                     </div>
@@ -1689,31 +1685,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                   <div className="plan-nodes-list">
                     <span className="nodes-list-title">
-                      {routeType === "graph" ? t("节点列表（点击聚焦查看详细日志与独立沙箱）：") : t("任务节点：")}
+                      {t("节点列表（点击聚焦查看详细日志与独立沙箱）：")}
                     </span>
                     <div className="nodes-chips">
-                      {routeType === "graph" ? (
-                        state.graph.nodes.map((node) => {
-                          const nState = state.nodes[node.name];
-                          return (
-                            <button
-                              type="button"
-                              key={node.name}
-                              className="node-chip"
-                              onClick={() => setSelected(node.name)}
-                              title={node.task}
-                            >
-                              <span className={`chip-dot ${nState?.status ?? "waiting"}`} />
-                              <span className="chip-name">{node.name}</span>
-                            </button>
-                          );
-                        })
-                      ) : (
-                        <div className="node-chip" style={{ cursor: "default" }}>
-                          <span className={`chip-dot ${state.phase === "completed" ? "done" : (isSerialWorking ? "running" : "waiting")}`} />
-                          <span className="chip-name">{state.graph.nodes[0]?.name || "serial-agent"}</span>
-                        </div>
-                      )}
+                      {state.graph.nodes.map((node) => {
+                        const nState = state.nodes[node.name];
+                        return (
+                          <button
+                            type="button"
+                            key={node.name}
+                            className="node-chip"
+                            onClick={() => setSelected(node.name)}
+                            title={node.task}
+                          >
+                            <span className={`chip-dot ${nState?.status ?? "waiting"}`} />
+                            <span className="chip-name">{node.name}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 </motion.div>
@@ -1953,6 +1942,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       ) : null}
                     </div>
                   </div>
+                  <EnvironmentResult state={state} />
                 </div>
               )}
             </motion.div>

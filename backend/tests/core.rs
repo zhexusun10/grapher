@@ -37,6 +37,7 @@ fn graph() -> Graph {
 
 fn config() -> Config {
     Config {
+        environment: None,
         repository: String::new(),
         engine: "fixture".into(),
         pi_command: "pi".into(),

@@ -4,6 +4,16 @@
 > **Scope:** Recorded file channels, workspace ownership, feedback handoff and environment portability limits.
 > **Maintained with:** [workspace_files.rs](../../backend/src/workspace_files.rs), [runtime.rs](../../backend/src/runtime.rs), [resource tests](../../backend/src/workspace_files_tests.rs) and [feedback tests](../../backend/src/feedback_workspace_tests.rs).
 
+This page describes compatibility filesystem channels. Backend-admitted
+[Native workspace environments](native-environments.md) keep frozen scopes/caches
+out of both channels, add E/L evidence, refuse unsafe path changes and retain
+managed layouts until explicit deletion. New standard Git Graph projects start
+with an empty business binding; supported private environments created by
+business tools are verified and scoped through versioned L, without environment
+settings. Legacy Runs keep their recorded filesystem contract. The
+allocator and conversation/feedback contracts below are unchanged; ordinary
+ignored-resource merging and copying are **not** environment-merge rules.
+
 ## Two filesystem channels
 
 Ordinary inputs combine the latest recorded source and successful parents:
@@ -21,7 +31,7 @@ Ordinary inputs combine the latest recorded source and successful parents:
 
 Ignored files are discovered through Git's ignore rules, including nested ignored directories. Git/Grapher internals and the configured runtime-data directory are excluded. Source capture and normal A → B inheritance therefore include project-local environments, caches, data and weights even when Git ignores them.
 
-Materialization copies bytes; it never makes writable hard links to source, blobs or siblings. Ordinary fan-out children can modify their copies independently. Content-addressed storage deduplicates snapshot bytes, not every working copy; hashing and materialization still cost I/O proportional to the resource size. This is not a shared writable cache or an arbitrary binary merge facility.
+Materialization uses private native clones where supported, otherwise independent byte copies; it never makes writable hard links to source, blobs or siblings. Ordinary fan-out children can modify their copies independently. Content-addressed storage deduplicates snapshot bytes, not every working copy; hashing and materialization still cost I/O proportional to the resource size. This is not a shared writable cache or an arbitrary binary merge facility.
 
 Internal links are rebased to the destination. External directory links are rejected; external file links retain their host target and remain subject to sandbox permissions. Unsupported/non-UTF-8 paths fail explicitly.
 

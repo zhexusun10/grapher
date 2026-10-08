@@ -1,5 +1,6 @@
 import { createWorkspacePaths } from './workspace-paths.mjs';
 import { registerWorkspaceTools } from './workspace-tools.ts';
+import { managedLaunch, managedBashOptions, managedBashCommand } from './launch-binding.mjs';
 import {
   createBashToolDefinition,
   createLocalBashOperations,
@@ -51,8 +52,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();
-  const localOps = createLocalBashOperations();
+  const launch = managedLaunch();
+  const localOps = createLocalBashOperations(launch ? { shellPath: launch.shell } : undefined);
   const baseBashTool = createBashToolDefinition(cwd);
+  if (launch) {
+    pi.on('user_bash', async () => ({ operations: {
+      exec: (command, workingDirectory, options) => localOps.exec(managedBashCommand(paths ? paths.command(command) : command),
+        workingDirectory, managedBashOptions(options)),
+    } }));
+  }
 
   pi.registerTool({
     ...baseBashTool,
@@ -65,7 +73,7 @@ export default function (pi: ExtensionAPI) {
       let callExitCode: number | null = null;
       const scopedOps: BashOperations = {
         exec: async (command, cwd, options) => {
-          const res = await localOps.exec(command, cwd, options);
+          const res = await localOps.exec(managedBashCommand(command), cwd, managedBashOptions(options));
           callExitCode = res.exitCode;
           return res;
         },

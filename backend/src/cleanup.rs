@@ -74,7 +74,7 @@ impl Target {
             Self::Data { bucket, id } => {
                 if !matches!(
                     bucket.as_str(),
-                    "sessions" | "planning" | "mergers" | "planner-sessions" | "partition-workers"
+                    "sessions" | "planning" | "mergers" | "planner-sessions" | "partition-workers" | "environments"
                 ) || !safe_id(id)
                 {
                     return Err("Invalid owned session directory".into());
@@ -155,6 +155,9 @@ pub(crate) fn configuration_targets(
     config: &Config,
 ) -> Result<BTreeSet<Target>, String> {
     let mut targets = BTreeSet::new();
+    if config.environment.is_some() && Uuid::parse_str(run_id).is_ok() {
+        targets.insert(Target::data("environments", run_id));
+    }
     let source = Path::new(&config.repository);
     if !source.is_absolute() {
         return Ok(targets);
@@ -214,6 +217,9 @@ pub(crate) fn remember_event(
         targets.extend(configuration_targets(root, &state.run_id, config)?);
     }
     match kind {
+        EventKind::EnvironmentPolicyResolved { environment: Some(_), .. } => {
+            targets.insert(Target::data("environments", &state.run_id));
+        }
         EventKind::Started { execution } => {
             targets.insert(Target::data("sessions", &execution.id));
         }

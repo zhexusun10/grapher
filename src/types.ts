@@ -7,8 +7,14 @@ export interface Plan { executionBatches: string[][]; roots: string[]; terminals
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelRole = "partitioner" | "planner" | "nodeAgent";
 export interface RoleModelConfig { model: string; thinkingLevel?: ThinkingLevel }
-export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean }
-interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null }
+export interface LaunchConfig { entry: string; path: string[]; shell: string; variables: Record<string, string>; inherit: string[]; hook?: string | null; environment?: { kind: "venv" | "conda"; prefix: string; abi: string } }
+export interface EnvironmentResources { memoryBytes?: number; cpuRate?: number; device?: { backend: "cuda"; ids: string[]; probe: string }; initializeTimeoutSeconds?: number; resultTimeoutSeconds?: number; maxOutputBytes?: number }
+export interface EnvironmentConfig { discovery?: boolean; resources?: EnvironmentResources; mode: "native-workspace"; platform: string; arch: string; scopes: string[]; caches: string[]; layout: "fixed" | "relocatable"; launch: LaunchConfig; baseline: string[]; initialize: string[]; importSource: boolean; launchFile?: string | null; authority: Record<string, string>; allowDescendant: boolean; require: string[] }
+export interface CompositeResult { domain: { platform: string; arch: string; baseline: string; policy: string; contract: string }; codeRef: string; environmentRef: string; launchRef: string; resourceRefs: string[]; layout: string | null; generation: string; selectedFrom: string[] }
+export interface ResultDescriptor { schema: number; runId: string; result: CompositeResult; config: EnvironmentConfig; workspace: string }
+export interface EnvironmentCapabilities { platform: string; arch: string; nativeWorkspace: boolean; fixedPhysicalLayout: boolean; namespaceLayout: boolean; basicSnapshots: boolean; extendedMetadata: boolean; sharedWorkingLayers: boolean; fullSystemSnapshot: boolean; gpuVerified: boolean; resourceQuotas: boolean; cpuQuota: boolean; memoryQuota: boolean; deviceLeases: boolean; storage: string }
+export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; environment?: EnvironmentConfig | null }
+interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; result?: CompositeResult | null }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
 interface ExecutionMetrics {
   durationSeconds: number;
@@ -30,7 +36,7 @@ interface RunMetrics {
   executionUsage: TokenUsage;
 }
 
-export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null }
+export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; input?: CompositeResult | null; result?: CompositeResult | null; workspaceLineage?: string[]; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null }
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Execution; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; from_execution_id?: string; from_event_sequence?: number; old_instruction?: string; first_turn?: boolean; selected_version?: number; human?: boolean; planning_id?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
@@ -87,6 +93,10 @@ export interface Snapshot {
   supersededExecutionIds?: string[];
   mergers?: Execution[];
   publication?: Publication | null;
+  environmentBaseline?: CompositeResult | null;
+  environmentPolicy?: "automatic-pending" | "automatic-lazy" | "automatic-managed" | "automatic-source-native";
+  publishedResult?: ResultDescriptor | null;
+  resultExecution?: { input: CompositeResult; args?: string[]; result: CompositeResult | null; status: string; error: string | null } | null;
   events: GraphEvent[];
   approved: boolean;
   paused: boolean;

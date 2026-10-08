@@ -15,6 +15,9 @@ struct ExecutionMetadata<'a> {
     worktree: &'a str,
     before: &'a str,
     after: &'a Option<String>,
+    workspace_lineage: &'a Vec<String>,
+    input: &'a Option<crate::environment::CompositeResult>,
+    result: &'a Option<crate::environment::CompositeResult>,
     status: &'a str,
     started_at: u64,
     completed_at: Option<u64>,
@@ -29,6 +32,7 @@ fn execution_metadata(execution: &Execution) -> ExecutionMetadata<'_> {
         id: &execution.id, node: &execution.node, revision: execution.revision,
         attempt: execution.attempt, session_id: &execution.session_id,
         worktree: &execution.worktree, before: &execution.before, after: &execution.after,
+        workspace_lineage: &execution.workspace_lineage, input: &execution.input, result: &execution.result,
         status: &execution.status, started_at: execution.started_at,
         completed_at: execution.completed_at, output: "",
         output_bytes: if execution.status == "running" { execution.output.len().max(execution.output_bytes) } else { execution.output_bytes },
@@ -63,6 +67,9 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "paused": state.paused, "stopRequested": state.stop_requested, "phase": state.phase, "base": state.base,
         "publishedHead": state.published_head, "feedbackCounts": state.feedback_counts,
         "pendingFeedback": state.pending_feedback, "sourceFiles": state.source_files,
+        "environmentPolicy": state.environment_policy,
+        "environmentBaseline": state.environment_baseline, "publishedResult": state.published_result,
+        "resultExecution": state.result_execution,
         "runMetrics": state.run_metrics
     })
 }
@@ -84,6 +91,9 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         "supersededExecutionIds": state.superseded_execution_ids,
         "publication": state.publication, "events": events, "approved": state.approved,
         "paused": state.paused, "phase": state.phase, "base": state.base, "feedbackCounts": state.feedback_counts,
+        "environmentPolicy": state.environment_policy,
+        "environmentBaseline": state.environment_baseline, "publishedResult": state.published_result,
+        "resultExecution": state.result_execution,
         "runMetrics": state.run_metrics
     });
     if let Some(plan_type) = &state.plan_type {
@@ -120,6 +130,7 @@ mod tests {
             session_id: "s".into(), worktree: String::new(), before: String::new(),
             workspace_lineage: vec![],
             after: None, status: "running".into(), started_at: 42,
+            input: None, result: None,
             completed_at: None, metrics: None, output_bytes: 0, pid: Some(123),
             output: "{\"type\":\"grapher_process_started\",\"pid\":123,\"cwd\":\"x\"}\nsecret".into(),
         });

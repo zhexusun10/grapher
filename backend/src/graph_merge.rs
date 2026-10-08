@@ -18,17 +18,17 @@ fn pending(repository: &Path) -> Option<String> {
     git(repository, &["rev-parse", "--verify", "MERGE_HEAD"]).ok()
 }
 
-fn finish_merge(repository: &Path, head: &str) -> Result<(), String> {
+fn finish_merge(repository: &Path, head: &str, exclusions: &[String]) -> Result<(), String> {
     if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
         return Err("Merger left unresolved conflicts".into());
     }
     if pending(repository).is_some() {
-        git(repository, &["add", "-A"])?;
+        workspace::stage_scoped(repository, exclusions)?;
         git(repository, &["commit", "--no-edit"])?;
     }
     git(repository, &["merge-base", "--is-ancestor", head, "HEAD"])
         .map_err(|_| "Merger did not preserve the incoming commit".to_string())?;
-    if !git(repository, &["status", "--porcelain"])?.is_empty() {
+    if !workspace::repository_status(repository, exclusions)?.is_empty() {
         return Err("Merge left uncommitted changes; inspect the affected workspace".into());
     }
     Ok(())
@@ -40,8 +40,12 @@ fn finish_merge(repository: &Path, head: &str) -> Result<(), String> {
 pub fn merge_graph(
     repository: &Path,
     heads: &[String],
-    mut resolve: impl FnMut() -> Result<(), String>,
+    resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
+    merge_graph_scoped(repository, heads, &[], resolve)
+}
+
+pub(crate) fn merge_graph_scoped(repository: &Path, heads: &[String], exclusions: &[String], mut resolve: impl FnMut() -> Result<(), String>) -> Result<String, String> {
     workspace::validate_binding(repository)?;
     if let Some(head) = pending(repository) {
         if !heads.contains(&head) {
@@ -52,9 +56,9 @@ pub fn merge_graph(
         if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
             resolve()?;
         }
-        finish_merge(repository, &head)?;
+        finish_merge(repository, &head, exclusions)?;
     }
-    if !git(repository, &["status", "--porcelain"])?.is_empty() {
+    if !workspace::repository_status(repository, exclusions)?.is_empty() {
         return Err("User directory changed during execution. Preserve or reconcile local changes, then retry publication.".into());
     }
     // Complete a pending merge above before pruning, so publication retries
@@ -71,7 +75,7 @@ pub fn merge_graph(
             }
             resolve()?;
         }
-        finish_merge(repository, head)?;
+        finish_merge(repository, head, exclusions)?;
     }
     git(repository, &["rev-parse", "HEAD"])
 }
@@ -115,6 +119,7 @@ pub fn resolve_with_merger_for_node(
             before: git(repository, &["rev-parse", "HEAD"])?,
             workspace_lineage: vec![],
             after: None,
+            input: None, result: None,
             status: "running".into(),
             output: String::new(), output_bytes: 0, pid: None,
             started_at: now(),
@@ -189,7 +194,7 @@ pub fn resolve_with_merger_for_node(
         if let Some(error) = output_error {
             return Err(format!("Cannot persist merger output: {error}"));
         }
-        finish_merge(repository, &incoming)
+        finish_merge(repository, &incoming, &config.environment.as_ref().map(|e| e.exclusions()).unwrap_or_default())
     });
     match &result {
         Ok(()) => {

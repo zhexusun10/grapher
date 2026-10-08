@@ -39,6 +39,28 @@ fn ignored_files_are_frozen_and_materialized_without_writable_aliases() {
 }
 
 #[test]
+fn verification_is_read_only_and_missing_or_same_stat_corrupt_blobs_are_not_repaired_or_trusted() {
+    let (_temp, source, files, base, head) = setup();
+    let count = fs::read_dir(files.directory.join("blobs")).unwrap().count();
+    fs::write(source.join(".cache/extra"), "unexpected live write").unwrap();
+    assert!(files.verify(&source, &base, &head).unwrap_err().contains("changed after completion"));
+    assert_eq!(fs::read_dir(files.directory.join("blobs")).unwrap().count(), count, "Verification must not persist new blobs");
+    fs::remove_file(source.join(".cache/extra")).unwrap();
+    let version = files.load(&base).unwrap();
+    let Entry::File {blob, ..} = &version.entries[".cache/base"] else {panic!("expected file")};
+    let path = files.blob_path(blob).unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(files.verify(&source, &base, &head).unwrap_err().contains("Missing workspace file blob"));
+    assert!(!path.exists(), "A live view cannot silently repair missing historical storage");
+    fs::write(&path, "base").unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, "evil").unwrap();
+    fs::OpenOptions::new().write(true).open(&path).unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified)).unwrap();
+    assert!(files.verify(&source, &base, &head).unwrap_err().contains("Damaged workspace file blob"));
+}
+
+#[test]
 fn fan_in_merges_independent_ignored_changes_and_deletions() {
     let (temp, source, files, base, head) = setup();
     let mut inputs = Vec::new();

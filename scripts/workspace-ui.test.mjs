@@ -65,6 +65,7 @@ test("workspace isolation, non-scrolling home, shared view transitions and globa
         case "list_skills": result = { skills: [] }; break;
         case "provider_auth": result = { providers: [{ id: "test", name: "Test", methods: [], configured: true }], models: [], warning: null }; break;
         case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "environment_capabilities": result = { platform: "windows", arch: "x86_64", nativeWorkspace: true }; break;
         case "plan_goal_stream":
           assert.equal(body.config.repository, repositoryA);
           planningRequested = true;

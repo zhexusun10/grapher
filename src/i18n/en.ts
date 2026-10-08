@@ -1,5 +1,16 @@
 // Keys retain the existing Chinese UI copy so the Chinese version stays unchanged.
 export const en: Record<string, string> = {
+  "环境由 Runtime 自动准入和绑定，不需要选择模式或填写环境配置。受管环境不会搬回源项目；能力不足时明确失败，不请求用户选择替代方案。": "Runtime admits and binds environments automatically; no environment mode or configuration is required. Managed environments are not copied back to the source. Unsupported capabilities fail without asking for an alternative.",
+  "原生 workspace 环境范围：{0}；默认入口：{1}。环境不搬回源项目，以结果描述交付；未验证的设备、跨槽路径及系统快照要求会阻塞。": "Native environment scopes: {0}; entry: {1}. Delivery uses a result descriptor, not a source-directory environment copy. Unverified device, cross-slot path and system snapshot requirements block execution.",
+  "可启动结果描述": "Launchable result descriptor",
+  "复制结果描述": "Copy result descriptor",
+  "通过 Runtime 启动默认入口，不调用模型。修改会记录新结果并重新发布；失败保留部分工作。不会激活源项目的环境。": "Launch the default entry through Runtime without a model call. Changes create a new result and publication; failures retain partial work. The source environment is not activated.",
+  "入口参数 JSON（字符串数组）": "Entry arguments JSON (string array)",
+  "入口参数必须是字符串数组。": "Entry arguments must be a string array.",
+  "保留部分工作重试结果": "Retry result with partial work",
+  "启动结果（无模型）": "Launch result (no model)",
+  "取消结果进程": "Cancel result process",
+
   "Pi 全局扩展": "Global Pi extensions",
   "始终启用，不可删除": "Always enabled; cannot be removed",
   "删除": "Remove",

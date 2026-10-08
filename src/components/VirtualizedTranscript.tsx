@@ -77,6 +77,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const userMessageStartsRef = useRef(new Set<string>());
   const pendingUserStartRef = useRef(false);
   const assistantStartIndexRef = useRef(0);
+  const inFinalResponseRef = useRef<boolean>(false);
+  const finalResponseSuppressedRef = useRef<boolean>(false);
   const [itemsVersion, setItemsVersion] = useState(0);
 
   // Height cache for virtualization
@@ -117,6 +119,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         userMessageStartsRef.current.clear();
         pendingUserStartRef.current = false;
         assistantStartIndexRef.current = 0;
+        inFinalResponseRef.current = false;
+        finalResponseSuppressedRef.current = false;
         return true;
       }
       return false;
@@ -131,6 +135,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       userMessageStartsRef.current.clear();
       pendingUserStartRef.current = false;
       assistantStartIndexRef.current = 0;
+      inFinalResponseRef.current = false;
+      finalResponseSuppressedRef.current = false;
     }
 
     const unparsed = rawOutput.slice(lastProcessedPosRef.current);
@@ -155,6 +161,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
       try {
         const event = JSON.parse(line);
+        inFinalResponseRef.current = false;
+        finalResponseSuppressedRef.current = false;
 
         // Planner follow-ups live in its durable JSONL, not in the Run's
         // transient browser messages. The first user turn is already shown as
@@ -419,6 +427,37 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
         // Fallback for unrecognized json event
       } catch {
+        const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, "").trim();
+        if (cleanLine === "── Final response ──") {
+          const lastUserIndex = currentItems.map(item => item.role).lastIndexOf("user");
+          const currentTurnItems = lastUserIndex >= 0 ? currentItems.slice(lastUserIndex + 1) : currentItems;
+          const hasStreamedAssistant = currentTurnItems.some(
+            item => item.type === "text" && item.role === "assistant" && !item.rawOutput && Boolean(item.content?.trim())
+          );
+          finalResponseSuppressedRef.current = hasStreamedAssistant;
+          inFinalResponseRef.current = true;
+          continue;
+        }
+
+        if (inFinalResponseRef.current) {
+          if (finalResponseSuppressedRef.current) {
+            continue;
+          }
+          const lastItem = currentItems[currentItems.length - 1];
+          if (lastItem && lastItem.type === "text" && lastItem.role === "assistant") {
+            lastItem.content = (lastItem.content || "") + "\n" + line;
+          } else {
+            currentItems.push({
+              id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              type: "text",
+              role: "assistant",
+              content: line,
+              timestamp: Date.now(),
+            });
+          }
+          continue;
+        }
+
         // Plain text line (e.g. stderr or stdout raw logs)
         if (line.startsWith("[stderr]")) {
           if (

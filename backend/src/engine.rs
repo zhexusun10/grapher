@@ -141,6 +141,7 @@ fn node_key(
     session_dir: &Path,
     session_id: &str,
 ) -> Result<(NodeKey, u64), String> {
+    if config.environment.is_some() { return Err("Managed views require a fresh, exact environment binding".into()); }
     let repo = Path::new(&config.repository)
         .canonicalize()
         .map_err(|e| e.to_string())?;
@@ -899,6 +900,21 @@ fn run_pi_with_timeout(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command.env_remove("GRAPHER_LAUNCH_BINDING");
+    let managed = request.role == PiRole::NodeAgent && config.environment.is_some();
+    if managed {
+        let environment = config.environment.as_ref().ok_or("Missing managed launch policy")?;
+        let data = request.environment.iter().find(|(key, _)| *key == "GRAPHER_ENVIRONMENT_DATA")
+            .map(|(_, value)| PathBuf::from(value)).ok_or("Missing environment data binding")?;
+        let execution = request.environment.iter().find(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID")
+            .map(|(_, value)| value.as_str()).ok_or("Missing managed execution identity")?;
+        let run = request.cwd.parent().and_then(Path::file_name).and_then(|name| name.to_str()).ok_or("Missing native Run layout")?;
+        let store = crate::environment::Environments::new(&data, run, environment)?;
+        // The owning native writer validated live/stored bytes during prepare.
+        // Bind that sealed generation; do not hash the whole environment again.
+        let input = store.load_record_metadata(execution, "before")?;
+        crate::environment::bind_command(&mut command, &data, run, environment, &input, request.cwd, session_dir)?;
+    }
     process_control::configure_command(&mut command);
     let started = Instant::now();
     #[cfg(not(feature = "fixture"))]
@@ -927,7 +943,7 @@ fn run_pi_with_timeout(
         invalidate_warm_node();
     }
     #[cfg(not(feature = "fixture"))]
-    let source_role = request.role != PiRole::Merger && request.cwd.canonicalize().ok()
+    let source_role = !managed && request.role != PiRole::Merger && request.cwd.canonicalize().ok()
         == Path::new(&config.repository).canonicalize().ok();
     #[cfg(not(feature = "fixture"))]
     let prepared = if warm_node.is_none() && source_role {
@@ -1320,6 +1336,7 @@ fn run_pi_with_timeout(
     let input_broken_pipe_on_success = input_error
         .as_ref()
         .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe && status.success() && !final_text.trim().is_empty());
+    if managed { process_tree.ensure_drained()?; }
     // ProcessGuard clears the process group. Detached descendants are not
     // guaranteed to be covered; tasks must finish background work before returning.
     on_output(format!(
@@ -1426,6 +1443,7 @@ pub fn execute(
                 ("GRAPHER_MODE", "node".into()),
                 ("GRAPHER_NODE_EXECUTION_ID", execution.id.clone()),
                 ("GRAPHER_NODE_NAME", execution.node.clone()),
+                ("GRAPHER_ENVIRONMENT_DATA", root.to_string_lossy().into()),
             ],
             system_prompt: None,
             images,
@@ -1500,6 +1518,7 @@ text = sys.stdin.read()
 print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':text}]}}), flush=True)
 "#).unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
@@ -1515,6 +1534,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             id: "feedback-prompt".into(), node: "review".into(), revision: 1, attempt: 1,
             session_id: "feedback-prompt".into(), worktree: temp.path().to_string_lossy().into(),
             before: String::new(), workspace_lineage: vec![], after: None, status: "running".into(),
+            input: None, result: None,
             output: String::new(), output_bytes: 0, pid: None, started_at: 0,
             completed_at: None, metrics: None,
         };
@@ -1553,6 +1573,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
                 "timestamp":"2026-01-01T00:00:02.000Z", "thinkingLevel":"high"}),
         )).unwrap();
         let config = Config {
+            environment: None,
             repository: repository.to_string_lossy().into(),
             model: "openai-codex/gpt-6-sol".into(),
             thinking_level: "high".into(),
@@ -1630,6 +1651,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read() # RPC shutdown is requested by closing stdin.
 "#).unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
@@ -1684,6 +1706,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
@@ -1755,6 +1778,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
@@ -1846,6 +1870,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
@@ -1918,6 +1943,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
@@ -1985,6 +2011,7 @@ print(json.dumps({'type':'response','id':prompt['id'],'command':'prompt','succes
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
@@ -2027,6 +2054,7 @@ sys.stdin.read()
         ] {
             let temp = tempfile::tempdir().unwrap();
             let config = Config {
+                environment: None,
                 engine: "pi".into(),
                 pi_command: "/bin/sh".into(),
                 pi_args: vec!["-c".into(), script.into()],
@@ -2079,6 +2107,7 @@ sys.stdin.read()
         std::env::set_var(&variable, "1");
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
             pi_args: vec!["-c".into(), "cat >/dev/null; sleep 1.2; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
@@ -2119,6 +2148,7 @@ sys.stdin.read()
         let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            environment: None,
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
             pi_args: vec!["-c".into(), "cat >/dev/null; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
@@ -2164,6 +2194,7 @@ sys.stdin.read()
         let _guard = lock_env();
         let original = std::env::var_os("PLANNER_THINKING");
         let mut config = Config {
+            environment: None,
             repository: "/tmp/fake".into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
@@ -2230,6 +2261,7 @@ sys.stdin.read()
         std::env::remove_var("PARTITIONER_THINKING");
 
         let custom_config = Config {
+            environment: None,
             repository: "/tmp/fake".into(),
             model: "anthropic/claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),
@@ -2264,6 +2296,7 @@ sys.stdin.read()
         std::env::remove_var("PARTITIONER_THINKING");
 
         let config = Config {
+            environment: None,
             repository: "/tmp/fake".into(),
             model: String::new(),
             role_models: Default::default(),
@@ -2290,6 +2323,7 @@ sys.stdin.read()
         let _guard = lock_env();
 
         let config = Config {
+            environment: None,
             repository: "/tmp/fake".into(),
             model: "some-model".into(),
             thinking_level: "medium".into(),
@@ -2383,6 +2417,7 @@ sys.stdin.read()
         let _guard = lock_env();
 
         let config = Config {
+            environment: None,
             repository: "/tmp/fake".into(),
             model: "claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),

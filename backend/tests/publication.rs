@@ -150,6 +150,7 @@ git add shared.txt
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"resolved"}]}}'
 "#).unwrap();
         let config = Config {
+            environment: None,
             repository: source.to_string_lossy().into(),
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),

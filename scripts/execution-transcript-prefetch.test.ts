@@ -124,3 +124,21 @@ test("both transcript caches enforce entry and byte limits", () => {
     cache.clear();
   }
 });
+
+test("final response tag and duplicate tail are suppressed when assistant message already exists", () => {
+  const end = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
+  const output = end("我是 AI 编程助手") + "\n── Final response ──\n我是 AI 编程助手\n";
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }));
+  assert.match(html, /我是 AI 编程助手/);
+  assert.doesNotMatch(html, /Final response/);
+  const occurrences = (html.match(/我是 AI 编程助手/g) || []).length;
+  assert.equal(occurrences, 1);
+});
+
+test("final response tail is shown without delimiter tag when no assistant message was emitted", () => {
+  const output = "some raw output\n── Final response ──\nDirect Final Answer\n";
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }));
+  assert.match(html, /Direct Final Answer/);
+  assert.doesNotMatch(html, /Final response/);
+});
+

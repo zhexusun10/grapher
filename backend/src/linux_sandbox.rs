@@ -255,7 +255,7 @@ pub fn execution_command(
     )?;
     command
         .arg("--")
-        .arg("node")
+        .arg(crate::native::trusted_node()?)
         .arg(engine.join("engine/entrypoint.mjs"));
     // PID namespaces reuse small PIDs across concurrent Graph nodes. tsx
     // names its IPC socket <os.tmpdir()>/tsx-<uid>/<pid>.pipe, so a shared

@@ -305,6 +305,7 @@ fn buffered_output_flushes_before_finish_and_replays() {
         before: "".into(),
         workspace_lineage: vec![],
         after: None,
+        input: None, result: None,
         status: "running".into(),
         output: String::new(), output_bytes: 0, pid: None,
         started_at: now(),
@@ -423,6 +424,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -536,6 +538,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     )
     .unwrap();
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -689,6 +692,7 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
                 edges: vec![],
             },
             Config {
+                environment: None,
                 repository: repo.to_string_lossy().into(),
                 engine: "pi".into(),
                 pi_command: "/bin/sh".into(),
@@ -746,6 +750,7 @@ fn legacy_planner_session_keeps_its_original_pi_identity() {
                 edges: vec![],
             },
             Config {
+                environment: None,
                 repository: repo.to_string_lossy().into(),
                 engine: "pi".into(),
                 pi_command: "/bin/sh".into(),
@@ -815,6 +820,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 "#).unwrap();
     let root = temp.path().join("runtime");
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -910,6 +916,7 @@ printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"nam
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
 "#).unwrap();
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -1005,6 +1012,7 @@ printf '%s' '{"originalGoal":"test","nodes":[{"name":"change","task":"updated"},
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
 "#).unwrap();
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -1107,6 +1115,7 @@ printf '%s' '{"originalGoal":"test","nodes":[{"name":"work","task":"work"}],"edg
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
 "#).unwrap();
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -1183,6 +1192,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -1282,6 +1292,7 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
         extension: temp.path().join("unused.ts"),
     });
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -1394,6 +1405,7 @@ esac
         planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
     });
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(), engine: "pi".into(),
         pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
         model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
@@ -1437,6 +1449,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         extension: temp.path().join("unused.ts"),
     });
     let config = Config {
+        environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -1484,6 +1497,7 @@ fn partitioner_failure_persists_history_without_compiling_or_approving_a_run() {
     let result = plan_goal_internal(
         "Build two modules".into(),
         Config {
+            environment: None,
             repository: repo.to_string_lossy().into(),
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
@@ -1572,6 +1586,7 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
     )
     .unwrap();
     let config = |script: &std::path::Path| Config {
+        environment: None,
         repository: repository.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -1708,6 +1723,7 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         let script = temp.path().join("failed-revision.sh");
         fs::write(&script, "cat >/dev/null\nprintf 'failed revision source' > tracked.txt\nprintf 'new file' > new.txt\nexit 1\n").unwrap();
         let config = Config {
+            environment: None,
             repository: repository.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
             model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
@@ -1774,6 +1790,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), if fail { "exit 1" } else { ":" })).unwrap();
             let config = Config {
+                environment: None,
                 repository: repository.to_string_lossy().into(), engine: "pi".into(),
                 pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
                 model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
@@ -1848,6 +1865,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), label, label)).unwrap();
         let config = Config {
+            environment: None,
             repository: repository.to_string_lossy().into(),
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
@@ -1921,6 +1939,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display())).unwrap();
         let config = Config {
+            environment: None,
             repository: repository.to_string_lossy().into(),
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
@@ -2009,6 +2028,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                         edges: vec![],
                     },
                     Config {
+                        environment: None,
                         repository: repository.to_string_lossy().into(),
                         engine: "pi".into(),
                         pi_command: "/bin/sh".into(),
@@ -2210,6 +2230,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 }],
             },
             Config {
+                environment: None,
                 repository: repository.to_string_lossy().into(),
                 engine: "pi".into(),
                 pi_command: "/bin/sh".into(),
@@ -2303,6 +2324,7 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         before: String::new(),
         workspace_lineage: vec![],
         after: None,
+        input: None, result: None,
         status: "running".into(),
         output: String::new(), output_bytes: 0, pid: None,
         started_at: now(),
@@ -2512,6 +2534,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 .collect(),
             },
             Config {
+                environment: None,
                 repository: repository.to_string_lossy().into(),
                 engine: "pi".into(),
                 pi_command: "/bin/sh".into(),
@@ -2646,6 +2669,7 @@ fn planning_metrics_parsing_and_persistence() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {
+        environment: None,
         repository: String::new(),
         #[cfg(feature = "fixture")]
         engine: "fixture".into(),
@@ -2721,6 +2745,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {
+        environment: None,
         repository: String::new(),
         #[cfg(feature = "fixture")]
         engine: "fixture".into(),
@@ -2759,6 +2784,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         before: "base-head".into(),
         workspace_lineage: vec![],
         after: None,
+        input: None, result: None,
         status: "running".into(),
         output: String::new(), output_bytes: 0, pid: None,
         started_at: 1726300000000,
@@ -2812,6 +2838,7 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {
+        environment: None,
         repository: "/workspace/repo-a".into(),
         #[cfg(feature = "fixture")]
         engine: "fixture".into(),
@@ -2919,6 +2946,7 @@ fn completed_graph_is_published_by_driver() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {
+        environment: None,
         repository: String::new(),
         engine: "fixture".into(),
         pi_command: String::new(),
@@ -3127,6 +3155,7 @@ fn list_files_and_list_skills_dispatch() {
 #[test]
 fn planning_preflight_checks_model_format() {
     let mut config = Config {
+        environment: None,
         repository: "/tmp/fake".into(),
         model: "".into(),
         thinking_level: "medium".into(),
@@ -3160,6 +3189,7 @@ fn planning_preflight_checks_model_format() {
 #[test]
 fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
     let config = Config {
+        environment: None,
         repository: "/tmp/fake".into(),
         model: "example/test".into(),
         thinking_level: "medium".into(),
@@ -3230,6 +3260,7 @@ fn save_config_updates_bootstrap_and_persists() {
 
     // 2. Save new config with valid model
     let new_config = Config {
+        environment: None,
         repository: temp_dir.path().to_string_lossy().into(),
         model: "openai/gpt-4o".into(),
         role_models: Default::default(),

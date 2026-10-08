@@ -255,6 +255,19 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
     Ok(())
 }
 
+/// Resolve the engine before applying business PATH. Never let an environment
+/// replace the pinned Pi's Node executable with an arbitrary workspace binary.
+pub(crate) fn trusted_node() -> Result<PathBuf, String> {
+    static NODE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    NODE.get_or_init(|| {
+        let output = Command::new("node").args(["-p", "process.execPath"]).output().map_err(|e| e.to_string())?;
+        if !output.status.success() { return Err("Cannot resolve trusted native Node".into()); }
+        let path = PathBuf::from(String::from_utf8(output.stdout).map_err(|e| e.to_string())?.trim());
+        if !path.is_absolute() || !path.is_file() { return Err("Invalid trusted native Node executable".into()); }
+        Ok(host_path(&path.canonicalize().map_err(|e| e.to_string())?))
+    }).clone()
+}
+
 pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, String> {
     validate_workspace(role, repository, cwd)?;
     if repository.canonicalize().map_err(|e| e.to_string())?
@@ -262,7 +275,7 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
     {
         return Err("Private workspaces require execution_command and its platform context".into());
     }
-    let mut command = Command::new("node");
+    let mut command = Command::new(trusted_node()?);
     command.arg(host_path(&installation_root().join("engine/entrypoint.mjs")));
     command.current_dir(host_path(cwd));
     command.env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
@@ -311,7 +324,7 @@ pub fn execution_command(
         command
             .arg("-f")
             .arg(profile)
-            .arg("node")
+            .arg(trusted_node()?)
             .arg(engine.join("engine/entrypoint.mjs"));
         command
             .current_dir(&current)
@@ -322,7 +335,7 @@ pub fn execution_command(
     #[cfg(target_os = "windows")]
     {
         let _ = (data, session);
-        let mut command = Command::new("node");
+        let mut command = Command::new(trusted_node()?);
         command
             .arg(host_path(&engine.join("engine/entrypoint.mjs")))
             .current_dir(host_path(&current))
@@ -585,7 +598,7 @@ export default function () {
         // canonicalizes /var to /private/var. Both identities must stay native.
         let canonical_source = source.canonicalize().unwrap();
         let mut command = execution_command(PiRole::Planner, &canonical_source, &canonical_source, &data, &session).unwrap();
-        assert_eq!(command.get_program(), std::ffi::OsStr::new("node"));
+        assert_eq!(command.get_program(), trusted_node().unwrap().as_os_str());
         assert_eq!(command.get_current_dir(), Some(host_path(&canonical_source).as_path()));
         let output = command.args(["--mode", "json", "--print", "--no-session", "--no-skills", "--no-extensions", "--extension"])
             .arg(&probe).arg("--session-dir").arg(&session)
@@ -607,7 +620,7 @@ export default function () {
         for role in [PiRole::Partitioner, PiRole::Planner] {
             for cwd in [&source, &canonical, &alias] {
                 let command = execution_command(role, &source, cwd, temp.path(), temp.path()).unwrap();
-                assert_eq!(command.get_program(), std::ffi::OsStr::new("node"));
+                assert_eq!(command.get_program(), trusted_node().unwrap().as_os_str());
                 assert_eq!(command.get_current_dir().unwrap().canonicalize().unwrap(), canonical);
                 assert_eq!(command.get_args().next(), Some(host_path(&installation_root().join("engine/entrypoint.mjs")).as_os_str()));
                 assert!(!temp.path().join(".grapher-workspaces").exists());

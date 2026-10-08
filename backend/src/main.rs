@@ -1,6 +1,13 @@
 use std::io::{self, Read};
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--grapher-env-tool") {
+        let status = match grapher::environment_discovery::tool(std::env::args().skip(2).collect()) {
+            Ok(status) => status,
+            Err(error) => { eprintln!("Native environment observation refused: {error}"); 1 }
+        };
+        std::process::exit(status);
+    }
 
     if std::env::args().nth(1).as_deref() == Some("--build-identity") {
         let revision = env!("GRAPHER_BUILD_COMMIT");

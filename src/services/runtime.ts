@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import { invalidateTranscriptCaches } from "./transcriptCache";
-import type { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot } from "../types";
+import type { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, EnvironmentCapabilities, ResultDescriptor } from "../types";
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
@@ -61,6 +61,10 @@ export const runtimeService = {
       return await request<Snapshot>("history", { runId });
     }
   },
+  environmentCapabilities: (signal?: AbortSignal) => request<EnvironmentCapabilities>("environment_capabilities", {}, signal),
+  resultDescriptor: (runId: string) => request<ResultDescriptor>("result_descriptor", { runId }),
+  launchResult: (runId: string, args: string[]) => request<{ output: string }>("launch_result", { runId, args }),
+  cancelResult: (runId: string) => request<{ requested: boolean }>("cancel_result", { runId }),
   compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config, runId?: string) => request<Snapshot>("save_graph", { graph, config, runId }),
   saveConfig: (config: Config) => request<Bootstrap>("save_config", { config }),

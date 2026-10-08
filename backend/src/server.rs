@@ -319,6 +319,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
             max_parallel: 0,
             max_feedback: 3,
             auto_approve: false,
+            environment: None,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
             #[cfg(feature = "fixture")]
@@ -327,6 +328,9 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
             pi_args: vec![entrypoint.to_string_lossy().into()],
         });
     config.max_feedback = config.max_feedback.min(3);
+    // Settings are future-Run defaults, not an environment selection surface.
+    // Historical Run/descriptor policies remain in their immutable projections.
+    config.environment = None;
     if config.repository.is_empty() {
         if let Some(ref repo) = detected_repo {
             config.repository = repo.path.clone();
@@ -462,6 +466,7 @@ fn save_graph(
 }
 
 fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
+    config.environment = None; // Native admission is Runtime-owned, never a UI default.
     config.validate_model_settings()?;
     config.max_feedback = 3;
     let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
@@ -614,6 +619,9 @@ fn validate_planning_models_preflight(
     fetch_catalog: impl Fn() -> Option<serde_json::Value>,
 ) -> Result<(), String> {
     config.validate_model_settings()?;
+    if config.environment.is_some() && mode != Some("graph") {
+        return Err("Managed environments require explicit Graph routing; Auto/Serial are not silently changed".into());
+    }
     let need_partitioner = mode.is_none();
     let need_planner = mode != Some("serial");
     // Keep validation order and failure behavior, but reuse one catalog response
@@ -1829,10 +1837,17 @@ fn drive(service: Arc<Service>) {
                         // a per-project lock. Concurrent Runs are allowed to reach
                         // Git publication; any resulting repository conflict is left
                         // for the existing publication state to expose.
-                        let preflight = service.runtime.lock().map_err(|error| error.to_string())?
-                            .validate_publication_files(&repository, &publication.heads);
+                        let preflight = {
+                            let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                            runtime.validate_publication_files(&repository, &publication.heads)
+                                .and_then(|()| runtime.publication_environment_input())
+                        }.and_then(|input| {
+                            if let Some((store, selected)) = input { store.validate_result(&selected)?; }
+                            Ok(())
+                        });
                         let result = preflight.and_then(|()| crate::process_control::with_owner(&run_id, || {
-                            crate::graph_merge::merge_graph(&repository, &publication.heads, || {
+                            let exclusions = service.runtime.lock().map_err(|e| e.to_string())?.exclusions()?;
+                            crate::graph_merge::merge_graph_scoped(&repository, &publication.heads, &exclusions, || {
                                 let attempt = service
                                     .runtime
                                     .lock()
@@ -3253,6 +3268,28 @@ pub fn dispatch(
             }
             to_value(result)
         }
+        "environment_capabilities" => to_value(crate::environment::capabilities()),
+        "cancel_result" => {
+            let run: String = argument(&body, "runId")?;
+            Uuid::parse_str(&run).map_err(|_| "Invalid result Run ID")?;
+            crate::process_control::cancel_result(&run)?;
+            to_value(serde_json::json!({"requested": true}))
+        }
+        "launch_result" => {
+            if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) { return Err("Wait for the Run driver/Planner before launching its published result".into()); }
+            let args: Vec<String> = argument(&body, "args")?;
+            let (job, control) = service.runtime.lock().map_err(|e| e.to_string())?.start_result(&args)?;
+            let outcome = crate::runtime::perform_result(&job, &control, |input| {
+                service.runtime.lock().map_err(|e| e.to_string())?.emit(EventKind::ResultExecutionPrepared { input })
+            });
+            let output = service.runtime.lock().map_err(|e| e.to_string())?.finish_result(&job, &control, outcome)?;
+            drive(service.clone());
+            to_value(serde_json::json!({"output": output}))
+        }
+        "result_descriptor" => {
+            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            to_value(runtime.result_descriptor()?)
+        }
         "bootstrap" => to_value(bootstrap(service, metadata)?),
         "snapshot" => to_value(snapshot(service)?),
         "history" => to_value(history(argument(&body, "runId")?, service)?),
@@ -3475,7 +3512,9 @@ fn api_service(
         | "edit_planner"
         | "save_graph"
         | "delete_run"
-        | "get_execution_output" => {
+        | "get_execution_output"
+        | "result_descriptor"
+        | "launch_result" => {
             if let Some(run_id) = body.get("runId").and_then(serde_json::Value::as_str) {
                 service_for_run(primary, run_id, false)
             } else if command == "save_graph" {

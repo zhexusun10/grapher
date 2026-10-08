@@ -46,7 +46,9 @@ async function fixture(name, handler = async () => false) {
     const command = new URL(route.request().url()).pathname.slice(5);
     const body = route.request().postDataJSON();
     if (await handler(route, command, body)) return;
-    const defaults = { provider_auth: catalog, pi_extensions: { globalDirectory: "mock", extensions: [] }, list_files: { files: [] }, list_skills: { skills: [] } };
+    const defaults = { provider_auth: catalog, pi_extensions: { globalDirectory: "mock", extensions: [] },
+      environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true },
+      list_files: { files: [] }, list_skills: { skills: [] } };
     if (Object.hasOwn(defaults, command)) return route.fulfill({ json: { result: defaults[command] } });
     errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ status: 500, json: { error: `Unexpected API: ${command}` } });

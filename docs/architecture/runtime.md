@@ -6,6 +6,14 @@
 
 The Rust backend owns Run state. SQLite stores append-only business events; a reducer produces the current Snapshot. React displays that projection and submits commands—it does not simulate execution or invent authoritative status.
 
+[Native workspace environments](native-environments.md) use durable backend
+admission for new supported Graph projects, without frontend environment choices.
+They fix code/E/L/resources and advance current workspace aliases atomically with
+completion/feedback. Model-free result execution reserves a generation, releases
+the Run mutex for native work, then guards the commit; success requests
+republishing, not UI-invented completion. Missing/incompatible views fail without
+asking the user to choose an environment. Legacy Runs retain their replay contract.
+
 ## Graph representation
 
 ```ts

@@ -6,6 +6,13 @@
 
 **Use trusted projects, extensions, and tools.** Private Git state, filesystem access controls, and model-visible path adaptation are separate mechanisms. None is a general malicious-multi-tenant or credential-protection guarantee.
 
+[Native workspace environments](native-environments.md) add backend-owned business
+entry/PATH/state and device binding inside these same boundaries, without a user
+environment configuration surface. Native CUDA proofs are per execution, not
+universal GPU acceptance. Job quotas/device locks do not add a Windows filesystem
+sandbox, system snapshots or stronger cross-slot path/metadata guarantees.
+Unsupported requirements are rejected without a user-selected fallback.
+
 ## Roles and permissions
 
 | Role | Working directory | Access boundary |

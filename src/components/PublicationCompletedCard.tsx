@@ -127,14 +127,9 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
         </div>
 
         <div className="pub-card-summary-tip">
-          {routeType === "graph" ? (
-            <span>
-              {t("已完成所有 ")}{state.graph.nodes.length}{t(" 个规划节点的执行，")}{publication?.heads ? t("{0} 个拓扑终点及上游变更已聚合并写回目标目录。", headsCount) : t("已聚合写入源文件工作区。")}
-            </span>
-          ) : (
-            <span>
-              {t("单节点串行任务已在源文件工作区直接完成修改与提交，所有修改已落盘生效。")}</span>
-          )}
+          <span>
+            {t("已完成所有 ")}{state.graph.nodes.length}{t(" 个规划节点的执行，")}{publication?.heads ? t("{0} 个拓扑终点及上游变更已聚合并写回目标目录。", headsCount) : t("已聚合写入源文件工作区。")}
+          </span>
         </div>
 
         {mergers.length > 0 && activeMerger && (

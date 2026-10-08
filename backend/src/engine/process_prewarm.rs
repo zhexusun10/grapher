@@ -198,6 +198,7 @@ mod tests {
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            environment: None,
             role_models: Default::default(),
         };
         for role in [PiRole::Partitioner, PiRole::Planner, PiRole::NodeAgent] {

@@ -17,6 +17,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
     let script_path = temp.path().join("fake-pi.sh");
     fs::write(&script_path, script).unwrap();
     let config = Config {
+        environment: None,
         repository: String::new(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -281,6 +282,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
 "#;
     fs::write(&script_path, script).unwrap();
     let config = Config {
+        environment: None,
         repository: String::new(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -327,6 +329,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
 "#;
     fs::write(&script_path, script).unwrap();
     let config = Config {
+        environment: None,
         repository: String::new(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -460,6 +463,7 @@ printf 'ROLE=%s\nROOT=%s\nORIGINAL_ROOT=%s\n' "$GRAPHER_MODE" "$GRAPHER_WORKSPAC
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
 "#).unwrap();
     let config = Config {
+        environment: None,
         repository: String::new(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -533,6 +537,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     )
     .unwrap();
     let config = Config {
+        environment: None,
         repository: repository.to_string_lossy().into(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
@@ -598,6 +603,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     std::env::set_var("PI_SESSION_FILE", "leaked-external-file");
 
     let base_config = Config {
+        environment: None,
         repository: String::new(),
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),

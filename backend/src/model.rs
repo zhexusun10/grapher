@@ -2,10 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[cfg(feature = "acceptance")]
-pub static LOG_TEXT_DESERIALIZED_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static LOG_TEXT_DESERIALIZED_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "acceptance")]
-fn count_log_deserialization<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+fn count_log_deserialization<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
     let text = String::deserialize(deserializer)?;
     LOG_TEXT_DESERIALIZED_BYTES.fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
     Ok(text)
@@ -38,7 +41,11 @@ impl<'de> Deserialize<'de> for Edge {
             _legacy_relation: Option<serde::de::IgnoredAny>,
         }
         let input = EdgeInput::deserialize(deserializer)?;
-        Ok(Self { from: input.from, to: input.to, feedback: input.feedback })
+        Ok(Self {
+            from: input.from,
+            to: input.to,
+            feedback: input.feedback,
+        })
     }
 }
 
@@ -155,13 +162,18 @@ pub struct Config {
     pub max_feedback: usize,
     #[serde(default)]
     pub auto_approve: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<crate::environment::EnvironmentConfig>,
 }
 
 impl Config {
     pub fn validate_model_settings(&self) -> Result<(), String> {
         const LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
         if !LEVELS.contains(&self.thinking_level.as_str()) {
-            return Err(format!("Invalid default thinking level: {}", self.thinking_level));
+            return Err(format!(
+                "Invalid default thinking level: {}",
+                self.thinking_level
+            ));
         }
         for (role, settings) in &self.role_models {
             if !matches!(role.as_str(), "partitioner" | "planner" | "nodeAgent") {
@@ -172,6 +184,9 @@ impl Config {
                     return Err(format!("Invalid {role} thinking level: {level}"));
                 }
             }
+        }
+        if let Some(environment) = &self.environment {
+            environment.validate()?;
         }
         Ok(())
     }
@@ -245,9 +260,16 @@ pub struct Execution {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_lineage: Vec<String>,
     pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<crate::environment::CompositeResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::environment::CompositeResult>,
     pub status: String,
     #[serde(default)]
-    #[cfg_attr(feature = "acceptance", serde(deserialize_with = "count_log_deserialization"))]
+    #[cfg_attr(
+        feature = "acceptance",
+        serde(deserialize_with = "count_log_deserialization")
+    )]
     pub output: String,
     #[serde(default)]
     pub output_bytes: usize,
@@ -321,6 +343,8 @@ pub struct NodeState {
     pub baseline_files_version: Option<String>,
     #[serde(default)]
     pub files_changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::environment::CompositeResult>,
     pub error: Option<String>,
 }
 
@@ -341,6 +365,7 @@ impl Default for NodeState {
             files_version: None,
             baseline_files_version: None,
             files_changed: false,
+            result: None,
             error: None,
         }
     }
@@ -381,6 +406,42 @@ pub enum EventKind {
     },
     SourceFilesRecorded {
         files: SourceFiles,
+    },
+    /// Only new Runs request automatic admission. Legacy Created events alone
+    /// never authorize reinterpreting a saved source/ignored-file contract.
+    EnvironmentPolicyRequested,
+    EnvironmentPolicyResolved {
+        environment: Option<crate::environment::EnvironmentConfig>,
+        reason: String,
+    },
+    EnvironmentInitialized {
+        result: crate::environment::CompositeResult,
+    },
+    ExecutionInputRecorded {
+        execution_id: String,
+        input: crate::environment::CompositeResult,
+    },
+    ExecutionResultRecorded {
+        execution_id: String,
+        result: crate::environment::CompositeResult,
+    },
+    ResultPublished {
+        descriptor: crate::environment::ResultDescriptor,
+    },
+    ResultExecutionStarted {
+        input: crate::environment::CompositeResult,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+    },
+    ResultExecutionPrepared {
+        input: crate::environment::CompositeResult,
+    },
+    ResultExecutionFinished {
+        descriptor: crate::environment::ResultDescriptor,
+    },
+    ResultExecutionFailed {
+        generation: String,
+        error: String,
     },
     WorkspaceFilesChanged {
         execution_id: String,
@@ -425,14 +486,20 @@ pub enum EventKind {
     },
     Output {
         execution_id: String,
-        #[cfg_attr(feature = "acceptance", serde(deserialize_with = "count_log_deserialization"))]
+        #[cfg_attr(
+            feature = "acceptance",
+            serde(deserialize_with = "count_log_deserialization")
+        )]
         text: String,
     },
     Finished {
         execution_id: String,
         head: String,
         #[serde(default)]
-        #[cfg_attr(feature = "acceptance", serde(deserialize_with = "count_log_deserialization"))]
+        #[cfg_attr(
+            feature = "acceptance",
+            serde(deserialize_with = "count_log_deserialization")
+        )]
         output: String,
         #[serde(default)]
         output_bytes: usize,
@@ -557,6 +624,17 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultExecution {
+    pub input: crate::environment::CompositeResult,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub result: Option<crate::environment::CompositeResult>,
+    pub status: String,
+    pub error: Option<String>,
+}
+
 /// Publication state is separate from node state. Retain the exact heads and
 /// target across retries/restarts instead of replaying historical attempts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -608,10 +686,22 @@ pub struct Snapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_files: Option<SourceFiles>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_baseline: Option<crate::environment::CompositeResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_result: Option<crate::environment::ResultDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_execution: Option<ResultExecution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_metrics: Option<RunMetrics>,
 }
 
-pub fn parse_execution_metrics(output: &str, started_at: u64, completed_at: u64) -> ExecutionMetrics {
+pub fn parse_execution_metrics(
+    output: &str,
+    started_at: u64,
+    completed_at: u64,
+) -> ExecutionMetrics {
     let mut duration_seconds = 0.0;
     let mut assistant_messages = 0;
     let mut tools = 0;
@@ -644,13 +734,17 @@ pub fn parse_execution_metrics(output: &str, started_at: u64, completed_at: u64)
                                 usage.output +=
                                     u.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                                 usage.cache_read +=
-                                    u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                    u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
                                 usage.cache_write +=
-                                    u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                    u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
                                 usage.reasoning +=
-                                    u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                    u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
                                 usage.total_tokens +=
-                                    u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                    u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
                             }
                         }
                     }
@@ -659,7 +753,10 @@ pub fn parse_execution_metrics(output: &str, started_at: u64, completed_at: u64)
                     tools += 1;
                 }
                 "tool_execution_end" => {
-                    if value.get("isError").and_then(|v| v.as_bool()).unwrap_or(false)
+                    if value
+                        .get("isError")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
                         || value
                             .get("result")
                             .and_then(|r| r.get("isError"))
@@ -731,15 +828,16 @@ impl Snapshot {
             }
         }
 
-        let wall_clock_duration = if let (Some(first), Some(last)) = (self.events.first(), self.events.last()) {
-            if last.timestamp >= first.timestamp {
-                (last.timestamp - first.timestamp) as f64 / 1000.0
+        let wall_clock_duration =
+            if let (Some(first), Some(last)) = (self.events.first(), self.events.last()) {
+                if last.timestamp >= first.timestamp {
+                    (last.timestamp - first.timestamp) as f64 / 1000.0
+                } else {
+                    planning_duration + exec_duration
+                }
             } else {
                 planning_duration + exec_duration
-            }
-        } else {
-            planning_duration + exec_duration
-        };
+            };
 
         RunMetrics {
             total_duration_seconds: wall_clock_duration,
@@ -786,7 +884,12 @@ pub fn append_live_output(execution: &mut Execution, text: &str) {
 
 pub fn apply(state: &mut Snapshot, event: &Event) {
     match &event.kind {
-        EventKind::PlanningStarted { goal, config, planning, plan_type } => {
+        EventKind::PlanningStarted {
+            goal,
+            config,
+            planning,
+            plan_type,
+        } => {
             state.graph.original_goal = goal.clone();
             state.config = Some(config.clone());
             state.planning_id = Some(planning.planning_id.clone());
@@ -824,14 +927,22 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.base = base.clone();
             state.phase = "running".into();
         }
-        EventKind::GraphRevised { graph, planning_id, planning, invalidated, .. } => {
+        EventKind::GraphRevised {
+            graph,
+            planning_id,
+            planning,
+            invalidated,
+            ..
+        } => {
             state.stop_requested = false;
             let changed = state.graph != *graph;
             state.graph = graph.clone();
             state.plan = crate::compiler::compile_legacy(graph, true).ok();
             state.planning_id = Some(planning_id.clone());
             state.planning = Some(planning.clone());
-            state.nodes.retain(|name, _| graph.nodes.iter().any(|node| node.name == *name));
+            state
+                .nodes
+                .retain(|name, _| graph.nodes.iter().any(|node| node.name == *name));
             for node in &graph.nodes {
                 state.nodes.entry(node.name.clone()).or_default();
             }
@@ -842,7 +953,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     "waiting"
                 } else {
                     "dirty"
-                }.into();
+                }
+                .into();
                 node.head = None;
                 node.error = None;
                 node.instruction.clear();
@@ -853,9 +965,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.files_override = None;
                 node.files_version = None;
                 node.baseline_files_version = None;
-                if node.status == "dirty" { node.revision += 1; }
+                if node.status == "dirty" {
+                    node.revision += 1;
+                }
             }
-            state.feedback_counts.retain(|key, _| graph.edges.iter().any(|edge| edge.feedback && key == &format!("{}->{}", edge.from, edge.to)));
+            state.feedback_counts.retain(|key, _| {
+                graph
+                    .edges
+                    .iter()
+                    .any(|edge| edge.feedback && key == &format!("{}->{}", edge.from, edge.to))
+            });
             if !state.approved {
                 // Draft revisions must stay approvable, including after Reject.
                 // No Approved event means there can be no execution.
@@ -870,16 +989,22 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.config = Some(config.clone());
             state.plan_type = Some("graph".into());
             state.plan = crate::compiler::compile_legacy(graph, true).ok();
-            state.nodes = graph.nodes.iter()
+            state.nodes = graph
+                .nodes
+                .iter()
                 .map(|node| (node.name.clone(), NodeState::default()))
                 .collect();
             state.phase = "awaiting_approval".into();
             // Planning identity and conversation history stay with this Run.
         }
-        EventKind::StopRequested => { state.stop_requested = true; }
+        EventKind::StopRequested => {
+            state.stop_requested = true;
+        }
         EventKind::Paused { paused } => {
             state.paused = *paused;
-            if !paused { state.stop_requested = false; }
+            if !paused {
+                state.stop_requested = false;
+            }
             state.phase = if *paused { "paused" } else { "running" }.into();
         }
         EventKind::Rejected => {
@@ -894,11 +1019,135 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.error = None;
             state.executions.push(execution.clone());
         }
-        EventKind::SourceSnapshotted { .. } | EventKind::Steered { .. } | EventKind::NodeMessaged { .. } => {}
+        EventKind::SourceSnapshotted { .. }
+        | EventKind::Steered { .. }
+        | EventKind::NodeMessaged { .. } => {}
         EventKind::SourceFilesRecorded { files } => state.source_files = Some(files.clone()),
+        EventKind::EnvironmentPolicyRequested => {
+            if !state.approved
+                && state.environment_policy.is_none()
+                && state
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.environment.is_none())
+            {
+                state.environment_policy = Some("automatic-pending".into());
+            }
+        }
+        EventKind::EnvironmentPolicyResolved { environment, .. } => {
+            if state.environment_policy.as_deref() == Some("automatic-pending") && !state.approved {
+                if let Some(config) = state.config.as_mut() {
+                    config.environment = environment.clone();
+                    state.environment_policy = Some(
+                        if environment.as_ref().is_some_and(|policy| policy.discovery) {
+                            "automatic-lazy"
+                        } else if environment.is_some() {
+                            "automatic-managed"
+                        } else {
+                            "automatic-source-native"
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
+        EventKind::EnvironmentInitialized { result } => {
+            state.environment_baseline = Some(result.clone())
+        }
+        EventKind::ExecutionInputRecorded {
+            execution_id,
+            input,
+        } => {
+            if let Some(execution) = state.executions.iter_mut().find(|e| e.id == *execution_id) {
+                if execution.input.is_none() {
+                    execution.input = Some(input.clone());
+                }
+            }
+        }
+        EventKind::ExecutionResultRecorded {
+            execution_id,
+            result,
+        } => {
+            if let Some(execution) = state.executions.iter_mut().find(|e| e.id == *execution_id) {
+                if execution.result.is_none() {
+                    execution.result = Some(result.clone());
+                }
+            }
+        }
+        EventKind::ResultPublished { descriptor } => {
+            state.published_result = Some(descriptor.clone())
+        }
+        EventKind::ResultExecutionStarted { input, args } => {
+            if !state
+                .result_execution
+                .as_ref()
+                .is_some_and(|e| e.status == "running")
+            {
+                state.result_execution = Some(ResultExecution {
+                    input: input.clone(),
+                    args: args.clone(),
+                    result: None,
+                    status: "running".into(),
+                    error: None,
+                });
+                state.phase = "launching_result".into();
+            }
+        }
+        EventKind::ResultExecutionPrepared { input } => {
+            if let Some(execution) = state
+                .result_execution
+                .as_mut()
+                .filter(|e| e.status == "running" && e.input.generation == input.generation)
+            {
+                execution.input = input.clone();
+            }
+        }
+        EventKind::ResultExecutionFailed { generation, error } => {
+            if let Some(execution) = state
+                .result_execution
+                .as_mut()
+                .filter(|e| e.input.generation == *generation && e.status == "running")
+            {
+                execution.status = "failed".into();
+                execution.error = Some(error.clone());
+                state.phase = "needs_attention".into();
+                state.paused = true;
+            }
+        }
+        EventKind::ResultExecutionFinished { descriptor } => {
+            if state.result_execution.as_ref().is_some_and(|e| {
+                e.input.generation == descriptor.result.generation && e.status == "running"
+            }) {
+                if let Some(execution) = &mut state.result_execution {
+                    execution.status = "completed".into();
+                    execution.result = Some(descriptor.result.clone());
+                }
+                for node in state.nodes.values_mut().filter(|node| {
+                    node.status == "done"
+                        && node
+                            .result
+                            .as_ref()
+                            .is_some_and(|r| r.layout.as_deref() == Some(&descriptor.workspace))
+                }) {
+                    node.head = Some(descriptor.result.code_ref.clone());
+                    node.result = Some(descriptor.result.clone());
+                    node.files_version = descriptor.result.resource_refs.last().cloned();
+                }
+                state.published_result = Some(descriptor.clone());
+                state.publication = None;
+                state.phase = "running".into();
+                state.paused = false;
+            }
+        }
         EventKind::WorkspaceFilesChanged { execution_id } => {
-            if let Some(execution) = state.executions.iter().find(|execution| execution.id == *execution_id && execution.status == "running") {
-                if let Some(node) = state.nodes.get_mut(&execution.node) { node.files_changed = true; }
+            if let Some(execution) = state
+                .executions
+                .iter()
+                .find(|execution| execution.id == *execution_id && execution.status == "running")
+            {
+                if let Some(node) = state.nodes.get_mut(&execution.node) {
+                    node.files_changed = true;
+                }
             }
         }
         EventKind::Output { execution_id, text } => {
@@ -943,29 +1192,36 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     execution.after = Some(head.clone());
                     execution.completed_at = Some(event.timestamp);
                     execution.output_bytes = (*output_bytes).max(output.len());
-                    execution.metrics = metrics.clone().or_else(|| (!output.is_empty()).then(||
-                        parse_execution_metrics(output, execution.started_at, event.timestamp)));
+                    execution.metrics = metrics.clone().or_else(|| {
+                        (!output.is_empty()).then(|| {
+                            parse_execution_metrics(output, execution.started_at, event.timestamp)
+                        })
+                    });
                     execution.output = String::new();
-                    (node_name, lineage)
+                    (node_name, lineage, execution.result.clone())
                 });
-            if let Some((node_name, lineage)) = completed {
+            if let Some((node_name, lineage, result)) = completed {
                 if !superseded {
                     let changed = state
                         .nodes
                         .get(&node_name)
                         .and_then(|node| node.baseline_head.as_deref())
-                        .is_some_and(|baseline| baseline != head.as_str() || state.nodes[&node_name].files_changed);
-                    let dependents: Vec<String> = if changed && !state.nodes[&node_name].shared_workspace {
-                        crate::compiler::downstream(&state.graph, &node_name)
-                            .into_iter()
-                            .filter(|name| name != &node_name)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
+                        .is_some_and(|baseline| {
+                            baseline != head.as_str() || state.nodes[&node_name].files_changed
+                        });
+                    let dependents: Vec<String> =
+                        if changed && !state.nodes[&node_name].shared_workspace {
+                            crate::compiler::downstream(&state.graph, &node_name)
+                                .into_iter()
+                                .filter(|name| name != &node_name)
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                     if let Some(node) = state.nodes.get_mut(&node_name) {
                         node.status = "done".into();
                         node.head = Some(head.clone());
+                        node.result = result.clone();
                         node.instruction_images = None;
                         node.baseline_head = None;
                         node.shared_workspace = false;
@@ -983,6 +1239,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         if let Some(node) = state.nodes.get_mut(&inherited) {
                             if node.status == "done" {
                                 node.head = Some(head.clone());
+                                node.result = result.clone();
                                 node.files_version = Some(format!("after-{execution_id}"));
                                 node.files_override = None;
                                 node.files_changed = false;
@@ -992,8 +1249,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     // A follow-up that changed the result makes every descendant
                     // recompute from it. Unrelated branches stay valid.
                     for name in dependents {
-                        let never_executed =
-                            !state.executions.iter().any(|execution| execution.node == name);
+                        let never_executed = !state
+                            .executions
+                            .iter()
+                            .any(|execution| execution.node == name);
                         if let Some(node) = state.nodes.get_mut(&name) {
                             let unstarted = node.status == "waiting"
                                 || (node.status == "blocked" && never_executed);
@@ -1045,8 +1304,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             {
                 execution.status = "failed".into();
                 execution.completed_at = Some(event.timestamp);
-                execution.output_bytes = (*output_bytes).max(execution.output_bytes).max(execution.output.len());
-                execution.metrics = metrics.clone().or_else(|| (!execution.output.is_empty()).then(|| parse_execution_metrics(&execution.output, execution.started_at, event.timestamp)));
+                execution.output_bytes = (*output_bytes)
+                    .max(execution.output_bytes)
+                    .max(execution.output.len());
+                execution.metrics = metrics.clone().or_else(|| {
+                    (!execution.output.is_empty()).then(|| {
+                        parse_execution_metrics(
+                            &execution.output,
+                            execution.started_at,
+                            event.timestamp,
+                        )
+                    })
+                });
                 execution.output = String::new();
             }
         }
@@ -1055,21 +1324,39 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.status = "blocked".into();
             node.error = Some(error.clone());
         }
-        EventKind::WorkspaceResolved { execution_id, head, nodes, files_version } => {
-            let execution = state.executions.iter_mut().find(|item| item.id == *execution_id).unwrap();
+        EventKind::WorkspaceResolved {
+            execution_id,
+            head,
+            nodes,
+            files_version,
+        } => {
+            let execution = state
+                .executions
+                .iter_mut()
+                .find(|item| item.id == *execution_id)
+                .unwrap();
             execution.status = "resolved".into();
             execution.completed_at = Some(event.timestamp);
             let target = execution.node.clone();
             state.publication = None;
             for name in nodes {
-                let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
+                let never_executed = !state
+                    .executions
+                    .iter()
+                    .any(|execution| execution.node == *name);
                 let node = state.nodes.get_mut(name).unwrap();
-                let unstarted = name != &target &&
-                    (node.status == "waiting" || (node.status == "blocked" && never_executed));
+                let unstarted = name != &target
+                    && (node.status == "waiting" || (node.status == "blocked" && never_executed));
                 node.status = if unstarted { "waiting" } else { "dirty" }.into();
                 node.error = None;
-                node.head = if *name == target { Some(head.clone()) } else { None };
-                if !unstarted { node.revision += 1; }
+                node.head = if *name == target {
+                    Some(head.clone())
+                } else {
+                    None
+                };
+                if !unstarted {
+                    node.revision += 1;
+                }
                 if *name == target {
                     node.files_override = files_version.clone();
                     node.files_version = files_version.clone();
@@ -1097,9 +1384,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.stop_requested = false;
             state.publication = None;
             for name in nodes {
-                let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
+                let never_executed = !state
+                    .executions
+                    .iter()
+                    .any(|execution| execution.node == *name);
                 let node = state.nodes.get_mut(name).unwrap();
-                let unstarted = node.status == "waiting" || (node.status == "blocked" && never_executed);
+                let unstarted =
+                    node.status == "waiting" || (node.status == "blocked" && never_executed);
                 node.status = if unstarted { "waiting" } else { "dirty" }.into();
                 node.error = None;
                 // Only the target continues from its previous result; every
@@ -1122,7 +1413,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             let target_node = state.nodes.get_mut(target).unwrap();
             target_node.shared_workspace = false;
-            if workspace.is_some() || !*human { target_node.feedback_workspace = workspace.clone(); }
+            if workspace.is_some() || !*human {
+                target_node.feedback_workspace = workspace.clone();
+            }
             if let Some(input) = workspace {
                 target_node.head = Some(input.head.clone());
                 target_node.files_override = None;
@@ -1155,13 +1448,24 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = if state.paused { "paused" } else { "running" }.into();
         }
         EventKind::ConversationEdited {
-            nodes, target, instruction, images, from_execution_id, first_turn, ..
+            nodes,
+            target,
+            instruction,
+            images,
+            from_execution_id,
+            first_turn,
+            ..
         } => {
             state.stop_requested = false;
-            let anchor = state.executions.iter().find(|execution| execution.id == *from_execution_id)
-                .expect("validated edit anchor").clone();
+            let anchor = state
+                .executions
+                .iter()
+                .find(|execution| execution.id == *from_execution_id)
+                .expect("validated edit anchor")
+                .clone();
             for execution in &state.executions {
-                if nodes.contains(&execution.node) && execution.started_at >= anchor.started_at
+                if nodes.contains(&execution.node)
+                    && execution.started_at >= anchor.started_at
                     && !state.superseded_execution_ids.contains(&execution.id)
                 {
                     state.superseded_execution_ids.push(execution.id.clone());
@@ -1172,7 +1476,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if state.plan_type.as_deref() == Some("serial") {
                     state.graph.original_goal = instruction.clone();
                 }
-                if let Some(node) = state.graph.nodes.iter_mut().find(|node| node.name == *target) {
+                if let Some(node) = state
+                    .graph
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.name == *target)
+                {
                     node.task = instruction.clone();
                 }
             }
@@ -1203,17 +1512,29 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             state.phase = if state.paused { "paused" } else { "running" }.into();
         }
-        EventKind::PlannerConversationEdited { instruction, first_turn, .. } => {
+        EventKind::PlannerConversationEdited {
+            instruction,
+            first_turn,
+            ..
+        } => {
             state.stop_requested = false;
-            if *first_turn { state.graph.original_goal = instruction.clone(); }
+            if *first_turn {
+                state.graph.original_goal = instruction.clone();
+            }
         }
         EventKind::FeedbackQueued { feedback } => {
-            if !state.pending_feedback.iter().any(|item| item.execution_id == feedback.execution_id) {
+            if !state
+                .pending_feedback
+                .iter()
+                .any(|item| item.execution_id == feedback.execution_id)
+            {
                 state.pending_feedback.push(feedback.clone());
             }
         }
         EventKind::FeedbackResolved { execution_id, .. } => {
-            state.pending_feedback.retain(|item| item.execution_id != *execution_id);
+            state
+                .pending_feedback
+                .retain(|item| item.execution_id != *execution_id);
         }
         EventKind::Feedback { from, to, accepted } => {
             if !accepted {
@@ -1266,16 +1587,35 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }
             }
         }
-        EventKind::MergerFinished { execution_id, head, output_bytes, metrics } => {
+        EventKind::MergerFinished {
+            execution_id,
+            head,
+            output_bytes,
+            metrics,
+        } => {
             if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
                 execution.status = "completed".into();
                 execution.after = Some(head.clone());
                 execution.completed_at = Some(event.timestamp);
-                execution.output_bytes = (*output_bytes).max(execution.output_bytes).max(execution.output.len());
-                execution.metrics = metrics.clone().or_else(|| (!execution.output.is_empty()).then(|| parse_execution_metrics(&execution.output, execution.started_at, event.timestamp)));
+                execution.output_bytes = (*output_bytes)
+                    .max(execution.output_bytes)
+                    .max(execution.output.len());
+                execution.metrics = metrics.clone().or_else(|| {
+                    (!execution.output.is_empty()).then(|| {
+                        parse_execution_metrics(
+                            &execution.output,
+                            execution.started_at,
+                            event.timestamp,
+                        )
+                    })
+                });
                 execution.output = String::new();
             }
-            if state.mergers.iter().any(|e| e.id == *execution_id && e.node == "merger") {
+            if state
+                .mergers
+                .iter()
+                .any(|e| e.id == *execution_id && e.node == "merger")
+            {
                 state.phase = "publishing".into();
                 if let Some(publication) = &mut state.publication {
                     publication.status = "publishing".into();
@@ -1294,8 +1634,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 // Replay restores byte counts from the log table, not text.
                 let _ = error;
                 execution.completed_at = Some(event.timestamp);
-                execution.output_bytes = (*output_bytes).max(execution.output_bytes).max(execution.output.len());
-                execution.metrics = metrics.clone().or_else(|| (!execution.output.is_empty()).then(|| parse_execution_metrics(&execution.output, execution.started_at, event.timestamp)));
+                execution.output_bytes = (*output_bytes)
+                    .max(execution.output_bytes)
+                    .max(execution.output.len());
+                execution.metrics = metrics.clone().or_else(|| {
+                    (!execution.output.is_empty()).then(|| {
+                        parse_execution_metrics(
+                            &execution.output,
+                            execution.started_at,
+                            event.timestamp,
+                        )
+                    })
+                });
                 execution.output = String::new();
             }
         }
@@ -1335,20 +1685,61 @@ mod metrics_tests {
     fn streaming_output_is_not_retained_as_business_history() {
         let mut state = Snapshot::default();
         let mut roles = BTreeMap::new();
-        roles.insert("planner".into(), PlanningRoleMetrics {
-            duration_seconds: 2.0,
+        roles.insert(
+            "planner".into(),
+            PlanningRoleMetrics {
+                duration_seconds: 2.0,
+                ..Default::default()
+            },
+        );
+        state.planning = Some(PlanningSummary {
+            total_planning_duration: 3.0,
+            roles,
             ..Default::default()
         });
-        state.planning = Some(PlanningSummary { total_planning_duration: 3.0, roles, ..Default::default() });
 
         for (sequence, timestamp, kind) in [
-            (1, 1_000, EventKind::Routed { plan_type: "serial".into() }),
-            (2, 2_500, EventKind::Output { execution_id: "node".into(), text: "first".into() }),
-            (3, 3_000, EventKind::Output { execution_id: "node".into(), text: "second".into() }),
+            (
+                1,
+                1_000,
+                EventKind::Routed {
+                    plan_type: "serial".into(),
+                },
+            ),
+            (
+                2,
+                2_500,
+                EventKind::Output {
+                    execution_id: "node".into(),
+                    text: "first".into(),
+                },
+            ),
+            (
+                3,
+                3_000,
+                EventKind::Output {
+                    execution_id: "node".into(),
+                    text: "second".into(),
+                },
+            ),
             // Preserve the existing fallback for non-monotonic persisted timestamps.
-            (4, 500, EventKind::Output { execution_id: "node".into(), text: "third".into() }),
+            (
+                4,
+                500,
+                EventKind::Output {
+                    execution_id: "node".into(),
+                    text: "third".into(),
+                },
+            ),
         ] {
-            apply(&mut state, &Event { sequence, timestamp, kind });
+            apply(
+                &mut state,
+                &Event {
+                    sequence,
+                    timestamp,
+                    kind,
+                },
+            );
             assert_eq!(state.run_metrics, Some(state.compute_run_metrics()));
         }
         assert_eq!(state.events.len(), 1);
