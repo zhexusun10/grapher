@@ -71,15 +71,26 @@ fn owned(root: &Path, prefix: &Path) -> Result<String, String> {
             .map_err(|e| e.to_string())?
             .join(prefix)
     };
-    if !workspace::scope_contains(&prefix, &root) || prefix == root {
-        return Err("Environment prefix must belong to this workspace; shared host environments are not adopted".into());
-    }
-    real_child_path(&root, &prefix, false)?;
+    let prefix = native::host_path(&prefix);
     let relative = prefix
         .strip_prefix(&root)
-        .map_err(|_| "Environment prefix leaves its workspace")?;
+        .ok()
+        .or_else(|| {
+            // Resolve only the workspace ancestor: Windows 8.3 paths, extended
+            // paths and trusted root aliases may name the same workspace. Resolving
+            // the entire candidate would conceal redirected children. Prefer the
+            // outermost root alias so links beneath it still get checked.
+            prefix
+                .ancestors()
+                .filter(|ancestor| canonical(ancestor).is_ok_and(|resolved| resolved == root))
+                .last()
+                .and_then(|alias| prefix.strip_prefix(alias).ok())
+        })
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .ok_or("Environment prefix must belong to this workspace; shared host environments are not adopted")?;
     let name = text(relative);
     environment::safe_relative(&name)?;
+    real_child_path(&root, &root.join(relative), false)?;
     if [".runtime-cache", ".agent-home", ".pi"]
         .iter()
         .any(|scope| workspace::scope_contains(Path::new(&name), Path::new(scope)))
@@ -537,8 +548,15 @@ fn verify(root: &Path, prefix: &str, expected_kind: &str) -> Result<Binding, Str
         return Err("Discovered environment metadata changed or is missing".into());
     }
     let python = interpreter(&canonical_prefix, expected_kind);
-    real_child_path(&canonical_prefix, &python, true)?
-        .ok_or("Discovered native interpreter is missing")?;
+    if let Some(parent) = python.parent() {
+        if parent != canonical_prefix {
+            real_child_path(&canonical_prefix, parent, false)?
+                .ok_or("Discovered native interpreter directory is missing")?;
+        }
+    }
+    if !python.is_file() {
+        return Err("Discovered native interpreter is missing".into());
+    }
     let script = r#"import sys,sysconfig,platform,ssl,zlib,struct,json,pathlib
 root=pathlib.Path(sys.argv[1]); prefix=pathlib.Path(sys.argv[2])
 assert pathlib.Path(sys.prefix).resolve()==prefix.resolve(), 'Native prefix differs from the owned environment'
@@ -773,6 +791,76 @@ mod tests {
         context(&root, &generation, &launch, &session).unwrap();
         (temp, root, session, launch, generation)
     }
+    #[test]
+    fn ownership_accepts_native_path_forms_and_trusted_workspace_root_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace 中文 space");
+        fs::create_dir_all(root.join("tools/existing-env")).unwrap();
+        let alias = temp.path().join("workspace-alias");
+        crate::path_safety::directory_link(&root, &alias);
+        let roots = [
+            root.clone(),
+            root.canonicalize().unwrap(),
+            canonical(&root).unwrap(),
+            alias,
+        ];
+        for root in &roots {
+            for prefix_root in &roots {
+                for name in ["tools/existing-env", "new/nested/env"] {
+                    assert_eq!(owned(root, &prefix_root.join(name)).unwrap(), name);
+                }
+                assert!(
+                    owned(root, prefix_root).is_err(),
+                    "the workspace itself is not an environment"
+                );
+            }
+            let args = private_conda_args(&["create".into(), "--name=business".into()], root).unwrap();
+            assert_eq!(
+                args,
+                vec![
+                    "create".to_string(),
+                    "--prefix".into(),
+                    text(&root.join(".environments/business"))
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_normalization_does_not_hide_traversal_child_links_or_excluded_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let outside = temp.path().join("workspace-sibling");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("marker"), "retained").unwrap();
+        fs::write(root.join("not-a-directory"), "retained").unwrap();
+        let alias = temp.path().join("workspace-alias");
+        crate::path_safety::directory_link(&root, &alias);
+        crate::path_safety::directory_link(&outside, &root.join("redirected"));
+        crate::path_safety::directory_link(&root, &root.join("redirected-root"));
+        for prefix_root in [&root, &alias] {
+            for name in [
+                "missing/../env",
+                "redirected/env",
+                "redirected-root/env",
+                ".runtime-cache/env",
+                ".agent-home/env",
+                ".pi/env",
+                "not-a-directory",
+            ] {
+                assert!(
+                    owned(&canonical(&root).unwrap(), &prefix_root.join(name)).is_err(),
+                    "{name}"
+                );
+            }
+        }
+        assert!(owned(&root, &outside.join("env"))
+            .unwrap_err()
+            .contains("workspace"));
+        assert_eq!(fs::read_to_string(outside.join("marker")).unwrap(), "retained");
+    }
+
     fn python(launch: &LaunchConfig) -> String {
         for directory in &launch.path {
             let path = Path::new(directory).join(if cfg!(windows) {
@@ -827,8 +915,10 @@ mod tests {
     }
     #[test]
     fn business_created_custom_venv_binds_from_receipt_and_actual_native_prefix() {
-        let (_temp, root, session, launch, generation) = setup();
-        create(&root, &session, &launch, "business-env");
+        let (temp, root, session, launch, generation) = setup();
+        let alias = temp.path().join("workspace-alias");
+        crate::path_safety::directory_link(&root, &alias);
+        create(&alias, &session, &launch, "business-env");
         let next = resolve(&root, &launch, &session, &generation).unwrap();
         assert_eq!(next.environment.as_ref().unwrap().prefix, "business-env");
         assert_eq!(next.environment.as_ref().unwrap().kind, "venv");

@@ -22,7 +22,18 @@ fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
     }))
     .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    runtime.create(graph, config).unwrap();
+    // These scheduler/replay tests synthesize results without native E/L seals.
+    // Seed a legacy Created record instead of admitting a new managed Run.
+    runtime.state.run_id = Uuid::new_v4().to_string();
+    runtime
+        .emit(EventKind::Created {
+            graph,
+            config,
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
     runtime.set_route("graph").unwrap();
     (temp, source, runtime)
 }
@@ -36,6 +47,73 @@ fn single() -> Graph {
         }],
         edges: vec![],
     }
+}
+
+#[test]
+fn legacy_created_runs_keep_their_unmanaged_contract_on_replay_and_approval() {
+    let (_temp, _source, runtime) = setup(true, single());
+    let root = runtime.root.clone();
+    let run_id = runtime.state.run_id.clone();
+    drop(runtime);
+    let mut replayed = Runtime::open(&root).unwrap();
+    assert_eq!(replayed.state.run_id, run_id);
+    assert!(replayed.state.environment_policy.is_none());
+    replayed.approve().unwrap();
+    assert!(replayed.state.environment_policy.is_none());
+    assert!(replayed.state.config.as_ref().unwrap().environment.is_none());
+    assert!(replayed.state.environment_baseline.is_none());
+    assert!(replayed
+        .store
+        .load(&run_id)
+        .unwrap()
+        .environment_policy
+        .is_none());
+}
+
+#[cfg(not(feature = "fixture"))]
+#[test]
+fn new_graph_runs_require_composite_evidence_and_retain_managed_workspaces() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    runtime
+        .create(single(), runtime.state.config.clone().unwrap())
+        .unwrap();
+    assert_eq!(
+        runtime.state.environment_policy.as_deref(),
+        Some("automatic-pending")
+    );
+    runtime.set_route("graph").unwrap();
+    runtime.approve().unwrap();
+    assert_eq!(
+        runtime.state.environment_policy.as_deref(),
+        Some("automatic-lazy")
+    );
+    assert!(runtime.state.environment_baseline.is_some());
+    let job = runtime.jobs().unwrap().remove(0);
+    let checkout = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, checkout, &job.execution.before, &[]).unwrap();
+    runtime
+        .finish(
+            &job.execution,
+            Ok((job.execution.before.clone(), "unsealed result".into())),
+        )
+        .unwrap();
+    assert_eq!(runtime.state.nodes["task"].status, "failed");
+    assert!(runtime.state.nodes["task"]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Missing composite execution evidence"));
+    assert!(runtime.state.executions[0].result.is_none());
+    assert!(runtime.state.executions[0].after.is_none());
+    runtime.cleanup_worktrees().unwrap();
+    assert!(checkout.is_dir(), "managed partial work is retained");
+    let run_id = runtime.state.run_id.clone();
+    runtime.delete_run(&run_id).unwrap();
+    assert!(
+        !checkout.exists(),
+        "explicit deletion still cleans the managed layout"
+    );
+    assert!(source.join("tracked.txt").is_file());
 }
 
 #[test]
