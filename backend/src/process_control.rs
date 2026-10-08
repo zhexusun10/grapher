@@ -680,6 +680,39 @@ mod tests {
     }
 
     #[test]
+    fn managed_drain_refuses_a_live_owned_descendant_after_its_parent_exits() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("writer-pid");
+        let writer = "require('node:fs').writeFileSync(process.argv[1],String(process.pid)); setTimeout(()=>{},90_000)";
+        let parent = r#"const fs=require('node:fs'),{spawn}=require('node:child_process');
+const [writer,marker]=process.argv.slice(1);
+// Windows skips libuv's child Job, not the outer Rust-owned Job.
+const child=spawn(process.execPath,['-e',writer,marker],{stdio:'ignore',detached:process.platform==='win32'});
+child.once('error',()=>process.exit(1)); child.unref();
+const deadline=setTimeout(()=>process.exit(2),5000);
+const ready=setInterval(()=>{if(fs.existsSync(marker)){clearInterval(ready);clearTimeout(deadline)}},10);"#;
+        let mut command = Command::new(crate::native::trusted_node().unwrap());
+        command.args(["-e", parent, writer]).arg(&marker);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        let tree = track(&child).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(
+            marker.is_file(),
+            "the writer must actually start before the parent exits"
+        );
+        assert!(tree
+            .ensure_drained()
+            .unwrap_err()
+            .contains("background writers have not drained"));
+        tree.terminate();
+    }
+
+    #[test]
     fn tracked_process_can_be_terminated() {
         let mut command = if cfg!(windows) {
             let mut command = Command::new("cmd");

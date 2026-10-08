@@ -8,9 +8,10 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, copyFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, delimiter } from 'node:path';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
+import { venvCreationCommand } from './fixtures/environment-native.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -33,9 +34,9 @@ const backendCode = `import pathlib,zipfile\ndef get_requires_for_build_editable
 function nativePython(ml?: any) {
   if (ml) return ml.python;
   for (const executable of process.platform === 'win32' ? ['python', 'py'] : ['python3', 'python']) {
-    try { return execFileSync(executable, ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim(); } catch {}
+    try { return execFileSync(executable, ['-I', '-c', 'import sys,venv,ensurepip,tomllib; print(sys.executable)'], { encoding: 'utf8' }).trim(); } catch {}
   }
-  throw new Error('A native Python with venv/ensurepip is required; no installation fallback');
+  throw new Error('A native Python 3.11+ with venv/ensurepip/tomllib is required; no installation fallback');
 }
 
 function nativeShell() {
@@ -109,6 +110,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     cudaDevice = { backend: 'cuda', ids: [match[0]], probe };
   }
   let backend: ChildProcess | undefined; let diagnostics = ''; let modelCalls = 0;
+  let heldBackground: ServerResponse | undefined;
   const failures: unknown[] = [];
   const commands: string[] = [];
   const modelServer = createServer(async (request, response) => {
@@ -124,14 +126,21 @@ test('native managed environment: install once, real Pi tools, editable/launcher
         assert.doesNotMatch(output, /Native environment observation refused|Traceback|command not found|No such file or directory|AssertionError|exited with code [1-9]/i, `native tool failed: ${output.slice(-12000)}`);
       }
       const step = tools.length;
+      if (step > 1 && prompt.includes('BACKGROUND_WRITER')) {
+        assert.match(JSON.stringify(tools.at(-1).content), /BACKGROUND_STARTED/, 'the background tool must actually start its writer');
+        if (prompt.includes('BACKGROUND_WRITER_STOP')) {
+          heldBackground = response;
+          return; // Keep this disposable writer active until explicit cancellation.
+        }
+      }
       let tool: { name: string; arguments: any } | undefined;
       if (step === 0) {
         let command: string;
         const activate = ml ? '' : conda ? 'eval "$(conda shell.bash hook)" && conda activate "$PWD/.venv" && ' : `source '${process.platform === 'win32' ? '.venv/Scripts/activate' : '.venv/bin/activate'}' && `;
-        const create = ml ? '' : conda ? `eval "$(conda shell.bash hook)" && conda create --prefix .venv --offline --yes --copy ${condaPackages.map(quote).join(' ')} && ` : 'python -m venv .venv && ';
+        const create = ml ? '' : conda ? `eval "$(conda shell.bash hook)" && conda create --prefix .venv --offline --yes --copy ${condaPackages.map(quote).join(' ')} && ` : venvCreationCommand(python) + ' && ';
         if (prompt.includes('RETRY_BACKGROUND') || prompt.includes('B_AFTER_RETRY')) command = 'python -c ' + quote("import pathlib; assert pathlib.Path('.venv/background-partial').read_text()=='partial'; print('RETRY_KEPT_CREATED_ENV')");
         else if (prompt.includes('NO_ENVIRONMENT')) command = 'node -e ' + quote("require('node:fs').writeFileSync('.env','ORDINARY=1'); require('node:fs').writeFileSync('environment.yml','name: declaration-only\\n'); console.log('NO_ENVIRONMENT_NEEDED')");
-        else if (prompt.includes('BACKGROUND_WRITER')) command = create + activate + 'python -c ' + quote("import subprocess,sys; subprocess.Popen([sys.executable,'-c',\"import pathlib,time; pathlib.Path('.venv/background-partial').write_text('partial'); time.sleep(90)\"],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); print('BACKGROUND_STARTED')");
+        else if (prompt.includes('BACKGROUND_WRITER')) command = create + activate + 'python -c ' + quote("import sys; print('BACKGROUND_ENV_CREATED',sys.executable)");
         else if (prompt.includes('A_CREATE')) command = create + activate + 'python -m pip install --no-index --no-build-isolation -e . && pip --version && python -c ' + quote("import sys,pathlib,os; assert sys.prefix == str(pathlib.Path.cwd()/'.venv'); assert not os.environ.get('PYTHONHOME'); assert 'outer-poison' not in os.environ.get('PATH',''); print(sys.executable)");
         else if (prompt.includes('B_USE')) command = 'envcheck && python -c ' + quote("import sysconfig,pathlib; pathlib.Path(sysconfig.get_paths()['purelib'],'native_dependency.py').write_text('VERSION=2\\n')");
         else if (prompt.includes('C_USE')) command = 'envcheck && python -c ' + quote("import native_dependency,pathlib,json,sys; assert native_dependency.VERSION==2; pathlib.Path('reports').mkdir(exist_ok=True); pathlib.Path('reports/C.json').write_text(json.dumps({'version':2,'prefix':sys.prefix}))");
@@ -139,6 +148,11 @@ test('native managed environment: install once, real Pi tools, editable/launcher
         else if (prompt.includes('FOLLOWUP_A')) command = 'envcheck && python -c ' + quote("import native_dependency,ml_probe,sysconfig,pathlib; assert native_dependency.VERSION==2; assert ml_probe.VALUE=='C'; assert pathlib.Path('reports/C.json').exists(); pathlib.Path(sysconfig.get_paths()['purelib'],'native_dependency.py').write_text('VERSION=3\\n')");
         else throw new Error(`Unexpected prompt ${prompt}`);
         commands.push(command); tool = { name: 'bash', arguments: { command } };
+      } else if (step === 1 && prompt.includes('BACKGROUND_WRITER')) {
+        // Pi's Unix Bash starts a detached session. Exercise Rust's documented
+        // lifecycle boundary with a real owned project-extension child.
+        assert.ok(body.tools.some((tool: any) => tool.function?.name === 'native_background_writer'));
+        tool = { name: 'native_background_writer', arguments: {} };
       } else if (step === 1 && /A_CREATE|B_USE|C_USE/.test(prompt)) {
         const value = prompt.includes('C_USE') ? 'C' : prompt.includes('B_USE') ? 'B' : 'A';
         tool = { name: 'write', arguments: { path: join(source, 'ml_probe.py'), content: code(value) } };
@@ -166,6 +180,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     await writeFile(join(source, 'editable_backend.py'), backendCode);
     await writeFile(join(source, 'pyproject.toml'), '[build-system]\nrequires=[]\nbuild-backend="editable_backend"\nbackend-path=["."]\n');
     await mkdir(join(source, '.pi/extensions'), { recursive: true });
+    await copyFile(join(root, 'scripts/fixtures/environment-native.mjs'), join(source, '.pi/extensions/background-probe.ts'));
     await writeFile(join(source, '.pi/extensions/launch-probe.ts'), `import {execFileSync} from 'node:child_process'; import {writeFileSync} from 'node:fs'; export default function(){ const proof=execFileSync('python',['-c','import sys,json,os; print(json.dumps({"prefix":sys.prefix,"cwd":os.getcwd()}))'],{encoding:'utf8'}); writeFileSync('.runtime-cache/extension.json',proof); }`);
     const git = (...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: source, encoding: 'utf8' }).trim();
     git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'baseline');
@@ -327,11 +342,46 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     assert.deepEqual(failed.nodes.C.result, stateBeforeCancel);
     const retry = await api('launch_result', { runId, args: ['-c', "import pathlib; assert pathlib.Path('reports/result-started').read_text()=='partial'; print('RETRY_KEPT_PARTIAL')"] });
     assert.match(retry.output, /RETRY_KEPT_PARTIAL/); await settled();
-    const background = await api('save_graph', { graph: { originalGoal: 'native drain boundary', nodes: [{ name: 'writer', task: 'BACKGROUND_WRITER' }, { name: 'downstream', task: 'B_AFTER_RETRY' }], edges: [{ from: 'writer', to: 'downstream', feedback: false }] },
-      config });
-    await api('control', { runId: background.runId, action: 'approve' });
-    const blocked = await until(async () => { const state = await api('snapshot', { runId: background.runId }); return state.phase === 'needs_attention' && state; }, 'background drain failure');
-    assert.match(blocked.nodes.writer.error, /background writers have not drained/i);
+    const backgroundRun = async (task: string) => {
+      const run = await api('save_graph', { graph: { originalGoal: 'native drain boundary', nodes: [{ name: 'writer', task }, { name: 'downstream', task: 'B_AFTER_RETRY' }], edges: [{ from: 'writer', to: 'downstream', feedback: false }] }, config });
+      await api('control', { runId: run.runId, action: 'approve' });
+      return run;
+    };
+    let background = await backgroundRun('BACKGROUND_WRITER');
+    let blocked = await until(async () => {
+      const state = await api('snapshot', { runId: background.runId });
+      return ['needs_attention', 'completed'].includes(state.phase) && state;
+    }, 'background lifecycle boundary');
+    if (blocked.phase === 'completed') {
+      // Linux's PID namespace can terminate all remaining writers before the
+      // outer process exits. Completion is safe only with positive stop evidence.
+      assert.equal(process.platform, 'linux', 'a surviving owned writer must refuse sealing');
+      const heartbeat = join(blocked.executions[0].worktree, '.venv/background-partial-heartbeat');
+      const stopped = await readFile(heartbeat, 'utf8');
+      assert.match(stopped, /^\d+$/);
+      assert.ok(Number(stopped) < 800, 'native cleanup must stop the 90-second writer, not wait it out');
+      await delay(1000);
+      assert.equal(await readFile(heartbeat, 'utf8'), stopped, 'no writer may outlive a sealed result');
+      // Also exercise failed-created-environment retry on this host: hold the
+      // model after creation, prove the writer is active, then explicitly stop.
+      background = await backgroundRun('BACKGROUND_WRITER_STOP');
+      await until(async () => heldBackground, 'background model hold');
+      const active = await api('snapshot', { runId: background.runId });
+      const ticking = join(active.executions[0].worktree, '.venv/background-partial-heartbeat');
+      const beforeStop = await readFile(ticking, 'utf8');
+      await delay(500);
+      assert.notEqual(await readFile(ticking, 'utf8'), beforeStop, 'the cancellation fixture must have a live writer');
+      await api('control', { runId: background.runId, action: 'stop' });
+      heldBackground!.destroy(); heldBackground = undefined;
+      await until(async () => (await api('snapshot', { runId: background.runId })).nodes.writer.status === 'failed', 'stopped background writer');
+      await api('control', { runId: background.runId, action: 'resume' });
+      blocked = await until(async () => {
+        const state = await api('snapshot', { runId: background.runId });
+        return state.phase === 'needs_attention' && state;
+      }, 'stopped writer blocks downstream');
+    } else {
+      assert.match(blocked.nodes.writer.error, /background writers have not drained/i);
+    }
     assert.equal(blocked.executions.length, 1); assert.equal(blocked.nodes.downstream.status, 'blocked');
     assert.equal(blocked.executions[0].result, undefined); assert.ok(blocked.executions[0].input);
     assert.equal(await readFile(join(blocked.executions[0].worktree, '.venv/background-partial'), 'utf8'), 'partial');
@@ -377,6 +427,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
       initialWallMs, restoredFollowupWallMs, workingEnvironmentBytes, retainedEnvironmentBytes, elapsedMs: Date.now() - started }));
   } catch (error) { throw new Error(`${error}\nNative acceptance elapsed=${Date.now() - started}ms; modelCalls=${modelCalls}; completed tool requests=${commands.length}\n${diagnostics}`); }
   finally {
+    heldBackground?.destroy();
     await stop(); await new Promise<void>(done => modelServer.close(() => done()));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     if (ml) await rm(workspaceParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

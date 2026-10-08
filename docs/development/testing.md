@@ -24,7 +24,7 @@ npm test
 | `npm run test:ui` | Mocked-API browser interactions, graph switching, settings and managed result controls; installed Playwright Chromium or `GRAPHER_BROWSER_CHANNEL` (Windows defaults to Edge), no credentials/backend |
 | `npm run test:pi` | Pinned Pi CLI/SDK and provider/auth transport; isolated auth; no paid model |
 | `npm run test:extensions` | Real Pi extension tools and Planner graph mutations; compatible `rg`/`fd` required |
-| `npm run test:environment` | Rust empty-start admission/discovery/E/L/resources/private copies, launch binding and production pinned Pi/native Python acceptance without user policy input. Windows includes real Job CPU/memory enforcement; device-lock tests include process/crash release. Python/Git/Bash plus Linux bubblewrap or macOS Seatbelt required. Optional offline Windows Conda/CUDA profile described below; [contract/evidence](../architecture/native-environments.md) |
+| `npm run test:environment` | Rust empty-start admission/discovery/E/L/resources/private copies, launch binding and production pinned Pi/native Python acceptance without user policy input. Windows includes real Job CPU/memory enforcement; device-lock tests include process/crash release. Python 3.11+/Git/Bash plus Linux bubblewrap or macOS Seatbelt required. Optional offline Windows Conda/CUDA profile described below; [contract/evidence](../architecture/native-environments.md) |
 | `npm run test:native` | Path adaptation plus native launcher/platform filesystem tests; actual pinned Pi and host tools |
 | `npm run test:planner-bash` | Shared macOS/Windows/Linux Planner contract: pinned Pi's unmodified Bash, direct source writes, absolute/Unicode/space paths, pipelines, nested shells, errors and timeouts |
 | `npm run test:hardening` | Production static-file path traversal, Windows drive/UNC/alternate-stream paths, linked web roots/children, and linked workspace cleanup |
@@ -67,6 +67,17 @@ large-environment acceptance. See the
 [native-environment evidence and open capabilities](../architecture/native-environments.md#verification-recorded-for-this-working-tree).
 
 Process-group/Job Object tests cover defined writers and descendants; they do not prove universal detached-process cleanup. Unknown third-party tools and external services need separate acceptance.
+
+The environment harness selects its probed native Python for the observed venv
+creation call using a call-local PATH, rather than relying on the unbound Bash
+entry's directory order. Its [drain fixture](../../scripts/fixtures/environment-native.mjs)
+starts a writer owned by the Unix process group or Windows Job from a real project
+extension. Windows bypasses libuv's additional kill-on-parent-exit child Job,
+not Rust's outer Job. Linux namespace cleanup may stop the writer before sealing;
+the harness then requires stopped-heartbeat evidence and separately checks an
+explicitly interrupted writer's partial-environment retry. The
+[lifecycle limits](../architecture/filesystem-isolation.md#process-lifecycle)
+still apply. Fixture regressions run with `npm run test:environment`.
 
 ## Search tools and offline runs
 

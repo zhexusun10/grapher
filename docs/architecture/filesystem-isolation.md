@@ -104,6 +104,13 @@ Unix uses process groups; Windows attaches suspended children to kill-on-close J
 
 Tests cover specific descendant writers and interruption cases. They do not establish a universal barrier against detached descendants, arbitrary third-party services, shared host state, or every crash scenario.
 
+Pinned Pi's Unix Bash launches in a detached session. Background processes left
+in that session are outside Rust's original owner process group and are not
+covered by its process-group drain check. Linux's private PID namespace may
+still terminate them when the execution exits. The native environment drain
+fixture uses a project-extension child in the owned Unix group or Windows Job;
+a passing group check is not detection or cleanup evidence for detached Bash writers.
+
 ## Validation
 
 [Testing](../development/testing.md) separates fixtures, real Pi launcher checks, platform boundary tests, and real-model acceptance. Passing one category does not prove the others.
