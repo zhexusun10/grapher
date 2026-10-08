@@ -15,7 +15,7 @@ npm run test:frontend
 npm test
 ```
 
-`npm test` uses Rust fixtures; no paid model is required. Frontend tests exercise UI logic and isolated browser smoke cases, not provider quality. `check:docs` checks repository-owned Markdown links/anchors, npm command references, knowledge-index coverage, status-directory consistency and current-vs-historical routing. The independent [documentation CI](../../.github/workflows/docs.yml) runs it and the checker tests without building Pi or Rust. It does not fetch external websites, lint upstream Pi docs, verify prose against code, or certify freshness. See [Documentation maintenance](documentation.md) for the review and exploration checks.
+`npm test` uses Rust fixtures; no paid model is required. Frontend tests exercise UI logic and isolated browser smoke cases, not provider quality. `check:docs` checks repository-owned Markdown links/anchors, npm command references, knowledge-index coverage, status-directory consistency and current-vs-historical routing. Local documentation checks run it and the checker tests without building Pi or Rust. It does not fetch external websites, lint upstream Pi docs, verify prose against code, or certify freshness. See [Documentation maintenance](documentation.md) for the review and exploration checks.
 
 ## Suites by responsibility
 

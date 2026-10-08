@@ -99,7 +99,7 @@ npm run check:docs
 node --test scripts/check-docs.test.mjs
 ```
 
-[Documentation CI](../../.github/workflows/docs.yml) runs these without building
+Documentation checks run these without building
 Pi or Rust. Checks cover local Markdown links/images/anchors, npm script names,
 index coverage, status-directory consistency and current-vs-historical routing.
 They do not fetch external sites, judge prose correctness, enforce freshness
