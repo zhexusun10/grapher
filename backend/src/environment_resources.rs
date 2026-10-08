@@ -302,38 +302,100 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn native_memory_probe(program: &str, count: usize) -> Command {
+        // `exit` can precede pipe drain. Await `close` and use exitCode so the
+        // parent also flushes its asynchronous Windows stdout/stderr writes.
+        const SUPERVISOR: &str = r#"const{spawn}=require('node:child_process'),{writeSync}=require('node:fs');
+const program=process.argv[1],count=Number(process.argv[2]),probes=[];
+let left=count,attempted=0,failed=false;
+for(let i=0;i<count;i++){
+  const child=spawn(process.execPath,['-e',program],{stdio:['ignore','pipe','pipe','ipc']});
+  const probe={child,ready:false,attempted:false}; probes.push(probe);
+  const finishAttempt=()=>{
+    if(probe.attempted)return;
+    probe.attempted=true;
+    if(++attempted===count)for(const p of probes)if(p.ready&&p.child.connected)p.child.send('RELEASE');
+  };
+  child.stdout.pipe(process.stdout); child.stderr.pipe(process.stderr);
+  child.once('message',message=>{
+    if(message!=='ALLOCATED'){writeSync(2,'PROBE_PROTOCOL_FAILED\n');failed=true;child.kill();return}
+    probe.ready=true; finishAttempt();
+  });
+  child.on('error',error=>{failed=true;writeSync(2,'PROBE_CHILD_ERROR '+error.message+'\n')});
+  child.once('close',(code,signal)=>{
+    if(code!==0){failed=true;writeSync(2,'DESCENDANT_FAILED code='+code+' signal='+signal+'\n')}
+    finishAttempt();
+    if(--left===0)process.exitCode=failed?19:0;
+  });
+}"#;
+        let mut command = Command::new(crate::native::trusted_node().unwrap());
+        command.args(["-e", SUPERVISOR, program, &count.to_string()]);
+        command
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_memory_probe_drains_child_failure_diagnostics() {
+        let program = r#"process.stderr.write('EXPECTED_CHILD_FAILURE\n'.repeat(100)+'EXPECTED_DIAGNOSTICS_DRAINED\n',()=>process.exit(23))"#;
+        let error =
+            crate::environment::controlled_output(native_memory_probe(program, 1)).unwrap_err();
+        assert_eq!(
+            error.matches("EXPECTED_CHILD_FAILURE").count(),
+            100,
+            "{error}"
+        );
+        assert!(error.contains("EXPECTED_DIAGNOSTICS_DRAINED"), "{error}");
+        assert!(error.contains("DESCENDANT_FAILED code=23"), "{error}");
+        assert!(
+            !error.contains("QUOTA_ALLOCATION_FAILED") && !error.contains("out of memory"),
+            "An ordinary child failure is not quota evidence: {error}"
+        );
+    }
+
+    #[cfg(windows)]
     #[test]
     fn windows_job_memory_limit_covers_combined_native_descendants() {
         // One descendant plus its parent fits the 384 MiB ceiling. Two 220 MiB
         // descendants must fail against the aggregate Job, not per-process RSS.
-        let node = crate::native::trusted_node().unwrap();
-        let script = r#"const{spawn}=require('node:child_process');
-const program="const chunks=[];try{for(let i=0;i<220;i++)chunks.push(Buffer.alloc(1024*1024,1));process.stdout.write('READY\\n');setTimeout(()=>process.exit(0),2500)}catch(e){console.error('QUOTA_ALLOCATION_FAILED');process.exit(23)}";
-const count=Number(process.argv[1]||2);let left=count,failed=false; for(let i=0;i<count;i++){const child=spawn(process.execPath,['-e',program],{stdio:['ignore','pipe','pipe']});child.stdout.pipe(process.stdout);child.stderr.pipe(process.stderr);child.on('exit',code=>{failed ||= code!==0;if(--left===0)process.exit(failed?19:0)})}"#;
-        let mut baseline = Command::new(&node);
-        baseline.args(["-e", script]);
-        let output = crate::environment::controlled_output(baseline).unwrap();
+        // Keep every successful allocation alive until all siblings have tried;
+        // a fixed sleep can release memory too early on an overloaded CI host.
+        // Request one large allocation: filling the Job in 1 MiB increments can
+        // starve V8's failure path and cause a silent STATUS_STACK_OVERFLOW.
+        let program = r#"const{writeSync}=require('node:fs');let allocation;
+const deadline=setTimeout(()=>{writeSync(2,'PROBE_RELEASE_TIMED_OUT\n');process.exit(24)},30000);
+process.once('message',message=>{
+  if(message!=='RELEASE'){writeSync(2,'PROBE_PROTOCOL_FAILED\n');process.exit(25)}
+  writeSync(1,'READY '+(allocation.length/(1024*1024))+'\n'); clearTimeout(deadline); process.disconnect();
+});
+try{allocation=Buffer.alloc(220*1024*1024,1)}
+catch(error){writeSync(2,'QUOTA_ALLOCATION_FAILED '+error+'\n');clearTimeout(deadline);process.exitCode=23;process.disconnect()}
+if(allocation)process.send('ALLOCATED');"#;
+        let output =
+            crate::environment::controlled_output(native_memory_probe(program, 2)).unwrap();
         assert_eq!(
-            String::from_utf8(output).unwrap().matches("READY").count(),
+            String::from_utf8(output)
+                .unwrap()
+                .matches("READY 220")
+                .count(),
             2
         );
-        let mut command = Command::new(node);
-        command.args(["-e", script]);
         let resources = Resources {
             memory_bytes: Some(384 * 1024 * 1024),
             ..Default::default()
         };
-        let mut single = Command::new(crate::native::trusted_node().unwrap());
-        single.args(["-e", script, "1"]);
-        assert!(
-            crate::process_control::with_resource_limits(Some(&resources), || {
-                crate::environment::controlled_output(single)
-            })
-            .is_ok(),
-            "The same aggregate quota must admit one descendant"
+        let single = crate::process_control::with_resource_limits(Some(&resources), || {
+            crate::environment::controlled_output(native_memory_probe(program, 1))
+        })
+        .expect("The same aggregate quota must admit one descendant");
+        assert_eq!(
+            String::from_utf8(single)
+                .unwrap()
+                .matches("READY 220")
+                .count(),
+            1
         );
         let result = crate::process_control::with_resource_limits(Some(&resources), || {
-            crate::environment::controlled_output(command)
+            crate::environment::controlled_output(native_memory_probe(program, 2))
         });
         let error = result.unwrap_err();
         assert!(
