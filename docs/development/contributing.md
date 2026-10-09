@@ -69,11 +69,7 @@ English is canonical under `docs/`; [README.zh-CN.md](../../README.zh-CN.md) rem
 - Keep sensitive logs and local reports in ignored runtime/output directories, not public documentation.
 - Keep every knowledge page discoverable from the [task-oriented index](../index.md). Root/local AGENTS.md files are navigation and development constraints, not architecture manuals.
 
-Follow [Documentation maintenance](documentation.md) for placement, statuses, related-code links, review triggers and agent exploration evaluation. When behavior changes, update the relevant canonical page and any affected README/translation summary. Do not create a second long document with a conflicting contract. Check references and navigation with:
-
-```sh
-npm run check:docs
-```
+Follow [Documentation maintenance](documentation.md) for placement, statuses, related-code links, review triggers and agent exploration evaluation. When behavior changes, update the relevant canonical page and any affected README/translation summary. Do not create a second long document with a conflicting contract.
 
 For log migration, see [Conversation logs](../testing/conversation-logs.md). Repository About-field maintenance is documented in [Repository homepage settings](../../.github/repository-homepage.md).
 

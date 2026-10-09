@@ -170,7 +170,6 @@ Read [Architecture](docs/architecture/overview.md) for motivation and invariants
 ```sh
 npm run check
 npm run build
-npm run check:docs
 npm run test:frontend
 npm test                      # Rust fixtures; no paid model
 ```

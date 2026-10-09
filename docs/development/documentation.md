@@ -2,7 +2,7 @@
 
 > **Status:** active
 > **Scope:** Repository knowledge placement, navigation and verification; not a product runtime contract.
-> **Maintained with:** [docs/index.md](../index.md), [AGENTS.md](../../AGENTS.md), [checker](../../scripts/check-docs.mjs) and [checker tests](../../scripts/check-docs.test.mjs).
+> **Maintained with:** [docs/index.md](../index.md) and [AGENTS.md](../../AGENTS.md).
 
 The goal is to find the smallest **relevant, trustworthy** context for a task.
 [AGENTS.md](../../AGENTS.md) is a map; [docs/index.md](../index.md) routes tasks to
@@ -25,7 +25,7 @@ should become a second architecture manual.
 Physical consolidation is unnecessary. Preserve stable URLs and code-adjacent
 READMEs. Every repository-owned knowledge Markdown page must have a direct link
 from [the index](../index.md); executable prompts and GitHub templates are exempt.
-The checker excludes upstream, dependencies, generated outputs and runtime data.
+Upstream, dependencies, generated outputs and runtime data are out of scope.
 The index is the inventory as well as the task router—do not maintain a second
 unconnected catalogue.
 
@@ -59,18 +59,18 @@ If an actual maintainer is assigned, name them rather than implying ownership.
 
 Only add a `Last verified` date after reviewing the stated claims against named
 code/tests; include revision, commands/results and untested boundaries. An edit
-date or `check:docs` success is **not** such a review. Missing verification dates
+date is **not** such a review. Missing verification dates
 mean "not recorded", not "verified recently". Dated Pi compatibility results and
 benchmark observations apply only to their recorded revision/environment.
 
 A `draft`, `deprecated` or `archived` page cannot be a direct recommendation in
 the index's **Task routes** or **Current documentation** sections. Put it under
 **Proposals and historical evidence**, with its current replacement/limitations.
-These three level-two headings are checked routing boundaries; update the checker
-and its tests deliberately if renaming them.
+These three level-two headings are the routing boundaries; keep them stable if
+renaming them.
 `docs/proposals/` is draft-only; `docs/reviews/`, `docs/releases/`,
-`docs/archive/` and `.github/releases/` are historical. The checker rejects an
-explicit status that contradicts these directory roles. Existing Chinese draft
+`docs/archive/` and `.github/releases/` are historical; an explicit status must
+not contradict these directory roles. Existing Chinese draft
 and historical warning banners remain valid; do not rewrite discussion content
 merely to standardize metadata.
 
@@ -91,19 +91,8 @@ rationale is already linked from the index.
    claims change. Link affected code/tests and repair task routes after renames.
 3. Keep root AGENTS.md roughly 50–100 lines. Local guides only add independent
    constraints or validation differences; do not duplicate global rules.
-4. Run the docs checks and applicable behavior tests; report what was not verified.
-   Never claim a semantic review just because all paths exist.
-
-```sh
-npm run check:docs
-node --test scripts/check-docs.test.mjs
-```
-
-Documentation checks run these without building
-Pi or Rust. Checks cover local Markdown links/images/anchors, npm script names,
-index coverage, status-directory consistency and current-vs-historical routing.
-They do not fetch external sites, judge prose correctness, enforce freshness
-from a timestamp, or prove provider/sandbox/benchmark claims.
+4. Run applicable behavior tests and repair links/routes after renames; report
+   what was not verified. A passing link check is not a semantic review.
 
 ## Agent exploration evaluation
 

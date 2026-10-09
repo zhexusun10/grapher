@@ -90,7 +90,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           onClick={toggleCollapsed}
           aria-label={isCollapsed ? t("展开侧边栏") : t("收起侧边栏")}
           aria-expanded={!isCollapsed}
-          title={isCollapsed ? t("展开侧边栏") : t("收起侧边栏")}
         >
           {isCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
         </button>
@@ -102,7 +101,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <button
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
-            title={t("添加或打开本地 Git 仓库")}
             aria-label={t("添加或打开本地 Git 仓库")}
             onClick={onOpenProject}
           >
@@ -126,7 +124,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   setRunContextMenu(null);
                   setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
                 }}
-                title={t("{0}\n{1}\n分支: {2}\n(右键管理工作区)", proj.name, normalizeWorkspacePath(proj.path), proj.branch)}
               >
                 <div className="proj-details">
                   <div className="proj-name-row">
@@ -152,7 +149,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <button
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
-            title={t("新建对话（不停止后台运行）")}
             aria-label={t("新建对话")}
             onClick={onNewConversation}
           >
@@ -185,17 +181,14 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   setProjectContextMenu(null);
                   setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
                 }}
-                title={labelText ? t("{0}\n\n快照: {1}\n(右键可复制 ID 或删除)", labelText, id) : t("快照: {0}\n(右键可复制 ID 或删除)", id)}
               >
                 {isThisRunActive ? (
                   <span
                     className="run-dot running-pulse"
-                    title={t("正在运行中")}
                   />
                 ) : isUnread ? (
                   <span
                     className={`run-dot ${needsUnreadApproval ? "approval-pulse" : ""}`}
-                    title={needsUnreadApproval ? t("有待审批的未读更新") : t("有未读更新")}
                   />
                 ) : null}
                 <span className="run-title-text">
@@ -216,7 +209,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           type="button"
           className={`sidebar-bottom-btn ${isSettingsOpen ? "active" : ""}`}
           onClick={onOpenSettings}
-          title="Setting"
           aria-label={t("设置")}
         >
           <Settings2 size={18} />
@@ -281,7 +273,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <button
             className="context-menu-item danger"
             disabled={runContextMenu.runId.startsWith("pending-")}
-            title={runContextMenu.runId.startsWith("pending-") ? t("对话正在创建，请稍后再删除。") : undefined}
             onClick={() => {
               const runId = runContextMenu.runId;
               setRunContextMenu(null);

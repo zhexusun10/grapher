@@ -72,15 +72,15 @@ test("LRU uses UTF-8 bytes, touches reads, replaces sizes and refuses oversized 
   cache.clear(); assert.equal(cache.size, 0); assert.equal(cache.byteSize, 0);
 });
 
-test("uncached settled nodes render a terminal skeleton on the first frame", () => {
+test("uncached settled nodes render a loading spinner on the first frame", () => {
   executionTranscriptCache.clear();
   const execution = { id: "selected", status: "done", outputBytes: 100 } as Execution;
   const html = renderToStaticMarkup(createElement(ExecutionTranscript, { runId: "run", execution }));
-  assert.match(html, /transcript-loading-skeleton/);
+  assert.match(html, /transcript-loading\"/);
   assert.match(html, /role="status"/);
   executionTranscriptCache.set("run:selected", { text: "known\n", offset: 6, complete: true });
   const cached = renderToStaticMarkup(createElement(ExecutionTranscript, { runId: "run", execution }));
-  assert.doesNotMatch(cached, /transcript-loading-skeleton/);
+  assert.doesNotMatch(cached, /transcript-loading\"/);
   executionTranscriptCache.clear();
 });
 

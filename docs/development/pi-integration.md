@@ -100,7 +100,6 @@ The submodule was upgraded from `v1.0.1` (`a7229ddc21810d6245105978033b7df645ecc
 | `npm run test:merger`, `npm run test:hardening` | Passed: production conflict repair, source/extended-path bindings, static-file and workspace boundaries |
 | Targeted upstream AI tests | Passed: 91 Azure routing/endpoint/tool-choice, sampling and model/OAuth runtime tests |
 | Targeted upstream coding-agent tests | Passed: 162 model-registry, credential-sync, codemode and MCP tests; the new removed-install detection regression also passes |
-| `npm run check:docs` and documentation tests | Passed; local links, anchors and npm references |
 | Root/profile audits at `--audit-level=moderate` | Both report 0 vulnerabilities |
 
 **Additional upstream test limitation:** the full upstream `test/config.test.ts` has 10 passes and 7 failures on this Windows host, in global self-update/package-manager fixtures and POSIX write-permission expectations. Running the original 1.0.1 test in an isolated previous-commit worktree reproduces the same seven failures (9 passes). This is not a new upgrade regression; the affected functions are unchanged and Grapher does not use global Pi self-update. No upstream tests were patched or their failures suppressed.

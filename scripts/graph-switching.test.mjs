@@ -3,7 +3,7 @@ import test from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 
-test("graphs remain visible when repeatedly switching conversations", { timeout: 60_000 }, async () => {
+test("graphs fade in only after fitting when repeatedly switching conversations", { timeout: 90_000 }, async () => {
   const repository = "/mock/project";
   const config = { repository, model: "test/model", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const makeSnapshot = (runId, names) => ({
@@ -27,6 +27,29 @@ test("graphs remain visible when repeatedly switching conversations", { timeout:
       localStorage.setItem("grapher_language_v1", "en");
       localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Project", lastOpened: 1 }]));
       localStorage.setItem("grapher_config", JSON.stringify(config));
+      // Sample actual painted opacity, not just the presence of animation props.
+      window.graphReveals = [];
+      let previousFlow, reveal;
+      const sample = () => {
+        const flow = document.querySelector(".graph-canvas .react-flow");
+        if (flow && flow !== previousFlow) {
+          reveal = { samples: [] };
+          window.graphReveals.push(reveal);
+        }
+        previousFlow = flow;
+        if (flow && reveal.samples.at(-1)?.opacity !== 1) {
+          const nodes = [...flow.querySelectorAll(".react-flow__node")];
+          reveal.samples.push({
+            opacity: Number(getComputedStyle(flow.closest(".graph-pane")).opacity),
+            flowOpacity: Number(getComputedStyle(flow).opacity),
+            names: nodes.map(node => node.dataset.id),
+            measured: nodes.length > 0 && nodes.every(node => node.offsetWidth > 0 && node.offsetHeight > 0 && getComputedStyle(node).visibility !== "hidden"),
+            viewport: flow.querySelector(".react-flow__viewport")?.style.transform,
+          });
+        }
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
     }, { repository, config });
     await context.route("**/api/*", async route => {
       const command = new URL(route.request().url()).pathname.slice(5);
@@ -54,20 +77,54 @@ test("graphs remain visible when repeatedly switching conversations", { timeout:
         const flow = document.querySelector(".graph-canvas .react-flow");
         const names = [...document.querySelectorAll(".react-flow__node")].map(node => node.dataset.id);
         const expected = id === "a" ? ["shared", "alpha"] : ["shared", "beta", "gamma"];
-        return flow && getComputedStyle(flow).opacity === "1" && names.length === expected.length && expected.every(name => names.includes(name));
-      }, id, { timeout: 3_000 });
+        return flow && getComputedStyle(flow).opacity === "1" && getComputedStyle(flow.closest(".graph-pane")).opacity === "1" &&
+          window.graphReveals.at(-1)?.samples.at(-1)?.opacity === 1 &&
+          names.length === expected.length && expected.every(name => names.includes(name));
+      }, id, { timeout: 3_000 }).catch(async error => {
+        const state = await page.evaluate(() => ({
+          paneOpacity: document.querySelector(".graph-pane") && getComputedStyle(document.querySelector(".graph-pane")).opacity,
+          flowOpacity: document.querySelector(".react-flow") && getComputedStyle(document.querySelector(".react-flow")).opacity,
+          names: [...document.querySelectorAll(".react-flow__node")].map(node => node.dataset.id),
+          revealCount: window.graphReveals.length,
+          lastSamples: window.graphReveals.at(-1)?.samples.slice(-3),
+        }));
+        throw new Error(`run ${id} did not become visible: ${JSON.stringify({ state, errors })}`, { cause: error });
+      });
       const bounds = await page.locator(".react-flow__node").evaluateAll(nodes => nodes.map(node => {
         const rect = node.getBoundingClientRect();
         const canvas = node.closest(".graph-canvas").getBoundingClientRect();
         return { name: node.dataset.id, rect: rect.toJSON(), canvas: canvas.toJSON(), visible: getComputedStyle(node).visibility !== "hidden", inside: rect.right > canvas.left && rect.left < canvas.right && rect.bottom > canvas.top && rect.top < canvas.bottom };
       }));
       assert.ok(bounds.every(node => node.visible && node.inside), `run ${id} must be fitted and visible: ${JSON.stringify(bounds)}`);
+      const samples = await page.evaluate(() => window.graphReveals.at(-1).samples);
+      assert.equal(samples[0].opacity, 0, `run ${id} must start hidden`);
+      const fading = samples.filter(sample => sample.opacity > 0 && sample.opacity < 1);
+      assert.ok(fading.length >= 2, `run ${id} must visibly animate, not flash in`);
+      const expected = Object.keys(snapshots[id].nodes).sort();
+      for (const sample of fading) {
+        assert.equal(sample.flowOpacity, 1, "the flow is ready before the panel fades in");
+        assert.ok(sample.measured, "every node is measured before the panel fades in");
+        assert.deepEqual(sample.names.sort(), expected, "no previous run's nodes appear during the fade");
+      }
+      assert.equal(new Set(fading.map(sample => sample.viewport)).size, 1, "the fitted viewport must not jump during the fade");
     };
     for (let index = 0; index < 60; index++) {
       const id = index % 2 ? "b" : "a";
       await page.locator(`[data-run-id="${id}"]`).click();
       await assertGraphVisible(id);
     }
+    // Selecting a node must not remount or replay the whole graph's entrance.
+    const revealCount = await page.evaluate(() => window.graphReveals.length);
+    await page.locator('.react-flow__node[data-id="shared"]').click();
+    await assertGraphVisible("b");
+    assert.equal(await page.evaluate(() => window.graphReveals.length), revealCount);
+
+    // Leaving for the landing page and returning must also animate.
+    await page.getByRole("button", { name: "New conversation", exact: true }).click();
+    await page.locator(".graph-pane").waitFor({ state: "detached" });
+    await page.locator('[data-run-id="b"]').click();
+    await assertGraphVisible("b");
+
     // Switch again before initialization/measurement callbacks can settle.
     for (let index = 0; index < 20; index++) {
       const id = index % 2 ? "b" : "a";

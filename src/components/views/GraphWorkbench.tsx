@@ -515,7 +515,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
       await instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6, duration: 0 });
       if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
-      setReadyGraphRunKey(targetKey);
+      // Commit the fitted viewport before starting the panel's entrance fade.
+      graphFitFrameRef.current = requestAnimationFrame(() => {
+        graphFitFrameRef.current = null;
+        if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
+        setReadyGraphRunKey(targetKey);
+      });
     };
     graphFitFrameRef.current = requestAnimationFrame(fitWhenMeasured);
   }, [currentRunKey]);
@@ -908,7 +913,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const prevEdgesCountRef = useRef(edges.length);
 
   useLayoutEffect(() => {
-    if (graphRunRef.current === currentRunKey) return;
+    if (graphRunRef.current === currentRunKey && showGraphPane) return;
     graphRunRef.current = currentRunKey;
     graphFlowRef.current = null;
     if (graphFitFrameRef.current !== null) cancelAnimationFrame(graphFitFrameRef.current);
@@ -916,25 +921,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     setReadyGraphRunKey("");
     prevNodesCountRef.current = nodes.length;
     prevEdgesCountRef.current = edges.length;
-  }, [currentRunKey, nodes.length, edges.length]);
+  }, [currentRunKey, showGraphPane, nodes.length, edges.length]);
 
   useEffect(() => {
     if (nodes.length > 0 && nodes.length !== prevNodesCountRef.current) {
       prevNodesCountRef.current = nodes.length;
-      if (graphFlowRef.current && isPlanning) {
+      if (graphFlowRef.current && isPlanning && isGraphMountedForRun) {
         void graphFlowRef.current.fitView({ padding: 0.24, duration: 400, minZoom: 0.3, maxZoom: 1.5 });
       }
     }
-  }, [nodes.length, isPlanning]);
+  }, [nodes.length, isPlanning, isGraphMountedForRun]);
 
   useEffect(() => {
     if (edges.length > 0 && edges.length !== prevEdgesCountRef.current) {
       prevEdgesCountRef.current = edges.length;
-      if (graphFlowRef.current && isPlanning) {
+      if (graphFlowRef.current && isPlanning && isGraphMountedForRun) {
         void graphFlowRef.current.fitView({ padding: 0.24, duration: 450, minZoom: 0.3, maxZoom: 1.5 });
       }
     }
-  }, [edges.length, isPlanning]);
+  }, [edges.length, isPlanning, isGraphMountedForRun]);
 
   const prevMsgCountRef = useRef(effectiveMessages.length);
   useEffect(() => {
@@ -1776,16 +1781,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       </motion.div>
 
       {/* 左右可调节分割器 与 右侧执行拓扑图面板 */}
-      <AnimatePresence initial={false}>
+      <AnimatePresence>
         {showGraphPane && (
           <>
             <motion.div
               key="workbench-resizer"
               className={`workbench-resizer ${isResizing ? "active" : ""}`}
-              initial={false}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: isGraphMountedForRun ? 1 : 0 }}
+              exit={{ opacity: 0, transition: { duration: 0 } }}
+              transition={{ duration: 0.4, delay: isGraphMountedForRun ? 0.08 : 0, ease: [0.22, 1, 0.36, 1] }}
+              style={{ pointerEvents: isGraphMountedForRun ? "auto" : "none" }}
               onMouseDown={handleStartResize}
               onDoubleClick={handleResetResizer}
               title={t("按住左右拖动调节宽度，双击恢复默认")}
@@ -1794,12 +1800,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             </motion.div>
 
             <motion.div
-              key="graph-pane"
+              key={`graph-pane:${currentRunKey}`}
               className="graph-pane"
-              initial={false}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: isGraphMountedForRun ? 1 : 0 }}
+              exit={{ opacity: 0, transition: { duration: 0 } }}
+              transition={{ duration: 0.4, delay: isGraphMountedForRun ? 0.08 : 0, ease: [0.22, 1, 0.36, 1] }}
+              style={{ pointerEvents: isGraphMountedForRun ? "auto" : "none" }}
             >
               <div className="graph-toolbar">
                 <div className="toolbar-left">

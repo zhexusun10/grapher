@@ -163,7 +163,6 @@ Rust 后端与 SQLite 事件日志拥有运行状态，React 界面只显示投�
 ```sh
 npm run check
 npm run build
-npm run check:docs
 npm run test:frontend
 npm test                      # Rust 固定样例；无需付费模型
 ```

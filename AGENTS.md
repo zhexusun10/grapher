@@ -66,9 +66,8 @@ Local guides supplement this file; check your agent's discovery behavior.
 
 Choose focused checks from [Testing](docs/development/testing.md) and
 [package.json](package.json); commands run from the repo root. Typical checks:
-`npm run check`, `npm run test:frontend`, `npm test` (Rust fixtures, no paid model),
-and `npm run check:docs`. For checker changes also run
-`node --test scripts/check-docs.test.mjs`.
+`npm run check`, `npm run test:frontend`, and `npm test` (Rust fixtures, no paid
+model).
 
 Run broader suites for cross-layer changes. Native checks need the actual host;
 fixtures do not prove provider quality or sandbox guarantees. Report commands,

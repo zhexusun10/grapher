@@ -9,13 +9,11 @@ From a checkout prepared with `npm ci --ignore-scripts` and `npm run pi:setup`:
 ```sh
 npm run check
 npm run build
-npm run check:docs
-node --test scripts/check-docs.test.mjs
 npm run test:frontend
 npm test
 ```
 
-`npm test` uses Rust fixtures; no paid model is required. Frontend tests exercise UI logic and isolated browser smoke cases, not provider quality. `check:docs` checks repository-owned Markdown links/anchors, npm command references, knowledge-index coverage, status-directory consistency and current-vs-historical routing. Local documentation checks run it and the checker tests without building Pi or Rust. It does not fetch external websites, lint upstream Pi docs, verify prose against code, or certify freshness. See [Documentation maintenance](documentation.md) for the review and exploration checks.
+`npm test` uses Rust fixtures; no paid model is required. Frontend tests exercise UI logic and isolated browser smoke cases, not provider quality. They do not fetch external sites, judge prose correctness, enforce freshness from a timestamp, or prove provider/sandbox/benchmark claims. See [Documentation maintenance](documentation.md) for the review and exploration checks.
 
 ## Suites by responsibility
 

@@ -947,7 +947,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             >
               {isWorking && !hasText && !selectedFile ? (
                 <Square size={compact ? 8 : 10} className="prompt-box-stop-icon" />
-              ) : isBusy || isPreparing || isSubmitting ? (
+              ) : isPreparing || isSubmitting ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
               ) : (
                 <motion.span

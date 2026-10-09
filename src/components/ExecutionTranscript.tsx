@@ -1,5 +1,6 @@
 import { t, localizeError } from "../i18n";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
@@ -181,9 +182,7 @@ export function ExecutionTranscript({
 
   let emptyText = t("工作区就绪，等待节点指令输出…");
   if (paged) {
-    if (isFetchingFirstPage) {
-      emptyText = t("正在加载历史记录…");
-    } else if (execution.status !== "running" && record.text === "") {
+    if (execution.status !== "running" && record.text === "" && !error) {
       emptyText = t("该节点没有产生日志输出");
     }
   } else {
@@ -195,8 +194,8 @@ export function ExecutionTranscript({
   return <div data-execution-id={execution.id} data-run-id={runId} aria-busy={isFetchingFirstPage}>
     {error && <p role="alert">{localizeError(error)} <button onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
     {paged && settled && !displayedText && !error && (isFetchingFirstPage || record.id !== cacheKey) ?
-      <div className="transcript-loading-skeleton" role="status" aria-label={t("正在加载历史记录…")}>
-        <span /><span /><span /><i aria-hidden="true" />
+      <div className="transcript-loading" role="status" aria-label={t("正在加载历史记录…")}>
+        <Loader2 size={14} className="spin" aria-hidden="true" />
       </div> : <VirtualizedTranscript key={`${runId}:${execution.id}:${retry}`}
       compact
       emptyText={execution.status === "running" ? "" : emptyText}

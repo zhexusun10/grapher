@@ -28,7 +28,6 @@ valid path or recent edit does not establish semantic correctness. See
 | Change workspace/cache cleanup or deletion | [Storage and cleanup](architecture/execution-model.md#storage-and-cleanup) | [cleanup.rs](../backend/src/cleanup.rs), [workspace_cleanup.rs](../backend/src/workspace_cleanup.rs), [native_runtime_storage.rs](../backend/src/native_runtime_storage.rs); [cleanup tests](../backend/src/cleanup_tests.rs), [runtime-storage tests](../scripts/native-runtime-storage.test.mjs) |
 | Install, start, configure or troubleshoot Grapher | [Installation](guides/installation.md), [Providers](guides/providers.md), [Windows](guides/windows.md) | [package.json](../package.json), [.env.example](../.env.example), [dev.mjs](../scripts/dev.mjs) |
 | Run or modify Harbor evaluation | [Harbor guide](benchmarks/harbor.md), [adapter README](../benchmark/README.md) | [harbor_agent.py](../benchmark/harbor_agent.py), [run.py](../benchmark/run.py), [Dockerfile](../benchmark/Dockerfile); `python3 -m unittest discover -s benchmark -p 'test_*.py'` |
-| Add/update docs or agent instructions | [Documentation maintenance](development/documentation.md), [root agent guide](../AGENTS.md) | [check-docs.mjs](../scripts/check-docs.mjs), [checker tests](../scripts/check-docs.test.mjs); `npm run check:docs` |
 
 Test commands, prerequisites and acceptance limits are authoritative in
 [Testing](development/testing.md) and [package.json](../package.json). A linked

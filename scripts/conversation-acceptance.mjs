@@ -209,7 +209,7 @@ try {
     for (const exec of displayed) {
       await chooseNode(view.page, exec.node);
       const card = view.page.locator(`[data-execution-id="${exec.id}"]`);
-      await card.locator('.transcript-loading-skeleton').waitFor({ state: 'visible', timeout: 30_000 });
+      await card.locator('.transcript-loading').waitFor({ state: 'visible', timeout: 30_000 });
       await until(async () => await card.getAttribute('aria-busy') === 'false' && await card.locator('.virtualized-transcript-container').count() > 0, `history ${exec.id} stayed blank`, 180_000);
       assert.ok((await card.innerText()).trim().length > 0, 'empty settled node card');
       const expected = fixture.executions.find(item => item.id === exec.id);
@@ -248,7 +248,7 @@ try {
   const ids = manifest.small.runs.map(run => run.id);
   const view = await pageFor(front, manifest, [...ids, manifest.small.failedRunId], 'TC08-switching');
   await view.page.locator(`button[data-run-id="${ids[0]}"]`).click();
-  await view.page.locator('[data-execution-id="alpha-exec"] .transcript-loading-skeleton').waitFor({ timeout: 30_000 });
+  await view.page.locator('[data-execution-id="alpha-exec"] .transcript-loading').waitFor({ timeout: 30_000 });
   const clicked = await view.page.evaluate(async ids => {
     const times = [];
     for (let i = 0; i < 30; i++) { document.querySelector(`button[data-run-id="${ids[i % 3]}"]`).click(); times.push(performance.now()); await new Promise(done => setTimeout(done, 50)); }
