@@ -14,7 +14,9 @@ jobs:
   planner-source:
     name: Planner source / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Native/environment/Merger step budgets total 61 minutes. Leave headroom
+    # for dependency setup, cold Rust builds, fixtures and post-job cleanup.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
