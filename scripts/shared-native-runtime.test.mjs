@@ -12,8 +12,8 @@ import { root } from './pi-baseline.mjs';
 const delay = ms => new Promise(done => setTimeout(done, ms));
 
 test('Windows projects/backends share a persistent engine and default workspaces to LocalAppData', {
-  skip: process.platform !== 'win32', timeout: 180000,
-}, async () => {
+  skip: process.platform !== 'win32', timeout: 360000,
+}, async t => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-shared-runtime-')));
   const backends = [];
   let modelCalls = 0;
@@ -31,16 +31,17 @@ test('Windows projects/backends share a persistent engine and default workspaces
     try { execFileSync('taskkill', ['/PID', String(backend.child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
     await exited;
   };
-  const until = async (backend, check, label) => {
-    const deadline = Date.now() + 60000;
+  const until = async (backend, check, label, timeoutMs = 60000) => {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      t.signal.throwIfAborted();
       assert.equal(backend.child.exitCode, null, backend.diagnostics);
       assert.equal(backend.child.signalCode, null, backend.diagnostics);
       assert.doesNotMatch(backend.diagnostics, /Graph runtime prewarm unavailable:/, backend.diagnostics);
       if (await check()) return;
       await delay(50);
     }
-    throw new Error(`${label}\n${backend.diagnostics}`);
+    throw new Error(`${label} within ${timeoutMs}ms\n${backend.diagnostics}`);
   };
   try {
     await new Promise(done => modelServer.listen(0, '127.0.0.1', done));
@@ -91,8 +92,15 @@ test('Windows projects/backends share a persistent engine and default workspaces
       return backend;
     };
     const [first, second] = await Promise.all([start('alpha'), start('beta')]);
-    const ready = backend => until(backend, () => backend.diagnostics.includes('Shared Graph runtime ready: '), 'Shared runtime not prepared');
-    await Promise.all([ready(first), ready(second)]);
+    const ready = async (backend, timeoutMs = 60000) => {
+      const started = Date.now();
+      await until(backend, () => backend.diagnostics.includes('Shared Graph runtime ready: '), 'Shared runtime not prepared', timeoutMs);
+      t.diagnostic(`shared engine readiness (${backend.source}): ${Date.now() - started}ms`);
+    };
+    // Cold preparation copies and verifies all pinned Pi dependencies. It also
+    // competes with the other prewarm tests for CI disk/CPU; this is not a role
+    // RPC startup benchmark. Keep ordinary operations and cached reuse at 60s.
+    await Promise.all([ready(first, 180000), ready(second, 180000)]);
     assert.equal(modelCalls, 0, 'preparation must not call a model');
     const copies = await readdir(engines);
     const names = copies.filter(name => name.startsWith('grapher-native-engine-'));
