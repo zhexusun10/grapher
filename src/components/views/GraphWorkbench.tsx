@@ -1260,9 +1260,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             </button>
             <motion.div
               className="pane-bottom-chat"
-              initial={{ opacity: 0, y: 16 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.48, ease: [0.16, 1, 0.3, 1] }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
             >
               {followUpQueue && followUpQueue.length > 0 && (
                 <div className="followup-queue-banner">

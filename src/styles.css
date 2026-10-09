@@ -223,14 +223,7 @@ h3 {
   mask-image: none;
 }
 
-.app-shell {
-  transition: background-color 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.app-shell .main {
-  transition: background-color 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
+/* Switch the canvas immediately; only the decorative background layer fades. */
 .app-shell.landing-active {
   background: transparent;
 }

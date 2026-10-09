@@ -1,8 +1,8 @@
 "use client";
 
 import React from "react";
-import { motion } from "motion/react";
 import { cn } from "@/lib/utils";
+import "./floating-paths.css";
 
 interface PathData {
   id: number;
@@ -12,49 +12,28 @@ interface PathData {
   firstDuration: number;
 }
 
-const FloatingPathItem = React.memo(function FloatingPathItem({ path }: { path: PathData }) {
+const FloatingPathItem = React.memo(function FloatingPathItem({ path, active }: { path: PathData; active: boolean }) {
   const [isFirstRound, setIsFirstRound] = React.useState(true);
 
   return (
-    <motion.path
+    <path
+      className={`floating-path ${isFirstRound ? "floating-path-enter" : "floating-path-loop"}`}
       d={path.d}
       stroke="currentColor"
       strokeWidth={path.width}
       strokeOpacity={0.8}
       strokeLinecap="round"
-      initial={isFirstRound ? { pathLength: 0.3, pathOffset: 0, opacity: 0.6 } : false}
-      animate={
-        isFirstRound
-          ? {
-              pathLength: [0.3, 0.3, 0.3, 0.3],
-              pathOffset: [0, 0.08, 0.92, 1],
-              opacity: [0.6, 0.6, 0.6, 0.6],
-            }
-          : {
-              pathLength: [0.3, 0.3, 0.3, 0.3],
-              pathOffset: [1, 0.92, 0.08, 0],
-              opacity: [0.6, 0.6, 0.6, 0.6],
-            }
-      }
-      transition={
-        isFirstRound
-          ? {
-              duration: path.firstDuration,
-              times: [0, 0.08, 0.92, 1],
-              ease: "linear",
-            }
-          : {
-              duration: path.duration,
-              times: [0, 0.08, 0.92, 1],
-              repeat: Number.POSITIVE_INFINITY,
-              repeatType: "reverse",
-              ease: "linear",
-            }
-      }
-      onAnimationComplete={() => {
-        if (isFirstRound) {
-          setIsFirstRound(false);
-        }
+      pathLength={1}
+      strokeDasharray="0.3 1"
+      strokeDashoffset={0}
+      opacity={0.6}
+      // Native playback freezes the current position without a JS animation loop.
+      style={{
+        animationDuration: `${isFirstRound ? path.firstDuration : path.duration}s`,
+        animationPlayState: active ? "running" : "paused",
+      }}
+      onAnimationEnd={() => {
+        if (isFirstRound) setIsFirstRound(false);
       }}
     />
   );
@@ -62,10 +41,12 @@ const FloatingPathItem = React.memo(function FloatingPathItem({ path }: { path: 
 
 export function FloatingPathsBackground({
   position,
+  active,
   children,
   className,
 }: {
   position: number;
+  active: boolean;
   className?: string;
   children: React.ReactNode;
 }) {
@@ -94,7 +75,7 @@ export function FloatingPathsBackground({
           style={{ overflow: "visible" }}
         >
           {paths.map((path) => (
-            <FloatingPathItem key={path.id} path={path} />
+            <FloatingPathItem key={path.id} path={path} active={active} />
           ))}
         </svg>
       </div>

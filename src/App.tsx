@@ -2260,6 +2260,7 @@ export default function App() {
       <FloatingPathsBackground
         className="aspect-16/9 flex items-center justify-center"
         position={-1}
+        active={isLandingView}
       >
         <div className={`app-shell ${isLandingView ? "landing-active" : ""}`}>
           <Sidebar
@@ -2402,9 +2403,9 @@ export default function App() {
                 <motion.div
                   key="workspace-view"
                   className="workspace-view-wrapper"
-                  initial={{ opacity: 0, y: reduceMotion ? 0 : 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: reduceMotion ? 0 : 8 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
                   transition={{ duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] }}
                 >
                   <PublicationPanel

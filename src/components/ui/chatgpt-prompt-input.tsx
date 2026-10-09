@@ -637,7 +637,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     return (
       <motion.div
         layoutId={layoutId || undefined}
-        transition={{ duration: reduceMotion ? 0 : 0.38, ease: [0.22, 1, 0.36, 1] }}
+        // Keep the shared handoff, without stretching the text or stacking page motion.
+        layout={layoutId ? "position" : undefined}
+        transition={{ layout: { type: "tween", duration: reduceMotion ? 0 : 0.3, ease: [0.25, 0.1, 0.25, 1] } }}
         className={`prompt-box-container ${compact ? "compact" : "landing"} ${disabled ? "disabled" : ""} ${isDraggingOver ? "dragging-over" : ""} ${className}`}
         onClick={() => {
           if (!disabled && !isBusy) {

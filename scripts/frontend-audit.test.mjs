@@ -66,6 +66,64 @@ async function fixture(name, handler = async () => false) {
   return { context, page, errors };
 }
 
+test("floating paths pause at their current position, resume both animation phases, and stop on unmount", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("background");
+  const sample = () => page.locator(".floating-path").evaluateAll(paths => paths.map(path => {
+    const animation = path.getAnimations()[0];
+    return { time: animation.currentTime, state: animation.playState, offset: getComputedStyle(path).strokeDashoffset };
+  }));
+  const assertPaused = async () => {
+    // Native pause requests settle on the next animation frame, not at style assignment.
+    await page.waitForFunction(() => [...document.querySelectorAll(".floating-path")].every(path => {
+      const animation = path.getAnimations()[0];
+      return animation?.playState === "paused" && !animation.pending;
+    }));
+    const before = await sample();
+    await page.waitForTimeout(200);
+    assert.deepEqual(await sample(), before, "hidden paths must neither move nor advance their playback clocks");
+    return before;
+  };
+  const resume = async paused => {
+    await page.evaluate(() => window.audit.setBackgroundActive(true));
+    await page.waitForFunction(times => [...document.querySelectorAll(".floating-path")]
+      .every((path, index) => path.getAnimations()[0]?.currentTime > times[index] + 50), paused.map(path => path.time));
+    assert.ok((await sample()).every((path, index) => path.state === "running" && path.offset !== paused[index].offset),
+      "paths must continue moving without restarting their animation");
+  };
+  try {
+    await page.waitForFunction(() => document.querySelectorAll(".floating-path").length === 36 &&
+      [...document.querySelectorAll(".floating-path")].every(path => path.getAnimations().length === 1));
+    const transitions = await page.locator(".app-shell, .main").evaluateAll(elements =>
+      elements.map(element => getComputedStyle(element).transitionDuration));
+    assert.deepEqual(transitions, ["0s", "0s"], "whole-screen canvas colors must not tween");
+    await resume(await assertPaused()); // Starting off the landing page must not play.
+    await page.evaluate(() => window.audit.setBackgroundActive(false));
+    await resume(await assertPaused());
+
+    // Seek to the end of the real native entry animations instead of waiting 8–12 seconds.
+    await page.locator(".floating-path").evaluateAll(paths => paths.forEach(path => {
+      const animation = path.getAnimations()[0];
+      animation.currentTime = animation.effect.getTiming().duration + 1;
+    }));
+    await page.waitForFunction(() => document.querySelectorAll(".floating-path-loop").length === 36);
+    const loops = await page.locator(".floating-path-loop").evaluateAll(paths => paths.map(path => {
+      const timing = path.getAnimations()[0].effect.getTiming();
+      return { direction: timing.direction, iterations: timing.iterations };
+    }));
+    assert.ok(loops.every(loop => loop.direction === "alternate" && loop.iterations === Infinity));
+    await page.evaluate(() => window.audit.setBackgroundActive(false));
+    await resume(await assertPaused()); // The repeating phase must pause/resume too.
+
+    await page.evaluate(() => {
+      window.audit.backgroundAnimations = [...document.querySelectorAll(".floating-path")].map(path => path.getAnimations()[0]);
+      window.audit.unmountBackground();
+    });
+    await page.locator(".floating-path").first().waitFor({ state: "detached" });
+    await page.waitForFunction(() => window.audit.backgroundAnimations.every(animation => animation.playState === "idle"));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("settings cancel/failure keep committed models unchanged; saving cannot submit twice", { timeout: 30_000 }, async () => {
   let saves = 0, fail = true, saved;
   const gate = deferred();

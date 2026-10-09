@@ -4,6 +4,7 @@ import { SettingsModal } from "../../src/components/modals/SettingsModal";
 import { EditorModal } from "../../src/components/modals/EditorModal";
 import { EditableUserBubble } from "../../src/components/views/ChatBubbles";
 import { PromptBox } from "../../src/components/ui/chatgpt-prompt-input";
+import { FloatingPathsBackground } from "../../src/components/ui/floating-paths";
 import { useSnapshotPolling } from "../../src/hooks/useSnapshotPolling";
 import { runtimeService } from "../../src/services/runtime";
 import { ThinkingCard } from "../../src/components/ThinkingCard";
@@ -101,9 +102,22 @@ function ThinkingFixture() {
     <section data-thinking-view="history"><VirtualizedTranscript output={output} inline /></section>
   </>;
 }
+function FloatingPathsFixture() {
+  const [active, setActive] = useState(false);
+  const [mounted, setMounted] = useState(true);
+  audit.setBackgroundActive = setActive;
+  audit.unmountBackground = () => setMounted(false);
+  return <React.StrictMode>{mounted &&
+    <div className={`app-background-root ${active ? "landing-active" : ""}`}>
+      <FloatingPathsBackground position={-1} active={active}>
+        <div className={`app-shell ${active ? "landing-active" : ""}`}><main className="main" /></div>
+      </FloatingPathsBackground>
+    </div>
+  }</React.StrictMode>;
+}
 const cases: Record<string, React.ComponentType> = {
   settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, prompt: PromptFixture, polling: PollingFixture,
-  thinking: ThinkingFixture,
+  thinking: ThinkingFixture, background: FloatingPathsFixture,
 };
 const Component = cases[new URLSearchParams(location.search).get("case") || "settings"];
 createRoot(document.getElementById("root")!).render(<Component />);

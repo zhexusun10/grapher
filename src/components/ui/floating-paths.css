@@ -1,0 +1,24 @@
+.floating-path {
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+.floating-path-enter {
+  animation-name: floating-path-enter;
+}
+
+.floating-path-loop {
+  animation-name: floating-path-loop;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+
+@keyframes floating-path-enter {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -1; }
+}
+
+@keyframes floating-path-loop {
+  from { stroke-dashoffset: -1; }
+  to { stroke-dashoffset: 0; }
+}
