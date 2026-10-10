@@ -55,7 +55,7 @@ the maintenance area, not a fictitious team owner.
 | [Windows](guides/windows.md) | Native setup, paths and limitations |
 | [Development](development/contributing.md) / [CONTRIBUTING.md](../CONTRIBUTING.md) | Checkout setup, code responsibilities and contribution rules |
 | [Testing](development/testing.md) | Suite selection, prerequisites and evidence boundaries |
-| [Pi integration](development/pi-integration.md) / [engine README](../engine/README.md) | Current pinned integration; dated validation sections are historical evidence |
+| [Pi integration](development/pi-integration.md) / [engine README](../engine/README.md) | Current pinned baseline, integration contracts, verification limits and upgrades |
 | [Conversation logs](testing/conversation-logs.md) | Offline maintenance, legacy migration and acceptance; Runtime owns storage/API limits |
 | [Harbor](benchmarks/harbor.md) / [benchmark README](../benchmark/README.md) | Adapter interface, reproducibility and evidence requirements |
 | [Documentation maintenance](development/documentation.md) | Knowledge placement, lifecycle, checks and exploration evaluation |
