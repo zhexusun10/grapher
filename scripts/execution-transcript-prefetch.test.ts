@@ -16,7 +16,7 @@ test("settled node requests share work and publish only complete history", async
   const offsets: number[] = [];
   let releaseSecond!: () => void;
   const secondPage = new Promise<void>(resolve => { releaseSecond = resolve; });
-  runtimeService.getExecutionOutput = async (_runId, _execId, offset, _signal, full) => {
+  runtimeService.getExecutionOutput = async (_runId, _execId, offset = 0, _signal, full) => {
     assert.equal(full, true);
     offsets.push(offset);
     if (offset) await secondPage;
