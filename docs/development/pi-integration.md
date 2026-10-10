@@ -54,6 +54,10 @@ npm run pi:build
 | Node Agent | Pi native tools, selected global extensions/MCP/skills, and trusted workspace resources |
 | Merger | Pi default prompt with a conflict-repair addendum (`--append-system-prompt`); fixed tools; bundled `pi-trim` only; no user extensions, MCP, skills or automatic context files |
 
+The [path-convention](../architecture/filesystem-isolation.md#path-convention)
+addendum is injected directly for Node Agent and Merger, not Partitioner or
+Planner; Planner does not need to repeat execution conventions in node tasks.
+
 The Partitioner/Planner/Serial use source-native execution. Planner Bash writes reach the source immediately without command filtering; Graph nodes use their own repositories derived from source snapshots and dependencies. The Merger runs in whichever workspace contains the conflict: a node repository or source project. Private Mergers use the same validated launcher and platform boundaries as other private executions; see [composition recovery](../architecture/execution-model.md#parent-composition-conflicts). Platform access rules and Graph path adaptation are described in [Filesystem isolation](../architecture/filesystem-isolation.md).
 
 The backend removes inherited Pi model/session selectors and sets explicit role/session identities. Long-term auth remains upstream-owned. Do not implement a competing Rust/browser token store or silently drop supported provider credentials from the child environment.

@@ -119,8 +119,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const loadingRepoRef = useRef<string | null>(null);
     const completionsGenerationRef = useRef(0);
 
+    // 惰性加载：仅当出现 @ / / 触发词且当前工作区尚未加载时才拉取数据，
+    // 避免首页挂载即全量遍历工作区文件与技能目录。
     const loadCompletions = useCallback(async (force = false) => {
       const key = repository || "__default__";
+      if (!force && loadedRepoRef.current === key) return;
       if (loadingRepoRef.current === key) return;
       const generation = completionsGenerationRef.current;
       loadingRepoRef.current = key;
@@ -142,13 +145,12 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     }, [repository]);
 
-    // 当切换工作区 repository 时，立即清空旧工作区文件，并强制刷新新工作区数据
+    // 当切换工作区 repository 时，仅清空旧工作区缓存；数据推迟到触发词出现时再加载
     useEffect(() => {
       loadedRepoRef.current = null;
       loadingRepoRef.current = null;
       setWorkspaceFiles([]);
       setWorkspaceSkills([]);
-      void loadCompletions(true);
       return () => { completionsGenerationRef.current += 1; };
     }, [repository, loadCompletions]);
 
@@ -199,13 +201,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     }, [triggerStart, triggerQuery, dismissedTrigger]);
 
+    // 触发词（@ 或 /）首次出现时才加载当前工作区的补全数据（已加载则跳过）
     useEffect(() => {
-      const currentKey = repository || "__default__";
-      if (triggerMode === "@" && loadedRepoRef.current !== currentKey) {
-        loadCompletions(true);
-      }
-      if (triggerMode === "/" && loadedRepoRef.current !== currentKey) {
-        loadCompletions(true);
+      if (triggerMode !== null) {
+        loadCompletions();
       }
     }, [triggerMode, repository, loadCompletions]);
 
@@ -839,7 +838,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               restProps.onSelect?.(e);
             }}
             onFocus={(e) => {
-              loadCompletions();
               setCursorPos(e.currentTarget.selectionStart || 0);
               restProps.onFocus?.(e);
             }}

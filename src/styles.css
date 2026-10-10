@@ -559,16 +559,18 @@ a,
   position: fixed;
   z-index: 1000;
   min-width: 150px;
-  background: rgba(255, 255, 255, 0.96);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: var(--bg-surface, #ffffff);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 1px solid var(--border-default, rgba(0, 0, 0, 0.12));
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14), 0 2px 6px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(0, 0, 0, 0.04);
   padding: 4px;
   display: flex;
   flex-direction: column;
   gap: 1px;
+  will-change: transform, opacity;
+  transform: translateZ(0);
   animation: contextMenuFadeIn 0.12s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -624,35 +626,25 @@ a,
 
 /* 应用内确认弹窗 */
 .modal-backdrop.confirm-backdrop {
-  background: rgba(15, 23, 42, 0.25);
-  backdrop-filter: blur(2px);
+  background: var(--bg-overlay, rgba(15, 23, 42, 0.45));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   padding: 24px;
 }
 
 .confirm-dialog {
+  will-change: transform, opacity;
+  transform: translateZ(0);
   width: 480px;
   max-width: 100%;
   background: #ffffff;
   border: 1px solid var(--border-default);
   border-radius: 12px;
-  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(0, 0, 0, 0.04);
   padding: 24px 26px 22px;
   display: flex;
   flex-direction: column;
   gap: 20px;
-  animation: confirmDialogScaleIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes confirmDialogScaleIn {
-  from {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
 }
 
 .confirm-header {
@@ -914,6 +906,49 @@ a,
   padding-right: 2px;
   width: var(--sidebar-content-width, 230px);
   min-width: var(--sidebar-content-width, 230px);
+}
+
+.runs-list.is-loaded {
+  animation: sidebarListFadeIn 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes sidebarListFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sidebar-skeleton-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+  width: var(--sidebar-content-width, 230px);
+}
+
+.sidebar-skeleton-item {
+  height: 36px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.03) 25%, rgba(0, 0, 0, 0.07) 50%, rgba(0, 0, 0, 0.03) 75%);
+  background-size: 200% 100%;
+  animation: sidebarSkeletonShimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes sidebarSkeletonShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-skeleton-item,
+  .runs-list.is-loaded {
+    animation: none;
+  }
 }
 
 .run-item {
@@ -1357,8 +1392,6 @@ a,
   border-radius: 26px;
   padding: 10px 14px 10px 14px;
   background: color-mix(in srgb, var(--bg-surface) 90%, transparent);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border: 1px solid color-mix(in srgb, var(--border-default) 85%, transparent);
   box-shadow: 0 4px 24px -2px rgba(15, 23, 42, 0.08), 0 2px 8px -1px rgba(15, 23, 42, 0.04);
 }
@@ -1388,7 +1421,7 @@ a,
 .prompt-box-container.landing:focus-within,
 .prompt-box-container.landing:focus-visible,
 .prompt-box-container.landing:hover {
-  background: color-mix(in srgb, var(--bg-surface) 96%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 95%, transparent);
   border-color: var(--border-default) !important;
   box-shadow: 0 6px 28px -2px rgba(15, 23, 42, 0.1), 0 2px 10px -1px rgba(15, 23, 42, 0.05) !important;
 }
@@ -1441,9 +1474,7 @@ a,
   align-items: center;
   justify-content: center;
   gap: 10px;
-  background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: var(--bg-surface);
   pointer-events: none;
   color: var(--brand-default, #2563eb);
   font-weight: 500;
@@ -1783,7 +1814,6 @@ a,
   padding: 2.5px 3px;
   gap: 3px;
   height: 32px;
-  backdrop-filter: blur(8px);
   position: relative;
   box-sizing: border-box;
 }

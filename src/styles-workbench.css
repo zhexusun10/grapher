@@ -1991,12 +1991,12 @@
   gap: 9px;
   max-width: min(580px, calc(100% - 32px));
   padding: 6px 12px 6px 10px;
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: var(--bg-surface, #ffffff);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   border: 1px solid var(--brand-border, #BFDBFE);
   border-radius: 9999px;
-  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.08), 0 4px 12px -2px rgba(37, 99, 235, 0.08);
+  box-shadow: 0 4px 16px -2px rgba(15, 23, 42, 0.08), 0 2px 6px -2px rgba(37, 99, 235, 0.06);
   color: var(--text-primary, #0F172A);
   font-size: 12.5px;
   line-height: 1.4;
@@ -2296,7 +2296,8 @@
   position: fixed;
   inset: 0;
   background: var(--bg-overlay);
-  backdrop-filter: blur(4px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   z-index: 1000;
   display: flex;
   align-items: center;
@@ -2305,10 +2306,12 @@
 }
 
 .modal {
+  will-change: transform, opacity;
+  transform: translateZ(0);
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   border-radius: 13px;
-  box-shadow: 0 20px 80px rgba(15, 23, 42, 0.15);
+  box-shadow: 0 16px 36px -4px rgba(15, 23, 42, 0.16), 0 4px 12px -2px rgba(15, 23, 42, 0.06);
   width: 530px;
   max-height: 90vh;
   overflow: auto;
@@ -2400,10 +2403,12 @@
 /* 3. 运行配置悬浮窗与视图 */
 .modal-backdrop.settings-backdrop {
   backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .modal.settings-modal {
   will-change: transform, opacity;
+  transform: translateZ(0);
   width: 740px;
   max-width: calc(100vw - 40px);
   max-height: 86vh;
@@ -2413,7 +2418,7 @@
   overflow: hidden;
   border-radius: 12px;
   border: 1px solid var(--border-default);
-  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.2), 0 4px 16px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 16px 36px -4px rgba(15, 23, 42, 0.16), 0 4px 12px -2px rgba(15, 23, 42, 0.06);
 }
 
 .settings-modal-header {

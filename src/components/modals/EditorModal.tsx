@@ -1,6 +1,6 @@
 import { t } from "../../i18n";
 import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
-import { motion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { Check, X } from "lucide-react";
 import { Graph, emptyGraph } from "../../types";
 
@@ -23,6 +23,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
   onSave,
   onError,
 }) => {
+  const reduceMotion = useReducedMotion();
   const [editorText, setEditorText] = useState(() => JSON.stringify(initialGraph, null, 2));
   const wasOpen = useRef(isOpen);
 
@@ -49,7 +50,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.2, ease: "easeOut" }}
+      transition={{ duration: reduceMotion ? 0 : 0.16, ease: "easeOut" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
@@ -59,10 +60,10 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
-        initial={{ opacity: 0, scale: 0.95, y: 14 }}
+        initial={{ opacity: 0, scale: reduceMotion ? 1 : 0.98, y: reduceMotion ? 0 : 8 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 10 }}
-        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+        exit={{ opacity: 0, scale: reduceMotion ? 1 : 0.98, y: reduceMotion ? 0 : 6 }}
+        transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
       >
         <header>
           <h2 id="modal-title">{t("Graph IR · 编辑与编译")}</h2>

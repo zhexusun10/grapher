@@ -101,6 +101,7 @@ export default function App() {
   // Do not flash unvalidated, potentially cross-workspace browser indexes.
   // Bootstrap repairs ownership before publishing the saved cards.
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>({});
+  const [isSidebarReady, setIsSidebarReady] = useState(false);
   const [runLabels, setRunLabels] = useState<Record<string, string>>(() => {
     try {
       const saved = localStorage.getItem("grapher_run_labels");
@@ -120,23 +121,26 @@ export default function App() {
   useEffect(() => {
     const missing = runs.filter(id => !id.startsWith("pending-") && !(id in runLabels) && !pendingRunLabelIdsRef.current.has(id));
     if (missing.length > 0) {
-      missing.forEach(id => {
-        pendingRunLabelIdsRef.current.add(id);
-        runtimeService.history(id).then(snapshot => {
-          setRunLabels(prev => {
-            if (prev[id] !== undefined) return prev; // already fetched
-            const updated = { ...prev, [id]: snapshot.graph.originalGoal || "" };
-            try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch { }
-            return updated;
-          });
-        }).catch(() => {
-          setRunLabels(prev => {
-            if (prev[id] !== undefined) return prev; // already fetched
-            const updated = { ...prev, [id]: "" };
-            try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch { }
-            return updated;
-          });
-        }).finally(() => pendingRunLabelIdsRef.current.delete(id));
+      missing.forEach(id => pendingRunLabelIdsRef.current.add(id));
+      Promise.all(
+        missing.map(id =>
+          runtimeService.history(id)
+            .then(snapshot => [id, snapshot.graph.originalGoal || ""] as const)
+            .catch(() => [id, ""] as const)
+        )
+      ).then(results => {
+        setRunLabels(prev => {
+          const updated = { ...prev };
+          for (const [id, goal] of results) {
+            if (updated[id] === undefined) {
+              updated[id] = goal;
+            }
+          }
+          try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch { }
+          return updated;
+        });
+      }).finally(() => {
+        missing.forEach(id => pendingRunLabelIdsRef.current.delete(id));
       });
     }
   }, [runs, runLabels, runtimeService]);
@@ -635,8 +639,23 @@ export default function App() {
       if (!planningRecovery.current(scope)) return;
     }
     const indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
+    const prefilledLabels: Record<string, string> = {};
+    for (let i = 0; i < indexedIds.length; i++) {
+      const snap = snapshots[i];
+      if (snap && snap.graph.originalGoal) {
+        prefilledLabels[indexedIds[i]] = snap.graph.originalGoal;
+      }
+    }
+    if (Object.keys(prefilledLabels).length > 0) {
+      setRunLabels(prev => {
+        const next = { ...prev, ...prefilledLabels };
+        try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
+        return next;
+      });
+    }
     setWorkspaceRuns(indexedRuns);
     try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
+    setIsSidebarReady(true);
 
     const currentRuns = indexedRuns[workspaceKey(activeRepo)] || [];
     const isActivelyRunning = Boolean(
@@ -2127,7 +2146,9 @@ export default function App() {
   }, [handleEditMessageSubmit]);
 
   useEffect(() => {
-    load().catch((err) => setError(String(err)));
+    load()
+      .catch((err) => setError(String(err)))
+      .finally(() => setIsSidebarReady(true));
   }, [load]);
 
   const hasCurrentPlan = hasCurrentPlanningRun(state, config.repository);
@@ -2260,7 +2281,7 @@ export default function App() {
       <FloatingPathsBackground
         className="aspect-16/9 flex items-center justify-center"
         position={-1}
-        active={isLandingView}
+        active={isLandingView && !modal && !confirmModal}
       >
         <div className={`app-shell ${isLandingView ? "landing-active" : ""}`}>
           <Sidebar
@@ -2271,6 +2292,7 @@ export default function App() {
             onRemoveProject={handleRemoveWorkspaceConfirm}
             runs={runs}
             runLabels={runLabels}
+            isReady={isSidebarReady}
             currentRunId={state.runId}
             runIndicators={runIndicators}
             onLoadRun={(id) => {

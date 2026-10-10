@@ -14,13 +14,9 @@ export default function (pi: ExtensionAPI) {
   const paths = process.env.GRAPHER_EXECUTION_KIND === 'graph' && project
     ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;
   const view = (value: any): any => paths ? paths.view(value) : value;
-  // Scope path guidance to each role's actual responsibilities.
-  const pathGuideline = process.env.GRAPHER_MODE === 'planner'
-    ? 'Use project-root-relative paths in Bash commands, project files, and node task handoffs.'
-    : process.env.GRAPHER_MODE === 'node'
-      ? 'Use project-root-relative paths in Bash commands and project files.'
-      : 'Use project-root-relative paths in Bash commands and project files.';
-  if (process.env.GRAPHER_MODE !== 'partition') {
+  // Execution roles receive path guidance directly; Planner need not repeat it in handoffs.
+  const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
+  if (process.env.GRAPHER_MODE !== 'partition' && process.env.GRAPHER_MODE !== 'planner') {
     pi.on('before_agent_start', async event => {
       // Pi 1.0 projects forceSystemPrompt after context_with_system handlers.
       // Returning systemPrompt here would overwrite pi-trim's request-time edits.

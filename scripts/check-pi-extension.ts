@@ -393,12 +393,11 @@ fn main() {
   assert.deepEqual([...extracted.extensions[0].tools.keys()].sort(), ["bash", "edge", "node"]);
   const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
   assert.match(JSON.stringify(listed), /sample.txt/);
+  assert.equal(extracted.extensions[1].handlers.has("before_agent_start"), false,
+    "Planner must not receive the execution path-convention addendum");
   const plannerOptions = normalizeBuildSystemPromptOptions({ customPrompt: "base", cwd: repository });
-  assert.equal(await extracted.extensions[1].handlers.get("before_agent_start")![0]({ systemPromptOptions: plannerOptions }), undefined);
-  assert.equal(plannerOptions.forceSystemPrompt, undefined, "Path guidance must not bypass request-time prompt trimming");
   const plannerPrompt = buildSystemPrompt(plannerOptions);
-  assert.match(plannerPrompt, /Use project-root-relative paths in Bash commands, project files, and node task handoffs/);
-  assert.doesNotMatch(plannerPrompt, /generated configuration/);
+  assert.doesNotMatch(plannerPrompt, /Use project-root-relative paths|node task handoffs|generated configuration/);
 
   // Partitioner and Merger use the same namespace without the Planner extension.
   for (const mode of ["partition", "merger"]) {
@@ -406,7 +405,7 @@ fn main() {
     const roleExtension = await loadExtensions([adapterPath], repository);
     assert.deepEqual(roleExtension.errors, []);
     const hooks = roleExtension.extensions[0].handlers;
-    assert.equal(hooks.has("before_agent_start"), mode !== "partition", "Working roles receive the relative-path convention");
+    assert.equal(hooks.has("before_agent_start"), mode !== "partition", "Execution roles receive the relative-path convention");
     assert.equal(hooks.has("context"), false, "No content rewriting");
     if (mode === "partition") assert.equal(roleExtension.extensions[0].tools.size, 0);
     else {
@@ -424,6 +423,12 @@ fn main() {
   const worker = await loadExtensions([adapterPath], repository);
   assert.deepEqual(worker.errors, []);
   const workerExtension = worker.extensions[0];
+  const workerOptions = normalizeBuildSystemPromptOptions({ customPrompt: "base", cwd: repository });
+  assert.equal(await workerExtension.handlers.get("before_agent_start")![0]({ systemPromptOptions: workerOptions }), undefined);
+  assert.equal(workerOptions.forceSystemPrompt, undefined, "Path guidance must not bypass request-time prompt trimming");
+  const workerPrompt = buildSystemPrompt(workerOptions);
+  assert.match(workerPrompt, /Use project-root-relative paths in Bash commands and project files/);
+  assert.doesNotMatch(workerPrompt, /node task handoffs|generated configuration/);
   const { createReadToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/read.ts");
   const { createWriteToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/write.ts");
   const { createEditToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/edit.ts");

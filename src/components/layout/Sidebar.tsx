@@ -23,6 +23,7 @@ interface SidebarProps {
   onOpenSettings: () => void;
   isSettingsOpen: boolean;
   runLabels?: Record<string, string>;
+  isReady?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = React.memo(({
@@ -42,6 +43,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onOpenSettings,
   isSettingsOpen,
   runLabels = {},
+  isReady = true,
 }) => {
   const [isCollapsed, setIsCollapsed] = useState(() => {
     try {
@@ -157,8 +159,14 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </div>
       </div>
 
-      <div className="runs-list">
-        {runs.length > 0 ? (
+      <div className={`runs-list ${isReady ? "is-loaded" : ""}`}>
+        {!isReady ? (
+          <div className="sidebar-skeleton-wrap" aria-hidden="true">
+            <div className="sidebar-skeleton-item" />
+            <div className="sidebar-skeleton-item" />
+            <div className="sidebar-skeleton-item" />
+          </div>
+        ) : runs.length > 0 ? (
           runs.map((id) => {
             const indicator = runIndicators[id];
             const isThisRunActive = ["running", "awaiting_approval", "publishing", "merging"].includes(indicator?.phase ?? (activeBackendRunId === id ? activeBackendPhase ?? "" : ""));

@@ -1,6 +1,6 @@
 import { t, localizeError } from "../../i18n";
 import React, { useEffect } from "react";
-import { motion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { ShieldCheck, Play, X } from "lucide-react";
 import { Snapshot, Config } from "../../types";
 
@@ -23,6 +23,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
   onAdjustPlan,
   onApprove,
 }) => {
+  const reduceMotion = useReducedMotion();
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !busy) onClose();
@@ -39,7 +40,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.2, ease: "easeOut" }}
+      transition={{ duration: reduceMotion ? 0 : 0.16, ease: "easeOut" }}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
@@ -49,10 +50,10 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
-        initial={{ opacity: 0, scale: 0.95, y: 14 }}
+        initial={{ opacity: 0, scale: reduceMotion ? 1 : 0.98, y: reduceMotion ? 0 : 8 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 10 }}
-        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+        exit={{ opacity: 0, scale: reduceMotion ? 1 : 0.98, y: reduceMotion ? 0 : 6 }}
+        transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
       >
         <header>
           <h2 id="modal-title">{t("审批执行图计划")}</h2>

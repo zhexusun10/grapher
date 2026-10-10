@@ -1,6 +1,6 @@
 import { t } from "../../i18n";
 import React, { useEffect } from "react";
-import { motion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { AlertTriangle, Trash2 } from "lucide-react";
 
 export interface ConfirmModalState {
@@ -20,6 +20,7 @@ interface ConfirmModalProps {
 }
 
 export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, onClose }) => {
+  const reduceMotion = useReducedMotion();
   const cancel = () => {
     config?.onCancel?.();
     onClose();
@@ -40,7 +41,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.18, ease: "easeOut" }}
+      transition={{ duration: reduceMotion ? 0 : 0.16, ease: "easeOut" }}
       onClick={cancel}
     >
       <motion.div
@@ -49,10 +50,10 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
         aria-describedby="confirm-dialog-message"
-        initial={{ opacity: 0, scale: 0.94, y: 10 }}
+        initial={{ opacity: 0, scale: reduceMotion ? 1 : 0.96, y: reduceMotion ? 0 : 8 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 8 }}
-        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+        exit={{ opacity: 0, scale: reduceMotion ? 1 : 0.97, y: reduceMotion ? 0 : 6 }}
+        transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="confirm-header">
