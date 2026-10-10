@@ -37,8 +37,14 @@ function blockIndex(items: TranscriptItem[], contentIndex: number | undefined, m
 
 /** Close cards without inventing text for provider-private reasoning blocks. */
 export function closeThinkingItems(items: TranscriptItem[], messageStart = 0): TranscriptItem[] {
-  return items.map((item, index) => index >= messageStart && item.type === "thinking" && item.status === "running"
-    ? { ...item, status: "success" } : item);
+  let next = items;
+  for (let index = messageStart; index < items.length; index++) {
+    const item = items[index];
+    if (item.type !== "thinking" || item.status !== "running") continue;
+    if (next === items) next = items.slice();
+    next[index] = { ...item, status: "success" };
+  }
+  return next;
 }
 
 /** One card per contentIndex within one assistant message, for live SSE and replay. */
@@ -48,8 +54,8 @@ export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpd
   if (update.type === "thinking_start" && update.contentIndex === undefined && index >= 0 && items[index].status !== "running") {
     index = -1;
   }
-  const next = update.type === "thinking_start" && index < 0
-    ? closeThinkingItems(items, messageStart) : [...items];
+  const closed = update.type === "thinking_start" && index < 0 ? closeThinkingItems(items, messageStart) : items;
+  const next = closed === items ? items.slice() : closed;
   if (index < 0) {
     index = next.length;
     next.push(thinkingItem(update.contentIndex));
@@ -69,7 +75,9 @@ export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpd
 
 /** Backfill final summaries in place, never duplicate cards or match a prior turn. */
 export function finalizeThinkingItems(items: TranscriptItem[], content: MessageContent[], messageStart = 0): TranscriptItem[] {
-  let next = closeThinkingItems(items, messageStart);
+  // Backfills below replace entries, so do not write into the caller's array even
+  // when there was no running block to close.
+  let next = closeThinkingItems(items, messageStart).slice();
   content.forEach((part, contentIndex) => {
     if (part.type !== "thinking") return;
     let index = blockIndex(next, contentIndex, messageStart);

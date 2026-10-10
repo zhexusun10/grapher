@@ -269,6 +269,8 @@ test("late workspace completions cannot replace current files/skills; controlled
     return true;
   });
   try {
+    // Completions are lazy: explicitly trigger the old workspace request first.
+    await page.locator("textarea").fill("@");
     await waitFor(() => oldRequests === 2);
     await page.evaluate(() => window.audit.switchRepository());
     const input = page.locator("textarea");

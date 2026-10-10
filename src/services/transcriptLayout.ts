@@ -1,5 +1,5 @@
 // Offsets include the trailing edge so binary search handles tall rows and EOF.
-export function rowOffsets(ids: string[], heights: ReadonlyMap<string, number>, estimate = 72): number[] {
+export function rowOffsets(ids: string[], heights: Pick<ReadonlyMap<string, number>, "get">, estimate = 72): number[] {
   const offsets = [0];
   for (const id of ids) offsets.push(offsets[offsets.length - 1] + (heights.get(id) ?? estimate));
   return offsets;

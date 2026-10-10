@@ -1,5 +1,6 @@
 import { t } from "../i18n";
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
+import { shareById } from "../services/structuralSharing";
 import type { Edge } from "@xyflow/react";
 import type { FeedbackExhaustion, Graph, Plan, Snapshot } from "../types";
 import { tokens } from "../tokens";
@@ -94,9 +95,9 @@ export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string
 export function useGraphElements(state: Snapshot, selected: string, recentlyAddedEdgeIds: Set<string>) {
   // Keep the same geometry for nodes and edges. Wider rows leave room for
   // edge channels; taller layers keep adjacent-layer paths below the cards.
+  const hasMergers = (state.mergers ?? []).some((m) => m.node.startsWith("merge:"));
   const graphLayout = useMemo(() => {
     const layers = computeExecutionLayers(state.graph, state.plan);
-    const hasMergers = (state.mergers ?? []).some((m) => m.node.startsWith("merge:"));
     const positions = new Map<string, { x: number; y: number; layer: number }>();
     layers.forEach((batch, layer) => batch.forEach((name, index) => {
       positions.set(name, {
@@ -107,7 +108,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     }));
     const xs = Array.from(positions.values(), (position) => position.x);
     return { positions, minX: Math.min(...xs, 160), maxX: Math.max(...xs, 160) + 236 };
-  }, [state.graph, state.plan, state.mergers]);
+  }, [state.graph, state.plan, hasMergers]);
 
   const mergeTargets = useMemo(() => {
     const targets = new Map<string, NonNullable<Snapshot["mergers"]>[number]>();
@@ -246,5 +247,11 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     }))];
   }, [state.graph.edges, state.nodes, recentlyAddedEdgeIds, edgeRouting, mergeTargets]);
 
-  return { nodes, edges };
+  const previous = useRef({ runId: state.runId, nodes, edges });
+  const shared = useMemo(() => {
+    if (previous.current.runId !== state.runId) return { runId: state.runId, nodes, edges };
+    return { runId: state.runId, nodes: shareById(previous.current.nodes, nodes), edges: shareById(previous.current.edges, edges) };
+  }, [state.runId, nodes, edges]);
+  previous.current = shared;
+  return { nodes: shared.nodes, edges: shared.edges };
 }

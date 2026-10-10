@@ -1,6 +1,8 @@
 import { t, localizeError } from "../../i18n";
 import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
-import { Background, Controls, ReactFlow, type ReactFlowInstance } from "@xyflow/react";
+import type { ReactFlowInstance } from "@xyflow/react";
+import { GraphCanvas } from "../graph/GraphCanvas";
+import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   Code2, ArrowLeft, FolderGit2,
   Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
@@ -15,11 +17,10 @@ import {
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
-import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
+import { EditableUserBubble } from "./ChatBubbles";
 import { NodeTaskCard } from "./NodeTaskCard";
 import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
 import { isNodeWorking } from "../../lib/nodeWorking";
-import { ToolCallCard } from "../ToolCallCard";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTranscript } from "../ExecutionTranscript";
@@ -32,6 +33,7 @@ import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
 import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 import { PublicationCompletedCard } from "../PublicationCompletedCard";
 import { EnvironmentResult } from "../EnvironmentResult";
+import { PlannerTranscript } from "../PlannerTranscript";
 
 interface GraphWorkbenchProps {
   state: Snapshot;
@@ -1046,6 +1048,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     setScrollBottomVisible,
   ]);
 
+  const selectGraphNode = useStableCallback((id: string) => {
+    if (!id) { setSelected(""); return; }
+    if (id.startsWith("merger:")) {
+      const target = id.slice(7);
+      setSelected(target);
+      setAttemptId((state.mergers ?? []).filter(item => item.node === `merge:${target}`).at(-1)?.id ?? "");
+    } else {
+      setSelected(id);
+      setAttemptId("");
+    }
+  });
+
   return (
     <section
       className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${isPlanning ? "planning-active" : "historical-settled"}`}
@@ -1527,72 +1541,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     {/* Planner 顺序流式记录：严格按实际发生时序呈现用户追加消息、工具调用、思维链与输出文字 */}
                     {renderLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {plannerStream.items.map((item: TranscriptItem, idx: number) => {
-                          const isLast = idx === plannerStream.items.length - 1;
-                          if (item.role === "user") {
-                            return (
-                              <motion.div
-                                key={item.id}
-                                className="chat-message-row user"
-                                initial={false}
-                                animate={{ opacity: 1, y: 0, scale: 1 }}
-                                transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-                              >
-                                <EditableUserBubble
-                                  text={item.content || ""}
-                                  editing={editingMessage?.id === item.id}
-                                  draft={editPrefillText ?? ""}
-                                  onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                                  onEdit={onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: item.content || "" }) : undefined}
-                                  onCancel={() => onCancelEditMessage?.()}
-                                  onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit({ id: item.id, parentId: null, role: "user", text: item.content || "" }, value) : onSendMessage(value)}
-                                  disabled={locked && !isPlanning}
-                                />
-                              </motion.div>
-                            );
-                          }
-                          if (item.type === "tool_call") {
-                            return (
-                              <ToolCallCard
-                                key={item.id}
-                                item={item}
-                                onExpandedChange={handleExpandableContentChange}
-                              />
-                            );
-                          }
-                          if (item.type === "thinking") {
-                            return (
-                              <ThinkingCard
-                                key={item.id}
-                                item={item}
-                                isStreaming={isPlanning && item.status === "running"}
-                                title={t("思考过程")}
-                                defaultExpanded={true}
-                                onExpandedChange={handleExpandableContentChange}
-                              />
-                            );
-                          }
-                          if (item.type === "text") {
-                            return (
-                              <motion.div
-                                key={item.id}
-                                className="chat-message-row assistant"
-                                initial={false}
-                                animate={{ opacity: 1, y: 0, scale: 1 }}
-                              >
-                                <div className="chat-bubble-assistant chat-message-assistant">
-                                  <StreamingAssistantBubble
-                                    content={item.content || ""}
-                                    isStreaming={isPlanning && isLast && item.status === "running"}
-                                  />
-                                </div>
-                              </motion.div>
-                            );
-                          }
-                          return null;
-                        })}
-                      </div>
+                      <PlannerTranscript items={plannerStream.items} isPlanning={isPlanning} locked={locked}
+                        editingMessage={editingMessage} draft={editPrefillText ?? ""}
+                        onDraftChange={onEditPrefillTextChange ?? (() => {})} onEditMessage={onEditMessage}
+                        onCancelEdit={onCancelEditMessage} onEditSubmit={onEditMessageSubmit}
+                        onSendMessage={onSendMessage} onUserResize={handleExpandableContentChange} />
                     ) : (
                       renderLivePlanner && (plannerStream.plannerThinking || smoothPlannerText) && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1826,70 +1779,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               </div>
 
               <div className="graph-canvas">
-                {/* 自定义高清晰度箭头 Marker 定义，解决被 handle 圆点遮挡问题 */}
-                <svg style={{ position: "absolute", width: 0, height: 0, pointerEvents: "none" }} aria-hidden="true">
-                  <defs>
-                    <marker
-                      id="workflow-arrow-default"
-                      viewBox="0 0 12 12"
-                      refX="10"
-                      refY="6"
-                      markerWidth="9"
-                      markerHeight="9"
-                      orient="auto"
-                    >
-                      <path d="M 2 2.5 L 10 6 L 2 9.5 Z" fill={tokens.graphEdgeDefault || "#94A3B8"} />
-                    </marker>
-                    <marker
-                      id="workflow-arrow-feedback"
-                      viewBox="0 0 12 12"
-                      refX="10"
-                      refY="6"
-                      markerWidth="9"
-                      markerHeight="9"
-                      orient="auto"
-                    >
-                      <path d="M 2 2.5 L 10 6 L 2 9.5 Z" fill={tokens.graphEdgeFeedback || "#8B5CF6"} />
-                    </marker>
-                  </defs>
-                </svg>
-
-                <ReactFlow
-                  key={currentRunKey}
-                  fitView
-                  fitViewOptions={{ padding: 0.24, minZoom: 0.3, maxZoom: 1.6 }}
-                  onInit={(instance) => centerGraph(instance, currentRunKey)}
-                  style={{
-                    opacity: isGraphMountedForRun ? 1 : 0,
-                    pointerEvents: isGraphMountedForRun ? "auto" : "none",
-                  }}
-                  nodes={animatedNodes}
-                  edges={edges}
-                  nodeTypes={nodeTypes}
-                  edgeTypes={edgeTypes}
-                  onNodeClick={(_, node) => {
-                    if (node.id.startsWith("merger:")) {
-                      const target = node.id.slice(7);
-                      setSelected(target);
-                      setAttemptId((state.mergers ?? []).filter((item) => item.node === `merge:${target}`).at(-1)?.id ?? "");
-                    } else {
-                      setSelected(node.id);
-                      setAttemptId("");
-                    }
-                  }}
-                  onPaneClick={() => {
-                    setSelected("");
-                  }}
-                  minZoom={0.3}
-                  maxZoom={1.6}
-                  nodesDraggable={false}
-                  nodesConnectable={false}
-                  elementsSelectable={false}
-                  proOptions={{ hideAttribution: true }}
-                >
-                  <Background color={tokens.graphGridDot} gap={20} size={1} />
-                  <Controls showInteractive={false} />
-                </ReactFlow>
+                <GraphCanvas runKey={currentRunKey} ready={isGraphMountedForRun}
+                  nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
+                  onInit={centerGraph} onSelect={selectGraphNode} />
 
                 {state.graph.nodes.length > 0 && (
                   <>

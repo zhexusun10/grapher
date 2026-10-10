@@ -3,20 +3,18 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallba
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
 import { TranscriptItem } from "../types";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../services/thinkingTranscript";
-import { MarkdownRenderer } from "./MarkdownRenderer";
-import { ToolCallCard } from "./ToolCallCard";
-import { ThinkingCard } from "./ThinkingCard";
 import { Terminal } from "lucide-react";
-import { EditableUserBubble } from "./views/ChatBubbles";
+import { shareJson } from "../services/structuralSharing";
+import { VirtualizedList } from "./VirtualizedList";
+import { TranscriptRow } from "./TranscriptRow";
 
 interface VirtualizedTranscriptProps {
   output: string;
   className?: string;
   emptyText?: string;
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
-  // Historical conversations share the workbench scroll area with the summary.
-  // They must render in document flow rather than virtualizing against that
-  // scroll area's unrelated coordinates.
+  // Historical conversations stay in document flow, windowed against the shared
+  // workbench viewport (including the transcript's offset below other content).
   inline?: boolean;
   // Execution transcripts grow with their parent conversation instead of reserving a viewport.
   compact?: boolean;
@@ -86,7 +84,6 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const [, setScrollTop] = useState(0);
   const [heightVersion, setHeightVersion] = useState(0);
   const [, setExpansionVersion] = useState(0);
-  const layoutRef = useRef({ ids: [] as string[], offsets: [0] });
   const prevOffsetsRef = useRef<number[]>([0]);
 
   // Schedule a single heightVersion bump per microtask batch.
@@ -149,7 +146,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     lastProcessedPosRef.current += chunkToProcess.length;
 
     const lines = chunkToProcess.split("\n");
-    let currentItems = itemsRef.current.map(item => ({ ...item }));
+    // Only the tail and unfinished tools are mutated by the parser. Completed
+    // history must keep its identity so memoized rows can skip live updates.
+    const previousItems = itemsRef.current;
+    let currentItems = previousItems.map((item, index) => index === previousItems.length - 1 ||
+      (item.type === "tool_call" && item.status === "running") ? { ...item } : item);
     const pendingTools = new Map(currentItems
       .filter(item => item.type === "tool_call" && item.status === "running" && item.toolCallId)
       .map(item => [item.toolCallId!, item]));
@@ -491,8 +492,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       }
     }
 
-    itemsRef.current = currentItems;
-    return true;
+    itemsRef.current = shareJson(previousItems, currentItems);
+    return itemsRef.current !== previousItems;
   }, [showUserTurns, skipFirstUser]);
 
   // Synchronously parse any initial output chunk immediately on mount so frame 0 renders with items populated
@@ -655,8 +656,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const totalCount = items.length;
   const isVirtual = !inline && totalCount > 35;
 
-  const offsets = useMemo(() => rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion]);
-  layoutRef.current = { ids: items.map(item => item.id), offsets };
+  // Inline rows have their own shared-viewport window; do not also build the
+  // legacy private-viewport offsets or read geometry during their render.
+  const offsets = useMemo(() => inline ? [0] : rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion, inline]);
   const totalOffsetsHeight = offsets[offsets.length - 1] ?? 0;
 
   // Scroll correction: when height measurements cause offsets to change,
@@ -687,16 +689,25 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     prevOffsetsRef.current = offsets;
   }, [offsets, getTranscriptRelativeScroll]);
 
-  const relativeScrollTop = getTranscriptRelativeScroll();
+  const relativeScrollTop = inline ? 0 : getTranscriptRelativeScroll();
   const maxScrollTop = Math.max(0, totalOffsetsHeight - containerHeight);
   const targetScrollTop = isUserScrolledUpRef.current
     ? Math.min(relativeScrollTop, maxScrollTop)
     : maxScrollTop;
   const { visibleItems, paddingTop, paddingBottom } = useMemo(() => {
+    if (inline) return { visibleItems: [], paddingTop: 0, paddingBottom: 0 };
     const range = isVirtual ? visibleRows(offsets, targetScrollTop, containerHeight, 30)
       : { start: 0, end: totalCount, paddingTop: 0, paddingBottom: 0 };
     return { visibleItems: items.slice(range.start, range.end), ...range };
-  }, [items, offsets, isVirtual, targetScrollTop, containerHeight, totalCount]);
+  }, [items, offsets, isVirtual, targetScrollTop, containerHeight, totalCount, inline]);
+
+  const startEdit = useCallback((id: string, text: string) => { setEditingUser(id); setUserDraft(text); }, []);
+  const cancelEdit = useCallback(() => setEditingUser(null), []);
+  const renderRow = useCallback((item: TranscriptItem) => <TranscriptRow item={item}
+    expanded={expandedRows.current.get(item.id)} onExpandedChange={handleExpandedChange}
+    editing={editingUser === item.id} draft={editingUser === item.id ? userDraft : ""}
+    onDraftChange={setUserDraft} onStartEdit={startEdit} onCancelEdit={cancelEdit} onEditUser={onEditUser} />,
+    [handleExpandedChange, editingUser, userDraft, startEdit, cancelEdit, onEditUser]);
 
   return (
     <div className={`virtualized-transcript-container ${inline ? "transcript-inline" : ""} ${compact ? "transcript-compact" : ""} ${className}`}>
@@ -706,79 +717,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         style={{ overflowAnchor: "none", minHeight: inline || compact ? 0 : 200 }}
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
-        <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
-          {visibleItems.map(item => {
-            const rowContent = (() => {
-              if (item.type === "tool_call") {
-                return (
-                  <div key={item.id} className="transcript-row tool-row">
-                    <ToolCallCard item={item} expanded={expandedRows.current.get(item.id)}
-                      onExpandedChange={(expanded, card) => handleExpandedChange(item.id, expanded, card)} />
-                  </div>
-                );
-              }
-
-              if (item.type === "thinking") {
-                return (
-                  <div key={item.id} className="transcript-row thinking-row">
-                    <ThinkingCard item={item} isStreaming={item.status === "running"}
-                      expanded={expandedRows.current.get(item.id)}
-                      onExpandedChange={expanded => handleExpandedChange(item.id, expanded)} />
-                  </div>
-                );
-              }
-
-              if (item.type === "system") {
-                return (
-                  <div
-                    key={item.id}
-                    className={`transcript-row system-row ${item.isError ? "error" : ""}`}
-                  >
-                    <span className="system-pill">{item.content}</span>
-                  </div>
-                );
-              }
-
-              if (item.role === "user") {
-                return (
-                  <div key={item.id} className="transcript-row text-row user">
-                    <EditableUserBubble
-                      text={item.content || ""}
-                      editing={editingUser === item.id}
-                      draft={userDraft}
-                      onDraftChange={setUserDraft}
-                      onEdit={onEditUser ? () => { setEditingUser(item.id); setUserDraft(item.content || ""); } : undefined}
-                      onCancel={() => setEditingUser(null)}
-                      onSend={onEditUser ? (text) => { void Promise.resolve(onEditUser(item.content || "", text))
-                        .then((accepted) => { if (accepted !== false) setEditingUser(null); }); } : () => {}}
-                    />
-                  </div>
-                );
-              }
-              return (
-                <div key={item.id} className={`transcript-row text-row ${item.role || "assistant"}`}>
-                  <div className="transcript-message-bubble">
-                    <MarkdownRenderer content={item.content || ""} isStreaming={true} />
-                  </div>
-                </div>
-              );
-            })();
-
-            if (inline) {
-              return (
-                <div key={item.id} data-transcript-id={item.id} style={{ display: "flow-root" }}>
-                  {rowContent}
-                </div>
-              );
-            }
-
-            return (
-              <MeasuredRow key={item.id} id={item.id} measure={measure}>
-                {rowContent}
-              </MeasuredRow>
-            );
-          })}
-        </div>
+        {inline ? <VirtualizedList items={items} renderRow={renderRow} /> :
+          <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
+            {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{renderRow(item)}</MeasuredRow>)}
+          </div>}
       </div>
     </div>
   );

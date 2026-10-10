@@ -1,6 +1,7 @@
 import { t } from "../i18n";
 import { useEffect, useState } from "react";
 import { runtimeService } from "../services/runtime";
+import { shareJson } from "../services/structuralSharing";
 
 // This checks only the selected binding. Viewing another project must never
 // change the repository stored in a running backend execution.
@@ -17,10 +18,10 @@ export function useRepositoryStatus(repository: string) {
       clearTimeout(timer);
       try {
         const result = await runtimeService.repositoryStatus(repository, controller.signal);
-        if (!controller.signal.aborted) setStatus(result);
+        if (!controller.signal.aborted) setStatus(previous => shareJson(previous, result));
       } catch (error) {
         if (!controller.signal.aborted) {
-          setStatus({ repository, valid: false, error: t("无法确认项目绑定：{0}", String(error)) });
+          setStatus(previous => shareJson(previous, { repository, valid: false, error: t("无法确认项目绑定：{0}", String(error)) }));
         }
       } finally {
         checking = false;

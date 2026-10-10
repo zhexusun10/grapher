@@ -1,6 +1,8 @@
 import { t, localizeError } from "../i18n";
 import { useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
 import { runtimeService } from "../services/runtime";
+import { startVisibilityPolling } from "../services/visibilityPolling";
+import { useStableCallback } from "../hooks/useStableCallback";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 
 import { utf8Bytes } from "../lib/BoundedLruCache";
@@ -54,11 +56,11 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
       setLoading(true);
     }
     setError("");
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopWaiting = () => {};
     let wake: (() => void) | undefined;
     const wait = () => new Promise<void>((resolve) => {
       wake = resolve;
-      timer = setTimeout(() => { wake = undefined; resolve(); }, 1000);
+      stopWaiting = startVisibilityPolling(async () => { wake = undefined; resolve(); return null; }, 1000);
     });
     const poll = async () => {
       let notifiedReady = false;
@@ -118,9 +120,10 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
       }
     };
     void poll();
-    return () => { abort.abort(); clearTimeout(timer); wake?.(); };
+    return () => { abort.abort(); stopWaiting(); wake?.(); };
   }, [key, retry]);
 
+  const editUser = useStableCallback((text: string, replacement: string) => onEditUser?.(text, replacement));
   return <section className="planning-activity" aria-label={t("规划活动记录")}>
     {loading && !output && <p role="status">{t("正在加载规划活动…")}</p>}
     {error && <p role="alert">{localizeError(error)} <button type="button" onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
@@ -128,7 +131,7 @@ export const PlanningActivity = memo(function PlanningActivity({ planningIds, on
     {output && <div className="planning-activity-output">
       <VirtualizedTranscript key={`${key}:${showUserTurns}:${skipFirstUser}:${editKey}`} output={activeOutput} inline
         showUserTurns={showUserTurns} skipFirstUser={skipFirstUser} onUserResize={onUserResize}
-        onEditUser={onEditUser} />
+        onEditUser={onEditUser ? editUser : undefined} />
     </div>}
   </section>;
 });

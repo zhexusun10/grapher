@@ -5,6 +5,7 @@ import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { utf8Bytes } from "../lib/BoundedLruCache";
+import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
 import { executionTranscriptCache, type CachedTranscript } from "../services/transcriptCache";
 export { executionTranscriptCache } from "../services/transcriptCache";
 
@@ -102,7 +103,8 @@ export function ExecutionTranscript({
     }
 
     const abort = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
+    let stopPolling = () => {};
+    let emptyPages = 0;
     let offset = cachedEntry ? cachedEntry.offset : 0;
     let text = cachedEntry ? cachedEntry.text : "";
     if (cachedEntry && (!settled || cachedEntry.complete)) {
@@ -136,7 +138,7 @@ export function ExecutionTranscript({
     const poll = async () => {
       try {
         const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, abort.signal, settled);
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted) return null;
         if (!settled) setIsFetchingFirstPage(false);
         if (page.runId !== runId || page.executionId !== execution.id || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
           throw new Error(t("执行记录与请求不匹配"));
@@ -153,28 +155,31 @@ export function ExecutionTranscript({
           setIsFetchingFirstPage(false);
           if (text.includes("\n") || page.complete) setInitialOutputReady(true);
         }
-        if (!page.complete || page.status === "running") timer = setTimeout(poll, page.complete ? 150 : 0);
+        emptyPages = page.content ? 0 : emptyPages + 1;
+        return !page.complete ? 0 : page.status === "running" ? liveOutputDelay(emptyPages) : null;
       } catch (error) {
         if (!abort.signal.aborted) {
           setError(String(error));
           setInitialOutputReady(true);
         }
+        return null;
       }
     };
+    const startPolling = () => { stopPolling = startVisibilityPolling(poll); };
     if (pending) {
       void pending.catch(() => {}).finally(() => {
         if (!abort.signal.aborted) {
           const latest = executionTranscriptCache.get(cacheKey);
           if (latest?.complete && execution.status !== "running") return;
-          void poll();
+          startPolling();
         }
       });
     } else {
-      void poll();
+      startPolling();
     }
     return () => {
       abort.abort();
-      clearTimeout(timer);
+      stopPolling();
       listeners.get(cacheKey)?.delete(onPrefetchPage);
       if (!listeners.get(cacheKey)?.size) listeners.delete(cacheKey);
     };

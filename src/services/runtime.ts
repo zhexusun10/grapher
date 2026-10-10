@@ -6,8 +6,16 @@ const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
 const filesRequests = new Map<string, number>();
 const skillsRequests = new Map<string, number>();
+// Share only requests in flight; settled history is never cached as authoritative state.
+const historyRequests = new Map<string, Promise<Snapshot>>();
+const snapshotMutations = new Set([
+  "save_graph", "save_config", "plan_goal", "control", "edit_planner", "edit_node",
+  "load_run", "reset_workspace", "clear_history", "delete_run", "launch_result", "cancel_result",
+]);
 
 async function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
+  // A post-action reader must not join a metadata request begun before the action.
+  if (snapshotMutations.has(command)) historyRequests.clear();
   let response: Response;
   try {
     response = await fetch(`/api/${command}`, {
@@ -17,12 +25,15 @@ async function request<T>(command: string, body: Record<string, unknown> = {}, s
       signal,
     });
   } catch (error) {
+    if (snapshotMutations.has(command)) historyRequests.clear();
     if (signal?.aborted) throw error;
     throw new Error(t("无法连接后端，请在终端运行 npm run backend。"));
   }
   const data = await response.json().catch(() => {
+    if (snapshotMutations.has(command)) historyRequests.clear();
     throw new Error(t("后端未返回有效响应 ({0})，请确认终端中的后端已启动。", response.status));
   });
+  if (snapshotMutations.has(command)) historyRequests.clear();
   if (!response.ok || data.error) throw new Error(data.error || t("后端请求失败 ({0})", response.status));
   return data.result as T;
 }
@@ -47,7 +58,14 @@ export const runtimeService = {
   snapshotForRun: (runId: string, signal?: AbortSignal) => request<Snapshot>("snapshot", { runId }, signal),
   snapshotIfChanged: (version: string | null, signal?: AbortSignal, runId?: string) =>
     request<{ version: string; snapshot: Snapshot | null }>("snapshot_if_changed", { version, ...(runId ? { runId } : {}) }, signal),
-  history: (runId: string) => request<Snapshot>("history", { runId }),
+  history: (runId: string) => {
+    const pending = historyRequests.get(runId);
+    if (pending) return pending;
+    const task = request<Snapshot>("history", { runId });
+    historyRequests.set(runId, task);
+    void task.finally(() => { if (historyRequests.get(runId) === task) historyRequests.delete(runId); }).catch(() => {});
+    return task;
+  },
   loadRun: async (runId: string) => {
     try {
       return await request<Snapshot>("load_run", { runId });
@@ -78,6 +96,7 @@ export const runtimeService = {
     images?: import("../types").ImageAttachment[],
     revisionRunId?: string
   ): Promise<Snapshot> {
+    historyRequests.clear();
     const response = await fetch("/api/plan_goal_stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -128,6 +147,7 @@ export const runtimeService = {
           try {
             const dataObj = JSON.parse(dataStr);
             if (eventType === "complete") {
+              historyRequests.clear();
               finalSnapshot = dataObj.snapshot || dataObj;
               onEvent({ type: "complete", snapshot: finalSnapshot! });
             } else if (eventType === "run_started") {
@@ -139,6 +159,7 @@ export const runtimeService = {
             } else if (eventType === "planner") {
               onEvent({ type: "planner", raw: dataObj.raw, event: dataObj.event });
             } else if (eventType === "error") {
+              historyRequests.clear();
               onEvent({
                 type: "error",
                 error: dataObj.error,

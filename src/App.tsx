@@ -20,6 +20,11 @@ import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
 import { executionIdForMessage, executionIdForVersion } from "./services/conversationBranch";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./services/thinkingTranscript";
+import { appendItemDelta } from "./services/transcriptUpdates";
+import { mapWithConcurrency } from "./services/boundedRequests";
+import { useSnapshotState } from "./hooks/useSnapshotState";
+import { useFrameBatchedState } from "./hooks/useFrameBatchedState";
+import { useStableCallback } from "./hooks/useStableCallback";
 
 import { TaskNode } from "./components/graph/TaskNode";
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
@@ -43,7 +48,7 @@ const edgeTypes = { workflow: SmoothWorkflowEdge };
 
 export default function App() {
   const reduceMotion = useReducedMotion();
-  const [state, setState] = useState<Snapshot>(emptySnapshot);
+  const [state, setState] = useSnapshotState(emptySnapshot);
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     try {
       const saved = localStorage.getItem("grapher_projects");
@@ -122,12 +127,10 @@ export default function App() {
     const missing = runs.filter(id => !id.startsWith("pending-") && !(id in runLabels) && !pendingRunLabelIdsRef.current.has(id));
     if (missing.length > 0) {
       missing.forEach(id => pendingRunLabelIdsRef.current.add(id));
-      Promise.all(
-        missing.map(id =>
-          runtimeService.history(id)
-            .then(snapshot => [id, snapshot.graph.originalGoal || ""] as const)
-            .catch(() => [id, ""] as const)
-        )
+      mapWithConcurrency(missing, 8, id =>
+        runtimeService.history(id)
+          .then(snapshot => [id, snapshot.graph.originalGoal || ""] as const)
+          .catch(() => [id, ""] as const)
       ).then(results => {
         setRunLabels(prev => {
           const updated = { ...prev };
@@ -360,7 +363,7 @@ export default function App() {
     tools: [] as TranscriptItem[],
   };
 
-  const [plannerStream, setPlannerStream] = useState(initialPlannerStream);
+  const [plannerStream, setPlannerStream, queuePlannerStream] = useFrameBatchedState(initialPlannerStream);
 
   const applyForegroundSnapshot = (snapshot: Snapshot, generation: number) => {
     if (snapshot.runId && snapshot.config?.repository) {
@@ -632,23 +635,28 @@ export default function App() {
     // selected project (which may differ for concurrent conversations).
     const indexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
       .filter(id => !id.startsWith("pending-"));
-    const snapshots: Array<Snapshot | null> = [];
-    // Validate cached ownership too, using bounded metadata requests.
-    for (let offset = 0; offset < indexedIds.length; offset += 8) {
-      snapshots.push(...await Promise.all(indexedIds.slice(offset, offset + 8).map(id => runtimeService.history(id).catch(() => null))));
-      if (!planningRecovery.current(scope)) return;
-    }
+    // Reuse bootstrap's selected projection and keep ownership validation bounded.
+    const snapshots = await mapWithConcurrency(indexedIds, 8, async id => {
+      if (!planningRecovery.current(scope)) return null;
+      if (data.snapshot.runId === id) return data.snapshot;
+      return runtimeService.history(id).catch(() => null);
+    });
+    if (!planningRecovery.current(scope)) return;
     const indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
     const prefilledLabels: Record<string, string> = {};
     for (let i = 0; i < indexedIds.length; i++) {
       const snap = snapshots[i];
-      if (snap && snap.graph.originalGoal) {
-        prefilledLabels[indexedIds[i]] = snap.graph.originalGoal;
+      if (snap) {
+        prefilledLabels[indexedIds[i]] = snap.graph.originalGoal || "";
+        setBackendStatus({ runId: snap.runId, phase: snap.phase });
       }
     }
     if (Object.keys(prefilledLabels).length > 0) {
       setRunLabels(prev => {
-        const next = { ...prev, ...prefilledLabels };
+        const next = { ...prev };
+        for (const [id, label] of Object.entries(prefilledLabels)) {
+          if (label || next[id] === undefined) next[id] = label;
+        }
         try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
         return next;
       });
@@ -1022,36 +1030,6 @@ export default function App() {
     setSelected("");
   });
 
-  const appendItemDelta = (
-    prevItems: TranscriptItem[],
-    type: "thinking" | "text",
-    delta: string,
-    isRunning: boolean = true
-  ): TranscriptItem[] => {
-    if (!delta) return prevItems;
-    const nextItems = prevItems.map((item) => ({ ...item }));
-    const last = nextItems[nextItems.length - 1];
-    if (last && last.type === type && (type === "thinking" ? last.status === "running" : true)) {
-      last.content = (last.content || "") + delta;
-      if (type === "thinking") {
-        last.status = isRunning ? "running" : "success";
-      }
-    } else {
-      if (last && last.type === "thinking" && last.status === "running") {
-        last.status = "success";
-      }
-      nextItems.push({
-        id: `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        type,
-        role: "assistant",
-        content: delta,
-        status: isRunning ? "running" : "success",
-        timestamp: Date.now(),
-      });
-    }
-    return nextItems;
-  };
-
   const closeRunningThinkingItem = closeThinkingItems;
 
   const handlePlanGoal = (
@@ -1317,16 +1295,16 @@ export default function App() {
             if (pEvent?.type === "message_update") {
               const aEvent = pEvent.assistantMessageEvent;
               if (aEvent?.type === "thinking_start") {
-                setPlannerStream((prev) => ({ ...prev, partitionerThinkingActive: true }));
+                queuePlannerStream((prev) => ({ ...prev, partitionerThinkingActive: true }));
               } else if (aEvent?.type === "thinking_delta") {
                 const delta = aEvent.delta || "";
-                setPlannerStream((prev) => ({
+                queuePlannerStream((prev) => ({
                   ...prev,
                   partitionerThinking: prev.partitionerThinking + delta,
                   partitionerThinkingActive: true,
                 }));
               } else if (aEvent?.type === "thinking_end") {
-                setPlannerStream((prev) => ({ ...prev, partitionerThinkingActive: false }));
+                queuePlannerStream((prev) => ({ ...prev, partitionerThinkingActive: false }));
               } else if (aEvent?.type === "text_delta") {
                 const delta = aEvent.delta || "";
                 if (partInTag || delta.includes("<think>") || delta.includes("<thought>")) {
@@ -1362,14 +1340,15 @@ export default function App() {
                       }
                     }
                   }
-                  setPlannerStream((prev) => ({
+                  const thinkingActive = partInTag;
+                  queuePlannerStream((prev) => ({
                     ...prev,
                     partitionerThinking: prev.partitionerThinking + thinkChunk,
-                    partitionerThinkingActive: partInTag,
+                    partitionerThinkingActive: thinkingActive,
                     partitionerText: prev.partitionerText + textChunk,
                   }));
                 } else {
-                  setPlannerStream((prev) => ({
+                  queuePlannerStream((prev) => ({
                     ...prev,
                     partitionerThinkingActive: false,
                     partitionerText: prev.partitionerText + delta,
@@ -1410,7 +1389,7 @@ export default function App() {
               setPlannerStream((prev) => ({ ...prev, stage: "planning" }));
             }
           } else if (event.type === "planner") {
-            setPlannerStream((prev) => (prev.stage !== "planning" ? { ...prev, stage: "planning" } : prev));
+            queuePlannerStream((prev) => (prev.stage !== "planning" ? { ...prev, stage: "planning" } : prev));
             const pEvent = event.event;
             if (pEvent?.type === "message_start" && pEvent.message?.role === "assistant") {
               setPlannerStream(prev => ({
@@ -1419,7 +1398,7 @@ export default function App() {
             } else if (pEvent?.type === "message_update") {
               const aEvent = pEvent.assistantMessageEvent;
               if (["thinking_start", "thinking_delta", "thinking_end"].includes(aEvent?.type)) {
-                setPlannerStream(prev => {
+                queuePlannerStream(prev => {
                   const items = updateThinkingItems(prev.items, aEvent, prev.plannerMessageStart);
                   return {
                     ...prev, items,
@@ -1462,12 +1441,13 @@ export default function App() {
                       }
                     }
                   }
-                  setPlannerStream((prev) => {
+                  const thinkingActive = planInTag;
+                  queuePlannerStream((prev) => {
                     let items = prev.items;
                     if (thinkChunk) {
-                      items = appendItemDelta(items, "thinking", thinkChunk, planInTag);
+                      items = appendItemDelta(items, "thinking", thinkChunk, thinkingActive);
                     }
-                    if (!planInTag && items.some((i) => i.type === "thinking" && i.status === "running")) {
+                    if (!thinkingActive && items.some((i) => i.type === "thinking" && i.status === "running")) {
                       items = closeRunningThinkingItem(items);
                     }
                     if (textChunk) {
@@ -1477,12 +1457,12 @@ export default function App() {
                       ...prev,
                       items,
                       plannerThinking: prev.plannerThinking + thinkChunk,
-                      plannerThinkingActive: planInTag,
+                      plannerThinkingActive: thinkingActive,
                       plannerText: prev.plannerText + textChunk,
                     };
                   });
                 } else {
-                  setPlannerStream((prev) => ({
+                  queuePlannerStream((prev) => ({
                     ...prev,
                     items: appendItemDelta(closeRunningThinkingItem(prev.items), "text", delta, true),
                     plannerThinkingActive: false,
@@ -2276,6 +2256,50 @@ export default function App() {
     !recoveredPlanning &&
     !failedPlanning;
 
+  const actions = {
+    selectProject: useStableCallback(handleSelectProject), openProject: useStableCallback(handleOpenProject),
+    removeProject: useStableCallback(handleRemoveWorkspaceConfirm), deleteRun: useStableCallback(handleDeleteRunConfirm),
+    newConversation: useStableCallback(handleNewConversation), send: useStableCallback(handleSendMessage),
+    edit: useStableCallback(handleEditMessageSubmit), switchVersion: useStableCallback(handleSwitchMessageVersion),
+    control: useStableCallback(control), save: useStableCallback(save),
+    openSettings: useStableCallback(() => setModal("settings")), openEditor: useStableCallback(() => setModal("editor")),
+    openApproval: useStableCallback(() => setModal("approval")), retryPublication: useStableCallback(() => control("retry_publication")),
+    plan: useStableCallback((val: string, options?: Parameters<typeof handlePlanGoal>[1]) => { void handlePlanGoal(val, options); }),
+  };
+  const publicationMergers = useMemo(() => (state.mergers ?? []).filter(merger => merger.node === "merger"), [state.mergers]);
+  const handleLoadRun = useStableCallback((id: string) => {
+    if (!runs.includes(id) || id.startsWith("pending-")) return;
+    if (id !== state.runId || isPlanning || recoveredPlanning) detachForeground(config.repository);
+    historyPrefetchRef.current?.abort();
+    const controller = new AbortController();
+    historyPrefetchRef.current = controller;
+    const generation = foregroundGeneration.current;
+    run(async () => {
+      clearRunUnread(id);
+      if (id !== state.runId) setPlannerStream(initialPlannerStream);
+      // Logs must never block opening a card; validate ownership before displaying it.
+      let snapshot: Snapshot;
+      try { snapshot = await runtimeService.snapshotForRun(id, controller.signal); }
+      catch (error) { if (controller.signal.aborted) return; throw error; }
+      if (controller.signal.aborted || generation !== foregroundGeneration.current) return;
+      if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
+      if (!snapshotBelongsToWorkspace(snapshot, config.repository)) {
+        setError(t("此对话不属于当前工作区，请在对应工作区中打开。"));
+        return;
+      }
+      setState(snapshot);
+      markSnapshotRead(snapshot);
+      setRouteType(deduceRouteType(snapshot));
+      setGoal(snapshot.graph.originalGoal || (id ? runLabels[id] : "") || "");
+      if (id !== state.runId) {
+        setSessionEntries(messagesByRunRef.current.get(id) ?? []);
+        setEditingMessage(null);
+        setEditPrefillText("");
+      }
+      setSelected("");
+    });
+  });
+
   return (
     <div className={`app-background-root ${isLandingView ? "landing-active" : ""}`}>
       <FloatingPathsBackground
@@ -2287,58 +2311,18 @@ export default function App() {
           <Sidebar
             projects={projects}
             activeRepo={config.repository}
-            onSelectProject={handleSelectProject}
-            onOpenProject={handleOpenProject}
-            onRemoveProject={handleRemoveWorkspaceConfirm}
+            onSelectProject={actions.selectProject}
+            onOpenProject={actions.openProject}
+            onRemoveProject={actions.removeProject}
             runs={runs}
             runLabels={runLabels}
             isReady={isSidebarReady}
             currentRunId={state.runId}
             runIndicators={runIndicators}
-            onLoadRun={(id) => {
-              if (!runs.includes(id) || id.startsWith("pending-")) return;
-              if (id !== state.runId || isPlanning || recoveredPlanning) detachForeground(config.repository);
-              historyPrefetchRef.current?.abort();
-              const controller = new AbortController();
-              historyPrefetchRef.current = controller;
-              const generation = foregroundGeneration.current;
-              run(async () => {
-                clearRunUnread(id);
-                if (id !== state.runId) setPlannerStream(initialPlannerStream);
-                // Show the conversation as soon as its snapshot arrives. Loading
-                // planner output or node logs must never block opening the card.
-                let snapshot: Snapshot;
-                try {
-                  snapshot = await runtimeService.snapshotForRun(id, controller.signal);
-                } catch (error) {
-                  if (controller.signal.aborted) return;
-                  throw error;
-                }
-                if (controller.signal.aborted || generation !== foregroundGeneration.current) return;
-                if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
-                if (!snapshotBelongsToWorkspace(snapshot, config.repository)) {
-                  setError(t("此对话不属于当前工作区，请在对应工作区中打开。"));
-                  return;
-                }
-                const deduced = deduceRouteType(snapshot);
-                setState(snapshot);
-                markSnapshotRead(snapshot);
-                setRouteType(deduced);
-                setGoal(snapshot.graph.originalGoal || (id ? runLabels[id] : "") || "");
-                if (id !== state.runId) {
-                  setSessionEntries(messagesByRunRef.current.get(id) ?? []);
-                  setEditingMessage(null);
-                  setEditPrefillText("");
-                }
-                setSelected("");
-
-                // Mounted node transcripts fetch only their own history.
-                // Unselected nodes never allocate or transfer historical logs.
-              });
-            }}
-            onDeleteRun={handleDeleteRunConfirm}
-            onNewConversation={handleNewConversation}
-            onOpenSettings={() => setModal("settings")}
+            onLoadRun={handleLoadRun}
+            onDeleteRun={actions.deleteRun}
+            onNewConversation={actions.newConversation}
+            onOpenSettings={actions.openSettings}
             isSettingsOpen={modal === "settings"}
           />
 
@@ -2411,9 +2395,7 @@ export default function App() {
                   key="landing-view"
                   goal={goal}
                   setGoal={setGoal}
-                  onPlanGoal={(val, options) => {
-                    void handlePlanGoal(val, options);
-                  }}
+                  onPlanGoal={actions.plan}
                   isBusy={busy || isPlanning || repositoryBlocked}
                   planMode={planMode}
                   onPlanModeChange={handlePlanModeChange}
@@ -2434,9 +2416,9 @@ export default function App() {
                     key={state.runId}
                     runId={state.runId}
                     publication={state.publication}
-                    mergers={(state.mergers ?? []).filter((merger) => merger.node === "merger")}
+                    mergers={publicationMergers}
                     busy={busy || repositoryBlocked}
-                    onRetry={() => control("retry_publication")}
+                    onRetry={actions.retryPublication}
                   />
 
                   <GraphWorkbench
@@ -2452,19 +2434,19 @@ export default function App() {
                     editPrefillText={editPrefillText}
                     onEditPrefillTextChange={setEditPrefillText}
                     onCancelEditMessage={handleCancelEditMessage}
-                    onEditMessageSubmit={handleEditMessageSubmit}
-                    onSwitchMessageVersion={handleSwitchMessageVersion}
+                    onEditMessageSubmit={actions.edit}
+                    onSwitchMessageVersion={actions.switchVersion}
                     onInterrupt={handleInterrupt}
                     isPlanning={isPlanning || backendPlanning || !!recoveredPlanning}
                     plannerStream={plannerStream}
                     recoveredPlanningId={recoveredPlanning?.planningId || (!isPlanning && backendPlanning ? state.planningId : undefined)}
                     onConversationReady={handleConversationReady}
-                    onSendMessage={handleSendMessage}
+                    onSendMessage={actions.send}
                     onRequestConfirmation={setConfirmModal}
-                    onControl={control}
-                    onSave={save}
-                    onOpenEditor={() => setModal("editor")}
-                    onOpenApproval={() => setModal("approval")}
+                    onControl={actions.control}
+                    onSave={actions.save}
+                    onOpenEditor={actions.openEditor}
+                    onOpenApproval={actions.openApproval}
                     repoInfo={repoInfo}
                     config={config}
                     active={active}
