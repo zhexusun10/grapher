@@ -1,4 +1,4 @@
-import { t, localizeError } from "../../i18n";
+import { t, localizePlanWarning } from "../../i18n";
 import React, { useEffect } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { ShieldCheck, Play, X } from "lucide-react";
@@ -69,7 +69,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
             <li>
               {t("Graph 模式的节点在用户仓库旁的 .grapher-worktrees 中执行，完成后自动合并回用户仓库。")}</li>
             <li>{t("Planner 已直接修改源项目；拒绝计划不会撤销这些修改。")}</li>
-            <li>{t("批准会将源项目当前变更暂存并提交为基线，包括您此前未提交的修改；这会改变 Git 暂存状态。被 Git 忽略的未跟踪文件不会随快照传递。")}</li>
+            <li>{t("批准会强制暂存并提交源项目文件作为基线，包括此前未提交及被 .gitignore 忽略的项目文件；节点结果通过 Git 合并回源目录。Git/Grapher 内部文件及受管环境范围除外。")}</li>
             <li>{t("每个节点分配独立隔离会话；验证失败最多自动反馈重试 3 次。")}</li>
             <li>{t("节点执行期间在隔离工作区内修改文件；整图完成后会将结果写回 {0}。", state.config?.repository || config.repository)}</li>
             {state.environmentPolicy && <li className="warning">{t("环境由 Runtime 自动准入和绑定，不需要选择模式或填写环境配置。受管环境不会搬回源项目；能力不足时明确失败，不请求用户选择替代方案。")}</li>}
@@ -80,7 +80,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
               {t("Execution Instance 可执行 shell 指令并调用模型，请审视节点任务定义后再行批准。")}</li>
           </ul>
           {state.plan?.warnings.map((warning) => (
-            <p className="warning" key={warning}>{localizeError(warning)}</p>
+            <p className="warning" key={warning}>{localizePlanWarning(warning)}</p>
           ))}
         </div>
         <footer>

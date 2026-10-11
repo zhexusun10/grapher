@@ -90,6 +90,96 @@ test("reaching the count or accepting a verdict is not exhaustion", () => {
   assert.equal(indexFeedbackExhaustion(state).size, 0);
 });
 
+function mergerState(): Snapshot {
+  return {
+    ...emptySnapshot,
+    graph: { originalGoal: "merge", nodes: [{ name: "join", task: "join task" }], edges: [] },
+    nodes: { join: { status: "blocked", revision: 1, head: null, instruction: "", error: "conflict" } },
+    mergers: [{
+      id: "merger-1", node: "merge:join", revision: 1, attempt: 1, sessionId: "merger-1",
+      worktree: "/worktrees/join", before: "base", after: null, status: "failed",
+      output: "", startedAt: 1, completedAt: 2,
+    } as Execution],
+  };
+}
+
+function projectGraph(state: Snapshot, selected: string, selectedMergerId = "") {
+  let elements: ReturnType<typeof useGraphElements> | undefined;
+  function Projection() {
+    elements = useGraphElements(state, selected, new Set(), selectedMergerId);
+    return null;
+  }
+  renderToStaticMarkup(createElement(Projection));
+  return elements!;
+}
+
+function publicationMergerState(): Snapshot {
+  return {
+    ...emptySnapshot,
+    graph: { originalGoal: "publish", nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }],
+      edges: [{ from: "a", to: "b", feedback: false }] },
+    plan: { executionBatches: [["a"], ["b"]], roots: ["a"], terminals: ["b"], warnings: [] },
+    nodes: { a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "done", revision: 1, head: "hb", instruction: "", error: null } },
+    mergers: [{
+      id: "publish-merger", node: "merger", revision: 1, attempt: 1, sessionId: "publish-merger",
+      worktree: "/source", before: "hb", after: "hc", status: "completed",
+      output: "", startedAt: 3, completedAt: 4,
+    } as Execution],
+  };
+}
+
+test("a publication merger is a card below the terminal layer", () => {
+  const state = publicationMergerState();
+  const idle = projectGraph(state, "");
+  const card = idle.nodes.find(node => node.id === "merger:publication");
+  assert.ok(card, "publication merger card must exist once invoked");
+  assert.equal(card!.data.name, "publication merger");
+  assert.equal(card!.data.status, "done");
+  assert.equal(card!.data.selected, false);
+  // The publication card sits below the last execution layer and receives the
+  // terminal edges only.
+  const terminal = idle.nodes.find(node => node.id === "b")!;
+  assert.ok(card!.position.y > terminal.position.y);
+  assert.equal(terminal.data.hasBottom, true);
+  const publicationEdges = idle.edges.filter(edge => edge.target === "merger:publication");
+  assert.deepEqual(publicationEdges.map(edge => edge.source), ["b"]);
+  assert.ok(!idle.edges.some(edge => edge.source === "a" && edge.target === "merger:publication"));
+
+  const selected = projectGraph(state, "merger:publication", "publish-merger");
+  const selectedCard = selected.nodes.find(node => node.id === "merger:publication")!;
+  assert.equal(selectedCard.data.selected, true);
+  assert.equal(selected.nodes.find(node => node.id === "b")!.data.selected, false);
+
+  // Without a recorded publication merger the synthetic card does not render.
+  const plain = publicationMergerState();
+  plain.mergers = [];
+  assert.ok(!projectGraph(plain, "").nodes.some(node => node.id === "merger:publication"));
+  assert.ok(!projectGraph(plain, "").edges.some(edge => edge.target === "merger:publication"));
+});
+
+test("a node-composition merger is a selectable card in the topology", () => {
+  const state = mergerState();
+  const idle = projectGraph(state, "");
+  assert.deepEqual(idle.nodes.map(node => node.id).sort(), ["join", "merger:join"]);
+  assert.equal(idle.nodes.find(node => node.id === "merger:join")!.data.status, "failed");
+
+  // Selecting the merger card highlights it without highlighting the node card.
+  const mergerSelected = projectGraph(state, "join", "merger-1");
+  assert.equal(mergerSelected.nodes.find(node => node.id === "merger:join")!.data.selected, true);
+  assert.equal(mergerSelected.nodes.find(node => node.id === "join")!.data.selected, false);
+
+  // Selecting the node card leaves the merger card unselected.
+  const nodeSelected = projectGraph(state, "join");
+  assert.equal(nodeSelected.nodes.find(node => node.id === "merger:join")!.data.selected, false);
+  assert.equal(nodeSelected.nodes.find(node => node.id === "join")!.data.selected, true);
+
+  // A `merger` node is a publication merger, not a per-target card.
+  const publication = mergerState();
+  publication.mergers![0].node = "merger";
+  assert.deepEqual(projectGraph(publication, "").nodes.map(node => node.id).sort(), ["join", "merger:publication"]);
+});
+
 test("stale, superseded, invalidated, and removed-route warnings are hidden", () => {
   for (const status of ["waiting", "dirty", "running", "failed", "blocked"] as const) {
     const state = skippedFeedbackState();

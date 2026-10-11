@@ -797,9 +797,6 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
     // This reducer-focused test synthesizes Finished, so record the filesystem
     // checkpoint that a real perform would create before opening the session.
     workspace::prepare(&_source, Path::new(&first.execution.worktree), &first.execution.before, &[]).unwrap();
-    let files = crate::workspace_files::Files::new(&runtime.root, &runtime.state.run_id).unwrap();
-    files.capture(Path::new(&first.execution.worktree), &format!("before-{}", first.execution.id),
-        &first.execution.before, &first.file_versions).unwrap();
     runtime.emit(EventKind::Finished {
         execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(), output_bytes: 0, metrics: None,
     }).unwrap();
@@ -1130,6 +1127,59 @@ fn retained_node_result_is_composed_with_subsequent_planner_source_writes() {
 }
 
 #[test]
+fn new_runs_force_collect_gitignored_project_files_without_creating_run_file_snapshots() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    fs::write(source.join(".gitignore"), ".cache/\n").unwrap();
+    fs::create_dir(source.join(".cache")).unwrap();
+    fs::write(source.join(".cache/package"), "ordinary bytes").unwrap();
+    runtime.approve().unwrap();
+
+    let run_root = runtime.run_workspace_root();
+    assert!(!run_root.join(".files").exists());
+    assert!(!runtime.state.events.iter().any(|event| matches!(
+        event.kind,
+        EventKind::SourceFilesRecorded { .. } | EventKind::WorkspaceFilesChanged { .. }
+    )));
+    let job = runtime.jobs().unwrap().remove(0);
+    let workspace_path = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, workspace_path, &job.execution.before, &[]).unwrap();
+    workspace::copy_ordinary_files(&source, workspace_path, &[], &runtime.root).unwrap();
+    assert_eq!(fs::read_to_string(workspace_path.join(".cache/package")).unwrap(), "ordinary bytes");
+    assert!(workspace::git(workspace_path, &["ls-files"]).unwrap().contains(".cache/package"));
+    assert!(!run_root.join(".files").exists());
+    let serialized = serde_json::to_value(&runtime.state).unwrap();
+    assert!(serialized.get("sourceFiles").is_none());
+}
+
+#[test]
+fn legacy_run_file_channel_records_are_read_only_and_deserialize_without_reemitting_fields() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    runtime.emit(EventKind::SourceFilesRecorded {
+        files: SourceFiles {
+            head: runtime.state.base.clone(),
+            version: Uuid::new_v4().to_string(),
+        },
+    }).unwrap();
+    let error = match runtime.jobs() {
+        Ok(_) => panic!("legacy file-channel Run must not schedule"),
+        Err(error) => error,
+    };
+    assert!(error.contains("legacy ignored-file snapshots"));
+
+    let mut legacy_json = serde_json::to_value(NodeState::default()).unwrap();
+    legacy_json["filesOverride"] = serde_json::json!("old-override");
+    legacy_json["filesVersion"] = serde_json::json!("old-version");
+    legacy_json["baselineFilesVersion"] = serde_json::json!("old-baseline");
+    legacy_json["filesChanged"] = serde_json::json!(true);
+    let legacy: NodeState = serde_json::from_value(legacy_json).unwrap();
+    let encoded = serde_json::to_value(legacy).unwrap();
+    for key in ["filesOverride", "filesVersion", "baselineFilesVersion", "filesChanged"] {
+        assert!(encoded.get(key).is_none());
+    }
+}
+
+#[test]
 fn approval_captures_planner_files_before_allocating_graph_workspaces() {
     for standard_git in [true, false] {
         let (temp, source, mut runtime) = setup(standard_git, single());
@@ -1429,22 +1479,112 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
 }
 
 #[test]
-fn shadow_prepare_refuses_user_edits_after_approval() {
+fn shadow_prepare_uses_approved_snapshot_despite_live_edits() {
     let (_temp, source, mut runtime) = setup(false, single());
     runtime.approve().unwrap();
     let base = runtime.state.base.clone();
     let job = runtime.jobs().unwrap().remove(0);
     let node = Path::new(&job.execution.worktree);
     fs::write(source.join("tracked.txt"), "edited after approval").unwrap();
-    let error = workspace::prepare(&source, node, &base, &[]).unwrap_err();
-    assert!(error.contains("changed after approval"));
-    assert!(!node.exists());
-    assert_eq!(
-        workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(),
-        base
-    );
-    fs::write(source.join("tracked.txt"), "original").unwrap();
+    // Live edits never block preparation: the node starts from the approved
+    // snapshot, and publication later commits the edit as its base.
     workspace::prepare(&source, node, &base, &[]).unwrap();
+    assert_eq!(
+        fs::read_to_string(node.join("tracked.txt")).unwrap(),
+        "original"
+    );
+    assert!(!workspace::repository_status(&source, &[]).unwrap().is_empty());
+    // Publication commits the live edit as its base instead of rejecting it.
+    let published = crate::graph_merge::merge_graph(&source, &[], || panic!("no merge expected"))
+        .unwrap();
+    assert_ne!(published, base);
+    assert_eq!(
+        fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        "edited after approval"
+    );
+    assert!(workspace::repository_status(&source, &[]).unwrap().is_empty());
+    // The earlier recorded base remains composable for nodes scheduled against it.
+    workspace::prepare(&source, node, &base, &[]).unwrap();
+    assert_eq!(
+        fs::read_to_string(node.join("tracked.txt")).unwrap(),
+        "original"
+    );
+    // A later recorded source snapshot does not invalidate an earlier base either.
+    fs::write(source.join("later.txt"), "later source").unwrap();
+    assert_ne!(
+        workspace::snapshot_repository_scoped(&source, &[]).unwrap(),
+        published
+    );
+    workspace::prepare(&source, node, &base, &[]).unwrap();
+    assert_eq!(
+        fs::read_to_string(node.join("tracked.txt")).unwrap(),
+        "original"
+    );
+    assert!(!node.join("later.txt").exists());
+}
+
+#[test]
+fn shadow_source_edits_do_not_block_downstream_handoff() {
+    let graph = Graph {
+        original_goal: "handoff".into(),
+        nodes: vec![
+            Node { name: "parent".into(), task: "parent task".into() },
+            Node { name: "child".into(), task: "child task".into() },
+        ],
+        edges: vec![Edge {
+            from: "parent".into(),
+            to: "child".into(),
+            feedback: false,
+        }],
+    };
+    let (_temp, source, mut runtime) = setup(false, graph);
+    runtime.approve().unwrap();
+    let parent = runtime.jobs().unwrap().remove(0);
+    let parent_path = Path::new(&parent.execution.worktree);
+    workspace::prepare(&source, parent_path, &parent.execution.before, &[]).unwrap();
+    fs::write(parent_path.join("parent.txt"), "parent result").unwrap();
+    let parent_head = workspace::snapshot_node(parent_path, &source, "parent").unwrap();
+    runtime
+        .finish(&parent.execution, Ok((parent_head, "done".into())))
+        .unwrap();
+
+    // The user edits the source directory while the graph is still running.
+    fs::write(source.join("tracked.txt"), "user edit during run").unwrap();
+
+    let child = runtime.jobs().unwrap().remove(0);
+    assert_eq!(child.execution.node, "child");
+    let child_path = Path::new(&child.execution.worktree);
+    // Handoff composes the recorded snapshots instead of failing on the dirty source.
+    workspace::prepare_with_merger_expected_for_run(
+        &source,
+        child_path,
+        &child.execution.before,
+        &child.parent_heads,
+        &child.expected_source_head,
+        Some(&runtime.state.run_id),
+        || Err("unexpected merge".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(child_path.join("tracked.txt")).unwrap(),
+        "original"
+    );
+    assert_eq!(
+        fs::read_to_string(child_path.join("parent.txt")).unwrap(),
+        "parent result"
+    );
+    // Publication commits the user edit and merges the node result on top.
+    let child_head = workspace::snapshot_node(child_path, &source, "child").unwrap();
+    crate::graph_merge::merge_graph(&source, &[child_head], || panic!("no conflict")).unwrap();
+    assert_eq!(
+        fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        "user edit during run"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("parent.txt")).unwrap(),
+        "parent result"
+    );
+    assert!(workspace::repository_status(&source, &[]).unwrap().is_empty());
 }
 
 #[test]
@@ -1505,7 +1645,7 @@ fn feedback_transfers_the_review_workspace_and_forks_the_owner_history() {
 }
 
 #[test]
-fn completed_shadow_graph_intervention_is_blocked_when_source_changed() {
+fn completed_shadow_graph_intervention_accepts_source_changes() {
     let graph = Graph {
         original_goal: "test".into(),
         nodes: vec![
@@ -1540,12 +1680,7 @@ fn completed_shadow_graph_intervention_is_blocked_when_source_changed() {
         .unwrap();
     assert_ne!(published, base);
     fs::write(source.join("tracked.txt"), "external edit").unwrap();
-    assert!(runtime
-        .intervene("parent", "again")
-        .unwrap_err()
-        .contains("changed after approval"));
-    assert_eq!(runtime.state.nodes["parent"].status, "done");
-    fs::write(source.join("tracked.txt"), "original").unwrap();
+    // Explicit node updates accept live source edits instead of failing fast.
     runtime.intervene("parent", "again").unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "dirty");
     // The follow-up only recomputes downstream once its result changes.
@@ -1704,6 +1839,47 @@ fn node_merger_events_do_not_enter_publication_phase() {
         .unwrap();
     assert_eq!(runtime.state.phase, "running");
     assert!(runtime.state.publication.is_none());
+}
+
+#[test]
+fn running_merger_reserves_its_workspace() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let id = Uuid::new_v4().to_string();
+    let path = source.parent().unwrap().join("merge-workspace");
+    let merger = Execution {
+        id: id.clone(),
+        node: "merge:task".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: id.clone(),
+        worktree: path.to_string_lossy().into(),
+        before: runtime.state.base.clone(),
+        workspace_lineage: vec![],
+        after: None,
+        input: None, result: None,
+        status: "running".into(),
+        output: String::new(), output_bytes: 0, pid: None,
+        started_at: now(),
+        completed_at: None,
+        metrics: None,
+    };
+    assert!(!runtime.path_is_running(&path));
+    runtime
+        .emit(EventKind::MergerStarted {
+            execution: merger.clone(),
+        })
+        .unwrap();
+    assert!(runtime.path_is_running(&path));
+    runtime
+        .emit(EventKind::MergerFailed {
+            execution_id: id,
+            error: "fixture".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    assert!(!runtime.path_is_running(&path));
 }
 
 #[test]

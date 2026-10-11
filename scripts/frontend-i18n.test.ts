@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import ts from "typescript";
 import {
-  detectLocale, translate, localizeError, readLanguagePreference, resolveLocale,
+  detectLocale, translate, localizeError, localizePlanWarning, readLanguagePreference, resolveLocale,
   restartFrontendWithLanguage, LANGUAGE_PREFERENCE_KEY,
 } from "../src/i18n/index.ts";
 import { en } from "../src/i18n/en.ts";
@@ -137,6 +137,48 @@ test("provider errors include actionable hints and role localization", () => {
 
   const abortZh = localizeError("Partitioner failed: Pi exited with exit code: 0xc0000409", "zh-CN");
   assert.ok(abortZh.includes("子进程异常退出 (0xc0000409)"));
+});
+
+test("approval copy discloses forced collection and Git publication of ignored project files", () => {
+  const source = fs.readFileSync("src/components/modals/ApprovalModal.tsx", "utf8");
+  const key = "批准会强制暂存并提交源项目文件作为基线，包括此前未提交及被 .gitignore 忽略的项目文件；节点结果通过 Git 合并回源目录。Git/Grapher 内部文件及受管环境范围除外。";
+  assert.ok(source.includes(key));
+  assert.match(translate("en", key), /force-stages.*ignored by \.gitignore.*merged back.*managed environment scopes are excluded/s);
+  assert.ok(!source.includes("不会单独版本化或发布回源目录"));
+});
+
+test("execution graph plan warnings are localized without diagnostic code prefixes", () => {
+  const w303Raw =
+    "W303: If <FEEDBACK> from verify_final_branch_b to integrate_branch_b is applied, the target and dependency descendants will be invalidated: integrate_branch_b, verify_final_branch_b. Completed results must be recomputed; integrate_branch_b continues its conversation. Nodes outside this set are unaffected.";
+  const w303Zh = localizePlanWarning(w303Raw, "zh-CN");
+  assert.equal(
+    w303Zh,
+    "若应用从 verify_final_branch_b 到 integrate_branch_b 的 <FEEDBACK>，目标节点及其依赖后代将被置为失效：integrate_branch_b, verify_final_branch_b。已完成的结果必须重新计算；integrate_branch_b 将继续其会话。该集合之外的节点不受影响。"
+  );
+  assert.ok(!w303Zh.includes("W303"));
+
+  const w303En = localizePlanWarning(w303Raw, "en");
+  assert.equal(
+    w303En,
+    "If <FEEDBACK> from verify_final_branch_b to integrate_branch_b is applied, the target and dependency descendants will be invalidated: integrate_branch_b, verify_final_branch_b. Completed results must be recomputed; integrate_branch_b continues its conversation. Nodes outside this set are unaffected."
+  );
+  assert.ok(!w303En.includes("W303"));
+
+  const w301Raw = "W301: Nodes first, second have identical task text; they may duplicate work. Confirm that this is intentional.";
+  assert.equal(localizePlanWarning(w301Raw, "zh-CN"), "节点 first, second 包含相同的任务描述，可能存在重复工作。请确认这是否符合预期。");
+  assert.equal(localizePlanWarning(w301Raw, "en"), "Nodes first, second have identical task text; they may duplicate work. Confirm that this is intentional.");
+
+  const w302Raw = "W302: review mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback.";
+  assert.equal(localizePlanWarning(w302Raw, "zh-CN"), "review 提及了 <FEEDBACK>，但没有向外发出的反馈边；该标记无法发送反馈。");
+  assert.equal(localizePlanWarning(w302Raw, "en"), "review mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback.");
+
+  // Unrecognized warning codes have their prefix stripped
+  assert.equal(localizePlanWarning("W399: Generic warning text", "en"), "Generic warning text");
+  assert.equal(localizePlanWarning("W399: Generic warning text", "zh-CN"), "Generic warning text");
+
+  // localizeError also formats plan warnings properly
+  assert.equal(localizeError(w303Raw, "zh-CN"), w303Zh);
+  assert.equal(localizeError(w303Raw, "en"), w303En);
 });
 
 for (const [systemLanguage, preference] of [["zh-CN", "en"], ["en-US", "zh-CN"], ["fr-FR", "auto"]]) {

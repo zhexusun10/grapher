@@ -335,14 +335,14 @@ pub struct NodeState {
     pub baseline_head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_workspace: Option<FeedbackWorkspace>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub files_override: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub files_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_files_version: Option<String>,
-    #[serde(default)]
-    pub files_changed: bool,
+    #[serde(default, skip_serializing, rename = "filesOverride")]
+    pub legacy_files_override: Option<String>,
+    #[serde(default, skip_serializing, rename = "filesVersion")]
+    pub legacy_files_version: Option<String>,
+    #[serde(default, skip_serializing, rename = "baselineFilesVersion")]
+    pub legacy_baseline_files_version: Option<String>,
+    #[serde(default, skip_serializing, rename = "filesChanged")]
+    pub legacy_files_changed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<crate::environment::CompositeResult>,
     pub error: Option<String>,
@@ -361,10 +361,10 @@ impl Default for NodeState {
             shared_workspace: false,
             baseline_head: None,
             feedback_workspace: None,
-            files_override: None,
-            files_version: None,
-            baseline_files_version: None,
-            files_changed: false,
+            legacy_files_override: None,
+            legacy_files_version: None,
+            legacy_baseline_files_version: None,
+            legacy_files_changed: false,
             result: None,
             error: None,
         }
@@ -404,11 +404,13 @@ pub enum EventKind {
     SourceSnapshotted {
         head: String,
     },
+    /// Legacy run-level project-file capture. New Runs retain this event only
+    /// for replay compatibility and never emit it.
     SourceFilesRecorded {
         files: SourceFiles,
     },
     /// Only new Runs request automatic admission. Legacy Created events alone
-    /// never authorize reinterpreting a saved source/ignored-file contract.
+    /// never authorize reinterpreting a saved legacy project-file contract.
     EnvironmentPolicyRequested,
     EnvironmentPolicyResolved {
         environment: Option<crate::environment::EnvironmentConfig>,
@@ -443,6 +445,8 @@ pub enum EventKind {
         generation: String,
         error: String,
     },
+    /// Legacy run-level project-file result marker. New Runs retain this
+    /// event only for replay compatibility and never emit it.
     WorkspaceFilesChanged {
         execution_id: String,
     },
@@ -451,7 +455,8 @@ pub enum EventKind {
         planning_id: String,
         planning: PlanningSummary,
         invalidated: Vec<String>,
-        /// Source files after this approved Planner turn; absent in legacy/draft events.
+        /// Legacy source-file capture after an approved Planner turn. New
+        /// Runs use `source_head` only for Git.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_head: Option<String>,
     },
@@ -476,6 +481,8 @@ pub enum EventKind {
         execution_id: String,
         node: String,
         instruction: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageAttachment>>,
     },
     /// A message addressed to a finished node. It does not start an execution.
     NodeMessaged {
@@ -519,7 +526,8 @@ pub enum EventKind {
         node: String,
         error: String,
     },
-    /// Human committed a conflicted preparation; the node task has not run.
+    /// Human committed a conflicted Git preparation; the legacy file-version
+    /// field is retained only for replay compatibility.
     WorkspaceResolved {
         execution_id: String,
         head: String,
@@ -683,7 +691,7 @@ pub struct Snapshot {
     pub feedback_counts: BTreeMap<String, usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_feedback: Vec<PendingFeedback>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub source_files: Option<SourceFiles>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_baseline: Option<crate::environment::CompositeResult>,
@@ -962,9 +970,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.edit_execution_id = None;
                 node.human_instruction = false;
                 node.feedback_workspace = None;
-                node.files_override = None;
-                node.files_version = None;
-                node.baseline_files_version = None;
                 if node.status == "dirty" {
                     node.revision += 1;
                 }
@@ -1015,14 +1020,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             let node = state.nodes.get_mut(&execution.node).unwrap();
             node.edit_execution_id = None;
             node.status = "running".into();
-            node.files_changed = false;
             node.error = None;
             state.executions.push(execution.clone());
         }
         EventKind::SourceSnapshotted { .. }
+        | EventKind::SourceFilesRecorded { .. }
+        | EventKind::WorkspaceFilesChanged { .. }
         | EventKind::Steered { .. }
         | EventKind::NodeMessaged { .. } => {}
-        EventKind::SourceFilesRecorded { files } => state.source_files = Some(files.clone()),
         EventKind::EnvironmentPolicyRequested => {
             if !state.approved
                 && state.environment_policy.is_none()
@@ -1131,23 +1136,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }) {
                     node.head = Some(descriptor.result.code_ref.clone());
                     node.result = Some(descriptor.result.clone());
-                    node.files_version = descriptor.result.resource_refs.last().cloned();
                 }
                 state.published_result = Some(descriptor.clone());
                 state.publication = None;
                 state.phase = "running".into();
                 state.paused = false;
-            }
-        }
-        EventKind::WorkspaceFilesChanged { execution_id } => {
-            if let Some(execution) = state
-                .executions
-                .iter()
-                .find(|execution| execution.id == *execution_id && execution.status == "running")
-            {
-                if let Some(node) = state.nodes.get_mut(&execution.node) {
-                    node.files_changed = true;
-                }
             }
         }
         EventKind::Output { execution_id, text } => {
@@ -1206,9 +1199,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         .nodes
                         .get(&node_name)
                         .and_then(|node| node.baseline_head.as_deref())
-                        .is_some_and(|baseline| {
-                            baseline != head.as_str() || state.nodes[&node_name].files_changed
-                        });
+                        .is_some_and(|baseline| baseline != head.as_str());
                     let dependents: Vec<String> =
                         if changed && !state.nodes[&node_name].shared_workspace {
                             crate::compiler::downstream(&state.graph, &node_name)
@@ -1226,10 +1217,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         node.baseline_head = None;
                         node.shared_workspace = false;
                         node.feedback_workspace = None;
-                        node.files_override = None;
-                        node.files_version = Some(format!("after-{execution_id}"));
-                        node.baseline_files_version = None;
-                        node.files_changed = false;
                     }
                     // A downstream execution on the inherited workspace advances
                     // the live result for every node represented by that workspace.
@@ -1240,9 +1227,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                             if node.status == "done" {
                                 node.head = Some(head.clone());
                                 node.result = result.clone();
-                                node.files_version = Some(format!("after-{execution_id}"));
-                                node.files_override = None;
-                                node.files_changed = false;
                             }
                         }
                     }
@@ -1265,9 +1249,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                             node.edit_execution_id = None;
                             node.human_instruction = false;
                             node.feedback_workspace = None;
-                            node.files_override = None;
-                            node.files_version = None;
-                            node.baseline_files_version = None;
                             if !unstarted {
                                 node.revision += 1;
                             }
@@ -1294,7 +1275,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.status = "failed".into();
                 node.error = Some(error.clone());
                 node.baseline_head = None;
-                node.baseline_files_version = None;
             }
             if let Some(execution) = state
                 .executions
@@ -1328,7 +1308,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             execution_id,
             head,
             nodes,
-            files_version,
+            files_version: _,
         } => {
             let execution = state
                 .executions
@@ -1358,9 +1338,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     node.revision += 1;
                 }
                 if *name == target {
-                    node.files_override = files_version.clone();
-                    node.files_version = files_version.clone();
-                    node.baseline_files_version = None;
                     if let Some(input) = &mut node.feedback_workspace {
                         input.head = head.clone();
                     } else if !node.human_instruction {
@@ -1403,9 +1380,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     node.edit_execution_id = None;
                     node.human_instruction = false;
                     node.feedback_workspace = None;
-                    node.files_override = None;
-                    node.files_version = None;
-                    node.baseline_files_version = None;
                 }
                 if *human && !unstarted {
                     node.revision += 1;
@@ -1418,15 +1392,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             if let Some(input) = workspace {
                 target_node.head = Some(input.head.clone());
-                target_node.files_override = None;
-                target_node.files_version = Some(format!("after-{}", input.source_execution_id));
             }
             if *human && !instruction.is_empty() {
                 // A user follow-up continues from the target's current result.
                 // A shared-workspace follow-up already edits the terminal result,
                 // so completed descendants remain valid and are not rescheduled.
                 target_node.baseline_head = target_node.head.clone();
-                target_node.baseline_files_version = target_node.files_version.clone();
                 target_node.instruction = instruction.clone();
                 target_node.instruction_images = images.clone();
                 target_node.edit_execution_id = None;
@@ -1436,7 +1407,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 // Feedback retains the target's conversation, but a pinned
                 // workspace input can transfer the reviewer's completed tree.
                 target_node.baseline_head = None;
-                target_node.baseline_files_version = None;
                 target_node.instruction = instruction.clone();
                 target_node.instruction_images = None;
                 target_node.edit_execution_id = None;
@@ -1491,11 +1461,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.error = None;
                 node.revision += 1;
                 node.feedback_workspace = None;
-                node.files_override = None;
                 if name == target {
                     node.baseline_head = node.head.clone();
-                    node.baseline_files_version = node.files_version.clone();
-                    node.files_version = Some(format!("before-{}", anchor.id));
                     node.head = Some(anchor.before.clone());
                     node.instruction = instruction.clone();
                     node.instruction_images = images.clone();
@@ -1580,7 +1547,15 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::MergerStarted { execution } => {
             state.mergers.push(execution.clone());
-            if execution.node == "merger" {
+            // Only the attempt owned by an active publication drives its state.
+            // A continued publication-Merger conversation in the source
+            // workspace stays standalone and must not re-enter that lifecycle.
+            if execution.node == "merger"
+                && state
+                    .publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.status == "publishing")
+            {
                 state.phase = "merging".into();
                 if let Some(publication) = &mut state.publication {
                     publication.status = "merging".into();
@@ -1611,10 +1586,15 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 });
                 execution.output = String::new();
             }
-            if state
+            let publication_attempt = state
                 .mergers
                 .iter()
-                .any(|e| e.id == *execution_id && e.node == "merger")
+                .any(|e| e.id == *execution_id && e.node == "merger");
+            if publication_attempt
+                && state
+                    .publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.status == "merging")
             {
                 state.phase = "publishing".into();
                 if let Some(publication) = &mut state.publication {

@@ -12,7 +12,7 @@ import { motion, AnimatePresence } from "motion/react";
 import {
   Snapshot, PlanRouteType, RepositoryInfo, Config,
   Graph, Execution, Status, PlanningSummary, TranscriptItem,
-  ChatMessage
+  ChatMessage, RuntimeActivity, publicationMergerCardId
 } from "../../types";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
@@ -35,11 +35,28 @@ import { PublicationCompletedCard } from "../PublicationCompletedCard";
 import { EnvironmentResult } from "../EnvironmentResult";
 import { PlannerTranscript } from "../PlannerTranscript";
 
+/** Transient I/O status takes precedence over the durable phase copy. */
+function activityStatusText(activity: RuntimeActivity[]): string | null {
+  if (!activity.length) return null;
+  const byKind = (kind: string) => activity.find(item => item.kind === kind);
+  const prepare = byKind("workspace_prepare");
+  if (prepare) {
+    return prepare.nodes.length
+      ? t("正在复制节点工作区：{0}", prepare.nodes.join("、"))
+      : t("正在复制节点工作区");
+  }
+  if (byKind("source_capture")) return t("正在记录 Git 源快照");
+  return null;
+}
+
 interface GraphWorkbenchProps {
   state: Snapshot;
+  activity?: RuntimeActivity[];
   routeType: PlanRouteType;
   selected: string;
   setSelected: (name: string) => void;
+  selectedMergerId: string;
+  setSelectedMergerId: (id: string) => void;
   effectiveMessages: Array<ChatMessage>;
   onEditMessage?: (msg: ChatMessage) => void;
   editingMessage?: ChatMessage | null;
@@ -253,9 +270,12 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
 
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   state,
+  activity = [],
   routeType,
   selected,
   setSelected,
+  selectedMergerId,
+  setSelectedMergerId,
   failedPlanning,
   recoveredPlanningId,
   effectiveMessages,
@@ -300,8 +320,29 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     setTaskDraft("");
     onCancelEditMessage?.();
   }, [selected, state.runId]);
-  const selectedNode = state.graph.nodes.find((item) => item.name === selected);
+  useEffect(() => {
+    setSelectedMergerId("");
+  }, [state.runId, setSelectedMergerId]);
+  // The publication Merger has no planner node; it is addressed through the
+  // synthetic card selected in the topology.
+  const publicationMergerSelected = selected === publicationMergerCardId;
+  const selectedPublicationMerger = useMemo(() => publicationMergerSelected
+    ? (state.mergers ?? []).find((item) => item.id === selectedMergerId && item.node === "merger")
+    : undefined, [publicationMergerSelected, selectedMergerId, state.mergers]);
+  const selectedNode = state.graph.nodes.find((item) => item.name === selected)
+    ?? (selectedPublicationMerger ? { name: publicationMergerCardId, task: t("合并最终回写结果冲突") } : undefined);
   const selectedState = selectedNode ? state.nodes[selectedNode.name] : undefined;
+  const selectedMerger = useMemo(() => {
+    if (selectedNode?.name === publicationMergerCardId) return selectedPublicationMerger;
+    if (!selectedMergerId || !selectedNode) return undefined;
+    return (state.mergers ?? []).find((item) => item.id === selectedMergerId && item.node === `merge:${selectedNode.name}`);
+  }, [selectedMergerId, selectedNode?.name, state.mergers, selectedPublicationMerger]);
+  const selectedMergerRunning = selectedMerger?.status === "running";
+  // Publication Mergers record their steered turns under the literal node name
+  // "merger", unlike node Mergers' `merge:<node>`.
+  const conversationNode = selectedNode?.name === publicationMergerCardId ? "merger" : (selectedNode?.name ?? "");
+  const selectedNodeLabel = selectedNode?.name === publicationMergerCardId ? t("publication merger") : (selectedNode?.name ?? "");
+  const selectedMergerContinuable = !!selectedMerger && selectedMerger.node === "merger" && !selectedMergerRunning;
   const initialTaskEdit = useMemo(() => {
     if (!selectedNode) return undefined;
     return [...state.events].reverse().find(event => event.type === "conversation_edited" &&
@@ -312,9 +353,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [initialTaskEdit, state.events]);
   const nodeMessages = useMemo(() => {
     if (!selectedNode) return [];
-    const localMessages = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === selectedNode.name && msg.runId === state.runId);
+    const localMessages = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === conversationNode && msg.runId === state.runId);
     const latestEdit = [...state.events].reverse().find((event) =>
-      event.type === "conversation_edited" && event.target === selectedNode.name && event.nodes?.includes(selectedNode.name));
+      event.type === "conversation_edited" && event.target === conversationNode && event.nodes?.includes(conversationNode));
     const local = latestEdit?.old_instruction
       ? (() => {
           const index = localMessages.findIndex((msg) =>
@@ -323,32 +364,41 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         })()
       : localMessages;
     const localRemaining = [...local];
-    const recorded = activeNodeConversationEvents(state, selectedNode.name).filter((event) =>
-      ((event.type === "invalidated" && event.human) || (event.type === "conversation_edited" && !event.first_turn)) && event.target === selectedNode.name && !!event.instruction ||
-      ((event.type === "steered" || event.type === "node_messaged") && event.node === selectedNode.name)
+    const mergerNode = `merge:${conversationNode}`;
+    const recorded = activeNodeConversationEvents(state, conversationNode).filter((event) =>
+      ((event.type === "invalidated" && event.human) || (event.type === "conversation_edited" && !event.first_turn)) && event.target === conversationNode && !!event.instruction ||
+      ((event.type === "steered" || event.type === "node_messaged") && (event.node === conversationNode || event.node === mergerNode))
     ).reverse().filter((event) => {
       // Match each optimistic turn to at most one durable event, from newest
       // to oldest, so repeated identical messages do not disappear.
       const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction);
       if (idx < 0) return true;
       localRemaining.splice(idx, 1);
-      return false;
+      // Keep the durable replacement; excluding both turns would make an
+      // accepted steer or follow-up disappear from the conversation.
+      return true;
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
-      text: event.instruction || "", images: event.images, node: selectedNode.name, runId: state.runId,
+      text: event.instruction || "", images: event.images, node: conversationNode, runId: state.runId,
       executionId: executionIdForMessage(state, event),
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
       delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
     }));
     return [...recorded, ...localRemaining];
-  }, [selectedNode?.name, effectiveMessages, state.runId, state.events]);
-  const attempts = useMemo(() => selectedNode
-    ? [...activeNodeExecutions(state, selectedNode.name),
-       ...(state.mergers ?? []).filter((item) => item.node === `merge:${selectedNode.name}`)]
-        .sort((a, b) => a.startedAt - b.startedAt)
-    : [], [selectedNode?.name, state.executions, state.supersededExecutionIds, state.mergers]);
-  const execution: Execution | undefined = attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
+  }, [selectedNode?.name, conversationNode, effectiveMessages, state.runId, state.events]);
+  const attempts = useMemo(() => {
+    if (!selectedNode) return [];
+    const list = selectedNode.name === publicationMergerCardId
+      ? (state.mergers ?? []).filter((item) => item.node === "merger")
+      : [...activeNodeExecutions(state, selectedNode.name),
+         ...(state.mergers ?? []).filter((item) => item.node === `merge:${selectedNode.name}`)];
+    return [...list].sort((a, b) => a.startedAt - b.startedAt);
+  }, [selectedNode?.name, state.executions, state.supersededExecutionIds, state.mergers]);
+  // Merger turns belong to a preparation session that has no message-branching
+  // path; keep them conversational but not editable.
+  const mergerExecutionIds = useMemo(() => new Set((state.mergers ?? []).map(item => item.id)), [state.mergers]);
+  const execution: Execution | undefined = selectedMerger ?? attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
   const nodeTurns = useMemo(() => {
     if (!selectedNode) return [];
     const turns: Array<{
@@ -393,8 +443,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // A steer adds a user turn to the running execution without creating a new
   // execution panel. Keep its status after that turn, not above it in the old panel.
   const nodeWorkingAfterMessage = nodeTurns.length > 1 && nodeTurns[nodeTurns.length - 1].executions.length === 0;
-  const isSelectedNodeWorking = isNodeWorking(selectedState?.status, execution, pendingRequest,
-    nodeWorkingAfterMessage ? nodeTurns[nodeTurns.length - 1].userMessage : undefined);
+  // While a merger is selected its own process decides the working state, not
+  // the node status that covers the whole preparation/execution cycle.
+  const isSelectedNodeWorking = selectedMerger
+    ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
+    : isNodeWorking(selectedState?.status, execution, pendingRequest,
+        nodeWorkingAfterMessage ? nodeTurns[nodeTurns.length - 1].userMessage : undefined);
   const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}:${execution?.id || ""}`;
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   // Live SSE is ephemeral. After reload or run selection, replay the durable
@@ -899,6 +953,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
   // A poll can return the old draft while the Planner is revising it.
   const graphPhase = isPlanning && !state.approved ? "planning" : state.phase;
+  const activityStatus = activityStatusText(activity);
   const isWorkspaceWritten = !isPlanning && routeType === "graph" && (
     state.publication?.status === "completed" ||
     (state.phase === "completed" && state.publication?.status !== "failed" && state.publication?.status !== "publishing" && state.publication?.status !== "merging")
@@ -1049,13 +1104,23 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   ]);
 
   const selectGraphNode = useStableCallback((id: string) => {
-    if (!id) { setSelected(""); return; }
+    if (!id) { setSelected(""); setSelectedMergerId(""); return; }
+    if (id === publicationMergerCardId) {
+      const merger = (state.mergers ?? []).filter(item => item.node === "merger").at(-1);
+      setSelected(publicationMergerCardId);
+      setSelectedMergerId(merger?.id ?? "");
+      setAttemptId(merger?.id ?? "");
+      return;
+    }
     if (id.startsWith("merger:")) {
       const target = id.slice(7);
+      const merger = (state.mergers ?? []).filter(item => item.node === `merge:${target}`).at(-1);
       setSelected(target);
-      setAttemptId((state.mergers ?? []).filter(item => item.node === `merge:${target}`).at(-1)?.id ?? "");
+      setSelectedMergerId(merger?.id ?? "");
+      setAttemptId(merger?.id ?? "");
     } else {
       setSelected(id);
+      setSelectedMergerId("");
       setAttemptId("");
     }
   });
@@ -1078,16 +1143,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           <div className="initial-query-view">
             <div className="conversation-heading">
               <div className="heading-title-col">
-                <h2>{selectedNode.name}</h2>
+                <h2>{selectedMerger && selectedNode?.name !== publicationMergerCardId ? t("merger · {0}", selectedNodeLabel) : selectedNodeLabel}</h2>
               </div>
-              <span className={`status ${selectedState?.status ?? "waiting"}`}>
-                {statusText[selectedState?.status ?? "waiting"]}
+              <span className={`status ${selectedMerger ? (selectedMerger.status === "completed" ? "done" : selectedMerger.status === "running" ? "running" : "failed") : (selectedState?.status ?? "waiting")}`}>
+                {selectedMerger
+                  ? statusText[selectedMerger.status === "completed" ? "done" : selectedMerger.status === "running" ? "running" : "failed"]
+                  : statusText[selectedState?.status ?? "waiting"]}
               </span>
               {routeType === "graph" && (
                 <button
                   type="button"
                   className="back-to-query-btn"
-                  onClick={() => setSelected("")}
+                  onClick={() => { setSelected(""); setSelectedMergerId(""); }}
                 >
                   <ArrowLeft size={16} />
                 </button>
@@ -1125,7 +1192,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         editing={editingTaskNode === selectedNode.name}
                         draft={taskDraft}
                         onDraftChange={setTaskDraft}
-                        onEdit={(!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "running") ? () => {
+                        onEdit={selected !== publicationMergerCardId && (!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "running") ? () => {
                           onCancelEditMessage?.();
                           setEditingTaskNode(selectedNode.name);
                           setTaskDraft(selectedNode.task);
@@ -1178,7 +1245,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           editing={editingMessage?.id === turn.userMessage.id}
                           draft={editPrefillText ?? ""}
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                          onEdit={onEditMessage && turn.userMessage.delivery !== "node_messaged" ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
+                          onEdit={onEditMessage && turn.userMessage.delivery !== "node_messaged" && !mergerExecutionIds.has(turn.userMessage.executionId ?? "") ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
                           onCancel={() => onCancelEditMessage?.()}
                           onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
                           disabled={locked}
@@ -1301,6 +1368,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 placeholder={
                   !state.approved
                     ? t("图规划审批启动后，可在此向选定节点发送介入指令…")
+                    : selectedMerger
+                    ? (selectedMergerRunning
+                      ? t("向 merger 实时发送 Steer（当前工具调用后生效）…")
+                      : selectedMergerContinuable
+                      ? t("向 publication merger 追加消息…")
+                      : t("merger 已结束，只能查看执行记录"))
                     : isSelectedNodeWorking
                     ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", selectedNode.name)
                     : selectedState?.status === "done"
@@ -1313,7 +1386,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 disabled={
                   locked ||
                   !!editingMessage ||
-                  !state.approved
+                  !state.approved ||
+                  (!!selectedMerger && !selectedMergerRunning && !selectedMergerContinuable)
                 }
               />
             </motion.div>
@@ -1653,7 +1727,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             type="button"
                             key={node.name}
                             className="node-chip"
-                            onClick={() => setSelected(node.name)}
+                            onClick={() => { setSelected(node.name); setSelectedMergerId(""); }}
                             title={node.task}
                           >
                             <span className={`chip-dot ${nState?.status ?? "waiting"}`} />
@@ -1809,7 +1883,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                   <div className="approval-row">
                     <span>
-                      {graphPhase === "planning" ? t("规划中")
+                      {activityStatus ? (
+                        <><span className="progress-dot" />{activityStatus}</>
+                      ) : graphPhase === "planning" ? t("规划中")
                         : graphPhase === "running" ? t("确定性运行时正在推进")
                         : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
                         : graphPhase === "paused" ? t("已暂停后续派发")

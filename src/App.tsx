@@ -4,9 +4,10 @@ import { AlertTriangle, Loader2, X } from "lucide-react";
 import { motion, AnimatePresence, LayoutGroup, useReducedMotion } from "motion/react";
 
 import {
-  defaultConfig, emptyGraph, emptySnapshot,
+  defaultConfig, emptyGraph, emptySnapshot, publicationMergerCardId,
   type Config, type Graph, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType, type TranscriptItem,
+  type RuntimeActivity,
   type PlanningSummary, type PlanMode, type ChatMessage,
   type ImageAttachment, type FileAttachment, type ChatMessageVersion
 } from "./types";
@@ -96,6 +97,11 @@ export default function App() {
   };
   const [goal, setGoal] = useState("");
   const [selected, setSelected] = useState<string>("");
+  const [selectedMergerId, setSelectedMergerId] = useState<string>("");
+  // A merger card is only meaningful together with its owning node selection.
+  useEffect(() => {
+    if (!selected) setSelectedMergerId("");
+  }, [selected]);
   const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -149,7 +155,21 @@ export default function App() {
   }, [runs, runLabels, runtimeService]);
   const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot } = useRunIndicators(state);
   const allRunIds = useMemo(() => [...new Set(Object.values(workspaceRuns).flat())], [workspaceRuns]);
-  const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, allRunIds, state.runId, state.phase);
+  const [activities, setActivities] = useState<Record<string, RuntimeActivity[]>>({});
+  const observeActivity = useCallback((runId: string, activity: RuntimeActivity[]) => {
+    if (!runId) return;
+    setActivities(previous => {
+      const current = previous[runId];
+      if (current && current.length === activity.length && current.every((item, index) =>
+        item.kind === activity[index].kind && item.nodes.join("\u0000") === activity[index].nodes.join("\u0000"))) {
+        return previous;
+      }
+      return { ...previous, [runId]: activity };
+    });
+  }, []);
+  const hasActiveExecutions = state.executions.some(item => item.status === "running") ||
+    (state.mergers ?? []).some(item => item.status === "running");
+  const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions);
 
   const [dataPath, setDataPath] = useState("");
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
@@ -369,7 +389,7 @@ export default function App() {
     if (snapshot.runId && snapshot.config?.repository) {
       recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
       observeRunSnapshot(snapshot);
-      setBackendStatus({ runId: snapshot.runId, phase: snapshot.phase });
+      setBackendStatus(snapshot);
     }
     if (generation !== foregroundGeneration.current || !snapshotBelongsToWorkspace(snapshot, config.repository)) return false;
     setState(snapshot);
@@ -424,14 +444,23 @@ export default function App() {
       setError(repositoryStatus?.error || t("正在确认项目绑定，请稍后重试。"));
       return false;
     }
-    if (publishing || publicationFailed) {
+    const selectedNode = state.graph.nodes.find(item => item.name === selected);
+    const targetNodeName = selectedNode?.name ||
+      (selected === publicationMergerCardId ? "merger" : (routeType === "serial" ? state.graph.nodes[0]?.name : undefined));
+    // A selected merger card owns the composer only while its native process is
+    // alive; a settled merger is read-only history.
+    const selectedMerger = selectedMergerId
+      ? (state.mergers ?? []).find(item => item.id === selectedMergerId &&
+          (selected === publicationMergerCardId ? item.node === "merger" : item.node === `merge:${selected}`))
+      : undefined;
+    // A publication Merger stays addressable through its lifecycle; other node
+    // messages remain blocked while publication is in progress.
+    if ((publishing || publicationFailed) && selectedMerger?.node !== "merger" && selectedMerger?.status !== "running") {
       setError(t("发布期间不能介入节点，请等待发布结束或处理发布失败。"));
       return false;
     }
     const generation = foregroundGeneration.current;
     const isCurrent = () => generation === foregroundGeneration.current;
-    const selectedNode = state.graph.nodes.find(item => item.name === selected);
-    const targetNodeName = selectedNode?.name || (routeType === "serial" ? state.graph.nodes[0]?.name : undefined);
     const displayMsg = options?.displayText !== undefined ? options.displayText : text;
     const fileAttachments: FileAttachment[] | undefined = options?.files && options.files.length > 0
       ? options.files.map(f => ({ name: f.name, size: f.size, type: f.type }))
@@ -455,29 +484,50 @@ export default function App() {
       setSessionEntries(prev => prev.filter(entry => entry.id !== message.id));
       setPlannerStream(prev => ({ ...prev, items: prev.items.filter(item => item.id !== message.id) }));
     };
-    const submitNodeMessage = (action: "steer" | "intervene", message: ChatMessage, executionId?: string) => run(async () => {
+    const submitNodeMessage = (action: "steer" | "intervene" | "continue_merger", message: ChatMessage, executionId?: string, nodeOverride?: string, onAccepted?: (snapshot: Snapshot) => void) => run(async () => {
       try {
         await requireRepository(state.config?.repository || config.repository);
         if (!isCurrent()) { removeMessage(message); return false; }
         let snapshot = await runtimeService.control(action, {
-          runId: state.runId, node: targetNodeName, executionId, instruction: text, images: options?.images,
+          runId: state.runId, node: nodeOverride ?? targetNodeName, executionId, instruction: text, images: options?.images,
         });
         // Once accepted, resuming the originating Run is independent of navigation.
         if (snapshot.paused) snapshot = await runtimeService.control("resume", { runId: snapshot.runId });
-        return applyForegroundSnapshot(snapshot, generation);
+        const applied = applyForegroundSnapshot(snapshot, generation);
+        if (applied) onAccepted?.(snapshot);
+        return applied;
       } catch (error) {
         removeMessage(message);
         throw error;
       }
     });
 
+    if (selectedMerger) {
+      const running = selectedMerger.status === "running";
+      // A settled publication merger still accepts follow-ups; a settled
+      // node-composition merger is read-only history.
+      if (!running && selectedMerger.node !== "merger") {
+        setError(t("merger 已结束，只能查看执行记录"));
+        return false;
+      }
+      // Retain the attachment envelope to match the durable event exactly.
+      // EditableUserBubble parses it into text and attachment cards.
+      const message = recordMessage(`[@${targetNodeName}] ${text}`, running ? "steered" : undefined, selectedMerger.id);
+      // Follow the continuation execution the runtime just created, so the pane
+      // and composer address the live Pi session instead of the settled one.
+      return submitNodeMessage(running ? "steer" : "continue_merger", message, selectedMerger.id, selectedMerger.node,
+        running ? undefined : (snapshot) => {
+          const next = (snapshot.mergers ?? []).filter(item => item.node === selectedMerger.node).at(-1);
+          if (next && next.id !== selectedMerger.id) setSelectedMergerId(next.id);
+        });
+    }
     if (targetNodeName && state.nodes[targetNodeName]?.status === "done") {
-      return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg));
+      return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${text}` : text));
     }
     const execution = targetNodeName && [...state.executions].reverse()
       .find(item => item.node === targetNodeName && item.status === "running");
     if ((isPlanning || recoveredPlanning?.status === "running" || active) && execution) {
-      const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${displayMsg}`, "steered", execution.id);
+      const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${text}`, "steered", execution.id);
       return submitNodeMessage("steer", message, execution.id);
     }
     if (isPlanning || backendPlanning || recoveredPlanning?.status === "running") {
@@ -509,7 +559,7 @@ export default function App() {
       });
     }
     if (targetNodeName) {
-      return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${displayMsg}` : displayMsg));
+      return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${text}` : text));
     }
     if ((routeType === "graph" || state.graph.nodes.length > 0) && state.runId && state.phase !== "planning_failed") {
       void handlePlanGoal(text, options, "graph", state.runId);
@@ -648,7 +698,7 @@ export default function App() {
       const snap = snapshots[i];
       if (snap) {
         prefilledLabels[indexedIds[i]] = snap.graph.originalGoal || "";
-        setBackendStatus({ runId: snap.runId, phase: snap.phase });
+        setBackendStatus(snap);
       }
     }
     if (Object.keys(prefilledLabels).length > 0) {
@@ -684,7 +734,7 @@ export default function App() {
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       markSnapshotRead(data.snapshot);
-      setBackendStatus({ runId: data.snapshot.runId, phase: data.snapshot.phase });
+      setBackendStatus(data.snapshot);
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
       setSelected("");
@@ -2249,7 +2299,7 @@ export default function App() {
     }
   }, [isPlanning, state.runId, plannerStream.runId]);
 
-  const { nodes, edges } = useGraphElements(state, selected, recentlyAddedEdgeIds);
+  const { nodes, edges } = useGraphElements(state, selected, recentlyAddedEdgeIds, selectedMergerId);
 
   const isLandingView = !state.runId && state.graph.nodes.length === 0 &&
     !isPlanning &&
@@ -2424,9 +2474,12 @@ export default function App() {
                   <GraphWorkbench
                     key={foregroundGeneration.current}
                     state={state}
+                    activity={activities[state.runId] ?? []}
                     routeType={routeType}
                     selected={selected}
                     setSelected={setSelected}
+                    selectedMergerId={selectedMergerId}
+                    setSelectedMergerId={setSelectedMergerId}
                     failedPlanning={failedPlanning || (state.phase === "planning_failed" ? state.planning : null)}
                     effectiveMessages={effectiveMessages}
                     onEditMessage={handleStartEditMessage}

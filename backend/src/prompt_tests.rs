@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn snapshot_poll_reports_transient_activity_without_waiting_for_the_run_mutex() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let run_id = Uuid::new_v4().to_string();
+    runtime.state.run_id = run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let capture = ActivityGuard::begin(&run_id, "capture", "source_capture", "");
+    let left = ActivityGuard::begin(&run_id, "left", "workspace_prepare", "left");
+    let right = ActivityGuard::begin(&run_id, "right", "workspace_prepare", "right");
+    let duplicate = ActivityGuard::begin(&run_id, "left-other", "workspace_prepare", "left");
+    let locked = service.runtime.lock().unwrap();
+    let events = locked.state.events.len();
+    let worker = service.clone();
+    let request_id = run_id.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let result = dispatch(&worker, "snapshot_if_changed", serde_json::json!({
+            "runId": request_id, "version": "unchanged"
+        }));
+        let _ = tx.send(result);
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+    drop(locked);
+    thread.join().unwrap();
+    let value = result.expect("snapshot poll waited for the Run mutex").unwrap();
+    assert_eq!(value["version"], "unchanged");
+    assert!(value["snapshot"].is_null());
+    assert_eq!(value["activity"], serde_json::json!([
+        { "kind": "source_capture", "nodes": [] },
+        { "kind": "workspace_prepare", "nodes": ["left", "right"] }
+    ]));
+    drop((capture, left, right, duplicate));
+    let value = dispatch(&service, "snapshot_if_changed", serde_json::json!({ "runId": run_id })).unwrap();
+    assert_eq!(value["activity"], serde_json::json!([]));
+    assert_eq!(service.runtime.lock().unwrap().state.events.len(), events);
+    let cached = dispatch(&service, "snapshot_if_changed", serde_json::json!({
+        "runId": run_id, "version": value["version"]
+    })).unwrap();
+    assert!(cached["snapshot"].is_null());
+    assert_eq!(cached["activity"], serde_json::json!([]));
+}
+
+#[test]
 fn reopening_a_paused_run_does_not_append_pause_events() {
     let temp = tempfile::TempDir::new().unwrap();
     let primary = Runtime::open(temp.path()).unwrap();
@@ -71,6 +120,106 @@ fn done_node_message_control_does_not_wait_for_planner_or_start_driver() {
     assert!(control("message_node".into(), Some("task".into()), Some("wrong run".into()),
         Some("old-run".into()), None, None, &service).is_err());
     assert!(!service.driving.load(Ordering::SeqCst));
+}
+
+#[test]
+fn publication_merger_continuation_control_validates_phase_and_workspace() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    runtime.state.run_id = Uuid::new_v4().to_string();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "test".into(),
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: "test".into(),
+                }],
+                edges: vec![],
+            },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": temp.path(), "model": "test", "maxParallel": 1,
+            }))
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Approved {
+            base: String::new(),
+        })
+        .unwrap();
+    let workspace = temp.path().join("source");
+    fs::create_dir_all(&workspace).unwrap();
+    let execution = |id: &str, node: &str, status: &str| Execution {
+        id: id.into(),
+        node: node.into(),
+        revision: 1,
+        attempt: 1,
+        session_id: format!("session-{id}"),
+        worktree: workspace.to_string_lossy().into(),
+        before: String::new(),
+        workspace_lineage: vec![],
+        after: None,
+        input: None, result: None,
+        status: status.into(),
+        output: String::new(), output_bytes: 0, pid: None,
+        started_at: now(),
+        completed_at: None,
+        metrics: None,
+    };
+    let merger = execution("publication-merger", "merger", "completed");
+    runtime
+        .emit(EventKind::MergerStarted {
+            execution: merger.clone(),
+        })
+        .unwrap();
+    assert_eq!(runtime.state.phase, "running", "a standalone merger must not own publication phase");
+    runtime
+        .emit(EventKind::MergerFinished {
+            execution_id: merger.id.clone(),
+            head: String::new(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let attempt = |node: &str, execution: &str| {
+        control(
+            "continue_merger".into(),
+            Some(node.into()),
+            Some("append a message".into()),
+            Some(run_id.clone()),
+            Some(execution.into()),
+            None,
+            &service,
+        )
+    };
+    // Only the publication merger is continuable; node-composition mergers
+    // keep their settled read-only rule.
+    assert!(attempt("merge:task", &merger.id).is_err());
+    assert!(attempt("merger", "missing").is_err());
+    // An active publication owns the source directory.
+    service.runtime.lock().unwrap().state.phase = "publishing".into();
+    assert!(attempt("merger", &merger.id).is_err());
+    service.runtime.lock().unwrap().state.phase = "completed".into();
+    // A running writer in the same workspace blocks the follow-up.
+    let busy = execution("node-1", "task", "running");
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .emit(EventKind::Started { execution: busy })
+        .unwrap();
+    assert!(attempt("merger", &merger.id).is_err());
 }
 
 #[cfg(feature = "fixture")]
@@ -2430,6 +2579,60 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         service.runtime.lock().unwrap().state.executions[0].output,
         text
     );
+}
+
+#[test]
+fn activity_is_reported_without_blocking_on_a_busy_run_lock() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let runtime = Runtime::open(temp.path()).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let run = "activity-run";
+    set_activity(run, "prepare-foundation", "workspace_prepare", "foundation_contract");
+    set_activity(run, "prepare-signals", "workspace_prepare", "temporal_signal_design");
+    set_activity(run, "approve", "source_capture", "");
+    {
+        // A long filesystem pass holds the Run mutex while the browser polls.
+        let _held = service.runtime.lock().unwrap();
+        let reply = dispatch(
+            &service,
+            "snapshot_if_changed",
+            serde_json::json!({"version": "stale", "runId": run}),
+        )
+        .unwrap();
+        assert!(reply["snapshot"].is_null());
+        assert_eq!(reply["version"], "stale");
+        let activity = reply["activity"].as_array().unwrap();
+        assert_eq!(activity.len(), 2);
+        let prepare = activity
+            .iter()
+            .find(|entry| entry["kind"] == "workspace_prepare")
+            .unwrap();
+        assert_eq!(
+            prepare["nodes"],
+            serde_json::json!(["foundation_contract", "temporal_signal_design"])
+        );
+        let capture = activity
+            .iter()
+            .find(|entry| entry["kind"] == "source_capture")
+            .unwrap();
+        assert_eq!(capture["nodes"], serde_json::json!([]));
+    }
+    clear_activity(run, "prepare-foundation");
+    clear_activity(run, "prepare-signals");
+    clear_activity(run, "approve");
+    let idle = dispatch(
+        &service,
+        "snapshot_if_changed",
+        serde_json::json!({"runId": run}),
+    )
+    .unwrap();
+    assert_eq!(idle["activity"], serde_json::json!([]));
 }
 
 #[cfg(feature = "fixture")]

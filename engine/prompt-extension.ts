@@ -26,9 +26,11 @@ export default function (pi: ExtensionAPI) {
       if (options.forceSystemPrompt !== undefined) {
         // Respect an explicit override supplied by another extension. Such
         // overrides require separate compatibility review with Pi's projection.
-        options.forceSystemPrompt = `${options.forceSystemPrompt}\n\n${pathGuideline}`;
+        const preceding = options.forceSystemPrompt.trimEnd();
+        options.forceSystemPrompt = `${preceding}${preceding ? '\n' : ''}${pathGuideline}`;
       } else {
-        options.appendSystemPrompt = `${options.appendSystemPrompt}${options.appendSystemPrompt ? '\n\n' : ''}${pathGuideline}`;
+        const preceding = options.appendSystemPrompt.trimEnd();
+        options.appendSystemPrompt = `${preceding}${preceding ? '\n' : ''}${pathGuideline}`;
       }
     });
   }

@@ -42,7 +42,11 @@ test('production Planner writes source directly; Merger repairs node and publica
       assert.ok(label, `Missing task marker: ${prompt}`);
       const scenario = cases.get(label)!;
       const planner = body.tools?.some((tool: any) => tool.function.name === 'node');
-      const merger = prompt.includes('Resolve the current Git merge conflicts.');
+      const userTurn = messages[messages.findLastIndex((message: any) => message.role === 'user')];
+      const userInstruction = typeof userTurn.content === 'string' ? userTurn.content
+        : userTurn.content.map((part: any) => part.text ?? '').join('');
+      const continuation = userInstruction.includes('CONTINUE_PUBLICATION');
+      const merger = prompt.includes('Resolve the current Git merge conflicts.') || continuation;
       const results = messages.filter((message: any) => message.role === 'tool');
       assert.ok(results.every((result: any) => !JSON.stringify(result.content).includes('exited with code')),
         `Tool failed for ${label}: ${JSON.stringify(results)}`);
@@ -75,9 +79,33 @@ test('production Planner writes source directly; Merger repairs node and publica
           .map((message: any) => JSON.stringify(message.content)).join('\n');
         assert.ok(system.includes('You are an expert coding assistant'), 'Merger must retain the default coding prompt');
         assert.ok(system.includes('<tools>') && system.includes('<rules>'), 'Merger must retain Pi tool guidance and rules');
-        assert.ok(system.includes('Preserve valid changes. Do not modify unrelated files.'), 'Merger instructions must be appended');
-        assert.ok(system.includes('Do not discard the incoming commit.'));
-        if (!scenario.fail && results.length === 0) {
+        const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
+        assert.ok(system.includes(pathGuideline), 'all Merger turns retain the shared path convention');
+        if (continuation) {
+          assert.ok(!system.includes('Continue the previous conflict-repair conversation'), 'follow-ups must not append continuation instructions');
+          assert.ok(!system.includes('leave the working tree clean'), 'follow-ups must not append Git workflow instructions');
+          assert.ok(!system.includes('git add -f -- <paths>'), 'follow-ups must not re-append the initial collection instructions');
+          assert.ok(!system.includes('CONTINUE_PUBLICATION'), 'the follow-up belongs only in the user message');
+          assert.equal(userInstruction, `${label} CONTINUE_PUBLICATION`, 'send the user instruction unchanged');
+        } else {
+          assert.ok(system.includes('git add -f -- <paths>'), 'initial repair must force-stage ignored project paths');
+          assert.ok(system.includes('Do not stage Git/Grapher internals or managed environment/cache scopes'), 'force-staging must preserve internal/environment exclusions');
+          assert.ok(system.includes('Preserve valid changes. Do not modify unrelated files.'), 'initial Merger instructions must be appended');
+          assert.ok(system.includes('Do not discard the incoming commit.'));
+          assert.ok(system.includes(`Finish with a short, nonempty assistant summary.\\n${pathGuideline}`), 'path convention must directly follow the initial addendum without a blank line');
+        }
+        // A continued session carries the original turn's tool results, so
+        // count results after the latest user message for this turn.
+        const turnResults = messages
+          .slice(messages.findLastIndex((message: any) => message.role === 'user') + 1)
+          .filter((message: any) => message.role === 'tool');
+        if (continuation && turnResults.length === 0) {
+          // A settled publication merger's follow-up must commit its changes so
+          // the source directory stays clean for the next publication retry.
+          tool = { name: 'bash', arguments: { command:
+            'printf \'continued\\n\' > continued.txt && git add continued.txt && git -c user.name=Test -c user.email=test@localhost commit -qm continued',
+          } };
+        } else if (!scenario.fail && results.length === 0) {
           // Absolute source aliases must select the conflicted private file for
           // node Mergers, but remain source paths during publication.
           tool = { name: 'bash', arguments: { command:
@@ -250,6 +278,25 @@ test('production Planner writes source directly; Merger repairs node and publica
         assert.equal((await readFile(join(repository, 'shared.txt'), 'utf8')).trim(), kind === 'planner' ? 'planner change' : 'resolved');
         if (kind !== 'publication') assert.equal(await readFile(join(repository, 'verified.txt'), 'utf8'), 'verified');
         assert.equal(state.publication.status, 'completed');
+        if (kind === 'publication') {
+          // The publication Merger accepts follow-ups after it settles, without
+          // re-entering the publication lifecycle.
+          const continued = await api('control', { runId: state.runId, action: 'continue_merger',
+            node: 'merger', executionId: merger.id, instruction: `${label} CONTINUE_PUBLICATION` });
+          assert.equal(continued.mergers.length, 2);
+          const followUp = await until(async () => {
+            const current = await api('snapshot', { runId: state.runId });
+            return current.mergers.find((item: any) => item.id !== merger.id)?.status === 'completed' && current;
+          });
+          const attempt = followUp.mergers.find((item: any) => item.id !== merger.id);
+          assert.equal(attempt.node, 'merger');
+          assert.equal(attempt.sessionId, merger.sessionId);
+          assert.equal(normalize(attempt.worktree), normalize(merger.worktree));
+          assert.equal(followUp.phase, 'completed', 'a follow-up must not re-enter publication');
+          assert.equal(followUp.publication.status, 'completed');
+          assert.equal(await readFile(join(repository, 'continued.txt'), 'utf8'), 'continued\n');
+          if (!plain) assert.equal(git(repository, 'status', '--porcelain'), '');
+        }
         if (!plain) {
           assert.equal(git(repository, 'status', '--porcelain'), '');
           for (const execution of state.executions) git(repository, 'merge-base', '--is-ancestor', execution.after, 'HEAD');

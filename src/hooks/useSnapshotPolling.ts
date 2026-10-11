@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
-import type { Snapshot } from "../types";
+import type { RuntimeActivity, Snapshot } from "../types";
 import { runtimeService } from "../services/runtime";
 import { startVisibilityPolling } from "../services/visibilityPolling";
 import { mapWithConcurrency } from "../services/boundedRequests";
@@ -11,19 +11,30 @@ const workingPhases = new Set(["planning", "running", "publishing", "merging"]);
 export function useSnapshotPolling(
   setSnapshot: Dispatch<SetStateAction<Snapshot>>,
   observeSnapshot: (snapshot: Snapshot) => void,
-  runIds: string[], viewedRunId: string, viewedPhase: string,
+  observeActivity: (runId: string, activity: RuntimeActivity[]) => void,
+  runIds: string[], viewedRunId: string, viewedPhase: string, viewedHasActiveExecutions = false,
 ) {
   const versions = useRef(new Map<string, string>());
   const phases = useRef(new Map<string, string>());
   const revisions = useRef(new Map<string, number>());
-  const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null }) => {
+  const activeRuns = useRef(new Set<string>());
+  // Standalone publication-Merger continuations leave the Run phase completed.
+  // Their durable execution status, not the phase alone, keeps polling alive.
+  const writerRuns = useRef(new Set<string>());
+  const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers">>) => {
     if (!status.runId || !status.phase) return;
     phases.current.set(status.runId, status.phase);
+    if ([...(status.executions ?? []), ...(status.mergers ?? [])].some(item => item.status === "running")) writerRuns.current.add(status.runId);
+    else writerRuns.current.delete(status.runId);
     versions.current.delete(status.runId);
     // Actions supersede polls already in flight, even at the same event sequence.
     revisions.current.set(status.runId, (revisions.current.get(status.runId) ?? 0) + 1);
   }, []);
-  if (viewedRunId) phases.current.set(viewedRunId, viewedPhase);
+  if (viewedRunId) {
+    phases.current.set(viewedRunId, viewedPhase);
+    if (viewedHasActiveExecutions) writerRuns.current.add(viewedRunId);
+    else writerRuns.current.delete(viewedRunId);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -33,23 +44,29 @@ export function useSnapshotPolling(
     for (const id of phases.current.keys()) {
       if (retained.has(id)) continue;
       phases.current.delete(id); versions.current.delete(id); revisions.current.delete(id);
+      activeRuns.current.delete(id); writerRuns.current.delete(id);
     }
     if (!ids.length && !viewedRunId) ids.push("");
-    const delay = () => ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) ? 750 : 2500;
+    const delay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) ? 750 : 2500;
     const poll = async () => {
       // A slow/unavailable background Run cannot serialize the foreground request.
       await mapWithConcurrency(ids, 4, async id => {
         if (cancelled) return;
         const phase = phases.current.get(id);
-        if (phase && !livePhases.has(phase)) return;
+        if (phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id)) return;
         const revision = revisions.current.get(id) ?? 0;
         try {
-          const { version, snapshot } = await runtimeService.snapshotIfChanged(versions.current.get(id) ?? null, abort.signal, id || undefined);
+          const { version, snapshot, activity } = await runtimeService.snapshotIfChanged(versions.current.get(id) ?? null, abort.signal, id || undefined);
           if (cancelled || revision !== (revisions.current.get(id) ?? 0)) return;
           if (snapshot && id && snapshot.runId !== id) return;
           versions.current.set(id, version);
+          if (activity?.length) activeRuns.current.add(id);
+          else activeRuns.current.delete(id);
+          observeActivity(snapshot?.runId ?? id, activity ?? []);
           if (!snapshot?.runId) return;
           phases.current.set(snapshot.runId, snapshot.phase);
+          if ([...snapshot.executions, ...(snapshot.mergers ?? [])].some(item => item.status === "running")) writerRuns.current.add(snapshot.runId);
+          else writerRuns.current.delete(snapshot.runId);
           observeSnapshot(snapshot);
           setSnapshot(previous => previous.runId === snapshot.runId &&
             (snapshot.events.at(-1)?.sequence ?? 0) >= (previous.events.at(-1)?.sequence ?? 0) ? snapshot : previous);
@@ -61,6 +78,6 @@ export function useSnapshotPolling(
     };
     const stopPolling = startVisibilityPolling(poll, delay());
     return () => { cancelled = true; stopPolling(); abort.abort(); };
-  }, [observeSnapshot, setSnapshot, runIds, viewedRunId, viewedPhase]);
+  }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, viewedPhase, viewedHasActiveExecutions]);
   return setBackendStatus;
 }

@@ -765,15 +765,24 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// Guard a shadow checkout against edits outside this run without creating a
-/// fresh snapshot or moving its approval base.
-pub fn check_shadow_source(repository: &Path, expected_head: &str) -> Result<(), String> {
+/// Confirm a recorded source snapshot is still part of the shadow repository's
+/// history. Live working-tree edits are deliberately ignored here: node
+/// composition reads recorded snapshots, and publication commits pending user
+/// edits as its base, so user work never blocks progress.
+pub fn check_shadow_base(repository: &Path, expected_head: &str) -> Result<(), String> {
     let head = repository_git(repository, &["rev-parse", "HEAD"])?;
-    let status = repository_git(repository, &["status", "--porcelain"])?;
-    if head != expected_head || !status.is_empty() {
-        return Err("Shadow workspace changed after approval; restore the approved files or start a new run".into());
+    if head == expected_head {
+        return Ok(());
     }
-    Ok(())
+    repository_git(
+        repository,
+        &["merge-base", "--is-ancestor", expected_head, "HEAD"],
+    )
+    .map(|_| ())
+    .map_err(|_| {
+        "Shadow repository no longer descends from the approved source snapshot; start a new run"
+            .to_string()
+    })
 }
 
 /// Run Git against either a normal checkout or the existing external shadow
@@ -827,7 +836,13 @@ pub fn verify(repository: &Path) -> Result<String, String> {
             return Err("Choose the Git repository root".into());
         }
 
-        git(repository, &["rev-parse", "--verify", "HEAD"])
+        git(repository, &["rev-parse", "--verify", "HEAD"]).map_err(|error| {
+            if error.contains("Needed a single revision") || error.contains("unknown revision") {
+                "绑定的 Git 仓库还没有任何提交（HEAD 不存在）；请先完成一次提交再运行。".to_string()
+            } else {
+                error
+            }
+        })
     } else {
         if !repository.is_dir() {
             return Err(format!(
@@ -840,17 +855,7 @@ pub fn verify(repository: &Path) -> Result<String, String> {
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
 
-        let _ = git(
-            &canonical,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "add",
-                "-A",
-            ],
-        );
+        stage_scoped(&canonical, &[])?;
         let status = git(
             &canonical,
             &[
@@ -863,7 +868,7 @@ pub fn verify(repository: &Path) -> Result<String, String> {
             ],
         )?;
         if !status.trim().is_empty() {
-            let _ = git(
+            git(
                 &canonical,
                 &[
                     "--git-dir",
@@ -874,12 +879,14 @@ pub fn verify(repository: &Path) -> Result<String, String> {
                     "-m",
                     "Grapher snapshot before run",
                 ],
-            );
+            )
+            .map_err(|error| format!("无法提交工作区快照（git commit）：{error}"))?;
         }
         git(
             &canonical,
             &["--git-dir", git_dir_str, "rev-parse", "--verify", "HEAD"],
         )
+        .map_err(|error| format!("工作区快照缺少可解析的 HEAD：{error}"))
     }
 }
 
@@ -1156,12 +1163,11 @@ mod planner_symlink_tests {
     }
 }
 
-/// Legacy private-Planner checkout helper (not used by current planning).
 /// Current Partitioner/Planner sessions run in source; these helpers remain for
 /// legacy checkout/publication compatibility tests.
 /// Snapshot the source into a private Planner checkout. The source lock is held
-/// only while taking this copy, never while Pi is running. Include ignored
-/// project files (e.g. dependencies), but never Git internals or Grapher data.
+/// only while taking this copy, never while Pi is running. Include ordinary
+/// project files, but never Git internals or Grapher data.
 pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
     let base = verify(repository)?;
     prepare(repository, path, &base, &[])?;
@@ -1423,11 +1429,11 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         }
     }
 
-    // The shadow HEAD is frozen at approval. Do not silently build a graph
-    // against a different user directory if files changed since then.
-    // Publication checks again before writing back to catch later edits.
+    // Node composition only depends on the recorded source snapshot. Live
+    // edits in the user directory must not block preparation or handoff;
+    // final publication revalidates the working tree before writing back.
     if !is_standard_git(&canonical_repo) {
-        check_shadow_source(&canonical_repo, expected_source_head)?;
+        check_shadow_base(&canonical_repo, expected_source_head)?;
     }
 
     fs::create_dir_all(path).map_err(|error| error.to_string())?;
@@ -1847,52 +1853,91 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
 }
 
 pub(crate) fn stage_scoped(path: &Path, exclusions: &[String]) -> Result<(), String> {
-    if exclusions.is_empty() {
-        repository_git(path, &["add", "-A"])?;
-        return Ok(());
+    // Runtime deliberately overrides Git's ignore rules for project files:
+    // every ordinary project file becomes part of the node/source Git snapshot.
+    // Only Grapher internals, Runtime data and managed environment scopes stay
+    // outside the code snapshot.
+    let mut pathspecs = vec![
+        ":(exclude,glob).grapher*".to_string(),
+        ":(exclude,glob).grapher*/**".to_string(),
+        ":(exclude,glob)**/.grapher*".to_string(),
+        ":(exclude,glob)**/.grapher*/**".to_string(),
+    ];
+    if let (Ok(root), Ok(data)) = (path.canonicalize(), data_root().canonicalize()) {
+        if let Ok(relative) = data.strip_prefix(&root) {
+            if !relative.as_os_str().is_empty() {
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                pathspecs.push(format!(":(exclude,literal){relative}"));
+                pathspecs.push(format!(":(exclude,glob){relative}/**"));
+            }
+        }
     }
-    // Git add's negative directory pathspec can still error on an ignored
-    // tree. Enumerate the ordinary channel, including tracked deletions, and
-    // pass literal NUL-delimited paths without shell/argv size constraints.
-    let names = repository_git(
-        path,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    )?;
-    let names: std::collections::BTreeSet<_> = names
+    pathspecs.extend(exclusions.iter().map(|scope| {
+        let scope = scope.replace('\\', "/");
+        if cfg!(windows) {
+            format!(":(exclude,literal,icase){scope}")
+        } else {
+            format!(":(exclude,literal){scope}")
+        }
+    }));
+    let mut args = vec!["add".to_string(), "-f".to_string(), "-A".to_string(), "--".to_string(), ".".to_string()];
+    args.extend(pathspecs);
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    repository_git(path, &args).map(|_| ())
+}
+
+pub(crate) fn copy_ordinary_files(
+    source: &Path,
+    destination: &Path,
+    exclusions: &[String],
+    runtime_data: &Path,
+) -> Result<(), String> {
+    let source = source.canonicalize().map_err(|error| error.to_string())?;
+    let destination = destination
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let source_tracked = tracked_paths(&source)?;
+    let destination_tracked = tracked_paths(&destination)?;
+    let runtime_data = runtime_data.canonicalize().ok();
+    crate::native_copy::copy_tree(&source, &destination, |relative| {
+        let Some(name) = relative.to_str().map(|name| {
+            if cfg!(windows) {
+                name.replace('\\', "/")
+            } else {
+                name.to_owned()
+            }
+        }) else {
+            return false;
+        };
+        relative.components().any(|component| {
+            matches!(component, std::path::Component::Normal(part) if part == ".git" || part.to_string_lossy().starts_with(".grapher"))
+        }) || source_tracked.contains(&name)
+            || destination_tracked.iter().any(|tracked| {
+                tracked == &name
+                    || tracked.starts_with(&format!("{name}/"))
+                    || name.starts_with(&format!("{tracked}/"))
+            })
+            || exclusions
+                .iter()
+                .any(|scope| scope_contains(relative, Path::new(scope)))
+            || runtime_data.as_ref().is_some_and(|data| {
+                data != &source && data.starts_with(&source) && source.join(relative).starts_with(data)
+            })
+    })
+}
+
+fn tracked_paths(repository: &Path) -> Result<std::collections::BTreeSet<String>, String> {
+    Ok(repository_git(repository, &["ls-files", "-z", "--cached"])?
         .split('\0')
-        .filter(|name| {
-            !name.is_empty()
-                && !exclusions
-                    .iter()
-                    .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            if cfg!(windows) {
+                name.replace('\\', "/")
+            } else {
+                name.to_owned()
+            }
         })
-        .collect();
-    if names.is_empty() {
-        return Ok(());
-    }
-    let metadata = repository_git(
-        path,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    let temporary = PathBuf::from(metadata).join(format!("grapher-stage-{}", uuid::Uuid::new_v4()));
-    let bytes: Vec<u8> = names
-        .iter()
-        .flat_map(|name| format!(":(literal){name}\0").into_bytes())
-        .collect();
-    fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
-    let argument = format!(
-        "--pathspec-from-file={}",
-        crate::native::host_path(&temporary).to_string_lossy()
-    );
-    let result = repository_git(path, &["add", "-A", &argument, "--pathspec-file-nul"]);
-    let _ = fs::remove_file(temporary);
-    result.map(|_| ())
+        .collect())
 }
 
 /// Exclusions never alter source .gitignore or unstage unrelated user changes.
@@ -1971,3 +2016,7 @@ pub fn snapshot_execution_for_run(
         snapshot_node_for_run(&canonical_path, &canonical_repo, node_name, run_id)
     }
 }
+
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod workspace_tests;

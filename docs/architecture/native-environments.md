@@ -56,16 +56,10 @@ replace that contract. Draft/model-setting changes cannot override it. Future-Ru
 projections/default saves do not carry environment policies from a previous Run.
 Existing event-backed Run policies and result descriptors remain intact.
 
-Legacy Runs without an admission event retain the original
-[Git/ignored-resource contract](workspace-snapshots-and-feedback.md), including
-unapproved saved drafts. Legacy explicit policies remain readable for replay,
-descriptors and compatibility tests; they are not an exposed configuration
-workflow. Legacy `automatic-managed` policies remain eager and frozen. Automatic
-device/quota policy synthesis and complete package-manager coverage are **not
-implemented**; lazy discovery is limited to the supported native tool adapters.
+Legacy managed-environment policies and scoped evidence remain readable for replay, descriptors and compatibility tests; they are not an exposed configuration workflow. Legacy `automatic-managed` policies remain eager and frozen. Automatic device/quota policy synthesis and complete package-manager coverage are **not implemented**; lazy discovery is limited to the supported native tool adapters. See the [workspace directory contract](workspace-snapshots-and-feedback.md) for ordinary project files.
 
 The internal frozen policy fixes platform/architecture, baseline, initial
-ownership scopes, rebuildable caches, layout and discovery rules. A verified
+managed-environment scopes, rebuildable caches, layout and discovery rules. A verified
 binding adds its private prefix to the scopes through versioned L, not by editing
 the Run policy. Legacy initializers/launch-file rules retain their old semantics.
 Traversal, overlapping paths, Runtime metadata and tracked-file conflicts fail.
@@ -103,22 +97,9 @@ Immutable E snapshots and L records are retained under
 same SQLite transaction as completion/queued feedback; historical executions
 stay unchanged. E/L changes count even when the Git head is unchanged.
 
-New manifests include integrity checks. Legacy ordinary-resource snapshots remain
-readable. Missing/damaged snapshots fail before materialization. Byte content is
-verified, not trusted only from size/mtime. Event-actor reference/manifest checks
-stay metadata-only; native writer byte/ABI checks and managed publication
-preflight run outside the Run mutex. Verification does not save new blobs or
-repair missing history from a live directory. A failed database commit may leave
-unreferenced storage but never a completion referring to an incomplete seal.
+New managed-environment manifests include integrity checks. Legacy environment records and scoped manifests remain readable. Missing/damaged managed-environment snapshots fail before materialization. Byte content is verified, not trusted only from size/mtime. Event-actor reference/manifest checks stay metadata-only; native writer byte/ABI checks and managed publication preflight run outside the Run mutex. Verification does not save new blobs or repair missing history from a live directory. A failed database commit may leave unreferenced storage but never a completion referring to an incomplete seal.
 
-Failed initialization/execution retries retain their selected partial directory.
-A missing failed view blocks, rather than silently restoring an old snapshot.
-Historical edits restore their recorded input. Dropping a dynamically added
-prefix outside the frozen ownership roots is currently refused **before touching
-the view**, rather than leaving or silently reclassifying an obsolete environment;
-complete dynamic-scope rollback remains open. Default `.venv`/`.environments`
-rollback and legacy frozen-scope behavior are unchanged. A missing successful
-terminal directory rebuilds the **current** composite at its fixed path.
+Legacy managed environment retry retains its selected partial scope directory. Missing failed environment views block rather than silently restoring an old scope snapshot. Historical conversation edits keep the established Git rollback; ordinary files are neither rolled back nor checked against a `before-*` snapshot. Dropping a dynamically added prefix outside the frozen ownership roots is currently refused **before touching the view**, rather than leaving or silently reclassifying an obsolete environment; complete dynamic-scope rollback remains open. Default `.venv`/`.environments` rollback and legacy frozen-scope behavior are unchanged. A missing successful terminal directory rebuilds the **current managed environment composite** at its fixed path; ordinary files have no reconstruction guarantee.
 
 Feedback retains pinned sender results, generation/budget checks and
 **drain-before-handoff**. It forks only the receiver's own history. Failed and
@@ -183,7 +164,7 @@ ROCm/MPS support or arbitrary CUDA framework compatibility.
 
 ## Publication and model-free execution
 
-Code/ordinary resources keep existing publication rules. Managed scopes/caches
+Code/Git state follows the Git publication contract. Managed scopes/caches
 are **not copied back into source**; source environments are not removed,
 overwritten or activated. Publication commits a launchable descriptor. Graph
 completion still requires successful publication.

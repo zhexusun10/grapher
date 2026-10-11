@@ -123,6 +123,41 @@ test('mandatory workspace policy reuses native ESM code but binds fresh tools an
   }
 });
 
+test('execution path guidance directly follows existing prompts without a blank line', async () => {
+  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  const guideline = 'Use project-root-relative paths in Bash commands and project files.';
+  try {
+    for (const role of ['node', 'merger', 'planner', 'partition']) {
+      for (const kind of ['source', 'graph']) {
+        Object.assign(process.env, { GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: kind,
+          GRAPHER_ORIGINAL_ROOT: process.cwd(), GRAPHER_SOURCE_ALIAS: process.cwd() });
+        const hooks = new Map<string, any>();
+        workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
+        const hook = hooks.get('before_agent_start');
+        if (role === 'planner' || role === 'partition') {
+          assert.equal(hook, undefined, `${role}: no execution path addendum`);
+          continue;
+        }
+        assert.ok(hook, `${role}/${kind}: path addendum registered`);
+        for (const preceding of ['', 'Task instructions.', 'Task instructions.\n\n']) {
+          const expected = preceding.trimEnd() ? `${preceding.trimEnd()}\n${guideline}` : guideline;
+          const options = { appendSystemPrompt: preceding, forceSystemPrompt: undefined };
+          assert.equal(await hook({ systemPromptOptions: options }), undefined);
+          assert.equal(options.appendSystemPrompt, expected, `${role}/${kind}: append prompt spacing`);
+          assert.equal(options.forceSystemPrompt, undefined, 'preserve structured prompts for pi-trim');
+          const forced = { appendSystemPrompt: 'Unchanged addendum.', forceSystemPrompt: preceding };
+          assert.equal(await hook({ systemPromptOptions: forced }), undefined);
+          assert.equal(forced.forceSystemPrompt, expected, `${role}/${kind}: forced prompt spacing`);
+          assert.equal(forced.appendSystemPrompt, 'Unchanged addendum.');
+        }
+      }
+    }
+  } finally {
+    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+  }
+});
+
 test('bundled continuity defaults on, supports persistent removal/restore and obeys role/CLI exclusions', async () => {
   const f = fixture();
   try {

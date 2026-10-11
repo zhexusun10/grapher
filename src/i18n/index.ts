@@ -109,9 +109,64 @@ function annotateProviderError(message: string, language: Locale): string {
   return text;
 }
 
+const W303_REGEX =
+  /^(?:W303:\s*)?If\s+<FEEDBACK>\s+from\s+(.+?)\s+to\s+(.+?)\s+is\s+applied,\s+the\s+target\s+and\s+dependency\s+descendants\s+will\s+be\s+invalidated:\s*(.+?)\.\s*Completed\s+results\s+must\s+be\s+recomputed;\s*(.+?)\s+continues\s+its\s+conversation\.\s*Nodes\s+outside\s+this\s+set\s+are\s+unaffected\.?$/i;
+
+const W301_REGEX =
+  /^(?:W301:\s*)?Nodes\s+(.+?)\s+have\s+identical\s+task\s+text;\s*they\s+may\s+duplicate\s+work\.\s*Confirm\s+that\s+this\s+is\s+intentional\.?$/i;
+
+const W302_REGEX =
+  /^(?:W302:\s*)?(.+?)\s+mentions\s+<FEEDBACK>\s+but\s+has\s+no\s+outgoing\s+feedback\s+edge;\s*the\s+marker\s+cannot\s+send\s+feedback\.?$/i;
+
+const GENERIC_WARNING_CODE_REGEX = /^W\d+:\s*(.*)$/;
+
+/** Localize execution graph plan warnings and strip machine diagnostic codes (e.g. W303). */
+export function localizePlanWarning(warning: string, language: Locale = locale): string {
+  const message = (warning ?? "").trim();
+  const m303 = message.match(W303_REGEX);
+  if (m303) {
+    return translate(
+      language,
+      "若应用从 {0} 到 {1} 的 <FEEDBACK>，目标节点及其依赖后代将被置为失效：{2}。已完成的结果必须重新计算；{1} 将继续其会话。该集合之外的节点不受影响。",
+      m303[1],
+      m303[2],
+      m303[3]
+    );
+  }
+  const m301 = message.match(W301_REGEX);
+  if (m301) {
+    return translate(
+      language,
+      "节点 {0} 包含相同的任务描述，可能存在重复工作。请确认这是否符合预期。",
+      m301[1]
+    );
+  }
+  const m302 = message.match(W302_REGEX);
+  if (m302) {
+    return translate(
+      language,
+      "{0} 提及了 <FEEDBACK>，但没有向外发出的反馈边；该标记无法发送反馈。",
+      m302[1]
+    );
+  }
+  const generic = message.match(GENERIC_WARNING_CODE_REGEX);
+  if (generic) {
+    return generic[1];
+  }
+  return message;
+}
+
 /** Localize application errors, never conversation content or tool/model output. */
 export function localizeError(error: unknown, language: Locale = locale): string {
   const message = error instanceof Error ? error.message : String(error ?? "");
+  if (
+    W303_REGEX.test(message) ||
+    W301_REGEX.test(message) ||
+    W302_REGEX.test(message) ||
+    GENERIC_WARNING_CODE_REGEX.test(message)
+  ) {
+    return localizePlanWarning(message, language);
+  }
   if (language === "zh-CN") return annotateProviderError(message, language);
   if (!/\p{Script=Han}/u.test(message)) return annotateProviderError(message, language);
   const prefix = message.startsWith("Error: ") ? "Error: " : "";

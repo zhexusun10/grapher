@@ -66,7 +66,7 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "publication": state.publication, "events": [], "approved": state.approved,
         "paused": state.paused, "stopRequested": state.stop_requested, "phase": state.phase, "base": state.base,
         "publishedHead": state.published_head, "feedbackCounts": state.feedback_counts,
-        "pendingFeedback": state.pending_feedback, "sourceFiles": state.source_files,
+        "pendingFeedback": state.pending_feedback,
         "environmentPolicy": state.environment_policy,
         "environmentBaseline": state.environment_baseline, "publishedResult": state.published_result,
         "resultExecution": state.result_execution,

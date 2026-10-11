@@ -756,7 +756,8 @@ fn run_pi_with_timeout(
     // can keep Node's provider handles alive for seconds after the route text.
     let rpc_agent = (request.role == PiRole::NodeAgent
         || request.role == PiRole::Planner
-        || request.role == PiRole::Partitioner)
+        || request.role == PiRole::Partitioner
+        || request.role == PiRole::Merger)
         && (!cfg!(feature = "fixture")
             || request
                 .environment

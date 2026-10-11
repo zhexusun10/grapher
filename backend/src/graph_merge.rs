@@ -1,6 +1,6 @@
 use crate::{
     engine::{run_pi, PiModelConfig, PiRequest, PiRole},
-    model::{now, Config, EventKind, Execution},
+    model::{now, Config, EventKind, Execution, ImageAttachment},
     workspace::{self, repository_git as git},
 };
 use std::{
@@ -10,8 +10,11 @@ use std::{
 };
 use uuid::Uuid;
 
+const MERGER_CONTEXT_INSTRUCTIONS: &str = "The user query below is background context for the desired project result, not the task to execute in this session. Your current task is conflict repair using the available file and Bash tools.";
+const MERGER_COLLECTION_INSTRUCTIONS: &str = "Project snapshots include project files ignored by .gitignore. Stage resolved or changed project paths with git add -f -- <paths>, even when they match .gitignore. Do not stage Git/Grapher internals or managed environment/cache scopes. Finish with a short, nonempty assistant summary.";
+
 fn merger_prompt(query: &str) -> String {
-    format!("User query:\n{query}\n\nResolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.")
+    format!("{MERGER_CONTEXT_INSTRUCTIONS}\n\nUser query:\n{query}\n\nResolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.\n{MERGER_COLLECTION_INSTRUCTIONS}")
 }
 
 fn pending(repository: &Path) -> Option<String> {
@@ -35,8 +38,9 @@ fn finish_merge(repository: &Path, head: &str, exclusions: &[String]) -> Result<
 }
 
 /// Use the same Git merge semantics for a checkout and an external shadow repo.
-/// Do not resnapshot the user's files here: local changes must block publication.
-/// Retrying may continue an existing merge only if its head belongs to this run.
+/// The user's source directory is authoritative: pending user edits are
+/// committed as the publication base, never rejected or discarded. Retrying
+/// may continue an existing merge only if its head belongs to this run.
 pub fn merge_graph(
     repository: &Path,
     heads: &[String],
@@ -58,9 +62,10 @@ pub(crate) fn merge_graph_scoped(repository: &Path, heads: &[String], exclusions
         }
         finish_merge(repository, &head, exclusions)?;
     }
-    if !workspace::repository_status(repository, exclusions)?.is_empty() {
-        return Err("User directory changed during execution. Preserve or reconcile local changes, then retry publication.".into());
-    }
+    // Commit pending user edits as the base before node results merge on top.
+    // The user's work is always accepted; a real conflict with node results is
+    // handled by the ordinary merge/Merger path below, not by refusing here.
+    workspace::snapshot_repository_scoped(repository, exclusions)?;
     // Complete a pending merge above before pruning, so publication retries
     // retain their original incoming commit even if it is now redundant.
     for head in &workspace::independent_heads(repository, heads)? {
@@ -220,13 +225,141 @@ pub fn resolve_with_merger_for_node(
     result
 }
 
+/// Continue a settled publication Merger conversation. The new execution keeps
+/// the previous Pi session and workspace (the source directory) so the user can
+/// append follow-ups without a new Merger-specific system prompt; it does not
+/// re-enter the publication state machine.
+///
+/// The caller has already emitted `MergerStarted` for `execution` under the Run
+/// lock and verified that no other execution owns the workspace. This function
+/// only drives the model turn and records its terminal event.
+pub fn continue_merger_for_node(
+    previous: &Execution,
+    execution: &Execution,
+    instruction: &str,
+    images: Option<&[ImageAttachment]>,
+    config: &Config,
+    session_dir: &Path,
+    mut emit: impl FnMut(EventKind) -> Result<(), String>,
+) -> Result<(), String> {
+    let canonical = Path::new(&execution.worktree)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let repository = canonical.as_path();
+    let id = execution.id.clone();
+    // Continue Pi's session file in the original Merger directory. The native
+    // process identity is the new execution so it stays steerable in its own right.
+    let environment = if workspace::is_standard_git(repository) {
+        vec![("GRAPHER_NODE_EXECUTION_ID", id.clone())]
+    } else {
+        vec![
+            (
+                "GIT_DIR",
+                crate::native::host_path(&workspace::shadow_repo_dir(repository)?)
+                    .to_string_lossy()
+                    .into(),
+            ),
+            ("GIT_WORK_TREE", crate::native::host_path(repository).to_string_lossy().into()),
+            ("GRAPHER_NODE_EXECUTION_ID", id.clone()),
+        ]
+    };
+    let mut output_error = None;
+    let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
+    let merger_config = merger_model_cfg.effective_config(config);
+    let mut extra_args = vec!["--no-context-files"];
+    if let Some(thinking) = &merger_model_cfg.thinking {
+        extra_args.push("--thinking");
+        extra_args.push(thinking.as_str());
+    }
+    let result = run_pi(
+        PiRequest {
+            role: PiRole::Merger,
+            config: &merger_config,
+            cwd: repository,
+            task: instruction,
+            session_dir,
+            extension: None,
+            tools: Some("read,write,bash,edit"),
+            session_id: Some(&previous.session_id),
+            extra_args,
+            environment,
+            system_prompt: None,
+            images,
+        },
+        |text| {
+            if let Err(error) = emit(EventKind::Output {
+                execution_id: id.clone(),
+                text,
+            }) {
+                output_error = Some(error);
+            }
+        },
+    )
+    .and_then(|_| {
+        if let Some(error) = output_error {
+            return Err(format!("Cannot persist merger output: {error}"));
+        }
+        let exclusions = config.environment.as_ref().map(|e| e.exclusions()).unwrap_or_default();
+        if let Some(head) = pending(repository) {
+            // The user asked the Merger to continue an unresolved merge.
+            if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
+                return Err("Merger left unresolved conflicts".into());
+            }
+            finish_merge(repository, &head, &exclusions)
+        } else if !workspace::repository_status(repository, &exclusions)?.is_empty() {
+            Err("Merger left uncommitted changes; commit or discard them".into())
+        } else {
+            Ok(())
+        }
+    });
+    match &result {
+        Ok(()) => {
+            let head = git(repository, &["rev-parse", "HEAD"])?;
+            eprintln!("[Grapher] [Merger] Continued publication repair (HEAD: {head})");
+            emit(EventKind::MergerFinished {
+                execution_id: id,
+                head, output_bytes: 0, metrics: None,
+            })?;
+        }
+        Err(error) => {
+            eprintln!("[Grapher] [Merger] Publication continuation failed: {error}");
+            emit(EventKind::MergerFailed {
+                execution_id: id,
+                error: error.clone(), output_bytes: 0, metrics: None,
+            })?;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn merger_prompt_preserves_task_context_without_graph_specific_terminology() {
         assert_eq!(
             super::merger_prompt("Combine results"),
-            "User query:\nCombine results\n\nResolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit."
+            format!("{}\n\nUser query:\nCombine results\n\nResolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.\n{}", super::MERGER_CONTEXT_INSTRUCTIONS, super::MERGER_COLLECTION_INSTRUCTIONS)
         );
+    }
+
+    #[test]
+    fn merger_treats_original_planning_request_as_context_not_its_current_task() {
+        let query = "Create two nodes with the node tool, then stop planning.";
+        let prompt = super::merger_prompt(query);
+        assert!(prompt.starts_with(super::MERGER_CONTEXT_INSTRUCTIONS));
+        assert!(prompt.contains(&format!("User query:\n{query}")));
+        assert!(prompt.contains("not the task to execute in this session"));
+        assert!(prompt.contains("Your current task is conflict repair"));
+        assert!(prompt.ends_with(super::MERGER_COLLECTION_INSTRUCTIONS));
+    }
+
+    #[test]
+    fn merger_prompt_force_stages_ignored_project_paths_without_collecting_internal_scopes() {
+        let prompt = super::merger_prompt("resolve");
+        assert!(prompt.contains("project files ignored by .gitignore"));
+        assert!(prompt.contains("git add -f -- <paths>"));
+        assert!(prompt.contains("Do not stage Git/Grapher internals or managed environment/cache scopes"));
+        assert!(prompt.contains("short, nonempty assistant summary"));
+        assert!(!prompt.contains("git add -f -A"), "Merger must stage explicit project paths, not all environment files");
     }
 }

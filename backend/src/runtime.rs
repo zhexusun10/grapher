@@ -27,8 +27,9 @@ pub struct Job {
     pub feedback_workspace: Option<FeedbackWorkspace>,
     /// The selected worktree already contains the inherited commit; do not rebuild it from refs.
     pub inherit_workspace: bool,
-    pub file_versions: Vec<String>,
-    pub previous_file_version: Option<String>,
+    /// Physical baseline for one-time copies of files that are outside the
+    /// recorded Git commit; normal project outputs are inherited through Git.
+    pub copy_from_workspace: Option<String>,
     pub history_edit: bool,
     pub feedback_source: bool,
     pub expected_source_head: String,
@@ -376,6 +377,7 @@ impl Runtime {
     }
 
     pub fn retry_publication(&mut self) -> Result<(), String> {
+        self.require_current_file_contract()?;
         if self.state.phase != "publication_failed" {
             return Err("Only failed publication can be retried".into());
         }
@@ -405,6 +407,11 @@ impl Runtime {
                 .nodes
                 .values()
                 .any(|node| node.status == "running")
+            || self
+                .state
+                .mergers
+                .iter()
+                .any(|merger| merger.status == "running")
     }
 
     /// Keep sessions for follow-ups, but persist workspace cleanup before any
@@ -520,6 +527,7 @@ impl Runtime {
         };
         if matches!(target.phase.as_str(), "planning" | "publishing" | "merging")
             || target.nodes.values().any(|node| node.status == "running")
+            || target.mergers.iter().any(|merger| merger.status == "running")
         {
             return Err("Cannot delete a running execution".into());
         }
@@ -660,6 +668,41 @@ impl Runtime {
         }
     }
 
+    fn uses_legacy_file_channel(&self) -> bool {
+        self.state.source_files.is_some()
+            || self.state.nodes.values().any(|node| {
+                node.legacy_files_override.is_some()
+                    || node.legacy_files_version.is_some()
+                    || node.legacy_baseline_files_version.is_some()
+                    || node.legacy_files_changed
+                    || node.result.as_ref().is_some_and(|result| !result.resource_refs.is_empty())
+            })
+            || self.state.executions.iter().any(|execution| {
+                execution.input.as_ref().is_some_and(|result| !result.resource_refs.is_empty())
+                    || execution.result.as_ref().is_some_and(|result| !result.resource_refs.is_empty())
+            })
+            || self.state.published_result.as_ref().is_some_and(|descriptor| {
+                !descriptor.result.resource_refs.is_empty()
+            })
+            || self.state.events.iter().any(|event| match &event.kind {
+                EventKind::SourceFilesRecorded { .. } | EventKind::WorkspaceFilesChanged { .. } => true,
+                EventKind::WorkspaceResolved { files_version, .. } => files_version.is_some(),
+                _ => false,
+            })
+    }
+
+    fn legacy_file_channel_error(&self) -> String {
+        "This saved Run uses legacy ignored-file snapshots and is read-only; start a new Run to use physical-directory workspace inheritance".into()
+    }
+
+    fn require_current_file_contract(&self) -> Result<(), String> {
+        if self.uses_legacy_file_channel() {
+            Err(self.legacy_file_channel_error())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Approval stays immutable; later Planner writes/publications advance the
     /// inputs of future jobs without replacing an in-flight node's workspace.
     fn latest_source_head(&self) -> &str {
@@ -722,13 +765,6 @@ impl Runtime {
         Ok(paths)
     }
 
-    fn files(&self) -> Result<crate::workspace_files::Files, String> {
-        Ok(
-            crate::workspace_files::Files::new(&self.root, &self.state.run_id)?
-                .with_exclusions(&self.exclusions()?),
-        )
-    }
-
     fn environments(&self) -> Result<Option<crate::environment::Environments>, String> {
         self.state
             .config
@@ -741,41 +777,20 @@ impl Runtime {
     }
 
     pub(crate) fn capture_planner_source(&mut self) -> Result<(), String> {
+        self.require_current_file_contract()?;
         let repository = resolve_repository(
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
         let head = workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?;
-        self.record_source_files(&repository, &head)?;
         if head != self.latest_source_head() {
             self.emit(EventKind::SourceSnapshotted { head })?;
         }
         Ok(())
     }
 
-    fn record_source_files(&mut self, repository: &Path, head: &str) -> Result<(), String> {
-        if self.is_serial() {
-            return Ok(());
-        }
-        let files = self.files()?;
-        let parents = self
-            .state
-            .source_files
-            .as_ref()
-            .filter(|source| files.exists(&source.version))
-            .map(|source| vec![source.version.clone()])
-            .unwrap_or_default();
-        let version = Uuid::new_v4().to_string();
-        files.capture(repository, &version, head, &parents)?;
-        self.emit(EventKind::SourceFilesRecorded {
-            files: SourceFiles {
-                head: head.into(),
-                version,
-            },
-        })
-    }
-
     pub fn approve(&mut self) -> Result<(), String> {
+        self.require_current_file_contract()?;
         if self.state.phase != "awaiting_approval" {
             return Err("Only a compiled, unapproved graph can be approved".into());
         }
@@ -813,14 +828,14 @@ impl Runtime {
                 self.emit(EventKind::EnvironmentInitialized { result })?;
             }
         }
-        // Planning writes directly to source. Freeze the actual files only now,
-        // after planning and approval, before any node workspace is allocated.
+        // Planning writes directly to source. Freeze the complete project Git
+        // snapshot only after planning and approval; managed scopes stay outside it.
         let base = workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?;
-        self.record_source_files(&repository, &base)?;
         self.emit(EventKind::Approved { base })
     }
 
     pub fn edit_draft_graph(&mut self, graph: Graph, mut config: Config) -> Result<(), String> {
+        self.require_current_file_contract()?;
         if self.state.run_id.is_empty()
             || self.state.approved
             || !matches!(self.state.phase.as_str(), "rejected" | "awaiting_approval")
@@ -863,6 +878,7 @@ impl Runtime {
         planning_id: String,
         planning: PlanningSummary,
     ) -> Result<(), String> {
+        self.require_current_file_contract()?;
         if self.state.approved {
             return self.revise_graph(graph, planning);
         }
@@ -923,6 +939,7 @@ impl Runtime {
     /// Apply a planner revision without discarding unrelated work. The caller
     /// must wait for any affected in-flight execution before replacing the graph.
     pub fn revise_graph(&mut self, graph: Graph, planning: PlanningSummary) -> Result<(), String> {
+        self.require_current_file_contract()?;
         if !self.state.approved
             || self.is_serial()
             || matches!(
@@ -967,7 +984,6 @@ impl Runtime {
         // Capture the real source after Planner's native writes. Persist the
         // input head with the revision so reloads cannot fall back to old files.
         let source_head = workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?;
-        self.record_source_files(&repository, &source_head)?;
         self.emit(EventKind::GraphRevised {
             graph,
             planning_id: planning.planning_id.clone(),
@@ -1092,12 +1108,6 @@ impl Runtime {
             })
             .ok_or("Select an active node message to edit")?
             .clone();
-        if !self.is_serial() && self.state.source_files.is_some() {
-            let files = self.files()?;
-            if !files.exists(&format!("before-{}", anchor.id)) {
-                return Err("Historical ignored-file snapshot is unavailable; use a new follow-up from the current source instead".into());
-            }
-        }
         if let Some(store) = self.environments()? {
             let input = anchor
                 .input
@@ -1191,6 +1201,7 @@ impl Runtime {
         if !self.state.nodes.contains_key(node) {
             return Err("Select a node".into());
         }
+        self.require_current_file_contract()?;
         let affected = downstream(&self.state.graph, node);
         if self.state.executions.iter().any(|execution| {
             execution.status == "running"
@@ -1204,12 +1215,15 @@ impl Runtime {
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
         if !self.is_serial() && !workspace::is_standard_git(&repository) {
-            workspace::check_shadow_source(&repository, self.latest_source_head())?;
+            // Explicit node updates must not be blocked by live user edits;
+            // they only require the recorded source snapshot to still exist.
+            workspace::check_shadow_base(&repository, self.latest_source_head())?;
         }
         Ok(())
     }
 
     pub fn resolved(&mut self, node: &str) -> Result<(), String> {
+        self.require_current_file_contract()?;
         resolve_repository(
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
@@ -1238,45 +1252,13 @@ impl Runtime {
         workspace::verify_prepared_ancestor(path, &execution.before)?;
         let head =
             workspace::snapshot_node_for_run(path, &repository, node, Some(&self.state.run_id))?;
-        let mut files_version = None;
-        if self.state.nodes[node]
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("ignored"))
-        {
-            let files = self.files()?;
-            let mut parents = self
-                .state
-                .source_files
-                .as_ref()
-                .map(|source| vec![source.version.clone()])
-                .unwrap_or_default();
-            let mut inputs = self.parents(node);
-            inputs.push(node.into());
-            for name in inputs {
-                if let Some(version) = &self.state.nodes[&name].files_version {
-                    if files.exists(version) {
-                        parents.push(version.clone());
-                    }
-                }
-            }
-            if let Some(input) = &self.state.nodes[node].feedback_workspace {
-                let version = format!("after-{}", input.source_execution_id);
-                if files.exists(&version) {
-                    parents.push(version);
-                }
-            }
-            let version = Uuid::new_v4().to_string();
-            files.capture(path, &version, &head, &parents)?;
-            files_version = Some(version);
-        }
         // This was a preparation failure, not a completed node task. Commit
         // the resolved inputs without emitting a fictitious Finished event.
         self.emit(EventKind::WorkspaceResolved {
             execution_id: execution.id,
             head,
             nodes: downstream(&self.state.graph, node).into_iter().collect(),
-            files_version,
+            files_version: None,
         })
     }
 
@@ -1358,18 +1340,9 @@ impl Runtime {
         {
             return Ok(Vec::new());
         }
+        self.require_current_file_contract()?;
         self.drain_feedback()?;
         let config = self.state.config.clone().ok_or("Missing config")?;
-        if !self.is_serial() {
-            let files = self.files()?;
-            if self.state.source_files.as_ref().is_none_or(|source| {
-                source.head != self.latest_source_head() || !files.exists(&source.version)
-            }) {
-                let repository = resolve_repository(&self.root, &config)?;
-                let head = self.latest_source_head().to_owned();
-                self.record_source_files(&repository, &head)?;
-            }
-        }
         // Check before emitting Started or allocating workspaces, including jobs
         // resumed without a UI request. perform() checks again before filesystem work.
         resolve_repository(&self.root, &config)?;
@@ -1609,24 +1582,33 @@ impl Runtime {
                     .collect();
                 let inherited_parent = parent_executions.iter().find(|execution| {
                     let path = Path::new(&execution.worktree);
-                    path.is_dir() && !busy(path)
+                    self.has_single_consumer(&execution.node)
+                        && path.is_dir()
+                        && !busy(path)
                 });
                 let available_parent = inherited_parent.or_else(|| {
-                    parent_executions
-                        .iter()
-                        .find(|execution| !busy(Path::new(&execution.worktree)))
+                    parent_executions.iter().find(|execution| {
+                        self.has_single_consumer(&execution.node)
+                            && !busy(Path::new(&execution.worktree))
+                    })
                 });
                 if let Some(parent) = available_parent {
                     // A one-to-one edge is a physical handoff. Fan-in folds all
                     // dependency lineages into the selected parent's live slot.
                     if parent_executions.len() > 1 {
                         workspace_lineage.extend(self.dependency_ancestors(&node.name));
-                    } else if self.has_single_consumer(&parent.node) {
+                    } else {
                         workspace_lineage.extend(parent.workspace_lineage.iter().cloned());
                         workspace_lineage.insert(parent.node.clone());
                     }
                     let selected_path = if inherited_parent.is_some() {
                         parent.worktree.clone()
+                    } else if parent_executions.len() == 1
+                        && !self.has_single_consumer(&parent.node)
+                    {
+                        // Fan-out branches must never claim the same parent slot:
+                        // allocate each private directory and copy the parent once.
+                        fresh_path()
                     } else {
                         self.idle_workspace_path()
                             .map(|path| path.to_string_lossy().into())
@@ -1643,11 +1625,49 @@ impl Runtime {
                 } else {
                     if parent_executions.len() > 1 {
                         workspace_lineage.extend(self.dependency_ancestors(&node.name));
+                    } else if let Some(parent) = parent_executions.first() {
+                        if self.has_single_consumer(&parent.node) {
+                            workspace_lineage.extend(parent.workspace_lineage.iter().cloned());
+                            workspace_lineage.insert(parent.node.clone());
+                        }
                     }
                     self.idle_workspace_path()
                         .map(|path| path.to_string_lossy().into())
                         .unwrap_or_else(fresh_path)
                 }
+            };
+            let copy_from_workspace = if !self.is_serial() && !Path::new(&worktree).is_dir() {
+                if feedback_workspace.is_some() {
+                    None
+                } else if parent_names.is_empty() {
+                    Some(
+                        resolve_repository(&self.root, &config)?
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                } else if let Some(terminal) = shared_terminal.filter(|terminal| {
+                    !busy(Path::new(&terminal.worktree))
+                        && Path::new(&terminal.worktree).is_dir()
+                }) {
+                    Some(terminal.worktree.clone())
+                } else if let Some(previous) = resume.filter(|previous| {
+                    !busy(Path::new(&previous.worktree))
+                        && Path::new(&previous.worktree).is_dir()
+                }) {
+                    Some(previous.worktree.clone())
+                } else {
+                    parent_names
+                        .iter()
+                        .filter_map(|parent| self.latest_node_execution(parent))
+                        .find(|execution| {
+                            (!busy(Path::new(&execution.worktree))
+                                || parent_names.len() == 1 && !self.has_single_consumer(&execution.node))
+                                && Path::new(&execution.worktree).is_dir()
+                        })
+                        .map(|execution| execution.worktree.clone())
+                }
+            } else {
+                None
             };
             workspace_lineage.insert(node.name.clone());
             if self
@@ -1731,73 +1751,7 @@ impl Runtime {
                 .edges
                 .iter()
                 .any(|edge| edge.feedback && edge.from == node.name);
-            let mut file_versions = Vec::new();
-            let mut previous_file_version = None;
             let history_edit = state.edit_execution_id.is_some();
-            if !self.is_serial() {
-                let files = self.files()?;
-                if let Some(source) = &self.state.source_files {
-                    file_versions.push(source.version.clone());
-                }
-                for parent in self.parents(&node.name) {
-                    if let Some(version) = &self.state.nodes[&parent].files_version {
-                        if files.exists(version) {
-                            file_versions.push(version.clone());
-                        }
-                    }
-                }
-                previous_file_version = if let Some(version) = &state.files_override {
-                    Some(version.clone())
-                } else if let Some(input) = &feedback_workspace {
-                    Some(format!("after-{}", input.source_execution_id))
-                } else if let Some(input) = &state.feedback_workspace {
-                    self.state
-                        .executions
-                        .iter()
-                        .rev()
-                        .find(|previous| {
-                            previous.node == node.name
-                                && previous.worktree == input.worktree
-                                && previous.completed_at.is_some()
-                        })
-                        .map(|previous| {
-                            let after = format!("after-{}", previous.id);
-                            if files.exists(&after) {
-                                after
-                            } else {
-                                format!("before-{}", previous.id)
-                            }
-                        })
-                        .filter(|version| files.exists(version))
-                        .or_else(|| Some(format!("after-{}", input.source_execution_id)))
-                } else if let Some(previous) = resume {
-                    let after = format!("after-{}", previous.id);
-                    if state.edit_execution_id.is_some() || !files.exists(&after) {
-                        Some(format!("before-{}", previous.id))
-                    } else {
-                        Some(after)
-                    }
-                } else {
-                    None
-                }
-                .filter(|version| files.exists(version));
-                if previous_file_version.is_none() {
-                    previous_file_version = state
-                        .files_version
-                        .clone()
-                        .filter(|version| files.exists(version));
-                }
-                if previous_file_version.is_none() {
-                    previous_file_version = state
-                        .feedback_workspace
-                        .as_ref()
-                        .map(|input| format!("after-{}", input.source_execution_id))
-                        .filter(|version| files.exists(version));
-                }
-                if let Some(version) = &previous_file_version {
-                    file_versions.push(version.clone());
-                }
-            }
             let mut environment_input = None;
             let preserve_failed_environment = !history_edit
                 && resume.is_some_and(|previous| {
@@ -1872,7 +1826,6 @@ impl Runtime {
                         );
                     }
                     store.validate_result_metadata(&selected)?;
-                    self.files()?.validate(&selected.resource_refs)?;
                     if store.requires_fixed_layout(&selected.launch_ref)?
                         && selected
                             .layout
@@ -1886,11 +1839,6 @@ impl Runtime {
                 })();
                 match selected {
                     Ok(input) => {
-                        file_versions.extend(input.resource_refs.iter().cloned());
-                        if history_edit {
-                            file_versions = input.resource_refs.clone();
-                            previous_file_version = input.resource_refs.last().cloned();
-                        }
                         environment_input = Some(input);
                     }
                     Err(error) => {
@@ -1926,8 +1874,7 @@ impl Runtime {
                 session_fork,
                 feedback_workspace,
                 inherit_workspace,
-                file_versions,
-                previous_file_version,
+                copy_from_workspace,
                 history_edit,
                 feedback_source,
                 expected_source_head: source_head,
@@ -2144,14 +2091,19 @@ impl Runtime {
             .collect()
     }
 
-    fn path_is_running(&self, path: &Path) -> bool {
+    pub(crate) fn path_is_running(&self, path: &Path) -> bool {
         self.state
             .result_execution
             .as_ref()
             .is_some_and(|e| e.status == "running" && e.input.layout.as_deref() == path.to_str())
-            || self.state.executions.iter().any(|execution| {
-                execution.status == "running" && Path::new(&execution.worktree) == path
-            })
+            || self
+                .state
+                .executions
+                .iter()
+                .chain(&self.state.mergers)
+                .any(|execution| {
+                    execution.status == "running" && Path::new(&execution.worktree) == path
+                })
     }
 
     fn workspace_has_head(&self, path: &Path, head: &str) -> bool {
@@ -2202,8 +2154,8 @@ impl Runtime {
     }
 
     /// Keep only live worker workspaces and the just-completed handoff workspace.
-    /// Git refs and ignored-file snapshots are durable, so retired branches can
-    /// be recreated from those inputs if they are needed again.
+    /// Git refs and commits are durable; a physical slot is still retained
+    /// while it is needed by an active writer, feedback request, or recovery.
     fn reclaim_workspace_slots(&self, completed: &Execution) -> Result<(), String> {
         // Fixed native layouts and failed partial views are result dependencies,
         // not expendable allocator caches. Do not reclaim them opportunistically.
@@ -2251,6 +2203,19 @@ impl Runtime {
         for node in self.state.nodes.values() {
             if let Some(input) = &node.feedback_workspace {
                 if let Ok(path) = Path::new(&input.worktree).canonicalize() {
+                    keep.insert(path);
+                }
+            }
+        }
+        // A completed parent can still be the physical baseline for a new
+        // slot when it contains files outside the recorded Git/environment scopes.
+        for execution in self.state.executions.iter().filter(|execution| execution.status == "completed") {
+            if self.state.graph.edges.iter().any(|edge| {
+                !edge.feedback
+                    && edge.from == execution.node
+                    && self.state.nodes.get(&edge.to).is_some_and(|node| node.status != "done")
+            }) {
+                if let Ok(path) = Path::new(&execution.worktree).canonicalize() {
                     keep.insert(path);
                 }
             }
@@ -2368,38 +2333,7 @@ impl Runtime {
                     now(),
                 ));
                 let mut terminal = Vec::new();
-                if !self.is_serial() && self.state.nodes[&execution.node].baseline_head.is_some() {
-                    let files = self.files()?;
-                    let baseline = self.state.nodes[&execution.node]
-                        .baseline_files_version
-                        .clone()
-                        .filter(|version| files.exists(version))
-                        .or_else(|| {
-                            self.state
-                                .source_files
-                                .as_ref()
-                                .map(|source| source.version.clone())
-                                .filter(|version| files.exists(version))
-                        })
-                        .unwrap_or_else(|| format!("before-{}", execution.id));
-                    let after = format!("after-{}", execution.id);
-                    if files.exists(&baseline)
-                        && files.exists(&after)
-                        && !files.same_contents(&baseline, &after)?
-                    {
-                        terminal.push(EventKind::WorkspaceFilesChanged {
-                            execution_id: execution.id.clone(),
-                        });
-                    }
-                }
                 if let Some((input, result)) = composite {
-                    if input.environment_ref != result.environment_ref
-                        || input.launch_ref != result.launch_ref
-                    {
-                        terminal.push(EventKind::WorkspaceFilesChanged {
-                            execution_id: execution.id.clone(),
-                        });
-                    }
                     if live.input.is_none() {
                         terminal.push(EventKind::ExecutionInputRecorded {
                             execution_id: execution.id.clone(),
@@ -2689,53 +2623,6 @@ impl Runtime {
         self.emit_outputs(events)
     }
 
-    fn publication_file_inputs(
-        &self,
-        repository: &Path,
-        heads: &[String],
-    ) -> Result<Option<(crate::workspace_files::Files, Vec<String>, String)>, String> {
-        let files = self.files()?;
-        // Git heads are not resource identities: ignored-only attempts can all
-        // share one head. Select current terminal outputs, never old attempts.
-        let mut versions: Vec<_> = self
-            .state
-            .graph
-            .nodes
-            .iter()
-            .filter(|node| {
-                !self
-                    .state
-                    .graph
-                    .edges
-                    .iter()
-                    .any(|edge| !edge.feedback && edge.from == node.name)
-            })
-            .filter(|node| {
-                self.state.nodes[&node.name]
-                    .head
-                    .as_ref()
-                    .is_some_and(|head| heads.contains(head))
-            })
-            .filter_map(|node| self.state.nodes[&node.name].files_version.clone())
-            .filter(|version| files.exists(version))
-            .collect();
-        if versions.is_empty() {
-            return Ok(None);
-        }
-        let parents = self
-            .state
-            .source_files
-            .as_ref()
-            .filter(|source| files.exists(&source.version))
-            .map(|source| vec![source.version.clone()])
-            .unwrap_or_default();
-        let current = Uuid::new_v4().to_string();
-        let head = workspace::repository_git(repository, &["rev-parse", "HEAD"])?;
-        files.capture(repository, &current, &head, &parents)?;
-        versions.push(current.clone());
-        Ok(Some((files, versions, current)))
-    }
-
     /// Select immutable publication inputs under the actor; actual native
     /// baseline/byte validation happens before Git publication, outside it.
     pub(crate) fn publication_environment_input(
@@ -2747,6 +2634,7 @@ impl Runtime {
         )>,
         String,
     > {
+        self.require_current_file_contract()?;
         let Some(store) = self.environments()? else {
             return Ok(None);
         };
@@ -2763,28 +2651,18 @@ impl Runtime {
         Ok(Some((store, selected)))
     }
 
-    pub(crate) fn validate_publication_files(
-        &self,
-        repository: &Path,
-        heads: &[String],
-    ) -> Result<(), String> {
-        self.publication_environment_input()?;
-        if let Some((files, versions, _)) = self.publication_file_inputs(repository, heads)? {
-            files.validate(&versions)?;
-        }
-        Ok(())
-    }
-
     pub fn result_descriptor(&self) -> Result<crate::environment::ResultDescriptor, String> {
+        self.require_current_file_contract()?;
         let descriptor = self
             .state
             .published_result
             .clone()
             .ok_or("No managed result has been published")?;
+        if !descriptor.result.resource_refs.is_empty() {
+            return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before using it".into());
+        }
         let store = self.environments()?.ok_or("No managed environment store")?;
         store.validate_result_metadata(&descriptor.result)?;
-        self.files()?
-            .validate_manifest_refs(&descriptor.result.resource_refs)?;
         let repository = resolve_repository(
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
@@ -2836,6 +2714,9 @@ impl Runtime {
             .clone()
             .ok_or("No managed result has been published")?;
         let config = self.state.config.clone().ok_or("Missing config")?;
+        if !descriptor.result.resource_refs.is_empty() {
+            return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before launching it".into());
+        }
         config
             .environment
             .as_ref()
@@ -2959,35 +2840,12 @@ impl Runtime {
             Some(&self.state.run_id),
             || Err("Publication descriptor requires a clean composed code result".into()),
         )?;
-        let files = self.files()?;
-        let parents: Vec<_> = self
-            .terminal_results()?
-            .iter()
-            .flat_map(|(_, result)| result.resource_refs.clone())
-            .collect();
-        let published_resources = Uuid::new_v4().to_string();
-        files.capture(&repository, &published_resources, head, &parents)?;
-        let versions = vec![published_resources];
-        files.materialize(path, &versions, None, false)?;
-        let resources = Uuid::new_v4().to_string();
-        files.capture(path, &resources, &code, &versions)?;
         let result = crate::environment::CompositeResult {
             code_ref: code,
-            resource_refs: vec![resources],
+            resource_refs: vec![],
             ..selected
         };
         Ok(Some(store.descriptor(&self.state.run_id, &result)?))
-    }
-
-    pub(crate) fn publish_workspace_files(
-        &self,
-        repository: &Path,
-        heads: &[String],
-    ) -> Result<(), String> {
-        if let Some((files, versions, current)) = self.publication_file_inputs(repository, heads)? {
-            files.materialize(repository, &versions, Some(&current), true)?;
-        }
-        Ok(())
     }
 }
 
@@ -3028,10 +2886,10 @@ pub(crate) fn perform_result(
                 let _device = crate::environment_resources::acquire(policy)?;
                 let store = crate::environment::Environments::new(&job.root, &job.run_id, policy)?;
                 store.validate_result(&job.descriptor.result)?;
+                if !job.descriptor.result.resource_refs.is_empty() {
+                    return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before launching it".into());
+                }
                 let mut exclusions = store.exclusions(&job.descriptor.result.launch_ref)?;
-                let files = crate::workspace_files::Files::new(&job.root, &job.run_id)?
-                    .with_exclusions(&exclusions);
-                files.validate(&job.descriptor.result.resource_refs)?;
                 let path = Path::new(&job.descriptor.workspace);
                 let repository = resolve_repository(&job.root, &job.config)?;
                 workspace::repository_git(
@@ -3056,9 +2914,6 @@ pub(crate) fn perform_result(
                     store
                         .scoped_files(&job.descriptor.result.launch_ref)?
                         .verify(path, &job.descriptor.result.environment_ref, "")?;
-                    if let Some(version) = job.descriptor.result.resource_refs.last() {
-                        files.verify(path, version, &job.descriptor.result.code_ref)?;
-                    }
                 }
                 control.check()?;
                 store.record_selected(
@@ -3076,7 +2931,6 @@ pub(crate) fn perform_result(
                         Some(&job.run_id),
                         || Err("Result reconstruction cannot require a Merger".into()),
                     )?;
-                    files.materialize(path, &job.descriptor.result.resource_refs, None, false)?;
                 }
                 let generation = &job.input.generation;
                 let head = workspace::snapshot_node_scoped(
@@ -3086,19 +2940,12 @@ pub(crate) fn perform_result(
                     Some(&job.run_id),
                     &exclusions,
                 )?;
-                let before_files = format!("before-{generation}");
-                files.capture(
-                    path,
-                    &before_files,
-                    &head,
-                    &job.descriptor.result.resource_refs,
-                )?;
                 let input = store.prepare(
                     path,
                     &job.descriptor.result,
                     generation,
                     &head,
-                    vec![before_files.clone()],
+                    vec![],
                     present && job.retry,
                     !present,
                 )?;
@@ -3163,11 +3010,7 @@ pub(crate) fn perform_result(
                     Some(&job.run_id),
                     &exclusions,
                 )?;
-                let after_files = format!("after-{generation}");
-                let files = crate::workspace_files::Files::new(&job.root, &job.run_id)?
-                    .with_exclusions(&exclusions);
-                files.capture(path, &after_files, &head, &[before_files])?;
-                let result = store.seal(path, &input, &head, vec![after_files])?;
+                let result = store.seal(path, &input, &head, vec![])?;
                 let descriptor = store.descriptor(&job.run_id, &result)?;
                 Ok((
                     String::from_utf8(output).map_err(|e| e.to_string())?,
@@ -3249,11 +3092,6 @@ fn perform_with_merger_inner(
         exclusions = crate::environment::Environments::new(root, &job.run_id, policy)?
             .exclusions(&input.launch_ref)?;
     }
-    let files = if path != repository {
-        Some(crate::workspace_files::Files::new(root, &job.run_id)?.with_exclusions(&exclusions))
-    } else {
-        None
-    };
     let environments = job
         .config
         .environment
@@ -3290,12 +3128,6 @@ fn perform_with_merger_inner(
             if let Some(head) = &target.after {
                 workspace::verify_prepared_ancestor(path, head)?;
             }
-        }
-        if let Some(version) = &job.previous_file_version {
-            files
-                .as_ref()
-                .ok_or("Missing feedback file store")?
-                .verify(path, version, &input.head)?;
         }
     }
     #[cfg(not(feature = "fixture"))]
@@ -3368,31 +3200,15 @@ fn perform_with_merger_inner(
             },
         )?
     };
-    let before_files = format!("before-{}", job.execution.id);
-    if let Some(files) = &files {
-        let mut versions = job.file_versions.clone();
-        let editing = job.history_edit;
-        let mut previous = job.previous_file_version.clone();
-        // Keep partial ignored work on an ordinary continuation. History edits
-        // instead restore the selected pre-execution file snapshot exactly.
-        let preserve = reused
-            && !editing
-            && (job.inherit_workspace
-                || job.resume_execution_id.is_some()
-                || job.session_fork.is_some()
-                || job.feedback_workspace.is_some());
-        if preserve {
-            let live = Uuid::new_v4().to_string();
-            let parents = previous
-                .clone()
-                .map(|version| vec![version])
-                .unwrap_or_else(|| versions.clone());
-            files.capture(path, &live, &before, &parents)?;
-            versions.push(live.clone());
-            previous = Some(live);
+    if !reused {
+        if let Some(source) = &job.copy_from_workspace {
+            workspace::copy_ordinary_files(
+                Path::new(source),
+                path,
+                &exclusions,
+                root,
+            )?;
         }
-        files.materialize(path, &versions, previous.as_deref(), preserve)?;
-        files.capture(path, &before_files, &before, &versions)?;
     }
     let environment_input = if let Some(store) = &environments {
         Some(
@@ -3403,7 +3219,7 @@ fn perform_with_merger_inner(
                     .ok_or("Missing managed environment input")?,
                 &job.execution.id,
                 &before,
-                vec![before_files.clone()],
+                vec![],
                 job.preserve_failed_environment,
                 job.history_edit || !reused,
             )?,
@@ -3483,23 +3299,13 @@ fn perform_with_merger_inner(
             Some(&job.run_id),
         )?
     };
-    if files.is_some() {
-        let files =
-            crate::workspace_files::Files::new(root, &job.run_id)?.with_exclusions(&exclusions);
-        files.capture(
-            path,
-            &format!("after-{}", job.execution.id),
-            &head,
-            &[before_files],
-        )?;
-    }
     if let (Some(store), Some(input)) = (&environments, &environment_result_input) {
         store.prove_accelerator(&repository, path, input)?;
         store.seal(
             path,
             input,
             &head,
-            vec![format!("after-{}", job.execution.id)],
+            vec![],
         )?;
     }
     Ok((head, output))

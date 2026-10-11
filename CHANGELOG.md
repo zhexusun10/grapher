@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Show Mergers as selectable cards in the execution graph: node-composition Mergers beside their target and the publication Merger as a `publication merger` card below the terminal layer; steer a running merger, continue a settled publication merger's session, and keep settled node-composition cards read-only.
+
 ### Changed
 
+- Accept user edits in the source directory during Graph execution: downstream handoff and explicit node updates no longer block on a dirty source, and publication commits pending user changes as its base before merging node results.
 - Share content-keyed Pi engine/dependency caches across projects and backend restarts, with reader leases and serialized preparation instead of per-backend copies.
 - Default workspace/engine caches to the OS cache directory (Windows: `%LOCALAPPDATA%\Grapher`), preserving existing runtime histories and legacy execution paths.
 - Upgrade the pinned Pi engine from 1.0.1 to the official stable 1.0.3 release, refreshing the checksummed model catalog and reviewed dependency profile.

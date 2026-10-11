@@ -9,7 +9,7 @@ run from the repository root.
 | --- | --- |
 | Graph validation / Planner tools | [Architecture](../docs/architecture/overview.md); [compiler.rs](src/compiler.rs), [planner.ts](resources/planner.ts) |
 | Scheduling, feedback, replay | [Runtime](../docs/architecture/runtime.md); [runtime.rs](src/runtime.rs), [model.rs](src/model.rs), [store.rs](src/store.rs) |
-| Inheritance, ignored files, directory ownership | [Workspace snapshots](../docs/architecture/workspace-snapshots-and-feedback.md); [workspace.rs](src/workspace.rs), [workspace_files.rs](src/workspace_files.rs) |
+| Workspace Git collection and feedback handoff | [Workspace directories and Git publication](../docs/architecture/workspace-snapshots-and-feedback.md); [workspace.rs](src/workspace.rs), [native_copy.rs](src/native_copy.rs), [runtime.rs](src/runtime.rs) |
 | Composition and publication | [Execution model](../docs/architecture/execution-model.md); [graph_merge.rs](src/graph_merge.rs) |
 | Launchers and permissions | [Filesystem isolation](../docs/architecture/filesystem-isolation.md); [native.rs](src/native.rs), [sandbox.rs](src/sandbox.rs), [linux_sandbox.rs](src/linux_sandbox.rs) |
 | API / logs / cleanup | [Conversation logs](../docs/testing/conversation-logs.md); [server.rs](src/server.rs), [store/](src/store/), [cleanup.rs](src/cleanup.rs) |

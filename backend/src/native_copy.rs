@@ -40,6 +40,111 @@ pub(crate) fn copy(source: &Path, destination: &Path) -> Result<CopyKind, String
     }
 }
 
+/// Copy ordinary files into an already prepared workspace. The caller owns
+/// Git-aware exclusions; this routine never reads `.gitignore` or follows links.
+pub(crate) fn copy_tree(
+    source: &Path,
+    destination: &Path,
+    excluded: impl Fn(&Path) -> bool,
+) -> Result<(), String> {
+    if !fs::symlink_metadata(source)
+        .map_err(|error| error.to_string())?
+        .is_dir()
+    {
+        return Err(format!("Workspace copy source is not a directory: {}", source.display()));
+    }
+    if !fs::symlink_metadata(destination)
+        .map_err(|error| error.to_string())?
+        .is_dir()
+    {
+        return Err(format!("Workspace copy destination is not a directory: {}", destination.display()));
+    }
+    let source = source.canonicalize().map_err(|error| error.to_string())?;
+    let destination = destination.canonicalize().map_err(|error| error.to_string())?;
+    if source == destination {
+        return Err("Workspace copy source and destination are identical".into());
+    }
+    copy_directory(&source, &destination, Path::new(""), &excluded)
+}
+
+fn copy_directory(
+    source: &Path,
+    destination: &Path,
+    relative: &Path,
+    excluded: &impl Fn(&Path) -> bool,
+) -> Result<(), String> {
+    for item in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let item = item.map_err(|error| error.to_string())?;
+        let name = item.file_name();
+        let child_relative = relative.join(&name);
+        if excluded(&child_relative) {
+            continue;
+        }
+        let from = item.path();
+        let to = destination.join(&name);
+        let metadata = fs::symlink_metadata(&from).map_err(|error| error.to_string())?;
+        let kind = metadata.file_type();
+        if is_link(&metadata) {
+            copy_symlink(&from, &to)?;
+        } else if kind.is_dir() {
+            match fs::symlink_metadata(&to) {
+                Ok(existing) if existing.file_type().is_symlink() || !existing.is_dir() => {
+                    return Err(format!("Ordinary workspace directory collides with {}", to.display()));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir(&to).map_err(|error| error.to_string())?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+            copy_directory(&from, &to, &child_relative, excluded)?;
+            fs::set_permissions(&to, metadata.permissions()).map_err(|error| error.to_string())?;
+        } else if kind.is_file() {
+            copy(&from, &to)?;
+            fs::set_permissions(&to, metadata.permissions()).map_err(|error| error.to_string())?;
+        } else {
+            return Err(format!("Unsupported special workspace file: {}", from.display()));
+        }
+    }
+    Ok(())
+}
+
+fn is_link(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return metadata.file_attributes() & 0x400 != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn copy_symlink(source: &Path, destination: &Path) -> Result<(), String> {
+    let target = fs::read_link(source).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, destination).map_err(|error| error.to_string())
+    }
+    #[cfg(windows)]
+    {
+        let target_path = if target.is_absolute() {
+            target.clone()
+        } else {
+            source.parent().unwrap_or_else(|| Path::new(".")).join(&target)
+        };
+        if fs::metadata(&target_path).is_ok_and(|metadata| metadata.is_dir()) {
+            std::os::windows::fs::symlink_dir(target, destination)
+                .map_err(|error| error.to_string())
+        } else {
+            std::os::windows::fs::symlink_file(target, destination)
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
 fn unsupported(error: &io::Error) -> bool {
     #[cfg(windows)]
     {
@@ -195,5 +300,29 @@ mod tests {
         assert!(copy(&source, &a).is_err());
         assert_eq!(fs::read(&a).unwrap(), b"private replacement");
         eprintln!("Native filesystem private copy outcome: {kind:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_copy_preserves_permissions_and_links_without_following_them() {
+        use std::os::unix::{fs::PermissionsExt, fs::symlink};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(source.join("nested/tool"), "tool").unwrap();
+        fs::set_permissions(source.join("nested/tool"), fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(outside.join("secret"), "secret").unwrap();
+        symlink(&outside, source.join("external")).unwrap();
+
+        copy_tree(&source, &destination, |_| false).unwrap();
+
+        assert_eq!(fs::read_to_string(destination.join("nested/tool")).unwrap(), "tool");
+        assert_eq!(fs::symlink_metadata(destination.join("external")).unwrap().file_type().is_symlink(), true);
+        assert_eq!(fs::read_link(destination.join("external")).unwrap(), outside);
+        assert_eq!(fs::metadata(destination.join("nested/tool")).unwrap().permissions().mode() & 0o777, 0o750);
     }
 }

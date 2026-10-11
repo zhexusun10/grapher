@@ -48,7 +48,7 @@ Built on [Pi](https://github.com/earendil-works/pi).
 
 - **Integrated coding-agent environment** — Chat with coding agents, manage provider authentication and model settings, inspect tool calls and logs, and intervene from the same UI.
 - **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions.
-- **Workspace inheritance** — Children inherit completed parent state, including ignored project resources; multiple parents are combined. Ordinary dependencies and applied feedback can hand off a completed directory, with one writer at a time and independent parallel branches. Conversations stay with their own nodes.
+- **Workspace inheritance** — Children inherit parent Git history and its complete project-file state, including files matched by `.gitignore`. Linear work can hand off a Git working tree; fan-out branches use independent Git worktrees; Git handles conflicts and publication. Conversations stay with their own nodes.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
@@ -93,7 +93,7 @@ Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo com
 3. For Graph, inspect and **approve** the plan. Follow node logs, pause new dispatches, or send instructions.
 4. Graph work is complete only after valid results are published to your project. Publication failures preserve state for inspection or retry.
 
-**Use trusted projects; start with a disposable one.** Planner Bash writes directly to the source before approval, even if planning fails or is cancelled; snapshots can stage/commit existing non-ignored changes. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read the [execution model](docs/architecture/execution-model.md) and [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.
+**Use trusted projects; start with a disposable one.** Planner Bash writes directly to the source before approval, even if planning fails or is cancelled; snapshots force-collect project files into Git except Runtime/managed-environment internals. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read the [execution model](docs/architecture/execution-model.md) and [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.
 
 For an existing clone, first run `git submodule update --init --recursive`. Pi is pinned; a global Pi installation is not substituted.
 
@@ -157,11 +157,11 @@ Partitioner
                                   Publish to project
 ```
 
-Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits their workspace state. Applied feedback sends bounded rework instructions and hands the sender's completed workspace to a fixed target, which continues its own conversation. Ordinary dependencies and feedback inherit project file state, not other nodes' conversations; feedback still has separate budget, generation, and invalidation rules.
+Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits parent Git history plus the complete project-file state, including paths matched by `.gitignore`. Applied feedback sends bounded rework instructions and hands the sender's completed workspace to a fixed target, which continues its own conversation. All project outputs are Git commits; conversations are not exchanged.
 
 ## Architecture
 
-The Rust backend and SQLite event log own runtime state; the React UI displays projections. Graph executions use private Run repositories with one writer per directory; completed directories can pass between nodes rather than being permanently assigned to one node. The backend prepares inherited state and records Git snapshots plus versioned ignored files; agents do not exchange commits. Delivery requires successful publication—not merely finished model calls.
+The Rust backend and SQLite event log own runtime state; the React UI displays projections. Graph executions use private Run repositories with one writer per directory; completed directories can pass between nodes rather than being permanently assigned to one node. The backend prepares complete Git snapshots of project files, including Git-ignored paths; agents do not exchange commits. Delivery requires successful Git publication—not merely finished model calls.
 
 Read [Architecture](docs/architecture/overview.md) for motivation and invariants, or [Execution model](docs/architecture/execution-model.md) for planning, sessions, workspace inheritance, Git snapshots, and publication semantics. Low-level runtime, isolation, and Pi contracts are linked from those pages rather than duplicated here.
 

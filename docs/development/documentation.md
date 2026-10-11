@@ -102,7 +102,7 @@ These are evaluation recipes, **not a claim that an agent has passed them**.
 | Task | Expected discovery |
 | --- | --- |
 | Find feedback budget/drain behavior and restart evidence | Index → runtime/workspace contracts → runtime.rs/store.rs → runtime/feedback tests |
-| Explain whether ignored `.venv` files survive inheritance and remain portable | Workspace contract → workspace_files.rs/tests → explicit portability limits; no proposal-as-feature inference |
+| Explain whether managed `.venv` state survives inheritance and remains portable | Workspace contract → environment.rs/workspace_files.rs/tests → explicit portability limits; no proposal-as-feature inference |
 | Locate the publication failure/retry boundary | Execution model → graph_merge.rs → publication tests and Merger acceptance prerequisites |
 | Change a transcript-loading contract | Conversation logs → store/logs.rs + frontend cache/API → applicable frontend/log checks |
 | Judge the old run audit or environment proposal | Historical/draft index row → warning/current authority → current implementation, not old recommendations |

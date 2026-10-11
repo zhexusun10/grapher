@@ -325,7 +325,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     const retainedEnvironmentBytes = await bytes(join(data, 'environments', runId));
     const stateBeforeCancel = rebuilt.nodes.C.result;
     const cancelDelay = ml ? 121_000 : 0;
-    const pending = api('launch_result', { runId, args: ['-c', `import pathlib,time; pathlib.Path('reports/result-started').write_text('partial'); time.sleep(${ml ? 125 : 90})`] }, 600000);
+    const pending = api('launch_result', { runId, args: ['-c', `import pathlib,time; pathlib.Path('reports').mkdir(exist_ok=True); pathlib.Path('reports/result-started').write_text('partial'); time.sleep(${ml ? 125 : 90})`] }, 600000);
     // Attach the rejection immediately; cancellation is expected, not unhandled.
     const cancelled = assert.rejects(pending, /failed|drain|timed out|cancelled/i);
     await until(async () => { try { return await readFile(join(workspace, 'reports/result-started'), 'utf8'); } catch { return false; } }, 'result process start');

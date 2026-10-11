@@ -24,27 +24,26 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
   const wasCompletedOnMount = useRef(publication?.status === "completed");
 
   const execution = mergers.find(e => e.id === attemptId) ?? mergers.at(-1);
-  if (!publication) return null;
+  const resultId = publication ? `${runId}:${publication.head}:${publication.completedAt}` : "";
 
-  const resultId = `${runId}:${publication.head}:${publication.completedAt}`;
-
-  // If this run was already completed when opened, or has been dismissed, suppress the completed banner
-  if (publication.status === "completed") {
-    if (wasCompletedOnMount.current || dismissedResult === resultId || dismissedPublicationResults.has(resultId)) {
-      return null;
-    }
-  }
-
-  // Auto-dismiss completed banner after 6 seconds when completing live in the foreground
+  // Hooks must run even before publication exists and after its banner is dismissed.
+  // Auto-dismiss completed banner after 6 seconds when completing live in the foreground.
   useEffect(() => {
-    if (publication.status === "completed" && !wasCompletedOnMount.current) {
+    if (publication?.status === "completed" && !wasCompletedOnMount.current) {
       const timer = setTimeout(() => {
         dismissedPublicationResults.add(resultId);
         setDismissedResult(resultId);
       }, 6000);
       return () => clearTimeout(timer);
     }
-  }, [publication.status, resultId]);
+  }, [publication?.status, resultId]);
+
+  if (!publication) return null;
+  // An already completed or dismissed result has no transient banner.
+  if (publication.status === "completed" &&
+      (wasCompletedOnMount.current || dismissedResult === resultId || dismissedPublicationResults.has(resultId))) {
+    return null;
+  }
 
   const handleDismiss = () => {
     dismissedPublicationResults.add(resultId);

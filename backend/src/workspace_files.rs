@@ -1,5 +1,6 @@
-//! Ignored project files use immutable, run-owned filesystem snapshots, not Git
-//! objects or writable hardlinks. Versions record their ancestry for fan-in.
+//! Managed native-environment scopes use immutable, run-owned filesystem
+//! snapshots, not Git objects or writable hardlinks. Versions record ancestry
+//! for environment fan-in.
 use crate::{path_safety::real_child_path, workspace};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -52,7 +53,6 @@ impl Version {
 pub(crate) struct Files {
     directory: PathBuf,
     excluded_data: PathBuf,
-    exclusions: Vec<PathBuf>,
     scopes: Option<Vec<PathBuf>>,
 }
 
@@ -104,29 +104,6 @@ fn mode(metadata: &fs::Metadata) -> u32 {
 }
 
 impl Files {
-    pub(crate) fn new(data: &Path, run: &str) -> Result<Self, String> {
-        Uuid::parse_str(run).map_err(|_| "Invalid Run ID for workspace files")?;
-        let parent = workspace::workspaces_parent(data);
-        fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
-        let directory = parent.join(".grapher-worktrees").join(run).join(".files");
-        real_child_path(&parent, &directory, false)?;
-        fs::create_dir_all(directory.join("versions")).map_err(|error| error.to_string())?;
-        fs::create_dir_all(directory.join("blobs")).map_err(|error| error.to_string())?;
-        real_child_path(&parent, &directory.join("versions"), false)?;
-        real_child_path(&parent, &directory.join("blobs"), false)?;
-        Ok(Self {
-            directory,
-            excluded_data: data.canonicalize().unwrap_or_else(|_| data.to_path_buf()),
-            exclusions: vec![],
-            scopes: None,
-        })
-    }
-
-    pub(crate) fn with_exclusions(mut self, paths: &[String]) -> Self {
-        self.exclusions = paths.iter().map(PathBuf::from).collect();
-        self
-    }
-
     pub(crate) fn environment(directory: &Path, scopes: &[String]) -> Result<Self, String> {
         fs::create_dir_all(directory).map_err(|e| e.to_string())?;
         for name in ["versions", "blobs"] {
@@ -136,17 +113,12 @@ impl Files {
         Ok(Self {
             directory: directory.to_path_buf(),
             excluded_data: directory.to_path_buf(),
-            exclusions: vec![],
             scopes: Some(scopes.iter().map(PathBuf::from).collect()),
         })
     }
 
     fn is_excluded(&self, path: &Path) -> bool {
         excluded(path)
-            || self
-                .exclusions
-                .iter()
-                .any(|scope| workspace::scope_contains(path, scope))
     }
 
     fn save_version(&self, version: &str, mut value: Version) -> Result<(), String> {
@@ -433,38 +405,20 @@ impl Files {
         Ok(())
     }
 
-    fn ignored(&self, workspace: &Path) -> Result<Vec<PathBuf>, String> {
-        if let Some(scopes) = &self.scopes {
-            let mut paths = Vec::new();
-            for scope in scopes {
-                let path = workspace.join(scope);
-                real_child_path(workspace, &path, false)?;
-                match fs::symlink_metadata(&path) {
-                    Ok(_) => paths.push(path),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.to_string()),
-                }
-            }
-            return Ok(paths);
-        }
-        let names = workspace::repository_git(
-            workspace,
-            &[
-                "ls-files",
-                "-z",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "--directory",
-            ],
-        )?;
+    fn scoped_paths(&self, workspace: &Path) -> Result<Vec<PathBuf>, String> {
+        let scopes = self
+            .scopes
+            .as_ref()
+            .ok_or("Managed environment storage requires explicit scopes")?;
         let mut paths = Vec::new();
-        for name in names.split('\0').filter(|name| !name.is_empty()) {
-            let name = name.trim_end_matches('/');
-            if self.is_excluded(Path::new(name)) {
-                continue;
+        for scope in scopes {
+            let path = workspace.join(scope);
+            real_child_path(workspace, &path, false)?;
+            match fs::symlink_metadata(&path) {
+                Ok(_) => paths.push(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
             }
-            paths.push(workspace.join(relative(name)?));
         }
         Ok(paths)
     }
@@ -483,7 +437,7 @@ impl Files {
             .canonicalize()
             .map_err(|error| error.to_string())?;
         let mut entries = Entries::new();
-        for path in self.ignored(&root)? {
+        for path in self.scoped_paths(&root)? {
             self.collect(&root, &path, &mut entries, None)?;
         }
         self.save_version(
@@ -547,7 +501,7 @@ impl Files {
             }
         }
         if bases.len() > 1 {
-            return Err("Workspace composition blocked: ambiguous ignored-file merge base".into());
+            return Err("Managed environment scope composition blocked: ambiguous merge base".into());
         }
         let base = bases
             .iter()
@@ -574,7 +528,7 @@ impl Files {
             let chosen = changes.next().unwrap_or(original);
             if changes.any(|value| value != chosen) {
                 return Err(format!(
-                    "Workspace composition blocked: conflicting ignored file {path}"
+                    "Managed environment scope composition blocked: conflicting file {path}"
                 ));
             }
             if let Some(entry) = chosen {
@@ -589,7 +543,7 @@ impl Files {
                     .is_some_and(|entry| !matches!(entry, Entry::Directory { .. }))
                 {
                     return Err(format!(
-                        "Workspace composition blocked: conflicting ignored directory {}",
+                        "Managed environment scope composition blocked: conflicting directory {}",
                         dir.display()
                     ));
                 }
@@ -603,13 +557,6 @@ impl Files {
     /// outside the Run mutex before preparation/materialization and sealing.
     pub(crate) fn validate_manifest(&self, version: &str) -> Result<(), String> {
         self.load(version).map(|_| ())
-    }
-
-    pub(crate) fn validate_manifest_refs(&self, versions: &[String]) -> Result<(), String> {
-        for version in versions {
-            self.validate_manifest(version)?;
-        }
-        Ok(())
     }
 
     pub(crate) fn validate(&self, versions: &[String]) -> Result<(), String> {
@@ -636,7 +583,7 @@ impl Files {
             .canonicalize()
             .map_err(|error| error.to_string())?;
         let mut entries = Entries::new();
-        for path in self.ignored(&root)? {
+        for path in self.scoped_paths(&root)? {
             self.collect(&root, &path, &mut entries, Some(&value.entries))?;
         }
         if entries != value.entries {
@@ -670,7 +617,7 @@ impl Files {
                         continue;
                     }
                 }
-                return Err(format!("Workspace composition blocked: ignored input conflicts with tracked path {name}"));
+                return Err(format!("Managed environment scope conflicts with tracked path {name}"));
             }
         }
         if reuse {
@@ -684,7 +631,7 @@ impl Files {
             .canonicalize()
             .map_err(|error| error.to_string())?;
         let mut current = Entries::new();
-        for path in self.ignored(&root)? {
+        for path in self.scoped_paths(&root)? {
             self.collect(&root, &path, &mut current, None)?;
         }
         #[cfg(unix)]
@@ -730,13 +677,13 @@ impl Files {
                     unlink(&path, metadata.is_dir() || path.is_dir())?
                 }
                 Ok(metadata) if metadata.is_dir() => {
-                    // An ignored directory may contain tracked descendants.
+                    // A managed scope may contain tracked descendants.
                     if !tracked
                         .iter()
                         .any(|tracked| tracked.starts_with(&(name.clone() + "/")))
                     {
                         // Deepest-first removal must not delete managed exclusions
-                        // or tracked descendants nested inside an ignored directory.
+                        // or tracked descendants nested inside a managed scope.
                         match fs::remove_dir(&path) {
                             Ok(()) => {}
                             Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}

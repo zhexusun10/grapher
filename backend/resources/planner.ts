@@ -87,7 +87,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     // Pi normalizes nullable optional edit fields before local validation.
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete graph nodes. Provide a nonempty nodes array; use one element for a single edit. Each nodes[].name must be unique within the call. Replacing a node updates its task and preserves its edges. Deleting a node removes its connected edges. A node's first execution starts a fresh session with its task and completed dependencies' filesystem state. Edits are applied in order and validated together. If validation fails, the saved graph is unchanged.",
+      "Create, replace, or delete graph nodes. Provide a nonempty nodes array; use one element for a single edit. Each nodes[].name must be unique within the call. Replacing a node updates its task and preserves its edges. Use project-root-relative paths in tasks. Deleting a node removes its connected edges. A node's first execution starts a fresh session with its task and completed dependencies' filesystem state. Edits are applied in order and validated together. If validation fails, the saved graph is unchanged.",
     parameters: Type.Object({
       nodes: Type.Array(Type.Object({
         name: Type.String({ description: "Stable node name" }),

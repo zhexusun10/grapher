@@ -428,9 +428,9 @@ fs.writeFileSync('.cache/runtime','cache should not fork E');
         );
     }
     assert_ne!(a0.environment_ref, histories[2].environment_ref);
-    assert_eq!(
+    assert_ne!(
         a0.code_ref, histories[2].code_ref,
-        "ignored environment changes do not force Git commits"
+        "ordinary node outputs are recorded in Git"
     );
     runtime
         .intervene("A", "continue A in current view")
@@ -470,9 +470,6 @@ fs.writeFileSync('.cache/runtime','cache should not fork E');
     )
     .unwrap();
     runtime
-        .publish_workspace_files(&source, &publication.heads)
-        .unwrap();
-    runtime
         .emit(EventKind::PublicationCompleted { head })
         .unwrap();
     assert!(runtime.state.published_result.is_some());
@@ -496,10 +493,6 @@ fs.writeFileSync('.cache/runtime','cache should not fork E');
     assert_eq!(
         fs::read_to_string(Path::new(&rebuilt.execution.worktree).join(".env/version")).unwrap(),
         "4"
-    );
-    assert_eq!(
-        fs::read_to_string(Path::new(&rebuilt.execution.worktree).join("ordinary/result")).unwrap(),
-        "C artifact"
     );
 }
 

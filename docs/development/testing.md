@@ -27,7 +27,7 @@ npm test
 | `npm run test:planner-bash` | Shared macOS/Windows/Linux Planner contract: pinned Pi's unmodified Bash, direct source writes, absolute/Unicode/space paths, pipelines, nested shells, errors and timeouts |
 | `npm run test:hardening` | Production static-file path traversal, Windows drive/UNC/alternate-stream paths, linked web roots/children, and linked workspace cleanup |
 | `npm run test:windows-native` | Windows production backend + real Pi/Bash; model responses served locally |
-| `npm run test:merger` | Production backend + pinned Pi/Git; local-model source-native Planner writes/revisions, failed-revision persistence, latest-source + retained-dependency composition, node/source conflict repair, and shadow folders; native Graph prerequisites apply |
+| `npm run test:merger` | Production backend + pinned Pi/Git; local-model source-native Planner writes/revisions, failed-revision persistence, latest-source + retained-dependency composition, node/source conflict repair, settled publication-merger follow-ups, and shadow folders; native Graph prerequisites apply |
 | `npm run test:bindings` | Local HTTP project binding/lifecycle and execution-route behavior |
 | `npm run test:concurrent` | Fixture HTTP multi-Run regression; requires `/bin/sh`, skips on Windows |
 | `npm run test:conversation-acceptance` | Legacy-history copies, log migration, browser/HTTP/process stress; see prerequisites below |
@@ -170,5 +170,70 @@ The mapping probes investigate tool/subprocess mapping boundaries; they are not 
 ## Real-model and evaluation acceptance
 
 When accepting a provider, role policy, or Pi baseline change, separately run real authentication/model flows against trusted disposable projects. Record provider/model/endpoint, platform, commit, configuration, and failures—not just successful outputs.
+
+### Short parallel browser acceptance (paid, opt-in)
+
+[`scripts/real-model-parallel-acceptance.mjs`](../../scripts/real-model-parallel-acceptance.mjs)
+starts an isolated production backend and Vite frontend, then drives the real UI
+with Playwright. It plans two parallel nodes, publishes their conflicting ignored
+project file through a Merger, sends live steering and a settled-Merger follow-up,
+and reloads durable history. It verifies execution overlap, Git publication,
+deletions, actual Pi model metadata, and browser/API errors. No API is mocked.
+
+Build the production backend first (using an isolated `CARGO_TARGET_DIR` if a
+user service is running), then explicitly authorize provider calls:
+
+```sh
+GRAPHER_REAL_MODEL_ACCEPTANCE=1 node scripts/real-model-parallel-acceptance.mjs
+```
+
+The default model is `zicc/gpt-6-luna`; override it with
+`GRAPHER_ACCEPTANCE_MODEL=provider/model`. Model/auth definitions are read from
+`GRAPHER_ACCEPTANCE_AGENT_SOURCE` (default `~/.pi/agent`) without changing them.
+Only the selected provider/model is copied into a temporary agent directory;
+that credential copy is removed after the harness-owned backend exits. Reports,
+screenshots, and disposable project/data directories are retained outside the
+checkout. `GRAPHER_ACCEPTANCE_PARENT` selects their parent. Treat retained traces
+as local evidence, not publishable artifacts. Installed Playwright Chromium or
+Edge and native Graph prerequisites are required. The task budget is four minutes;
+provider latency/failure can still prevent completion. To test publication recovery
+without repeating completed node model calls, set `GRAPHER_ACCEPTANCE_RESUME_DIR`
+to a failed harness directory. This mode requires its original failed report and
+Run identity, retries publication through the UI, and retains a new `retry-*`
+evidence directory without overwriting the original failure. It does not accept
+arbitrary user runtime data. This script is deliberately excluded from default
+test suites and is not a provider benchmark or sandbox proof.
+
+### Attachment, live-source and private fan-in risk acceptance
+
+[`scripts/real-model-risk-acceptance.mjs`](../../scripts/real-model-risk-acceptance.mjs)
+uses the same isolated production-backend/browser prerequisites and credential
+handling as the short parallel acceptance above. Two parallel nodes modify one
+ignored project file, followed by a dependent verifier. The harness checks the
+private composition Merger's completion and the child's **prepared Git input**
+before publication, then verifies the child's copied output. During root
+execution it edits that same file in the source; publication must preserve the
+user line through explicit Git conflict repair. Image colors and random text-file
+tokens must be returned by the real model for both live node Steer and completed
+node continuations. Each accepted attachment turn must retain exactly one card
+(and image thumbnail) after acceptance, Run switching and reload.
+
+```sh
+GRAPHER_REAL_MODEL_ACCEPTANCE=1 GRAPHER_ACCEPTANCE_MANUAL_GRAPH=1 node scripts/real-model-risk-acceptance.mjs
+```
+
+The fixed-graph option avoids a paid Planner call while still approving and
+controlling the real graph through the browser; omit it to include Planner.
+The model defaults to `zicc/gpt-6-luna` and the overall attempt budget is four
+minutes. Provider latency may exceed that budget. The harness waits for a real
+Pi tool call before steering (a scheduled execution is not yet a live RPC
+session), and for published completion to reach the browser before continuing.
+`GRAPHER_ACCEPTANCE_RESUME_DIR` can finish continuation checks from a failed
+harness-owned report only when its private-composition/source-publication checks
+passed and that Run is already completed. Recovery does not repeat the graph;
+it retains a `retry-*` report linked to the original evidence. An accumulated
+recovery report is not an uninterrupted single-attempt pass. Native Windows
+acceptance exercised these three risks with the real model; no cross-platform,
+aggregate provider-quality or sandbox guarantee follows from this small task.
 
 For benchmark comparisons, use [Harbor](../benchmarks/harbor.md). Record exact task digests, image architecture/tools/permissions, budget, concurrency, retry policy, and all terminal outcomes. Protocol mocks and one-task smoke runs are not aggregate performance results.

@@ -106,6 +106,12 @@ export interface Snapshot {
   feedbackCounts: Record<string, number>;
   runMetrics?: RunMetrics | null;
 }
+
+/** Transient backend progress outside durable Run state. */
+export interface RuntimeActivity {
+  kind: "source_capture" | "workspace_prepare" | string;
+  nodes: string[];
+}
 export interface RepositoryInfo {
   path: string;
   name: string;
@@ -141,6 +147,9 @@ export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},
 };
+
+/** Synthetic topology-card identity for the publication (source write-back) Merger. */
+export const publicationMergerCardId = "merger:publication";
 
 export const example: Graph = {
   originalGoal: t("为当前项目实现工作图自动化编译与多节点协作执行"),

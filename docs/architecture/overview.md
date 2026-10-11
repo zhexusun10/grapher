@@ -60,9 +60,9 @@ A node is a stable task definition; an execution is a recorded attempt, not nece
 
 ## Workspace inheritance
 
-Ordinary dependencies and applied feedback inherit completed project state, including ignored resources—not other nodes' conversations. Private repositories are reusable single-writer execution slots, not permanent node identities or security sandboxes.
+Ordinary dependencies and applied feedback inherit completed Git history and physical working-tree ownership—not other nodes' conversations. Private repositories are reusable single-writer execution slots, not permanent node identities or security sandboxes.
 
-[Workspace snapshots and feedback](workspace-snapshots-and-feedback.md) owns the Git/ignored channels, handoff/fan-out/fan-in rules, storage details and portability limits. [Execution model](execution-model.md#parent-composition-conflicts) owns user-facing conflict recovery.
+[Workspace directories and Git publication](workspace-snapshots-and-feedback.md) owns forced Git collection, handoff/fan-out/fan-in rules, publication and managed-environment boundaries. [Execution model](execution-model.md#parent-composition-conflicts) owns user-facing Git conflict recovery.
 
 ## Feedback
 
@@ -102,8 +102,9 @@ Planner writes reach the source **before graph approval**; rejection, failure an
 | --- | --- |
 | [compiler.rs](../../backend/src/compiler.rs) | Graph validation and execution plan |
 | [runtime.rs](../../backend/src/runtime.rs) | Scheduling, feedback, revisions, and events |
-| [workspace.rs](../../backend/src/workspace.rs) | Private repositories, Git snapshots, composition, and refs |
-| [workspace_files.rs](../../backend/src/workspace_files.rs) | Ignored-file snapshots, composition, verification, and materialization |
+| [workspace.rs](../../backend/src/workspace.rs) | Physical workspace preparation, Git snapshots, composition, and refs |
+| [native_copy.rs](../../backend/src/native_copy.rs) | Ordinary directory copy primitive and link/metadata rules |
+| [workspace_files.rs](../../backend/src/workspace_files.rs) | Managed native-environment scope snapshots only |
 | [graph_merge.rs](../../backend/src/graph_merge.rs) | Workspace conflict Merger and final publication |
 | [engine.rs](../../backend/src/engine.rs) | Role configuration and Pi process protocol |
 | [native.rs](../../backend/src/native.rs) | Native launchers and platform preflight |

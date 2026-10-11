@@ -11,7 +11,7 @@ import { ThinkingCard } from "../../src/components/ThinkingCard";
 import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../../src/services/thinkingTranscript";
 import type { TranscriptItem } from "../../src/types";
-import { defaultConfig, emptyGraph, emptySnapshot, type Snapshot } from "../../src/types";
+import { defaultConfig, emptyGraph, emptySnapshot, type RuntimeActivity, type Snapshot } from "../../src/types";
 import "../../src/styles.css";
 import "../../src/styles-workbench.css";
 
@@ -67,7 +67,8 @@ function PollingFixture() {
   const observe = useCallback((next: Snapshot) => {
     (audit.observed ??= []).push(next.runId);
   }, []);
-  const accept = useSnapshotPolling(setSnapshot, observe, ids, snapshot.runId, snapshot.phase);
+  const observeActivity = useCallback((_runId: string, _activity: RuntimeActivity[]) => {}, []);
+  const accept = useSnapshotPolling(setSnapshot, observe, observeActivity, ids, snapshot.runId, snapshot.phase);
   audit.acceptAction = () => {
     accept({ runId: "view", phase: "running" });
     setSnapshot(previous => ({ ...previous, graph: { ...emptyGraph, originalGoal: "Action result" } }));

@@ -100,6 +100,6 @@ inside each task.
 
 - [Architecture overview](overview.md) — Boundaries and invariants
 - [Execution model](execution-model.md) — Planning side effects, sessions and publication
-- [Workspace snapshots and feedback](workspace-snapshots-and-feedback.md) — File inheritance and portability
+- [Workspace directories and feedback](workspace-snapshots-and-feedback.md) — Git history, physical directory inheritance and managed-environment portability
 - [Runtime](runtime.md) — Scheduling, bounded feedback and persistence
 - [Filesystem isolation](filesystem-isolation.md) — Actual platform permissions

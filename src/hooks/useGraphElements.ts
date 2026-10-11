@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import { useMemo, useRef } from "react";
 import { shareById } from "../services/structuralSharing";
 import type { Edge } from "@xyflow/react";
-import type { FeedbackExhaustion, Graph, Plan, Snapshot } from "../types";
+import { publicationMergerCardId, type FeedbackExhaustion, type Graph, type Plan, type Snapshot } from "../types";
 import { tokens } from "../tokens";
 import type { WorkNode } from "../components/graph/TaskNode";
 
@@ -92,7 +92,7 @@ export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string
 }
 
 /** Derive topology from the snapshot only when its graph/execution inputs change. */
-export function useGraphElements(state: Snapshot, selected: string, recentlyAddedEdgeIds: Set<string>) {
+export function useGraphElements(state: Snapshot, selected: string, recentlyAddedEdgeIds: Set<string>, selectedMergerId = "") {
   // Keep the same geometry for nodes and edges. Wider rows leave room for
   // edge channels; taller layers keep adjacent-layer paths below the cards.
   const hasMergers = (state.mergers ?? []).some((m) => m.node.startsWith("merge:"));
@@ -119,6 +119,36 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     }
     return targets;
   }, [state.mergers, state.graph.nodes]);
+  // Publication merges the terminal heads into the source directory, so its
+  // card sits below the last execution layer and receives the terminal edges.
+  const publicationMerger = useMemo(
+    () => (state.mergers ?? []).filter((merger) => merger.node === "merger").at(-1),
+    [state.mergers],
+  );
+  const publicationAttempts = useMemo(
+    () => (state.mergers ?? []).filter((merger) => merger.node === "merger").length,
+    [state.mergers],
+  );
+  const publicationTargets = useMemo(() => {
+    const names = new Set(state.graph.nodes.map((node) => node.name));
+    const planned = (state.plan?.terminals ?? []).filter((name) => names.has(name));
+    if (planned.length) return new Set(planned);
+    const hasDependencyChild = new Set(
+      state.graph.edges
+        .filter((edge) => !edge.feedback && names.has(edge.from) && names.has(edge.to))
+        .map((edge) => edge.from),
+    );
+    return new Set(Array.from(names).filter((name) => !hasDependencyChild.has(name)));
+  }, [state.graph, state.plan]);
+  const publicationPosition = useMemo(() => {
+    let lastLayer = 0;
+    for (const position of graphLayout.positions.values()) lastLayer = Math.max(lastLayer, position.layer);
+    return {
+      x: (graphLayout.minX + graphLayout.maxX) / 2 - 118,
+      y: (lastLayer + 1) * (hasMergers ? 320 : 210) + 24,
+      layer: lastLayer + 1,
+    };
+  }, [graphLayout, hasMergers]);
   // Reuse the card's existing top/bottom/side ports. Route only long edges
   // around intermediate rows; never insert a new port or an off-card junction.
   const edgeRouting = useMemo(() => {
@@ -132,7 +162,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     }
     const laneCount = { left: 0, right: 0 };
     const center = (graphLayout.minX + graphLayout.maxX) / 2;
-    return new Map<string, { sourceHandle: string; targetHandle: string; routeX?: number; routeSide?: string }>(state.graph.edges.map((edge) => {
+    const routing = new Map<string, { sourceHandle: string; targetHandle: string; routeX?: number; routeSide?: string }>(state.graph.edges.map((edge) => {
       const from = graphLayout.positions.get(edge.from);
       const to = graphLayout.positions.get(edge.to);
       const side = from && to && (from.x + to.x + 236) / 2 > center ? "right" : "left";
@@ -152,7 +182,24 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         routeSide: sideRoute ? side : undefined,
       }] as const;
     }));
-  }, [state.graph.edges, graphLayout]);
+    if (publicationMerger) {
+      for (const name of publicationTargets) {
+        const from = graphLayout.positions.get(name);
+        if (!from) continue;
+        const routed = publicationPosition.layer - from.layer > 1;
+        const side = from.x + 118 > center ? "right" : "left";
+        routing.set(`publication:${name}`, {
+          sourceHandle: "bottom",
+          targetHandle: "top",
+          routeX: routed
+            ? side === "left" ? graphLayout.minX - 48 - laneCount.left++ * 14
+              : graphLayout.maxX + 48 + laneCount.right++ * 14
+            : undefined,
+        });
+      }
+    }
+    return routing;
+  }, [state.graph.edges, graphLayout, publicationMerger, publicationPosition, publicationTargets]);
 
   const indexes = useMemo(() => indexGraphInputs(state.graph, state.executions), [state.graph, state.executions]);
   const feedbackExhaustion = useMemo(() => indexFeedbackExhaustion(state), [state.graph, state.nodes, state.executions, state.events, state.supersededExecutionIds]);
@@ -184,10 +231,13 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
             .join("\n"),
           reviewer: outgoing.some((edge) => edge.feedback),
           feedbackExhaustion: feedbackExhaustion.get(node.name),
-          selected: selected === node.name,
+          // A merger conversation is its own selected card; the node card is not
+          // highlighted while one of its merger attempts is addressed.
+          selected: selected === node.name && !selectedMergerId,
           worktree: nodeAttempts.at(-1)?.worktree ?? "",
           hasTop: incoming.some((edge) => route(edge)?.targetHandle === "top") || mergeTargets.has(node.name),
-          hasBottom: outgoing.some((edge) => route(edge)?.sourceHandle === "bottom"),
+          hasBottom: outgoing.some((edge) => route(edge)?.sourceHandle === "bottom") ||
+            (!!publicationMerger && publicationTargets.has(node.name)),
           hasLeftTarget: incoming.some((edge) => route(edge)?.targetHandle === "left-target"),
           hasLeftSource: outgoing.some((edge) => route(edge)?.sourceHandle === "left-source"),
           hasRightTarget: incoming.some((edge) => route(edge)?.targetHandle === "right-target"),
@@ -198,7 +248,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     // A merger is an execution, not a planner node. Show one card per fan-in
     // target only after a real conflict has launched the resolver.
     const taskNodesById = new Map(taskNodes.map((node) => [node.id, node]));
-    return [...taskNodes, ...Array.from(mergeTargets, ([target, merger]): WorkNode => {
+    const mergerNodes = Array.from(mergeTargets, ([target, merger]): WorkNode => {
       const node = taskNodesById.get(target)!;
       const attempts = mergerAttempts.get(`merge:${target}`) ?? 0;
       return {
@@ -207,13 +257,26 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         data: {
           name: `merger · ${target}`, task: t("合并上游分支冲突"),
           status: merger.status === "completed" ? "done" : merger.status === "running" ? "running" : "failed",
-          attempts, hint: t("合并至 {0}", target), reviewer: false, selected: false,
+          attempts, hint: t("合并至 {0}", target), reviewer: false, selected: merger.id === selectedMergerId,
           worktree: merger.worktree, hasTop: true, hasBottom: true,
           hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
         },
       };
-    })];
-  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, selected, graphLayout, edgeRouting, mergeTargets]);
+    });
+    if (!publicationMerger) return [...taskNodes, ...mergerNodes];
+    return [...taskNodes, ...mergerNodes, {
+      id: publicationMergerCardId, type: "work", width: 236,
+      position: { x: publicationPosition.x, y: publicationPosition.y },
+      data: {
+        name: t("publication merger"), task: t("合并最终回写结果冲突"),
+        status: publicationMerger.status === "completed" ? "done" : publicationMerger.status === "running" ? "running" : "failed",
+        attempts: publicationAttempts, hint: t("合并至源目录"), reviewer: false,
+        selected: publicationMerger.id === selectedMergerId,
+        worktree: publicationMerger.worktree, hasTop: true, hasBottom: false,
+        hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
+      },
+    }];
+  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, selected, selectedMergerId, graphLayout, edgeRouting, mergeTargets, publicationMerger, publicationAttempts, publicationPosition, publicationTargets]);
 
   const edges = useMemo<Edge[]>(() => {
     const graphEdges = state.graph.edges.map((edge) => {
@@ -239,13 +302,25 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         },
       };
     });
-    return [...graphEdges, ...Array.from(mergeTargets.keys(), (target): Edge => ({
+    const publicationEdges: Edge[] = publicationMerger
+      ? Array.from(publicationTargets, (name): Edge => {
+          const routing = edgeRouting.get(`publication:${name}`);
+          return {
+            id: `publication:${name}->merger`, source: name, target: publicationMergerCardId,
+            sourceHandle: routing?.sourceHandle ?? "bottom", targetHandle: "top", type: "workflow",
+            markerEnd: "url(#workflow-arrow-default)",
+            data: { routeX: routing?.routeX, routeSide: routing?.routeSide },
+            style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
+          };
+        })
+      : [];
+    return [...graphEdges, ...publicationEdges, ...Array.from(mergeTargets.keys(), (target): Edge => ({
       id: `merger:${target}->${target}`, source: `merger:${target}`, target,
       sourceHandle: "bottom", targetHandle: "top", type: "workflow",
       markerEnd: "url(#workflow-arrow-default)",
       style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
     }))];
-  }, [state.graph.edges, state.nodes, recentlyAddedEdgeIds, edgeRouting, mergeTargets]);
+  }, [state.graph.edges, state.nodes, recentlyAddedEdgeIds, edgeRouting, mergeTargets, publicationMerger, publicationTargets]);
 
   const previous = useRef({ runId: state.runId, nodes, edges });
   const shared = useMemo(() => {

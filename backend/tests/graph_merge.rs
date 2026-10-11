@@ -395,21 +395,23 @@ fn resolved_conflict_does_not_drop_remaining_heads() {
 }
 
 #[test]
-fn failed_resolver_preserves_conflict_and_dirty_source_never_invokes_merger() {
+fn failed_resolver_preserves_conflict_and_user_edits_publish_before_merge() {
     let temp = TempDir::new().unwrap();
     let (source, base) = repository(temp.path());
     let a = branch(&source, &base, &temp.path().join("a"), "shared", "first\n");
     let b = branch(&source, &base, &temp.path().join("b"), "shared", "second\n");
     fs::write(source.join("local"), "user changes").unwrap();
-    assert!(merge_graph(&source, &[a.clone()], || panic!(
-        "Dirty source is not a merge conflict"
-    ))
-    .is_err());
+    // Pending user work is committed as the publication base. It is not a merge
+    // conflict, so publication succeeds without launching the Merger.
+    merge_graph(&source, &[a.clone()], || {
+        panic!("User edits are not a merge conflict")
+    })
+    .unwrap();
     assert_eq!(
         fs::read_to_string(source.join("local")).unwrap(),
         "user changes"
     );
-    fs::remove_file(source.join("local")).unwrap();
+    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
     assert!(merge_graph(&source, &[a, b], || Err("Resolver failed".into())).is_err());
     assert!(!git(&source, &["diff", "--name-only", "--diff-filter=U"])
         .unwrap()

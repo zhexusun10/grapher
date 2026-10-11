@@ -34,8 +34,33 @@ const taskNodeCanvas = (component, data) => React.createElement(ReactFlow, {
 try {
   const { defaultConfig: config, emptySnapshot, example } = await vite.ssrLoadModule("/src/types.ts");
   const { t, locale } = await vite.ssrLoadModule("/src/i18n/index.ts");
-  const state = { ...emptySnapshot, graph: example, config, runId: "run-123", phase: "awaiting_approval" };
+  const state = {
+    ...emptySnapshot,
+    graph: example,
+    config,
+    runId: "run-123",
+    phase: "awaiting_approval",
+    plan: {
+      executionBatches: [["api_spec"], ["frontend", "backend"], ["qa_review"]],
+      roots: ["api_spec"],
+      terminals: ["qa_review"],
+      warnings: ["W303: If <FEEDBACK> from qa_review to frontend is applied, the target and dependency descendants will be invalidated: frontend, qa_review. Completed results must be recomputed; frontend continues its conversation. Nodes outside this set are unaffected."],
+    },
+  };
   const planning = { planningId: "plan-123", roles: {}, totalPlanningDuration: 65, modelDuration: 61, status: "failed", error: "用户已停止本次执行；可以修改消息或重新运行。" };
+  const mergerState = {
+    ...state,
+    approved: true,
+    graph: { originalGoal: "merge", nodes: [{ name: "join", task: "Join results" }], edges: [] },
+    nodes: { join: { status: "blocked", revision: 1, head: null, instruction: "", error: "conflict" } },
+    mergers: [{ id: "merger-1", node: "merge:join", revision: 1, attempt: 1, sessionId: "merger-1",
+      worktree: "/worktrees/join", before: "base", after: null, status: "failed", output: "", startedAt: 1, completedAt: 2 }],
+  };
+  const publicationMergerState = {
+    ...mergerState,
+    plan: { executionBatches: [["join"]], roots: ["join"], terminals: ["join"], warnings: [] },
+    mergers: [{ ...mergerState.mergers[0], id: "publish-merger", node: "merger", status: "completed" }],
+  };
   const cases = [
     ["layout/Sidebar", "Sidebar", { projects: [], activeRepo: "", runs: [], currentRunId: "", runIndicators: {}, onSelectProject: noop, onOpenProject: noop, onRemoveProject: noop, onLoadRun: noop, onDeleteRun: noop, onNewConversation: noop, onOpenSettings: noop }],
     ["modals/SettingsModal", "SettingsModal", { isOpen: true, config, setConfig: noop, dataPath: "", onClose: noop, onSaveConfig: noop }],
@@ -49,7 +74,9 @@ try {
     ["ToolCallCard", "ToolCallCard", { item: { id: "tool", type: "tool_call", toolName: "bash", status: "running", args: {} } }],
     ["PublicationPanel", "PublicationPanel", { publication: { repository: "/project", heads: ["abc"], status: "failed", error: planning.error, head: null }, mergers: [], onRetry: noop }],
     ["PublicationCompletedCard", "PublicationCompletedCard", { state: { ...state, phase: "completed" }, routeType: "graph" }],
-    ["views/GraphWorkbench", "GraphWorkbench", { state, routeType: "graph", selected: "", setSelected: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
+    ["views/GraphWorkbench", "GraphWorkbench", { state, activity: [{ kind: "workspace_prepare", nodes: ["foundation_contract"] }], routeType: "graph", selected: "", setSelected: noop, selectedMergerId: "", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
+    ["views/GraphWorkbench", "GraphWorkbench", { state: mergerState, routeType: "graph", selected: "join", setSelected: noop, selectedMergerId: "merger-1", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
+    ["views/GraphWorkbench", "GraphWorkbench", { state: publicationMergerState, routeType: "graph", selected: "merger:publication", setSelected: noop, selectedMergerId: "publish-merger", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
   ];
   for (const [path, name, props] of cases) {
     const module = await vite.ssrLoadModule(`/src/components/${path}.tsx`);
@@ -66,6 +93,18 @@ try {
       assert.ok(!html.includes('role="alertdialog"'), "confirmation is not shown before a language change");
     }
     if (name === "Sidebar") assert.ok(html.includes(t("暂无工作区")));
+    if (name === "GraphWorkbench") {
+      if (props.activity) assert.ok(html.includes(t("正在复制节点工作区：{0}", "foundation_contract")), "activity status must render localized copy");
+      if (props.selectedMergerId) {
+        if (props.selected === "merger:publication") {
+          assert.ok(html.includes(t("publication merger")), "publication merger heading must render");
+          assert.ok(html.includes(t("向 publication merger 追加消息…")), "a settled publication merger still accepts follow-ups");
+        } else {
+          assert.ok(html.includes(t("merger · {0}", "join")), "merger card heading must render localized copy");
+          assert.ok(html.includes(t("merger 已结束，只能查看执行记录")), "settled node merger must render the read-only notice");
+        }
+      }
+    }
     if (name === "TaskNode") {
       assert.match(html, /class="task-node[^\"]*done"/);
       assert.match(html, /class="status done"/);

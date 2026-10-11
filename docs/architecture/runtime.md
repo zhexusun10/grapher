@@ -50,7 +50,7 @@ waiting / dirty -> blocked
 - `failed`: the execution or protocol failed.
 - `blocked`: dependencies failed or workspace composition could not proceed.
 
-Nodes remain stable across recorded execution attempts. Historical output and backend-recorded Git snapshots remain inspectable even when a later revision supersedes their result.
+Nodes remain stable across recorded execution attempts. Historical output and backend-recorded Git snapshots remain inspectable even when a later revision supersedes their result; ordinary files remain tied to their physical directory.
 
 ## Scheduling and concurrency
 
@@ -60,16 +60,16 @@ There is no global pool limiting nodes across Runs, and no shared cap for Planne
 
 Failure blocks dependent branches; unrelated work continues. Pause stops new dispatches without forcibly terminating active model calls. Stop/cancel is a separate process-lifecycle action.
 
-Scheduling enforces one writer per physical Run directory and retains directories required by pending feedback/repair. Allocation, reuse and reclamation follow the [workspace ownership contract](workspace-snapshots-and-feedback.md#shared-inheritance-and-workspace-ownership).
+Scheduling enforces one writer per physical Run directory and retains directories required by pending feedback/repair. Allocation, reuse and reclamation follow the [workspace directory contract](workspace-snapshots-and-feedback.md#allocation-and-ownership).
 
-Source locks cover approval and recorded source snapshots after approved Planner revisions, not the Planner's live Bash/model session. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce conflicts, surfaced by each execution/publication result.
+Source locks cover approval and recorded Git snapshots after approved Planner revisions, not the Planner's live Bash/model session. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce Git conflicts, surfaced by each execution/publication result.
 
 ## Bounded feedback
 
 A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `<FEEDBACK>`:
 
 - `<ACCEPT>` leaves the result accepted without sending an additional instruction.
-- `<FEEDBACK>` queues a versioned request for the graph's one explicit target. After affected running work drains, applying it invalidates the target and its ordinary dependency descendants; other branches remain valid. The target receives completed workspace state plus instruction, never the sender's conversation.
+- `<FEEDBACK>` queues a versioned request for the graph's one explicit target. After affected running work drains, applying it invalidates the target and its ordinary dependency descendants; other branches remain valid. The target receives the sender's completed physical workspace plus instruction, never the sender's conversation.
 - A malformed verdict fails the execution.
 - Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains done; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
 - The runtime caps the configured limit at 3. A limit of 0 skips the first feedback request. Execution errors and malformed verdicts still fail normally.
@@ -87,6 +87,8 @@ Live steering does not itself mark a running node dirty. Completed-node follow-u
 Business events include graph creation/revision, approval, execution transitions, feedback, human intervention, pause, and publication. Execution output is stored separately in UTF-8 byte-indexed `execution_logs` chunks; terminal events carry structured metadata rather than full transcripts.
 
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand using `(runId, executionId, byteOffset)`; planning output has its own cursor. Execution-log pages default to 256 KiB, with a configurable limit capped at 1 MiB. For settled executions, `full=true` bypasses that page limit; the current UI uses this to load the selected historical transcript in full. Planning-output pages are capped at 256 KiB. The two browser transcript caches each have a 20-entry / 30 MiB limit; those cache limits are not a cap on a selected transcript's size.
+
+Long Git snapshot, node-workspace preparation/copy and publication passes hold the Run mutex. `snapshot_if_changed` reads a transient per-Run activity projection and uses a non-blocking attempt on that mutex, so a poll during such a pass returns the unchanged version plus progress (for example that node workspaces are being copied) instead of queueing behind the I/O. Activity is display-only and never changes durable event state.
 
 Planning attempts retain requests, graph candidates, summaries, and Pi JSONL streams. UI switching must not confuse one Run's transcripts with another's. Tests and legacy-log migration are described in [Conversation logs](../testing/conversation-logs.md).
 

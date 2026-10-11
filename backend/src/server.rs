@@ -7,6 +7,7 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::PathBuf,
@@ -25,6 +26,94 @@ pub struct Service {
     drive_signal: (Mutex<u64>, Condvar),
     planning: AtomicBool,
     extension: PathBuf,
+}
+
+/// Transient display-only activity. It lives outside the Run mutex so the
+/// browser can observe long Git/directory preparation passes without blocking
+/// on their I/O. Entries are keyed by Run and by a unique operation key.
+type ActivityEntries = BTreeMap<String, (String, String)>;
+type ActivityRuns = BTreeMap<String, ActivityEntries>;
+
+#[derive(Default)]
+struct ActivityBoard {
+    runs: Mutex<ActivityRuns>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeActivity {
+    kind: String,
+    nodes: Vec<String>,
+}
+
+static ACTIVITY: OnceLock<ActivityBoard> = OnceLock::new();
+
+fn activity() -> &'static ActivityBoard {
+    ACTIVITY.get_or_init(ActivityBoard::default)
+}
+
+fn set_activity(run: &str, key: &str, kind: &str, node: &str) {
+    if let Ok(mut runs) = activity().runs.lock() {
+        runs.entry(run.into())
+            .or_default()
+            .insert(key.into(), (kind.into(), node.into()));
+    }
+}
+
+fn clear_activity(run: &str, key: &str) {
+    if let Ok(mut runs) = activity().runs.lock() {
+        if let Some(entries) = runs.get_mut(run) {
+            entries.remove(key);
+            if entries.is_empty() {
+                runs.remove(run);
+            }
+        }
+    }
+}
+
+fn run_activity(run: &str) -> Vec<RuntimeActivity> {
+    let Ok(runs) = activity().runs.lock() else {
+        return Vec::new();
+    };
+    let Some(entries) = runs.get(run) else {
+        return Vec::new();
+    };
+    let mut grouped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (kind, node) in entries.values() {
+        let nodes = grouped.entry(kind.clone()).or_default();
+        if !node.is_empty() {
+            nodes.insert(node.clone());
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(kind, nodes)| RuntimeActivity {
+            kind,
+            nodes: nodes.into_iter().collect(),
+        })
+        .collect()
+}
+
+/// Clears its activity entry on drop, including early `?` returns.
+struct ActivityGuard {
+    run: String,
+    key: String,
+}
+
+impl ActivityGuard {
+    fn begin(run: &str, key: &str, kind: &str, node: &str) -> Self {
+        set_activity(run, key, kind, node);
+        Self {
+            run: run.into(),
+            key: key.into(),
+        }
+    }
+}
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        clear_activity(&self.run, &self.key);
+    }
 }
 
 // Keep only weak references: active workers own their service; idle runs can
@@ -1839,8 +1928,7 @@ fn drive(service: Arc<Service>) {
                         // for the existing publication state to expose.
                         let preflight = {
                             let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                            runtime.validate_publication_files(&repository, &publication.heads)
-                                .and_then(|()| runtime.publication_environment_input())
+                            runtime.publication_environment_input()
                         }.and_then(|input| {
                             if let Some((store, selected)) = input { store.validate_result(&selected)?; }
                             Ok(())
@@ -1873,10 +1961,6 @@ fn drive(service: Arc<Service>) {
                             })
                         }));
                         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                        let result = result.and_then(|head| {
-                            runtime.publish_workspace_files(&repository, &publication.heads)?;
-                            Ok(head)
-                        });
                         match result {
                             Ok(head) => {
                                 eprintln!(
@@ -1913,6 +1997,16 @@ fn drive(service: Arc<Service>) {
                             // the source checkout, but it does not serialize sessions
                             // from different Runs or attempt to reconcile their writes.
                             crate::process_control::with_owner(&run_id, || {
+                                let activity_key =
+                                    format!("prepare-{}", job.execution.id);
+                                // Covers Git checkout, ordinary-file copying and
+                                // environment preparation until Prepared is emitted.
+                                let _prepare_activity = ActivityGuard::begin(
+                                    &job.run_id,
+                                    &activity_key,
+                                    "workspace_prepare",
+                                    &job.execution.node,
+                                );
                                 perform_with_merger(
                                     &job,
                                     &root,
@@ -1924,6 +2018,7 @@ fn drive(service: Arc<Service>) {
                                         });
                                     },
                                     |head| {
+                                        clear_activity(&job.run_id, &activity_key);
                                         service
                                             .runtime
                                             .lock()
@@ -2126,19 +2221,21 @@ fn control(
         let execution_id = execution_id.ok_or("Missing execution identity")?;
         {
             let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-            if run_id.as_deref() != Some(runtime.state.run_id.as_str())
-                || !runtime
-                    .state
-                    .executions
-                    .iter()
-                    .any(|e| e.id == execution_id && e.node == node && e.status == "running")
-            {
+            // Merger executions are steerable while their native process is
+            // alive, exactly like node executions.
+            let running = runtime
+                .state
+                .executions
+                .iter()
+                .chain(&runtime.state.mergers)
+                .any(|e| e.id == execution_id && e.node == node && e.status == "running");
+            if run_id.as_deref() != Some(runtime.state.run_id.as_str()) || !running {
                 return Err(
                     "Node execution is no longer running; send a new instruction instead".into(),
                 );
             }
         }
-        crate::engine::steer(&execution_id, instruction.trim(), images)?;
+        crate::engine::steer(&execution_id, instruction.trim(), images.clone())?;
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
         if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
             return Err("Run changed while steering".into());
@@ -2147,8 +2244,159 @@ fn control(
             execution_id,
             node,
             instruction: instruction.trim().into(),
+            images,
         })?;
         return Ok(runtime.state.clone());
+    }
+    if action == "continue_merger" {
+        if node.as_deref() != Some("merger") {
+            return Err("Only the publication merger can continue its conversation".into());
+        }
+        let instruction = instruction.ok_or("Enter a message for the publication merger")?;
+        if instruction.trim().is_empty() {
+            return Err("Enter a message for the publication merger".into());
+        }
+        let execution_id = execution_id.ok_or("Missing merger execution identity")?;
+        let (previous, config, session_dir) = {
+            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
+                return Err("Run changed while messaging the merger".into());
+            }
+            let previous = runtime
+                .state
+                .mergers
+                .iter()
+                .find(|m| m.id == execution_id && m.node == "merger")
+                .cloned()
+                .ok_or("Publication merger execution not found in this Run")?;
+            if previous.status == "running" {
+                return Err("Steer the running merger instead".into());
+            }
+            // The publication writer/materializer owns the source directory
+            // while its phase is active; never start a second writer there.
+            if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
+                return Err("Wait for publication to finish before messaging the merger".into());
+            }
+            if !std::path::Path::new(&previous.worktree).is_dir() {
+                return Err("Merger workspace is no longer available".into());
+            }
+            if runtime.path_is_running(std::path::Path::new(&previous.worktree)) {
+                return Err("This workspace is currently in use; wait for it to finish".into());
+            }
+            let config = runtime.state.config.clone().ok_or("Missing config")?;
+            // The model turn continues the previous Pi session in its original
+            // directory. The new execution owns the native identity so it stays
+            // steerable in its own right.
+            let session_dir = runtime.root.join("mergers").join(&previous.id);
+            (previous, config, session_dir)
+        };
+        let id = Uuid::new_v4().to_string();
+        // Plain folders keep Git state in the external shadow repository, so a
+        // plain `git rev-parse` there would not be a repository at all.
+        let before = crate::workspace::repository_git(
+            std::path::Path::new(&previous.worktree),
+            &["rev-parse", "HEAD"],
+        )?;
+        let execution = Execution {
+            id: id.clone(),
+            node: "merger".into(),
+            revision: previous.revision,
+            attempt: previous.attempt + 1,
+            session_id: previous.session_id.clone(),
+            worktree: previous.worktree.clone(),
+            before,
+            workspace_lineage: previous.workspace_lineage.clone(),
+            after: None,
+            input: None, result: None,
+            status: "running".into(),
+            output: String::new(), output_bytes: 0, pid: None,
+            started_at: now(),
+            completed_at: None,
+            metrics: None,
+        };
+        let snapshot = {
+            let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            // Re-check under the Run lock: publication may have started and a
+            // scheduled execution may have claimed the workspace meanwhile.
+            if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
+                return Err("Wait for publication to finish before messaging the merger".into());
+            }
+            if runtime.path_is_running(std::path::Path::new(&previous.worktree)) {
+                return Err("This workspace is currently in use; wait for it to finish".into());
+            }
+            runtime.emit(EventKind::MergerStarted {
+                execution: execution.clone(),
+            })?;
+            runtime.emit(EventKind::Steered {
+                execution_id: id.clone(),
+                node: "merger".into(),
+                instruction: instruction.trim().into(),
+                images: images.clone(),
+            })?;
+            runtime.state.clone()
+        };
+        let run_id = run_id.ok_or("Missing run identity")?;
+        let worker_service = service.clone();
+        let worker_execution = execution.clone();
+        let worker_previous = previous.clone();
+        let worker_config = config.clone();
+        let worker_instruction = instruction.trim().to_string();
+        let worker_images = images.clone();
+        let spawned = thread::Builder::new()
+            .name("grapher-merger".into())
+            .spawn(move || {
+                let _ = crate::process_control::with_owner(&run_id, || {
+                    let result = crate::graph_merge::continue_merger_for_node(
+                        &worker_previous,
+                        &worker_execution,
+                        &worker_instruction,
+                        worker_images.as_deref(),
+                        &worker_config,
+                        &session_dir,
+                        |event| {
+                            worker_service
+                                .runtime
+                                .lock()
+                                .map_err(|e| e.to_string())?
+                                .emit(event)
+                        },
+                    );
+                    if let Err(error) = result {
+                        eprintln!("[Grapher] [Merger] Continuation worker failed: {error}");
+                        // An early filesystem error may return before the model
+                        // turn recorded its terminal event; never leave a running
+                        // merger behind without a native process.
+                        if let Ok(mut runtime) = worker_service.runtime.lock() {
+                            if runtime.state.mergers.iter().any(|m| {
+                                m.id == worker_execution.id && m.status == "running"
+                            }) {
+                                let _ = runtime.emit(EventKind::MergerFailed {
+                                    execution_id: worker_execution.id.clone(),
+                                    error,
+                                    output_bytes: 0,
+                                    metrics: None,
+                                });
+                            }
+                        }
+                    }
+                });
+                // Wake the scheduler: the workspace reservation is released.
+                if let Ok(mut generation) = worker_service.drive_signal.0.lock() {
+                    *generation += 1;
+                    worker_service.drive_signal.1.notify_one();
+                }
+            });
+        if let Err(error) = spawned {
+            let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            runtime.emit(EventKind::MergerFailed {
+                execution_id: id,
+                error: format!("Cannot start merger worker: {error}"),
+                output_bytes: 0,
+                metrics: None,
+            })?;
+            return Err(format!("Cannot start merger worker: {error}"));
+        }
+        return Ok(snapshot);
     }
     if matches!(action.as_str(), "stop" | "cancel") {
         let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
@@ -2204,7 +2452,11 @@ fn control(
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     match action.as_str() {
         "retry_publication" => runtime.retry_publication()?,
-        "approve" => runtime.approve()?,
+        "approve" => {
+            let _activity =
+                ActivityGuard::begin(&runtime.state.run_id, "approve", "source_capture", "");
+            runtime.approve()?;
+        }
         "pause" => runtime.pause(true)?,
         "resume" => runtime.pause(false)?,
         "reject" => {
@@ -3156,10 +3408,35 @@ pub fn dispatch(
         .unwrap_or(false);
     let metadata = body.get("detail").and_then(serde_json::Value::as_str) == Some("metadata");
     if command == "snapshot_if_changed" {
-        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        // Read transient activity before trying the Run lock: a long
+        // source/workspace snapshot must not hide the progress indicator.
+        let activity_run = body
+            .get("runId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let activity = activity_run
+            .as_deref()
+            .map(run_activity)
+            .unwrap_or_default();
+        let requested = body
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let Ok(runtime) = service.runtime.try_lock() else {
+            // The Run mutex is held by long filesystem work. Report progress
+            // instead of queueing this poll behind the lock.
+            return Ok(serde_json::json!({
+                "version": requested,
+                "snapshot": null,
+                "activity": activity
+            }));
+        };
         let version = runtime.snapshot_version();
         if body.get("version").and_then(serde_json::Value::as_str) == Some(version.as_str()) {
-            return Ok(serde_json::json!({ "version": version, "snapshot": null }));
+            return Ok(
+                serde_json::json!({ "version": version, "snapshot": null, "activity": activity }),
+            );
         }
         // Hold the lock across version and snapshot capture so they describe
         // exactly the same state. Do not clone or serialize on a cache hit.
@@ -3178,7 +3455,9 @@ pub fn dispatch(
                 });
             }
         }
-        return Ok(serde_json::json!({ "version": version, "snapshot": value }));
+        return Ok(
+            serde_json::json!({ "version": version, "snapshot": value, "activity": activity }),
+        );
     }
     if command == "snapshot" && metadata {
         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;

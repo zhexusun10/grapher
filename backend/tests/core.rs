@@ -753,6 +753,7 @@ fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up
             execution_id: spec.execution.id.clone(),
             node: "spec".into(),
             instruction: "clarify".into(),
+            images: None,
         })
         .unwrap();
     assert_eq!(runtime.state.nodes["spec"].status, "running");
@@ -782,6 +783,29 @@ fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up
     assert_eq!(runtime.state.nodes["review"].status, "waiting");
     assert_eq!(runtime.state.nodes["review"].revision, 1);
     assert_eq!(runtime.state.nodes["backend"].status, "running");
+}
+
+#[test]
+fn steer_attachments_survive_replay_and_legacy_events_remain_readable() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = runtime(temp.path());
+    let instruction = "<file name=\"notes.txt\">\nunique token\n</file>\nclarify";
+    let image = ImageAttachment {
+        r#type: "image".into(), mime_type: "image/png".into(),
+        data: "aW1hZ2U=".into(), name: Some("sample.png".into()),
+    };
+    runtime.emit(EventKind::Steered {
+        execution_id: "execution".into(), node: "spec".into(),
+        instruction: instruction.into(), images: Some(vec![image.clone()]),
+    }).unwrap();
+    let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+    let event = serde_json::to_value(replay.events.last().unwrap()).unwrap();
+    assert_eq!(event["instruction"], instruction);
+    assert_eq!(event["images"][0], serde_json::to_value(image).unwrap());
+    let legacy: EventKind = serde_json::from_value(serde_json::json!({
+        "type": "steered", "execution_id": "old", "node": "spec", "instruction": "old turn"
+    })).unwrap();
+    assert!(matches!(legacy, EventKind::Steered { images: None, .. }));
 }
 
 #[test]

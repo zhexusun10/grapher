@@ -88,9 +88,9 @@ Model-visible normalization is not a byte-for-byte file representation or a data
 
 [Workspace inheritance](workspace-snapshots-and-feedback.md) does not expand source/sibling write permissions. The backend prepares inherited files and session forks before launching the private process; the platform boundaries above remain unchanged.
 
-Internal directory links are rebased (Windows uses junctions); external directory links are rejected rather than granted broad access. External file targets remain subject to platform permissions. Source-local ignored secrets can be inherited too: snapshots are not a credential filter.
+Internal directory links are rebased (Windows uses junctions); external directory links are rejected rather than granted broad access. External file targets remain subject to platform permissions. Source-local secrets can be copied as ordinary files: physical-directory inheritance is not a credential filter. Managed environment scopes have their own policy and evidence rules.
 
-The [environment portability boundary](workspace-snapshots-and-feedback.md#environment-portability-boundary) and tool-mapping limits above apply to copied environments; copying is not a process namespace or stable-path volume.
+The [managed environment portability boundary](workspace-snapshots-and-feedback.md#managed-environment-boundary) and tool-mapping limits above apply to copied environments; copying is not a process namespace or stable-path volume.
 
 ## Shared runtime and external state
 
