@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add Azure provider/API, credential-migration and retired-model/API-change regression coverage; validate existing extensions, prepared hosts and Windows production execution against Pi 1.0.3.
 - Upgrade the bundled `pi-continuity` extension from 0.1.1 to 0.2.0, adding bounded polling for subscription usage limits without an advertised reset time.
 
+### Fixed
+
+- Retry transient Chocolatey community-feed failures in Windows CI and verify both `rg` and `fd` before running tests, instead of failing later on a missing binary.
+- Keep fixture result-entry launches off the platform sandbox: disposable test workspaces live under the test data root, which production Linux/macOS geometry intentionally rejects. Native suites built without the fixture feature still cover the real boundaries.
+
 ### Breaking Changes
 
 - Pi's Azure provider ID changes from `azure-openai-responses` to `azure`. Existing credentials, custom provider definitions and saved model references require [migration](docs/guides/providers.md#azure-configuration); the Responses API ID and `AZURE_OPENAI_*` environment variables are unchanged.

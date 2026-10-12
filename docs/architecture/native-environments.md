@@ -129,21 +129,21 @@ retention/reference GC is not implemented.
 ## Branches, metadata and storage
 
 A verified fixed-layout environment is reused only at the current physical
-workspace. When Runtime replaces that workspace with another slot, it does not
-copy the environment directory; the next execution either observes an environment
-it can use or runs unbound. Parent environments need not agree, and environment
-mismatch alone never blocks the node.
+workspace. When environment reuse is not possible, Runtime leaves the current workspace's
+business environment paths untouched and starts the Node with an unbound launch.
+The Node may then discover, activate, switch or install environments through Bash.
+Runtime may carry a non-owning ambient hint as
+`previous agent used: <manager> <selector> (<executable>)`. At fan-in all parent
+hints are preserved, sorted and deduplicated; no hint is authoritative and
+conflicting hints do not block the node.
 
 At fan-in, Runtime selects a provable local input if one exists; other parents'
 E/L are provenance, not constraints on the downstream task. Otherwise the current
-workspace starts unbound. All input manifests and stored bytes are still validated
-before preparation, including environments not selected for reuse. Known custom
-prefixes remain excluded from copying and Git collection. Resetting an allocated
-view touches only its managed scopes, checks its current writer's evidence and
-tracked-path safety, and never changes an upstream tree or its history. There is
-no automatic package installation/rebuild and no instruction asking an Agent to
-perform one. Ordinary business Bash retains its existing exploration/creation
-behavior and permissions.
+workspace starts unbound. Runtime never cleans or resets business environment
+paths. All input manifests and stored bytes are still validated before preparation,
+including environments not selected for reuse. Known custom prefixes remain
+excluded from copying and Git collection. Ordinary business Bash retains its
+existing exploration/creation behavior and permissions.
 
 Persisted records from earlier execution contracts remain readable for replay and
 recovery; they are not a second user-visible environment mode. The current

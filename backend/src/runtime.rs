@@ -3075,6 +3075,7 @@ pub(crate) fn perform_result(
                     .join("sessions")
                     .join(generation);
                 fs::create_dir_all(&session).map_err(|e| e.to_string())?;
+                #[cfg(not(feature = "fixture"))]
                 let mut command = crate::native::execution_command(
                     engine::PiRole::NodeAgent,
                     &repository,
@@ -3082,6 +3083,8 @@ pub(crate) fn perform_result(
                     &job.root,
                     &session,
                 )?;
+                #[cfg(feature = "fixture")]
+                let mut command = crate::native::fixture_execution_command(path)?;
                 command.arg("--grapher-run-result").args(&job.args);
                 command
                     .env("GRAPHER_MODE", "result")
@@ -3356,9 +3359,6 @@ fn perform_with_merger_inner(
         }
     }
     let environment_input = if let Some(store) = &environments {
-        if let Some(selected) = &selected_environment {
-            store.prepare_independent(path, selected, &job.environment_sources)?;
-        }
         Some(store.prepare(
             path,
             selected_environment

@@ -46,14 +46,7 @@ jobs:
           /usr/bin/sandbox-exec -p '(version 1)(allow default)' /bin/sh -c ': <>/dev/null'
       - name: Install Windows native tools
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install ripgrep fd --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { throw "Failed to install ripgrep/fd" }
-          rg --version
-          if ($LASTEXITCODE -ne 0) { throw "ripgrep is not executable on PATH" }
-          fd --version
-          if ($LASTEXITCODE -ne 0) { throw "fd is not executable on PATH" }
+        uses: ./.github/actions/install-windows-search-tools
       - name: Install Grapher and pinned Pi
         run: npm ci --ignore-scripts
       - run: npm run pi:setup

@@ -335,13 +335,7 @@ pub fn execution_command(
     #[cfg(target_os = "windows")]
     {
         let _ = (data, session);
-        let mut command = Command::new(trusted_node()?);
-        command
-            .arg(host_path(&engine.join("engine/entrypoint.mjs")))
-            .current_dir(host_path(&current))
-            .env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
-        clear_git_environment(&mut command);
-        return Ok(command);
+        return unsandboxed_command(&engine, &current);
     }
     #[cfg(target_os = "linux")]
     {
@@ -366,6 +360,29 @@ pub fn execution_command(
                 .into(),
         )
     }
+}
+
+/// Run the verified engine without a platform sandbox. Windows uses the host
+/// boundary directly; fixture result launches cannot use production sandbox
+/// geometry because their disposable workspaces live under the test data root.
+#[cfg(any(windows, feature = "fixture"))]
+fn unsandboxed_command(engine: &Path, current: &Path) -> Result<Command, String> {
+    let mut command = Command::new(trusted_node()?);
+    command
+        .arg(host_path(&engine.join("engine/entrypoint.mjs")))
+        .current_dir(host_path(current))
+        .env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
+    clear_git_environment(&mut command);
+    Ok(command)
+}
+
+/// Fixture result-entry launches substitute the engine and keep disposable
+/// workspaces under the test data root, which production sandbox geometry
+/// rejects. Platform boundaries stay covered by the native suites built
+/// without the fixture feature.
+#[cfg(feature = "fixture")]
+pub fn fixture_execution_command(cwd: &Path) -> Result<Command, String> {
+    unsandboxed_command(&prepared_runtime()?, cwd)
 }
 
 /// Shared upstream-owned credentials/config; this is not a directory mapping.

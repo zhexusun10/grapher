@@ -214,10 +214,10 @@ fn best_effort_serialized_roots_keep_independent_terminal_slots() {
 }
 
 #[test]
-fn best_effort_reused_path_requires_current_writer_evidence_not_just_parent_layout() {
+fn best_effort_reused_path_preserves_business_environment_when_binding_is_unavailable() {
     let (_temp, source, mut runtime) = setup(
         graph(&["A", "B", "C", "D"], &[("A", "C", false), ("B", "D", false)]), automatic(),
-        "if(name==='C' && (fs.existsSync('business-env')||fs.existsSync('.venv'))) throw Error('obsolete environment survived reset');",
+        "if(name==='C' && (!fs.existsSync('business-env') || !fs.existsSync('.venv'))) throw Error('Runtime cleaned a business environment');",
     );
     runtime.state.config.as_mut().unwrap().max_parallel = 1;
     let a = runtime.jobs().unwrap().remove(0);
@@ -227,14 +227,45 @@ fn best_effort_reused_path_requires_current_writer_evidence_not_just_parent_layo
     run_created(&mut runtime, &b, ".venv");
     let c = runtime.jobs().unwrap().remove(0);
     assert_eq!(c.execution.worktree, b.execution.worktree);
-    assert!(store(&runtime).load_launch(&c.environment_input.as_ref().unwrap().launch_ref).unwrap().environment.is_none(),
-        "A's old snapshot is not the current writer at that path");
+    assert!(Path::new(&c.execution.worktree).join("business-env").exists(), "Runtime must preserve the business environment");
+    assert!(Path::new(&c.execution.worktree).join(".venv").exists(), "Runtime must preserve the current workspace environment");
     run(&mut runtime, &c);
     let d = runtime.jobs().unwrap().remove(0);
     assert_ne!(d.execution.worktree, c.execution.worktree, "C's terminal slot must stay pinned");
     run(&mut runtime, &d);
     assert_eq!(publish(&mut runtime, &source).entries.len(), 2);
     assert!(!workspace::git(&source, &["ls-files"]).unwrap().contains("business-env"));
+}
+
+#[test]
+fn fan_in_merges_external_environment_hints_without_choosing_or_blocking() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = Uuid::new_v4().to_string();
+    let config = automatic();
+    let store = Environments::new(&temp.path().join("data"), &run, &config).unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    workspace::git(&workspace, &["init", "-q"]).unwrap();
+    let baseline = store.initialize(&workspace).unwrap();
+    let parent = |name: &str, selector: &str| {
+        let mut launch = store.load_launch(&baseline.launch_ref).unwrap();
+        launch.ambient_hints.push(crate::environment_discovery::AmbientEnvironmentHint {
+            manager: "conda".into(), selector: selector.into(), executable: "conda".into(),
+        });
+        let launch_ref = store.launch(&launch).unwrap();
+        (name.into(), CompositeResult {
+            layout: Some(temp.path().join(name).to_string_lossy().into()),
+            launch_ref,
+            ..baseline.clone()
+        })
+    };
+    let inputs = vec![parent("B", "name:train"), parent("C", "name:report")];
+    let selected = store.select_for_workspace("D", &inputs,
+        &temp.path().join("D").to_string_lossy(), &baseline, None).unwrap();
+    let launch = store.load_launch(&selected.launch_ref).unwrap();
+    assert!(launch.environment.is_none(), "fanin with external-only inputs remains unbound");
+    assert_eq!(launch.ambient_hints.iter().map(|hint| hint.selector.as_str()).collect::<Vec<_>>(),
+        vec!["name:report", "name:train"], "fanin preserves and deterministically deduplicates every parent hint");
 }
 
 #[test]

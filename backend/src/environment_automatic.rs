@@ -137,6 +137,7 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
                 "CONDA_PREFIX".into(), "CONDA_DEFAULT_ENV".into(), "CONDA_SHLVL".into(),
             ],
             managed_scopes: vec![],
+            ambient_hints: vec![],
             hook: None,
             environment: None,
         },

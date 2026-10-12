@@ -60,6 +60,7 @@ pub(super) fn policy() -> EnvironmentConfig {
             variables: BTreeMap::new(),
             inherit: vec![],
             managed_scopes: vec![],
+            ambient_hints: vec![],
             hook: None,
             environment: None,
         },
@@ -163,6 +164,17 @@ pub(super) fn run(runtime: &mut Runtime, job: &Job) {
     );
 }
 
+#[test]
+fn ambient_environment_hints_use_non_authoritative_previous_agent_wording() {
+    let mut launch = policy().launch;
+    launch.ambient_hints = vec![crate::environment_discovery::AmbientEnvironmentHint {
+        manager: "conda".into(), selector: "name:ml".into(), executable: "conda".into(),
+    }];
+    assert_eq!(
+        super::previous_agent_environment_hints(&launch).as_deref(),
+        Some("previous agent used: conda name:ml (conda)"),
+    );
+}
 #[test]
 fn history_scope_transition_is_checked_before_touching_code_or_partial_environment() {
     let temp = tempfile::tempdir().unwrap();

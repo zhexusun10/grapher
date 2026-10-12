@@ -29,6 +29,10 @@ pub struct LaunchConfig {
     pub hook: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_scopes: Vec<String>,
+    /// Non-owning hints from previous business processes. Runtime never copies,
+    /// activates or cleans these environments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambient_hints: Vec<crate::environment_discovery::AmbientEnvironmentHint>,
     /// Runtime-verified lazy binding. Absent in all pre-discovery records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<crate::environment_discovery::Binding>,
@@ -291,6 +295,9 @@ impl LaunchConfig {
         for scope in &self.managed_scopes {
             safe_relative(scope)?;
         }
+        for hint in &self.ambient_hints {
+            hint.validate()?;
+        }
         for key in self.variables.keys().chain(&self.inherit) {
             if !variable_name(key) || reserved(key) {
                 return Err(format!("Reserved/invalid launch variable: {key}"));
@@ -319,6 +326,7 @@ impl LaunchConfig {
             inherit: self.inherit.clone(),
             hook: self.hook.as_ref().map(|v| expand(v)),
             managed_scopes: self.managed_scopes.clone(),
+            ambient_hints: self.ambient_hints.clone(),
             environment: self.environment.clone(),
         }
     }
@@ -678,6 +686,18 @@ impl Environments {
                 .is_ok_and(|launch| launch.environment.is_some())) { "fixed-layout-not-reusable" }
             else { "unbound-inputs" };
         let mut selected = reusable.unwrap_or_else(|| baseline.clone());
+        let mut hints = Vec::new();
+        for input in inputs.iter().map(|(_, input)| input)
+            .chain(current.into_iter())
+        {
+            hints.extend(self.load_launch(&input.launch_ref)?.ambient_hints);
+        }
+        hints.sort_by(|a, b| (&a.manager, &a.selector, &a.executable)
+            .cmp(&(&b.manager, &b.selector, &b.executable)));
+        hints.dedup();
+        let mut launch = self.load_launch(&selected.launch_ref)?;
+        launch.ambient_hints = hints;
+        selected.launch_ref = self.launch(&launch)?;
         selected.selected_from = inputs.iter().map(|(name, _)| name.clone()).collect();
         selected.inheritance = Some(InheritanceDecision {
             reason: reason.into(),
@@ -687,27 +707,6 @@ impl Environments {
             }).collect(),
         });
         Ok(selected)
-    }
-
-    /// Remove only Run-owned managed scopes from an allocated destination when
-    /// starting unbound. Source trees and their immutable snapshots are untouched.
-    pub(crate) fn prepare_independent(
-        &self, path: &Path, selected: &CompositeResult, sources: &[CompositeResult],
-    ) -> Result<(), String> {
-        if !self.config.best_effort || selected.layout.is_some() {
-            return Ok(());
-        }
-        let mut scopes = self.config.scopes.clone();
-        for source in sources {
-            scopes.extend(self.exclusions(&source.launch_ref)?.into_iter()
-                .filter(|scope| !self.config.caches.contains(scope)));
-        }
-        scopes.sort();
-        scopes.dedup();
-        // Existing Files handles traversal, tracked descendants and readonly
-        // files before materialization; never recursively delete arbitrary paths.
-        Files::environment(&self.directory.join("files"), &scopes)?
-            .materialize(path, &[selected.environment_ref.clone()], None, false)
     }
 
     fn configured_launch(&self, path: &Path, reference: &str) -> Result<LaunchConfig, String> {
@@ -750,9 +749,12 @@ impl Environments {
         }
         let same_view = selected.layout.as_deref() == Some(&layout);
         let scoped = self.scoped_files(&selected.launch_ref)?;
-        if same_view && !history_edit && !preserve_failed {
+        let unbound_best_effort = self.config.best_effort
+            && selected.layout.is_none()
+            && self.load_launch(&selected.launch_ref)?.environment.is_none();
+        if !unbound_best_effort && same_view && !history_edit && !preserve_failed {
             scoped.verify(path, &selected.environment_ref, "")?;
-        } else if !preserve_failed {
+        } else if !preserve_failed && !unbound_best_effort {
             // Materialization itself validates every stored byte before touching
             // the view; do not repeat the same multi-GiB scan beforehand.
             scoped.materialize(path, &[selected.environment_ref.clone()], None, false)?;
@@ -1333,6 +1335,9 @@ pub(crate) fn bind_command(
         &serde_json::to_vec(&launch).map_err(|e| e.to_string())?,
     )?;
     clean_command(command, &launch, Some(&binding))?;
+    if let Some(hints) = previous_agent_environment_hints(&launch) {
+        command.env("GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS", hints);
+    }
     if config.discovery {
         let context = crate::environment_discovery::context(
             path,
@@ -1350,6 +1355,14 @@ pub(crate) fn bind_command(
     }
     crate::environment_resources::bind(command, config)
 }
+
+fn previous_agent_environment_hints(launch: &LaunchConfig) -> Option<String> {
+    (!launch.ambient_hints.is_empty()).then(|| launch.ambient_hints.iter()
+        .map(|hint| format!("previous agent used: {} {} ({})",
+            hint.manager, hint.selector, hint.executable))
+        .collect::<Vec<_>>().join("\n"))
+}
+
 
 #[cfg(test)]
 #[path = "environment_tests.rs"]

@@ -50,8 +50,7 @@ jobs:
           sudo apt-get install -y bubblewrap build-essential git
       - name: Install Windows native tools
         if: matrix.platform == 'windows'
-        shell: pwsh
-        run: choco install ripgrep fd --yes --no-progress
+        uses: ./.github/actions/install-windows-search-tools
       - name: Install Node dependencies
         run: npm ci --ignore-scripts
       - name: Install and build Pi

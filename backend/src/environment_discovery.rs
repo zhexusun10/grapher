@@ -16,6 +16,25 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Non-owning description of an external environment actually selected by a
+/// business Bash tool. It is evidence for the next Node, never an authorization.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AmbientEnvironmentHint {
+    pub manager: String,
+    pub selector: String,
+    pub executable: String,
+}
+impl AmbientEnvironmentHint {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.manager.is_empty() || self.selector.is_empty() || self.executable.is_empty()
+            || self.manager.contains('\0') || self.selector.contains('\0') || self.executable.contains('\0') {
+            return Err("Invalid ambient environment hint".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Binding {
@@ -55,6 +74,14 @@ struct Receipt {
     prefix: String,
     kind: String,
     created: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AmbientReceipt {
+    schema: u32,
+    generation: String,
+    hint: AmbientEnvironmentHint,
 }
 fn text(path: &Path) -> String {
     native::host_path(path).to_string_lossy().replace('\\', "/")
@@ -277,6 +304,39 @@ fn private_conda_args(args: &[String], root: &Path) -> Result<Vec<String>, Strin
         index += 1;
     }
     Ok(result)
+}
+
+fn hint(name: &str, program: &Path, args: &[String], root: &Path, launch: &LaunchConfig) -> Option<AmbientEnvironmentHint> {
+    let manager = match name {
+        "conda" => "conda",
+        "python" | "python3" | "pip" | "pip3" => "python",
+        _ => return None,
+    };
+    if executable_prefix(program).ok().flatten().is_some_and(|prefix| owned(root, &prefix).is_ok()) {
+        return None;
+    }
+    let selector = if name == "conda" {
+        conda_private_prefix(args, root).map(|path| text(&path))
+            .or_else(|| conda_environment_name(args).map(|name| format!("name:{name}")))
+            .or_else(|| std::env::var("CONDA_PREFIX").ok())
+    } else {
+        Some(text(program))
+    }?;
+    let changed = launch.environment.as_ref().is_none_or(|binding| binding.prefix != selector);
+    changed.then(|| AmbientEnvironmentHint {
+        manager: manager.into(), selector, executable: text(program),
+    })
+}
+fn conda_environment_name(args: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "-n" || args[index] == "--name" {
+            return args.get(index + 1).map(String::as_str);
+        }
+        if let Some(name) = args[index].strip_prefix("--name=") { return Some(name); }
+        index += 1;
+    }
+    None
 }
 
 fn conda_private_prefix(args: &[String], root: &Path) -> Option<PathBuf> {
@@ -600,6 +660,21 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     }
     let status = command.status().map_err(|e| e.to_string())?;
     if status.success() {
+        if ctx.best_effort {
+            if let Some(hint) = hint(name, &program, &business, &root, &ctx.launch) {
+                let receipt = AmbientReceipt {
+                    schema: 1,
+                    generation: ctx.generation.clone(),
+                    hint,
+                };
+                receipt.hint.validate()?;
+                let directory = file.parent().ok_or("Missing observer session")?
+                    .join("ambient-observations").join(&ctx.generation);
+                fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+                write(&directory.join(format!("{}.json", Uuid::new_v4())),
+                    &serde_json::to_vec(&receipt).map_err(|e| e.to_string())?)?;
+            }
+        }
         let mut candidates: Vec<_> = creates.into_iter().map(|p| (p, true)).collect();
         if let Some(prefix) = private_prefix {
             candidates.push((prefix, false));
@@ -777,6 +852,22 @@ pub(crate) fn resolve_for_policy(
     let mut candidates = BTreeMap::new();
     let mut external_selected = false;
     let mut discovered_scopes = Vec::new();
+    let mut ambient_hints = launch.ambient_hints.clone();
+    let ambient_directory = session.join("ambient-observations").join(generation);
+    if let Ok(entries) = fs::read_dir(&ambient_directory) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "json") { continue; }
+            real_child_path(&session.join("ambient-observations"), &path, true)?
+                .ok_or("Missing ambient environment hint")?;
+            let value: AmbientReceipt = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            if value.schema != 1 || value.generation != generation { return Err("Stale ambient environment hint".into()); }
+            ambient_hints.push(value.hint);
+        }
+    }
+    ambient_hints.sort_by(|a, b| (&a.manager, &a.selector, &a.executable).cmp(&(&b.manager, &b.selector, &b.executable)));
+    ambient_hints.dedup();
     match fs::read_dir(&directory) {
         Ok(entries) => {
             for entry in entries {
@@ -868,6 +959,7 @@ pub(crate) fn resolve_for_policy(
         next.managed_scopes.extend(discovered_scopes);
         next.managed_scopes.sort();
         next.managed_scopes.dedup();
+        next.ambient_hints = ambient_hints;
         next
     } else {
         launch.clone()

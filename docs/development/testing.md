@@ -99,7 +99,7 @@ Debian/Ubuntu: sudo apt-get install ripgrep fd-find
 
 `fdfind` is recognized, but distribution packages must support the flags used by pinned Pi; an old fd package may need replacement. The Harbor base image pins compatible tool versions/checksums in [benchmark/Dockerfile](../../benchmark/Dockerfile).
 
-Windows CI explicitly provisions search tools and sets `PI_OFFLINE=1` for extension tests. This avoids test-time implicit downloads, not initial dependency installation.
+Windows CI explicitly provisions search tools, verifies both `rg` and `fd`, and retries transient Chocolatey community-feed failures. It sets `PI_OFFLINE=1` for extension tests. This avoids test-time implicit downloads, not initial dependency installation.
 
 ## Offline native ML acceptance tools
 
