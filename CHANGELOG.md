@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Retry transient Chocolatey community-feed failures in Windows CI and verify both `rg` and `fd` before running tests, instead of failing later on a missing binary.
+- Resolve host Git for the Grapher-owned engine bootstrap independently of the business launch PATH, so pinned-baseline verification keeps working when a managed environment omits Git.
 - Keep fixture result-entry launches off the platform sandbox: disposable test workspaces live under the test data root, which production Linux/macOS geometry intentionally rejects. Native suites built without the fixture feature still cover the real boundaries.
 
 ### Breaking Changes

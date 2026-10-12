@@ -76,7 +76,8 @@ not by editing the policy. Traversal, overlapping paths, Runtime metadata and
 tracked-file conflicts fail. Windows case aliases and reserved names are checked.
 
 The default entry directory is first in the complete business PATH. Trusted
-engine Node is resolved independently. Pi PATH processing and Windows MSYS
+engine Node and the bootstrap Git used for pinned-baseline verification are
+resolved independently, before that binding. Pi PATH processing and Windows MSYS
 startup cannot add host bins; managed Bash resets PATH inside Bash. Hooks run
 before extension/MCP factories and cannot change Runtime/Pi identity, Node
 bootstrap or the default entry. Loader variables enter inside the established

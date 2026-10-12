@@ -268,6 +268,22 @@ pub(crate) fn trusted_node() -> Result<PathBuf, String> {
     }).clone()
 }
 
+/// Resolve the bootstrap Git before applying business PATH. The Grapher-owned
+/// entrypoint verifies the pinned Pi baseline with the host's Git; a business
+/// environment may keep a deliberately minimal PATH and must not choose it.
+pub(crate) fn trusted_git() -> Result<PathBuf, String> {
+    static GIT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    GIT.get_or_init(|| {
+        let name = if cfg!(windows) { "git.exe" } else { "git" };
+        let path = std::env::var_os("PATH")
+            .and_then(|value| std::env::split_paths(&value)
+                .map(|directory| directory.join(name))
+                .find(|candidate| candidate.is_file()))
+            .ok_or("Native Git is unavailable for pinned baseline verification")?;
+        Ok(host_path(&path.canonicalize().map_err(|e| e.to_string())?))
+    }).clone()
+}
+
 pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, String> {
     validate_workspace(role, repository, cwd)?;
     if repository.canonicalize().map_err(|e| e.to_string())?
@@ -281,7 +297,16 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
     command.env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     command.env_remove("GRAPHER_EXECUTION_KIND");
     clear_git_environment(&mut command);
+    bind_trusted_git(&mut command)?;
     Ok(command)
+}
+
+/// The business launch binding replaces PATH before Pi/extension factories.
+/// The bootstrap needs host Git even when that PATH omits it; the protected
+/// GRAPHER_ namespace keeps business variables from forging the value.
+fn bind_trusted_git(command: &mut Command) -> Result<(), String> {
+    command.env("GRAPHER_TRUSTED_GIT", host_path(&trusted_git()?));
+    Ok(())
 }
 
 pub fn execution_command(
@@ -330,6 +355,7 @@ pub fn execution_command(
             .current_dir(&current)
             .env("PI_CODING_AGENT_DIR", agent_dir()?);
         clear_git_environment(&mut command);
+        bind_trusted_git(&mut command)?;
         return Ok(command);
     }
     #[cfg(target_os = "windows")]
@@ -350,6 +376,7 @@ pub fn execution_command(
             &pi_dir,
         )?;
         clear_git_environment(&mut command);
+        bind_trusted_git(&mut command)?;
         Ok(command)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -373,6 +400,7 @@ fn unsandboxed_command(engine: &Path, current: &Path) -> Result<Command, String>
         .current_dir(host_path(current))
         .env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     clear_git_environment(&mut command);
+    bind_trusted_git(&mut command)?;
     Ok(command)
 }
 
@@ -504,6 +532,20 @@ mod tests {
                 .get_envs()
                 .any(|(name, value)| name == std::ffi::OsStr::new(key) && value.is_none()));
         }
+    }
+
+    #[test]
+    fn engine_bootstrap_binds_host_git_outside_the_business_path() {
+        let git = trusted_git().unwrap();
+        assert!(git.is_file(), "baseline verification requires a real Git: {}", git.display());
+        let mut command = Command::new("node");
+        bind_trusted_git(&mut command).unwrap();
+        let value = command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("GRAPHER_TRUSTED_GIT"))
+            .and_then(|(_, value)| value)
+            .expect("bootstrap Git binding is required");
+        assert_eq!(Path::new(value), git);
     }
 
     #[test]
