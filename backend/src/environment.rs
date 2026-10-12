@@ -27,6 +27,8 @@ pub struct LaunchConfig {
     /// Trusted Bash initialization, e.g. a declared Conda activation hook.
     #[serde(default)]
     pub hook: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_scopes: Vec<String>,
     /// Runtime-verified lazy binding. Absent in all pre-discovery records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<crate::environment_discovery::Binding>,
@@ -66,9 +68,14 @@ pub struct EnvironmentConfig {
     pub require: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<crate::environment_resources::Resources>,
-    /// New Runs start unbound; ordinary business tools create the environment.
+    /// The current workspace starts unbound; ordinary business tools may create
+    /// or switch environments and Runtime records only verifiable private ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub discovery: bool,
+    /// Runtime may inherit a safe local environment without requiring parents to
+    /// agree. This is an internal admission mode, not a user configuration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub best_effort: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +86,22 @@ pub struct Domain {
     pub baseline: String,
     pub policy: String,
     pub contract: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InheritanceInput {
+    pub node: String,
+    pub environment_ref: String,
+    pub launch_ref: String,
+    pub layout: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InheritanceDecision {
+    pub reason: String,
+    pub inputs: Vec<InheritanceInput>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +117,16 @@ pub struct CompositeResult {
     pub generation: String,
     #[serde(default)]
     pub selected_from: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inheritance: Option<InheritanceDecision>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultEntry {
+    pub name: String,
+    pub result: CompositeResult,
+    pub workspace: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -105,6 +138,30 @@ pub struct ResultDescriptor {
     pub config: EnvironmentConfig,
     /// A result must be prepared by Runtime, not activated in the source folder.
     pub workspace: String,
+    /// Schema 2 publishes independent business entries, never a merged env tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<ResultEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_entry: Option<String>,
+}
+
+impl ResultDescriptor {
+    pub(crate) fn for_entry(&self, name: Option<&str>) -> Result<Self, String> {
+        if self.entries.is_empty() {
+            if name.is_some() {
+                return Err("This legacy result has no named business entries".into());
+            }
+            return Ok(self.clone());
+        }
+        let name = name.or(self.default_entry.as_deref())
+            .ok_or("Published result has independent business entries; specify entryId")?;
+        let entry = self.entries.iter().find(|entry| entry.name == name)
+            .ok_or("Unknown published business entry")?;
+        let mut selected = self.clone();
+        selected.result = entry.result.clone();
+        selected.workspace = entry.workspace.clone();
+        Ok(selected)
+    }
 }
 
 #[derive(Serialize)]
@@ -231,6 +288,9 @@ impl LaunchConfig {
         if let Some(binding) = &self.environment {
             binding.validate()?;
         }
+        for scope in &self.managed_scopes {
+            safe_relative(scope)?;
+        }
         for key in self.variables.keys().chain(&self.inherit) {
             if !variable_name(key) || reserved(key) {
                 return Err(format!("Reserved/invalid launch variable: {key}"));
@@ -258,6 +318,7 @@ impl LaunchConfig {
                 .collect(),
             inherit: self.inherit.clone(),
             hook: self.hook.as_ref().map(|v| expand(v)),
+            managed_scopes: self.managed_scopes.clone(),
             environment: self.environment.clone(),
         }
     }
@@ -282,6 +343,11 @@ impl EnvironmentConfig {
                 "Source import requires explicitly relocatable layout and cannot also initialize"
                     .into(),
             );
+        }
+        if self.best_effort && (!self.discovery || self.import_source
+            || !self.initialize.is_empty() || self.launch_file.is_some()
+            || !self.authority.is_empty()) {
+            return Err("Best-effort inheritance requires an empty-start discovery policy".into());
         }
         let paths = self.exclusions();
         for (i, path) in paths.iter().enumerate() {
@@ -508,6 +574,7 @@ impl Environments {
             layout: None,
             generation: "baseline".into(),
             selected_from: vec!["baseline".into()],
+            inheritance: None,
         })
     }
 
@@ -578,6 +645,69 @@ impl Environments {
         let mut selected = selected.clone();
         selected.selected_from = inputs.iter().map(|(name, _)| name.clone()).collect();
         Ok(selected)
+    }
+
+    /// Metadata-only selection. Other parents remain provenance, not runtime
+    /// constraints. Fixed-layout environments are reused only at their own path.
+    pub(crate) fn select_for_workspace(
+        &self,
+        node: &str,
+        inputs: &[(String, CompositeResult)],
+        path: &str,
+        baseline: &CompositeResult,
+        current: Option<&CompositeResult>,
+    ) -> Result<CompositeResult, String> {
+        if !self.config.best_effort {
+            return self.select(node, inputs);
+        }
+        self.validate_result_metadata(baseline)?;
+        for (_, input) in inputs {
+            if input.domain != baseline.domain {
+                return Err("Environment inputs belong to different native domains".into());
+            }
+            self.validate_result_metadata(input)?;
+        }
+        let local: Vec<_> = inputs.iter()
+            .filter(|(_, input)| input.layout.as_deref() == Some(path)
+                && current.is_some_and(|current| current.environment_ref == input.environment_ref
+                    && current.launch_ref == input.launch_ref))
+            .cloned().collect();
+        let reusable = local.first().map(|(_, input)| input.clone());
+        let reason = if reusable.is_some() { "same-layout" }
+            else if inputs.iter().any(|(_, input)| self.load_launch(&input.launch_ref)
+                .is_ok_and(|launch| launch.environment.is_some())) { "fixed-layout-not-reusable" }
+            else { "unbound-inputs" };
+        let mut selected = reusable.unwrap_or_else(|| baseline.clone());
+        selected.selected_from = inputs.iter().map(|(name, _)| name.clone()).collect();
+        selected.inheritance = Some(InheritanceDecision {
+            reason: reason.into(),
+            inputs: inputs.iter().map(|(name, input)| InheritanceInput {
+                node: name.clone(), environment_ref: input.environment_ref.clone(),
+                launch_ref: input.launch_ref.clone(), layout: input.layout.clone(),
+            }).collect(),
+        });
+        Ok(selected)
+    }
+
+    /// Remove only Run-owned managed scopes from an allocated destination when
+    /// starting unbound. Source trees and their immutable snapshots are untouched.
+    pub(crate) fn prepare_independent(
+        &self, path: &Path, selected: &CompositeResult, sources: &[CompositeResult],
+    ) -> Result<(), String> {
+        if !self.config.best_effort || selected.layout.is_some() {
+            return Ok(());
+        }
+        let mut scopes = self.config.scopes.clone();
+        for source in sources {
+            scopes.extend(self.exclusions(&source.launch_ref)?.into_iter()
+                .filter(|scope| !self.config.caches.contains(scope)));
+        }
+        scopes.sort();
+        scopes.dedup();
+        // Existing Files handles traversal, tracked descendants and readonly
+        // files before materialization; never recursively delete arbitrary paths.
+        Files::environment(&self.directory.join("files"), &scopes)?
+            .materialize(path, &[selected.environment_ref.clone()], None, false)
     }
 
     fn configured_launch(&self, path: &Path, reference: &str) -> Result<LaunchConfig, String> {
@@ -666,8 +796,9 @@ impl Environments {
     }
 
     /// Seal the current workspace view as this execution's input composite.
-    /// Shared by ordinary preparation and composition-Merger reconciliation; the
-    /// caller has already materialized or reconciled the view it is capturing.
+    /// Shared by ordinary preparation after Runtime has selected the current
+    /// workspace environment.
+    /// The caller has already materialized the selected current view.
     fn finalize_input(
         &self,
         path: &Path,
@@ -678,7 +809,7 @@ impl Environments {
     ) -> Result<CompositeResult, String> {
         let launch = self.configured_launch(path, &selected.launch_ref)?;
         if self.config.discovery {
-            crate::environment_discovery::validate_launch(path, &launch)?;
+            crate::environment_discovery::validate_launch(path, &launch, !self.config.best_effort)?;
         }
         let expanded = launch.expanded(path);
         if Path::new(&expanded.entry).parent() != expanded.path.first().map(Path::new) {
@@ -700,83 +831,12 @@ impl Environments {
             layout: Some(workspace::normalize_workspace_display_path(path)),
             generation: generation.into(),
             selected_from: selected.selected_from.clone(),
+            inheritance: selected.inheritance.clone(),
         };
         self.record(generation, "before", &input)?;
         Ok(input)
     }
 
-    /// Persist the base generation a composition Merger runs under before its
-    /// managed L is bound, mirroring `prepare`'s pre-execution evidence.
-    pub(crate) fn record_before(
-        &self,
-        execution: &str,
-        code: &str,
-        input: &CompositeResult,
-    ) -> Result<(), String> {
-        let input = CompositeResult {
-            generation: execution.into(),
-            code_ref: code.into(),
-            ..input.clone()
-        };
-        self.record(execution, "before", &input)
-    }
-
-    /// Bind and capture the environment a composition Merger selected or built
-    /// in an already-composed workspace. Discovery reads the Merger's own
-    /// observation receipts; trying every Merger session in order covers
-    /// multi-parent conflicts where more than one Merger invocation ran.
-    /// No directory is merged and no launch is adopted without verification.
-    pub(crate) fn capture_reconciled(
-        &self,
-        path: &Path,
-        base: &CompositeResult,
-        generation: &str,
-        head: &str,
-        resources: Vec<String>,
-        selected_from: &[String],
-        merger_sessions: &[(String, std::path::PathBuf)],
-    ) -> Result<CompositeResult, String> {
-        self.validate_result_metadata(base)?;
-        if self.baseline()? != base.domain {
-            return Err("Native baseline/domain changed; refusing unsafe environment reconciliation".into());
-        }
-        self.config.check_tracked(path)?;
-        if self.requires_fixed_layout(&base.launch_ref)?
-            && base.layout.as_ref().is_some_and(|original| {
-                *original != workspace::normalize_workspace_display_path(path)
-            })
-        {
-            return Err("Workspace composition blocked: fixed native environment cannot change physical layout; namespace/relocatable capability required".into());
-        }
-        let mut last = None;
-        for (merger_generation, session) in merger_sessions {
-            let mut observed = base.clone();
-            observed.generation = merger_generation.clone();
-            match self.discover(path, &observed, session) {
-                Ok(discovered) => {
-                    // A Merger that claims success without selecting or
-                    // building a verified environment must not silently fall
-                    // back to the unbound bootstrap for the downstream node.
-                    if self.config.discovery
-                        && self.load_launch(&discovered.launch_ref)?.environment.is_none()
-                    {
-                        last = Some("Environment Merger did not select or build a verified private environment; refusing an unbound composition".into());
-                        continue;
-                    }
-                    let mut input =
-                        self.finalize_input(path, &discovered, generation, head, resources.clone())?;
-                    if !selected_from.is_empty() {
-                        input.selected_from = selected_from.to_vec();
-                    }
-                    return Ok(input);
-                }
-                Err(error) => last = Some(error),
-            }
-        }
-        Err(last.unwrap_or_else(|| {
-            "Environment reconciliation has no Merger observation session".into()
-        }))
-    }
 
     pub(crate) fn validate_history_scopes(
         &self,
@@ -809,6 +869,9 @@ impl Environments {
                 paths.push(binding.prefix);
             }
         }
+        paths.extend(self.load_launch(reference)?.managed_scopes);
+        paths.sort();
+        paths.dedup();
         Ok(paths)
     }
 
@@ -841,11 +904,13 @@ impl Environments {
         if !self.config.discovery {
             return Ok(input.clone());
         }
-        let launch = crate::environment_discovery::resolve(
+        let launch = crate::environment_discovery::resolve_for_policy(
             path,
             &self.load_launch(&input.launch_ref)?,
             session,
             &input.generation,
+            !self.config.best_effort,
+            self.config.best_effort,
         )?;
         let reference = self.launch(&launch)?;
         let exclusions = self.exclusions(&reference)?;
@@ -939,7 +1004,7 @@ impl Environments {
             .env("GRAPHER_EXECUTION_KIND", "graph")
             .env("GRAPHER_WORKSPACE_ROOT", native::host_path(path))
             .env("GRAPHER_ORIGINAL_ROOT", native::host_path(repository));
-        bind_command(&mut command, data, run, &self.config, input, path, &session, false)?;
+        bind_command(&mut command, data, run, &self.config, input, path, &session)?;
         let output = controlled_output(command)?;
         let proof: serde_json::Value = serde_json::from_slice(&output)
             .map_err(|e| format!("Invalid native accelerator computation proof: {e}"))?;
@@ -1032,6 +1097,8 @@ impl Environments {
         self.validate_result_metadata(result)?;
         Ok(ResultDescriptor {
             schema: 1,
+            entries: vec![],
+            default_entry: None,
             run_id: run.into(),
             result: result.clone(),
             config: self.config.clone(),
@@ -1043,14 +1110,6 @@ impl Environments {
     }
 }
 
-/// True for the composition ambiguity a node-composition Merger can
-/// reconcile. Native domain mismatches and missing evidence stay hard
-/// failures; only independent inputs with no provable automatic selection
-/// are eligible.
-pub(crate) fn composition_conflict(error: &str) -> bool {
-    error.contains("incompatible E/L inputs")
-        || error.contains("ambiguous independent environments")
-}
 
 /// No inherited business environment; OS plumbing and explicitly authorized
 /// values are separate from immutable L. Native launcher overrides survive.
@@ -1251,7 +1310,6 @@ pub(crate) fn bind_command(
     input: &CompositeResult,
     path: &Path,
     session: &Path,
-    reconciliation: bool,
 ) -> Result<(), String> {
     let store = Environments::new(data, run, config)?;
     // Called only after the owning worker prepares/validates the selected view.
@@ -1281,7 +1339,7 @@ pub(crate) fn bind_command(
             &input.generation,
             &launch,
             session,
-            reconciliation,
+            config.best_effort,
         )?;
         command
             .env("GRAPHER_ENVIRONMENT_DISCOVERY", native::host_path(&context))
@@ -1296,3 +1354,7 @@ pub(crate) fn bind_command(
 #[cfg(test)]
 #[path = "environment_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "fixture"))]
+#[path = "environment_best_effort_tests.rs"]
+mod best_effort_tests;

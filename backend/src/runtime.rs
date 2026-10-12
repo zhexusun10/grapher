@@ -34,9 +34,8 @@ pub struct Job {
     pub feedback_source: bool,
     pub expected_source_head: String,
     pub environment_input: Option<crate::environment::CompositeResult>,
-    /// Fan-in inputs whose E/L composition had no provable automatic selection.
-    /// Preparation dispatches an environment Merger instead of blocking.
-    pub environment_conflict: Option<Vec<(String, crate::environment::CompositeResult)>>,
+    pub environment_sources: Vec<crate::environment::CompositeResult>,
+    pub environment_previous: Option<crate::environment::CompositeResult>,
     pub previous_environment_launch: Option<String>,
     pub preserve_failed_environment: bool,
 }
@@ -642,9 +641,8 @@ impl Runtime {
             };
             self.touch();
         }
-        // Admission is durable and opt-out is not a frontend decision. Fixture
-        // actuators keep their injected tool contract; production new Runs with
-        // no historical policy are resolved by Rust at approval, after Planner.
+        // Production workspace admission is resolved by Rust after planning;
+        // it is not a frontend environment choice.
         let automatic = config.environment.is_none() && !cfg!(feature = "fixture");
         let mut events = vec![EventKind::Created {
             graph,
@@ -707,7 +705,7 @@ impl Runtime {
     }
 
     fn legacy_file_channel_error(&self) -> String {
-        "This saved Run uses legacy ignored-file snapshots and is read-only; start a new Run to use physical-directory workspace inheritance".into()
+        "This saved workspace uses legacy ignored-file snapshots and is read-only; use the current workspace Git inheritance contract".into()
     }
 
     fn require_current_file_contract(&self) -> Result<(), String> {
@@ -869,8 +867,7 @@ impl Runtime {
         }
         if config.environment != previous.environment && self.state.environment_baseline.is_some() {
             return Err(
-                "Environment domain was already initialized; create a new Run to change its policy"
-                    .into(),
+                "Environment domain is already initialized for this workspace execution".into(),
             );
         }
         resolve_repository(&self.root, &config)?;
@@ -1767,8 +1764,16 @@ impl Runtime {
                 .iter()
                 .any(|edge| edge.feedback && edge.from == node.name);
             let history_edit = state.edit_execution_id.is_some();
+            let environment_previous = self.state.executions.iter().rev()
+                .filter(|previous| previous.status == "completed")
+                .find(|previous| previous.result.as_ref()
+                    .is_some_and(|result| result.layout.as_deref() == Some(&execution.worktree)))
+                .and_then(|previous| self.state.nodes.get(&previous.node)
+                    .and_then(|node| node.result.as_ref())
+                    .filter(|result| result.layout.as_deref() == Some(&execution.worktree))
+                    .or(previous.result.as_ref())).cloned();
             let mut environment_input = None;
-            let mut environment_conflict = None;
+            let mut environment_sources = Vec::new();
             let preserve_failed_environment = !history_edit
                 && resume.is_some_and(|previous| {
                     previous.status == "failed"
@@ -1824,19 +1829,11 @@ impl Runtime {
                                 ))
                             })
                             .collect::<Result<Vec<_>, String>>()?;
-                        match store.select(&node.name, &inputs) {
+                        environment_sources.extend(inputs.iter().map(|(_, input)| input.clone()));
+                        let baseline = self.state.environment_baseline.as_ref()
+                            .ok_or("Environment baseline is missing")?;
+                        match store.select_for_workspace(&node.name, &inputs, &execution.worktree, baseline, environment_previous.as_ref()) {
                             Ok(selected) => selected,
-                            Err(error)
-                                if crate::environment::composition_conflict(&error) =>
-                            {
-                                // Prepare on the frozen baseline; the Merger
-                                // reconciles against the conflicting inputs.
-                                environment_conflict = Some(inputs);
-                                self.state
-                                    .environment_baseline
-                                    .clone()
-                                    .ok_or("Environment was not explicitly initialized at approval")?
-                            }
                             Err(error) => return Err(error),
                         }
                     } else {
@@ -1855,7 +1852,20 @@ impl Runtime {
                             "Selected composite input differs from the frozen native domain".into(),
                         );
                     }
+                    let mut selected = selected;
                     store.validate_result_metadata(&selected)?;
+                    if config.environment.as_ref().is_some_and(|policy| policy.best_effort)
+                        && !preserve_failed_environment && !history_edit && feedback_workspace.is_none()
+                        && store.requires_fixed_layout(&selected.launch_ref)?
+                        && selected.layout.as_ref().is_some_and(|path| *path != execution.worktree)
+                    {
+                        environment_sources.push(selected.clone());
+                        selected = store.select_for_workspace(
+                            &node.name, &[(node.name.clone(), selected)], &execution.worktree,
+                            self.state.environment_baseline.as_ref().ok_or("Environment baseline is missing")?,
+                            environment_previous.as_ref(),
+                        )?;
+                    }
                     if store.requires_fixed_layout(&selected.launch_ref)?
                         && selected
                             .layout
@@ -1880,9 +1890,23 @@ impl Runtime {
                     }
                 }
             }
+            if config.environment.as_ref().is_some_and(|policy| policy.best_effort) {
+                // An idle slot may retain a custom managed prefix from an older
+                // owner. Keep its exclusion/ownership evidence when resetting it.
+                environment_sources.extend(self.state.nodes.values()
+                    .filter_map(|state| state.result.as_ref())
+                    .filter(|result| result.layout.as_deref() == Some(&execution.worktree))
+                    .cloned());
+            }
             self.emit(EventKind::Started {
                 execution: execution.clone(),
             })?;
+            if config.environment.as_ref().is_some_and(|policy| policy.best_effort) {
+                environment_sources.extend(environment_previous.iter().cloned());
+            }
+            let mut seen_environments = BTreeSet::new();
+            environment_sources.retain(|source| seen_environments.insert(
+                (source.environment_ref.clone(), source.launch_ref.clone())));
             let previous_environment_launch = if history_edit {
                 self.state
                     .nodes
@@ -1909,7 +1933,8 @@ impl Runtime {
                 feedback_source,
                 expected_source_head: source_head,
                 environment_input,
-                environment_conflict,
+                environment_sources,
+                environment_previous,
                 previous_environment_launch,
                 preserve_failed_environment,
             });
@@ -2154,6 +2179,19 @@ impl Runtime {
             .is_none()
         {
             return false;
+        }
+        let best_effort = self.state.config.as_ref().and_then(|c| c.environment.as_ref())
+            .is_some_and(|policy| policy.best_effort);
+        let shared_handoff = owner.is_some_and(|owner| self.state.nodes.get(owner)
+            .is_some_and(|node| node.shared_workspace)
+            && self.terminal_workspace_for(owner).is_some_and(|terminal| Path::new(&terminal.worktree) == path));
+        if best_effort && !shared_handoff && self.state.graph.nodes.iter().any(|node|
+            Some(node.name.as_str()) != owner
+            && self.state.nodes[&node.name].status == "done"
+            && !self.state.graph.edges.iter().any(|edge| !edge.feedback && edge.from == node.name)
+            && self.state.nodes[&node.name].result.as_ref()
+                .is_some_and(|result| result.layout.as_deref() == path.to_str())) {
+            return true;
         }
         self.state.pending_feedback.iter().any(|pending| {
             self.state
@@ -2654,32 +2692,30 @@ impl Runtime {
         self.emit_outputs(events)
     }
 
-    /// Select immutable publication inputs under the actor; actual native
-    /// baseline/byte validation happens before Git publication, outside it.
-    pub(crate) fn publication_environment_input(
-        &self,
-    ) -> Result<
-        Option<(
-            crate::environment::Environments,
-            crate::environment::CompositeResult,
-        )>,
-        String,
-    > {
+    /// Metadata-only reservation. All native scans and code preparation can run
+    /// outside the actor, including independent terminal result publication.
+    pub(crate) fn publication_environment_input(&self) -> Result<Option<PublicationJob>, String> {
         self.require_current_file_contract()?;
-        let Some(store) = self.environments()? else {
-            return Ok(None);
-        };
-        let selected = store.select("$publication", &self.terminal_results()?)?;
-        if self
-            .state
-            .environment_baseline
-            .as_ref()
-            .is_none_or(|baseline| baseline.domain != selected.domain)
-        {
-            return Err("Publication input differs from the frozen native domain".into());
+        let Some(store) = self.environments()? else { return Ok(None); };
+        let config = self.state.config.as_ref().ok_or("Missing config")?;
+        let independent = config.environment.as_ref().is_some_and(|policy| policy.best_effort);
+        let terminals = self.terminal_results()?;
+        let inputs = if independent { terminals }
+            else { vec![("$publication".into(), store.select("$publication", &terminals)?)] };
+        for (_, input) in &inputs {
+            if self.state.environment_baseline.as_ref().is_none_or(|base| base.domain != input.domain) {
+                return Err("Publication input differs from the frozen native domain".into());
+            }
+            store.validate_result_metadata(input)?;
+            let path = input.layout.as_deref().ok_or("Published environment has no native layout")?;
+            if self.path_is_running(Path::new(path)) {
+                return Err("Cannot publish a launch descriptor over a live writer".into());
+            }
         }
-        store.validate_result_metadata(&selected)?;
-        Ok(Some((store, selected)))
+        Ok(Some(PublicationJob {
+            run_id: self.state.run_id.clone(), repository: resolve_repository(&self.root, config)?,
+            store, inputs, independent,
+        }))
     }
 
     pub fn result_descriptor(&self) -> Result<crate::environment::ResultDescriptor, String> {
@@ -2689,11 +2725,18 @@ impl Runtime {
             .published_result
             .clone()
             .ok_or("No managed result has been published")?;
-        if !descriptor.result.resource_refs.is_empty() {
-            return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before using it".into());
-        }
+        let results: Vec<_> = std::iter::once(&descriptor.result)
+            .chain(descriptor.entries.iter().map(|entry| &entry.result)).collect();
         let store = self.environments()?.ok_or("No managed environment store")?;
-        store.validate_result_metadata(&descriptor.result)?;
+        for result in &results {
+            if !result.resource_refs.is_empty() {
+                return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before using it".into());
+            }
+            store.validate_result_metadata(result)?;
+            if result.code_ref != descriptor.result.code_ref {
+                return Err("Published entries do not refer to the same project code".into());
+            }
+        }
         let repository = resolve_repository(
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
@@ -2723,6 +2766,12 @@ impl Runtime {
         &mut self,
         args: &[String],
     ) -> Result<(ResultJob, crate::process_control::ResultControl), String> {
+        self.start_result_entry(args, None)
+    }
+
+    pub(crate) fn start_result_entry(
+        &mut self, args: &[String], entry: Option<&str>,
+    ) -> Result<(ResultJob, crate::process_control::ResultControl), String> {
         let retry = self
             .state
             .result_execution
@@ -2743,7 +2792,12 @@ impl Runtime {
             .state
             .published_result
             .clone()
-            .ok_or("No managed result has been published")?;
+            .ok_or("No managed result has been published")?
+            .for_entry(entry)?;
+        if retry && self.state.result_execution.as_ref().is_some_and(|execution|
+            execution.input.layout.as_deref() != Some(&descriptor.workspace)) {
+            return Err("Retry must use the failed business entry and its partial workspace".into());
+        }
         let config = self.state.config.clone().ok_or("Missing config")?;
         if !descriptor.result.resource_refs.is_empty() {
             return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before launching it".into());
@@ -2844,39 +2898,71 @@ impl Runtime {
         &self,
         head: &str,
     ) -> Result<Option<crate::environment::ResultDescriptor>, String> {
-        let Some(store) = self.environments()? else {
-            return Ok(None);
-        };
-        let selected = store.select("$publication", &self.terminal_results()?)?;
-        let path = Path::new(
-            selected
-                .layout
-                .as_deref()
-                .ok_or("Published environment has no native layout")?,
-        );
-        if self.path_is_running(path) {
-            return Err("Cannot publish a launch descriptor over a live writer".into());
+        self.publication_environment_input()?.map(|job| job.descriptor(head)).transpose()
+    }
+}
+
+pub(crate) struct PublicationJob {
+    pub(crate) run_id: String,
+    pub(crate) inputs: Vec<(String, crate::environment::CompositeResult)>,
+    repository: PathBuf,
+    store: crate::environment::Environments,
+    independent: bool,
+}
+
+impl PublicationJob {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for (_, input) in &self.inputs { self.store.validate_result(input)?; }
+        Ok(())
+    }
+
+    pub(crate) fn descriptor(&self, head: &str) -> Result<crate::environment::ResultDescriptor, String> {
+        let mut entries = Vec::new();
+        for (name, selected) in &self.inputs {
+            let path = Path::new(selected.layout.as_deref().ok_or("Result has no native layout")?);
+            let exclusions = self.store.exclusions(&selected.launch_ref)?;
+            let present = path.is_dir();
+            if present {
+                self.store.scoped_files(&selected.launch_ref)?.verify(path, &selected.environment_ref, "")?;
+                if !workspace::repository_status(path, &exclusions)?.is_empty() {
+                    return Err("Published code view changed outside its writer lease".into());
+                }
+            }
+            let code = workspace::prepare_with_merger_expected_for_run(
+                &self.repository, path, head, &[], head, Some(&self.run_id),
+                || Err("Publication descriptor requires a clean composed code result".into()),
+            )?;
+            if !present {
+                // Reconstruct a missing successful fixed view at its original path.
+                self.store.prepare(path, selected, &Uuid::new_v4().to_string(), &code, vec![], false, true)?;
+            }
+            let result = crate::environment::CompositeResult { code_ref: code, resource_refs: vec![], ..selected.clone() };
+            self.store.scoped_files(&result.launch_ref)?.verify(path, &result.environment_ref, "")?;
+            crate::environment_discovery::validate_launch(path, &self.store.load_launch(&result.launch_ref)?, !self.independent)?;
+            entries.push(crate::environment::ResultEntry {
+                name: name.clone(), workspace: path.to_string_lossy().into(), result,
+            });
         }
-        store.files.verify(path, &selected.environment_ref, "")?;
-        let repository = resolve_repository(
-            &self.root,
-            self.state.config.as_ref().ok_or("Missing config")?,
-        )?;
-        let code = workspace::prepare_with_merger_expected_for_run(
-            &repository,
-            path,
-            head,
-            &[],
-            head,
-            Some(&self.state.run_id),
-            || Err("Publication descriptor requires a clean composed code result".into()),
-        )?;
-        let result = crate::environment::CompositeResult {
-            code_ref: code,
-            resource_refs: vec![],
-            ..selected
-        };
-        Ok(Some(store.descriptor(&self.state.run_id, &result)?))
+        let first = entries.first().ok_or("Missing terminal result")?;
+        let mut descriptor = self.store.descriptor(&self.run_id, &first.result)?;
+        if self.independent {
+            // HOME differences are not runtime incompatibility. Bound package
+            // bytes still have to agree before an implicit entry is available.
+            let launch = self.store.load_launch(&first.result.launch_ref)?;
+            let mut equivalent = true;
+            for entry in &entries {
+                equivalent &= entry.result.launch_ref == first.result.launch_ref;
+                if let Some(binding) = &launch.environment {
+                    equivalent &= self.store.files.same_scope_contents(
+                        &first.result.environment_ref, &entry.result.environment_ref, &binding.prefix,
+                    )?;
+                }
+            }
+            descriptor.schema = 2;
+            descriptor.default_entry = equivalent.then(|| first.name.clone());
+            descriptor.entries = entries;
+        }
+        Ok(descriptor)
     }
 }
 
@@ -3013,7 +3099,6 @@ pub(crate) fn perform_result(
                     &input,
                     path,
                     &session,
-                    false,
                 )?;
                 let timeout = policy
                     .resources
@@ -3043,7 +3128,15 @@ pub(crate) fn perform_result(
                     &exclusions,
                 )?;
                 let result = store.seal(path, &input, &head, vec![])?;
-                let descriptor = store.descriptor(&job.run_id, &result)?;
+                let mut descriptor = store.descriptor(&job.run_id, &result)?;
+                if !job.descriptor.entries.is_empty() {
+                    descriptor.schema = job.descriptor.schema;
+                    descriptor.default_entry = job.descriptor.default_entry.clone();
+                    descriptor.entries = job.descriptor.entries.clone();
+                    for entry in descriptor.entries.iter_mut().filter(|entry| entry.workspace == descriptor.workspace) {
+                        entry.result = result.clone();
+                    }
+                }
                 Ok((
                     String::from_utf8(output).map_err(|e| e.to_string())?,
                     descriptor,
@@ -3130,8 +3223,27 @@ fn perform_with_merger_inner(
         .as_ref()
         .map(|config| crate::environment::Environments::new(root, &job.run_id, config))
         .transpose()?;
+    if let Some(store) = &environments {
+        for source in &job.environment_sources {
+            store.validate_result(source)?;
+            exclusions.extend(store.exclusions(&source.launch_ref)?);
+        }
+        exclusions.sort();
+        exclusions.dedup();
+        if job.config.environment.as_ref().is_some_and(|policy| policy.best_effort)
+            && selected_environment.as_ref().is_some_and(|selected| selected.layout.is_none())
+            && reused && !job.preserve_failed_environment
+        {
+            if let Some(previous) = &job.environment_previous {
+                store.scoped_files(&previous.launch_ref)?.verify(path, &previous.environment_ref, "")?;
+            }
+        }
+    }
     if let (Some(store), Some(input)) = (&environments, &job.environment_input) {
-        store.validate_result(input)?;
+        if !job.environment_sources.iter().any(|source|
+            source.environment_ref == input.environment_ref && source.launch_ref == input.launch_ref) {
+            store.validate_result(input)?;
+        }
         if job.feedback_workspace.is_some() {
             store
                 .scoped_files(&input.launch_ref)?
@@ -3208,11 +3320,6 @@ fn perform_with_merger_inner(
         })
         && workspace::repository_status(path, &exclusions).is_ok_and(|status| status.is_empty())
         && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err();
-    let environment_conflict = job.environment_conflict.as_deref();
-    // A Merger that already observed the workspace may hold the reconciliation
-    // receipts; Environment discovery later reads these sessions in order.
-    let mut merger_sessions: Vec<(String, std::path::PathBuf)> = Vec::new();
-    let mut git_conflict = false;
     let before = if can_inherit {
         inherited_head.unwrap_or_else(|| job.execution.before.clone())
     } else {
@@ -3224,39 +3331,16 @@ fn perform_with_merger_inner(
             &job.expected_source_head,
             Some(&job.run_id),
             || {
-                git_conflict = true;
-                // A simultaneous Git and environment conflict is one Merger
-                // invocation with both prompt segments concatenated.
-                let conflicts = if environment_conflict.is_some() {
-                    crate::graph_merge::MergerConflicts::BOTH
-                } else {
-                    crate::graph_merge::MergerConflicts::GIT
-                };
-                let environment =
-                    match (environment_conflict, &environments, &selected_environment) {
-                        (Some(inputs), Some(store), Some(base)) => {
-                            Some(crate::graph_merge::EnvironmentMerger {
-                                store,
-                                base,
-                                inputs,
-                            })
-                        }
-                        _ => None,
-                    };
-                let session = crate::graph_merge::resolve_with_merger_for_node(
+                crate::graph_merge::resolve_with_merger_for_node(
                     path,
                     &job.task,
                     &job.config,
                     root,
                     job.execution.attempt,
                     &format!("merge:{}", job.execution.node),
-                    conflicts,
-                    environment.as_ref(),
+                    crate::graph_merge::MergerConflicts::GIT,
                     &mut on_merger_event,
                 )?;
-                if let Some(session) = session {
-                    merger_sessions.push((session.id, session.directory));
-                }
                 Ok(())
             },
         )?
@@ -3272,64 +3356,20 @@ fn perform_with_merger_inner(
         }
     }
     let environment_input = if let Some(store) = &environments {
-        if let Some(inputs) = environment_conflict {
-            let base = selected_environment
-                .as_ref()
-                .ok_or("Missing environment reconciliation base")?;
-            if !git_conflict {
-                // Environment-only incompatibility: reconcile after the clean
-                // code composition, then bind the Merger's observed result.
-                let session = crate::graph_merge::dispatch_environment_merger(
-                    path,
-                    &job.task,
-                    &job.config,
-                    root,
-                    &format!("merge:{}", job.execution.node),
-                    job.execution.attempt,
-                    &crate::graph_merge::EnvironmentMerger {
-                        store,
-                        base,
-                        inputs,
-                    },
-                    &mut on_merger_event,
-                )
-                .map_err(|error| {
-                    format!(
-                        "Workspace composition blocked: environment reconciliation failed at {}: {error}",
-                        path.display()
-                    )
-                })?;
-                merger_sessions.push((session.id, session.directory));
-            }
-            let selected_from: Vec<String> =
-                inputs.iter().map(|(name, _)| name.clone()).collect();
-            Some(store.capture_reconciled(
-                path,
-                base,
-                &job.execution.id,
-                &before,
-                vec![],
-                &selected_from,
-                &merger_sessions,
-            ).map_err(|error| {
-                format!(
-                    "Workspace composition blocked: environment reconciliation failed at {}: {error}",
-                    path.display()
-                )
-            })?)
-        } else {
-            Some(store.prepare(
-                path,
-                selected_environment
-                    .as_ref()
-                    .ok_or("Missing managed environment input")?,
-                &job.execution.id,
-                &before,
-                vec![],
-                job.preserve_failed_environment,
-                job.history_edit || !reused,
-            )?)
+        if let Some(selected) = &selected_environment {
+            store.prepare_independent(path, selected, &job.environment_sources)?;
         }
+        Some(store.prepare(
+            path,
+            selected_environment
+                .as_ref()
+                .ok_or("Missing managed environment input")?,
+            &job.execution.id,
+            &before,
+            vec![],
+            job.preserve_failed_environment,
+            job.history_edit || !reused,
+        )?)
     } else {
         None
     };

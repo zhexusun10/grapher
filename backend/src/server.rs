@@ -2018,12 +2018,12 @@ fn drive(service: Arc<Service>) {
                             let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                             runtime.publication_environment_input()
                         }.and_then(|input| {
-                            if let Some((store, selected)) = input { store.validate_result(&selected)?; }
-                            Ok(())
+                            if let Some(job) = &input { job.validate()?; }
+                            Ok(input)
                         });
-                        let result = preflight.and_then(|()| crate::process_control::with_owner(&run_id, || {
+                        let result = preflight.and_then(|input| crate::process_control::with_owner(&run_id, || {
                             let exclusions = service.runtime.lock().map_err(|e| e.to_string())?.exclusions()?;
-                            crate::graph_merge::merge_graph_scoped(&repository, &publication.heads, &exclusions, || {
+                            let head = crate::graph_merge::merge_graph_scoped(&repository, &publication.heads, &exclusions, || {
                                 let attempt = service
                                     .runtime
                                     .lock()
@@ -2046,15 +2046,27 @@ fn drive(service: Arc<Service>) {
                                             .emit(event)
                                     },
                                 )
-                            })
+                            })?;
+                            let descriptor = input.as_ref().map(|job| job.descriptor(&head)).transpose()?;
+                            Ok((head, descriptor))
                         }));
                         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                         match result {
-                            Ok(head) => {
+                            Ok((head, descriptor)) => {
                                 eprintln!(
                                     "[Grapher] [Publication] Completed! Published HEAD: {head}"
                                 );
-                                runtime.emit(EventKind::PublicationCompleted { head })?;
+                                if runtime.state.run_id != run_id
+                                    || !matches!(runtime.state.phase.as_str(), "publishing" | "merging")
+                                    || runtime.state.publication.as_ref().is_none_or(|current|
+                                        current.heads != publication.heads || current.repository != publication.repository)
+                                {
+                                    return Err("Stale publication worker cannot commit to this Run".into());
+                                }
+                                let mut events = Vec::new();
+                                if let Some(descriptor) = descriptor { events.push(EventKind::ResultPublished { descriptor }); }
+                                events.push(EventKind::PublicationCompleted { head });
+                                runtime.emit_outputs(events)?;
                                 if let Err(error) = runtime.cleanup_worktrees() {
                                     eprintln!("Cannot clean completed run worktrees: {error}");
                                 }
@@ -3645,7 +3657,8 @@ pub fn dispatch(
         "launch_result" => {
             if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) { return Err("Wait for the Run driver/Planner before launching its published result".into()); }
             let args: Vec<String> = argument(&body, "args")?;
-            let (job, control) = service.runtime.lock().map_err(|e| e.to_string())?.start_result(&args)?;
+            let entry: Option<String> = body.get("entryId").map(|_| argument(&body, "entryId")).transpose()?;
+            let (job, control) = service.runtime.lock().map_err(|e| e.to_string())?.start_result_entry(&args, entry.as_deref())?;
             let outcome = crate::runtime::perform_result(&job, &control, |input| {
                 service.runtime.lock().map_err(|e| e.to_string())?.emit(EventKind::ResultExecutionPrepared { input })
             });

@@ -103,7 +103,7 @@ export const runtimeService = {
   },
   environmentCapabilities: (signal?: AbortSignal) => request<EnvironmentCapabilities>("environment_capabilities", {}, signal),
   resultDescriptor: (runId: string) => request<ResultDescriptor>("result_descriptor", { runId }),
-  launchResult: (runId: string, args: string[]) => request<{ output: string }>("launch_result", { runId, args }),
+  launchResult: (runId: string, args: string[], entryId?: string) => request<{ output: string }>("launch_result", { runId, args, ...(entryId ? { entryId } : {}) }),
   cancelResult: (runId: string) => request<{ requested: boolean }>("cancel_result", { runId }),
   compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config, runId?: string) => request<Snapshot>("save_graph", { graph, config, runId }),

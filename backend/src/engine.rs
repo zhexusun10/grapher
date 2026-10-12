@@ -902,9 +902,8 @@ fn run_pi_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.env_remove("GRAPHER_LAUNCH_BINDING");
-    // Node Agents and environment-reconciling Mergers run under managed L.
-    // A Git-only Merger does not receive the environment data binding and
-    // keeps its plain workspace shell.
+    // Node Agents and publication/Git Mergers use the same validated native
+    // launch boundary when a managed environment is available.
     let managed = matches!(request.role, PiRole::NodeAgent | PiRole::Merger)
         && config.environment.is_some()
         && request
@@ -934,7 +933,6 @@ fn run_pi_with_timeout(
             &input,
             request.cwd,
             session_dir,
-            request.role == PiRole::Merger,
         )?;
     }
     process_control::configure_command(&mut command);

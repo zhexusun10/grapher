@@ -226,6 +226,17 @@ impl Files {
         Ok(self.load(left)?.entries == self.load(right)?.entries)
     }
 
+    /// Compare a business prefix independently of writer HOME/other scopes.
+    /// This is a metadata optimization only; native use still validates bytes.
+    pub(crate) fn same_scope_contents(&self, left: &str, right: &str, scope: &str) -> Result<bool, String> {
+        relative(scope)?;
+        let entries = |version: &str| -> Result<Entries, String> {
+            Ok(self.load(version)?.entries.into_iter().filter(|(name, _)|
+                workspace::scope_contains(Path::new(name), Path::new(scope))).collect())
+        };
+        Ok(entries(left)? == entries(right)?)
+    }
+
     fn blob_path(&self, blob: &str) -> Result<PathBuf, String> {
         if blob.len() != 40 || !blob.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("Invalid workspace file blob".into());

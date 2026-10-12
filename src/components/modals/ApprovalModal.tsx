@@ -74,7 +74,9 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
             <li>{t("节点执行期间在隔离工作区内修改文件；整图完成后会将结果写回 {0}。", state.config?.repository || config.repository)}</li>
             {state.environmentPolicy && <li className="warning">{t("环境由 Runtime 自动准入和绑定，不需要选择模式或填写环境配置。受管环境不会搬回源项目；能力不足时明确失败，不请求用户选择替代方案。")}</li>}
             {state.config?.environment && <li className="warning">
-              {t("原生 workspace 环境范围：{0}；默认入口：{1}。环境不搬回源项目，以结果描述交付；未验证的设备、跨槽路径及系统快照要求会阻塞。", state.config.environment.scopes.join(", "), state.config.environment.launch.entry)}
+              {state.config.environment.bestEffort
+                ? t("原生 workspace 环境范围：{0}；初始入口：{1}。Runtime 尽力继承可安全复用的环境，节点不要求环境一致；环境不会搬回源项目。", state.config.environment.scopes.join(", "), state.config.environment.launch.entry)
+                : t("原生 workspace 环境范围：{0}；默认入口：{1}。环境不搬回源项目，以结果描述交付；未验证的设备、跨槽路径及系统快照要求会阻塞。", state.config.environment.scopes.join(", "), state.config.environment.launch.entry)}
             </li>}
             <li className="warning">
               {t("Execution Instance 可执行 shell 指令并调用模型，请审视节点任务定义后再行批准。")}</li>

@@ -29,6 +29,8 @@ test("environment APIs use explicit Run/arguments and request, not termination, 
       { command: "launch_result", body: { runId: "run-a", args: ["--smoke", "space value"], compact: true, detail: "metadata" } },
       { command: "cancel_result", body: { runId: "run-a", compact: true, detail: "metadata" } },
     ]);
+    await runtimeService.launchResult("run-a", ["train.py"], "train");
+    assert.deepEqual(requests.at(-1), { command: "launch_result", body: { runId: "run-a", args: ["train.py"], entryId: "train", compact: true, detail: "metadata" } });
     globalThis.fetch = async () => new Response(JSON.stringify({ error: "No active result execution" }), { status: 400 });
     await assert.rejects(runtimeService.cancelResult("run-a"), /No active result execution/);
   } finally { globalThis.fetch = fetch; }
@@ -60,6 +62,10 @@ test("settings expose no environment choices and result UI isolates invalid inpu
     function Harness() {
       const [state, setState] = React.useState(snapshot('run-a'));
       window.showRun = (runId, phase, status) => setState(snapshot(runId, phase, status));
+      window.showEntries = () => setState({ ...snapshot('run-entries'), publishedResult: { schema: 2, runId: 'run-entries', result, config: {}, workspace: '/mock/workspace', entries: [
+        { name: 'train', result: { ...result, launchRef: 'train-launch' }, workspace: '/mock/train' },
+        { name: 'report', result: { ...result, launchRef: 'report-launch' }, workspace: '/mock/report' }
+      ] } });
       return React.createElement(React.Fragment, null,
         React.createElement('span', { id: 'current-run' }, state.runId),
         React.createElement(SettingsModal, { isOpen: true, onClose() {}, config, dataPath: '/mock/data', onSaveConfig(value) { window.saved.push(value); } }),
@@ -77,7 +83,7 @@ test("settings expose no environment choices and result UI isolates invalid inpu
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   let launchGate: ReturnType<typeof gate> | undefined;
   let cancelGate: ReturnType<typeof gate> | undefined;
-  const commands: { command: string; runId?: string; args?: string[] }[] = [];
+  const commands: { command: string; runId?: string; args?: string[]; entryId?: string }[] = [];
   const errors: string[] = [];
   try {
     await server.listen();
@@ -172,6 +178,16 @@ test("settings expose no environment choices and result UI isolates invalid inpu
     launchGate = undefined;
     await launch.click();
     await expect(page.locator("pre")).toHaveText("output run-c");
+    await page.evaluate(() => (window as any).showEntries());
+    await expect(launch).toBeDisabled();
+    await page.getByLabel("Business entry", { exact: true }).selectOption("report");
+    await expect(launch).toBeEnabled();
+    await expect(page.locator("code").filter({ hasText: "report-launch" })).toHaveCount(1);
+    await launch.click();
+    await expect(page.locator("pre")).toHaveText("output run-entries");
+    assert.equal(commands.at(-1)?.entryId, "report");
+    await page.evaluate(() => (window as any).showRun("run-d", "completed"));
+    await expect(page.getByLabel("Business entry", { exact: true })).toHaveCount(0);
     assert.deepEqual(errors, []);
     assert.equal(commands.some(item => /plan|message|steer|compile/.test(item.command)), false);
   } finally {

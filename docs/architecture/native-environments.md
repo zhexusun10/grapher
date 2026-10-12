@@ -1,12 +1,12 @@
 # Native workspace environment control
 
 > **Status:** active
-> **Maturity:** experimental; full proposal acceptance remains open.
+> **Maturity:** experimental; full native acceptance remains open.
 > **Scope:** Backend-owned environment admission, Graph NodeAgent E/L, native resource controls and model-free result execution. No VM, WSL, container fallback, new allocator or maintenance Agent.
 > **Maintained with:** [automatic admission](../../backend/src/environment_automatic.rs), [tool observations](../../backend/src/environment_discovery.rs), [environment state](../../backend/src/environment.rs), [resources](../../backend/src/environment_resources.rs), [runtime](../../backend/src/runtime.rs), [launch binding](../../engine/launch-binding.mjs), [state tests](../../backend/src/environment_tests.rs) and [native acceptance](../../scripts/environment-native.test.ts).
 
-The [proposal](../proposals/shared-environment-control.zh-CN.md) includes
-unimplemented and unverified capabilities. This page owns the current contract.
+This page owns the implemented contract. The capability limitations and native
+acceptance boundaries below distinguish it from unimplemented design goals.
 
 ## Admission and configuration
 
@@ -18,9 +18,10 @@ not a request that the user select an environment, authoritative parent or
 CPU/OS fallback. Graph approval and result arguments remain business controls,
 not environment configuration.
 
-New production Runs without an already frozen policy record
-`EnvironmentPolicyRequested`. At approval, after Planner's existing source
-writes, Rust records `EnvironmentPolicyResolved` with the decision and reason:
+Graph approval without an already frozen environment policy records
+`EnvironmentPolicyRequested`. After Planner's existing source writes, Rust resolves
+the current workspace execution contract at approval; the contract is backend-owned
+and not a user environment choice:
 
 - Standard Git Graph projects start with **no business environment binding**
   (`automatic-lazy`), irrespective of language or ML declarations. No venv,
@@ -29,44 +30,50 @@ writes, Rust records `EnvironmentPolicyResolved` with the decision and reason:
   excluded caches are ownership boundaries, not precreated environments. A
   project that never needs an environment can complete and launch results while
   remaining unbound. Serial/shadow projects retain their source-native contract.
-- Ordinary business tasks may create private venv/Conda environments. Managed
-  Bash delegates actual `python`/`python3`/`pip`/`pip3`/`conda` invocations through
-  Rust's native adapter, recording creation/use receipts per writer generation.
-  Supported forms include `python -m venv`, `conda create` and `conda env create`
-  with a private prefix/name. Conda names resolve inside `.environments`; its
-  supported Bash-hook delegate remains observed. No task-text or arbitrary Shell
-  parser, maintenance Agent, extra binding message or user choice is involved.
-- After drain, Runtime verifies a unique candidate's ownership, native metadata,
-  actual interpreter prefix, supported Python constraints and ABI/library-byte
-  evidence, then versions L and captures E separately. `.env`, `environment.yml`
-  and temporary activation/exports alone do not bind anything. Multiple candidates,
-  external prefixes and unobserved executable environments refuse sealing rather
-  than picking the newest or quietly retaining the bootstrap. Metadata inventory
-  is a refusal guard bounded to 50,000 source directories, not an adoption heuristic.
-- Bound environments use fixed physical layout; unbound views retain ordinary
-  parallel allocation/copying. Fan-in accepts identical E/L or a provable descendant
-  with unchanged L. Incompatible independent E/L dispatch a composition Merger
-  with an environment-specific prompt instead of blocking: it selects one
-  verified input environment or builds a new private environment offline, and
-  Rust then binds and captures the result. Environment directories are never
-  merged. Native probes do not constitute a complete system-library/compiler/driver/root
-  snapshot. Unsupported tools or requirement forms fail explicitly when used.
+- Ordinary business tasks may create, install into, activate and switch between
+  whatever native Python/Conda environments their Bash process can access.
+  For the active workspace, the adapter does not reject an ambient interpreter,
+  rewrite Conda names, forbid package installation destinations, or turn a
+  temporary activation into a Runtime failure. The OS sandbox/permissions and
+  the command's own exit status still apply. Runtime records receipts only when
+  a private project-owned environment can be verified; external use is recorded
+  as unbound business execution. No task-text parser, extra binding message,
+  maintenance Agent or user choice is involved. Persisted compatibility records
+  retain their recorded ownership/offline contract for replay only; they are not
+  a user-facing environment mode.
+- After drain, Runtime tries to identify a unique private candidate's ownership,
+  native metadata, actual interpreter prefix and ABI/library-byte evidence, then
+  versions L and captures E separately. The current workspace policy treats
+  project Python/version declarations as business inputs, not startup/binding
+  gates or proof of package compatibility. `.env`, `environment.yml` and
+  temporary activation/exports alone do not bind anything. Multiple candidates,
+  external prefixes and unverified switches fall back to an unbound launch rather
+  than blocking the node. Metadata inventory remains bounded and is used only to
+  retain managed-scope evidence, not to adopt an environment by directory name.
+- Environment binding is an execution/workspace property, not a distinction between
+  execution labels. Runtime attempts safe reuse at the current workspace;
+  if it cannot bind the observed environment, the execution remains unbound and
+  is not blocked. Persisted E/L records are evidence for replay and recovery, not an
+  instruction to resurrect an obsolete workspace or force a historical policy.
 
 `environmentPolicy` is present in full/metadata projections and checkpoints.
-The admission/discovery contract is frozen before execution; verified E/L and
+The current workspace contract is frozen for the execution, while verified E/L and
 private prefix scopes evolve through immutable composite references. Retry cannot
-replace that contract. Draft/model-setting changes cannot override it. Future-Run Settings
-projections/default saves do not carry environment policies from a previous Run.
-Existing event-backed Run policies and result descriptors remain intact.
+replace that contract; a workspace that falls back to unbound remains runnable and
+records that decision. Draft/model-setting changes cannot override it. Environment
+policy is not exposed as a frontend choice.
 
-Legacy managed-environment policies and scoped evidence remain readable for replay, descriptors and compatibility tests; they are not an exposed configuration workflow. Legacy `automatic-managed` policies remain eager and frozen. Automatic device/quota policy synthesis and complete package-manager coverage are **not implemented**; lazy discovery is limited to the supported native tool adapters. See the [workspace directory contract](workspace-snapshots-and-feedback.md) for ordinary project files.
+The active workspace contract is resolved by Runtime; persisted compatibility
+records remain readable for replay and recovery but are not a second user-visible
+mode. Automatic device/quota policy synthesis and complete package-manager
+coverage are **not implemented**; lazy discovery is limited to the supported
+native tool adapters.
 
-The internal frozen policy fixes platform/architecture, baseline, initial
+The internal policy fixes platform/architecture, baseline, initial
 managed-environment scopes, rebuildable caches, layout and discovery rules. A verified
-binding adds its private prefix to the scopes through versioned L, not by editing
-the Run policy. Legacy initializers/launch-file rules retain their old semantics.
-Traversal, overlapping paths, Runtime metadata and tracked-file conflicts fail.
-Windows case aliases and reserved names are checked.
+binding adds its private prefix to the current workspace scopes through versioned L,
+not by editing the policy. Traversal, overlapping paths, Runtime metadata and
+tracked-file conflicts fail. Windows case aliases and reserved names are checked.
 
 The default entry directory is first in the complete business PATH. Trusted
 engine Node is resolved independently. Pi PATH processing and Windows MSYS
@@ -100,9 +107,18 @@ Immutable E snapshots and L records are retained under
 same SQLite transaction as completion/queued feedback; historical executions
 stay unchanged. E/L changes count even when the Git head is unchanged.
 
-New managed-environment manifests include integrity checks. Legacy environment records and scoped manifests remain readable. Missing/damaged managed-environment snapshots fail before materialization. Byte content is verified, not trusted only from size/mtime. Event-actor reference/manifest checks stay metadata-only; native writer byte/ABI checks and managed publication preflight run outside the Run mutex. Verification does not save new blobs or repair missing history from a live directory. A failed database commit may leave unreferenced storage but never a completion referring to an incomplete seal.
+Environment manifests and persisted E/L records remain readable for replay and
+recovery. Missing or damaged records fail when that evidence is explicitly needed;
+they do not resurrect an obsolete workspace or turn an unrelated current execution
+into an environment-selection workflow. Byte content is verified, not trusted only
+from size/mtime. Event-actor reference/manifest checks stay metadata-only; native
+writer byte/ABI checks and managed publication preflight run outside the Run mutex.
+Verification does not save new blobs or repair missing history from a live directory.
 
-Legacy managed environment retry retains its selected partial scope directory. Missing failed environment views block rather than silently restoring an old scope snapshot. Historical conversation edits keep the established Git rollback; ordinary files are neither rolled back nor checked against a `before-*` snapshot. Dropping a dynamically added prefix outside the frozen ownership roots is currently refused **before touching the view**, rather than leaving or silently reclassifying an obsolete environment; complete dynamic-scope rollback remains open. Default `.venv`/`.environments` rollback and legacy frozen-scope behavior are unchanged. A missing successful terminal directory rebuilds the **current managed environment composite** at its fixed path; ordinary files have no reconstruction guarantee.
+A failed database commit may leave unreferenced storage but never a completion
+referring to an incomplete seal. A missing current workspace view is rebuilt only
+from the current managed composite when the result contract requires it; ordinary
+files have no reconstruction guarantee.
 
 Feedback retains pinned sender results, generation/budget checks and
 **drain-before-handoff**. It forks only the receiver's own history. Failed and
@@ -112,29 +128,29 @@ retention/reference GC is not implemented.
 
 ## Branches, metadata and storage
 
-Once a business environment is bound, fixed layout refuses a different physical
-slot, without repairing shebangs, `.pth` files or binaries. An empty business
-binding does not impose that environment-only restriction on ordinary fan-out. Saved legacy `relocatable` assertions/import policies
-are honored only under their recorded compatibility contract; automatic
-admission never makes that assertion. Independent roots initialize independently.
+A verified fixed-layout environment is reused only at the current physical
+workspace. When Runtime replaces that workspace with another slot, it does not
+copy the environment directory; the next execution either observes an environment
+it can use or runs unbound. Parent environments need not agree, and environment
+mismatch alone never blocks the node.
 
-Fan-in accepts identical E/L or, for automatic policies, a provable descendant
-with unchanged L. Incompatible independent E/L dispatch a node-composition
-Merger with the environment-reconciliation prompt: it may select an existing
-input environment that satisfies every branch's constraints and validation, or
-build one new private environment from a matching lock file plus offline cache,
-verify the interpreter/dependencies/health checks, and leave exactly one usable
-environment. The two venv/Conda file trees are never directory-merged, packages
-are never installed over the network, and the host Python is never a fallback.
-Runtime then discovers, verifies and captures the observed result as the
-downstream input; a Merger that leaves no verified binding is refused. When the
-same composition also has a Git conflict, one Merger receives the concatenated
-Git and environment prompt segments. Legacy recorded authorities remain
-replayable. Arbitrary `activate`/`export` alone do not change L. A uniquely observed and
-verified business-created/used private environment can establish the formerly
-empty binding; creating a second independent candidate is ambiguity, not an
-implicit switch. Legacy launch files retain their frozen rules; new Runs need no
-binding file or user configuration.
+At fan-in, Runtime selects a provable local input if one exists; other parents'
+E/L are provenance, not constraints on the downstream task. Otherwise the current
+workspace starts unbound. All input manifests and stored bytes are still validated
+before preparation, including environments not selected for reuse. Known custom
+prefixes remain excluded from copying and Git collection. Resetting an allocated
+view touches only its managed scopes, checks its current writer's evidence and
+tracked-path safety, and never changes an upstream tree or its history. There is
+no automatic package installation/rebuild and no instruction asking an Agent to
+perform one. Ordinary business Bash retains its existing exploration/creation
+behavior and permissions.
+
+Persisted records from earlier execution contracts remain readable for replay and
+recovery; they are not a second user-visible environment mode. The current
+workspace contract uses local reuse/unbound fallback. Arbitrary `activate`/`export`
+may affect the Node's business process, but only a verifiable private environment
+is recorded as reusable L. Multiple candidates do not block the node; they simply
+remain unbound.
 
 Scopes support basic files/directories, Unix modes/Windows readonly and supported
 links. Special files, escaping directory links and nested Runtime/Git metadata
@@ -178,14 +194,27 @@ ROCm/MPS support or arbitrary CUDA framework compatibility.
 
 Code/Git state follows the Git publication contract. Managed scopes/caches
 are **not copied back into source**; source environments are not removed,
-overwritten or activated. Publication commits a launchable descriptor. Graph
-completion still requires successful publication.
+overwritten or activated. New best-effort Runs publish schema-2 descriptors with
+one named business entry per terminal, each retaining its own E/L and fixed
+workspace. Every entry uses the final published code commit and passes native
+integrity/startup checks. Validation and code preparation run outside the Run
+mutex; descriptor/completion events commit together after the publication worker
+identity/state check. Graph completion still requires successful publication.
+
+Different terminal environments do not prevent publication. A default entry is
+available only when startup bindings and business-prefix bytes agree (private
+HOME changes do not constitute incompatibility). Otherwise `launch_result`
+requires `entryId`, a terminal/business entry name, not an environment setting.
+Failure/retry remains tied to that entry's partial workspace. Launching an entry
+preserves the others; successful result execution still requests republication.
+Schema-1 descriptors remain readable; current publication may expose multiple
+business entries over the current project code.
 
 | Local JSON POST endpoint | Body / result |
 | --- | --- |
 | `/api/environment_capabilities` | `{}` → compiled capabilities/limitations; not device acceptance |
 | `/api/result_descriptor` | `{"runId":"…"}` → published composite descriptor |
-| `/api/launch_result` | `{"runId":"…","args":["train.py","--smoke"]}` → native entry stdout, no model call |
+| `/api/launch_result` | `{"runId":"…","entryId":"train","args":["train.py","--smoke"]}` → native entry stdout, no model call (`entryId` optional with a unique default) |
 | `/api/cancel_result` | `{"runId":"…"}` → requests cancellation, not a claim of termination |
 
 The workbench displays/copies descriptors and exposes business arguments,
@@ -209,8 +238,9 @@ Results have **no implicit execution timeout**. Internal policies may set
 and computation proofs retain bounded time/drain checks.
 
 Planner/Serial remain source-native. A Git-conflict Merger keeps its plain
-workspace shell; an environment-reconciliation Merger runs under managed L so a
-selected/built private environment is observable and capturable. Managed ML
+workspace shell. Environment differences do not create a Merger or a new Agent
+instruction; the affected execution either reuses the current workspace
+environment or runs unbound. Managed ML
 commands in a Git-only Merger role are not accepted. Process groups/Job Objects
 cover defined descendants, not arbitrary external services or universally
 detached writers.
@@ -219,8 +249,8 @@ detached writers.
 
 - Complete dynamic-scope rollback outside the initial ownership roots.
 - Complete automatic package/toolchain and resource/device policy synthesis;
-  automatic fan-in reconciliation is limited to the documented Merger flow and
-  does not install packages over the network.
+  transparent cross-slot environment rebuilding and arbitrary multi-environment
+  execution; new fan-in uses local reuse/unbound selection, not a package solver.
 - Namespace-backed fixed logical paths / transparent cross-slot migration.
 - Shared working layers, system snapshots and extended snapshot metadata.
 - Run/host-wide and Linux/macOS aggregate quotas, disk quotas and bounded GC.
@@ -233,6 +263,25 @@ or device. Compiled capability reporting and configured CI are not native
 acceptance evidence.
 
 ## Verification recorded for this working tree
+
+Best-effort Runtime regressions: [native-venv fixtures](../../backend/src/environment_best_effort_tests.rs)
+cover parallel bound fan-out, custom-prefix exclusions, local fan-in without a
+Merger, independent multi-entry publication/launch/republication, serialized
+roots retaining distinct terminal slots, HOME-only differences, discarded-input
+corruption, entry-scoped partial retry, project-requirement decoupling, ambient
+Python/pip exploration and saved policy compatibility, current-writer checks on
+reused paths and explicit ancestor follow-ups through reserved terminal views. [Focused Pi acceptance](../../scripts/environment-chain.test.ts)
+also covers default linear reuse and bound fan-out with existing business tasks,
+independent bound/unbound terminal entries and model-free named launch. These
+checks passed on Windows x86_64 with native Python 3.14 and pinned Pi. Verification
+commands: `npm run check`, `npm run build`, `npm run test:frontend`, `npm test`,
+`npm run test:environment`, `npm run test:environment-chain`, and the focused
+`environment-ui.test.ts` browser/transport suite (isolated Cargo target and
+disposable projects). They do not establish transparent relocation, offline
+rebuilding, CUDA/Conda quality, or Linux/macOS native acceptance.
+
+The following measurements are historical strict/lazy-profile evidence, not
+new best-effort throughput budgets:
 
 Windows x86_64, Node 24.16.0, Python 3.14.6, Git Bash, source base `c43b0c5` plus
 these uncommitted changes. Pi baseline `1cedd32724abfcb0915f76cc61b6827e2c16dbad`
@@ -273,7 +322,7 @@ is an independent working-tree upgrade, not part of this environment change.
   aggregate descendant CPU from **5,983 ms** to **1,562 ms** over the test interval.
   Independent-process device-lock contention/crash release and partial multi-device
   release passed; these lock tests use disposable UUID keys, not GPU computation.
-- An optimized Windows legacy-policy Conda/PyTorch profile completed A→B→C,
+- An optimized Windows compatibility-policy Conda/PyTorch profile completed A→B→C,
   current-view follow-up and a model-free synchronized CUDA forward/backward
   result with retained computation proofs, including the framework's actual
   leased device UUID. Its complete harness nevertheless hit the **30-minute**

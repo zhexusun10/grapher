@@ -2,9 +2,12 @@
 export const en: Record<string, string> = {
   "环境由 Runtime 自动准入和绑定，不需要选择模式或填写环境配置。受管环境不会搬回源项目；能力不足时明确失败，不请求用户选择替代方案。": "Runtime admits and binds environments automatically; no environment mode or configuration is required. Managed environments are not copied back to the source. Unsupported capabilities fail without asking for an alternative.",
   "原生 workspace 环境范围：{0}；默认入口：{1}。环境不搬回源项目，以结果描述交付；未验证的设备、跨槽路径及系统快照要求会阻塞。": "Native environment scopes: {0}; entry: {1}. Delivery uses a result descriptor, not a source-directory environment copy. Unverified device, cross-slot path and system snapshot requirements block execution.",
+  "原生 workspace 环境范围：{0}；初始入口：{1}。Runtime 尽力继承可安全复用的环境，节点不要求环境一致；环境不会搬回源项目。": "Native environment scopes: {0}; initial entry: {1}. Runtime inherits safely reusable environments on a best-effort basis; nodes need not share an environment. Environments are not copied back to the source.",
   "可启动结果描述": "Launchable result descriptor",
   "复制结果描述": "Copy result descriptor",
-  "通过 Runtime 启动默认入口，不调用模型。修改会记录新结果并重新发布；失败保留部分工作。不会激活源项目的环境。": "Launch the default entry through Runtime without a model call. Changes create a new result and publication; failures retain partial work. The source environment is not activated.",
+  "业务入口": "Business entry",
+  "请选择业务入口": "Choose a business entry",
+  "通过 Runtime 启动业务入口，不调用模型。修改会记录新结果并重新发布；失败保留部分工作。不会激活源项目的环境。": "Launch a business entry through Runtime without a model call. Changes create a new result and publication; failures retain partial work. The source environment is not activated.",
   "入口参数 JSON（字符串数组）": "Entry arguments JSON (string array)",
   "入口参数必须是字符串数组。": "Entry arguments must be a string array.",
   "保留部分工作重试结果": "Retry result with partial work",

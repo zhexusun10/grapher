@@ -1,5 +1,5 @@
-//! New Graph Runs start with an empty business-environment binding. No project
-//! type guessing, eager venv, downloads, user choices or activation of source.
+//! Graph workspace admission starts with an empty business-environment binding.
+//! No project type guessing, eager venv, downloads, user choices or source activation.
 use crate::{
     environment::{self, EnvironmentConfig, LaunchConfig},
     native, workspace,
@@ -130,14 +130,13 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
                 ),
                 ("PYTHONUTF8".into(), "1".into()),
                 ("PYTHONIOENCODING".into(), "utf-8".into()),
-                ("CONDA_ENVS_PATH".into(), "{workspace}/.environments".into()),
-                (
-                    "CONDA_PKGS_DIRS".into(),
-                    "{workspace}/.runtime-cache/c".into(),
-                ),
                 ("CONDA_ALWAYS_COPY".into(), "true".into()),
             ]),
-            inherit: vec![],
+            inherit: vec![
+                "CONDA_ENVS_PATH".into(), "CONDA_PKGS_DIRS".into(), "CONDARC".into(),
+                "CONDA_PREFIX".into(), "CONDA_DEFAULT_ENV".into(), "CONDA_SHLVL".into(),
+            ],
+            managed_scopes: vec![],
             hook: None,
             environment: None,
         },
@@ -161,6 +160,7 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
         ],
         resources: None,
         discovery: true,
+        best_effort: true,
     };
     config.validate()?;
     config.check_tracked(&source)?;

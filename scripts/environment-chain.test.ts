@@ -187,6 +187,7 @@ test('default environment discovery binds one private venv across a parallel Gra
     const state = await settled();
     assert.equal(state.environmentPolicy, 'automatic-lazy');
     assert.equal(state.config.environment.discovery, true, 'automatic policy uses lazy discovery');
+    assert.equal(state.config.environment.bestEffort, true, 'new Runs do not require matching parent environments');
     assert.deepEqual(state.config.environment.authority, {});
     assert.equal(state.config.environment.allowDescendant, true);
     assert.equal(state.config.environment.layout, 'fixed');
@@ -271,7 +272,43 @@ test('default environment discovery binds one private venv across a parallel Gra
     assert.notEqual(execution.input.environmentRef, byNode.create.result.environmentRef);
     const isolatedManifest = JSON.parse(await readFile(join(data, 'environments', isolated.runId, 'files', 'versions', `${execution.result.environmentRef}.json`), 'utf8'));
     assert.ok(!Object.keys(isolatedManifest.entries).some((name: string) => name.startsWith('.venv/')), 'a new Run does not see the previous environment');
-    console.log(JSON.stringify({ platform: process.platform, arch: process.arch, python, shell, modelCalls, executions: state.executions.length,
+    // Reuse the existing business tasks, with no new prompt or reconciliation
+    // session: a bound parent forks into a local bound and a fresh unbound task.
+    const fork = await api('save_graph', { graph: { originalGoal: graph.originalGoal,
+      nodes: [{ name: 'create', task: 'CREATE_PROBE' }, { name: 'left', task: 'PREP_BRANCH' }, { name: 'right', task: 'PREP_BRANCH' }],
+      edges: [{ from: 'create', to: 'left', feedback: false }, { from: 'create', to: 'right', feedback: false }] }, config });
+    await api('control', { runId: fork.runId, action: 'approve' });
+    const forkSettled = () => until(async () => {
+      const check = await api('snapshot', { runId: fork.runId, detail: 'metadata' });
+      if (['needs_attention', 'publication_failed'].includes(check.phase)) throw new Error(JSON.stringify(check.nodes) + '\n' + diagnostics);
+      return check.phase === 'completed' && check;
+    }, 'bound fan-out and independent publication');
+    const forked = await forkSettled();
+    const forkNodes: Record<string, any> = Object.fromEntries(forked.executions.map((execution: any) => [execution.node, execution]));
+    const forkLaunch = (ref: string) => readFile(join(data, 'environments', fork.runId, 'launches', `${ref}.json`), 'utf8').then(JSON.parse);
+    assert.equal(forked.executions.length, 3, 'no added environment Agent');
+    assert.equal(forked.mergers.length, 0, 'environment differences do not dispatch a Merger');
+    assert.notEqual(forkNodes.left.worktree, forkNodes.right.worktree);
+    assert.ok(Math.min(forkNodes.left.completedAt, forkNodes.right.completedAt) >= Math.max(forkNodes.left.startedAt, forkNodes.right.startedAt), 'bound fan-out remains parallel');
+    assert.equal((await forkLaunch(forkNodes.left.input.launchRef)).environment.kind, 'venv');
+    assert.equal((await forkLaunch(forkNodes.right.input.launchRef)).environment, undefined);
+    assert.equal(forkNodes.right.input.inheritance.reason, 'fixed-layout-not-reusable');
+    await assert.rejects(stat(join(forkNodes.right.worktree, '.venv')), /ENOENT/, 'Runtime does not copy an unportable environment');
+    const descriptor = await api('result_descriptor', { runId: fork.runId });
+    assert.equal(descriptor.schema, 2);
+    assert.deepEqual(descriptor.entries.map((entry: any) => entry.name), ['left', 'right']);
+    assert.equal(descriptor.defaultEntry, undefined, 'different environments have no guessed default');
+    assert.ok(descriptor.entries.every((entry: any) => entry.result.codeRef === git('rev-parse', 'HEAD')));
+    await assert.rejects(api('launch_result', { runId: fork.runId, args: [] }), /entryId/);
+    const callsBeforeLaunch = modelCalls;
+    const expectedProbe = JSON.parse(await readFile(join(source, 'environment-probe.json'), 'utf8'));
+    const launched = await api('launch_result', { runId: fork.runId, entryId: 'left', args: ['-c', 'import grapher_probe; print(grapher_probe.MARKER)'] });
+    assert.equal(launched.output.trim(), expectedProbe.marker);
+    const republished = await forkSettled();
+    assert.equal(republished.publishedResult.entries.length, 2);
+    assert.equal(modelCalls, callsBeforeLaunch, 'entry launch and republication do not call a model');
+    assert.doesNotMatch(git('ls-files'), /(^|\n)\.venv\//);
+    console.log(JSON.stringify({ platform: process.platform, arch: process.arch, python, shell, modelCalls, executions: state.executions.length, fanoutExecutions: forked.executions.length,
       parallelOverlapMs: Math.min(byNode.left.completedAt, byNode.right.completedAt) - Math.max(byNode.left.startedAt, byNode.right.startedAt),
       elapsedMs: Date.now() - started }));
   } catch (error) { throw new Error(`${error}\nEnvironment chain elapsed=${Date.now() - started}ms; modelCalls=${modelCalls}; toolRequests=${commands.length}\n${diagnostics}`); }

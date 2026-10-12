@@ -7,15 +7,12 @@
 This document describes what happens to your project, sessions, and files. [Runtime](runtime.md) covers scheduling; [Filesystem isolation](filesystem-isolation.md) covers permissions and path adaptation.
 
 Backend-admitted [Native workspace environments](native-environments.md) add E/L
-evidence to standard Git Graph projects, starting with no business binding and
-no precreated environment. Supported business-created private venv/Conda
-bindings are discovered and verified without user choices or changes to
-allocation, conversation and feedback. Projects needing no environment stay
-unbound; ordinary parallel allocation remains available. Managed scopes/caches
-are excluded from source publication; Graph publishes a launchable descriptor.
-Serial and shadow projects retain their native contract. Legacy Runs
-are not reinterpreted; unsupported toolchains or stronger capabilities fail
-without asking for an environment or execution fallback.
+evidence to the current workspace execution. The workspace is handed off or
+replaced as Runtime schedules nodes; environment inheritance is best-effort and
+never a parent compatibility gate. Projects needing no environment stay unbound;
+ordinary parallel allocation remains available. Managed scopes/caches are excluded
+from source publication; Graph publishes a launchable descriptor. Serial and
+shadow projects retain their native contract.
 
 ## Serial and Graph
 
@@ -51,8 +48,14 @@ Source locks protect approval and snapshots taken after approved Planner revisio
 
 Graph executions use Run-owned private repositories, not `git worktree` checkouts. A directory is a reusable single-writer execution slot; its allocation name does not identify its current node owner.
 
-1. A root starts from the latest recorded source snapshot: approval, a subsequent approved Planner revision, or successful publication. Approval history remains immutable.
-2. A child waits for its ordinary dependencies to finish successfully. Git merges the recorded parent commits with the current recorded source commit. Each parent result includes all project files, including files matching `.gitignore`; a reused directory keeps its working tree and a new slot checks out the selected Git baseline.
+1. Runtime selects the current workspace state from the latest recorded source
+   snapshot and completed dependency results. A completed workspace is handed off
+   when ownership permits; otherwise a new slot is materialized from the current
+   code snapshot.
+2. A child waits for ordinary dependencies and Git-composes their project state.
+   Environment reuse is attempted at the selected current slot only; failure to
+   reuse means an unbound execution, not a blocked dependency. Parent environment
+   directories are never copied or merged.
 3. The agent performs its task in that workspace with its own session. It does not receive parent conversations or exchange commits with other agents.
 4. After execution, the backend snapshots the result for downstream inheritance and final publication.
 
@@ -66,12 +69,12 @@ Git is the host's snapshot/composition mechanism, not an agent messaging protoco
 
 All project files participate in Git composition. A Git conflict while combining parents invokes the Merger in the child's workspace before the task starts. This includes `.gitignore` and paths that `.gitignore` would normally hide from a user `git add`. The selected physical directory supplies the working tree; the committed Git result supplies the project history.
 
-Managed parent environments compose under the same preparation phase. Identical E/L or a provable descendant is selected automatically. When independent E/L inputs have no provable automatic selection, a Merger runs with environment-reconciliation instructions instead of blocking: it may select one existing input environment only after it satisfies every branch's declared constraints and validation, or build one new private environment offline from a matching lock file and cache, then verify the interpreter, dependencies and health checks. Runtime discovers and captures that observed result as the child's environment input; a Merger that leaves no verified private binding is refused. Two venv/Conda directory trees are never merged, packages are never installed over the network, and the host Python is never a fallback. If the same composition has both a Git conflict and an incompatible environment, one Merger invocation receives the concatenated Git and environment prompt segments.
+Environment inheritance is a separate Runtime decision, not a parent compatibility gate. Runtime reuses a verified environment at the selected physical path or starts the current workspace unbound, while retaining input E/L evidence. No environment prompt or environment-only Merger is added. Distinct terminal environments publish distinct business entries over the final code. [Native environments](native-environments.md) owns selection, integrity, recovery and named-entry launch rules.
 
 
 A node-composition Merger is a first-class conversation while it runs: the execution graph shows its card while it prepares the node, and its live session accepts steering like a node execution. Once the Merger settles, its card becomes read-only history and the node's own execution is the conversation that continues the work. A publication Merger has no planner node; the graph shows it as a `publication merger` card below the terminal layer, receiving the terminal edges. It is steerable while it runs and, unlike a node-composition Merger, keeps accepting follow-ups after it settles: each follow-up is a new Merger execution continuing the same Pi session in the source directory, and it does not re-enter the publication state machine. Publication status and retry remain the publication panel's concern, not the Merger conversation's.
 
-If the Merger fails, leaves an unresolved conflict, or cannot select/build a verified environment, the affected node is blocked and its workspace/logs are preserved. For a Git conflict, resolve and commit the merge there, then use **Use resolved workspace**; for an environment blocker, select or build and validate a private environment in that workspace without network installation. The original task still needs an execution. Retrying final publication does not repair a node's preparation conflict.
+If a Git Merger fails or leaves an unresolved conflict, the affected node is blocked and its workspace/logs are preserved. Resolve and commit the merge there, then use **Use resolved workspace**; the original task still needs an execution. An environment mismatch alone does not block the node. Retrying final publication does not repair a node's preparation conflict.
 
 ## Sessions, follow-ups, and history edits
 

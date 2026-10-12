@@ -2,7 +2,7 @@ use super::*;
 #[cfg(feature = "fixture")]
 use crate::{
     model::*,
-    runtime::{perform, perform_with_merger, Job, Runtime},
+    runtime::{perform, Job, Runtime},
 };
 #[cfg(feature = "fixture")]
 use tempfile::TempDir;
@@ -37,7 +37,7 @@ fn shell() -> String {
     }
 }
 
-fn policy() -> EnvironmentConfig {
+pub(super) fn policy() -> EnvironmentConfig {
     let python = python();
     EnvironmentConfig {
         mode: "native-workspace".into(),
@@ -59,6 +59,7 @@ fn policy() -> EnvironmentConfig {
             shell: shell(),
             variables: BTreeMap::new(),
             inherit: vec![],
+            managed_scopes: vec![],
             hook: None,
             environment: None,
         },
@@ -71,11 +72,12 @@ fn policy() -> EnvironmentConfig {
         require: vec![],
         resources: None,
         discovery: false,
+        best_effort: false,
     }
 }
 
 #[cfg(feature = "fixture")]
-fn graph(names: &[&str], edges: &[(&str, &str, bool)]) -> Graph {
+pub(super) fn graph(names: &[&str], edges: &[(&str, &str, bool)]) -> Graph {
     Graph {
         original_goal: "native environment test".into(),
         nodes: names
@@ -97,7 +99,7 @@ fn graph(names: &[&str], edges: &[(&str, &str, bool)]) -> Graph {
 }
 
 #[cfg(feature = "fixture")]
-fn setup(graph: Graph, policy: EnvironmentConfig, body: &str) -> (TempDir, PathBuf, Runtime) {
+pub(super) fn setup(graph: Graph, policy: EnvironmentConfig, body: &str) -> (TempDir, PathBuf, Runtime) {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source 中文 space");
     fs::create_dir(&source).unwrap();
@@ -129,7 +131,7 @@ fn setup(graph: Graph, policy: EnvironmentConfig, body: &str) -> (TempDir, PathB
 }
 
 #[cfg(feature = "fixture")]
-fn run(runtime: &mut Runtime, job: &Job) {
+pub(super) fn run(runtime: &mut Runtime, job: &Job) {
     let root = runtime.root.clone();
     let result = perform(
         job,
@@ -187,35 +189,6 @@ fn history_scope_transition_is_checked_before_touching_code_or_partial_environme
         .unwrap();
 }
 
-#[test]
-fn reconciliation_refuses_to_capture_an_unbound_environment() {
-    let temp = tempfile::tempdir().unwrap();
-    let run = Uuid::new_v4().to_string();
-    let mut config = policy();
-    config.discovery = true;
-    let store = Environments::new(temp.path(), &run, &config).unwrap();
-    let workspace = temp.path().join("workspace");
-    fs::create_dir(&workspace).unwrap();
-    workspace::git(&workspace, &["init", "-q"]).unwrap();
-    let base = store.initialize(&workspace).unwrap();
-    let session = temp.path().join("merger-session");
-    fs::create_dir_all(&session).unwrap();
-    let error = store
-        .capture_reconciled(
-            &workspace,
-            &base,
-            &Uuid::new_v4().to_string(),
-            "head",
-            vec![],
-            &["B".into(), "C".into()],
-            &[(Uuid::new_v4().to_string(), session)],
-        )
-        .unwrap_err();
-    assert!(
-        error.contains("did not select or build a verified private environment"),
-        "{error}"
-    );
-}
 
 #[cfg(feature = "fixture")]
 #[test]
@@ -526,253 +499,8 @@ fs.writeFileSync('.cache/runtime','cache should not fork E');
     );
 }
 
-#[cfg(feature = "fixture")]
-#[test]
-fn fanout_private_c_input_is_not_b_upgrade_and_fanin_requires_authority() {
-    for authority in [false, true] {
-        let mut config = policy();
-        config.layout = "relocatable".into();
-        if authority {
-            config.authority.insert("D".into(), "B".into());
-        }
-        let (_temp, _source, mut runtime) = setup(
-            graph(
-                &["A", "B", "C", "D"],
-                &[
-                    ("A", "B", false),
-                    ("A", "C", false),
-                    ("B", "D", false),
-                    ("C", "D", false),
-                ],
-            ),
-            config,
-            r#"
-if(name==='A') fs.writeFileSync('.env/version','1');
-else if(name==='B' || name==='C') {
-  if(fs.readFileSync('.env/version','utf8')!=='1') throw Error('sibling environment leaked');
-  fs.writeFileSync('.env/version',name==='B'?'2':'3');
-} else { if(fs.readFileSync('.env/version','utf8')!=='2') throw Error('authority not applied'); }
-"#,
-        );
-        let a = runtime.jobs().unwrap().remove(0);
-        run(&mut runtime, &a);
-        let siblings = runtime.jobs().unwrap();
-        assert_eq!(siblings.len(), 2);
-        assert_ne!(
-            siblings[0].execution.worktree,
-            siblings[1].execution.worktree
-        );
-        assert_eq!(
-            siblings[0]
-                .environment_input
-                .as_ref()
-                .unwrap()
-                .environment_ref,
-            siblings[1]
-                .environment_input
-                .as_ref()
-                .unwrap()
-                .environment_ref
-        );
-        run(&mut runtime, &siblings[0]);
-        run(&mut runtime, &siblings[1]);
-        let b = runtime.state.nodes["B"].result.clone().unwrap();
-        let jobs = runtime.jobs().unwrap();
-        if authority {
-            assert_eq!(jobs.len(), 1);
-            assert_eq!(
-                jobs[0].environment_input.as_ref().unwrap().environment_ref,
-                b.environment_ref
-            );
-            assert_eq!(
-                jobs[0].environment_input.as_ref().unwrap().selected_from,
-                vec!["B"]
-            );
-            run(&mut runtime, &jobs[0]);
-        } else {
-            // Incompatible independent environments now dispatch a
-            // composition Merger (with an environment prompt) instead of
-            // blocking the node with no recovery path.
-            assert_eq!(jobs.len(), 1);
-            assert!(
-                jobs[0].environment_conflict.is_some(),
-                "fan-in incompatibility must request environment reconciliation"
-            );
-            assert_eq!(
-                jobs[0].environment_input.as_ref().unwrap().environment_ref,
-                runtime.state.environment_baseline.as_ref().unwrap().environment_ref
-            );
-        }
-        assert_eq!(
-            fs::read_to_string(Path::new(&siblings[0].execution.worktree).join(".env/version"))
-                .unwrap(),
-            "2"
-        );
-    }
-}
 
-#[cfg(feature = "fixture")]
-fn run_with_merger(runtime: &mut Runtime, job: &Job) {
-    let root = runtime.root.clone();
-    let events = std::cell::RefCell::new(Vec::<EventKind>::new());
-    let result = perform_with_merger(
-        job,
-        &root,
-        &[],
-        |_| {},
-        |head| {
-            events.borrow_mut().push(EventKind::Prepared {
-                execution_id: job.execution.id.clone(),
-                head,
-            });
-            Ok(())
-        },
-        |event| {
-            events.borrow_mut().push(event);
-            Ok(())
-        },
-    );
-    for event in events.into_inner() {
-        runtime.emit(event).unwrap();
-    }
-    if let Err(error) = &result {
-        panic!("{}: {error}", job.execution.node);
-    }
-    runtime.finish(&job.execution, result).unwrap();
-    assert_eq!(
-        runtime
-            .state
-            .executions
-            .iter()
-            .find(|e| e.id == job.execution.id)
-            .unwrap()
-            .status,
-        "completed",
-        "{:?}",
-        runtime.state.nodes[&job.execution.node].error
-    );
-}
 
-#[cfg(feature = "fixture")]
-#[test]
-fn incompatible_fan_in_dispatches_an_environment_merger() {
-    let mut config = policy();
-    config.layout = "relocatable".into();
-    let (_temp, _source, mut runtime) = setup(
-        graph(
-            &["A", "B", "C", "D"],
-            &[
-                ("A", "B", false),
-                ("A", "C", false),
-                ("B", "D", false),
-                ("C", "D", false),
-            ],
-        ),
-        config,
-        r#"
-if (process.env.GRAPHER_MODE === 'merger') {
-  if (name !== 'merge:D') throw Error('unexpected merger identity ' + name);
-  const inherited = fs.readFileSync('.env/version','utf8');
-  if (inherited !== '2' && inherited !== '3') throw Error('unexpected inherited environment');
-  fs.writeFileSync('.env/version','reconciled');
-} else if (name === 'A') fs.writeFileSync('.env/version','1');
-else if (name === 'B') fs.writeFileSync('.env/version','2');
-else if (name === 'C') fs.writeFileSync('.env/version','3');
-else if (name === 'D') {
-  if (fs.readFileSync('.env/version','utf8') !== 'reconciled') throw Error('environment was not reconciled');
-}
-"#,
-    );
-    let a = runtime.jobs().unwrap().remove(0);
-    run(&mut runtime, &a);
-    let siblings = runtime.jobs().unwrap();
-    assert_eq!(siblings.len(), 2);
-    run(&mut runtime, &siblings[0]);
-    run(&mut runtime, &siblings[1]);
-    let d = runtime.jobs().unwrap().remove(0);
-    assert!(
-        d.environment_conflict.is_some(),
-        "fan-in incompatibility must dispatch a Merger instead of blocking"
-    );
-    assert!(d.environment_input.is_some());
-    run_with_merger(&mut runtime, &d);
-    assert_eq!(runtime.state.nodes["D"].status, "done");
-    assert_eq!(
-        fs::read_to_string(Path::new(&d.execution.worktree).join(".env/version")).unwrap(),
-        "reconciled"
-    );
-    assert_eq!(runtime.state.mergers.len(), 1);
-    assert_eq!(runtime.state.mergers[0].node, "merge:D");
-    let input = runtime.state.nodes["D"].result.clone().unwrap();
-    assert_eq!(
-        input.selected_from,
-        vec!["B".to_string(), "C".to_string()],
-        "the reconciled environment records both fan-in inputs"
-    );
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn simultaneous_git_and_environment_conflicts_use_one_combined_merger() {
-    let mut config = policy();
-    config.layout = "relocatable".into();
-    let (_temp, _source, mut runtime) = setup(
-        graph(
-            &["A", "B", "C", "D"],
-            &[
-                ("A", "B", false),
-                ("A", "C", false),
-                ("B", "D", false),
-                ("C", "D", false),
-            ],
-        ),
-        config,
-        r#"
-if (process.env.GRAPHER_MODE === 'merger') {
-  if (name !== 'merge:D') throw Error('unexpected merger identity ' + name);
-  fs.writeFileSync('tracked.txt','merged');
-  const cp = await import('node:child_process');
-  cp.execFileSync('git', ['add','-A'], { stdio: 'inherit' });
-  fs.writeFileSync('.env/version','reconciled');
-} else if (name === 'A') { fs.writeFileSync('tracked.txt','base'); fs.writeFileSync('.env/version','1'); }
-else if (name === 'B') { fs.writeFileSync('tracked.txt','b'); fs.writeFileSync('.env/version','2'); }
-else if (name === 'C') { fs.writeFileSync('tracked.txt','c'); fs.writeFileSync('.env/version','3'); }
-else if (name === 'D') {
-  if (fs.readFileSync('.env/version','utf8') !== 'reconciled') throw Error('environment was not reconciled');
-  if (fs.readFileSync('tracked.txt','utf8') !== 'merged') throw Error('git conflict was not resolved');
-}
-"#,
-    );
-    let a = runtime.jobs().unwrap().remove(0);
-    run(&mut runtime, &a);
-    let siblings = runtime.jobs().unwrap();
-    assert_eq!(siblings.len(), 2);
-    run(&mut runtime, &siblings[0]);
-    run(&mut runtime, &siblings[1]);
-    let d = runtime.jobs().unwrap().remove(0);
-    assert!(d.environment_conflict.is_some());
-    run_with_merger(&mut runtime, &d);
-    assert_eq!(runtime.state.nodes["D"].status, "done");
-    assert_eq!(runtime.state.mergers.len(), 1);
-    let merger = &runtime.state.mergers[0];
-    assert_eq!(merger.node, "merge:D");
-    let prompt = fs::read_to_string(
-        runtime.root.join("mergers").join(&merger.id).join("system-prompt.md"),
-    )
-    .unwrap();
-    assert!(prompt.contains("Your current task is conflict repair and environment reconciliation"));
-    assert!(prompt.contains("Resolve the current Git merge conflicts"));
-    assert!(prompt.contains("Select or build one environment for the downstream execution"));
-    let git = prompt.find("Resolve the current Git merge conflicts").unwrap();
-    let environment = prompt
-        .find("Select or build one environment for the downstream execution")
-        .unwrap();
-    assert!(git < environment);
-    assert_eq!(
-        fs::read_to_string(Path::new(&d.execution.worktree).join("tracked.txt")).unwrap(),
-        "merged"
-    );
-}
 
 #[cfg(feature = "fixture")]
 #[test]
