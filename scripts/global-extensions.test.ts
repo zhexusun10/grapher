@@ -158,6 +158,29 @@ test('execution path guidance directly follows existing prompts without a blank 
   }
 });
 
+test('previous agent environment hints are appended to system prompt guidance when present', async () => {
+  const previousMode = process.env.GRAPHER_MODE;
+  const previousHints = process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS;
+  const guideline = 'Use project-root-relative paths in Bash commands and project files.';
+  const hint = 'previous agent used: conda name:ml (conda)';
+  try {
+    process.env.GRAPHER_MODE = 'node';
+    process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS = hint;
+    const hooks = new Map<string, any>();
+    workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
+    const hook = hooks.get('before_agent_start');
+    assert.ok(hook);
+    const options = { appendSystemPrompt: 'Base instructions.', forceSystemPrompt: undefined };
+    await hook({ systemPromptOptions: options });
+    assert.equal(options.appendSystemPrompt, `Base instructions.\n${guideline}\n${hint}`);
+  } finally {
+    if (previousMode === undefined) delete process.env.GRAPHER_MODE;
+    else process.env.GRAPHER_MODE = previousMode;
+    if (previousHints === undefined) delete process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS;
+    else process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS = previousHints;
+  }
+});
+
 test('bundled continuity defaults on, supports persistent removal/restore and obeys role/CLI exclusions', async () => {
   const f = fixture();
   try {

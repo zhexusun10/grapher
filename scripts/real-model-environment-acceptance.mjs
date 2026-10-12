@@ -355,6 +355,7 @@ try {
   // Real UI shows the completed run and the published result descriptor.
   await until(async () => (await page.locator(".graph-bottom .approval-row").innerText()).includes("Run completed"), "browser completion", 30_000);
   await until(async () => (await page.locator(".graph-bottom details summary").first().innerText()).includes("Launchable result descriptor"), "published result descriptor in UI", 20_000);
+  await page.locator(".graph-bottom details summary").first().click();
   const descriptorText = await page.locator(".graph-bottom details").first().innerText();
   assert.ok(descriptorText.includes(byNode.report.result.environmentRef), "UI shows the bound E ref");
   assert.ok(descriptorText.includes(byNode.report.result.launchRef), "UI shows the bound L ref");

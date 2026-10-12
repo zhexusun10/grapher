@@ -23,14 +23,16 @@ export default function (pi: ExtensionAPI) {
       // Keep ordinary prompts structured so the upstream extension can trim them.
       const options = event.systemPromptOptions;
       if (paths) Object.assign(options, paths.view(options));
+      const hints = process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS?.trim();
+      const guidance = hints ? `${pathGuideline}\n${hints}` : pathGuideline;
       if (options.forceSystemPrompt !== undefined) {
         // Respect an explicit override supplied by another extension. Such
         // overrides require separate compatibility review with Pi's projection.
         const preceding = options.forceSystemPrompt.trimEnd();
-        options.forceSystemPrompt = `${preceding}${preceding ? '\n' : ''}${pathGuideline}`;
+        options.forceSystemPrompt = `${preceding}${preceding ? '\n' : ''}${guidance}`;
       } else {
         const preceding = options.appendSystemPrompt.trimEnd();
-        options.appendSystemPrompt = `${preceding}${preceding ? '\n' : ''}${pathGuideline}`;
+        options.appendSystemPrompt = `${preceding}${preceding ? '\n' : ''}${guidance}`;
       }
     });
   }
