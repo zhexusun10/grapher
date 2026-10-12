@@ -100,10 +100,12 @@ test('production Planner writes source directly; Merger repairs node and publica
           .slice(messages.findLastIndex((message: any) => message.role === 'user') + 1)
           .filter((message: any) => message.role === 'tool');
         if (continuation && turnResults.length === 0) {
-          // A settled publication merger's follow-up must commit its changes so
-          // the source directory stays clean for the next publication retry.
-          tool = { name: 'bash', arguments: { command:
-            'printf \'continued\\n\' > continued.txt && git add continued.txt && git -c user.name=Test -c user.email=test@localhost commit -qm continued',
+          // A Git-backed publication merger's follow-up commits its changes so
+          // the source directory stays clean for the next publication retry. An
+          // ordinary folder whose snapshot was reclaimed edits files directly.
+          tool = { name: 'bash', arguments: { command: scenario.plain
+            ? "printf 'continued\\n' > continued.txt"
+            : "printf 'continued\\n' > continued.txt && git add continued.txt && git -c user.name=Test -c user.email=test@localhost commit -qm continued",
           } };
         } else if (!scenario.fail && results.length === 0) {
           // Absolute source aliases must select the conflicted private file for
@@ -160,7 +162,7 @@ test('production Planner writes source directly; Merger repairs node and publica
       const response = await fetch(`http://127.0.0.1:${port}/api/${command}`, { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(180000) });
       const payload = await response.json() as any;
-      if (!response.ok || payload.error) throw new Error(payload.error || String(response.status));
+      if (!response.ok || payload.error) throw new Error(`${payload.error || String(response.status)}\n${diagnostics}`);
       return payload.result;
     };
     // Revisions use the same SSE endpoint as the frontend, not draft plan_goal.
@@ -323,7 +325,14 @@ test('production Planner writes source directly; Merger repairs node and publica
           return current.phase === 'completed' && current.nodes.late?.status === 'done' && current;
         });
         assert.equal(revised.base, state.base, 'approval is immutable');
-        assert.ok(revised.events.some((event: any) => event.type === 'graph_revised' && event.source_head));
+        // A plain folder whose successful publication reclaimed its snapshot
+        // records the revision without a source head; the next dispatch
+        // materializes from the current source files. Standard Git keeps
+        // snapshotting its own repository at revision time.
+        assert.ok(revised.events.some((event: any) => event.type === 'graph_revised'));
+        if (!plain) {
+          assert.ok(revised.events.some((event: any) => event.type === 'graph_revised' && event.source_head));
+        }
         assert.equal(revised.executions.filter((execution: any) => execution.node === 'verify').length, 1);
         assert.deepEqual(revised.executions.find((execution: any) => execution.id === state.executions[0].id), state.executions[0]);
         assert.equal(await readFile(join(repository, 'late.txt'), 'utf8'), 'inherited');

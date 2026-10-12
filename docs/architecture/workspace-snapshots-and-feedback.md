@@ -40,12 +40,49 @@ still part of the project's Git history and still participates in Git merges,
 but it is not a Runtime collection boundary. A regular file that is created
 under an ignored directory is still part of the node's Git result.
 
-There is no automatic large-file rejection. A 35GB project file is collected
+There is no automatic large-file rejection. A large project file is collected
 by Git like any other project file. Git will read/hash it and may create a
 large object; projects that need different storage must use an explicit Git
 LFS/artifact policy. Removing the guard avoids silently treating a large file
 differently from other project files, but it does not make Git large-file I/O
 cheap.
+
+The user's desktop folder is not an accepted binding: [detection and
+binding validation](../../backend/src/workspace.rs) refuse it before a shadow
+repository is created, so forced collection cannot walk unrelated personal
+data. Bind an actual project directory instead.
+
+## Shadow repository lifecycle
+
+An ordinary folder (no `.git`) uses a temporary external Git metadata
+repository under `<data>/shadow_repos/`. Detection, planning, approval and
+pre-dispatch Planner revisions are pure filesystem operations and never create
+it. The snapshot is materialized lazily by the first dispatched node worker,
+which force-collects the current source files once and records a
+`SourceSnapshotted` event plus durable cleanup ownership. Serial runs and
+standard Git repositories never create a shadow repository.
+
+Materialization runs without holding the Runtime lock, so the UI keeps
+reporting a `source_materialize` activity while Git walks the project. A
+successful publication reclaims the shadow repository as soon as no other
+incomplete Run still needs the shared snapshot; failed, interrupted and paused
+Runs keep it for `retry_publication` and evidence. Run deletion and the offline
+`--cleanup-workspaces --apply` GC also reclaim it. `""` is the only encoding
+of "no Git snapshot", and every consumer must handle it explicitly.
+
+After a successful publication, a conversation with a completed node edits the
+source directory directly: no shadow repository is rebuilt, no new worktree is
+allocated, no commit is created, and downstream results are not invalidated or
+republished. Only a Planner revision that dispatches new nodes materializes a
+fresh snapshot from the current source files. The same applies to a
+publication-merger follow-up once the successful publication has reclaimed an
+ordinary folder's snapshot; a follow-up on a retained failed-publication
+snapshot keeps its Git-backed merge behavior.
+
+A revised graph that reuses already-completed nodes dispatches new nodes from
+the fresh snapshot. Recorded parent commits that only existed in the reclaimed
+snapshot are not resolved or merged: their published content is already part
+of that snapshot.
 
 ## Physical workspaces and ownership
 

@@ -45,6 +45,7 @@ function activityStatusText(activity: RuntimeActivity[]): string | null {
       ? t("正在复制节点工作区：{0}", prepare.nodes.join("、"))
       : t("正在复制节点工作区");
   }
+  if (byKind("source_materialize")) return t("正在建立临时 Git 快照（首次收录项目文件）");
   if (byKind("source_capture")) return t("正在记录 Git 源快照");
   return null;
 }
@@ -1299,8 +1300,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   >
                     <p>Worktree: {execution.worktree}</p>
                     <p>Session ID: {execution.sessionId}</p>
-                    <p>Commit Before: {execution.before}</p>
-                    <p>Commit After: {execution.after ?? "pending"}</p>
+                    <p>Commit Before: {execution.before || t("未快照")}</p>
+                    <p>Commit After: {execution.after === "" ? t("源目录直改（无快照）") : execution.after ?? "pending"}</p>
                     <p className="details-tip">{t("Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。")}</p>
                   </WorkspaceDetailsPanel>
                 )}
@@ -1483,8 +1484,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                            serialExecution.output.match(/"pid":(\d+)/);
                           return pidMatch ? <p>{t("沙箱进程 PID: ")}{pidMatch[1]}</p> : null;
                         })()}
-                        <p>Commit Before: {serialExecution.before || "HEAD"}</p>
-                        <p>Commit After: {serialExecution.after ?? "pending"}</p>
+                        <p>Commit Before: {serialExecution.before || t("未快照")}</p>
+                        <p>Commit After: {serialExecution.after === "" ? t("源目录直改（无快照）") : serialExecution.after ?? "pending"}</p>
                         <p className="details-tip">{t("单节点串行任务直接在本地目录工作，无需额外 worktree。")}</p>
                       </WorkspaceDetailsPanel>
                     )}
@@ -1887,6 +1888,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <><span className="progress-dot" />{activityStatus}</>
                       ) : graphPhase === "planning" ? t("规划中")
                         : graphPhase === "running" ? t("确定性运行时正在推进")
+                        : graphPhase === "followup" ? t("源目录直改中（无快照）")
                         : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
                         : graphPhase === "paused" ? t("已暂停后续派发")
                         : graphPhase === "completed" ? t("运行已完成")

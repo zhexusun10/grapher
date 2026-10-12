@@ -198,6 +198,49 @@ fn source_lock(repository: &std::path::Path) -> Result<Arc<Mutex<()>>, String> {
     Ok(lock)
 }
 
+/// Lazily materialize the external shadow repository for the first dispatched
+/// job of a plain-directory graph run. Git collection runs without the runtime
+/// lock; the source lock serializes it with planning and other workers.
+fn materialize_job_source(
+    service: &Arc<Service>,
+    root: &std::path::Path,
+    job: &mut crate::runtime::Job,
+) -> Result<(), String> {
+    let repository = crate::runtime::resolve_repository(root, &job.config)?;
+    let activity_key = format!("materialize-{}", job.execution.id);
+    let _activity = ActivityGuard::begin(
+        &job.run_id,
+        &activity_key,
+        "source_materialize",
+        &job.execution.node,
+    );
+    // Hold the source lock across the freshness check, the Git collection and
+    // the ownership/event record. Sibling workers of the same first batch are
+    // serialized here, so the first one materializes and the rest reuse its
+    // commit instead of committing again and duplicating SourceSnapshotted.
+    let lock = source_lock(&repository)?;
+    let _source_guard = lock.lock().map_err(|error| error.to_string())?;
+    // Short lock: read the managed-environment exclusions and this Run's
+    // snapshot freshness, then release before any Git work.
+    let (exclusions, fresh) = {
+        let runtime = service
+            .runtime
+            .lock()
+            .map_err(|error| error.to_string())?;
+        (
+            runtime.exclusions()?,
+            runtime.job_source_is_fresh(&repository)?,
+        )
+    };
+    let head = crate::runtime::collect_source_snapshot(&repository, &exclusions, fresh)?;
+    // Short lock: durable ownership and the one-time source snapshot event.
+    service
+        .runtime
+        .lock()
+        .map_err(|error| error.to_string())?
+        .record_job_source(job, &repository, &head)
+}
+
 fn service_for_run(
     primary: &Arc<Service>,
     run_id: &str,
@@ -1272,7 +1315,7 @@ fn plan_goal_internal_with_started(
             let lock = source_lock(&repository).map_err(|e| (e, None))?;
             {
                 let _source_guard = lock.lock().map_err(|e| (e.to_string(), None))?;
-                crate::workspace::verify(&repository).map_err(|error| (error, None))?;
+                crate::workspace::validate_binding(&repository).map_err(|error| (error, None))?;
             }
             check_planning_cancelled(&owner).map_err(|e| (e, None))?;
             validate_planning_preflight(&config, mode).map_err(|error| (error, None))?;
@@ -2070,6 +2113,33 @@ fn drive(service: Arc<Service>) {
                                 if let Err(error) = runtime.cleanup_worktrees() {
                                     eprintln!("Cannot clean completed run worktrees: {error}");
                                 }
+                                // Publication succeeded, so the user's source now
+                                // contains the merged result. Decide under a short
+                                // lock and remove the snapshot only after release.
+                                let repository = PathBuf::from(&publication.repository);
+                                drop(runtime);
+                                let reclaimable = {
+                                    let runtime = service
+                                        .runtime
+                                        .lock()
+                                        .map_err(|e| e.to_string())?;
+                                    runtime.shadow_reclaimable_after_publication(&repository)
+                                };
+                                match reclaimable {
+                                    Ok(true) => {
+                                        if let Err(error) =
+                                            crate::workspace::remove_shadow_repo(&repository)
+                                        {
+                                            eprintln!(
+                                                "Cannot reclaim published shadow repository: {error}"
+                                            );
+                                        }
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => eprintln!(
+                                        "Cannot check published shadow repository: {error}"
+                                    ),
+                                }
                             }
                             Err(error) => {
                                 eprintln!("[Grapher] [Publication] Failed: {error}");
@@ -2092,11 +2162,15 @@ fn drive(service: Arc<Service>) {
                     );
                     let run_id = run_id.clone();
                     let spawned = thread::Builder::new().name("grapher-node".into()).spawn(move || {
+                        let mut job = job;
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             // Every model session is independent. Serial mode selects
                             // the source checkout, but it does not serialize sessions
                             // from different Runs or attempt to reconcile their writes.
                             crate::process_control::with_owner(&run_id, || {
+                                if job.materialize_source {
+                                    materialize_job_source(&service, &root, &mut job)?;
+                                }
                                 let activity_key =
                                     format!("prepare-{}", job.execution.id);
                                 // Covers Git checkout, ordinary-file copying and
@@ -2392,11 +2466,17 @@ fn control(
         };
         let id = Uuid::new_v4().to_string();
         // Plain folders keep Git state in the external shadow repository, so a
-        // plain `git rev-parse` there would not be a repository at all.
-        let before = crate::workspace::repository_git(
-            std::path::Path::new(&previous.worktree),
-            &["rev-parse", "HEAD"],
-        )?;
+        // plain `git rev-parse` there would not be a repository at all. A
+        // successful publication reclaims that snapshot: the continuation then
+        // edits the source directly and records no `before` commit.
+        let worktree = std::path::Path::new(&previous.worktree);
+        let before = if crate::workspace::is_standard_git(worktree)
+            || crate::workspace::shadow_repo_if_exists(worktree)?.is_some()
+        {
+            crate::workspace::repository_git(worktree, &["rev-parse", "HEAD"])?
+        } else {
+            String::new()
+        };
         let execution = Execution {
             id: id.clone(),
             node: "merger".into(),

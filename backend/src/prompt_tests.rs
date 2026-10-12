@@ -1895,10 +1895,21 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         let mut runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.state.graph, graph);
         assert_eq!(runtime.state.base, approval);
-        assert!(runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. })));
+        // A failed Planner revision before the first dispatch has no Git
+        // snapshot to record for a plain directory; standard Git still does.
+        let snapshotted = runtime
+            .state
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. }));
+        assert_eq!(snapshotted, standard_git);
         runtime.state = runtime.store.load(&run_id).unwrap();
         runtime.pause(false).unwrap();
-        let job = runtime.jobs().unwrap().remove(0);
+        let mut job = runtime.jobs().unwrap().remove(0);
+        if job.materialize_source {
+            let exclusions = runtime.exclusions().unwrap();
+            runtime.attach_job_source(&mut job, &exclusions).unwrap();
+        }
         assert_ne!(job.execution.before, approval);
         let node = std::path::Path::new(&job.execution.worktree);
         crate::workspace::prepare_with_merger_expected_for_run(&repository, node, &job.execution.before, &[],
@@ -1973,7 +1984,11 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             assert_eq!(result.unwrap().phase, "awaiting_approval");
             let mut runtime = service.runtime.lock().unwrap();
             runtime.approve().unwrap();
-            let job = runtime.jobs().unwrap().remove(0);
+            let mut job = runtime.jobs().unwrap().remove(0);
+            if job.materialize_source {
+                let exclusions = runtime.exclusions().unwrap();
+                runtime.attach_job_source(&mut job, &exclusions).unwrap();
+            }
             let node = std::path::Path::new(&job.execution.worktree);
             crate::workspace::prepare(&repository, node, &job.execution.before, &[]).unwrap();
             assert_eq!(fs::read_to_string(node.join("tracked.txt")).unwrap(), "planner edit");
@@ -3668,4 +3683,131 @@ printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"
     assert_eq!(runtime.state.phase, "completed");
     assert_eq!(runtime.state.executions.len(), 1);
     assert_eq!(runtime.state.executions[0].status, "completed");
+}
+#[test]
+fn snapshot_poll_reports_source_materialize_activity() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let run_id = Uuid::new_v4().to_string();
+    runtime.state.run_id = run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let activity = ActivityGuard::begin(&run_id, "materialize-task", "source_materialize", "task");
+    let locked = service.runtime.lock().unwrap();
+    let worker = service.clone();
+    let request_id = run_id.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let result = dispatch(
+            &worker,
+            "snapshot_if_changed",
+            serde_json::json!({ "runId": request_id }),
+        );
+        let _ = tx.send(result);
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+    drop(locked);
+    thread.join().unwrap();
+    let value = result
+        .expect("source_materialize poll waited for the Run mutex")
+        .unwrap();
+    assert_eq!(
+        value["activity"],
+        serde_json::json!([{ "kind": "source_materialize", "nodes": ["task"] }])
+    );
+    drop(activity);
+    let value = dispatch(&service, "snapshot_if_changed", serde_json::json!({ "runId": run_id }))
+        .unwrap();
+    assert_eq!(value["activity"], serde_json::json!([]));
+}
+
+#[test]
+fn parallel_first_batch_materializes_the_plain_directory_once() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "a").unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": source,
+        "model": "test",
+        "maxParallel": 2,
+        "maxFeedback": 0
+    }))
+    .unwrap();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "test".into(),
+                nodes: vec![
+                    Node {
+                        name: "left".into(),
+                        task: "left".into(),
+                    },
+                    Node {
+                        name: "right".into(),
+                        task: "right".into(),
+                    },
+                ],
+                edges: vec![],
+            },
+            config,
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Approved {
+            base: String::new(),
+        })
+        .unwrap();
+    let root = runtime.root.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let mut jobs = service.runtime.lock().unwrap().jobs().unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs.iter().all(|job| job.materialize_source));
+    let mut left = jobs.remove(0);
+    let mut right = jobs.remove(0);
+    // Both workers race on the first batch; the source lock must let exactly
+    // one of them collect the snapshot.
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    std::thread::scope(|scope| {
+        let left_worker = scope.spawn(|| {
+            barrier.wait();
+            materialize_job_source(&service, &root, &mut left)
+        });
+        let right_worker = scope.spawn(|| {
+            barrier.wait();
+            materialize_job_source(&service, &root, &mut right)
+        });
+        left_worker.join().unwrap().unwrap();
+        right_worker.join().unwrap().unwrap();
+    });
+    assert!(!left.expected_source_head.is_empty());
+    assert_eq!(left.expected_source_head, right.expected_source_head);
+    assert_eq!(left.execution.before, right.execution.before);
+    let runtime = service.runtime.lock().unwrap();
+    let snapshots = runtime
+        .state
+        .events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. }))
+        .count();
+    assert_eq!(snapshots, 1);
+    drop(runtime);
+    assert_eq!(
+        crate::workspace::repository_git(&source, &["rev-list", "--count", "HEAD"]).unwrap(),
+        "1"
+    );
 }

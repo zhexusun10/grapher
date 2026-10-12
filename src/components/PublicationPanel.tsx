@@ -85,7 +85,7 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
       <p>{t("状态：")}{executionLabels[execution.status] ?? execution.status}{t(" · 会话：")}<code>{execution.sessionId}</code></p>
       <p>{t("工作目录：")}<code>{execution.worktree}</code></p>
       {(detailsOpen || publication.status === "merging") && <div className="publication-transcript"><ExecutionTranscript key={execution.id} runId={runId} execution={execution} /></div>}
-      <p>Before: <code>{execution.before}</code> · After: <code>{execution.after ?? t("待提交")}</code></p>
+      <p>Before: <code>{execution.before || t("未快照")}</code> · After: <code>{execution.after === "" ? t("源目录直改（无快照）") : execution.after ?? t("待提交")}</code></p>
     </details>}
   </section>;
 }

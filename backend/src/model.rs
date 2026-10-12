@@ -547,6 +547,10 @@ pub enum EventKind {
         /// The message runs on the final inherited workspace; descendants stay valid.
         #[serde(default)]
         shared_workspace: bool,
+        /// Post-publication follow-up: rerun only this node directly in the
+        /// source directory, without worktree, snapshot or downstream churn.
+        #[serde(default)]
+        source_direct: bool,
     },
     /// Move Pi's active leaf before an earlier user turn. Old executions and
     /// transcript entries remain durable but no longer belong to this branch.
@@ -1357,8 +1361,34 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             images,
             workspace,
             shared_workspace,
+            source_direct,
         } => {
             state.stop_requested = false;
+            if *source_direct {
+                // Source-direct follow-up: only the target re-runs in the user's
+                // directory. Publication, downstream heads and pending feedback
+                // stay untouched, and the run enters an explicit `followup` phase.
+                let node = state.nodes.get_mut(target).unwrap();
+                node.status = "dirty".into();
+                node.error = None;
+                if *human {
+                    node.revision += 1;
+                }
+                // A source-direct result is not a tracked Git change: keep the
+                // generic `Finished` handler from dirtying descendants or
+                // clearing the publication (an absent baseline means unchanged).
+                node.baseline_head = None;
+                node.instruction = instruction.clone();
+                node.instruction_images = images.clone();
+                node.edit_execution_id = None;
+                node.human_instruction = true;
+                node.shared_workspace = false;
+                node.feedback_workspace = None;
+                state.phase = if state.paused { "paused" } else { "followup" }.into();
+                state.events.push(event.clone());
+                state.run_metrics = Some(state.compute_run_metrics());
+                return;
+            }
             state.publication = None;
             for name in nodes {
                 let never_executed = !state

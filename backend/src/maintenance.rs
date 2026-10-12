@@ -10,7 +10,9 @@ use uuid::Uuid;
 #[derive(Default)]
 struct WorkspacePlan {
     paths: BTreeSet<PathBuf>,
+    shadow_paths: BTreeSet<PathBuf>,
     retained: usize,
+    shadow_retained: usize,
     tasks: Vec<crate::cleanup::Task>,
 }
 
@@ -125,6 +127,29 @@ fn workspace_plan(root: &Path, store: &Store, parent: &Path) -> Result<Workspace
             }
         }
     }
+    // Temporary shadow Git metadata is reclaimable whenever no live,
+    // non-completed Run still maps to it. Skip entries that fail the shadow
+    // name validation or are symlinks.
+    if let Ok(shadow_root) = real_child_path(root, &root.join("shadow_repos"), false) {
+        if let Some(shadow_root) = shadow_root {
+            for entry in fs::read_dir(&shadow_root).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let target = crate::cleanup::Target::Shadow {
+                    root: root.to_path_buf(),
+                    name,
+                };
+                let Ok(Some(path)) = target.resolve(root, "offline-gc") else {
+                    continue;
+                };
+                if store.shadow_repo_in_use(&path)? {
+                    plan.shadow_retained += 1;
+                } else {
+                    plan.shadow_paths.insert(path);
+                }
+            }
+        }
+    }
     Ok(plan)
 }
 
@@ -195,6 +220,9 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
     for path in &plan.paths {
         println!("[cleanup] workspace: {}", path.display());
     }
+    for path in &plan.shadow_paths {
+        println!("[cleanup] shadow repository: {}", path.display());
+    }
     for task in &plan.tasks {
         println!(
             "[cleanup] queued Run {} (attempts: {}, last error: {})",
@@ -228,6 +256,10 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
     println!("[cleanup] {} workspace paths, {} unused engine copies; retained {} live/unproven Run roots.",
         plan.paths.len(), engines.len(), plan.retained);
     println!(
+        "[cleanup] {} shadow repositories; retained {} referenced by incomplete Runs.",
+        plan.shadow_paths.len(), plan.shadow_retained
+    );
+    println!(
         "[cleanup] {} cleanup tasks (deleted conversations and completed-run workspaces).",
         plan.tasks.len()
     );
@@ -246,6 +278,7 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
             }
         }
         crate::workspace_cleanup::remove_paths(plan.paths.into_iter().collect())?;
+        crate::workspace_cleanup::remove_paths(plan.shadow_paths.into_iter().collect())?;
         let mut failures = Vec::new();
         for task in &plan.tasks {
             if let Err(error) = crate::cleanup::attempt(&root, &store, task) {
@@ -353,5 +386,49 @@ mod tests {
         assert!(!plan
             .paths
             .contains(&ws.join(&unknown_id).canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn offline_gc_reclaims_only_unreferenced_shadow_repos() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::workspace::data_root();
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("a.txt"), "a").unwrap();
+        let store = Store::open(&root.join("events.sqlite")).unwrap();
+        let run_id = Uuid::new_v4().to_string();
+        let config: Config = serde_json::from_value(
+            serde_json::json!({"repository":source,"model":"test","maxParallel":1}),
+        )
+        .unwrap();
+        let mut state = Snapshot {
+            run_id: run_id.clone(),
+            ..Default::default()
+        };
+        store
+            .append(
+                &mut state,
+                EventKind::Created {
+                    graph: Graph::default(),
+                    config,
+                    planning_id: None,
+                    planning: None,
+                },
+            )
+            .unwrap();
+        // An incomplete Run keeps its materialized snapshot.
+        let head = crate::workspace::materialize_shadow_repo(&source, &[]).unwrap();
+        assert!(!head.is_empty());
+        let referenced = crate::workspace::shadow_repo_dir(&source).unwrap();
+        assert!(store.shadow_repo_in_use(&referenced).unwrap());
+        // A leftover directory with no owning Run is reclaimable.
+        let orphan = root.join("shadow_repos").join("orphan_0000000000000000.git");
+        fs::create_dir_all(&orphan).unwrap();
+        assert!(!store.shadow_repo_in_use(&orphan).unwrap());
+        let plan = workspace_plan(&root, &store, temp.path()).unwrap();
+        assert!(plan.shadow_paths.contains(&orphan));
+        assert!(!plan.shadow_paths.contains(&referenced));
+        let _ = fs::remove_dir_all(&orphan);
+        let _ = fs::remove_dir_all(&referenced);
     }
 }

@@ -48,7 +48,19 @@ pub struct PickResult {
 pub fn data_root() -> PathBuf {
     let path = std::env::var_os("GRAPHER_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| crate::native::installation_root().join(".grapher"));
+        .unwrap_or_else(|| {
+            // Unit tests must never write shadow/workspace data into the
+            // checkout; integration fixtures call `ensure_test_data_root()`
+            // explicitly because this library is compiled without `cfg(test)`.
+            #[cfg(test)]
+            {
+                crate::ensure_test_data_root()
+            }
+            #[cfg(not(test))]
+            {
+                crate::native::installation_root().join(".grapher")
+            }
+        });
     let path = if path.is_relative() {
         std::env::current_dir()
             .map(|cwd| cwd.join(&path))
@@ -183,6 +195,101 @@ mod cache_path_tests {
     }
 }
 
+#[cfg(test)]
+mod workspace_guard_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_is_not_a_valid_workspace_root() {
+        let home = PathBuf::from("C:/Users/test");
+        let env = |name: &str| match name {
+            "USERPROFILE" => Some(home.clone()),
+            "OneDrive" => Some(home.join("OneDrive")),
+            _ => None,
+        };
+        assert!(is_desktop_workspace(&home.join("Desktop"), "windows", env));
+        assert!(is_desktop_workspace(
+            &home.join("OneDrive").join("Desktop"),
+            "windows",
+            env
+        ));
+        assert!(is_desktop_workspace(
+            &PathBuf::from(r"\\?\c:\users\test\desktop"),
+            "windows",
+            env
+        ));
+        assert!(!is_desktop_workspace(&home.join("DesktopX"), "windows", env));
+        assert!(!is_desktop_workspace(
+            &home.join("Desktop").join("project"),
+            "windows",
+            env
+        ));
+        assert!(is_desktop_workspace(
+            &PathBuf::from("/home/test/Desktop"),
+            "linux",
+            |name| (name == "HOME").then(|| PathBuf::from("/home/test"))
+        ));
+        assert!(!is_desktop_workspace(
+            &PathBuf::from("/home/test/DesktopX"),
+            "linux",
+            |name| (name == "HOME").then(|| PathBuf::from("/home/test"))
+        ));
+    }
+}
+
+/// Desktop folders are not valid project workspaces. Runtime collection is
+/// forced and ignores `.gitignore`, so a desktop binding would drag unrelated
+/// personal data into shadow Git history and stall every run. This is a
+/// product guard, not a sandbox boundary.
+fn is_desktop_workspace(
+    candidate: &Path,
+    platform: &str,
+    env: impl Fn(&str) -> Option<PathBuf>,
+) -> bool {
+    let home = if platform == "windows" {
+        env("USERPROFILE").or_else(|| env("HOME"))
+    } else {
+        env("HOME").or_else(|| env("USERPROFILE"))
+    };
+    let Some(home) = home else { return false };
+    let mut roots = vec![home.join("Desktop")];
+    if platform == "windows" {
+        // Redirected desktops live under the OneDrive roots, not the profile.
+        for key in ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"] {
+            if let Some(root) = env(key) {
+                roots.push(root.join("Desktop"));
+            }
+        }
+    }
+    let normalize = |path: &Path| {
+        let text = path.to_string_lossy();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        let text = text.replace('\\', "/");
+        let text = text.trim_end_matches('/').to_string();
+        if platform == "windows" {
+            text.to_ascii_lowercase()
+        } else {
+            text
+        }
+    };
+    let target = normalize(candidate);
+    roots.iter().any(|root| normalize(root) == target)
+}
+
+fn prohibited_workspace_reason(candidate: &Path) -> Option<String> {
+    let probe = candidate
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.to_path_buf());
+    is_desktop_workspace(&probe, std::env::consts::OS, |name| {
+        std::env::var_os(name).map(PathBuf::from)
+    })
+    .then(|| {
+        "不能选择系统桌面作为项目工作区：Grapher 会强制把工作区内所有文件收录进 Git 快照（无视 .gitignore），\
+         而桌面通常包含大量无关个人数据，会让运行长时间卡住。请选择具体的项目或代码仓库目录。"
+            .to_string()
+    })
+}
+
 pub fn is_standard_git(path: &Path) -> bool {
     if !path.exists() {
         return false;
@@ -284,6 +391,119 @@ mod shadow_safety_tests {
     }
 }
 
+const MISSING_SHADOW_ERROR: &str = "临时 Git 快照不存在或已回收：快照在首次派发节点时建立，发布成功后删除。请开启新对话后重试。";
+
+const STALE_SHADOW_ERROR: &str = "临时 Git 快照不存在：图运行的快照在首次派发节点时建立，并在发布成功后回收。请开启新对话后重试。";
+
+/// Return the existing shadow repository for a plain-directory binding.
+/// Never creates, initializes, follows a symlink, or invokes Git.
+pub fn shadow_repo_if_exists(target: &Path) -> Result<Option<PathBuf>, String> {
+    let shadow = shadow_repo_dir(target)?;
+    match checked_shadow_directory(&shadow)? {
+        true => Ok(Some(shadow)),
+        false => Ok(None),
+    }
+}
+
+fn missing_shadow_error(target: &Path) -> String {
+    format!("{STALE_SHADOW_ERROR}（工作区：{}）", target.display())
+}
+
+/// Metadata-only initialization of the external shadow repository. Creates the
+/// Git directory when needed but never stages or commits, so a caller that
+/// needs a usable `HEAD` must do so explicitly.
+fn ensure_shadow_metadata(target: &Path) -> Result<PathBuf, String> {
+    let canonical_target = canonical_workspace_path(target)?;
+    if let Some(reason) = prohibited_workspace_reason(&canonical_target) {
+        return Err(reason);
+    }
+    let shadow_dir = shadow_repo_dir(&canonical_target)?;
+    let shadow_parent = data_root().join("shadow_repos");
+    if !checked_shadow_directory(&shadow_parent)? {
+        fs::create_dir_all(&shadow_parent).map_err(|e| e.to_string())?;
+        checked_shadow_directory(&shadow_parent)?;
+    }
+    if !checked_shadow_directory(&shadow_dir)? {
+        fs::create_dir_all(&shadow_dir).map_err(|e| e.to_string())?;
+        checked_shadow_directory(&shadow_dir)?;
+        let git_dir_str = shadow_dir.to_str().ok_or("Invalid shadow path")?;
+        let work_tree_str = canonical_target.to_str().ok_or("Invalid target path")?;
+        git(
+            &canonical_target,
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "init",
+            ],
+        )?;
+    }
+    if !checked_shadow_directory(&shadow_dir)? {
+        return Err(format!(
+            "Shadow repository is missing: {}",
+            shadow_dir.display()
+        ));
+    }
+    Ok(shadow_dir)
+}
+
+/// Materialize the external shadow repository for a plain directory: create
+/// the metadata when needed, then force-collect the current source files into
+/// one commit so a usable `HEAD` exists. This is the only lazy creation point.
+pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<String, String> {
+    let canonical = canonical_workspace_path(target)?;
+    let shadow = ensure_shadow_metadata(&canonical)?;
+    let git_dir = shadow.to_str().ok_or("Invalid shadow path")?;
+    let work_tree = canonical.to_str().ok_or("Invalid target path")?;
+    let head_exists = git(
+        &canonical,
+        &["--git-dir", git_dir, "rev-parse", "-q", "--verify", "HEAD"],
+    )
+    .is_ok();
+    if !head_exists {
+        // A crashed first collection can leave a stale lock behind. Only a
+        // missing `HEAD` justifies removing it; a valid repository keeps its lock.
+        let lock = shadow.join("index.lock");
+        if lock.exists() {
+            fs::remove_file(&lock).map_err(|error| error.to_string())?;
+        }
+    }
+    stage_scoped(&canonical, exclusions)?;
+    let staged = git(
+        &canonical,
+        &[
+            "--git-dir",
+            git_dir,
+            "--work-tree",
+            work_tree,
+            "diff",
+            "--cached",
+            "--name-only",
+        ],
+    )?;
+    let mut commit = vec![
+        "--git-dir",
+        git_dir,
+        "--work-tree",
+        work_tree,
+        "commit",
+    ];
+    if staged.trim().is_empty() {
+        if head_exists {
+            // Nothing changed and a usable HEAD already exists; reuse it instead
+            // of adding a redundant empty commit (idempotent re-materialization
+            // for crash recovery and shared sources).
+            return git(&canonical, &["--git-dir", git_dir, "rev-parse", "HEAD"]);
+        }
+        // First collection of an empty directory: still create a HEAD.
+        commit.push("--allow-empty");
+    }
+    commit.extend(["-m", "Grapher source snapshot"]);
+    git(&canonical, &commit)?;
+    git(&canonical, &["--git-dir", git_dir, "rev-parse", "HEAD"])
+}
+
 pub fn remove_shadow_repo(target: &Path) -> Result<(), String> {
     let canonical = canonical_workspace_path(target)?;
     if is_standard_git(&canonical) {
@@ -307,63 +527,11 @@ pub fn remove_shadow_repo(target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Compatibility alias for metadata-only initialization. It no longer stages
+/// or commits; callers that need a usable `HEAD` must call
+/// [`materialize_shadow_repo`] explicitly.
 pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
-    let canonical_target = canonical_workspace_path(target)?;
-    let shadow_dir = shadow_repo_dir(&canonical_target)?;
-    let shadow_parent = data_root().join("shadow_repos");
-    if !checked_shadow_directory(&shadow_parent)? {
-        fs::create_dir_all(&shadow_parent).map_err(|e| e.to_string())?;
-        checked_shadow_directory(&shadow_parent)?;
-    }
-    let initialize = !checked_shadow_directory(&shadow_dir)?;
-    if initialize {
-        fs::create_dir_all(&shadow_dir).map_err(|e| e.to_string())?;
-        checked_shadow_directory(&shadow_dir)?;
-        let git_dir_str = shadow_dir.to_str().ok_or("Invalid shadow path")?;
-        let work_tree_str = canonical_target.to_str().ok_or("Invalid target path")?;
-
-        git(
-            &canonical_target,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "init",
-            ],
-        )?;
-        let _ = git(
-            &canonical_target,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "add",
-                "-A",
-            ],
-        );
-        let _ = git(
-            &canonical_target,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "commit",
-                "--allow-empty",
-                "-m",
-                "Initial shadow snapshot by Grapher",
-            ],
-        );
-    }
-    if !checked_shadow_directory(&shadow_dir)? {
-        return Err(format!(
-            "Shadow repository is missing: {}",
-            shadow_dir.display()
-        ));
-    }
-    Ok(shadow_dir)
+    ensure_shadow_metadata(target)
 }
 
 pub fn pick_folder() -> Result<Option<PathBuf>, String> {
@@ -488,6 +656,9 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
             Err(_) => return Ok(None),
         },
     };
+    if let Some(reason) = prohibited_workspace_reason(&candidate) {
+        return Err(reason);
+    }
 
     if is_standard_git(&candidate) {
         let top_level = match git(&candidate, &["rev-parse", "--show-toplevel"]) {
@@ -514,25 +685,20 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
             is_shadow: false,
         }))
     } else if candidate.is_dir() {
-        let shadow = ensure_shadow_repo(&candidate)?;
-        let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
+        // A pure filesystem report: never create, read or delete shadow Git
+        // metadata here. The snapshot is materialized lazily on first dispatch.
         let canonical = canonical_workspace_path(&candidate)?;
         let path_str = normalize_workspace_display_path(&canonical);
         let name = candidate
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path_str.clone());
-        let head = git(
-            &candidate,
-            &["--git-dir", git_dir_str, "rev-parse", "--short", "HEAD"],
-        )
-        .unwrap_or_default();
 
         Ok(Some(RepositoryInfo {
             path: path_str,
             name,
             branch: "shadow".into(),
-            head,
+            head: String::new(),
             clean: true,
             is_shadow: true,
         }))
@@ -770,6 +936,14 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 /// composition reads recorded snapshots, and publication commits pending user
 /// edits as its base, so user work never blocks progress.
 pub fn check_shadow_base(repository: &Path, expected_head: &str) -> Result<(), String> {
+    if shadow_repo_if_exists(repository)?.is_none() {
+        // Not materialized yet: the Run has not dispatched its first node.
+        return if expected_head.is_empty() {
+            Ok(())
+        } else {
+            Err(STALE_SHADOW_ERROR.to_string())
+        };
+    }
     let head = repository_git(repository, &["rev-parse", "HEAD"])?;
     if head == expected_head {
         return Ok(());
@@ -792,12 +966,11 @@ pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String
     if is_standard_git(&repository) {
         return git(&repository, args);
     }
-    let shadow = shadow_repo_dir(&repository)?;
-    if !checked_shadow_directory(&shadow)? {
-        return Err(
-            "Shadow repository is missing; retained node results have not been published".into(),
-        );
-    }
+    let shadow = match shadow_repo_if_exists(&repository) {
+        Ok(Some(shadow)) => shadow,
+        Ok(None) => return Err(MISSING_SHADOW_ERROR.into()),
+        Err(error) => return Err(error),
+    };
     let mut command = vec![
         "--git-dir",
         shadow.to_str().ok_or("Invalid shadow path")?,
@@ -823,6 +996,9 @@ pub fn validate_binding(repository: &Path) -> Result<(), String> {
             repository.display()
         )
     })?;
+    if let Some(reason) = prohibited_workspace_reason(repository) {
+        return Err(reason);
+    }
     Ok(())
 }
 
@@ -851,42 +1027,8 @@ pub fn verify(repository: &Path) -> Result<String, String> {
             ));
         }
         let canonical = canonical_workspace_path(repository)?;
-        let shadow = ensure_shadow_repo(&canonical)?;
-        let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
-        let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
-
-        stage_scoped(&canonical, &[])?;
-        let status = git(
-            &canonical,
-            &[
-                "--git-dir",
-                git_dir_str,
-                "--work-tree",
-                work_tree_str,
-                "status",
-                "--porcelain",
-            ],
-        )?;
-        if !status.trim().is_empty() {
-            git(
-                &canonical,
-                &[
-                    "--git-dir",
-                    git_dir_str,
-                    "--work-tree",
-                    work_tree_str,
-                    "commit",
-                    "-m",
-                    "Grapher snapshot before run",
-                ],
-            )
-            .map_err(|error| format!("无法提交工作区快照（git commit）：{error}"))?;
-        }
-        git(
-            &canonical,
-            &["--git-dir", git_dir_str, "rev-parse", "--verify", "HEAD"],
-        )
-        .map_err(|error| format!("工作区快照缺少可解析的 HEAD：{error}"))
+        materialize_shadow_repo(&canonical, &[])
+            .map_err(|error| format!("工作区快照缺少可解析的 HEAD：{error}"))
     }
 }
 
@@ -1420,7 +1562,8 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         if is_standard_git(repository) {
             return git(repository, &["rev-parse", "HEAD"]);
         } else {
-            let shadow = ensure_shadow_repo(&canonical_repo)?;
+            let shadow = shadow_repo_if_exists(&canonical_repo)?
+                .ok_or_else(|| missing_shadow_error(&canonical_repo))?;
             let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
             return git(
                 &canonical_repo,
@@ -1454,7 +1597,8 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         }
         canonical_repo.clone()
     } else {
-        let shadow = ensure_shadow_repo(&canonical_repo)?;
+        let shadow = shadow_repo_if_exists(&canonical_repo)?
+            .ok_or_else(|| missing_shadow_error(&canonical_repo))?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical_repo.to_str().ok_or("Invalid target path")?;
         let pin = format!("refs/grapher/heads/{base}");
@@ -1765,7 +1909,8 @@ pub(crate) fn snapshot_node_scoped(
     let source_args = if is_standard_git(&canonical_repo) {
         Vec::new()
     } else {
-        let shadow = ensure_shadow_repo(&canonical_repo)?;
+        let shadow = shadow_repo_if_exists(&canonical_repo)?
+            .ok_or_else(|| missing_shadow_error(&canonical_repo))?;
         vec![
             "--git-dir".to_string(),
             shadow.to_string_lossy().into_owned(),
@@ -1956,7 +2101,7 @@ pub(crate) fn snapshot_repository_scoped(
         git(path, &["rev-parse", "HEAD"])
     } else {
         let canonical = path.canonicalize().map_err(|error| error.to_string())?;
-        let shadow = ensure_shadow_repo(&canonical)?;
+        let shadow = ensure_shadow_metadata(&canonical)?;
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
         stage_scoped(&canonical, exclusions)?;
@@ -1972,19 +2117,24 @@ pub(crate) fn snapshot_repository_scoped(
                 "--name-only",
             ],
         )?;
-        if !status.trim().is_empty() {
-            git(
-                &canonical,
-                &[
-                    "--git-dir",
-                    git_dir_str,
-                    "--work-tree",
-                    work_tree_str,
-                    "commit",
-                    "-m",
-                    "Grapher execution snapshot",
-                ],
-            )?;
+        let unborn = git(
+            &canonical,
+            &["--git-dir", git_dir_str, "rev-parse", "--verify", "HEAD"],
+        )
+        .is_err();
+        if !status.trim().is_empty() || unborn {
+            let mut commit = vec![
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "commit",
+            ];
+            if status.trim().is_empty() {
+                commit.push("--allow-empty");
+            }
+            commit.extend(["-m", "Grapher execution snapshot"]);
+            git(&canonical, &commit)?;
         }
         git(&canonical, &["--git-dir", git_dir_str, "rev-parse", "HEAD"])
     }
@@ -2006,12 +2156,29 @@ pub fn snapshot_execution_for_run(
     node_name: &str,
     run_id: Option<&str>,
 ) -> Result<String, String> {
+    snapshot_execution_scoped(path, repository, node_name, run_id, "")
+}
+
+/// Serial/plain-directory executions run in the source directory and have no
+/// Git snapshot: the caller's `before` is returned unchanged. Standard Git
+/// serial runs keep committing their own source repository.
+pub(crate) fn snapshot_execution_scoped(
+    path: &Path,
+    repository: &Path,
+    node_name: &str,
+    run_id: Option<&str>,
+    before: &str,
+) -> Result<String, String> {
     let canonical_repo = repository
         .canonicalize()
         .map_err(|error| error.to_string())?;
     let canonical_path = path.canonicalize().map_err(|error| error.to_string())?;
     if canonical_path == canonical_repo {
-        snapshot_repository(&canonical_path)
+        if is_standard_git(&canonical_repo) {
+            snapshot_repository(&canonical_path)
+        } else {
+            Ok(before.to_string())
+        }
     } else {
         snapshot_node_for_run(&canonical_path, &canonical_repo, node_name, run_id)
     }

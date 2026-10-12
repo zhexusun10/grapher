@@ -282,6 +282,53 @@ impl Store {
         Ok(false)
     }
 
+    /// Whether any other, still-incomplete Run shares this source binding and
+    /// therefore still needs its shadow snapshot. Completed Runs do not count:
+    /// their source files were already written back by publication.
+    pub fn shadow_repo_needed_by_other_run(
+        &self,
+        excluded: &str,
+        repository: &Path,
+    ) -> Result<bool, String> {
+        let expected = crate::workspace::shadow_repo_dir(repository)?;
+        self.shadow_repo_referenced_by(excluded, &expected)
+    }
+
+    /// Offline variant: does any live, non-completed Run map to this shadow
+    /// directory? Used by `--cleanup-workspaces` GC without a current Run.
+    pub(crate) fn shadow_repo_in_use(&self, shadow: &Path) -> Result<bool, String> {
+        self.shadow_repo_referenced_by("", shadow)
+    }
+
+    fn shadow_repo_referenced_by(&self, excluded: &str, expected: &Path) -> Result<bool, String> {
+        let deleted: std::collections::BTreeSet<String> =
+            self.deleted_runs()?.into_iter().collect();
+        for id in self.runs()? {
+            if id == excluded || deleted.contains(&id) {
+                continue;
+            }
+            let state = self.load(&id)?;
+            if state.events.is_empty() {
+                continue;
+            }
+            let Some(config) = state.config else {
+                continue;
+            };
+            let source = Path::new(&config.repository);
+            if crate::workspace::shadow_repo_dir(source)
+                .ok()
+                .as_deref()
+                != Some(expected)
+            {
+                continue;
+            }
+            if state.phase != "completed" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn has_cleanup_owner(&self, target: &Target) -> Result<bool, String> {
         let target = serde_json::to_string(target).map_err(|error| error.to_string())?;
         self.connection

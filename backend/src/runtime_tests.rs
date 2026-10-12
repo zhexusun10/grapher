@@ -49,6 +49,16 @@ fn single() -> Graph {
     }
 }
 
+/// Emulate the server worker's lazy source materialization for tests that drive
+/// jobs directly instead of through `perform`. A no-op for standard Git and
+/// serial Runs.
+fn attach(runtime: &mut Runtime, job: &mut Job) {
+    if job.materialize_source {
+        let exclusions = runtime.exclusions().unwrap();
+        runtime.attach_job_source(job, &exclusions).unwrap();
+    }
+}
+
 #[test]
 fn legacy_created_runs_keep_their_unmanaged_contract_on_replay_and_approval() {
     let (_temp, _source, runtime) = setup(true, single());
@@ -1046,7 +1056,10 @@ fn planner_revision_refreshes_future_node_inputs_without_replacing_running_works
         runtime.edit_draft_graph(graph.clone(), config).unwrap();
         runtime.approve().unwrap();
         let approval = runtime.state.base.clone();
-        let roots = runtime.jobs().unwrap();
+        let mut roots = runtime.jobs().unwrap();
+        for job in roots.iter_mut() {
+            attach(&mut runtime, job);
+        }
         let parent = roots.iter().find(|job| job.execution.node == "parent").unwrap();
         let running = roots.iter().find(|job| job.execution.node == "running").unwrap();
         let parent_path = Path::new(&parent.execution.worktree);
@@ -1104,6 +1117,8 @@ fn retained_node_result_is_composed_with_subsequent_planner_source_writes() {
         let (temp, source, mut runtime) = setup(standard_git, single());
         runtime.approve().unwrap();
         let first = runtime.jobs().unwrap().remove(0);
+        let mut first = first;
+        attach(&mut runtime, &mut first);
         let path = Path::new(&first.execution.worktree);
         workspace::prepare(&source, path, &first.execution.before, &[]).unwrap();
         fs::write(path.join("node.txt"), "retained node result").unwrap();
@@ -1113,6 +1128,7 @@ fn retained_node_result_is_composed_with_subsequent_planner_source_writes() {
         runtime.revise_graph(single(), PlanningSummary { planning_id: "revision".into(), ..Default::default() }).unwrap();
         runtime.intervene("task", "continue").unwrap();
         let mut job = runtime.jobs().unwrap().remove(0);
+        attach(&mut runtime, &mut job);
         assert_eq!(job.execution.before, node_head);
         assert_ne!(job.expected_source_head, node_head);
         let script = temp.path().join("node.sh");
@@ -1194,7 +1210,8 @@ fn approval_captures_planner_files_before_allocating_graph_workspaces() {
         fs::remove_file(source.join("deleted.txt")).unwrap();
         runtime.approve().unwrap();
         assert_ne!(runtime.state.base, old_head);
-        let job = runtime.jobs().unwrap().remove(0);
+        let mut job = runtime.jobs().unwrap().remove(0);
+        attach(&mut runtime, &mut job);
         let node = Path::new(&job.execution.worktree);
         assert_ne!(node, source);
         assert!(!node.exists());
@@ -1482,8 +1499,10 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
 fn shadow_prepare_uses_approved_snapshot_despite_live_edits() {
     let (_temp, source, mut runtime) = setup(false, single());
     runtime.approve().unwrap();
-    let base = runtime.state.base.clone();
-    let job = runtime.jobs().unwrap().remove(0);
+    // The plain-directory snapshot is created lazily on first dispatch.
+    let mut job = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut job);
+    let base = job.execution.before.clone();
     let node = Path::new(&job.execution.worktree);
     fs::write(source.join("tracked.txt"), "edited after approval").unwrap();
     // Live edits never block preparation: the node starts from the approved
@@ -1539,7 +1558,8 @@ fn shadow_source_edits_do_not_block_downstream_handoff() {
     };
     let (_temp, source, mut runtime) = setup(false, graph);
     runtime.approve().unwrap();
-    let parent = runtime.jobs().unwrap().remove(0);
+    let mut parent = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut parent);
     let parent_path = Path::new(&parent.execution.worktree);
     workspace::prepare(&source, parent_path, &parent.execution.before, &[]).unwrap();
     fs::write(parent_path.join("parent.txt"), "parent result").unwrap();
@@ -1551,7 +1571,8 @@ fn shadow_source_edits_do_not_block_downstream_handoff() {
     // The user edits the source directory while the graph is still running.
     fs::write(source.join("tracked.txt"), "user edit during run").unwrap();
 
-    let child = runtime.jobs().unwrap().remove(0);
+    let mut child = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut child);
     assert_eq!(child.execution.node, "child");
     let child_path = Path::new(&child.execution.worktree);
     // Handoff composes the recorded snapshots instead of failing on the dirty source.
@@ -1662,7 +1683,8 @@ fn completed_shadow_graph_intervention_accepts_source_changes() {
     runtime.approve().unwrap();
     let base = runtime.state.base.clone();
     for name in ["parent", "child"] {
-        let job = runtime.jobs().unwrap().remove(0);
+        let mut job = runtime.jobs().unwrap().remove(0);
+        attach(&mut runtime, &mut job);
         let path = Path::new(&job.execution.worktree);
         workspace::prepare(&source, path, &job.execution.before, &runtime.parents(name)).unwrap();
         fs::write(path.join(format!("{name}.txt")), name).unwrap();
@@ -1747,7 +1769,11 @@ fn fan_in_conflict_invokes_merger_and_preserves_both_parents() {
     for standard_git in [true, false] {
         let (_temp, source, mut runtime) = setup(standard_git, single());
         runtime.approve().unwrap();
-        let base = runtime.state.base.clone();
+        let base = if standard_git {
+            runtime.state.base.clone()
+        } else {
+            workspace::materialize_shadow_repo(&source, &runtime.exclusions().unwrap()).unwrap()
+        };
         for (name, text) in [("left", "left\n"), ("right", "right\n")] {
             let path = source.parent().unwrap().join(format!("{name}-workspace"));
             workspace::prepare(&source, &path, &base, &[]).unwrap();
@@ -2142,4 +2168,519 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
     assert_eq!(fs::read_to_string(source.join("root.txt")).unwrap(), "root v2");
     assert_eq!(fs::read_to_string(source.join("child.txt")).unwrap(), "child v2");
     assert_eq!(fs::read_to_string(source.join("extra.txt")).unwrap(), "extra v1");
+}
+
+#[test]
+fn plan_and_approve_do_not_materialize_a_plain_directory() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    workspace::remove_shadow_repo(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    runtime.approve().unwrap();
+    assert_eq!(runtime.state.base, "");
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+}
+
+#[test]
+fn first_graph_dispatch_materializes_once() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    let mut job = runtime.jobs().unwrap().remove(0);
+    assert!(job.materialize_source);
+    assert!(job.execution.before.is_empty());
+    attach(&mut runtime, &mut job);
+    let snapshots = |runtime: &Runtime| {
+        runtime
+            .state
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. }))
+            .count()
+    };
+    assert_eq!(snapshots(&runtime), 1);
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
+    let head = job.execution.before.clone();
+    assert!(!head.is_empty());
+    runtime
+        .emit(EventKind::Prepared {
+            execution_id: job.execution.id.clone(),
+            head: head.clone(),
+        })
+        .unwrap();
+    assert_eq!(runtime.state.executions[0].before, head);
+    // A second worker reuses the snapshot without another event.
+    attach(&mut runtime, &mut job);
+    assert_eq!(snapshots(&runtime), 1);
+}
+
+#[test]
+fn serial_run_never_materializes_a_plain_directory() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    assert_eq!(runtime.state.base, "");
+    let job = runtime.jobs().unwrap().remove(0);
+    assert_eq!(Path::new(&job.execution.worktree), source);
+    assert!(!job.materialize_source);
+    assert_eq!(
+        workspace::snapshot_execution(Path::new(&job.execution.worktree), &source, "task").unwrap(),
+        ""
+    );
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+}
+
+#[test]
+fn publication_reclaims_shadow_and_failure_retains_it() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    let mut job = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut job);
+    let path = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
+    fs::write(path.join("result.txt"), "done").unwrap();
+    let node_head = workspace::snapshot_node(path, &source, "task").unwrap();
+    runtime
+        .finish(&job.execution, Ok((node_head, "done".into())))
+        .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    // A failed publication keeps the snapshot for retry and evidence.
+    runtime
+        .emit(EventKind::PublicationFailed {
+            error: "conflict".into(),
+        })
+        .unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
+    // Retry succeeds: the merged result is written back and the snapshot freed.
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    assert!(runtime.shadow_reclaimable_after_publication(&source).unwrap());
+    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    assert!(source.join("result.txt").is_file());
+}
+
+#[test]
+fn shared_source_reclaims_after_last_incomplete_run() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    let mut job = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut job);
+    let run_id = runtime.state.run_id.clone();
+    // A second, still-incomplete Run on the same source keeps the snapshot.
+    let config = runtime.state.config.clone().unwrap();
+    let mut other = Snapshot {
+        run_id: Uuid::new_v4().to_string(),
+        ..Default::default()
+    };
+    runtime
+        .store
+        .append(
+            &mut other,
+            EventKind::Created {
+                graph: single(),
+                config,
+                planning_id: None,
+                planning: None,
+            },
+        )
+        .unwrap();
+    assert!(runtime
+        .store
+        .shadow_repo_needed_by_other_run(&run_id, &source)
+        .unwrap());
+    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
+    // Once every other Run is completed, the last finisher reclaims it.
+    let mut other = runtime.store.load(&other.run_id).unwrap();
+    runtime
+        .store
+        .append(
+            &mut other,
+            EventKind::PublicationCompleted {
+                head: "deadbeef".into(),
+            },
+        )
+        .unwrap();
+    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+}
+
+#[test]
+#[cfg(feature = "fixture")]
+fn post_publication_node_followup_runs_in_source() {
+    let (temp, source, mut runtime) = setup(false, single());
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    let mut job = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut job);
+    let path = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
+    fs::write(path.join("result.txt"), "v1").unwrap();
+    let head = workspace::snapshot_node(path, &source, "task").unwrap();
+    runtime
+        .finish(&job.execution, Ok((head, "done".into())))
+        .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+
+    runtime.intervene("task", "again").unwrap();
+    assert_eq!(runtime.state.phase, "followup");
+    let mut followup = runtime.jobs().unwrap().remove(0);
+    assert!(followup.source_direct);
+    assert!(!followup.materialize_source);
+    assert_eq!(Path::new(&followup.execution.worktree), source);
+    assert_eq!(followup.execution.before, "");
+    let script = temp.path().join("agent.sh");
+    fs::write(&script, "cat >/dev/null
+printf '%s\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}'
+").unwrap();
+    followup.config.pi_command = "/bin/sh".into();
+    followup.config.pi_args = vec![script.to_string_lossy().into()];
+    let result = perform(&followup, &runtime.root, &[], |_| {}, |_| Ok(()));
+    runtime.finish(&followup.execution, result).unwrap();
+    assert_eq!(runtime.state.executions.last().unwrap().after.as_deref(), Some(""));
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
+    assert_eq!(runtime.state.nodes["task"].status, "done");
+    // A source-direct result is not a tracked Git change: the completed
+    // publication survives the follow-up.
+    assert!(runtime.state.publication.is_some());
+}
+
+#[test]
+#[cfg(feature = "fixture")]
+fn post_publication_direct_edit_keeps_downstream_and_publication() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: vec![
+            Node {
+                name: "parent".into(),
+                task: "parent task".into(),
+            },
+            Node {
+                name: "child".into(),
+                task: "child task".into(),
+            },
+        ],
+        edges: vec![Edge {
+            from: "parent".into(),
+            to: "child".into(),
+            feedback: false,
+        }],
+    };
+    let (temp, source, mut runtime) = setup(false, graph);
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    for name in ["parent", "child"] {
+        let mut job = runtime.jobs().unwrap().remove(0);
+        assert_eq!(job.execution.node, name);
+        attach(&mut runtime, &mut job);
+        let path = Path::new(&job.execution.worktree);
+        let parents: Vec<String> = runtime
+            .parents(name)
+            .iter()
+            .filter_map(|parent| runtime.state.nodes[parent].head.clone())
+            .collect();
+        workspace::prepare(&source, path, &job.execution.before, &parents).unwrap();
+        fs::write(path.join(format!("{name}.txt")), name).unwrap();
+        let head = workspace::snapshot_node(path, &source, name).unwrap();
+        runtime
+            .finish(&job.execution, Ok((head, "done".into())))
+            .unwrap();
+    }
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("merge conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    let child_head = runtime.state.nodes["child"].head.clone().unwrap();
+
+    runtime.intervene("parent", "direct edit").unwrap();
+    assert_eq!(runtime.state.phase, "followup");
+    assert_eq!(runtime.state.nodes["child"].status, "done");
+    let mut followup = runtime.jobs().unwrap().remove(0);
+    assert!(followup.source_direct);
+    let script = temp.path().join("agent.sh");
+    fs::write(&script, "cat >/dev/null\nprintf '%s\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}'\n").unwrap();
+    followup.config.pi_command = "/bin/sh".into();
+    followup.config.pi_args = vec![script.to_string_lossy().into()];
+    let result = perform(&followup, &runtime.root, &[], |_| {}, |_| Ok(()));
+    runtime.finish(&followup.execution, result).unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
+    assert_eq!(runtime.state.nodes["parent"].status, "done");
+    assert_eq!(runtime.state.nodes["child"].status, "done");
+    assert_eq!(
+        runtime.state.nodes["child"].head.as_deref(),
+        Some(child_head.as_str())
+    );
+    assert!(runtime.state.publication.is_some());
+}
+
+#[test]
+#[cfg(feature = "fixture")]
+fn standard_git_post_publication_followup_runs_in_source() {
+    let (temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    let path = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
+    fs::write(path.join("result.txt"), "v1").unwrap();
+    let head = workspace::snapshot_node(path, &source, "task").unwrap();
+    runtime
+        .finish(&job.execution, Ok((head, "done".into())))
+        .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    let before = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
+
+    runtime.intervene("task", "again").unwrap();
+    let mut followup = runtime.jobs().unwrap().remove(0);
+    assert!(followup.source_direct);
+    assert_eq!(Path::new(&followup.execution.worktree), source);
+    let script = temp.path().join("agent.sh");
+    fs::write(&script, "cat >/dev/null
+printf '%s\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}'
+").unwrap();
+    followup.config.pi_command = "/bin/sh".into();
+    followup.config.pi_args = vec![script.to_string_lossy().into()];
+    let result = perform(&followup, &runtime.root, &[], |_| {}, |_| Ok(()));
+    runtime.finish(&followup.execution, result).unwrap();
+    assert_eq!(
+        workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        before
+    );
+    assert_eq!(
+        runtime.state.executions.last().unwrap().after.as_deref(),
+        Some("")
+    );
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
+}
+
+#[test]
+fn post_publication_planner_revision_materializes_only_on_dispatch() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    let mut job = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut job);
+    let path = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
+    fs::write(path.join("result.txt"), "v1").unwrap();
+    let head = workspace::snapshot_node(path, &source, "task").unwrap();
+    runtime
+        .finish(&job.execution, Ok((head, "done".into())))
+        .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+
+    let mut revised = single();
+    revised.nodes[0].task = "revised task".into();
+    runtime
+        .revise_graph(
+            revised,
+            PlanningSummary {
+                planning_id: "revision".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    let mut job = runtime.jobs().unwrap().remove(0);
+    assert!(job.materialize_source);
+    attach(&mut runtime, &mut job);
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
+    assert!(!job.execution.before.is_empty());
+}
+
+#[test]
+#[cfg(feature = "fixture")]
+fn post_publication_revision_with_done_parent_ignores_stale_commit() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: vec![
+            Node {
+                name: "parent".into(),
+                task: "parent task".into(),
+            },
+            Node {
+                name: "child".into(),
+                task: "child task".into(),
+            },
+        ],
+        edges: vec![Edge {
+            from: "parent".into(),
+            to: "child".into(),
+            feedback: false,
+        }],
+    };
+    let (temp, source, mut runtime) = setup(false, graph.clone());
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    for name in ["parent", "child"] {
+        let mut job = runtime.jobs().unwrap().remove(0);
+        attach(&mut runtime, &mut job);
+        let path = Path::new(&job.execution.worktree);
+        let parents: Vec<String> = runtime
+            .parents(name)
+            .iter()
+            .filter_map(|parent| runtime.state.nodes[parent].head.clone())
+            .collect();
+        workspace::prepare(&source, path, &job.execution.before, &parents).unwrap();
+        fs::write(path.join(format!("{name}.txt")), name).unwrap();
+        let head = workspace::snapshot_node(path, &source, name).unwrap();
+        runtime
+            .finish(&job.execution, Ok((head, "done".into())))
+            .unwrap();
+    }
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    let child_head = runtime.state.nodes["child"].head.clone().unwrap();
+
+    // The revision adds a node after a node whose commit only existed in the
+    // reclaimed snapshot. Its published content is in the fresh source
+    // snapshot, so the stale parent commit must not be resolved or merged.
+    let mut revised = graph;
+    revised.nodes.push(Node {
+        name: "late".into(),
+        task: "late task".into(),
+    });
+    revised.edges.push(Edge {
+        from: "child".into(),
+        to: "late".into(),
+        feedback: false,
+    });
+    runtime
+        .revise_graph(
+            revised,
+            PlanningSummary {
+                planning_id: "revision-after-publication".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    let mut job = runtime.jobs().unwrap().remove(0);
+    assert_eq!(job.execution.node, "late");
+    assert!(job.materialize_source);
+    assert_eq!(job.parent_heads, vec![child_head.clone()]);
+    attach(&mut runtime, &mut job);
+    let fresh = job.expected_source_head.clone();
+    assert!(!fresh.is_empty());
+    assert_ne!(fresh, child_head);
+
+    let script = temp.path().join("agent.sh");
+    fs::write(
+        &script,
+        "cat >/dev/null\nprintf late > late.txt\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}'\n",
+    )
+    .unwrap();
+    job.config.pi_command = "/bin/sh".into();
+    job.config.pi_args = vec![script.to_string_lossy().into()];
+    let result = perform(
+        &job,
+        &runtime.root,
+        &runtime.parents("late"),
+        |_| {},
+        |_| Ok(()),
+    );
+    let (head, _) = result.expect("a stale parent commit must not block the rebaseline");
+    let worktree = Path::new(&job.execution.worktree).to_path_buf();
+    runtime
+        .finish(&job.execution, Ok((head, "done".into())))
+        .unwrap();
+    assert_eq!(runtime.state.nodes["late"].status, "done");
+    assert_eq!(fs::read_to_string(worktree.join("late.txt")).unwrap(), "late");
+    assert_eq!(fs::read_to_string(worktree.join("child.txt")).unwrap(), "child");
+}
+
+#[test]
+fn mid_run_completed_node_message_keeps_worktree_semantics() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: vec![
+            Node {
+                name: "parent".into(),
+                task: "parent".into(),
+            },
+            Node {
+                name: "child".into(),
+                task: "child".into(),
+            },
+        ],
+        edges: vec![Edge {
+            from: "parent".into(),
+            to: "child".into(),
+            feedback: false,
+        }],
+    };
+    let (_temp, source, mut runtime) = setup(false, graph);
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    let mut parent = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut parent);
+    let path = Path::new(&parent.execution.worktree);
+    workspace::prepare(&source, path, &parent.execution.before, &[]).unwrap();
+    fs::write(path.join("parent.txt"), "parent").unwrap();
+    let head = workspace::snapshot_node(path, &source, "parent").unwrap();
+    runtime
+        .finish(&parent.execution, Ok((head, "done".into())))
+        .unwrap();
+    // The Run is still executing, so a completed-node message keeps worktree
+    // (and downstream invalidation) semantics instead of source-direct editing.
+    assert_ne!(runtime.state.phase, "completed");
+    runtime.intervene("parent", "again").unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    assert!(!retry.source_direct);
+    assert_ne!(Path::new(&retry.execution.worktree), source);
 }

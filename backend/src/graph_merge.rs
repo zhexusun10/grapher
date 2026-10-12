@@ -277,19 +277,32 @@ pub fn continue_merger_for_node(
     let id = execution.id.clone();
     // Continue Pi's session file in the original Merger directory. The native
     // process identity is the new execution so it stays steerable in its own right.
-    let environment = if workspace::is_standard_git(repository) {
-        vec![("GRAPHER_NODE_EXECUTION_ID", id.clone())]
+    // A successful publication reclaims the temporary shadow snapshot of an
+    // ordinary folder, so that continuation edits the source directly with no
+    // Git (there is nothing left to commit or merge into); a retained
+    // failed-publication snapshot keeps the previous Git-backed behavior.
+    let standard_git = workspace::is_standard_git(repository);
+    let shadow = if standard_git {
+        None
     } else {
+        workspace::shadow_repo_if_exists(repository)?
+    };
+    let git_backed = standard_git || shadow.is_some();
+    let environment = if standard_git {
+        vec![("GRAPHER_NODE_EXECUTION_ID", id.clone())]
+    } else if let Some(shadow) = &shadow {
         vec![
             (
                 "GIT_DIR",
-                crate::native::host_path(&workspace::shadow_repo_dir(repository)?)
+                crate::native::host_path(shadow)
                     .to_string_lossy()
                     .into(),
             ),
             ("GIT_WORK_TREE", crate::native::host_path(repository).to_string_lossy().into()),
             ("GRAPHER_NODE_EXECUTION_ID", id.clone()),
         ]
+    } else {
+        vec![("GRAPHER_NODE_EXECUTION_ID", id.clone())]
     };
     let mut output_error = None;
     let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
@@ -327,6 +340,9 @@ pub fn continue_merger_for_node(
         if let Some(error) = output_error {
             return Err(format!("Cannot persist merger output: {error}"));
         }
+        if !git_backed {
+            return Ok(());
+        }
         let exclusions = config.environment.as_ref().map(|e| e.exclusions()).unwrap_or_default();
         if let Some(head) = pending(repository) {
             // The user asked the Merger to continue an unresolved merge.
@@ -342,7 +358,12 @@ pub fn continue_merger_for_node(
     });
     match &result {
         Ok(()) => {
-            let head = git(repository, &["rev-parse", "HEAD"])?;
+            let head = if git_backed {
+                git(repository, &["rev-parse", "HEAD"])?
+            } else {
+                // No Git snapshot exists for this source-direct continuation.
+                String::new()
+            };
             eprintln!("[Grapher] [Merger] Continued publication repair (HEAD: {head})");
             emit(EventKind::MergerFinished {
                 execution_id: id,

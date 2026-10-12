@@ -223,7 +223,7 @@ fn publication_writes_ordinary_files_back_to_source_through_git() {
 }
 
 #[test]
-fn shared_terminal_workspace_retry_keeps_partial_project_files_without_snapshot_restore() {
+fn post_publication_direct_edit_runs_in_source_and_failed_retry_uses_graph_worktree() {
     let (temp, source, mut runtime) = configured(&["owner", "related"], 0);
     let script = temp.path().join("agent.sh");
     fs::write(&script, "cat >/dev/null\necho first > .cache/$GRAPHER_NODE_NAME\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
@@ -236,19 +236,26 @@ fn shared_terminal_workspace_retry_keeps_partial_project_files_without_snapshot_
     crate::graph_merge::merge_graph(&source, &heads, || Err("unexpected merge".into())).unwrap();
     runtime.emit(EventKind::PublicationCompleted { head: head.clone() }).unwrap();
     runtime.cleanup_worktrees().unwrap();
+    // A completed conversation edits the source directory directly.
     runtime.intervene("owner", "change only the ordinary result").unwrap();
+    assert_eq!(runtime.state.phase, "followup");
     fs::write(&script, "cat >/dev/null\necho partial-update > .cache/owner\nexit 21\n").unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
+    assert!(failed.source_direct);
+    assert_eq!(Path::new(&failed.execution.worktree), source.as_path());
     let result = perform(&failed, &runtime.root, &[], |_| {}, |_| Ok(()));
     assert!(result.is_err());
     runtime.finish(&failed.execution, result).unwrap();
+    assert_eq!(
+        fs::read_to_string(source.join(".cache/owner")).unwrap().trim(),
+        "partial-update"
+    );
+    // A message while the Run is no longer `completed` keeps the existing graph
+    // worktree semantics; it does not silently rebuild the shadow snapshot.
     runtime.intervene("owner", "finish without discarding partial ordinary work").unwrap();
-    fs::write(&script, "cat >/dev/null\n[ \"$(cat .cache/owner)\" = partial-update ] || exit 82\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
-    assert_eq!(retry.execution.worktree, failed.execution.worktree);
-    execute(&mut runtime, &retry);
-    assert_ne!(runtime.state.nodes["owner"].head.as_deref(), Some(head.as_str()));
-    assert_eq!(runtime.state.nodes["related"].status, "done");
+    assert!(!retry.source_direct);
+    assert_ne!(Path::new(&retry.execution.worktree), source.as_path());
 }
 
 #[test]

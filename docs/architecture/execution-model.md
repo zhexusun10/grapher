@@ -32,7 +32,7 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 2. For Graph, the Planner runs directly in the bound source project directory, not a private copy.
 3. The Planner uses `node`, `edge`, `read`, and native `bash`. Bash writes are not filtered, and files appear in the source immediately, even if planning fails or is cancelled.
 4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records the source path for session/legacy compatibility; it is not a directory allocation.
-5. The graph is validated and presented for approval. Approval records a Git source snapshot with forced collection of project files; managed environment scopes and Runtime data remain outside project Git.
+5. The graph is validated and presented for approval. Approval validates the binding and records a Git source snapshot for a standard Git repository; an ordinary folder records no snapshot until its first node is dispatched, when Grapher lazily materializes a temporary shadow snapshot with forced collection of project files. Managed environment scopes and Runtime data remain outside project Git.
 
 **Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Planner commands change the source before approval. Reject, failure, and cancellation do not undo those changes, Git commits, or external command side effects. Existing user changes can also be staged and committed during source snapshots.
 
@@ -98,7 +98,7 @@ An execution record is not identical to a new model conversation. This distincti
 
 ## Ordinary folders
 
-A directory without `.git` uses shadow Git metadata under the runtime data directory. Grapher does not create `.git` in that user's folder. Snapshots, node composition, and publication still use Git semantics.
+A directory without `.git` uses temporary shadow Git metadata under the runtime data directory. Grapher does not create `.git` in that user's folder. The snapshot is created lazily by the first dispatched node worker and fully reclaimed after a successful publication (or Run deletion / offline GC); it is not a cross-conversation history. A directory without a materialized snapshot reports an empty `HEAD`, and `""` means "no Git snapshot". After publication, completed-node conversations edit the source directory directly. Snapshots, node composition, and publication still use Git semantics.
 
 ## Final publication
 
@@ -130,7 +130,7 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
   planner-sessions/      # Planner history for manually created Runs
   partition-workers/     # Temporary idle Partitioner sessions
   mergers/               # Merger sessions/output (including composition attempts)
-  shadow_repos/          # Git metadata for ordinary folders
+  shadow_repos/          # Temporary Git metadata for ordinary folders (lazy, reclaimed after publication)
 ```
 
 Graph workspaces default to the OS cache: `%LOCALAPPDATA%\Grapher\workspaces\.grapher-worktrees` on Windows, `~/Library/Caches/Grapher/workspaces/.grapher-worktrees` on macOS, and `${XDG_CACHE_HOME:-~/.cache}/grapher/workspaces/.grapher-worktrees` on Linux. `GRAPHER_CACHE_DIR` changes the cache root; `GRAPHER_WORKSPACE_PARENT` overrides the node-workspace parent. Cache placement is independent of `GRAPHER_DATA_DIR`. Existing execution paths are retained, not moved. Successful publication/reset cleans owned workspaces but keeps Pi histories for follow-ups; Git history keeps project files recoverable after a workspace is reclaimed. Conversation deletion/clearing history also cleans owned Node/Planner/Merger histories, attachments and all historical planning attempts, preserving shared resources and source projects.

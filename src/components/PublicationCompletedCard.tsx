@@ -165,7 +165,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
                 <ExecutionTranscript key={activeMerger.id} runId={state.runId} execution={activeMerger} />
               </div>
               <p className="pub-card-merger-commits">
-                Before: <code>{activeMerger.before}</code> · After: <code>{activeMerger.after ?? t("已提交")}</code>
+                Before: <code>{activeMerger.before || t("未快照")}</code> · After: <code>{activeMerger.after === "" ? t("源目录直改（无快照）") : activeMerger.after ?? t("已提交")}</code>
               </p>
             </div>
           </details>

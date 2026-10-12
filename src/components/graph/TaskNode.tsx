@@ -20,6 +20,7 @@ export const phaseText: Record<string, string> = {
   running: t("执行中"),
   paused: t("已暂停"),
   completed: t("已完成"),
+  followup: t("源目录直改中"),
   publishing: t("正在写回工作文件夹"),
   merging: t("merger 修复冲突中"),
   publication_failed: t("回写失败"),

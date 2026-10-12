@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Materialize the temporary shadow Git snapshot for an ordinary folder lazily on the first node dispatch instead of during detection, planning or approval; reclaim it after a successful publication (Run deletion and offline GC also reclaim it), and keep it for failed/interrupted Runs that need `retry_publication`. The first dispatch reports a non-blocking `source_materialize` activity.
+- Run completed-node conversations directly in the source directory (no worktree, commit, downstream invalidation or republication) for both ordinary folders and standard Git repositories; a settled publication-merger follow-up follows the same rule once a successful publication has reclaimed the ordinary folder's snapshot; only a Planner revision that dispatches new nodes rebuilds the snapshot.
 - Accept user edits in the source directory during Graph execution: downstream handoff and explicit node updates no longer block on a dirty source, and publication commits pending user changes as its base before merging node results.
 - Share content-keyed Pi engine/dependency caches across projects and backend restarts, with reader leases and serialized preparation instead of per-backend copies.
 - Default workspace/engine caches to the OS cache directory (Windows: `%LOCALAPPDATA%\Grapher`), preserving existing runtime histories and legacy execution paths.
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject the user's desktop folder as a project workspace. Forced Git collection ignores `.gitignore`, so a desktop binding would snapshot unrelated personal data and stall planning before any node is dispatched.
 - Retry transient Chocolatey community-feed failures in Windows CI and verify both `rg` and `fd` before running tests, instead of failing later on a missing binary.
 - Resolve host Git for the Grapher-owned engine bootstrap independently of the business launch PATH, so pinned-baseline verification keeps working when a managed environment omits Git.
 - Keep fixture result-entry launches off the platform sandbox: disposable test workspaces live under the test data root, which production Linux/macOS geometry intentionally rejects. Native suites built without the fixture feature still cover the real boundaries.

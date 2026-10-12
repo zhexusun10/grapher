@@ -32,6 +32,12 @@ pub struct Job {
     pub copy_from_workspace: Option<String>,
     pub history_edit: bool,
     pub feedback_source: bool,
+    /// First job batch of a plain-directory graph run: materialize the external
+    /// shadow repository before any prepare/hand-off work.
+    pub materialize_source: bool,
+    /// Post-publication follow-up of a done node runs directly in the source
+    /// directory (no worktree, no commit, no invalidation of descendants).
+    pub source_direct: bool,
     pub expected_source_head: String,
     pub environment_input: Option<crate::environment::CompositeResult>,
     pub environment_sources: Vec<crate::environment::CompositeResult>,
@@ -69,6 +75,24 @@ pub(crate) fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf
     let repository = PathBuf::from(&config.repository);
     workspace::validate_binding(&repository)?;
     Ok(repository)
+}
+
+/// Collect (or reuse) the lazily created source snapshot for a plain-directory
+/// job. `fresh` is true when this Run has no recorded snapshot yet: the current
+/// source files are force-collected then. Git work runs without the runtime
+/// lock; production callers serialize it with the per-source lock.
+pub(crate) fn collect_source_snapshot(
+    repository: &Path,
+    exclusions: &[String],
+    fresh: bool,
+) -> Result<String, String> {
+    if fresh {
+        return workspace::materialize_shadow_repo(repository, exclusions);
+    }
+    let shadow = workspace::shadow_repo_if_exists(repository)?
+        .ok_or_else(|| "临时 Git 快照不存在或已回收；请重新派发节点或开启新对话。".to_string())?;
+    let git_dir = shadow.to_str().ok_or("Invalid shadow path")?;
+    workspace::git(repository, &["--git-dir", git_dir, "rev-parse", "HEAD"])
 }
 
 pub struct Runtime {
@@ -465,6 +489,87 @@ impl Runtime {
         Ok(())
     }
 
+    /// Whether a successful publication may reclaim the plain-directory shadow
+    /// snapshot. Read-only; callers should release the runtime lock before the
+    /// actual removal.
+    pub(crate) fn shadow_reclaimable_after_publication(
+        &self,
+        repository: &Path,
+    ) -> Result<bool, String> {
+        if workspace::is_standard_git(repository) {
+            return Ok(false);
+        }
+        if workspace::shadow_repo_if_exists(repository)?.is_none() {
+            return Ok(false);
+        }
+        Ok(!self
+            .store
+            .shadow_repo_needed_by_other_run(&self.state.run_id, repository)?)
+    }
+
+    /// Reclaim the published source's shadow snapshot. Only a successful
+    /// publication or an explicit Run deletion may release it; failed,
+    /// interrupted and paused Runs keep their snapshot for retry/evidence.
+    pub fn reclaim_shadow_after_publication(&self, repository: &Path) -> Result<(), String> {
+        if self.shadow_reclaimable_after_publication(repository)? {
+            workspace::remove_shadow_repo(repository)?;
+        }
+        Ok(())
+    }
+
+    /// A plain-directory Run has no source snapshot until its first node
+    /// dispatch. A pre-existing shared snapshot is still re-collected so
+    /// Planner writes made after another Run's snapshot are included.
+    pub(crate) fn job_source_is_fresh(&self, repository: &Path) -> Result<bool, String> {
+        Ok(self.latest_source_head().is_empty()
+            || workspace::shadow_repo_if_exists(repository)?.is_none())
+    }
+
+    /// Record ownership, the one-time `SourceSnapshotted` event and the
+    /// resolved base on the Job. Must be called after the (lock-free) Git
+    /// collection; it only needs a short runtime lock.
+    pub(crate) fn record_job_source(
+        &mut self,
+        job: &mut Job,
+        repository: &Path,
+        head: &str,
+    ) -> Result<(), String> {
+        let name = workspace::shadow_repo_dir(repository)?
+            .file_name()
+            .ok_or("Invalid shadow directory")?
+            .to_string_lossy()
+            .into_owned();
+        self.store.remember_cleanup_targets(
+            &job.run_id,
+            &BTreeSet::from([crate::cleanup::Target::Shadow {
+                root: workspace::data_root(),
+                name,
+            }]),
+        )?;
+        if head != self.latest_source_head() {
+            self.emit(EventKind::SourceSnapshotted {
+                head: head.to_string(),
+            })?;
+        }
+        job.expected_source_head = head.to_string();
+        job.execution.before = head.to_string();
+        Ok(())
+    }
+
+    /// Convenience entry for tests: collect and record in one step.
+    #[cfg(test)]
+    pub(crate) fn attach_job_source(
+        &mut self,
+        job: &mut Job,
+        exclusions: &[String],
+    ) -> Result<String, String> {
+        let repository = resolve_repository(&self.root, &job.config)?;
+        let fresh = self.job_source_is_fresh(&repository)?;
+        let head = collect_source_snapshot(&repository, exclusions, fresh)?;
+        self.record_job_source(job, &repository, &head)?;
+        Ok(head)
+    }
+
     /// Safe without another Run's runtime mutex: deleted IDs cannot be reused,
     /// and stale writers are rejected by the store's deletion tombstones.
     pub fn retry_deleted_cleanups(&self) -> Result<(), String> {
@@ -718,7 +823,7 @@ impl Runtime {
 
     /// Approval stays immutable; later Planner writes/publications advance the
     /// inputs of future jobs without replacing an in-flight node's workspace.
-    fn latest_source_head(&self) -> &str {
+    pub(crate) fn latest_source_head(&self) -> &str {
         self.state
             .events
             .iter()
@@ -795,6 +900,13 @@ impl Runtime {
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
+        // Plain directories are not materialized until the first node dispatch;
+        // a Planner turn before that has no Git snapshot to record.
+        if !workspace::is_standard_git(&repository)
+            && workspace::shadow_repo_if_exists(&repository)?.is_none()
+        {
+            return Ok(());
+        }
         let head = workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?;
         if head != self.latest_source_head() {
             self.emit(EventKind::SourceSnapshotted { head })?;
@@ -834,16 +946,23 @@ impl Runtime {
             environment.validate()?;
             environment.check_tracked(&repository)?;
         }
-        workspace::verify(&repository)?;
+        workspace::validate_binding(&repository)?;
         if let Some(store) = self.environments()? {
             if self.state.environment_baseline.is_none() {
                 let result = store.initialize(&repository)?;
                 self.emit(EventKind::EnvironmentInitialized { result })?;
             }
         }
-        // Planning writes directly to source. Freeze the complete project Git
-        // snapshot only after planning and approval; managed scopes stay outside it.
-        let base = workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?;
+        // Approval is immutable. Plain directories (and serial on either
+        // repository type) have no Git snapshot yet: the lazy snapshot is
+        // materialized by the first node worker and recorded as `base` only
+        // for a standard Git repository, whose commits stay user-owned.
+        let base = if self.is_serial() || !workspace::is_standard_git(&repository) {
+            String::new()
+        } else {
+            workspace::verify(&repository)?;
+            workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?
+        };
         self.emit(EventKind::Approved { base })
     }
 
@@ -995,13 +1114,25 @@ impl Runtime {
             .collect();
         // Capture the real source after Planner's native writes. Persist the
         // input head with the revision so reloads cannot fall back to old files.
-        let source_head = workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?;
+        // Plain directories that were never materialized (no node dispatched
+        // yet) have no snapshot to record; the eventual first dispatch will
+        // materialize from the current source files instead.
+        let source_head = if !workspace::is_standard_git(&repository)
+            && workspace::shadow_repo_if_exists(&repository)?.is_none()
+        {
+            None
+        } else {
+            Some(workspace::snapshot_repository_scoped(
+                &repository,
+                &self.exclusions()?,
+            )?)
+        };
         self.emit(EventKind::GraphRevised {
             graph,
             planning_id: planning.planning_id.clone(),
             planning,
             invalidated,
-            source_head: Some(source_head),
+            source_head,
         })
     }
 
@@ -1065,11 +1196,18 @@ impl Runtime {
         }) {
             return Err("No previous node session to continue; revise the plan instead".into());
         }
+        // A post-publication follow-up edits the user's source directory; the
+        // shadow snapshot (if any) was already reclaimed and must not be rebuilt.
+        let source_direct = self.source_direct_context(node);
+        if source_direct {
+            self.require_current_file_contract()?;
+        } else {
+            self.validate_invalidation(node)?;
+        }
         // Failed executions also retain a session, even without a result head.
         // Replies on a node's unique terminal workspace update that shared tree
         // directly, so completed descendants remain valid and stay done.
-        self.validate_invalidation(node)?;
-        let shared_workspace = self.terminal_workspace_for(node).is_some();
+        let shared_workspace = !source_direct && self.terminal_workspace_for(node).is_some();
         self.emit(EventKind::Invalidated {
             nodes: vec![node.into()],
             target: node.into(),
@@ -1078,6 +1216,7 @@ impl Runtime {
             images,
             workspace: None,
             shared_workspace,
+            source_direct,
         })
     }
 
@@ -1105,6 +1244,21 @@ impl Runtime {
     ) -> Result<(), String> {
         if instruction.trim().is_empty() {
             return Err("Enter a replacement message".into());
+        }
+        // Completed conversations run in the source directory: the replacement
+        // message becomes a new source-direct execution, not a worktree replay.
+        if self.source_direct_context(node) {
+            self.require_current_file_contract()?;
+            return self.emit(EventKind::Invalidated {
+                nodes: vec![node.into()],
+                target: node.into(),
+                instruction: instruction.trim().into(),
+                human: true,
+                images,
+                workspace: None,
+                shared_workspace: false,
+                source_direct: true,
+            });
         }
         self.validate_invalidation(node)?;
         let anchor = self
@@ -1187,6 +1341,26 @@ impl Runtime {
             });
         }
         Ok(())
+    }
+
+    /// Post-publication conversations with a done node edit the user's source
+    /// directory directly instead of rebuilding a Graph worktree. Managed
+    /// environments keep their fixed-layout workspace contract, so they are
+    /// excluded from source-direct follow-ups.
+    fn source_direct_context(&self, node: &str) -> bool {
+        !self.is_serial()
+            && self
+                .state
+                .config
+                .as_ref()
+                .and_then(|config| config.environment.as_ref())
+                .is_none()
+            && self.state.phase == "completed"
+            && self
+                .state
+                .nodes
+                .get(node)
+                .is_some_and(|state| state.status == "done")
     }
 
     /// Refuses an update while a downstream node is still running, because a
@@ -1347,8 +1521,9 @@ impl Runtime {
             || self.state.paused
             || matches!(
                 self.state.phase.as_str(),
-                "publishing" | "merging" | "publication_failed" | "completed"
+                "publishing" | "merging" | "publication_failed"
             )
+            || self.state.phase == "completed"
         {
             return Ok(Vec::new());
         }
@@ -1454,6 +1629,15 @@ impl Runtime {
             .cloned()
             .collect();
         let mut jobs = Vec::new();
+        // A source-direct follow-up runs in the user's directory and must not
+        // rebuild/invalidate anything else. `followup` is entered only by a
+        // source_direct Invalidated event, so every job scheduled here is one.
+        let source_direct_run = self.state.phase == "followup";
+        let resolved_repository = resolve_repository(&self.root, &config)?;
+        let materialize_source = !source_direct_run
+            && !self.is_serial()
+            && !workspace::is_standard_git(&resolved_repository)
+            && self.job_source_is_fresh(&resolved_repository)?;
         for node in ready {
             let id = Uuid::new_v4().to_string();
             // Dependency nodes normally take over their parent's physical workspace.
@@ -1468,10 +1652,14 @@ impl Runtime {
                         .ok_or("Ready node has no completed parent head")
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut before = self.state.nodes[&node.name]
-                .head
-                .clone()
-                .unwrap_or_else(|| source_head.clone());
+            let mut before = if source_direct_run {
+                String::new()
+            } else {
+                self.state.nodes[&node.name]
+                    .head
+                    .clone()
+                    .unwrap_or_else(|| source_head.clone())
+            };
             let resume = if self.state.nodes[&node.name].human_instruction {
                 let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
                 let previous = self
@@ -1542,7 +1730,7 @@ impl Runtime {
                     workspace_lineage.extend(source.workspace_lineage.iter().cloned());
                 }
                 input.worktree.clone()
-            } else if self.is_serial() {
+            } else if self.is_serial() || source_direct_run {
                 resolve_repository(&self.root, &config)?
                     .to_string_lossy()
                     .into()
@@ -1931,6 +2119,8 @@ impl Runtime {
                 copy_from_workspace,
                 history_edit,
                 feedback_source,
+                materialize_source,
+                source_direct: source_direct_run,
                 expected_source_head: source_head,
                 environment_input,
                 environment_sources,
@@ -1946,7 +2136,12 @@ impl Runtime {
             && !self.active()
             && !matches!(self.state.phase.as_str(), "completed" | "needs_attention")
         {
-            if !self.is_serial() && self.state.nodes.values().all(|node| node.status == "done") {
+            // A source-direct follow-up settles the Run instead of publishing:
+            // the user's directory already holds the result.
+            if self.state.phase != "followup"
+                && !self.is_serial()
+                && self.state.nodes.values().all(|node| node.status == "done")
+            {
                 let terminal_names: Vec<String> = if let Some(plan) = &self.state.plan {
                     if !plan.terminals.is_empty() {
                         plan.terminals.clone()
@@ -2682,6 +2877,7 @@ impl Runtime {
                         head: pending.source_head.clone(),
                     }),
                     shared_workspace: false,
+                    source_direct: false,
                 });
             }
         }
@@ -3281,6 +3477,28 @@ fn perform_with_merger_inner(
     if path != repository {
         crate::native::require_graph_execution()?;
     }
+    // Direct `perform` callers (fixtures, embedded use) may not have gone
+    // through the server worker's lazy materialization. Reuse the existing
+    // snapshot or create it once. Production workers already did this under
+    // the per-source lock and passed the commit in through the Job.
+    let materialized_base = if job.materialize_source
+        && !job.source_direct
+        && !workspace::is_standard_git(&repository)
+    {
+        Some(collect_source_snapshot(
+            &repository,
+            &exclusions,
+            job.expected_source_head.is_empty(),
+        )?)
+    } else {
+        None
+    };
+    let expected_source_head = materialized_base
+        .as_deref()
+        .unwrap_or(&job.expected_source_head);
+    let execution_before = materialized_base
+        .as_deref()
+        .unwrap_or(&job.execution.before);
     let parent_refs = if job.parent_heads.is_empty() {
         parents
     } else {
@@ -3290,20 +3508,51 @@ fn perform_with_merger_inner(
     if job.history_edit && environments.is_some() {
         input_heads.clear();
     }
-    if path != repository
-        && job.execution.before != job.expected_source_head
+    // Serial runs and post-publication source-direct follow-ups execute in the
+    // source directory: no shadow base pin, no worktree composition, no refs.
+    let source_tree = path == repository;
+    // A post-publication rebaseline recreates a plain folder's shadow snapshot
+    // from the current source files, so parent commits recorded before it no
+    // longer exist. Empty heads come from source-direct edits. In both cases the
+    // parent's content is already part of the prepared source snapshot, so it
+    // must not be resolved or merged as a commit.
+    if !job.source_direct && !source_tree {
+        let standard_git = workspace::is_standard_git(&repository);
+        input_heads.retain(|head| {
+            if head.is_empty() {
+                return false;
+            }
+            standard_git
+                || workspace::repository_git(
+                    &repository,
+                    &["cat-file", "-e", &format!("{head}^{{commit}}")],
+                )
+                .is_ok()
+        });
+    }
+    if !job.source_direct
+        && !source_tree
+        && !expected_source_head.is_empty()
+        && execution_before != expected_source_head
         && !(job.history_edit && environments.is_some())
     {
         // Continuations keep their own result and dependency inputs, while also
         // receiving source files written by a subsequent Planner turn.
-        workspace::pin_repository_head(&repository, &job.expected_source_head)?;
-        if !input_heads.contains(&job.expected_source_head) {
-            input_heads.push(job.expected_source_head.clone());
+        workspace::pin_repository_head(&repository, expected_source_head)?;
+        if !input_heads.contains(&expected_source_head.to_string()) {
+            input_heads.push(expected_source_head.to_string());
         }
     }
-    let inherited_head = workspace::git(path, &["rev-parse", "HEAD"]).ok();
-    let can_inherit = job.inherit_workspace
+    let inherited_head = if job.source_direct || source_tree {
+        None
+    } else {
+        workspace::git(path, &["rev-parse", "HEAD"]).ok()
+    };
+    let can_inherit = !job.source_direct
+        && !source_tree
+        && job.inherit_workspace
         && !job.history_edit
+        && !expected_source_head.is_empty()
         && inherited_head.as_deref().is_some_and(|head| {
             (!job.parent_heads.is_empty() && job.parent_heads.iter().any(|parent| parent == head)
                 || job.execution.workspace_lineage.len() > 1 && job.parent_heads.is_empty())
@@ -3312,26 +3561,23 @@ fn perform_with_merger_inner(
                 })
                 && workspace::git(
                     path,
-                    &[
-                        "merge-base",
-                        "--is-ancestor",
-                        &job.expected_source_head,
-                        head,
-                    ],
+                    &["merge-base", "--is-ancestor", expected_source_head, head],
                 )
                 .is_ok()
         })
         && workspace::repository_status(path, &exclusions).is_ok_and(|status| status.is_empty())
         && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err();
     let before = if can_inherit {
-        inherited_head.unwrap_or_else(|| job.execution.before.clone())
+        inherited_head.unwrap_or_else(|| execution_before.to_string())
+    } else if job.source_direct || source_tree {
+        execution_before.to_string()
     } else {
         workspace::prepare_with_merger_expected_for_run(
             &repository,
             path,
-            &job.execution.before,
+            execution_before,
             &input_heads,
-            &job.expected_source_head,
+            expected_source_head,
             Some(&job.run_id),
             || {
                 crate::graph_merge::resolve_with_merger_for_node(
@@ -3429,7 +3675,10 @@ fn perform_with_merger_inner(
     if let Some(config) = &job.config.environment {
         config.check_tracked(path)?;
     }
-    let head = if environments.is_some() {
+    let head = if job.source_direct {
+        // The source directory was edited directly; no commit belongs to Grapher.
+        String::new()
+    } else if environments.is_some() {
         workspace::snapshot_node_scoped(
             path,
             &repository,
@@ -3438,11 +3687,12 @@ fn perform_with_merger_inner(
             &exclusions,
         )?
     } else {
-        workspace::snapshot_execution_for_run(
+        workspace::snapshot_execution_scoped(
             path,
             &repository,
             &job.execution.node,
             Some(&job.run_id),
+            execution_before,
         )?
     };
     if let (Some(store), Some(input)) = (&environments, &environment_result_input) {
