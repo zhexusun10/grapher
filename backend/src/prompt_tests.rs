@@ -3811,3 +3811,26 @@ fn parallel_first_batch_materializes_the_plain_directory_once() {
         "1"
     );
 }
+
+#[test]
+fn merger_continuation_before_treats_a_reclaimed_snapshot_as_absent() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), "a").unwrap();
+    // A plain folder without a snapshot has no `before` commit.
+    assert_eq!(merger_continuation_before(&source).unwrap(), "");
+    let head = crate::workspace::materialize_shadow_repo(&source, &[]).unwrap();
+    assert_eq!(merger_continuation_before(&source).unwrap(), head);
+    // A concurrent reclaim of the temporary snapshot reads as absent, not an
+    // error that would fail the continuation request.
+    crate::workspace::remove_shadow_repo(&source).unwrap();
+    assert_eq!(merger_continuation_before(&source).unwrap(), "");
+    // Standard Git keeps reading its own repository.
+    let git_source = temp.path().join("git-source");
+    fs::create_dir_all(&git_source).unwrap();
+    fs::write(git_source.join("a.txt"), "a").unwrap();
+    crate::workspace::git(&git_source, &["init", "-q"]).unwrap();
+    let git_head = crate::workspace::snapshot_repository(&git_source).unwrap();
+    assert_eq!(merger_continuation_before(&git_source).unwrap(), git_head);
+}

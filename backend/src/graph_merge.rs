@@ -280,9 +280,12 @@ pub fn continue_merger_for_node(
     // A successful publication reclaims the temporary shadow snapshot of an
     // ordinary folder, so that continuation edits the source directly with no
     // Git (there is nothing left to commit or merge into); a retained
-    // failed-publication snapshot keeps the previous Git-backed behavior.
+    // failed-publication snapshot keeps the previous Git-backed behavior. The
+    // caller's recorded `before` commit is authoritative for an ordinary
+    // folder: reclaiming may race this worker, and only a retained snapshot
+    // has a `before` commit.
     let standard_git = workspace::is_standard_git(repository);
-    let shadow = if standard_git {
+    let shadow = if standard_git || execution.before.is_empty() {
         None
     } else {
         workspace::shadow_repo_if_exists(repository)?

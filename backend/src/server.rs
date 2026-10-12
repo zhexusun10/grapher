@@ -198,6 +198,27 @@ fn source_lock(repository: &std::path::Path) -> Result<Arc<Mutex<()>>, String> {
     Ok(lock)
 }
 
+/// Resolve `before` for a settled publication-merger continuation. Reclaiming a
+/// successful publication's snapshot is asynchronous, so a plain folder whose
+/// snapshot vanished while reading resolves to "no snapshot".
+fn merger_continuation_before(worktree: &std::path::Path) -> Result<String, String> {
+    if crate::workspace::is_standard_git(worktree) {
+        return crate::workspace::repository_git(worktree, &["rev-parse", "HEAD"]);
+    }
+    let Some(shadow) = crate::workspace::shadow_repo_if_exists(worktree)? else {
+        return Ok(String::new());
+    };
+    let git_dir = shadow.to_str().ok_or("Invalid shadow path")?;
+    match crate::workspace::git(worktree, &["--git-dir", git_dir, "rev-parse", "HEAD"]) {
+        Ok(head) => Ok(head),
+        // The snapshot was reclaimed between the check and this read.
+        Err(_) if crate::workspace::shadow_repo_if_exists(worktree)?.is_none() => {
+            Ok(String::new())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Lazily materialize the external shadow repository for the first dispatched
 /// job of a plain-directory graph run. Git collection runs without the runtime
 /// lock; the source lock serializes it with planning and other workers.
@@ -2114,31 +2135,30 @@ fn drive(service: Arc<Service>) {
                                     eprintln!("Cannot clean completed run worktrees: {error}");
                                 }
                                 // Publication succeeded, so the user's source now
-                                // contains the merged result. Decide under a short
-                                // lock and remove the snapshot only after release.
+                                // contains the merged result. Reclaim the snapshot
+                                // under the source lock and re-check there: a
+                                // concurrent dispatch may have materialized a new
+                                // snapshot while this publication was finishing.
                                 let repository = PathBuf::from(&publication.repository);
                                 drop(runtime);
-                                let reclaimable = {
-                                    let runtime = service
+                                let reclaimed = (|| -> Result<(), String> {
+                                    let lock = source_lock(&repository)?;
+                                    let _guard =
+                                        lock.lock().map_err(|error| error.to_string())?;
+                                    let reclaimable = service
                                         .runtime
                                         .lock()
-                                        .map_err(|e| e.to_string())?;
-                                    runtime.shadow_reclaimable_after_publication(&repository)
-                                };
-                                match reclaimable {
-                                    Ok(true) => {
-                                        if let Err(error) =
-                                            crate::workspace::remove_shadow_repo(&repository)
-                                        {
-                                            eprintln!(
-                                                "Cannot reclaim published shadow repository: {error}"
-                                            );
-                                        }
+                                        .map_err(|error| error.to_string())?
+                                        .shadow_reclaimable_after_publication(&repository)?;
+                                    if reclaimable {
+                                        crate::workspace::remove_shadow_repo(&repository)?;
                                     }
-                                    Ok(false) => {}
-                                    Err(error) => eprintln!(
-                                        "Cannot check published shadow repository: {error}"
-                                    ),
+                                    Ok(())
+                                })();
+                                if let Err(error) = reclaimed {
+                                    eprintln!(
+                                        "Cannot reclaim published shadow repository: {error}"
+                                    );
                                 }
                             }
                             Err(error) => {
@@ -2465,18 +2485,10 @@ fn control(
             (previous, config, session_dir)
         };
         let id = Uuid::new_v4().to_string();
-        // Plain folders keep Git state in the external shadow repository, so a
-        // plain `git rev-parse` there would not be a repository at all. A
-        // successful publication reclaims that snapshot: the continuation then
-        // edits the source directly and records no `before` commit.
-        let worktree = std::path::Path::new(&previous.worktree);
-        let before = if crate::workspace::is_standard_git(worktree)
-            || crate::workspace::shadow_repo_if_exists(worktree)?.is_some()
-        {
-            crate::workspace::repository_git(worktree, &["rev-parse", "HEAD"])?
-        } else {
-            String::new()
-        };
+        // A successful publication may reclaim the temporary snapshot at any
+        // moment, so a plain folder whose snapshot vanished resolves to no
+        // `before` commit instead of failing the continuation request.
+        let before = merger_continuation_before(std::path::Path::new(&previous.worktree))?;
         let execution = Execution {
             id: id.clone(),
             node: "merger".into(),
