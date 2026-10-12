@@ -6,7 +6,7 @@ import type { PlanMode } from "../../types";
 interface LandingViewProps {
   goal: string;
   setGoal: (val: string) => void;
-  onPlanGoal: (val: string, options?: PromptBoxSubmitOptions) => void;
+  onPlanGoal: (val: string, options?: PromptBoxSubmitOptions) => boolean | void | Promise<boolean>;
   isBusy: boolean;
   planMode?: PlanMode;
   onPlanModeChange?: (mode: PlanMode) => void;

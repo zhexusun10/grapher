@@ -902,7 +902,19 @@ fn run_pi_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.env_remove("GRAPHER_LAUNCH_BINDING");
-    let managed = request.role == PiRole::NodeAgent && config.environment.is_some();
+    // Node Agents and environment-reconciling Mergers run under managed L.
+    // A Git-only Merger does not receive the environment data binding and
+    // keeps its plain workspace shell.
+    let managed = matches!(request.role, PiRole::NodeAgent | PiRole::Merger)
+        && config.environment.is_some()
+        && request
+            .environment
+            .iter()
+            .any(|(key, _)| *key == "GRAPHER_ENVIRONMENT_DATA")
+        && request
+            .environment
+            .iter()
+            .any(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID");
     if managed {
         let environment = config.environment.as_ref().ok_or("Missing managed launch policy")?;
         let data = request.environment.iter().find(|(key, _)| *key == "GRAPHER_ENVIRONMENT_DATA")
@@ -914,7 +926,16 @@ fn run_pi_with_timeout(
         // The owning native writer validated live/stored bytes during prepare.
         // Bind that sealed generation; do not hash the whole environment again.
         let input = store.load_record_metadata(execution, "before")?;
-        crate::environment::bind_command(&mut command, &data, run, environment, &input, request.cwd, session_dir)?;
+        crate::environment::bind_command(
+            &mut command,
+            &data,
+            run,
+            environment,
+            &input,
+            request.cwd,
+            session_dir,
+            request.role == PiRole::Merger,
+        )?;
     }
     process_control::configure_command(&mut command);
     let started = Instant::now();

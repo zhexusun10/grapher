@@ -10,11 +10,113 @@ use std::{
 };
 use uuid::Uuid;
 
-const MERGER_CONTEXT_INSTRUCTIONS: &str = "The user query below is background context for the desired project result, not the task to execute in this session. Your current task is conflict repair using the available file and Bash tools.";
-const MERGER_COLLECTION_INSTRUCTIONS: &str = "Project snapshots include project files ignored by .gitignore. Stage resolved or changed project paths with git add -f -- <paths>, even when they match .gitignore. Do not stage Git/Grapher internals or managed environment/cache scopes. Finish with a short, nonempty assistant summary.";
+/// Which conflict kinds a Merger invocation must handle. The prompt is the
+/// concatenation of the applicable task segments; a Merger that prepares the
+/// workspace for a fan-in node may face a Git conflict, an incompatible
+/// environment composition, or both at the same time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MergerConflicts {
+    pub(crate) git: bool,
+    pub(crate) environment: bool,
+}
 
-fn merger_prompt(query: &str) -> String {
-    format!("{MERGER_CONTEXT_INSTRUCTIONS}\n\nUser query:\n{query}\n\nResolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.\n{MERGER_COLLECTION_INSTRUCTIONS}")
+impl MergerConflicts {
+    pub(crate) const GIT: Self = Self {
+        git: true,
+        environment: false,
+    };
+    pub(crate) const ENVIRONMENT: Self = Self {
+        git: false,
+        environment: true,
+    };
+    pub(crate) const BOTH: Self = Self {
+        git: true,
+        environment: true,
+    };
+}
+
+/// The query is background; the concrete task comes from the conflict segments.
+fn merger_context(conflicts: MergerConflicts) -> String {
+    let task = match (conflicts.git, conflicts.environment) {
+        (true, true) => "conflict repair and environment reconciliation",
+        (true, false) => "conflict repair",
+        (false, true) => "environment reconciliation",
+        (false, false) => "workspace preparation",
+    };
+    format!("The user query below is background context for the desired project result, not the task to execute in this session. Your current task is {task} using the available file and Bash tools.")
+}
+
+const MERGER_GIT_INSTRUCTIONS: &str = "Resolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.\nProject snapshots include project files ignored by .gitignore. Stage resolved or changed project paths with git add -f -- <paths>, even when they match .gitignore. Do not stage Git/Grapher internals or managed environment/cache scopes.";
+
+/// A fan-in environment is never directory-merged. The Merger selects a
+/// verified input environment or builds one private environment offline.
+const MERGER_ENVIRONMENT_INSTRUCTIONS: &str = "Select or build one environment for the downstream execution from the input environments and the merged project files.\n- If an existing input environment satisfies every input branch's declared constraints and dependencies and passes validation, select it.\n- Otherwise, if a matching lock file and an offline package/artifact cache exist, build the environment in a new private prefix inside this workspace's managed scopes, then verify the interpreter, the declared dependencies and the required health checks.\n- Never combine two venv/Conda directory trees, install packages over the network, fall back to the host Python, or claim compatibility that a check did not prove.\n- Leave exactly one usable environment in the managed scopes; remove or replace incompatible leftovers. If you cannot select or build a verified environment offline, stop and report the exact blocker instead of inventing one.";
+
+const MERGER_SUMMARY_INSTRUCTIONS: &str = "Finish with a short, nonempty assistant summary.";
+
+const MERGER_ENVIRONMENT_SUMMARY_INSTRUCTIONS: &str = "When environment reconciliation applies, the summary must also state which input environment you selected or which private prefix you built and which checks passed.";
+
+fn merger_prompt(
+    query: &str,
+    conflicts: MergerConflicts,
+    environment_context: Option<&str>,
+) -> String {
+    let mut tasks = Vec::new();
+    if conflicts.git {
+        tasks.push(MERGER_GIT_INSTRUCTIONS);
+    }
+    if conflicts.environment {
+        tasks.push(MERGER_ENVIRONMENT_INSTRUCTIONS);
+        if let Some(context) = environment_context {
+            tasks.push(context);
+        }
+        tasks.push(MERGER_ENVIRONMENT_SUMMARY_INSTRUCTIONS);
+    }
+    tasks.push(MERGER_SUMMARY_INSTRUCTIONS);
+    format!(
+        "{}\n\nUser query:\n{query}\n\n{}",
+        merger_context(conflicts),
+        tasks.join("\n\n")
+    )
+}
+
+/// The managed L binding used when an environment Merger may create or select
+/// a private environment. The Merger's observation receipts then let Runtime
+/// discover and capture the reconciled composite before the node starts.
+pub(crate) struct EnvironmentMerger<'a> {
+    pub(crate) store: &'a crate::environment::Environments,
+    pub(crate) base: &'a crate::environment::CompositeResult,
+    pub(crate) inputs: &'a [(String, crate::environment::CompositeResult)],
+}
+
+/// One settled Merger session. Environment discovery reads the session's own
+/// observation receipts, so callers retain every session that may have built
+/// or validated the downstream environment.
+pub(crate) struct MergerSession {
+    pub(crate) id: String,
+    pub(crate) directory: std::path::PathBuf,
+}
+
+fn environment_context(environment: &EnvironmentMerger<'_>) -> Result<String, String> {
+    let mut lines = vec!["Input branch environments (select one only if it satisfies every branch; otherwise build a new private prefix):".to_string()];
+    for (node, input) in environment.inputs {
+        let binding = environment
+            .store
+            .load_launch(&input.launch_ref)?
+            .environment
+            .map(|binding| {
+                format!(
+                    "kind={}, prefix={}, abi={}",
+                    binding.kind, binding.prefix, binding.abi
+                )
+            })
+            .unwrap_or_else(|| "unbound".into());
+        lines.push(format!(
+            "- {node}: environmentRef={}, launchRef={}, {binding}",
+            input.environment_ref, input.launch_ref
+        ));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn pending(repository: &Path) -> Option<String> {
@@ -93,23 +195,51 @@ pub fn resolve_with_merger(
     attempt: usize,
     emit: impl FnMut(EventKind) -> Result<(), String>,
 ) -> Result<(), String> {
-    resolve_with_merger_for_node(repository, query, config, root, attempt, "merger", emit)
+    resolve_with_merger_for_node(
+        repository,
+        query,
+        config,
+        root,
+        attempt,
+        "merger",
+        MergerConflicts::GIT,
+        None,
+        emit,
+    )
+    .map(|_| ())
 }
 
 /// Resolve an in-progress merge in either the publication checkout or a DAG node checkout.
-pub fn resolve_with_merger_for_node(
+/// When `environment` is present, the Merger also runs under managed L so a
+/// selected/built private environment is observable for the caller.
+pub(crate) fn resolve_with_merger_for_node(
     repository: &Path,
     query: &str,
     config: &Config,
     root: &Path,
     attempt: usize,
     node: &str,
+    conflicts: MergerConflicts,
+    environment: Option<&EnvironmentMerger<'_>>,
     mut emit: impl FnMut(EventKind) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<Option<MergerSession>, String> {
     let canonical = repository.canonicalize().map_err(|e| e.to_string())?;
     let repository = canonical.as_path();
     let id = Uuid::new_v4().to_string();
     let incoming = pending(repository).ok_or("No pending merge to resolve")?;
+    let before_head = git(repository, &["rev-parse", "HEAD"])?;
+    // Resolve evidence before announcing a running Merger, so a missing
+    // launch record cannot leave an execution that never receives a terminal
+    // event. The record is immutable and reclaimable with the Run.
+    let context = environment
+        .map(environment_context)
+        .transpose()?;
+    let prompt = merger_prompt(query, conflicts, context.as_deref());
+    if let Some(environment) = environment {
+        environment
+            .store
+            .record_before(&id, &before_head, environment.base)?;
+    }
     let directory = root.join("mergers").join(&id);
     // Commit ownership before allocation; even a failed mkdir/open belongs to
     // this Run and can be reclaimed when the conversation is deleted.
@@ -121,7 +251,7 @@ pub fn resolve_with_merger_for_node(
             attempt,
             session_id: id.clone(),
             worktree: repository.to_string_lossy().into(),
-            before: git(repository, &["rev-parse", "HEAD"])?,
+            before: before_head,
             workspace_lineage: vec![],
             after: None,
             input: None, result: None,
@@ -143,11 +273,10 @@ pub fn resolve_with_merger_for_node(
             return Err(error);
         }
     };
-    let prompt = merger_prompt(query);
     // Make native Git commands work in a plain folder without adding a .git
     // entry there. This environment is scoped to the merger process tree;
     // stock Git/Bash must receive host paths, not Windows device prefixes.
-    let environment = if workspace::is_standard_git(repository) {
+    let mut environment_vars: Vec<(&str, String)> = if workspace::is_standard_git(repository) {
         Vec::new()
     } else {
         vec![
@@ -160,6 +289,14 @@ pub fn resolve_with_merger_for_node(
             ("GIT_WORK_TREE", crate::native::host_path(repository).to_string_lossy().into()),
         ]
     };
+    if environment.is_some() {
+        environment_vars.push((
+            "GRAPHER_ENVIRONMENT_DATA",
+            crate::native::host_path(root).to_string_lossy().into(),
+        ));
+        environment_vars.push(("GRAPHER_NODE_EXECUTION_ID", id.clone()));
+        environment_vars.push(("GRAPHER_NODE_NAME", node.into()));
+    }
     let mut output_error = None;
     let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
     let merger_config = merger_model_cfg.effective_config(config);
@@ -179,7 +316,7 @@ pub fn resolve_with_merger_for_node(
             tools: Some("read,write,bash,edit"),
             session_id: Some(&id),
             extra_args,
-            environment,
+            environment: environment_vars,
             system_prompt: Some(&prompt),
             images: None,
         },
@@ -222,7 +359,170 @@ pub fn resolve_with_merger_for_node(
         "id": id, "name": "merger", "node": node, "cwd": repository,
         "status": if result.is_ok() { "completed" } else { "failed" }, "error": result.as_ref().err(),
     })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    result
+    result.map(|()| {
+        Some(MergerSession {
+            id,
+            directory,
+        })
+    })
+}
+
+/// Run an environment-reconciliation Merger outside a pending Git merge. The
+/// caller has already composed the merged workspace; the Merger selects or
+/// builds one verified environment under managed L, and the returned session
+/// lets `Environments::capture_reconciled` bind it for the downstream node.
+pub(crate) fn dispatch_environment_merger(
+    path: &Path,
+    query: &str,
+    config: &Config,
+    root: &Path,
+    node: &str,
+    attempt: usize,
+    environment: &EnvironmentMerger<'_>,
+    mut emit: impl FnMut(EventKind) -> Result<(), String>,
+) -> Result<MergerSession, String> {
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    let repository = canonical.as_path();
+    let id = Uuid::new_v4().to_string();
+    let before = git(repository, &["rev-parse", "HEAD"])?;
+    let context = environment_context(environment)?;
+    let prompt = merger_prompt(query, MergerConflicts::ENVIRONMENT, Some(&context));
+    environment.store.record_before(&id, &before, environment.base)?;
+    let directory = root.join("mergers").join(&id);
+    emit(EventKind::MergerStarted {
+        execution: Execution {
+            id: id.clone(),
+            node: node.into(),
+            revision: 1,
+            attempt,
+            session_id: id.clone(),
+            worktree: repository.to_string_lossy().into(),
+            before: before.clone(),
+            workspace_lineage: vec![],
+            after: None,
+            input: None,
+            result: None,
+            status: "running".into(),
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: now(),
+            completed_at: None,
+            metrics: None,
+        },
+    })?;
+    let mut log = match (|| -> Result<_, String> {
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(directory.join("output.jsonl"))
+            .map_err(|error| error.to_string())
+    })() {
+        Ok(log) => log,
+        Err(error) => {
+            emit(EventKind::MergerFailed {
+                execution_id: id,
+                error: error.clone(),
+                output_bytes: 0,
+                metrics: None,
+            })?;
+            return Err(error);
+        }
+    };
+    let mut environment_vars: Vec<(&str, String)> = if workspace::is_standard_git(repository) {
+        Vec::new()
+    } else {
+        vec![
+            (
+                "GIT_DIR",
+                crate::native::host_path(&workspace::shadow_repo_dir(repository)?)
+                    .to_string_lossy()
+                    .into(),
+            ),
+            (
+                "GIT_WORK_TREE",
+                crate::native::host_path(repository).to_string_lossy().into(),
+            ),
+        ]
+    };
+    environment_vars.push((
+        "GRAPHER_ENVIRONMENT_DATA",
+        crate::native::host_path(root).to_string_lossy().into(),
+    ));
+    environment_vars.push(("GRAPHER_NODE_EXECUTION_ID", id.clone()));
+    environment_vars.push(("GRAPHER_NODE_NAME", node.into()));
+    let mut output_error = None;
+    let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
+    let merger_config = merger_model_cfg.effective_config(config);
+    let mut extra_args = vec!["--no-context-files"];
+    if let Some(thinking) = &merger_model_cfg.thinking {
+        extra_args.push("--thinking");
+        extra_args.push(thinking.as_str());
+    }
+    let result = run_pi(
+        PiRequest {
+            role: PiRole::Merger,
+            config: &merger_config,
+            cwd: repository,
+            task: "Reconcile the environments of the merged branches.",
+            session_dir: &directory,
+            extension: None,
+            tools: Some("read,write,bash,edit"),
+            session_id: Some(&id),
+            extra_args,
+            environment: environment_vars,
+            system_prompt: Some(&prompt),
+            images: None,
+        },
+        |text| {
+            if let Err(error) = log.write_all(text.as_bytes()) {
+                output_error = Some(error.to_string());
+            }
+            if let Err(error) = emit(EventKind::Output {
+                execution_id: id.clone(),
+                text,
+            }) {
+                output_error = Some(error);
+            }
+        },
+    )
+    .and_then(|_| {
+        if let Some(error) = output_error {
+            return Err(format!("Cannot persist merger output: {error}"));
+        }
+        Ok(())
+    });
+    match &result {
+        Ok(()) => {
+            let head = git(repository, &["rev-parse", "HEAD"])?;
+            eprintln!(
+                "[Grapher] [Merger] Reconciled the environment for '{node}' (HEAD: {head})"
+            );
+            emit(EventKind::MergerFinished {
+                execution_id: id.clone(),
+                head,
+                output_bytes: 0,
+                metrics: None,
+            })?;
+        }
+        Err(error) => {
+            eprintln!(
+                "[Grapher] [Merger] Failed reconciling the environment for '{node}': {error}"
+            );
+            emit(EventKind::MergerFailed {
+                execution_id: id.clone(),
+                error: error.clone(),
+                output_bytes: 0,
+                metrics: None,
+            })?;
+        }
+    }
+    fs::write(directory.join("result.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "id": id, "name": "merger", "node": node, "cwd": repository,
+        "status": if result.is_ok() { "completed" } else { "failed" }, "error": result.as_ref().err(),
+    })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    result.map(|()| MergerSession { id, directory })
 }
 
 /// Continue a settled publication Merger conversation. The new execution keeps
@@ -334,32 +634,72 @@ pub fn continue_merger_for_node(
 
 #[cfg(test)]
 mod tests {
+    use super::{merger_prompt, MergerConflicts};
+
     #[test]
-    fn merger_prompt_preserves_task_context_without_graph_specific_terminology() {
+    fn git_merger_prompt_preserves_task_context_without_graph_specific_terminology() {
         assert_eq!(
-            super::merger_prompt("Combine results"),
-            format!("{}\n\nUser query:\nCombine results\n\nResolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.\n{}", super::MERGER_CONTEXT_INSTRUCTIONS, super::MERGER_COLLECTION_INSTRUCTIONS)
+            merger_prompt("Combine results", MergerConflicts::GIT, None),
+            format!("The user query below is background context for the desired project result, not the task to execute in this session. Your current task is conflict repair using the available file and Bash tools.\n\nUser query:\nCombine results\n\n{}\n\n{}", super::MERGER_GIT_INSTRUCTIONS, super::MERGER_SUMMARY_INSTRUCTIONS)
         );
     }
 
     #[test]
     fn merger_treats_original_planning_request_as_context_not_its_current_task() {
         let query = "Create two nodes with the node tool, then stop planning.";
-        let prompt = super::merger_prompt(query);
-        assert!(prompt.starts_with(super::MERGER_CONTEXT_INSTRUCTIONS));
+        let prompt = merger_prompt(query, MergerConflicts::GIT, None);
+        assert!(prompt.starts_with("The user query below is background context"));
         assert!(prompt.contains(&format!("User query:\n{query}")));
         assert!(prompt.contains("not the task to execute in this session"));
-        assert!(prompt.contains("Your current task is conflict repair"));
-        assert!(prompt.ends_with(super::MERGER_COLLECTION_INSTRUCTIONS));
+        assert!(prompt.contains("Your current task is conflict repair using the available file and Bash tools"));
+        assert!(prompt.ends_with(super::MERGER_SUMMARY_INSTRUCTIONS));
     }
 
     #[test]
     fn merger_prompt_force_stages_ignored_project_paths_without_collecting_internal_scopes() {
-        let prompt = super::merger_prompt("resolve");
+        let prompt = merger_prompt("resolve", MergerConflicts::GIT, None);
         assert!(prompt.contains("project files ignored by .gitignore"));
         assert!(prompt.contains("git add -f -- <paths>"));
         assert!(prompt.contains("Do not stage Git/Grapher internals or managed environment/cache scopes"));
         assert!(prompt.contains("short, nonempty assistant summary"));
         assert!(!prompt.contains("git add -f -A"), "Merger must stage explicit project paths, not all environment files");
+        assert!(!prompt.contains("Select or build one environment"), "A Git-only Merger must not receive environment instructions");
+    }
+
+    #[test]
+    fn environment_merger_prompt_reconciles_without_git_instructions() {
+        let prompt = merger_prompt(
+            "ship the model",
+            MergerConflicts::ENVIRONMENT,
+            Some("- B: environmentRef=e1, launchRef=l1, unbound"),
+        );
+        assert!(prompt.contains("Your current task is environment reconciliation using the available file and Bash tools"));
+        assert!(prompt.contains("Select or build one environment for the downstream execution"));
+        assert!(prompt.contains("satisfies every input branch's declared constraints and dependencies"));
+        assert!(prompt.contains("matching lock file and an offline package/artifact cache"));
+        assert!(prompt.contains("verify the interpreter, the declared dependencies and the required health checks"));
+        assert!(prompt.contains("Never combine two venv/Conda directory trees"));
+        assert!(prompt.contains("install packages over the network, fall back to the host Python"));
+        assert!(prompt.contains("report the exact blocker instead of inventing one"));
+        assert!(prompt.contains("- B: environmentRef=e1, launchRef=l1, unbound"));
+        assert!(!prompt.contains("Resolve the current Git merge conflicts"));
+        assert!(!prompt.contains("git add -f -- <paths>"));
+    }
+
+    #[test]
+    fn combined_merger_prompt_concatenates_both_task_segments() {
+        let prompt = merger_prompt(
+            "ship the model",
+            MergerConflicts::BOTH,
+            Some("Input branch environments:"),
+        );
+        assert!(prompt.contains("Your current task is conflict repair and environment reconciliation using the available file and Bash tools"));
+        let git = prompt.find("Resolve the current Git merge conflicts").unwrap();
+        let environment = prompt
+            .find("Select or build one environment for the downstream execution")
+            .unwrap();
+        assert!(git < environment, "Git instructions must precede the environment segment");
+        assert!(prompt.contains("Input branch environments:"));
+        assert!(prompt.ends_with(super::MERGER_SUMMARY_INSTRUCTIONS));
     }
 }

@@ -90,6 +90,25 @@ Snapshot/history/list requests are metadata-oriented. Node logs load on demand u
 
 Long Git snapshot, node-workspace preparation/copy and publication passes hold the Run mutex. `snapshot_if_changed` reads a transient per-Run activity projection and uses a non-blocking attempt on that mutex, so a poll during such a pass returns the unchanged version plus progress (for example that node workspaces are being copied) instead of queueing behind the I/O. Activity is display-only and never changes durable event state.
 
+HTTP Run lookup serializes construction per `(data root, Run ID)`, not across
+all Runs. It releases the primary/registry mutexes before replaying another Run;
+legacy service-alias checks use non-blocking locks. An unverified busy alias
+returns a retryable lookup error instead of waiting under global locks or opening
+a second writer. Bootstrap repository discovery runs outside the Run mutex;
+saving model defaults skips repository discovery and honors metadata projection.
+See [service responsiveness regressions](../../backend/src/service_responsiveness_tests.rs).
+
+The browser bounds metadata/history/settings and Provider catalog/poll waits to
+15 seconds, including response-body reads. Planning streams, approvals and native
+result execution do not inherit this UI deadline. Timeout does not roll back a
+server write: a settings timeout asks the user to refresh and verify first, and
+never automatically retries the save. Initialization/history failures provide a
+sidebar retry; verified cards appear progressively with at most eight history
+requests in flight. Planning waits for authoritative settings rather than
+mistaking unloaded settings for a missing model. See
+[request deadlines](../../src/services/requestTimeout.ts) and
+[browser regressions](../../scripts/bootstrap-settings-ui.test.mjs).
+
 Planning attempts retain requests, graph candidates, summaries, and Pi JSONL streams. UI switching must not confuse one Run's transcripts with another's. Tests and legacy-log migration are described in [Conversation logs](../testing/conversation-logs.md).
 
 ## Recovery and ownership

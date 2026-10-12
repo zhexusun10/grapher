@@ -19,10 +19,11 @@ npm test
 
 | Command | Scope / prerequisites |
 | --- | --- |
-| `npm run test:ui` | Mocked-API browser interactions, graph switching, settings and managed result controls; installed Playwright Chromium or `GRAPHER_BROWSER_CHANNEL` (Windows defaults to Edge), no credentials/backend |
+| `npm run test:ui` | Mocked-API browser interactions, stalled bootstrap/history/Provider catalog/settings recovery, graph switching, settings and managed result controls; installed Playwright Chromium or `GRAPHER_BROWSER_CHANNEL` (Windows defaults to Edge), no credentials/backend |
 | `npm run test:pi` | Pinned Pi CLI/SDK and provider/auth transport; isolated auth; no paid model |
 | `npm run test:extensions` | Real Pi extension tools and Planner graph mutations; compatible `rg`/`fd` required |
 | `npm run test:environment` | Rust empty-start admission/discovery/E/L/resources/private copies, launch binding and production pinned Pi/native Python acceptance without user policy input. Windows includes real Job CPU/memory enforcement; device-lock tests include process/crash release. Python 3.11+/Git/Bash plus Linux bubblewrap or macOS Seatbelt required. Optional offline Windows Conda/CUDA profile described below; [contract/evidence](../architecture/native-environments.md) |
+| `npm run test:environment-chain` | Focused real-Pi/native Python Graph acceptance for default lazy discovery with no client policy: a parallel branch plus serial create/verify/report nodes share one `--without-pip` private venv, downstream nodes use the Runtime-bound `python` entry, ordinary reports publish, and host/new-Run isolation is checked from backend records. Deterministic localhost model; Python 3.11+/Git/Bash required. Fast companion to the long `test:environment` profile |
 | `npm run test:native` | Path adaptation plus native launcher/platform filesystem tests; actual pinned Pi and host tools |
 | `npm run test:planner-bash` | Shared macOS/Windows/Linux Planner contract: pinned Pi's unmodified Bash, direct source writes, absolute/Unicode/space paths, pipelines, nested shells, errors and timeouts |
 | `npm run test:hardening` | Production static-file path traversal, Windows drive/UNC/alternate-stream paths, linked web roots/children, and linked workspace cleanup |
@@ -32,6 +33,13 @@ npm test
 | `npm run test:concurrent` | Fixture HTTP multi-Run regression; requires `/bin/sh`, skips on Windows |
 | `npm run test:conversation-acceptance` | Legacy-history copies, log migration, browser/HTTP/process stress; see prerequisites below |
 | `python3 -m unittest discover -s benchmark -p 'test_*.py'` | Harbor adapter tests; real import-path interface test needs a separate Harbor installation |
+
+Focused API-responsiveness checks: [Rust lock/ownership tests](../../backend/src/service_responsiveness_tests.rs)
+(`--lib service_responsiveness` with the fixture feature),
+[request deadline tests](../../scripts/request-timeout.test.ts), and
+[real-App browser tests](../../scripts/bootstrap-settings-ui.test.mjs). The browser
+suite deliberately stalls transport/response bodies and uses a controlled clock;
+it does not prove the exact cause of a past production stall without its trace.
 
 Local deterministic model responses exercise production integration without paid API calls. They are not a real-model benchmark. Similarly, fixture engines cannot establish real launcher permissions or shell compatibility.
 

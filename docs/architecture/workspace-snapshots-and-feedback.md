@@ -62,7 +62,7 @@ identity or a security sandbox.
 | Linear A → B | B starts from A's committed result | Reuse/hand off A's directory when possible |
 | Feedback B → A | A receives B's committed result and normal Git ancestry | Reuse B's directory after ownership, generation, budget and drain checks |
 | Fan-out | Each branch has a distinct Git working tree and result history | One branch may take the parent slot; other branches get independent slots |
-| Fan-in | Git merges all parent commits; conflicts include formerly ignored paths and `.gitignore` | The selected parent directory is used for the merge; other slots are retired |
+| Fan-in | Git merges all parent commits; conflicts include formerly ignored paths and `.gitignore` | The selected parent directory is used for the merge; other slots are retired. Incompatible parent E/L dispatch a composition Merger that selects or builds a verified private environment instead of merging environment directories |
 
 The native copy primitive remains available for creating a new physical slot
 and for files that are intentionally outside the project Git channel. It uses

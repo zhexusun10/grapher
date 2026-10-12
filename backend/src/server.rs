@@ -203,37 +203,85 @@ fn service_for_run(
     run_id: &str,
     create: bool,
 ) -> Result<Arc<Service>, String> {
-    let runtime = primary.runtime.lock().map_err(|e| e.to_string())?;
-    if runtime.state.run_id == run_id {
-        return Ok(primary.clone());
-    }
-    let root = runtime.root.clone();
-    let registry = RUN_SERVICES.get_or_init(Default::default);
-    let mut registry = registry.lock().map_err(|e| e.to_string())?;
-    let runs = registry.entry(root.clone()).or_default();
-    runs.retain(|_, weak| weak.strong_count() > 0);
-    if let Some(service) = runs.get(run_id).and_then(Weak::upgrade) {
-        return Ok(cache_service(&root, run_id, service));
-    }
-    // Planning persists the provisional ID before publishing it to clients.
-    // Other callers can still replace a Run in the same service, so resolve
-    // its current identity rather than relying only on the original map key.
-    if let Some(service) = runs.values().filter_map(Weak::upgrade).find(|service| {
-        service
-            .runtime
-            .lock()
-            .is_ok_and(|runtime| runtime.state.run_id == run_id)
-    }) {
-        runs.insert(run_id.to_owned(), Arc::downgrade(&service));
-        return Ok(cache_service(&root, run_id, service));
-    }
-    let exists = runtime.store.contains_run(run_id)?;
+    let (root, exists, open_run) = {
+        let runtime = primary.runtime.lock().map_err(|e| e.to_string())?;
+        if runtime.state.run_id == run_id {
+            return Ok(primary.clone());
+        }
+        (
+            runtime.root.clone(),
+            runtime.store.contains_run(run_id)?,
+            runtime.run_opener(),
+        )
+    };
     if !create && !exists {
         return Err("Run not found".into());
     }
-    // Creating a provisional planner is explicit; loading an unknown durable
-    // run must never silently create an empty snapshot.
-    let mut child_runtime = runtime.open_run(if exists { run_id } else { "" })?;
+    // Serialize construction of this identity only. Never hold the primary or
+    // registry mutex while waiting on another Run or replaying its database.
+    type LookupLocks = std::collections::HashMap<(PathBuf, String), Weak<Mutex<()>>>;
+    static LOOKUP_LOCKS: OnceLock<Mutex<LookupLocks>> = OnceLock::new();
+    let lookup = {
+        let mut locks = LOOKUP_LOCKS
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|e| e.to_string())?;
+        locks.retain(|_, weak| weak.strong_count() > 0);
+        let key = (root.clone(), run_id.to_owned());
+        let lock = locks
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| Arc::new(Mutex::new(())));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    };
+    let _lookup = lookup.lock().map_err(|e| e.to_string())?;
+    let (cached, candidates) = {
+        let mut registry = RUN_SERVICES
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let runs = registry.entry(root.clone()).or_default();
+        runs.retain(|_, weak| weak.strong_count() > 0);
+        (
+            runs.get(run_id).and_then(Weak::upgrade),
+            runs.values().filter_map(Weak::upgrade).collect::<Vec<_>>(),
+        )
+    };
+    if let Some(service) = cached {
+        return Ok(cache_service(&root, run_id, service));
+    }
+    // Planning persists identities before publishing them. A new provisional
+    // ID cannot alias an existing service, so it need not inspect busy Runs.
+    if exists {
+        let mut busy_alias = false;
+        for service in candidates {
+            let matches = match service.runtime.try_lock() {
+                Ok(runtime) => runtime.state.run_id == run_id,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    busy_alias = true;
+                    false
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+            if matches {
+                RUN_SERVICES
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .entry(root.clone())
+                    .or_default()
+                    .insert(run_id.to_owned(), Arc::downgrade(&service));
+                return Ok(cache_service(&root, run_id, service));
+            }
+        }
+        // Do not create a second writer if an old alias cannot yet be checked.
+        if busy_alias {
+            return Err("Run lookup is busy; retry after the current workspace operation".into());
+        }
+    }
+    let mut child_runtime = open_run(if exists { run_id } else { "" })?;
     if !exists {
         child_runtime.state.run_id = run_id.to_owned();
     }
@@ -244,7 +292,14 @@ fn service_for_run(
         planning: AtomicBool::new(false),
         extension: primary.extension.clone(),
     });
-    runs.insert(run_id.to_owned(), Arc::downgrade(&child));
+    RUN_SERVICES
+        .get()
+        .unwrap()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .entry(root.clone())
+        .or_default()
+        .insert(run_id.to_owned(), Arc::downgrade(&child));
     Ok(cache_service(&root, run_id, child))
 }
 
@@ -308,17 +363,20 @@ const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.
 const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
 
 #[cfg(test)]
-#[path = "prompt_tests.rs"]
-mod prompt_tests;
+#[path = "planning_lifecycle_tests.rs"]
+mod planning_lifecycle_tests;
 #[cfg(test)]
 #[path = "planning_repository_tests.rs"]
 mod planning_repository_tests;
 #[cfg(test)]
+#[path = "prompt_tests.rs"]
+mod prompt_tests;
+#[cfg(test)]
 #[path = "service_cache_tests.rs"]
 mod service_cache_tests;
 #[cfg(test)]
-#[path = "planning_lifecycle_tests.rs"]
-mod planning_lifecycle_tests;
+#[path = "service_responsiveness_tests.rs"]
+mod service_responsiveness_tests;
 #[cfg(test)]
 #[path = "startup_prewarm_tests.rs"]
 mod startup_prewarm_tests;
@@ -350,6 +408,14 @@ fn load_env_file() {
 }
 
 fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String> {
+    bootstrap_projection(service, metadata, true)
+}
+
+fn bootstrap_projection(
+    service: &Arc<Service>,
+    metadata: bool,
+    discover_repository: bool,
+) -> Result<Bootstrap, String> {
     load_env_file();
     let active_config = if service.planning.load(Ordering::SeqCst) {
         let active = list_plannings(service, None)?
@@ -375,12 +441,29 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
     } else {
         None
     };
-    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    let (root, snapshot, runs, event_config) = {
+        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        let snapshot = if metadata {
+            snapshot_metadata(&runtime.state)?
+        } else {
+            serde_json::to_value(&runtime.state).map_err(|e| e.to_string())?
+        };
+        (
+            runtime.root.clone(),
+            snapshot,
+            runtime.store.runs()?,
+            runtime.state.config.clone(),
+        )
+    };
     #[cfg(feature = "fixture")]
     let entrypoint = crate::native::installation_root().join("engine/entrypoint.mjs");
-    let detected_repo = crate::workspace::detect(None).ok().flatten();
+    // Repository status can touch an arbitrarily large/native working tree.
+    // It must not hold the primary Run lock or be part of saving model defaults.
+    let detected_repo = discover_repository
+        .then(|| crate::workspace::detect(None).ok().flatten())
+        .flatten();
     let saved_config_on_disk = {
-        let path = runtime.root.join("config.json");
+        let path = root.join("config.json");
         if let Ok(bytes) = fs::read(&path) {
             serde_json::from_slice::<Config>(&bytes).ok()
         } else {
@@ -391,7 +474,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
     let mut config = saved_config_on_disk
         .or(active_config)
         .or_else(|| {
-            let mut cfg = runtime.state.config.clone()?;
+            let mut cfg = event_config?;
             if !cfg.model.is_empty() && !cfg.model.contains('/') {
                 cfg.model = String::new();
             }
@@ -425,7 +508,7 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
             config.repository = repo.path.clone();
         }
     }
-    let repository_info = if !config.repository.is_empty() {
+    let repository_info = if discover_repository && !config.repository.is_empty() {
         if let Some(ref repo) = detected_repo {
             if repo.path == config.repository {
                 Some(repo.clone())
@@ -482,14 +565,10 @@ fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String
     }
 
     Ok(Bootstrap {
-        snapshot: if metadata {
-            snapshot_metadata(&runtime.state)?
-        } else {
-            serde_json::to_value(&runtime.state).map_err(|e| e.to_string())?
-        },
+        snapshot,
         config,
-        runs: runtime.store.runs()?,
-        data_path: runtime.root.to_string_lossy().into(),
+        runs,
+        data_path: root.to_string_lossy().into(),
         repository_info,
         effective_role_models,
         env_overrides,
@@ -554,7 +633,16 @@ fn save_graph(
     Ok(runtime.state.clone())
 }
 
-fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
+#[cfg(test)]
+fn save_config(config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
+    save_config_projection(config, service, false)
+}
+
+fn save_config_projection(
+    mut config: Config,
+    service: &Arc<Service>,
+    metadata: bool,
+) -> Result<Bootstrap, String> {
     config.environment = None; // Native admission is Runtime-owned, never a UI default.
     config.validate_model_settings()?;
     config.max_feedback = 3;
@@ -568,7 +656,7 @@ fn save_config(mut config: Config, service: &Arc<Service>) -> Result<Bootstrap, 
         crate::provider_auth::warm();
         crate::engine::warm_planning_engines(config);
     }
-    bootstrap(service, false)
+    bootstrap_projection(service, metadata, false)
 }
 
 pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetrics {
@@ -3583,7 +3671,11 @@ pub fn dispatch(
             argument(&body, "runId")?,
             service,
         )?),
-        "save_config" => to_value(save_config(argument(&body, "config")?, service)?),
+        "save_config" => to_value(save_config_projection(
+            argument(&body, "config")?,
+            service,
+            metadata,
+        )?),
         "plan_goal" => to_value(plan_goal(
             argument(&body, "goal")?,
             argument(&body, "config")?,

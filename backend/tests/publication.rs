@@ -222,9 +222,10 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         };
         let session = runtime_root.join("mergers").join(&execution.id);
         assert!(session.join("result.json").exists());
-        assert!(fs::read_to_string(session.join("system-prompt.md"))
-            .unwrap()
-            .starts_with("User query:\nCombine results"));
+        let prompt = fs::read_to_string(session.join("system-prompt.md")).unwrap();
+        assert!(prompt.starts_with("The user query below is background context"));
+        assert!(prompt.contains("\n\nUser query:\nCombine results\n\n"));
+        assert!(prompt.contains("Your current task is conflict repair"));
         assert!(!source.join(".git").exists());
         assert!(!source.join("mergers").exists());
         assert_eq!(

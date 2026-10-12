@@ -45,8 +45,11 @@ writes, Rust records `EnvironmentPolicyResolved` with the decision and reason:
   is a refusal guard bounded to 50,000 source directories, not an adoption heuristic.
 - Bound environments use fixed physical layout; unbound views retain ordinary
   parallel allocation/copying. Fan-in accepts identical E/L or a provable descendant
-  with unchanged L, never arbitrary authority or environment-directory merging.
-  Native probes do not constitute a complete system-library/compiler/driver/root
+  with unchanged L. Incompatible independent E/L dispatch a composition Merger
+  with an environment-specific prompt instead of blocking: it selects one
+  verified input environment or builds a new private environment offline, and
+  Rust then binds and captures the result. Environment directories are never
+  merged. Native probes do not constitute a complete system-library/compiler/driver/root
   snapshot. Unsupported tools or requirement forms fail explicitly when used.
 
 `environmentPolicy` is present in full/metadata projections and checkpoints.
@@ -116,8 +119,17 @@ are honored only under their recorded compatibility contract; automatic
 admission never makes that assertion. Independent roots initialize independently.
 
 Fan-in accepts identical E/L or, for automatic policies, a provable descendant
-with unchanged L. Incompatible independent E/L block without a user-choice
-prompt and are never directory-merged. Legacy recorded authorities remain
+with unchanged L. Incompatible independent E/L dispatch a node-composition
+Merger with the environment-reconciliation prompt: it may select an existing
+input environment that satisfies every branch's constraints and validation, or
+build one new private environment from a matching lock file plus offline cache,
+verify the interpreter/dependencies/health checks, and leave exactly one usable
+environment. The two venv/Conda file trees are never directory-merged, packages
+are never installed over the network, and the host Python is never a fallback.
+Runtime then discovers, verifies and captures the observed result as the
+downstream input; a Merger that leaves no verified binding is refused. When the
+same composition also has a Git conflict, one Merger receives the concatenated
+Git and environment prompt segments. Legacy recorded authorities remain
 replayable. Arbitrary `activate`/`export` alone do not change L. A uniquely observed and
 verified business-created/used private environment can establish the formerly
 empty binding; creating a second independent candidate is ambiguity, not an
@@ -196,16 +208,19 @@ Results have **no implicit execution timeout**. Internal policies may set
 `maxOutputBytes` (4–256 MiB). Output is bounded, not live streamed. Native probes
 and computation proofs retain bounded time/drain checks.
 
-Planner/Serial remain source-native. **Merger still does not use managed L**;
-managed ML commands in that role are not accepted. Process groups/Job Objects
+Planner/Serial remain source-native. A Git-conflict Merger keeps its plain
+workspace shell; an environment-reconciliation Merger runs under managed L so a
+selected/built private environment is observable and capturable. Managed ML
+commands in a Git-only Merger role are not accepted. Process groups/Job Objects
 cover defined descendants, not arbitrary external services or universally
 detached writers.
 
 ## Capabilities not implemented or accepted
 
 - Complete dynamic-scope rollback outside the initial ownership roots.
-- Complete automatic package/toolchain, resource/device policy synthesis and
-  automatic reconciliation of incompatible independent fan-in environments.
+- Complete automatic package/toolchain and resource/device policy synthesis;
+  automatic fan-in reconciliation is limited to the documented Merger flow and
+  does not install packages over the network.
 - Namespace-backed fixed logical paths / transparent cross-slot migration.
 - Shared working layers, system snapshots and extended snapshot metadata.
 - Run/host-wide and Linux/macOS aggregate quotas, disk quotas and bounded GC.

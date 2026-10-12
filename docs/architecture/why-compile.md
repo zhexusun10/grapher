@@ -92,7 +92,8 @@ instead of maintaining a second selection checklist here.
 ## Design philosophy
 
 Models classify, plan and implement; deterministic host code validates, schedules
-and publishes. The Merger is invoked for actual Git conflicts, not every delivery.
+and publishes. The Merger is invoked for actual Git conflicts or independent
+fan-in environments with no provable automatic selection, not every delivery.
 This separation makes control flow inspectable while retaining model flexibility
 inside each task.
 

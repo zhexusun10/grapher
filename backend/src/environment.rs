@@ -662,6 +662,20 @@ impl Environments {
         for cache in &self.config.caches {
             fs::create_dir_all(path.join(cache)).map_err(|e| e.to_string())?;
         }
+        self.finalize_input(path, selected, generation, head, resources)
+    }
+
+    /// Seal the current workspace view as this execution's input composite.
+    /// Shared by ordinary preparation and composition-Merger reconciliation; the
+    /// caller has already materialized or reconciled the view it is capturing.
+    fn finalize_input(
+        &self,
+        path: &Path,
+        selected: &CompositeResult,
+        generation: &str,
+        head: &str,
+        resources: Vec<String>,
+    ) -> Result<CompositeResult, String> {
         let launch = self.configured_launch(path, &selected.launch_ref)?;
         if self.config.discovery {
             crate::environment_discovery::validate_launch(path, &launch)?;
@@ -683,12 +697,85 @@ impl Environments {
             environment_ref,
             launch_ref,
             resource_refs: resources,
-            layout: Some(layout),
+            layout: Some(workspace::normalize_workspace_display_path(path)),
             generation: generation.into(),
             selected_from: selected.selected_from.clone(),
         };
         self.record(generation, "before", &input)?;
         Ok(input)
+    }
+
+    /// Persist the base generation a composition Merger runs under before its
+    /// managed L is bound, mirroring `prepare`'s pre-execution evidence.
+    pub(crate) fn record_before(
+        &self,
+        execution: &str,
+        code: &str,
+        input: &CompositeResult,
+    ) -> Result<(), String> {
+        let input = CompositeResult {
+            generation: execution.into(),
+            code_ref: code.into(),
+            ..input.clone()
+        };
+        self.record(execution, "before", &input)
+    }
+
+    /// Bind and capture the environment a composition Merger selected or built
+    /// in an already-composed workspace. Discovery reads the Merger's own
+    /// observation receipts; trying every Merger session in order covers
+    /// multi-parent conflicts where more than one Merger invocation ran.
+    /// No directory is merged and no launch is adopted without verification.
+    pub(crate) fn capture_reconciled(
+        &self,
+        path: &Path,
+        base: &CompositeResult,
+        generation: &str,
+        head: &str,
+        resources: Vec<String>,
+        selected_from: &[String],
+        merger_sessions: &[(String, std::path::PathBuf)],
+    ) -> Result<CompositeResult, String> {
+        self.validate_result_metadata(base)?;
+        if self.baseline()? != base.domain {
+            return Err("Native baseline/domain changed; refusing unsafe environment reconciliation".into());
+        }
+        self.config.check_tracked(path)?;
+        if self.requires_fixed_layout(&base.launch_ref)?
+            && base.layout.as_ref().is_some_and(|original| {
+                *original != workspace::normalize_workspace_display_path(path)
+            })
+        {
+            return Err("Workspace composition blocked: fixed native environment cannot change physical layout; namespace/relocatable capability required".into());
+        }
+        let mut last = None;
+        for (merger_generation, session) in merger_sessions {
+            let mut observed = base.clone();
+            observed.generation = merger_generation.clone();
+            match self.discover(path, &observed, session) {
+                Ok(discovered) => {
+                    // A Merger that claims success without selecting or
+                    // building a verified environment must not silently fall
+                    // back to the unbound bootstrap for the downstream node.
+                    if self.config.discovery
+                        && self.load_launch(&discovered.launch_ref)?.environment.is_none()
+                    {
+                        last = Some("Environment Merger did not select or build a verified private environment; refusing an unbound composition".into());
+                        continue;
+                    }
+                    let mut input =
+                        self.finalize_input(path, &discovered, generation, head, resources.clone())?;
+                    if !selected_from.is_empty() {
+                        input.selected_from = selected_from.to_vec();
+                    }
+                    return Ok(input);
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            "Environment reconciliation has no Merger observation session".into()
+        }))
     }
 
     pub(crate) fn validate_history_scopes(
@@ -852,7 +939,7 @@ impl Environments {
             .env("GRAPHER_EXECUTION_KIND", "graph")
             .env("GRAPHER_WORKSPACE_ROOT", native::host_path(path))
             .env("GRAPHER_ORIGINAL_ROOT", native::host_path(repository));
-        bind_command(&mut command, data, run, &self.config, input, path, &session)?;
+        bind_command(&mut command, data, run, &self.config, input, path, &session, false)?;
         let output = controlled_output(command)?;
         let proof: serde_json::Value = serde_json::from_slice(&output)
             .map_err(|e| format!("Invalid native accelerator computation proof: {e}"))?;
@@ -954,6 +1041,15 @@ impl Environments {
                 .ok_or("Result has no launchable native layout")?,
         })
     }
+}
+
+/// True for the composition ambiguity a node-composition Merger can
+/// reconcile. Native domain mismatches and missing evidence stay hard
+/// failures; only independent inputs with no provable automatic selection
+/// are eligible.
+pub(crate) fn composition_conflict(error: &str) -> bool {
+    error.contains("incompatible E/L inputs")
+        || error.contains("ambiguous independent environments")
 }
 
 /// No inherited business environment; OS plumbing and explicitly authorized
@@ -1155,6 +1251,7 @@ pub(crate) fn bind_command(
     input: &CompositeResult,
     path: &Path,
     session: &Path,
+    reconciliation: bool,
 ) -> Result<(), String> {
     let store = Environments::new(data, run, config)?;
     // Called only after the owning worker prepares/validates the selected view.
@@ -1179,8 +1276,13 @@ pub(crate) fn bind_command(
     )?;
     clean_command(command, &launch, Some(&binding))?;
     if config.discovery {
-        let context =
-            crate::environment_discovery::context(path, &input.generation, &launch, session)?;
+        let context = crate::environment_discovery::context(
+            path,
+            &input.generation,
+            &launch,
+            session,
+            reconciliation,
+        )?;
         command
             .env("GRAPHER_ENVIRONMENT_DISCOVERY", native::host_path(&context))
             .env(

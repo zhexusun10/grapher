@@ -43,6 +43,10 @@ struct Context {
     workspace: String,
     generation: String,
     launch: LaunchConfig,
+    /// Set for a composition-Merger generation: package/conda mutations must
+    /// use the declared offline cache instead of reaching the network.
+    #[serde(default)]
+    reconciliation: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -118,6 +122,7 @@ pub(crate) fn context(
     generation: &str,
     launch: &LaunchConfig,
     session: &Path,
+    reconciliation: bool,
 ) -> Result<PathBuf, String> {
     Uuid::parse_str(generation).map_err(|_| "Invalid discovery writer generation")?;
     let file = session.join(format!("environment-observer-{generation}.json"));
@@ -126,6 +131,7 @@ pub(crate) fn context(
         workspace: text(&canonical(root)?),
         generation: generation.into(),
         launch: launch.clone(),
+        reconciliation,
     })
     .map_err(|e| e.to_string())?;
     if file.exists() {
@@ -457,6 +463,26 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
             .ok_or("Conda mutation has no owned active prefix")?;
         owned(&root, &active)?;
     }
+    // A composition Merger may build an environment only from the declared
+    // lock file and offline cache. Rust enforces this instead of trusting the
+    // prompt: a network-only install is refused before it mutates the view.
+    let network_mutation = pip_action == Some("install")
+        || conda_mutation
+        || name == "conda"
+            && (business.first().is_some_and(|arg| arg == "create")
+                || business.first().is_some_and(|arg| arg == "env")
+                    && business.get(1).is_some_and(|arg| arg == "create"));
+    if ctx.reconciliation
+        && network_mutation
+        && !business
+            .iter()
+            .any(|arg| arg == "--offline" || arg == "--no-index")
+    {
+        return Err(
+            "Environment reconciliation must install from the declared offline cache; network installation is not allowed"
+                .into(),
+        );
+    }
     // Keep the lexical executable path: resolving a Unix venv symlink and
     // launching its host target would silently lose sys.prefix/pyvenv.cfg.
     let mut command = Command::new(&requested);
@@ -777,6 +803,11 @@ pub(crate) fn resolve(
 mod tests {
     use super::*;
     fn setup() -> (tempfile::TempDir, PathBuf, PathBuf, LaunchConfig, String) {
+        setup_with_context(false)
+    }
+    fn setup_with_context(
+        reconciliation: bool,
+    ) -> (tempfile::TempDir, PathBuf, PathBuf, LaunchConfig, String) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("workspace");
         fs::create_dir(&root).unwrap();
@@ -788,8 +819,40 @@ mod tests {
         let launch = policy.launch.expanded(&root);
         let session = temp.path().join("session");
         let generation = Uuid::new_v4().to_string();
-        context(&root, &generation, &launch, &session).unwrap();
+        context(&root, &generation, &launch, &session, reconciliation).unwrap();
         (temp, root, session, launch, generation)
+    }
+
+    #[test]
+    fn reconciliation_requires_offline_install_arguments() {
+        let (_temp, root, session, launch, generation) = setup_with_context(true);
+        create(&root, &session, &launch, "business-env");
+        let file = text(&session.join(format!("environment-observer-{generation}.json")));
+        let entry = text(&interpreter(&root.join("business-env"), "venv"));
+        let error = tool(vec![
+            file.clone(),
+            "python".into(),
+            entry.clone(),
+            "-m".into(),
+            "pip".into(),
+            "install".into(),
+            "fake-no-network-package".into(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("offline cache"), "{error}");
+        // Explicit offline evidence passes this guard; the command itself may
+        // still fail because the package is not in the offline cache.
+        assert!(tool(vec![
+            file,
+            "python".into(),
+            entry,
+            "-m".into(),
+            "pip".into(),
+            "install".into(),
+            "--no-index".into(),
+            "fake-no-network-package".into(),
+        ])
+        .is_ok());
     }
     #[test]
     fn ownership_accepts_native_path_forms_and_trusted_workspace_root_aliases() {

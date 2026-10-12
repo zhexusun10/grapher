@@ -34,6 +34,9 @@ pub struct Job {
     pub feedback_source: bool,
     pub expected_source_head: String,
     pub environment_input: Option<crate::environment::CompositeResult>,
+    /// Fan-in inputs whose E/L composition had no provable automatic selection.
+    /// Preparation dispatches an environment Merger instead of blocking.
+    pub environment_conflict: Option<Vec<(String, crate::environment::CompositeResult)>>,
     pub previous_environment_launch: Option<String>,
     pub preserve_failed_environment: bool,
 }
@@ -147,7 +150,19 @@ impl Runtime {
     /// A run-scoped runtime has its own projection and scheduler but shares the
     /// database and the single-process data-directory lease with its parent.
     pub fn open_run(&self, run_id: &str) -> Result<Self, String> {
-        let store = Store::open(&self.root.join("events.sqlite"))?;
+        self.run_opener()(run_id)
+    }
+
+    /// Capture only the immutable path/lease, not the parent's projection lock.
+    /// HTTP routing can replay another Run after releasing the primary mutex.
+    pub(crate) fn run_opener(&self) -> impl FnOnce(&str) -> Result<Self, String> + Send + 'static {
+        let root = self.root.clone();
+        let lock = self._lock.clone();
+        move |run_id| Self::open_run_with_lease(root, lock, run_id)
+    }
+
+    fn open_run_with_lease(root: PathBuf, lock: Arc<RuntimeLock>, run_id: &str) -> Result<Self, String> {
+        let store = Store::open(&root.join("events.sqlite"))?;
         #[allow(unused_mut)]
         let mut state = if run_id.is_empty() {
             Snapshot::default()
@@ -165,8 +180,8 @@ impl Runtime {
             state,
             epoch: Uuid::new_v4(),
             revision: 0,
-            root: self.root.clone(),
-            _lock: self._lock.clone(),
+            root,
+            _lock: lock,
         };
         let interrupted: Vec<_> = runtime
             .state
@@ -1753,6 +1768,7 @@ impl Runtime {
                 .any(|edge| edge.feedback && edge.from == node.name);
             let history_edit = state.edit_execution_id.is_some();
             let mut environment_input = None;
+            let mut environment_conflict = None;
             let preserve_failed_environment = !history_edit
                 && resume.is_some_and(|previous| {
                     previous.status == "failed"
@@ -1808,7 +1824,21 @@ impl Runtime {
                                 ))
                             })
                             .collect::<Result<Vec<_>, String>>()?;
-                        store.select(&node.name, &inputs)?
+                        match store.select(&node.name, &inputs) {
+                            Ok(selected) => selected,
+                            Err(error)
+                                if crate::environment::composition_conflict(&error) =>
+                            {
+                                // Prepare on the frozen baseline; the Merger
+                                // reconciles against the conflicting inputs.
+                                environment_conflict = Some(inputs);
+                                self.state
+                                    .environment_baseline
+                                    .clone()
+                                    .ok_or("Environment was not explicitly initialized at approval")?
+                            }
+                            Err(error) => return Err(error),
+                        }
                     } else {
                         self.state
                             .environment_baseline
@@ -1879,6 +1909,7 @@ impl Runtime {
                 feedback_source,
                 expected_source_head: source_head,
                 environment_input,
+                environment_conflict,
                 previous_environment_launch,
                 preserve_failed_environment,
             });
@@ -2982,6 +3013,7 @@ pub(crate) fn perform_result(
                     &input,
                     path,
                     &session,
+                    false,
                 )?;
                 let timeout = policy
                     .resources
@@ -3176,6 +3208,11 @@ fn perform_with_merger_inner(
         })
         && workspace::repository_status(path, &exclusions).is_ok_and(|status| status.is_empty())
         && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err();
+    let environment_conflict = job.environment_conflict.as_deref();
+    // A Merger that already observed the workspace may hold the reconciliation
+    // receipts; Environment discovery later reads these sessions in order.
+    let mut merger_sessions: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut git_conflict = false;
     let before = if can_inherit {
         inherited_head.unwrap_or_else(|| job.execution.before.clone())
     } else {
@@ -3187,16 +3224,40 @@ fn perform_with_merger_inner(
             &job.expected_source_head,
             Some(&job.run_id),
             || {
-                let attempt = job.execution.attempt;
-                crate::graph_merge::resolve_with_merger_for_node(
+                git_conflict = true;
+                // A simultaneous Git and environment conflict is one Merger
+                // invocation with both prompt segments concatenated.
+                let conflicts = if environment_conflict.is_some() {
+                    crate::graph_merge::MergerConflicts::BOTH
+                } else {
+                    crate::graph_merge::MergerConflicts::GIT
+                };
+                let environment =
+                    match (environment_conflict, &environments, &selected_environment) {
+                        (Some(inputs), Some(store), Some(base)) => {
+                            Some(crate::graph_merge::EnvironmentMerger {
+                                store,
+                                base,
+                                inputs,
+                            })
+                        }
+                        _ => None,
+                    };
+                let session = crate::graph_merge::resolve_with_merger_for_node(
                     path,
                     &job.task,
                     &job.config,
                     root,
-                    attempt,
+                    job.execution.attempt,
                     &format!("merge:{}", job.execution.node),
+                    conflicts,
+                    environment.as_ref(),
                     &mut on_merger_event,
-                )
+                )?;
+                if let Some(session) = session {
+                    merger_sessions.push((session.id, session.directory));
+                }
+                Ok(())
             },
         )?
     };
@@ -3211,8 +3272,53 @@ fn perform_with_merger_inner(
         }
     }
     let environment_input = if let Some(store) = &environments {
-        Some(
-            store.prepare(
+        if let Some(inputs) = environment_conflict {
+            let base = selected_environment
+                .as_ref()
+                .ok_or("Missing environment reconciliation base")?;
+            if !git_conflict {
+                // Environment-only incompatibility: reconcile after the clean
+                // code composition, then bind the Merger's observed result.
+                let session = crate::graph_merge::dispatch_environment_merger(
+                    path,
+                    &job.task,
+                    &job.config,
+                    root,
+                    &format!("merge:{}", job.execution.node),
+                    job.execution.attempt,
+                    &crate::graph_merge::EnvironmentMerger {
+                        store,
+                        base,
+                        inputs,
+                    },
+                    &mut on_merger_event,
+                )
+                .map_err(|error| {
+                    format!(
+                        "Workspace composition blocked: environment reconciliation failed at {}: {error}",
+                        path.display()
+                    )
+                })?;
+                merger_sessions.push((session.id, session.directory));
+            }
+            let selected_from: Vec<String> =
+                inputs.iter().map(|(name, _)| name.clone()).collect();
+            Some(store.capture_reconciled(
+                path,
+                base,
+                &job.execution.id,
+                &before,
+                vec![],
+                &selected_from,
+                &merger_sessions,
+            ).map_err(|error| {
+                format!(
+                    "Workspace composition blocked: environment reconciliation failed at {}: {error}",
+                    path.display()
+                )
+            })?)
+        } else {
+            Some(store.prepare(
                 path,
                 selected_environment
                     .as_ref()
@@ -3222,8 +3328,8 @@ fn perform_with_merger_inner(
                 vec![],
                 job.preserve_failed_environment,
                 job.history_edit || !reused,
-            )?,
-        )
+            )?)
+        }
     } else {
         None
     };

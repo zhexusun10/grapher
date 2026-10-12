@@ -1,5 +1,6 @@
 import { t } from "../i18n";
 import { invalidateTranscriptCaches } from "./transcriptCache";
+import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
 import type { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, EnvironmentCapabilities, ResultDescriptor, RuntimeActivity } from "../types";
 
 const filesCache = new Map<string, string[]>();
@@ -13,7 +14,26 @@ const snapshotMutations = new Set([
   "load_run", "reset_workspace", "clear_history", "delete_run", "launch_result", "cancel_result",
 ]);
 
-async function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
+// Bound metadata/default-settings waits, not model streams, approvals, native
+// result execution or other long-running mutations. A client timeout never
+// claims that a server-side write was rolled back.
+const boundedCommands = new Set([
+  "bootstrap", "history", "snapshot", "snapshot_if_changed", "save_config",
+  "detect_repository", "repository_status", "get_planning", "list_plannings",
+  "get_planning_snapshot", "get_execution_output", "get_planning_output",
+  "provider_auth", "pi_extensions", "list_skills", "list_files", "environment_capabilities",
+]);
+const metadataTimeoutMs = 15_000;
+
+function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
+  if (!boundedCommands.has(command)) return requestBody<T>(command, body, signal);
+  const message = command === "save_config"
+    ? t("保存设置请求超时，请刷新确认是否已生效后再重试。")
+    : t("后端响应超时，请稍后重试。");
+  return withRequestTimeout(deadline => requestBody<T>(command, body, deadline), metadataTimeoutMs, message, signal);
+}
+
+async function requestBody<T>(command: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   // A post-action reader must not join a metadata request begun before the action.
   if (snapshotMutations.has(command)) historyRequests.clear();
   let response: Response;
@@ -45,6 +65,8 @@ export const runtimeService = {
       try {
         return await request<Bootstrap>("bootstrap");
       } catch (err) {
+        // Three stalled bootstrap attempts must not multiply the wait budget.
+        if (err instanceof RequestTimeoutError) throw err;
         retries--;
         if (retries === 0) throw err;
         await new Promise((resolve) => setTimeout(resolve, 600));

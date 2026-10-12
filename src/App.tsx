@@ -113,6 +113,10 @@ export default function App() {
   // Bootstrap repairs ownership before publishing the saved cards.
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>({});
   const [isSidebarReady, setIsSidebarReady] = useState(false);
+  const [isBootstrapReady, setIsBootstrapReady] = useState(false);
+  const [bootstrapLoading, setBootstrapLoading] = useState(true);
+  const [bootstrapError, setBootstrapError] = useState("");
+  const acceptedSettingsRef = useRef<Config | null>(null);
   const [runLabels, setRunLabels] = useState<Record<string, string>>(() => {
     try {
       const saved = localStorage.getItem("grapher_run_labels");
@@ -572,8 +576,12 @@ export default function App() {
 
   const load = useCallback(async () => {
     const scope = planningRecovery.begin();
-    const data = await runtimeService.bootstrap();
-    if (!planningRecovery.current(scope)) return;
+    const acceptedAtStart = acceptedSettingsRef.current;
+    const data = await runtimeService.bootstrap().catch(error => {
+      if (planningRecovery.current(scope)) throw error;
+      return null;
+    });
+    if (!data || !planningRecovery.current(scope)) return;
     if (data.envOverrides) setEnvOverrides(data.envOverrides);
 
     let storedProjects: ProjectItem[] | null = null;
@@ -667,11 +675,12 @@ export default function App() {
     // Bootstrap owns the persisted model. A browser cache from an older session
     // must not silently replace it or write it back to the backend.
     const nextConfigObj: Config = {
-      ...data.config,
+      ...((acceptedSettingsRef.current !== acceptedAtStart ? acceptedSettingsRef.current : null) ?? data.config),
       repository: activeRepo || (activeInfo ? activeInfo.path : ""),
       maxFeedback: 3,
     };
     setConfig(nextConfigObj);
+    setIsBootstrapReady(true);
     setDataPath(data.dataPath);
     try {
       localStorage.setItem("grapher_config", JSON.stringify(nextConfigObj));
@@ -685,32 +694,32 @@ export default function App() {
     // selected project (which may differ for concurrent conversations).
     const indexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
       .filter(id => !id.startsWith("pending-"));
-    // Reuse bootstrap's selected projection and keep ownership validation bounded.
+    // Publish each validated card instead of making every conversation wait for
+    // the slowest history. Unknown browser ownership stays hidden until checked.
+    let historyFailed = false;
     const snapshots = await mapWithConcurrency(indexedIds, 8, async id => {
       if (!planningRecovery.current(scope)) return null;
-      if (data.snapshot.runId === id) return data.snapshot;
-      return runtimeService.history(id).catch(() => null);
-    });
-    if (!planningRecovery.current(scope)) return;
-    const indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
-    const prefilledLabels: Record<string, string> = {};
-    for (let i = 0; i < indexedIds.length; i++) {
-      const snap = snapshots[i];
-      if (snap) {
-        prefilledLabels[indexedIds[i]] = snap.graph.originalGoal || "";
-        setBackendStatus(snap);
-      }
-    }
-    if (Object.keys(prefilledLabels).length > 0) {
+      const snapshot = data.snapshot.runId === id ? data.snapshot : await runtimeService.history(id).catch(() => {
+        historyFailed = true;
+        return null;
+      });
+      if (!planningRecovery.current(scope) || !snapshot || snapshot.runId !== id) return null;
+      setBackendStatus(snapshot);
       setRunLabels(prev => {
-        const next = { ...prev };
-        for (const [id, label] of Object.entries(prefilledLabels)) {
-          if (label || next[id] === undefined) next[id] = label;
-        }
+        const label = snapshot.graph.originalGoal || "";
+        const next = label || prev[id] === undefined ? { ...prev, [id]: label } : prev;
         try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
         return next;
       });
-    }
+      if (snapshot.config?.repository) {
+        setWorkspaceRuns(prev => bindRunToWorkspace(prev, id, snapshot.config!.repository));
+        setIsSidebarReady(true);
+      }
+      return snapshot;
+    });
+    if (!planningRecovery.current(scope)) return;
+    const indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
+    if (historyFailed) setBootstrapError(t("部分会话历史加载失败，请重试。"));
     setWorkspaceRuns(indexedRuns);
     try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
     setIsSidebarReady(true);
@@ -1023,13 +1032,10 @@ export default function App() {
 
   const handleSaveConfig = (draftConfig: Config) => run(async () => {
     const generation = foregroundGeneration.current;
-    let repoPath = config.repository.trim();
-    let info: RepositoryInfo | null = null;
-    if (repoPath) {
-      info = await runtimeService.detectRepository(repoPath);
-      if (!info) throw new Error(t("目标路径不存在或无法作为工作区加载。"));
-      repoPath = normalizeWorkspacePath(info.path);
-    }
+    // Settings change models/defaults, not the selected workspace. Rediscovery
+    // or Git status here can stall saving behind an unrelated large tree scan.
+    const repoPath = normalizeWorkspacePath(config.repository.trim());
+    const info = repoInfo && workspaceKey(repoInfo.path) === workspaceKey(repoPath) ? repoInfo : null;
     if (generation !== foregroundGeneration.current) return false;
     const nextConfig = { ...draftConfig, repository: repoPath, maxFeedback: 3 };
     try {
@@ -1039,8 +1045,11 @@ export default function App() {
     } catch (error) {
       throw new Error(t("保存设置失败：{0}", String(error)));
     }
-    // Commit only after the backend accepts the draft. Cancel/failure changes nothing.
+    // Commit the browser draft only after acceptance. A timeout does not prove
+    // the server write was rolled back; its error asks the user to verify first.
+    acceptedSettingsRef.current = nextConfig;
     setConfig(nextConfig);
+    setIsBootstrapReady(true);
     if (info) setRepoInfo({ ...info, path: repoPath });
     try {
       localStorage.setItem("grapher_config", JSON.stringify(nextConfig));
@@ -1096,6 +1105,10 @@ export default function App() {
   ) => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
     if (!targetGoal) return Promise.resolve();
+    if (!isBootstrapReady) {
+      setError(t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。"));
+      return Promise.resolve(false);
+    }
 
     if (isPlanning && !allowWhilePlanning) {
       setError(t("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。"));
@@ -2175,11 +2188,21 @@ export default function App() {
       executionId: execution?.id ?? message.executionId }, version.text, index);
   }, [handleEditMessageSubmit]);
 
-  useEffect(() => {
-    load()
-      .catch((err) => setError(String(err)))
-      .finally(() => setIsSidebarReady(true));
+  const initialize = useCallback(async () => {
+    setBootstrapLoading(true);
+    setBootstrapError("");
+    setError("");
+    try {
+      await load();
+    } catch (err) {
+      setBootstrapError(String(err));
+      setError(String(err));
+    } finally {
+      setIsSidebarReady(true);
+      setBootstrapLoading(false);
+    }
   }, [load]);
+  useEffect(() => { void initialize(); }, [initialize]);
 
   const hasCurrentPlan = hasCurrentPlanningRun(state, config.repository);
 
@@ -2314,7 +2337,7 @@ export default function App() {
     control: useStableCallback(control), save: useStableCallback(save),
     openSettings: useStableCallback(() => setModal("settings")), openEditor: useStableCallback(() => setModal("editor")),
     openApproval: useStableCallback(() => setModal("approval")), retryPublication: useStableCallback(() => control("retry_publication")),
-    plan: useStableCallback((val: string, options?: Parameters<typeof handlePlanGoal>[1]) => { void handlePlanGoal(val, options); }),
+    plan: useStableCallback(async (val: string, options?: Parameters<typeof handlePlanGoal>[1]) => (await handlePlanGoal(val, options)) !== false),
   };
   const publicationMergers = useMemo(() => (state.mergers ?? []).filter(merger => merger.node === "merger"), [state.mergers]);
   const handleLoadRun = useStableCallback((id: string) => {
@@ -2367,6 +2390,9 @@ export default function App() {
             runs={runs}
             runLabels={runLabels}
             isReady={isSidebarReady}
+            loadError={bootstrapError}
+            retrying={bootstrapLoading}
+            onRetryLoad={() => void initialize()}
             currentRunId={state.runId}
             runIndicators={runIndicators}
             onLoadRun={handleLoadRun}
@@ -2530,6 +2556,7 @@ export default function App() {
                 config={config}
                 dataPath={dataPath}
                 envOverrides={envOverrides}
+                error={error}
                 onSaveConfig={handleSaveConfig}
               />
             )}

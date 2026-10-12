@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Dispatch a node-composition Merger when fan-in parent environments are incompatible: it selects one verified input environment or builds a new private environment offline, then Runtime discovers and captures the result. A simultaneous Git and environment conflict uses one Merger with both prompt segments concatenated; environment directory trees are never merged and there is no network or host-Python fallback.
 - Show Mergers as selectable cards in the execution graph: node-composition Mergers beside their target and the publication Merger as a `publication merger` card below the terminal layer; steer a running merger, continue a settled publication merger's session, and keep settled node-composition cards read-only.
 
 ### Changed
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Default workspace/engine caches to the OS cache directory (Windows: `%LOCALAPPDATA%\Grapher`), preserving existing runtime histories and legacy execution paths.
 - Upgrade the pinned Pi engine from 1.0.1 to the official stable 1.0.3 release, refreshing the checksummed model catalog and reviewed dependency profile.
 - Add Azure provider/API, credential-migration and retired-model/API-change regression coverage; validate existing extensions, prepared hosts and Windows production execution against Pi 1.0.3.
+- Upgrade the bundled `pi-continuity` extension from 0.1.1 to 0.2.0, adding bounded polling for subscription usage limits without an advertised reset time.
 
 ### Breaking Changes
 

@@ -48,7 +48,7 @@ test("aborted requests retain their cancellation error instead of reporting a ba
   const original = globalThis.fetch;
   const controller = new AbortController();
   const cancellation = new DOMException("Cancelled", "AbortError");
-  controller.abort();
+  controller.abort(cancellation);
   try {
     globalThis.fetch = async () => { throw cancellation; };
     await assert.rejects(runtimeService.snapshot(controller.signal), error => error === cancellation);
