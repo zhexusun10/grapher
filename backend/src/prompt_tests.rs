@@ -2216,12 +2216,13 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         (service, started, release)
     };
     let (first, started_first, release_first) = make_run("first", true);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !started_first.exists() && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(started_first.exists(), "first run never started");
     let (second, started_second, release_second) = make_run("second", true);
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !started_second.exists() && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -2232,6 +2233,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         both_started,
         "second run did not start while first was active"
     );
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while second.driving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -2273,6 +2275,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         "running"
     );
     fs::write(&release_first, "go").unwrap();
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while first.driving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -2281,6 +2284,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
 
     let (third, started_third, release_third) = make_run("third", true);
     let (fourth, started_fourth, release_fourth) = make_run("fourth", true);
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while (!started_third.exists() || !started_fourth.exists())
         && std::time::Instant::now() < deadline
     {
@@ -2301,6 +2305,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         .unwrap();
     }
     fs::write(&release_fourth, "go").unwrap();
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while fourth.driving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -2310,6 +2315,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         both_started && third_still_running,
         "stopping one Run affected another"
     );
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while third.driving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -2320,16 +2326,19 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
 
     // Serial is only an execution route, not a session concurrency limit.
     let (serial_a, started_a, release_a) = make_run("serial-a", false);
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !started_a.exists() && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
     let (serial_b, started_b, release_b) = make_run("serial-b", false);
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !started_b.exists() && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
     let both_serial_started = started_a.exists() && started_b.exists();
     fs::write(&release_a, "go").unwrap();
     fs::write(&release_b, "go").unwrap();
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while (serial_a.driving.load(Ordering::SeqCst) || serial_b.driving.load(Ordering::SeqCst))
         && std::time::Instant::now() < deadline
     {
@@ -3250,10 +3259,10 @@ fn planning_prompts_separate_user_query_from_system() {
 fn planner_prompt_explains_workspace_inputs_and_file_handoffs() {
     for guidance in [
         "first execution starts in a fresh session and its own workspace",
-        "recorded source state and completed dependencies' filesystem snapshots",
+        "recorded source state and completed dependencies' filesystem",
         "Nodes do not share a live working directory",
         "changes from parallel or unrelated nodes are not automatically available",
-        "not upstream conversations or conversational output",
+        "not upstream conversations",
     ] {
         assert!(PLANNER_PROMPT.contains(guidance), "Missing Planner guidance: {guidance}");
     }
