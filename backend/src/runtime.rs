@@ -44,6 +44,9 @@ pub struct Job {
     pub environment_previous: Option<crate::environment::CompositeResult>,
     pub previous_environment_launch: Option<String>,
     pub preserve_failed_environment: bool,
+    /// Resume the existing Pi session through its public continuation boundary
+    /// rather than sending the original task again.
+    pub continuation: bool,
 }
 
 pub(crate) struct ResultJob {
@@ -1136,6 +1139,34 @@ impl Runtime {
         })
     }
 
+    fn queue_interrupted_recovery(&mut self) -> Result<(), String> {
+        let roots = self.state.interrupted_nodes();
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let continuation_nodes = roots.clone();
+
+        let mut recovery = BTreeSet::new();
+        for root in roots {
+            recovery.extend(downstream(&self.state.graph, &root));
+        }
+        // Do not disturb a completed branch. Only interrupted failures and the
+        // blocked/failed work that depends on them are eligible for retry.
+        recovery.retain(|name| {
+            self.state
+                .nodes
+                .get(name)
+                .is_some_and(|node| matches!(node.status.as_str(), "failed" | "blocked"))
+        });
+        if recovery.is_empty() {
+            return Ok(());
+        }
+        self.emit(EventKind::RecoveryQueued {
+            nodes: recovery.into_iter().collect(),
+            continuation_nodes,
+        })
+    }
+
     pub fn pause(&mut self, paused: bool) -> Result<(), String> {
         if matches!(
             self.state.phase.as_str(),
@@ -1151,6 +1182,7 @@ impl Runtime {
                 &self.root,
                 self.state.config.as_ref().ok_or("Missing config")?,
             )?;
+            self.queue_interrupted_recovery()?;
         }
         self.emit(EventKind::Paused { paused })
     }
@@ -1660,7 +1692,18 @@ impl Runtime {
                     .clone()
                     .unwrap_or_else(|| source_head.clone())
             };
-            let resume = if self.state.nodes[&node.name].human_instruction {
+            let continuation = self.state.nodes[&node.name].continuation;
+            let resume = if continuation {
+                self.state
+                    .executions
+                    .iter()
+                    .rev()
+                    .find(|execution| {
+                        execution.node == node.name
+                            && execution.status == "failed"
+                            && execution.completed_at.is_some()
+                    })
+            } else if self.state.nodes[&node.name].human_instruction {
                 let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
                 let previous = self
                     .state
@@ -1935,7 +1978,11 @@ impl Runtime {
                 metrics: None,
             };
             let state = &self.state.nodes[&node.name];
-            let task = if state.instruction.is_empty() {
+            let task = if continuation {
+                // The Pi continuation boundary restores the interrupted turn
+                // from the existing session; do not resend the original task.
+                String::new()
+            } else if state.instruction.is_empty() {
                 node.task.clone()
             } else if state.human_instruction {
                 // A follow-up is its own user request in a fresh execution,
@@ -2127,6 +2174,7 @@ impl Runtime {
                 environment_previous,
                 previous_environment_launch,
                 preserve_failed_environment,
+                continuation,
             });
         }
         if allow_publication
@@ -3649,6 +3697,7 @@ fn perform_with_merger_inner(
         &job.task,
         job.feedback_source,
         job.resume_execution_id.as_deref(),
+        job.continuation,
         job.images.as_deref(),
         root,
         on_output,

@@ -325,6 +325,10 @@ pub struct NodeState {
     pub edit_execution_id: Option<String>,
     #[serde(default)]
     pub human_instruction: bool,
+    /// Continue this node's Pi session directly after a host/process interruption.
+    /// This is not a human intervention and does not add a new task instruction.
+    #[serde(default)]
+    pub continuation: bool,
     /// Continue this node's conversation in the current terminal workspace
     /// without invalidating already-completed descendants.
     #[serde(default)]
@@ -358,6 +362,7 @@ impl Default for NodeState {
             instruction_images: None,
             edit_execution_id: None,
             human_instruction: false,
+            continuation: false,
             shared_workspace: false,
             baseline_head: None,
             feedback_workspace: None,
@@ -467,6 +472,15 @@ pub enum EventKind {
     },
     Paused {
         paused: bool,
+    },
+    /// Marks failed/blocked work caused by an interrupted execution as ready
+    /// for a new Execution Instance. This is deliberately separate from a
+    /// human invalidation: it keeps the recovery decision in the Runtime and
+    /// makes restart recovery append-only and replayable.
+    RecoveryQueued {
+        nodes: Vec<String>,
+        #[serde(default)]
+        continuation_nodes: Vec<String>,
     },
     StopRequested,
     Rejected,
@@ -797,6 +811,42 @@ pub fn parse_execution_metrics(
 }
 
 impl Snapshot {
+    pub fn interrupted_nodes(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .filter_map(|(name, node)| {
+                if node.status != "failed"
+                    || !node.error.as_deref().is_some_and(is_interrupted_error)
+                {
+                    return None;
+                }
+                let latest = self.executions.iter().rev().find(|execution| {
+                    execution.node == *name
+                        && !self.superseded_execution_ids.contains(&execution.id)
+                })?;
+                (latest.status == "failed").then(|| name.clone())
+            })
+            .collect()
+    }
+
+    /// Whether the saved projection contains node work that can be restarted
+    /// after a process/application interruption. This is a backend-owned
+    /// display/control hint, not a completion claim.
+    pub fn can_resume_interrupted(&self) -> bool {
+        self.approved
+            && !matches!(
+                self.phase.as_str(),
+                "completed" | "publishing" | "merging" | "publication_failed"
+            )
+            && !self
+                .executions
+                .iter()
+                .chain(self.mergers.iter())
+                .any(|execution| execution.status == "running")
+            && !self.nodes.values().any(|node| node.status == "running")
+            && !self.interrupted_nodes().is_empty()
+    }
+
     pub fn compute_run_metrics(&self) -> RunMetrics {
         let mut planning_duration = 0.0;
         let mut planning_messages = 0;
@@ -870,6 +920,18 @@ impl Snapshot {
             execution_usage: exec_usage,
         }
     }
+}
+
+fn is_interrupted_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    error.contains("用户已停止本次执行")
+        || lower.contains("application stopped during this execution")
+        || lower.contains("execution was interrupted")
+        || lower.contains("0xc000013a")
+        || lower.contains("exit code: 130")
+        || lower.contains("exit code: 143")
+        || lower.contains("signal: sigint")
+        || lower.contains("signal: sigterm")
 }
 
 pub fn now() -> u64 {
@@ -1016,6 +1078,28 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             state.phase = if *paused { "paused" } else { "running" }.into();
         }
+        EventKind::RecoveryQueued { nodes, continuation_nodes } => {
+            for name in nodes {
+                let Some(node) = state.nodes.get_mut(name) else {
+                    continue;
+                };
+                if !matches!(node.status.as_str(), "failed" | "blocked") {
+                    continue;
+                }
+                let continuation = continuation_nodes.contains(name)
+                    && node.error.as_deref().is_some_and(is_interrupted_error);
+                let has_previous_result = node.head.is_some()
+                    || state.executions.iter().any(|execution| {
+                        execution.node == *name
+                            && execution.status == "completed"
+                            && !state.superseded_execution_ids.contains(&execution.id)
+                    });
+                node.status = if has_previous_result { "dirty" } else { "waiting" }.into();
+                node.error = None;
+                node.baseline_head = None;
+                node.continuation = continuation;
+            }
+        }
         EventKind::Rejected => {
             state.phase = "rejected".into();
             state.approved = false;
@@ -1023,6 +1107,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::Started { execution } => {
             let node = state.nodes.get_mut(&execution.node).unwrap();
             node.edit_execution_id = None;
+            node.continuation = false;
             node.status = "running".into();
             node.error = None;
             state.executions.push(execution.clone());

@@ -635,6 +635,7 @@ fn messaging_a_failed_node_resumes_its_session_without_a_successful_result() {
             runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
             runtime.jobs().unwrap();
             assert_eq!(runtime.state.phase, "needs_attention");
+            assert!(!runtime.state.can_resume_interrupted());
             assert_eq!(runtime.state.nodes["task"].status, "failed");
             assert!(runtime.state.executions[0].after.is_none());
             if paused {
@@ -749,6 +750,56 @@ fn editing_an_earlier_serial_turn_branches_pi_and_supersedes_later_executions() 
     assert_eq!(edited.resume_execution_id.as_deref(), Some(first.execution.id.as_str()));
     assert_eq!(edited.execution.before, second.execution.before);
     assert!(!runtime.state.superseded_execution_ids.contains(&edited.execution.id));
+}
+
+#[test]
+fn interrupted_nodes_and_blocked_descendants_resume_from_the_topology_control() {
+    let graph = Graph {
+        original_goal: "interrupted graph".into(),
+        nodes: vec![
+            Node { name: "first".into(), task: "first".into() },
+            Node { name: "second".into(), task: "second".into() },
+            Node { name: "after".into(), task: "after".into() },
+        ],
+        edges: vec![
+            Edge { from: "first".into(), to: "after".into(), feedback: false },
+            Edge { from: "second".into(), to: "after".into(), feedback: false },
+        ],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 2);
+    let interrupted = jobs.iter().find(|job| job.execution.node == "first").unwrap().execution.clone();
+    let completed = jobs.iter().find(|job| job.execution.node == "second").unwrap().execution.clone();
+
+    runtime.finish(&interrupted, Err("Pi exited with exit code: 0xc000013a".into())).unwrap();
+    runtime.finish(&completed, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    runtime.jobs().unwrap(); // The failed root blocks its dependent and settles the Run.
+    assert_eq!(runtime.state.phase, "needs_attention");
+    assert_eq!(runtime.state.nodes["first"].status, "failed");
+    assert_eq!(runtime.state.nodes["after"].status, "blocked");
+    assert!(runtime.state.can_resume_interrupted());
+    assert_eq!(crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"], true);
+
+    runtime.pause(true).unwrap();
+    runtime.pause(false).unwrap();
+    assert_eq!(runtime.state.phase, "running");
+    assert_eq!(runtime.state.nodes["first"].status, "waiting");
+    assert_eq!(runtime.state.nodes["after"].status, "waiting");
+    assert!(runtime.state.events.iter().any(|event| matches!(
+        event.kind,
+        EventKind::RecoveryQueued { ref nodes, .. } if nodes.iter().any(|node| node == "first") && nodes.iter().any(|node| node == "after")
+    )));
+
+    let resumed = runtime.jobs().unwrap();
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].execution.node, "first");
+    assert!(resumed[0].continuation);
+    assert!(resumed[0].task.is_empty());
+    assert_eq!(resumed[0].resume_execution_id.as_deref(), Some(interrupted.id.as_str()));
+    assert_eq!(resumed[0].execution.session_id, interrupted.session_id);
+    assert_ne!(resumed[0].execution.id, interrupted.id);
 }
 
 #[test]

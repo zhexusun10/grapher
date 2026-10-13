@@ -102,6 +102,8 @@ export interface Snapshot {
   events: GraphEvent[];
   approved: boolean;
   paused: boolean;
+  /** Backend-authoritative hint that interrupted node work can be restarted. */
+  canResume?: boolean;
   stopRequested?: boolean;
   phase: string;
   base: string;

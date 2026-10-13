@@ -952,8 +952,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined);
   const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialWorking) : isPlanning;
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
-  // A poll can return the old draft while the Planner is revising it.
-  const graphPhase = isPlanning && !state.approved ? "planning" : state.phase;
+  // A poll can return the old draft while the Planner is revising it. The
+  // backend also exposes recoverable interruption state for Runs whose last
+  // node failure was caused by stopping the app/process rather than the task.
+  const canContinue = !publishing && !publicationFailed &&
+    (state.paused || state.canResume === true);
+  const graphPhase = isPlanning && !state.approved
+    ? "planning"
+    : canContinue ? "paused" : state.phase;
   const activityStatus = activityStatusText(activity);
   const isWorkspaceWritten = !isPlanning && routeType === "graph" && (
     state.publication?.status === "completed" ||
@@ -1910,10 +1916,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             type="button"
                             className="primary"
                             disabled={locked || publishing || publicationFailed || state.phase === "completed"}
-                            onClick={() => onControl(state.paused ? "resume" : "pause")}
+                            onClick={() => onControl(canContinue ? "resume" : "pause")}
                           >
-                            {state.paused ? <Play size={13} /> : <Pause size={13} />}
-                            {state.paused ? t("继续") : t("暂停")}
+                            {canContinue ? <Play size={13} /> : <Pause size={13} />}
+                            {canContinue ? t("继续") : t("暂停")}
                           </button>
                         </>
                       ) : null}

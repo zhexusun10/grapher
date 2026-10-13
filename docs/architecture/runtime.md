@@ -119,7 +119,17 @@ One backend process exclusively owns a runtime data directory through `runtime.l
 After interruption:
 
 - Old model sessions are not automatically resumed.
-- Interrupted executions become failed and the Run is paused.
+- Interrupted executions become failed; the Run retains a paused or recoverable
+  state.
+- If the failed execution is identified as an application/process interruption,
+  the saved projection exposes a recoverable Continue action. Continue queues
+  those interrupted nodes and their blocked dependency descendants, then starts
+  new Execution Instances. For an interrupted node, the new instance keeps the
+  same Pi session/workspace and uses the bundled `pi-continuity` public session
+  boundary to continue the unfinished turn; it does not resend the original
+  task or inject a synthetic “continue” user message. It does not mark a
+  provider failure as successful or silently retry an ordinary failed node;
+  ordinary failures still require an explicit node intervention.
 - Interrupted planning becomes failed, preserving available output.
 - Interrupted publication or its Merger becomes `publication_failed` for explicit retry.
 - An interrupted node-composition Merger is recorded as failed without entering the publication phase; inspect the node workspace and rerun or resolve it.

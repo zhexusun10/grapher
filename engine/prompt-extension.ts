@@ -8,8 +8,39 @@ import {
   type ExtensionAPI,
 } from './pi-compat.ts';
 
+const INTERRUPTED_CONTINUATION = '__grapher_continue_interrupted__';
+
 export default function (pi: ExtensionAPI) {
+  const continuation = process.env.GRAPHER_CONTINUE_INTERRUPTED === 'true';
   const cwd = process.cwd();
+  if (continuation) {
+    // The host sends a private RPC marker. Intercept it before Pi appends a
+    // user message, then start an empty custom turn. The context hook below
+    // removes the incomplete assistant/tool protocol; pi-continuity and Pi's
+    // public session boundary continue the existing task without a synthetic
+    // "continue" instruction.
+    pi.on('input', event => {
+      if (event.text !== INTERRUPTED_CONTINUATION) return { action: 'continue' };
+      pi.sendMessage({
+        customType: 'grapher-interrupted-continuation',
+        content: [],
+        display: false,
+        details: { reason: 'grapher-interrupted-node' },
+      }, { triggerTurn: true });
+      return { action: 'handled' };
+    });
+    pi.on('context', event => {
+      const lastAssistant = event.messages.findLastIndex(message =>
+        message.role === 'assistant' &&
+        ['toolUse', 'error', 'aborted', 'length'].includes(message.stopReason));
+      if (lastAssistant < 0) return;
+      return {
+        messages: event.messages.filter((_message, index) => index !== lastAssistant &&
+          !(_message.role === 'custom' && _message.customType === 'grapher-interrupted-continuation')),
+      };
+    });
+  }
+
   const project = process.env.GRAPHER_ORIGINAL_ROOT;
   const paths = process.env.GRAPHER_EXECUTION_KIND === 'graph' && project
     ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;

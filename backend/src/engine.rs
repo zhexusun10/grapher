@@ -1421,6 +1421,7 @@ pub fn execute(
     task: &str,
     feedback_source: bool,
     resume_execution_id: Option<&str>,
+    continuation: bool,
     images: Option<&[crate::model::ImageAttachment]>,
     root: &Path,
     on_output: impl FnMut(String),
@@ -1429,7 +1430,9 @@ pub fn execute(
     if config.engine == crate::fixture::ENGINE {
         return crate::fixture::execute(execution, task, feedback_source, on_output);
     }
-    let task = if feedback_source {
+    let task = if continuation {
+        "__grapher_continue_interrupted__".to_string()
+    } else if feedback_source {
         format!("{task}{FEEDBACK_INSTRUCTIONS}")
     } else {
         task.into()
@@ -1463,6 +1466,7 @@ pub fn execute(
                 ("GRAPHER_MODE", "node".into()),
                 ("GRAPHER_NODE_EXECUTION_ID", execution.id.clone()),
                 ("GRAPHER_NODE_NAME", execution.node.clone()),
+                ("GRAPHER_CONTINUE_INTERRUPTED", continuation.to_string()),
                 ("GRAPHER_ENVIRONMENT_DATA", root.to_string_lossy().into()),
             ],
             system_prompt: None,
@@ -1560,7 +1564,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         };
         let task = "Inspect the result";
         for feedback_source in [false, true] {
-            let captured = execute(&config, &execution, task, feedback_source, None, None, temp.path(), |_| {}).unwrap();
+            let captured = execute(&config, &execution, task, feedback_source, None, false, None, temp.path(), |_| {}).unwrap();
             if feedback_source {
                 assert_eq!(captured, format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker."));
             } else {
