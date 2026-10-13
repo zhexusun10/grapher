@@ -35,3 +35,6 @@ venv/
 __pycache__/
 *.pyc
 
+# Local Windows launcher scripts
+start.bat
+scripts/launch.ps1

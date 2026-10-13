@@ -41,6 +41,7 @@ thread_local! {
     static LIMITS: RefCell<NativeLimits> = const { RefCell::new(NativeLimits { memory_bytes: None, cpu_rate: None }) };
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Default)]
 struct NativeLimits {
     memory_bytes: Option<u64>,

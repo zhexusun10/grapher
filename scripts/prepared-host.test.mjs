@@ -82,7 +82,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const global = join(directory, 'global');
     const marker = join(directory, 'loaded.jsonl');
     for (const path of [source, other, agent, join(global, 'extensions')]) await mkdir(path, { recursive: true });
-    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH }) + '\\n'); }`);
+    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED }) + '\\n'); }`);
     await new Promise(done => server.listen(0, '127.0.0.1', done));
     const model = id => ({ id, reasoning: false, input: ['text', 'image'], contextWindow: 128000, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
@@ -92,7 +92,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     } } }));
     const env = { ...process.env, PI_CODING_AGENT_DIR: agent, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
       GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1', GRAPHER_ACTIVE_RUN_ID: 'outer-must-not-leak',
-      GRAPHER_GRAPH_PATH: join(other, 'outer-graph.json'), GRAPHER_NODE_NAME: 'outer-node-must-not-leak' };
+      GRAPHER_GRAPH_PATH: join(other, 'outer-graph.json'), GRAPHER_NODE_NAME: 'outer-node-must-not-leak',
+      GRAPHER_CONTINUE_INTERRUPTED: 'outer-continuation-must-not-leak' };
     const roles = ['partition', 'planner', 'node'];
     const started = performance.now();
     const prepared = roles.map(role => { const value = host(role, source, env); children.push(value); return value; });
@@ -125,7 +126,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: source,
         GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, GRAPHER_GRAPH_PATH: graph,
         GRAPHER_ACTIVE_RUN_ID: `run-${role}`, GRAPHER_NODE_EXECUTION_ID: `execution-${role}`,
-        ...(role === 'node' ? { GRAPHER_NODE_NAME: 'task' } : {}),
+        ...(role === 'node' ? { GRAPHER_NODE_NAME: 'task', GRAPHER_CONTINUE_INTERRUPTED: 'false' } : {}),
         GRAPHER_COMPILER_PATH: join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`),
         GRAPHER_TRUSTED_GIT: process.env.GRAPHER_TRUSTED_GIT ?? 'git',
         PI_MODEL: null, PI_SESSION_ID: null,
@@ -175,7 +176,9 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const loaded = (await readFile(marker, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
     assert.deepEqual(loaded.map(value => value.role).sort(), ['node', 'planner']);
     assert.equal(loaded.find(value => value.role === 'node').nodeName, 'task');
+    assert.equal(loaded.find(value => value.role === 'node').continuation, 'false');
     assert.equal(loaded.find(value => value.role === 'planner').nodeName, undefined, 'prepared roles must not inherit an outer node identity');
+    assert.equal(loaded.find(value => value.role === 'planner').continuation, undefined, 'prepared roles must not inherit an outer continuation flag');
     assert.ok(loaded.every(value => value.run === `run-${value.role}` && value.execution === `execution-${value.role}` && value.graph === join(directory, `graph-${value.role}.json`)));
     assert.deepEqual(await readdir(other), [], 'outer Run graph path must never be touched');
 

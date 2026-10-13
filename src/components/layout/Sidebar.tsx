@@ -167,10 +167,21 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
 
       <div className={`runs-list ${isReady ? "is-loaded" : ""}`}>
         {loadError && (
-          <div className="run-placeholder sidebar-load-error" role="alert" title={loadError}>
-            <span>{t("对话列表加载失败")}</span>
-            <small>{loadError}</small>
-            {onRetryLoad && <button type="button" className="text-button" disabled={retrying} onClick={onRetryLoad}>{t("重试")}</button>}
+          <div className="sidebar-load-error" role="alert" title={loadError}>
+            <div className="sidebar-load-error-header">
+              <span className="sidebar-load-error-title">{t("对话列表加载失败")}</span>
+              {onRetryLoad && (
+                <button
+                  type="button"
+                  className="sidebar-load-error-retry text-button"
+                  disabled={retrying}
+                  onClick={onRetryLoad}
+                >
+                  {t("重试")}
+                </button>
+              )}
+            </div>
+            <small className="sidebar-load-error-desc">{loadError}</small>
           </div>
         )}
         {!isReady ? (
