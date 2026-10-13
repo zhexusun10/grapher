@@ -158,7 +158,18 @@ test('refreshed catalog exposes reviewed API changes and does not resurrect reti
     ['openrouter', 'qwen/qwen3.8-27b:free'],
     ['openrouter', 'stealth/space-bunny-alpha'],
     ['vercel-ai-gateway', 'inclusionai/ling-3.0-flash-sante-free'],
+    // Retired while moving to the Pi 1.2.0 snapshot: the paid Ling and OpenCode
+    // Step models remain, the Vertex `*-latest` aliases moved to concrete ids.
+    ['openrouter', 'inclusionai/ling-3.0-flash-sante:free'],
+    ['opencode', 'fledge-alpha-free'],
+    ['google-vertex', 'gemini-flash-latest'],
+    ['google-vertex', 'gemini-flash-lite-latest'],
   ]) {
     assert.equal(runtime.getModel(provider, id), undefined, `${provider}/${id}: saved selections need replacement`);
   }
+  assert.equal(runtime.getModel('openrouter', 'inclusionai/ling-3.0-flash-sante')?.api, 'openai-completions');
+  assert.equal(runtime.getModel('opencode', 'step-5-preview-free')?.api, 'openai-completions');
+  // OpenRouter router models report a negative placeholder price; the snapshot must use 0, not -$1,000,000.
+  assert.deepEqual(runtime.getModel('openrouter', 'openrouter/auto')?.cost,
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 });

@@ -19,8 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accept user edits in the source directory during Graph execution: downstream handoff and explicit node updates no longer block on a dirty source, and publication commits pending user changes as its base before merging node results.
 - Share content-keyed Pi engine/dependency caches across projects and backend restarts, with reader leases and serialized preparation instead of per-backend copies.
 - Default workspace/engine caches to the OS cache directory (Windows: `%LOCALAPPDATA%\Grapher`), preserving existing runtime histories and legacy execution paths.
-- Upgrade the pinned Pi engine from 1.0.1 to the official stable 1.0.3 release, refreshing the checksummed model catalog and reviewed dependency profile.
-- Add Azure provider/API, credential-migration and retired-model/API-change regression coverage; validate existing extensions, prepared hosts and Windows production execution against Pi 1.0.3.
+- Upgrade the pinned Pi engine to the official stable 1.2.0 release (exact `v1.2.0` tag), refreshing the checksummed model catalog and reviewed dependency profile; the profile drops the removed experimental `client`, `protocol` and `server` workspaces and adds `@silvia-odwyer/photon` for Durable image handling.
+- Extend the Pi contracts with Azure provider/API, credential-migration, retired 1.2.0 catalog, OpenRouter router placeholder-price and `before_agent_start` user/custom event-union regressions; revalidate extensions, prepared hosts and Windows production execution against Pi 1.2.0.
 - Upgrade the bundled `pi-continuity` extension from 0.1.1 to 0.2.0, adding bounded polling for subscription usage limits without an advertised reset time.
 
 ### Fixed
@@ -33,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking Changes
 
 - Pi's Azure provider ID changes from `azure-openai-responses` to `azure`. Existing credentials, custom provider definitions and saved model references require [migration](docs/guides/providers.md#azure-configuration); the Responses API ID and `AZURE_OPENAI_*` environment variables are unchanged.
-- The refreshed snapshot retires three OpenRouter/Vercel offerings and switches two `opencode-go` models to the Anthropic API; see the [catalog compatibility findings](docs/development/pi-integration.md#compatibility-findings) before continuing saved selections.
+- The refreshed 1.2.0 snapshot additionally retires `openrouter/inclusionai/ling-3.0-flash-sante:free`, `opencode/fledge-alpha-free` and the `google-vertex` `gemini-flash-latest`/`gemini-flash-lite-latest` aliases, on top of the earlier OpenRouter/Vercel retirements, and switches two `opencode-go` models to the Anthropic API; see the [catalog compatibility findings](docs/development/pi-integration.md#compatibility-findings) before continuing saved selections. With an OpenRouter key, Pi now narrows its catalog to the models that key may use, so the Settings catalog and saved selections can change with the key.
+- Pi's `before_agent_start` event is now a union and also fires for extension-triggered runs, and the session counts as busy while a run starts; third-party extension handlers that assume a user prompt must check `event.messageType === "user"`, and `pi.sendUserMessage()` requires `deliverAs` in that window.
 
 ## [0.1.0-alpha.2] - 2026-10-05
 

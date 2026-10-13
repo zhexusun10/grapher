@@ -25,23 +25,24 @@ Pi is Grapher's only production execution-instance engine. Grapher owns graph co
 | [native.rs](../../backend/src/native.rs) | Native launchers, preflight, prepared runtime, and agent directory |
 | [provider_auth.rs](../../backend/src/provider_auth.rs) | Rust provider/auth IPC bridge |
 
-The current baseline is **Pi 1.1.0**, pinned to official upstream commit `1cedd32724abfcb0915f76cc61b6827e2c16dbad` (2026-10-08), as recorded in [pi-lock.json](../../engine/pi-lock.json).
+The current baseline is **Pi 1.2.0**, the exact upstream release tag `v1.2.0` at commit `06a466935536f8c9bcacb2d5efc0fc021be1bdff` (2026-10-13), as recorded in [pi-lock.json](../../engine/pi-lock.json).
 
-This checkout includes two commits after stable tag `v1.1.0` (released 2026-10-07), commit `abe508e1b89912adde45528136c3221eb69acdd7`. Its package version remains `1.1.0`; it is not the exact release-tag checkout or a floating `main` checkout. Later upstream commits require explicit review and adoption.
+This checkout is the release-tag commit, not a floating `main` checkout; upstream `main` already contained later post-release changes. Later upstream commits require explicit review and adoption.
 
 The lock manifest, submodule gitlink, and hydrated model data form one baseline. Runtime startup must not float to a different commit or silently use a global Pi. Catalog snapshots are not a separately maintained Grapher provider implementation.
 
 ### Current baseline checks
 
-Checks against the pinned commit `1cedd32724abfcb0915f76cc61b6827e2c16dbad`:
+Checks against the pinned commit `06a466935536f8c9bcacb2d5efc0fc021be1bdff`:
 
 | Check | Result |
 | --- | --- |
 | `npm run pi:verify` | Passed; pinned commit, clean upstream tree, lockfile and catalog checksums verified |
-| `npm run pi -- --version` | Reports `1.1.0` |
-| Release ancestry/count checks | `v1.1.0` commit is an ancestor of the pinned commit; two commits follow the release |
+| `npm run pi -- --version` | Reports `1.2.0` |
+| Release ancestry/count checks | The pinned commit is the exact `v1.2.0` release tag; no commits follow it |
+| `npm run pi:upgrade-check` | Passed on Windows x86_64 on 2026-10-13: verify/build, Pi contracts, frontend typecheck, Rust fixtures, extension smoke, native/prewarm and binding suites |
 
-These checks establish baseline identity, not full compatibility. Build, upgrade, provider/auth and native acceptance suites were not run as part of this verification. The loaded version of already-running backend/prewarmed agents and prepared runtime copies remains unverified; restart the backend after an upgrade to load the new baseline.
+These checks establish baseline identity and the local regression suites, not provider quality: real authentication/model flows and Linux/macOS native acceptance were not run. The loaded version of already-running backend/prewarmed agents and prepared runtime copies remains unverified; restart the backend after an upgrade to load the new baseline.
 
 ## Setup and verification
 
@@ -95,7 +96,11 @@ Grapher merges external global and dedicated MCP definitions **before** applying
 ## Compatibility findings
 
 - **Azure configuration:** the provider ID is `azure`; the Responses **API** ID is `azure-openai-responses`. Credentials, custom provider definitions and saved model selections must use the provider ID. See [Azure configuration](../guides/providers.md#azure-configuration).
-- **Pinned catalog:** `openrouter/qwen/qwen3.8-27b:free`, `openrouter/stealth/space-bunny-alpha`, and `vercel-ai-gateway/inclusionai/ling-3.0-flash-sante-free` are absent from the current snapshot; select an available replacement if configured. `opencode-go/qwen3.7-plus` and `opencode-go/qwen3.8-max` use `anthropic-messages`. Catalog/API assertions are defined in the [Pi contracts](../../scripts/pi-compat.test.ts); actual endpoint, tool and thinking behavior requires provider acceptance.
+- **Pinned catalog:** the snapshots refreshed for 1.1.0 and 1.2.0 retired `openrouter/qwen/qwen3.8-27b:free`, `openrouter/stealth/space-bunny-alpha`, `vercel-ai-gateway/inclusionai/ling-3.0-flash-sante-free`, `openrouter/inclusionai/ling-3.0-flash-sante:free` (the paid `inclusionai/ling-3.0-flash-sante` remains), `opencode/fledge-alpha-free` (`opencode/step-5-preview-free` remains), and the `google-vertex` `gemini-flash-latest`/`gemini-flash-lite-latest` aliases; select an available replacement if configured. `opencode-go/qwen3.7-plus` and `opencode-go/qwen3.8-max` use `anthropic-messages`. Catalog/API assertions are defined in the [Pi contracts](../../scripts/pi-compat.test.ts); actual endpoint, tool and thinking behavior requires provider acceptance.
+- **OpenRouter key-scoped catalog (1.2.0):** with an OpenRouter key, Pi lists only the chat models that key may use, with the key's context size, max output and prices, and saves that list for offline use. The Settings catalog and `available` flags therefore follow the key and can narrow or change without a Pi upgrade. OpenRouter's negative placeholder price for router models such as `openrouter/auto` is now `0`, not `-$1,000,000` per 1M tokens.
+- **`before_agent_start` union (1.2.0):** the event also fires for runs started by `pi.sendMessage(..., { triggerTurn: true })` while idle and is now a union on `messageType`. Grapher's adapter edits only `systemPromptOptions`, which exists on both variants, so the path addendum applies to user and custom runs; the host contract covers the custom variant. Third-party handlers that assume a user `prompt` must check `messageType === "user"`. A session also counts as busy while a run starts (including inside `before_agent_start`), so `pi.sendUserMessage()` requires `deliverAs` in that window; Grapher drives prompts over RPC, whose prompt/steer/follow-up behavior is unchanged.
+- **MCP reporting (1.2.0):** Pi no longer lists resources when connecting, so `pi mcp list --json` reports `resources: true` instead of counts, and MCP tool declarations type `structuredContent` from the server's schema or as unknown. Grapher's layered MCP config, namespace validation and `createMcpExtension` usage are unaffected; startup no longer waits for resource listings.
+- **Themes and removed packages (1.2.0):** user themes are schema-validated during startup, and the unreleased experimental `client`, `protocol` and `server` packages are gone. Grapher launches execution roles with `--no-themes`, uses Pi's public theme-independent APIs, and no longer includes those experimental workspaces in the reviewed dependency profile; only `src/experimental/source-resolver.ts` remains and is still the source loader Grapher imports.
 - **Saved state and extensions:** configuration and conversations are not automatically migrated after catalog/provider changes. Verify saved selections before resuming. Third-party extensions require their own compatibility review; a passing bundled-extension contract does not establish arbitrary extension compatibility.
 
 ## Updating pi-trim independently

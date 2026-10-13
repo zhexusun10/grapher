@@ -21,9 +21,6 @@ export function verifyBuildScripts(directory) {
     },
     durable: { build: 'tsc -p tsconfig.build.json' },
     agent: { build: 'tsc -p tsconfig.build.json' },
-    protocol: { build: 'tsc -p tsconfig.build.json' },
-    client: { build: 'tsc -p tsconfig.build.json' },
-    server: { build: 'tsc -p tsconfig.build.json' },
     'coding-agent': {
       build: 'npm run build:unbundled && node ../../scripts/build-coding-agent-bundle.mjs',
       'build:unbundled': 'tsc -p tsconfig.build.json && shx chmod +x dist/cli.js dist/rpc-entry.js && npm run copy-assets',

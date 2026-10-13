@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symli
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const corePackages = ['chord', 'tui', 'telemetry', 'codemode', 'mcp', 'ai', 'durable', 'agent', 'protocol', 'client', 'server', 'coding-agent'];
+export const corePackages = ['chord', 'tui', 'telemetry', 'codemode', 'mcp', 'ai', 'durable', 'agent', 'coding-agent'];
 const excludedPackages = new Set(['shx', 'shelljs', 'fast-glob', 'micromatch', 'braces', 'node-forge', '@earendil-works/gondolin']);
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
