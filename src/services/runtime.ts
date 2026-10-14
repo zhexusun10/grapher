@@ -300,4 +300,44 @@ export const runtimeService = {
       return skillsCache.get(key) || [];
     }
   },
+  writeWorkspaceFile: async (
+    file: File,
+    repository?: string,
+    context?: { runId?: string; node?: string }
+  ): Promise<{ name: string; path: string }> => {
+    const base64Data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const res = await request<{ name: string; path: string }>("write_workspace_file", {
+      repository,
+      filename: file.name,
+      content: base64Data,
+      runId: context?.runId,
+      node: context?.node,
+    });
+    const key = repository || "__default__";
+    filesCache.delete(key);
+    return res;
+  },
+  deleteWorkspaceFile: async (
+    filename: string,
+    repository?: string,
+    context?: { runId?: string; node?: string }
+  ): Promise<void> => {
+    try {
+      await request<{ success: boolean }>("delete_workspace_file", {
+        repository,
+        filename,
+        runId: context?.runId,
+        node: context?.node,
+      });
+      const key = repository || "__default__";
+      filesCache.delete(key);
+    } catch (err) {
+      console.warn("Failed to delete workspace file:", err);
+    }
+  },
 };

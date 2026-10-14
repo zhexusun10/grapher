@@ -129,6 +129,9 @@ export default function App() {
   const pendingRunLabelIdsRef = useRef(new Set<string>());
 
   const [recentlyAddedEdgeIds, setRecentlyAddedEdgeIds] = useState<Set<string>>(new Set());
+  // Newly created topology nodes keep a short-lived entrance class, mirroring
+  // the edge entrance animation while the Planner streams its tools.
+  const [recentlyAddedNodeNames, setRecentlyAddedNodeNames] = useState<Set<string>>(new Set());
   const pendingToolArgsRef = useRef<Map<string, any>>(new Map());
 
   const currentRepoPath = useMemo(() => workspaceKey(config.repository), [config.repository]);
@@ -176,7 +179,6 @@ export default function App() {
     (state.mergers ?? []).some(item => item.status === "running") ||
     Object.values(state.nodes).some(item => item.status === "running" || item.status === "dirty") ||
     state.resultExecution?.status === "running";
-  const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions);
 
   const [dataPath, setDataPath] = useState("");
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
@@ -271,7 +273,7 @@ export default function App() {
     });
   };
 
-  const removeProvisionalRunId = (provisionalId: string) => {
+  const removeProvisionalRunId = (provisionalId: string, failureSummary?: PlanningSummary) => {
     setWorkspaceRuns((prev) => {
       const updated: Record<string, string[]> = {};
       for (const [repo, list] of Object.entries(prev)) {
@@ -292,7 +294,20 @@ export default function App() {
       return copy;
     });
 
-    setState((prev) => (prev.runId === provisionalId ? { ...emptySnapshot } : prev));
+    // A failed foreground attempt keeps its conversation mounted so the error
+    // stays visible; only a detached (user-navigated-away) attempt resets home.
+    setState((prev) => (prev.runId === provisionalId
+      ? (failureSummary
+        ? {
+          ...prev,
+          runId: "",
+          planningId: "",
+          planType: failureSummary.planType === "graph" || failureSummary.planType === "serial" ? failureSummary.planType : prev.planType,
+          planning: failureSummary,
+          phase: "planning_failed",
+        }
+        : { ...emptySnapshot })
+      : prev));
     setPlannerStream(prev => prev.runId === provisionalId ? initialPlannerStream : prev);
     setSessionEntries(prev => prev.filter(msg => msg.runId !== provisionalId));
     messagesByRunRef.current.delete(provisionalId);
@@ -401,6 +416,10 @@ export default function App() {
   const transcriptRunId = state.runId || plannerStream.runId || recoveredPlanning?.runId || failedPlanning?.runId ||
     (visiblePlanningId ? `planning@${visiblePlanningId}` : "");
   useConversationTranscriptCache(transcriptRunId);
+  const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions,
+    // While a live Planner SSE stream owns this Run's draft topology, durable
+    // snapshot polls must not clobber the incrementally assembled graph.
+    isPlanning && plannerStream.runId && !plannerStream.runId.startsWith("pending-") ? plannerStream.runId : "");
 
   const applyForegroundSnapshot = (snapshot: Snapshot, generation: number) => {
     if (snapshot.runId && snapshot.config?.repository) {
@@ -1270,6 +1289,7 @@ export default function App() {
     return run(async () => {
       let abortController: AbortController | null = null;
       let routeConfirmed = false;
+      let failureSummary: PlanningSummary | undefined;
       try {
         await requireRepository(targetRepo);
         if (!planningRecovery.current(scope)) return;
@@ -1552,9 +1572,30 @@ export default function App() {
                 }
               }
             } else if (pEvent?.type === "message_end" && pEvent.message?.role === "assistant") {
+              // A failed model call is the only visible explanation for a stopped
+              // Planner turn; terminal SSE errors may never arrive (detached view).
+              const failureStopReason = pEvent.message?.stopReason;
+              const failureMessage = pEvent.message?.errorMessage;
               setPlannerStream(prev => {
-                const items = finalizeThinkingItems(prev.items,
+                let items = finalizeThinkingItems(prev.items,
                   Array.isArray(pEvent.message.content) ? pEvent.message.content : [], prev.plannerMessageStart);
+                if ((failureStopReason === "error" || failureStopReason === "aborted") && failureMessage) {
+                  const alreadyHas = items.some(i => (i.isError || i.status === "error") && i.content === failureMessage);
+                  if (!alreadyHas) {
+                    items = [
+                      ...closeRunningThinkingItem(items),
+                      {
+                        id: `planner_error_${Date.now()}`,
+                        type: "text",
+                        role: "assistant",
+                        content: failureMessage,
+                        isError: true,
+                        status: "error",
+                        timestamp: Date.now(),
+                      },
+                    ];
+                  }
+                }
                 return {
                   ...prev, items, plannerMessageStart: items.length,
                   plannerThinking: items.filter(item => item.type === "thinking" && item.content).map(item => item.content).join("\n\n"),
@@ -1604,6 +1645,11 @@ export default function App() {
               if (!isErr && !liveRevision) {
                 // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
                 if (pEvent.toolName === "node") {
+                  // 新建（非替换、非删除）的节点标记一个短入场动画窗口。
+                  const addedNodeNames = (Array.isArray(args.nodes) ? args.nodes : (args.name ? [args] : []))
+                    .filter((n: any) => n && n.name && !n.delete &&
+                      !state.graph.nodes.some((item) => item.name === n.name))
+                    .map((n: any) => n.name as string);
                   setState((prev) => {
                     let nextNodes = [...prev.graph.nodes];
                     let nextEdges = [...prev.graph.edges];
@@ -1649,6 +1695,16 @@ export default function App() {
                       },
                     };
                   });
+                  if (addedNodeNames.length > 0) {
+                    setRecentlyAddedNodeNames((prev) => new Set([...prev, ...addedNodeNames]));
+                    setTimeout(() => {
+                      setRecentlyAddedNodeNames((prev) => {
+                        const next = new Set(prev);
+                        for (const name of addedNodeNames) next.delete(name);
+                        return next;
+                      });
+                    }, 1200);
+                  }
                 } else if (pEvent.toolName === "edge") {
                   const rawEdgeList = Array.isArray(args.edges)
                     ? args.edges
@@ -1750,6 +1806,31 @@ export default function App() {
               });
             }
           } else if (event.type === "error") {
+            const errorMsg = event.error;
+            if (errorMsg) {
+              setPlannerStream((prev) => {
+                const closed = closeRunningThinkingItem(prev.items);
+                const alreadyHas = closed.some(
+                  (i) => (i.isError || i.status === "error") && i.content === errorMsg
+                );
+                if (alreadyHas) return prev;
+                return {
+                  ...prev,
+                  items: [
+                    ...closed,
+                    {
+                      id: `planner_error_${Date.now()}`,
+                      type: "text",
+                      role: "assistant",
+                      content: errorMsg,
+                      isError: true,
+                      status: "error",
+                      timestamp: Date.now(),
+                    },
+                  ],
+                };
+              });
+            }
             void planningRecovery.finish(scope, event.summary, event.planningId);
           } else if (event.type === "complete") {
             if (event.snapshot) {
@@ -1796,20 +1877,58 @@ export default function App() {
         if (!routeConfirmed && effectiveMode === "auto") setRouteType(deduceRouteType(state));
         return;
       }
-      setError(String(err?.message || err));
+      const errorMsg = String(err?.message || err);
+      setError(errorMsg);
       if (!routeConfirmed && effectiveMode === "auto") setRouteType(deduceRouteType(state));
+      // Keep the failed first-message conversation mounted: wiping the whole
+      // snapshot here remounts the landing view over the workspace (page flash)
+      // and hides the failure the user is looking at.
+      if (provisionalRunId && !startedRunId) {
+        failureSummary = err?.summary ?? {
+          planningId: "",
+          roles: {},
+          totalPlanningDuration: 0,
+          modelDuration: 0,
+          status: "failed",
+          error: errorMsg,
+          createdAt: Date.now(),
+          repository: targetRepo,
+          planType: effectiveMode === "graph" ? "graph" : undefined,
+          goal: targetGoal,
+          runId: "",
+        };
+      }
       void planningRecovery.finish(scope, err?.summary, err?.planningId);
-      setPlannerStream((prev) => ({
-        ...prev,
-        items: closeRunningThinkingItem(prev.items),
-        stage: "error",
-      }));
+      setPlannerStream((prev) => {
+        const closed = closeRunningThinkingItem(prev.items);
+        const alreadyHas = closed.some(
+          (i) => (i.isError || i.status === "error") && i.content === errorMsg
+        );
+        return {
+          ...prev,
+          items: alreadyHas
+            ? closed
+            : [
+                ...closed,
+                {
+                  id: `planner_error_${Date.now()}`,
+                  type: "text",
+                  role: "assistant",
+                  content: errorMsg,
+                  isError: true,
+                  status: "error",
+                  timestamp: Date.now(),
+                },
+              ],
+          stage: "error",
+        };
+      });
     } finally {
       if (abortController && planningAbortControllerRef.current === abortController) {
         planningAbortControllerRef.current = null;
       }
       if (provisionalRunId && !startedRunId) {
-        removeProvisionalRunId(provisionalRunId);
+        removeProvisionalRunId(provisionalRunId, failureSummary);
         if (planningRecovery.current(scope)) setGoal(targetGoal);
       }
       if (planningRecovery.current(scope)) setIsPlanning(false);
@@ -2535,12 +2654,14 @@ export default function App() {
     recentlyAddedEdgeIds,
     selectedMergerId,
     activities[state.runId] ?? [],
+    recentlyAddedNodeNames,
   );
 
   const isLandingView = !state.runId && state.graph.nodes.length === 0 &&
     !isPlanning &&
     !recoveredPlanning &&
-    !failedPlanning;
+    !failedPlanning &&
+    state.phase !== "planning_failed";
 
   const actions = {
     selectProject: useStableCallback(handleSelectProject), openProject: useStableCallback(handleOpenProject),
@@ -2702,7 +2823,7 @@ export default function App() {
                   transition={{ duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] }}
                 >
                   <PublicationPanel
-                    key={state.runId}
+                    key={state.runId.startsWith("pending-") ? "provisional" : state.runId}
                     runId={state.runId}
                     publication={state.publication}
                     mergers={publicationMergers}

@@ -3414,6 +3414,134 @@ fn list_files_and_list_skills_dispatch() {
 }
 
 #[test]
+fn write_and_delete_workspace_file_dispatch() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path().join("runtime");
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&root).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    // 1. 写入文件至工作区根目录（"hello world" -> "aGVsbG8gd29ybGQ="）
+    let write_res = dispatch(
+        &service,
+        "write_workspace_file",
+        serde_json::json!({
+            "repository": repo.to_string_lossy(),
+            "filename": "hello.txt",
+            "content": "aGVsbG8gd29ybGQ=",
+        }),
+    )
+    .unwrap();
+    assert_eq!(write_res["name"], "hello.txt");
+    assert_eq!(write_res["path"], "hello.txt");
+    assert_eq!(
+        fs::read_to_string(repo.join("hello.txt")).unwrap(),
+        "hello world"
+    );
+
+    // 2. 验证路径穿越被安全剥离，只写在工作区根目录
+    let traversal_res = dispatch(
+        &service,
+        "write_workspace_file",
+        serde_json::json!({
+            "repository": repo.to_string_lossy(),
+            "filename": "../../sub/evil.py",
+            "content": "cHJpbnQoIjEiKQ==",
+        }),
+    )
+    .unwrap();
+    assert_eq!(traversal_res["name"], "evil.py");
+    assert!(repo.join("evil.py").is_file());
+    assert!(!temp.path().join("evil.py").exists());
+
+    // 3. 删除文件
+    let del_res = dispatch(
+        &service,
+        "delete_workspace_file",
+        serde_json::json!({
+            "repository": repo.to_string_lossy(),
+            "filename": "hello.txt",
+        }),
+    )
+    .unwrap();
+    assert_eq!(del_res["success"], true);
+    assert!(!repo.join("hello.txt").exists());
+
+    // 4. 针对特定节点工作区（worktree）的定向写入与删除验证
+    let node_worktree = temp.path().join("worktrees/run-1/node-a");
+    fs::create_dir_all(&node_worktree).unwrap();
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        runtime.state.run_id = "run-1".to_string();
+        runtime.state.executions.push(Execution {
+            id: "exec-1".to_string(),
+            node: "node-a".to_string(),
+            revision: 1,
+            attempt: 1,
+            session_id: "sess-1".to_string(),
+            worktree: node_worktree.to_string_lossy().to_string(),
+            before: "HEAD".to_string(),
+            workspace_lineage: Default::default(),
+            after: None,
+            input: None,
+            result: None,
+            status: "running".to_string(),
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: 0,
+            completed_at: None,
+            metrics: None,
+        });
+    }
+
+    let node_write_res = dispatch(
+        &service,
+        "write_workspace_file",
+        serde_json::json!({
+            "repository": repo.to_string_lossy(),
+            "filename": "node_data.csv",
+            "content": "MSwyLDM=", // "1,2,3"
+            "runId": "run-1",
+            "node": "node-a",
+        }),
+    )
+    .unwrap();
+    assert_eq!(node_write_res["written_to_worktree"], true);
+    assert_eq!(
+        fs::read_to_string(node_worktree.join("node_data.csv")).unwrap(),
+        "1,2,3"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("node_data.csv")).unwrap(),
+        "1,2,3"
+    );
+
+    // 5. 定向删除测试
+    let node_del_res = dispatch(
+        &service,
+        "delete_workspace_file",
+        serde_json::json!({
+            "repository": repo.to_string_lossy(),
+            "filename": "node_data.csv",
+            "runId": "run-1",
+            "node": "node-a",
+        }),
+    )
+    .unwrap();
+    assert_eq!(node_del_res["success"], true);
+    assert!(!node_worktree.join("node_data.csv").exists());
+    assert!(!repo.join("node_data.csv").exists());
+}
+
+#[test]
 fn planning_preflight_checks_model_format() {
     let mut config = Config {
         environment: None,

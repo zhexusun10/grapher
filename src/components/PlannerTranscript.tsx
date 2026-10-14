@@ -33,11 +33,21 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
       disabled={locked} />
   </motion.div>;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
+  if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}><span className="system-pill">{item.content}</span></div>;
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={streaming} title={t("思考过程")}
     defaultExpanded={item.defaultExpanded ?? true} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand} />;
-  if (item.type === "text") return <motion.div className="chat-message-row assistant" initial={false} animate={{ opacity: 1, y: 0, scale: 1 }}>
-    <div className="chat-bubble-assistant chat-message-assistant"><StreamingAssistantBubble content={item.content || ""} isStreaming={streaming} /></div>
-  </motion.div>;
+  if (item.type === "text") {
+    if (item.isError || item.status === "error") {
+      return <motion.div className="chat-message-row assistant" initial={false} animate={{ opacity: 1, y: 0, scale: 1 }}>
+        <div className="node-error" style={{ margin: "4px 0", fontSize: 12, lineHeight: 1.6 }}>
+          {item.content || ""}
+        </div>
+      </motion.div>;
+    }
+    return <motion.div className="chat-message-row assistant" initial={false} animate={{ opacity: 1, y: 0, scale: 1 }}>
+      <div className="chat-bubble-assistant chat-message-assistant"><StreamingAssistantBubble content={item.content || ""} isStreaming={streaming} /></div>
+    </motion.div>;
+  }
   return null;
 });
 

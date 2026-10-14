@@ -98,6 +98,7 @@ export function useGraphElements(
   recentlyAddedEdgeIds: Set<string>,
   selectedMergerId = "",
   activity: RuntimeActivity[] = [],
+  recentlyAddedNodeNames: Set<string> = new Set(),
 ) {
   // Keep the same geometry for nodes and edges. Wider rows leave room for
   // edge channels; cards in the same layer remain cleanly aligned.
@@ -226,6 +227,9 @@ export function useGraphElements(
         type: "work",
         width: 236,
         position: { x: position.x, y: position.y },
+        // A short-lived entrance class lets newly created cards animate in
+        // without re-triggering the animation on later data updates.
+        className: recentlyAddedNodeNames.has(node.name) ? "node-entering" : undefined,
         data: {
           name: node.name,
           task: node.task,
@@ -289,7 +293,7 @@ export function useGraphElements(
         hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
       },
     }];
-  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, selected, selectedMergerId, graphLayout, edgeRouting, mergeTargets, publicationMerger, publicationAttempts, publicationPosition, publicationTargets]);
+  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, selected, selectedMergerId, graphLayout, edgeRouting, mergeTargets, publicationMerger, publicationAttempts, publicationPosition, publicationTargets, recentlyAddedNodeNames]);
 
   const edges = useMemo<Edge[]>(() => {
     const graphEdges = state.graph.edges.map((edge) => {

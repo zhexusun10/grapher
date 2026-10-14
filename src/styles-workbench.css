@@ -930,6 +930,34 @@
   justify-content: flex-start;
 }
 
+button.session-label-toggle {
+  background: transparent;
+  border: none;
+  padding: 4px 6px;
+  margin: 4px 0 8px 0;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 6px;
+  box-sizing: border-box;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+button.session-label-toggle:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+button.session-label-toggle:focus-visible {
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: 1px;
+}
+
 .execution-collapsed-card {
   padding: 6px 12px;
   background: rgba(255, 255, 255, 0.02);
@@ -1479,6 +1507,9 @@
   border-top-left-radius: 18px;
   border-bottom-left-radius: 18px;
   overflow: hidden;
+  /* Splitting into graph mode slides the conversation pane open smoothly;
+   * manual resizer drags opt out via .workbench.resizing. */
+  transition: width 0.34s cubic-bezier(0.22, 1, 0.36, 1), max-width 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .workbench-resizer {
@@ -1699,7 +1730,7 @@
   flex-direction: column;
 }
 
-/* 节点动效与样式 */
+/* 节点动效与样式：新拓扑卡片入场（由 useGraphElements 的 node-entering 类驱动） */
 @keyframes nodeAppear {
   0% {
     opacity: 0;
@@ -1726,7 +1757,22 @@
   border: 1px solid var(--border-default);
   border-radius: 8px;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.task-node:hover {
+  border-color: var(--border-hover, var(--brand-border, #93c5fd));
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+}
+
+.react-flow__node.node-entering .task-node {
+  animation: nodeAppear 0.45s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__node.node-entering .task-node {
+    animation: none;
+  }
 }
 
 .task-node.selected {

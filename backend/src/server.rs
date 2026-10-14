@@ -3602,6 +3602,157 @@ fn list_files(
     Ok(serde_json::json!({ "files": files }))
 }
 
+fn write_workspace_file(
+    service: &Arc<Service>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo_path = resolve_repo_path(service, argument(&body, "repository").ok());
+    if !repo_path.exists() {
+        return Err("Repository workspace directory not found".into());
+    }
+    let raw_filename: String = argument(&body, "filename")?;
+    let content: String = argument(&body, "content")?;
+    let run_id_param: Option<String> = argument(&body, "runId").ok();
+    let node_param: Option<String> = argument(&body, "node").ok();
+
+    let file_name = std::path::Path::new(&raw_filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or("Invalid filename")?;
+
+    let clean_base64 = if let Some(idx) = content.find(',') {
+        &content[idx + 1..]
+    } else {
+        &content
+    };
+    let bytes = decode_base64(clean_base64).ok_or("Invalid base64 content")?;
+
+    // 1. 若指定了特定节点与运行上下文，同步写入该节点真实的私有 worktree 物理目录，
+    // 确保拓扑图沙箱内的 NodeAgent / Merger 能够立即物理访问该文件。
+    let mut written_worktree = false;
+    if let (Some(ref run_id), Some(ref node_name)) = (&run_id_param, &node_param) {
+        if let Ok(runtime) = service.runtime.lock() {
+            if runtime.state.run_id == *run_id {
+                let clean_node_name = node_name.strip_prefix("merge:").unwrap_or(node_name);
+                let is_merger = node_name == "merger" || node_name.starts_with("merge:");
+
+                let target_worktree = if is_merger {
+                    runtime
+                        .state
+                        .mergers
+                        .iter()
+                        .rev()
+                        .find(|m| {
+                            m.node == *node_name
+                                || m.node == *clean_node_name
+                                || (node_name == "merger" && m.node == "merger")
+                        })
+                        .map(|m| PathBuf::from(&m.worktree))
+                } else {
+                    runtime
+                        .state
+                        .executions
+                        .iter()
+                        .rev()
+                        .find(|e| e.node == *node_name)
+                        .map(|e| PathBuf::from(&e.worktree))
+                };
+
+                if let Some(worktree) = target_worktree {
+                    if worktree.is_dir() {
+                        let _ = fs::write(worktree.join(file_name), &bytes);
+                        written_worktree = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. 无论是否写入特定 worktree，源仓库根目录始终同步写入一份，保证归档完整性。
+    let target_file = repo_path.join(file_name);
+    fs::write(&target_file, &bytes)
+        .map_err(|e| format!("Failed to write workspace file: {e}"))?;
+
+    Ok(serde_json::json!({
+        "name": file_name,
+        "path": file_name,
+        "size": bytes.len(),
+        "written_to_worktree": written_worktree,
+    }))
+}
+
+fn delete_workspace_file(
+    service: &Arc<Service>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let repo_path = resolve_repo_path(service, argument(&body, "repository").ok());
+    if !repo_path.exists() {
+        return Err("Repository workspace directory not found".into());
+    }
+    let raw_filename: String = argument(&body, "filename")?;
+    let run_id_param: Option<String> = argument(&body, "runId").ok();
+    let node_param: Option<String> = argument(&body, "node").ok();
+
+    let file_name = std::path::Path::new(&raw_filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or("Invalid filename")?;
+
+    // 1. 若指定了特定节点，从该节点的私有 worktree 中清理
+    if let (Some(ref run_id), Some(ref node_name)) = (&run_id_param, &node_param) {
+        if let Ok(runtime) = service.runtime.lock() {
+            if runtime.state.run_id == *run_id {
+                let clean_node_name = node_name.strip_prefix("merge:").unwrap_or(node_name);
+                let is_merger = node_name == "merger" || node_name.starts_with("merge:");
+
+                let target_worktree = if is_merger {
+                    runtime
+                        .state
+                        .mergers
+                        .iter()
+                        .rev()
+                        .find(|m| {
+                            m.node == *node_name
+                                || m.node == *clean_node_name
+                                || (node_name == "merger" && m.node == "merger")
+                        })
+                        .map(|m| PathBuf::from(&m.worktree))
+                } else {
+                    runtime
+                        .state
+                        .executions
+                        .iter()
+                        .rev()
+                        .find(|e| e.node == *node_name)
+                        .map(|e| PathBuf::from(&e.worktree))
+                };
+
+                if let Some(worktree) = target_worktree {
+                    let node_file = worktree.join(file_name);
+                    if node_file.is_file() {
+                        let _ = fs::remove_file(&node_file);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. 从源仓库清理
+    let target_file = repo_path.join(file_name);
+    if target_file.is_file() {
+        let _ = fs::remove_file(&target_file);
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "name": file_name,
+    }))
+}
+
 fn list_skills(
     service: &Arc<Service>,
     repository_param: Option<String>,
@@ -3996,6 +4147,8 @@ pub fn dispatch(
         "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),
         "pick_repository" => to_value(crate::workspace::pick_repository()?),
         "list_files" => to_value(list_files(service, argument(&body, "repository").ok())?),
+        "write_workspace_file" => to_value(write_workspace_file(service, body)?),
+        "delete_workspace_file" => to_value(delete_workspace_file(service, body)?),
         "list_skills" => to_value(list_skills(service, argument(&body, "repository").ok())?),
         "reset_workspace" => to_value(reset_workspace(service)?),
         "clear_history" => to_value(clear_history(service)?),

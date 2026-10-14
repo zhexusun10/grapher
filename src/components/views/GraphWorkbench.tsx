@@ -325,12 +325,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 }) => {
   const [attemptId, setAttemptId] = useState("");
   const [expandedAttemptIds, setExpandedAttemptIds] = useState<Set<string>>(new Set());
+  const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
   const [editingTaskNode, setEditingTaskNode] = useState("");
   const [taskDraft, setTaskDraft] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
   useEffect(() => {
     setAttemptId("");
     setExpandedAttemptIds(new Set());
+    setCollapsedAttemptIds(new Set());
     setEditingTaskNode("");
     setTaskDraft("");
     onCancelEditMessage?.();
@@ -497,6 +499,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
     return activeNodeExecutions(state, selectedNode.name).sort((a, b) => a.startedAt - b.startedAt);
   }, [selectedNode?.name, publicationMergerSelected, isNodeMergerSelected, nodeMergerTarget, state.executions, state.supersededExecutionIds, state.mergers]);
+  const latestAttemptId = attempts.length > 0 ? attempts[attempts.length - 1].id : "";
   const execution: Execution | undefined = selectedMerger ?? attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
   const nodeTaskText = selectedNode?.task ?? "";
   const latestNodeMessage = nodeMessages.length > 0 ? nodeMessages[nodeMessages.length - 1] : undefined;
@@ -551,12 +554,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const isSelectedNodeWorking = selectedMerger
     ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
     : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage);
-  const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}:${execution?.id || ""}`;
+  const provisionalRunIdRef = useRef<string | null>(null);
+  if (state.runId.startsWith("pending-")) {
+    provisionalRunIdRef.current = state.runId;
+  }
+  const currentRunKey = useMemo(() => {
+    // When a newly initiated conversation's provisional pending-* runId resolves
+    // to the real server-assigned runId, keep the key stable so the graph pane,
+    // canvas, and chat view do not unmount and flicker right after the first send.
+    if (provisionalRunIdRef.current && state.runId && !state.runId.startsWith("pending-")) {
+      return provisionalRunIdRef.current;
+    }
+    return state.runId || state.graph.originalGoal || "initial";
+  }, [state.runId, state.graph.originalGoal]);
+  const conversationViewKey = `${currentRunKey}:${routeType}:${selected || "planner"}`;
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   // Live SSE is ephemeral. After reload or run selection, replay the durable
   // planning JSONL associated with the selected run, never a previous run's stream.
   const showLivePlanner = !recoveredPlanningId && (isPlanning ||
-    (plannerStream.runId === state.runId && plannerStream.items?.length > 0));
+    ((plannerStream.runId === state.runId || (provisionalRunIdRef.current && (plannerStream.runId === provisionalRunIdRef.current || state.runId === provisionalRunIdRef.current))) && plannerStream.items?.length > 0));
   const savedPlannerId = recoveredPlanningId || (failedPlanning
     ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
     : (routeType === "graph" ? state.planningId : undefined));
@@ -655,7 +671,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
     }
   }, []);
-  const currentRunKey = state.runId || state.graph.originalGoal || "initial";
   const graphRunRef = useRef(currentRunKey);
   const [readyGraphRunKey, setReadyGraphRunKey] = useState("");
   const isGraphMountedForRun = readyGraphRunKey === currentRunKey;
@@ -931,6 +946,130 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       });
     }
   }, [handleChatScroll]);
+
+  const followExecutionExpansion = useCallback((panelEl: HTMLElement, hasExpandedBelow: boolean) => {
+    if (expandedCardObserverRef.current) {
+      expandedCardObserverRef.current.disconnect();
+      expandedCardObserverRef.current = null;
+    }
+    if (expandedCardTimerRef.current !== null) {
+      clearTimeout(expandedCardTimerRef.current);
+      expandedCardTimerRef.current = null;
+    }
+
+    const scroll = chatScrollRef.current;
+    if (!scroll) return;
+
+    const follow = () => {
+      const scrollEl = chatScrollRef.current;
+      if (!scrollEl || !scrollEl.contains(panelEl)) return;
+
+      if (!hasExpandedBelow) {
+        // No expanded attempt below: follow all the way to bottom so the user sees the latest output
+        scrollEl.scrollTop = scrollEl.scrollHeight;
+        lastScrollTopRef.current = scrollEl.scrollTop;
+      } else {
+        // There is an expanded attempt below: reveal the bottom of this execution panel
+        const viewport = scrollEl.getBoundingClientRect();
+        const bounds = panelEl.getBoundingClientRect();
+        const delta = bounds.bottom - viewport.bottom + 16;
+        if (delta > 0) {
+          scrollEl.scrollTop += delta;
+          lastScrollTopRef.current = scrollEl.scrollTop;
+        }
+      }
+    };
+
+    // Follow immediately
+    follow();
+
+    // Observe size changes as transcript lines load and measure
+    const observer = new ResizeObserver(() => {
+      follow();
+    });
+    observer.observe(panelEl);
+    expandedCardObserverRef.current = observer;
+
+    // Keep following across the initial transcript load and settle
+    expandedCardTimerRef.current = setTimeout(() => {
+      follow();
+      observer.disconnect();
+      if (expandedCardObserverRef.current === observer) {
+        expandedCardObserverRef.current = null;
+      }
+      expandedCardTimerRef.current = null;
+      if (!hasExpandedBelow) {
+        isUserScrolledUpRef.current = false;
+        suppressAutoScrollRef.current = false;
+      }
+      handleChatScroll();
+    }, 600);
+  }, [handleChatScroll]);
+
+  const isAttemptExpanded = useCallback((execId: string) => {
+    if (attempts.length <= 1) return true;
+    return execId === latestAttemptId
+      ? !collapsedAttemptIds.has(execId)
+      : expandedAttemptIds.has(execId);
+  }, [attempts.length, latestAttemptId, collapsedAttemptIds, expandedAttemptIds]);
+
+  const handleToggleAttempt = useCallback((execId: string, panelEl?: HTMLElement | null) => {
+    const currentlyExpanded = isAttemptExpanded(execId);
+    const willExpand = !currentlyExpanded;
+    const isLatest = execId === latestAttemptId;
+
+    const attemptIndex = attempts.findIndex(a => a.id === execId);
+    const hasExpandedBelow = attemptIndex >= 0 && attempts.slice(attemptIndex + 1).some(a => isAttemptExpanded(a.id));
+
+    if (willExpand) {
+      if (!hasExpandedBelow) {
+        isUserScrolledUpRef.current = false;
+        userGestureUpRef.current = false;
+        suppressAutoScrollRef.current = false;
+      } else {
+        isUserScrolledUpRef.current = true;
+        suppressAutoScrollRef.current = true;
+      }
+    } else {
+      suppressAutoScrollRef.current = true;
+      isUserScrolledUpRef.current = true;
+    }
+
+    if (isLatest) {
+      setCollapsedAttemptIds((prev) => {
+        const next = new Set(prev);
+        if (currentlyExpanded) next.add(execId);
+        else next.delete(execId);
+        return next;
+      });
+    } else {
+      setExpandedAttemptIds((prev) => {
+        const next = new Set(prev);
+        if (currentlyExpanded) next.delete(execId);
+        else next.add(execId);
+        return next;
+      });
+    }
+
+    if (panelEl) {
+      if (willExpand) {
+        followExecutionExpansion(panelEl, hasExpandedBelow);
+      } else {
+        // On collapse, keep auto-scroll suppressed while shrinking so view doesn't jump
+        expandedCardObserverRef.current?.disconnect();
+        expandedCardObserverRef.current = null;
+        if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
+        expandedCardTimerRef.current = setTimeout(() => {
+          if (chatScrollRef.current) {
+            prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+          }
+          suppressAutoScrollRef.current = false;
+          expandedCardTimerRef.current = null;
+          handleChatScroll();
+        }, 260);
+      }
+    }
+  }, [isAttemptExpanded, latestAttemptId, attempts, followExecutionExpansion, handleChatScroll]);
 
   useLayoutEffect(() => {
     const view = chatScrollRef.current?.parentElement;
@@ -1309,21 +1448,31 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     // If no execution or planning output needed to trigger onReady, reveal after layout settle
-    const needsExecutionReady = selectedNode && routeType === "graph"
-      ? Boolean(execution)
+    const hasExpandedExecution = selectedNode && routeType === "graph"
+      ? Boolean(execution && attempts.some(a => isAttemptExpanded(a.id)))
       : (routeType === "serial"
           ? Boolean(serialExecutions.length)
           : (savedPlannerIds.length > 0 && useSavedPlanner));
 
-    if (readyConversationKey !== conversationViewKey && !needsExecutionReady) {
+    if (readyConversationKey !== conversationViewKey && !hasExpandedExecution) {
       revealConversation();
     }
+
+    // Safety fallback: ensure conversation is revealed even if an output event fails to fire
+    const safetyTimer = setTimeout(() => {
+      if (activeConversationViewRef.current === conversationViewKey && readyConversationKey !== conversationViewKey) {
+        revealConversation();
+      }
+    }, 350);
+    return () => clearTimeout(safetyTimer);
   }, [
     conversationViewKey,
     readyConversationKey,
     selectedNode,
     routeType,
     execution,
+    attempts,
+    isAttemptExpanded,
     savedPlannerIds.length,
     useSavedPlanner,
     serialExecutions.length,
@@ -1503,8 +1652,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       </div>
                     )}
                     {turn.executions.map((exec) => {
-                      const isLatestAttempt = exec.id === execution?.id;
-                      const isExpanded = isLatestAttempt || expandedAttemptIds.has(exec.id) || turn.executions.length === 1;
+                      const isLatestAttempt = exec.id === latestAttemptId;
+                      const isExpanded = isAttemptExpanded(exec.id);
                       return (
                         <motion.div
                           key={exec.id}
@@ -1514,22 +1663,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           transition={{ duration: 0.3 }}
                         >
                           {attempts.length > 1 && (
-                            <div
+                            <button
+                              type="button"
                               className="session-label session-label-toggle"
-                              onClick={() => {
-                                setExpandedAttemptIds((prev) => {
-                                  const next = new Set(prev);
-                                  if (next.has(exec.id)) next.delete(exec.id);
-                                  else next.add(exec.id);
-                                  return next;
-                                });
-                                if (isNodeMergerSelected || publicationMergerSelected) {
-                                  setSelectedMergerId(exec.id);
-                                  setAttemptId(exec.id);
-                                }
+                              aria-expanded={isExpanded}
+                              onClick={(e) => {
+                                const panel = (e.currentTarget as HTMLElement).closest<HTMLElement>(".serial-execution-panel");
+                                handleToggleAttempt(exec.id, panel);
                               }}
                               style={{ cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", justifyContent: "space-between" }}
-                              title={isExpanded ? t("点击收起执行记录") : t("点击展开执行记录并加载日志")}
+                              title={isExpanded ? t("点击收起执行记录") : t("点击展开执行记录")}
                             >
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                 <span className={`status-badge ${exec.status}`}>
@@ -1541,9 +1684,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                 <ExecutionTiming execution={exec} />
                               </div>
                               <span style={{ fontSize: 12, opacity: 0.65, marginLeft: "auto" }}>
-                                {isExpanded ? t("点击收起执行记录") : t("点击展开执行记录并加载日志")}
+                                {isExpanded ? t("点击收起执行记录") : t("点击展开执行记录")}
                               </span>
-                            </div>
+                            </button>
                           )}
                           {isExpanded && (
                             <div style={{ display: "flex", flexDirection: "column", marginTop: attempts.length > 1 ? 4 : 0 }}>
@@ -1551,7 +1694,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                 runId={state.runId}
                                 execution={exec}
                                 onUserResize={handleExpandableContentChange}
-                                onInitialOutputReady={isLatestAttempt ? revealConversation : undefined}
+                                onInitialOutputReady={isLatestAttempt || !isAttemptExpanded(latestAttemptId) ? revealConversation : undefined}
                               />
                             </div>
                           )}
@@ -1625,6 +1768,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               <PromptBox
                 layoutId="conversation-composer"
                 repository={config?.repository}
+                runId={state.runId}
+                node={selectedNode?.name}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={
                   !state.approved
@@ -2060,6 +2205,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               <PromptBox
                 layoutId="conversation-composer"
                 repository={config?.repository}
+                runId={state.runId}
+                node={isSerialExecution ? state.graph.nodes[0]?.name : undefined}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={
                   isPlanning
@@ -2092,8 +2239,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               className={`workbench-resizer ${isResizing ? "active" : ""}`}
               initial={{ opacity: 0 }}
               animate={{ opacity: isGraphMountedForRun ? 1 : 0 }}
-              exit={{ opacity: 0, transition: { duration: 0 } }}
-              transition={{ duration: 0.4, delay: isGraphMountedForRun ? 0.08 : 0, ease: [0.22, 1, 0.36, 1] }}
+              exit={{ opacity: 0, transition: { duration: 0.16 } }}
+              transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
               style={{ pointerEvents: isGraphMountedForRun ? "auto" : "none" }}
               onMouseDown={handleStartResize}
               onDoubleClick={handleResetResizer}
@@ -2105,10 +2252,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             <motion.div
               key={`graph-pane:${currentRunKey}`}
               className="graph-pane"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: isGraphMountedForRun ? 1 : 0 }}
-              exit={{ opacity: 0, transition: { duration: 0 } }}
-              transition={{ duration: 0.4, delay: isGraphMountedForRun ? 0.08 : 0, ease: [0.22, 1, 0.36, 1] }}
+              initial={{ opacity: 0, x: 28 }}
+              animate={{ opacity: isGraphMountedForRun ? 1 : 0, x: isGraphMountedForRun ? 0 : 28 }}
+              exit={{ opacity: 0, x: 28, transition: { duration: 0.16, ease: [0.3, 0, 0.8, 0.15] } }}
+              transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
               style={{ pointerEvents: isGraphMountedForRun ? "auto" : "none" }}
             >
               <div className="graph-toolbar">

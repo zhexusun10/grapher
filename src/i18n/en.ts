@@ -547,7 +547,7 @@ export const en: Record<string, string> = {
   "编辑": "Edit",
   "（未指定节点任务）": "(No node task specified)",
   "点击收起执行记录": "Click to collapse execution log",
-  "点击展开执行记录并加载日志": "Click to expand execution log",
+  "点击展开执行记录": "Click to expand execution log",
   "已折叠，点击展开": "Collapsed, click to expand",
   "加载更早的消息 (还有 {0} 条)": "Load earlier messages ({0} remaining)",
   "Merger 系统提示词": "Merger System Prompt",

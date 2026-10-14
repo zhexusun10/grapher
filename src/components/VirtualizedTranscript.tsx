@@ -496,6 +496,16 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           inTagThinkingRef.current = false;
 
           const message = event.message;
+          // A failed model call must stay visible in the durable replay, not
+          // only in the live SSE stream (e.g. after a reload).
+          if (message?.role === "assistant" &&
+              (message.stopReason === "error" || message.stopReason === "aborted") && message.errorMessage) {
+            currentItems.push({
+              id: rowId("system"),
+              type: "system", role: "assistant", content: message.errorMessage, isError: true,
+              status: "error", timestamp: Date.now(),
+            });
+          }
           if (message?.role === "assistant" && Array.isArray(message.content)) {
             currentItems = finalizeThinkingItems(currentItems, message.content, assistantStartIndexRef.current);
             for (const part of message.content) {

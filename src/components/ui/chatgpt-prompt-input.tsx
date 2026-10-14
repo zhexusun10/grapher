@@ -51,6 +51,8 @@ interface PromptBoxProps
   layoutId?: string;
   className?: string;
   repository?: string;
+  runId?: string;
+  node?: string;
 }
 
 
@@ -79,6 +81,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       layoutId,
       className = "",
       repository,
+      runId,
+      node,
       ...restProps
     },
     forwardedRef
@@ -395,6 +399,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       selectedFileRef.current = file;
       setSelectedFile(file);
       setSelectedImage(null);
+      // 自动写入对应工作区（如果指定了当前节点则写入其专属 worktree，同时同步源工作区）
+      void runtimeService.writeWorkspaceFile(file, repository, { runId, node }).catch((err) => {
+        console.warn("Failed to write incoming file to workspace:", err);
+      });
       if (file.type.startsWith("image/")) {
         const reader = new FileReader();
         reader.onload = () => {
@@ -402,7 +410,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         };
         reader.readAsDataURL(file);
       }
-    }, []);
+    }, [repository, runId, node]);
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -478,11 +486,16 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       e.stopPropagation();
       if (submittingRef.current) return;
       setAttachmentError("");
+      const removedFile = selectedFileRef.current;
       selectedFileRef.current = null;
       setSelectedImage(null);
       setSelectedFile(null);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
+      }
+      // 用户删除附件时，同步将对应节点工作区与源工作区中的文件删除
+      if (removedFile?.name) {
+        void runtimeService.deleteWorkspaceFile(removedFile.name, repository, { runId, node });
       }
     };
 
@@ -492,70 +505,49 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       submittingRef.current = true;
       setIsSubmitting(true);
       setAttachmentError("");
-      let combinedPrompt = trimmed;
-      let displayText = trimmed;
-      const currentAttachment = selectedFile;
-      let structuredImages: ImageAttachment[] | undefined = undefined;
 
+      const currentAttachment = selectedFile;
+      let combinedPrompt = trimmed;
+
+      // 如果有附件，确保其写入工作区根目录，并直接以 @filename 形式在提示词中引用，无需 attachment 前缀
       if (currentAttachment) {
         setIsPreparing(true);
         try {
-          if (currentAttachment.type.startsWith("image/")) {
-            let dataUrl = selectedImage;
-            if (!dataUrl) {
-              dataUrl = await new Promise<string>((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve(reader.result as string);
-                reader.onerror = reject;
-                reader.readAsDataURL(currentAttachment);
-              });
-            }
-            const commaIndex = dataUrl.indexOf(",");
-            const base64Data = commaIndex !== -1 ? dataUrl.slice(commaIndex + 1) : dataUrl;
-            structuredImages = [
-              {
-                type: "image",
-                mimeType: currentAttachment.type || "image/png",
-                data: base64Data,
-                name: currentAttachment.name,
-              },
-            ];
-
-            // Mimic Pi's native file attachment format (<file name="...">...</file>)
-            const fileTag = `<file name="${currentAttachment.name}"></file>\n`;
-            combinedPrompt = trimmed ? `${fileTag}${trimmed}` : fileTag.trim();
-            displayText = trimmed;
-          } else {
-            let fileContent = "";
-            try {
-              fileContent = await currentAttachment.text();
-            } catch {
-              fileContent = await new Promise<string>((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve(reader.result as string);
-                reader.onerror = reject;
-                reader.readAsText(currentAttachment);
-              });
-            }
-            // Strip BOM if present (matching Pi's stripBom in file-processor.ts)
-            if (fileContent.charCodeAt(0) === 0xfeff) {
-              fileContent = fileContent.slice(1);
-            }
-            // Mimic Pi's native file attachment format (<file name="...">\n${content}\n</file>\n)
-            const fileTag = `<file name="${currentAttachment.name}">\n${fileContent}\n</file>\n`;
-            combinedPrompt = trimmed ? `${fileTag}${trimmed}` : fileTag.trim();
-            displayText = trimmed;
-          }
+          await runtimeService.writeWorkspaceFile(currentAttachment, repository, { runId, node });
         } catch (err) {
-          console.error("Failed to process attached file:", err);
-          submittingRef.current = false;
-          if (mountedRef.current) {
-            setAttachmentError(t("无法读取附件，请重新选择文件后重试。"));
-            setIsSubmitting(false);
-          }
-          return;
+          console.warn("Failed to ensure file written to workspace before submit:", err);
         } finally {
           if (mountedRef.current) setIsPreparing(false);
+        }
+        const fileMention = `@${currentAttachment.name}`;
+        combinedPrompt = trimmed ? `${fileMention} ${trimmed}` : fileMention;
+      }
+      const displayText = combinedPrompt;
+      let structuredImages: ImageAttachment[] | undefined = undefined;
+
+      if (currentAttachment && currentAttachment.type.startsWith("image/")) {
+        try {
+          let dataUrl = selectedImage;
+          if (!dataUrl) {
+            dataUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = reject;
+              reader.readAsDataURL(currentAttachment);
+            });
+          }
+          const commaIndex = dataUrl.indexOf(",");
+          const base64Data = commaIndex !== -1 ? dataUrl.slice(commaIndex + 1) : dataUrl;
+          structuredImages = [
+            {
+              type: "image",
+              mimeType: currentAttachment.type || "image/png",
+              data: base64Data,
+              name: currentAttachment.name,
+            },
+          ];
+        } catch {
+          // 忽略图片转换异常
         }
       }
 
