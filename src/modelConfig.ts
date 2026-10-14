@@ -1,5 +1,5 @@
 import { t } from "./i18n";
-import type { Config, ModelRole, RoleModelConfig, ThinkingLevel } from "./types";
+import type { Config, Execution, ModelRole, RoleModelConfig, ThinkingLevel } from "./types";
 
 export const modelRoles: Array<{ id: ModelRole; label: string; description: string }> = [
   { id: "partitioner", label: "Partitioner", description: t("负责判断任务走 Serial 还是 Graph。推荐选择小型、低延迟模型，思维链默认关闭。") },
@@ -32,3 +32,53 @@ export function updateRoleModelConfig(config: Config, role: ModelRole, patch: Pa
 export function planningModelRoles(mode: "auto" | "serial" | "graph"): ModelRole[] {
   return mode === "serial" ? ["nodeAgent"] : mode === "graph" ? ["planner", "nodeAgent"] : ["partitioner", "planner", "nodeAgent"];
 }
+
+export function resolveExecutionModelAndThinking(
+  execution: Execution,
+  isMerger: boolean,
+  config: Config,
+  envOverrides: Record<string, string> = {}
+): { model: string; thinkingLevel: string } {
+  let modelFromOutput: string | undefined;
+  let thinkingFromOutput: string | undefined;
+
+  if (execution.output) {
+    const lines = execution.output.split("\n");
+    for (const line of lines) {
+      if (line.includes("model_change")) {
+        try {
+          const evt = JSON.parse(line.trim());
+          if (evt.type === "model_change") {
+            const mId = evt.modelId || evt.model;
+            if (mId) {
+              modelFromOutput = evt.provider ? `${evt.provider}/${mId}` : mId;
+            }
+          }
+        } catch {}
+      }
+      if (line.includes("thinking_level_change")) {
+        try {
+          const evt = JSON.parse(line.trim());
+          if (evt.type === "thinking_level_change" && evt.thinkingLevel) {
+            thinkingFromOutput = evt.thinkingLevel;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  const nodeSettings = config.roleModels?.nodeAgent;
+  const configModel = isMerger
+    ? (envOverrides.merger?.trim() || envOverrides.nodeAgent?.trim() || nodeSettings?.model?.trim() || config.model?.trim() || "")
+    : (envOverrides.nodeAgent?.trim() || nodeSettings?.model?.trim() || config.model?.trim() || "");
+
+  const configThinking = isMerger
+    ? (envOverrides.mergerThinking?.trim() || envOverrides.nodeAgentThinking?.trim() || nodeSettings?.thinkingLevel || config.thinkingLevel || "medium")
+    : (envOverrides.nodeAgentThinking?.trim() || nodeSettings?.thinkingLevel || config.thinkingLevel || "medium");
+
+  return {
+    model: modelFromOutput || configModel || t("未设置模型"),
+    thinkingLevel: thinkingFromOutput || configThinking || "medium",
+  };
+}
+

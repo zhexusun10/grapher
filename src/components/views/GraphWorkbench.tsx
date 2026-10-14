@@ -4,13 +4,13 @@ import type { ReactFlowInstance } from "@xyflow/react";
 import { GraphCanvas } from "../graph/GraphCanvas";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
-  Code2, ArrowLeft, FolderGit2,
+  Code2, ArrowLeft,
   Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
   AlertCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
-  Snapshot, PlanRouteType, RepositoryInfo, Config,
+  Snapshot, PlanRouteType, PlanMode, RepositoryInfo, Config,
   Graph, Execution, Status, PlanningSummary, TranscriptItem,
   ChatMessage, RuntimeActivity, publicationMergerCardId
 } from "../../types";
@@ -21,13 +21,14 @@ import { EditableUserBubble } from "./ChatBubbles";
 import { NodeTaskCard } from "./NodeTaskCard";
 import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
+import { shouldShowRouteBadge } from "../../services/executionRoute";
 import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
 import { captureViewScrollState, resolveViewScroll, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
-import { ExecutionTranscript } from "../ExecutionTranscript";
+import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
 import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
@@ -41,6 +42,7 @@ import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 import { PublicationCompletedCard } from "../PublicationCompletedCard";
 import { EnvironmentResult } from "../EnvironmentResult";
 import { PlannerTranscript } from "../PlannerTranscript";
+import { resolveExecutionModelAndThinking } from "../../modelConfig";
 
 /** Transient I/O status takes precedence over the durable phase copy. */
 function activityStatusText(activity: RuntimeActivity[]): string | null {
@@ -64,6 +66,7 @@ interface GraphWorkbenchProps {
   transcriptRunId?: string;
   activity?: RuntimeActivity[];
   routeType: PlanRouteType;
+  initialPlanMode?: PlanMode;
   selected: string;
   setSelected: (name: string) => void;
   selectedMergerId: string;
@@ -90,6 +93,7 @@ interface GraphWorkbenchProps {
   onOpenApproval: () => void;
   repoInfo: RepositoryInfo | null;
   config: Config;
+  envOverrides?: Record<string, string>;
   active: boolean;
   locked: boolean;
   pendingRequest: boolean;
@@ -102,6 +106,36 @@ interface GraphWorkbenchProps {
   tokens: any;
   failedPlanning?: PlanningSummary | null;
   onConversationReady?: () => void;
+}
+
+function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = false }: {
+  execution: Execution;
+  expanded: boolean;
+  onToggle?: React.MouseEventHandler<HTMLButtonElement>;
+  placeholder?: boolean;
+}) {
+  return <button
+    type="button"
+    className="session-label session-label-toggle"
+    aria-expanded={placeholder ? undefined : expanded}
+    aria-hidden={placeholder || undefined}
+    disabled={placeholder}
+    onClick={onToggle}
+    style={{ cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", justifyContent: "space-between",
+      visibility: placeholder ? "hidden" : undefined }}
+    title={expanded ? t("点击收起执行记录") : t("点击展开执行记录")}
+  >
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <span className={`status-badge ${execution.status}`}>
+        {statusText[execution.status as Status] ?? execution.status}
+      </span>
+      <span style={{ fontSize: 13, fontWeight: 500 }}>{t("#{0} 尝试", execution.attempt || 1)}</span>
+      <ExecutionTiming execution={execution} />
+    </div>
+    <span style={{ fontSize: 12, opacity: 0.65, marginLeft: "auto" }}>
+      {expanded ? t("点击收起执行记录") : t("点击展开执行记录")}
+    </span>
+  </button>;
 }
 
 interface WorkspaceDetailsPanelProps {
@@ -239,22 +273,19 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
 
   return (
     <div ref={panelRef} className={`workspace-details ${isOpen ? "open" : ""}`} style={{ marginTop: 12 }}>
-      <div className="workspace-details-summary">
-        <div className="workspace-details-summary-left">
-          {showWorking && (
-            <div className="working-indicator" role="status" aria-live="polite">
-              <span className="working-indicator-dot" />
-              Working…
-            </div>
-          )}
+      {showWorking && !isOpen && (
+        <div className="working-indicator" role="status" aria-live="polite">
+          <span className="working-indicator-dot" />
+          Working…
         </div>
+      )}
+      <div className="workspace-details-summary">
         <button
           type="button"
           className="workspace-details-trigger"
           onClick={handleToggle}
           aria-expanded={isOpen}
         >
-          <FolderGit2 size={12} />
           <span>{t("工作区与会话信息")}</span>
           <ChevronRight size={11} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} />
         </button>
@@ -284,6 +315,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   transcriptRunId = state.runId,
   activity = [],
   routeType,
+  initialPlanMode,
   selected,
   setSelected,
   selectedMergerId,
@@ -311,6 +343,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   onOpenApproval,
   repoInfo,
   config,
+  envOverrides = {},
   active,
   locked,
   pendingRequest,
@@ -501,6 +534,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [selectedNode?.name, publicationMergerSelected, isNodeMergerSelected, nodeMergerTarget, state.executions, state.supersededExecutionIds, state.mergers]);
   const latestAttemptId = attempts.length > 0 ? attempts[attempts.length - 1].id : "";
   const execution: Execution | undefined = selectedMerger ?? attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
+  const isMerger = publicationMergerSelected || isNodeMergerSelected;
+  const snapshotModelInfo = useMemo(() => {
+    if (!execution) return null;
+    return resolveExecutionModelAndThinking(
+      execution,
+      isMerger,
+      state.config || config,
+      envOverrides
+    );
+  }, [execution, isMerger, state.config, config, envOverrides]);
   const nodeTaskText = selectedNode?.task ?? "";
   const latestNodeMessage = nodeMessages.length > 0 ? nodeMessages[nodeMessages.length - 1] : undefined;
   // Keep each human turn in the same conversation as its Pi execution. A
@@ -554,6 +597,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const isSelectedNodeWorking = selectedMerger
     ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
     : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage);
+  const latestNodeTurn = nodeTurns.at(-1);
+  const waitingForNodeExecution = !!latestNodeTurn && latestNodeTurn.executions.length === 0 &&
+    !latestNodeTurn.userMessage?.delivery && (isSelectedNodeWorking || pendingRequest);
+  // Apply the continuation layout with the optimistic message, rather than
+  // waiting for the backend to insert a new execution and its record header.
+  const showExecutionRecords = attempts.length > 1 || (waitingForNodeExecution && attempts.length > 0);
   const provisionalRunIdRef = useRef<string | null>(null);
   if (state.runId.startsWith("pending-")) {
     provisionalRunIdRef.current = state.runId;
@@ -626,6 +675,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (state.planType) return state.planType;
     return "undecided";
   }, [routeType, state.planType]);
+
+  const showRouteBadge = useMemo(() => {
+    return shouldShowRouteBadge({
+      initialPlanMode,
+      plannerStream,
+      state,
+      routeType,
+    });
+  }, [
+    initialPlanMode,
+    plannerStream?.initialPlanMode,
+    plannerStream?.stage,
+    plannerStream?.partitionerText,
+    plannerStream?.partitionerThinking,
+    state.events,
+    state.planning?.roles?.partition,
+    routeType,
+    state.planType,
+  ]);
   const useSavedPlanner = savedPlannerIds.length > 0 &&
     (!showLivePlanner || readySavedPlannerKey === savedPlannerKey);
   const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
@@ -1007,16 +1075,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [handleChatScroll]);
 
   const isAttemptExpanded = useCallback((execId: string) => {
-    if (attempts.length <= 1) return true;
-    return execId === latestAttemptId
+    if (!showExecutionRecords) return true;
+    return execId === latestAttemptId && !waitingForNodeExecution
       ? !collapsedAttemptIds.has(execId)
       : expandedAttemptIds.has(execId);
-  }, [attempts.length, latestAttemptId, collapsedAttemptIds, expandedAttemptIds]);
+  }, [showExecutionRecords, waitingForNodeExecution, latestAttemptId, collapsedAttemptIds, expandedAttemptIds]);
 
   const handleToggleAttempt = useCallback((execId: string, panelEl?: HTMLElement | null) => {
     const currentlyExpanded = isAttemptExpanded(execId);
     const willExpand = !currentlyExpanded;
-    const isLatest = execId === latestAttemptId;
+    const isLatest = execId === latestAttemptId && !waitingForNodeExecution;
 
     const attemptIndex = attempts.findIndex(a => a.id === execId);
     const hasExpandedBelow = attemptIndex >= 0 && attempts.slice(attemptIndex + 1).some(a => isAttemptExpanded(a.id));
@@ -1069,7 +1137,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         }, 260);
       }
     }
-  }, [isAttemptExpanded, latestAttemptId, attempts, followExecutionExpansion, handleChatScroll]);
+  }, [isAttemptExpanded, latestAttemptId, waitingForNodeExecution, attempts, followExecutionExpansion, handleChatScroll]);
 
   useLayoutEffect(() => {
     const view = chatScrollRef.current?.parentElement;
@@ -1208,9 +1276,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       .sort((a, b) => a.startedAt - b.startedAt);
   }, [serialNode?.name, state.executions, state.supersededExecutionIds]);
   const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
+  const serialModelInfo = useMemo(() => {
+    if (!serialExecution) return null;
+    return resolveExecutionModelAndThinking(
+      serialExecution,
+      false,
+      state.config || config,
+      envOverrides
+    );
+  }, [serialExecution, state.config, config, envOverrides]);
 
   const serialTurns = useMemo(() => {
-    if (routeType !== "serial" || !serialNode) return [];
+    if (routeType !== "serial") return [];
     const turns: Array<{
       id: string;
       userMessage: ChatMessage;
@@ -1226,6 +1303,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         text: state.graph.originalGoal,
       }] : []
     );
+    // Serial is selected before the backend creates its node. Render the
+    // optimistic messages and their waiting space now, not after that snapshot.
+    if (!serialNode) {
+      return messages.map((userMessage, index) => ({
+        id: userMessage.id, userMessage, isInitial: index === 0, executions: [] as Execution[],
+      }));
+    }
     const latestEdit = [...state.events].reverse().find((event) =>
       event.type === "conversation_edited" && event.target === serialNode.name && event.nodes?.includes(serialNode.name));
     if (latestEdit?.old_instruction) {
@@ -1301,10 +1385,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [routeType, serialNode?.name, effectiveMessages, serialExecutions, state.graph.originalGoal, state.runId, state.events]);
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
-  const serialWorkingAfterMessage = serialTurns.length > 1 && serialTurns[serialTurns.length - 1].executions.length === 0;
+  const serialWorkingAfterMessage = serialTurns.length > 0 && serialTurns[serialTurns.length - 1].executions.length === 0;
   const isSerialWorking = isNodeWorking(serialNodeState?.status, serialExecution, pendingRequest,
     serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined);
-  const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialWorking) : isPlanning;
+  // Serial auto-approval runs after planning releases its busy state, and
+  // approval returns before the background driver starts the waiting node.
+  // Both phases belong to first-execution startup, not an idle conversation.
+  const isSerialAwaitingStart = !serialExecution && !state.paused && (
+    state.phase === "awaiting_approval" ||
+    (state.approved && state.phase === "running" && serialNodeState?.status === "waiting")
+  );
+  const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialAwaitingStart || isSerialWorking) : isPlanning;
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
   // A poll can return the old draft while the Planner is revising it. The
   // backend also exposes recoverable interruption state for Runs whose last
@@ -1628,7 +1719,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   }}
                 />
 
-                {nodeTurns.map((turn) => (
+                {nodeTurns.map((turn, index) => {
+                  const isWaitingExecution = waitingForNodeExecution && index === nodeTurns.length - 1;
+
+                  return (
                   <React.Fragment key={turn.id}>
                     {turn.userMessage && (
                       <div className="chat-message-row user">
@@ -1662,34 +1756,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ duration: 0.3 }}
                         >
-                          {attempts.length > 1 && (
-                            <button
-                              type="button"
-                              className="session-label session-label-toggle"
-                              aria-expanded={isExpanded}
-                              onClick={(e) => {
-                                const panel = (e.currentTarget as HTMLElement).closest<HTMLElement>(".serial-execution-panel");
-                                handleToggleAttempt(exec.id, panel);
-                              }}
-                              style={{ cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", justifyContent: "space-between" }}
-                              title={isExpanded ? t("点击收起执行记录") : t("点击展开执行记录")}
-                            >
-                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                <span className={`status-badge ${exec.status}`}>
-                                  {statusText[exec.status as Status] ?? exec.status}
-                                </span>
-                                <span style={{ fontSize: 13, fontWeight: 500 }}>
-                                  {t("#{0} 尝试", exec.attempt || 1)}
-                                </span>
-                                <ExecutionTiming execution={exec} />
-                              </div>
-                              <span style={{ fontSize: 12, opacity: 0.65, marginLeft: "auto" }}>
-                                {isExpanded ? t("点击收起执行记录") : t("点击展开执行记录")}
-                              </span>
-                            </button>
+                          {showExecutionRecords && (
+                            <ExecutionRecordHeader execution={exec} expanded={isExpanded} onToggle={(e) => {
+                              const panel = e.currentTarget.closest<HTMLElement>(".serial-execution-panel");
+                              handleToggleAttempt(exec.id, panel);
+                            }} />
                           )}
                           {isExpanded && (
-                            <div style={{ display: "flex", flexDirection: "column", marginTop: attempts.length > 1 ? 4 : 0 }}>
+                            <div style={{ display: "flex", flexDirection: "column", marginTop: showExecutionRecords ? 4 : 0 }}>
                               <ExecutionTranscript
                                 runId={state.runId}
                                 execution={exec}
@@ -1701,30 +1775,38 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         </motion.div>
                       );
                     })}
+                    {isWaitingExecution && (
+                      <div className="serial-execution-panel" aria-hidden="true">
+                        {showExecutionRecords && attempts.at(-1) && (
+                          <ExecutionRecordHeader execution={attempts.at(-1)!} expanded placeholder />
+                        )}
+                        <div style={{ display: "flex", flexDirection: "column", marginTop: showExecutionRecords ? 4 : 0 }}>
+                          <ExecutionTranscriptPlaceholder />
+                        </div>
+                      </div>
+                    )}
                   </React.Fragment>
-                ))}
+                );
+              })}
 
-                {execution && (
-                  <WorkspaceDetailsPanel
-                    key={`${state.runId}:${selectedNode.name}`}
-                    showWorking={isSelectedNodeWorking}
-                    scrollContainerRef={chatScrollRef}
-                    onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
-                    onAfterToggle={handleWorkspaceDetailsAfterToggle}
-                  >
-                    <p>Worktree: {execution.worktree}</p>
-                    <p>Session ID: {execution.sessionId}</p>
-                    <p>Commit Before: {execution.before || t("未快照")}</p>
-                    <p>Commit After: {execution.after === "" ? t("源目录直改（无快照）") : execution.after ?? "pending"}</p>
-                  </WorkspaceDetailsPanel>
-                )}
-
-                {isSelectedNodeWorking && !execution && (
-                  <div className="working-indicator" role="status" aria-live="polite">
-                    <span className="working-indicator-dot" />
-                    Working…
-                  </div>
-                )}
+                <WorkspaceDetailsPanel
+                  key={`${state.runId}:${selectedNode.name}`}
+                  showWorking={isSelectedNodeWorking}
+                  scrollContainerRef={chatScrollRef}
+                  onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
+                  onAfterToggle={handleWorkspaceDetailsAfterToggle}
+                >
+                  <p>Worktree: {execution?.worktree || config.repository || t("准备工作区…")}</p>
+                  <p>Session ID: {execution?.sessionId || t("等待初始化…")}</p>
+                  <p>Commit Before: {execution?.before || t("未快照")}</p>
+                  <p>Commit After: {execution ? (execution.after === "" ? t("源目录直改（无快照）") : execution.after ?? "pending") : "pending"}</p>
+                  {snapshotModelInfo && (
+                    <>
+                      <p>Model: {snapshotModelInfo.model}</p>
+                      <p>Thinking Level: {snapshotModelInfo.thinkingLevel}</p>
+                    </>
+                  )}
+                </WorkspaceDetailsPanel>
 
                 {selectedState?.error && (
                   <div className="node-error" style={{ marginTop: 12 }}>
@@ -1816,14 +1898,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               >
                 {routeType === "serial" ? (
                   <div className="serial-turns-container" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {serialTurns.map((turn) => (
+                    {serialTurns.map((turn, index) => {
+                      const isWaitingExecution =
+                        turn.executions.length === 0 &&
+                        index === serialTurns.length - 1 &&
+                        (isSerialWorking || isMainViewWorking || pendingRequest);
+
+                      return (
                       <React.Fragment key={turn.id}>
                         {turn.userMessage && (
                           <motion.div
                             className="chat-message-row user"
-                            initial={isPlanning && turn.isInitial ? { opacity: 0, y: 16, scale: 0.98 } : false}
+                            initial={isPlanning && turn.isInitial ? { opacity: 0 } : false}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
-                            transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+                            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
                           >
                             <EditableUserBubble
                               text={turn.userMessage.text.trim()}
@@ -1843,7 +1931,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           </motion.div>
                         )}
 
-                        {turn.isInitial && (
+                        {turn.isInitial && showRouteBadge && (
                           <motion.div
                             className="route-decision-pill serial"
                             initial={isPlanning ? { opacity: 0, scale: 0.96 } : false}
@@ -1863,8 +1951,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               key={exec.id}
                               className="serial-execution-panel"
                               initial={false}
-                              animate={{ opacity: 1, y: 0 }}
-                              transition={{ duration: 0.3 }}
+                              animate={{ opacity: 1 }}
+                              transition={{ duration: 0.15 }}
                             >
                               <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
                                 <ExecutionTranscript
@@ -1878,37 +1966,40 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             </motion.div>
                           );
                         })}
+                        {isWaitingExecution && (
+                          <div className="serial-execution-panel" aria-hidden="true">
+                            <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                              <ExecutionTranscriptPlaceholder />
+                            </div>
+                          </div>
+                        )}
                       </React.Fragment>
-                    ))}
+                    );
+                  })}
 
-                    {serialExecution && (
-                      <WorkspaceDetailsPanel
-                        key={`${state.runId}:serial`}
-                        showWorking={isSerialWorking}
-                        scrollContainerRef={chatScrollRef}
-                        onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
-                        onAfterToggle={handleWorkspaceDetailsAfterToggle}
-                      >
-                        <p>{t("工作目录: ")}{serialExecution.worktree}</p>
-                        <p>{t("会话实例: ")}{serialExecution.sessionId}</p>
-                        {(() => {
-                          if (serialExecution.pid) return <p>{t("进程 PID: ")}{serialExecution.pid}</p>;
-                          const pidMatch = serialExecution.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
-                                           serialExecution.output.match(/"pid":(\d+)/);
-                          return pidMatch ? <p>{t("沙箱进程 PID: ")}{pidMatch[1]}</p> : null;
-                        })()}
-                        <p>Commit Before: {serialExecution.before || t("未快照")}</p>
-                        <p>Commit After: {serialExecution.after === "" ? t("源目录直改（无快照）") : serialExecution.after ?? "pending"}</p>
-                        <p className="details-tip">{t("单节点串行任务直接在本地目录工作，无需额外 worktree。")}</p>
-                      </WorkspaceDetailsPanel>
-                    )}
-
-                    {isSerialWorking && !serialExecution && (
-                      <div className="working-indicator" role="status" aria-live="polite">
-                        <span className="working-indicator-dot" />
-                        Working…
-                      </div>
-                    )}
+                    <WorkspaceDetailsPanel
+                      key={`${state.runId}:serial`}
+                      showWorking={isMainViewWorking}
+                      scrollContainerRef={chatScrollRef}
+                      onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
+                      onAfterToggle={handleWorkspaceDetailsAfterToggle}
+                    >
+                      <p>{t("工作目录: ")}{serialExecution?.worktree || config.repository || repoInfo?.name || t("准备工作区…")}</p>
+                      <p>{t("会话实例: ")}{serialExecution?.sessionId || t("等待初始化…")}</p>
+                      {(() => {
+                        if (!serialExecution) return null;
+                        if (serialExecution.pid) return <p>{t("进程 PID: ")}{serialExecution.pid}</p>;
+                        const pidMatch = serialExecution.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
+                                         serialExecution.output.match(/"pid":(\d+)/);
+                        return pidMatch ? <p>{t("沙箱进程 PID: ")}{pidMatch[1]}</p> : null;
+                      })()}
+                      {serialModelInfo && (
+                        <>
+                          <p>Model: {serialModelInfo.model}</p>
+                          <p>Thinking Level: {serialModelInfo.thinkingLevel}</p>
+                        </>
+                      )}
+                    </WorkspaceDetailsPanel>
                     {serialNodeState?.error && (
                       <div className="node-error" style={{ marginTop: 12 }}>
                         {localizeError(serialNodeState.error)}
@@ -1950,7 +2041,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
 
                     {/* 任务路线决策结果或评估中加载状态 */}
-                    {((isPlanning && effectiveRouteType === "undecided") || effectiveRouteType !== "undecided") && (
+                    {((isPlanning && effectiveRouteType === "undecided") || (showRouteBadge && effectiveRouteType !== "undecided")) && (
                       <motion.div
                         className={`route-decision-pill ${effectiveRouteType}`}
                         initial={isPlanning ? { opacity: 0, scale: 0.96, y: 10 } : false}
@@ -2069,7 +2160,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
                   </>
                 )}
-                {isMainViewWorking && !(routeType === "serial" && serialExecutions.length > 0 && isSerialWorking) && (
+                {isMainViewWorking && routeType !== "serial" && (
                   <div className="working-indicator" role="status" aria-live="polite">
                     <span className="working-indicator-dot" />
                     Working…

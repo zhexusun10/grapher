@@ -126,6 +126,14 @@ export default function App() {
       return {};
     }
   });
+  const [runModes, setRunModes] = useState<Record<string, PlanMode>>(() => {
+    try {
+      const saved = localStorage.getItem("grapher_run_modes");
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
   const pendingRunLabelIdsRef = useRef(new Set<string>());
 
   const [recentlyAddedEdgeIds, setRecentlyAddedEdgeIds] = useState<Set<string>>(new Set());
@@ -257,6 +265,18 @@ export default function App() {
       return copy;
     });
 
+    setRunModes((prev) => {
+      const mode = prev[oldId];
+      if (!mode) return prev;
+      const copy = { ...prev };
+      delete copy[oldId];
+      copy[newId] = mode;
+      try {
+        localStorage.setItem("grapher_run_modes", JSON.stringify(copy));
+      } catch { }
+      return copy;
+    });
+
     setState((prev) => (prev.runId === oldId ? { ...prev, runId: newId } : prev));
     setPlannerStream((prev) => (prev.runId === oldId ? { ...prev, runId: newId } : prev));
     const cached = messagesByRunRef.current.get(oldId);
@@ -290,6 +310,16 @@ export default function App() {
       delete copy[provisionalId];
       try {
         localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
+      } catch { }
+      return copy;
+    });
+
+    setRunModes((prev) => {
+      if (!prev[provisionalId]) return prev;
+      const copy = { ...prev };
+      delete copy[provisionalId];
+      try {
+        localStorage.setItem("grapher_run_modes", JSON.stringify(copy));
       } catch { }
       return copy;
     });
@@ -395,6 +425,7 @@ export default function App() {
 
   const initialPlannerStream = {
     runId: "",
+    initialPlanMode: undefined as PlanMode | undefined,
     stage: "idle" as "idle" | "partitioning" | "planning" | "done" | "error",
     items: [] as TranscriptItem[],
     plannerMessageStart: 0,
@@ -1000,6 +1031,15 @@ export default function App() {
       } catch { }
       return copy;
     });
+    setRunModes((prev) => {
+      if (!prev[runIdToDelete]) return prev;
+      const copy = { ...prev };
+      delete copy[runIdToDelete];
+      try {
+        localStorage.setItem("grapher_run_modes", JSON.stringify(copy));
+      } catch { }
+      return copy;
+    });
     messagesByRunRef.current.delete(runIdToDelete);
     if (state.runId === runIdToDelete && generation === foregroundGeneration.current) {
       const scope = detachForeground(config.repository);
@@ -1176,6 +1216,13 @@ export default function App() {
 
       recordRunToWorkspace(provisionalRunId, targetRepo);
       setRunLabels((prev) => ({ ...prev, [provisionalRunId!]: targetGoal }));
+      setRunModes((prev) => {
+        const next = { ...prev, [provisionalRunId!]: effectiveMode };
+        try {
+          localStorage.setItem("grapher_run_modes", JSON.stringify(next));
+        } catch { }
+        return next;
+      });
 
       const fileAttachments: FileAttachment[] | undefined = options?.files && options.files.length > 0
         ? options.files.map(f => ({ name: f.name, size: f.size, type: f.type }))
@@ -1209,6 +1256,7 @@ export default function App() {
 
       setPlannerStream({
         runId: provisionalRunId,
+        initialPlanMode: effectiveMode,
         stage: effectiveMode === "auto" ? "partitioning" : effectiveMode === "graph" ? "planning" : "idle",
         items: [],
         plannerMessageStart: 0,
@@ -1356,6 +1404,12 @@ export default function App() {
                     try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch {}
                     return updated;
                   });
+                  setRunModes((prev) => {
+                    if (prev[event.runId!]) return prev;
+                    const updated = { ...prev, [event.runId!]: effectiveMode };
+                    try { localStorage.setItem("grapher_run_modes", JSON.stringify(updated)); } catch {}
+                    return updated;
+                  });
                 }
               }
               if (event.type === "complete" && event.snapshot?.runId) {
@@ -1363,6 +1417,12 @@ export default function App() {
                   replaceProvisionalRunId(provisionalRunId, event.snapshot.runId, targetGoal, event.snapshot.config?.repository || targetRepo);
                 } else {
                   recordRunToWorkspace(event.snapshot.runId, event.snapshot.config?.repository || targetRepo);
+                  setRunModes((prev) => {
+                    if (prev[event.snapshot!.runId]) return prev;
+                    const updated = { ...prev, [event.snapshot!.runId]: effectiveMode };
+                    try { localStorage.setItem("grapher_run_modes", JSON.stringify(updated)); } catch {}
+                    return updated;
+                  });
                 }
               }
               return;
@@ -1386,6 +1446,14 @@ export default function App() {
                     const updated = { ...prev, [runId]: targetGoal };
                     try {
                       localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
+                    } catch {}
+                    return updated;
+                  });
+                  setRunModes((prev) => {
+                    if (prev[runId]) return prev;
+                    const updated = { ...prev, [runId]: effectiveMode };
+                    try {
+                      localStorage.setItem("grapher_run_modes", JSON.stringify(updated));
                     } catch {}
                     return updated;
                   });
@@ -1856,6 +1924,12 @@ export default function App() {
       setState(snapshot);
       setRouteType(deduceRouteType(snapshot));
       recordRunToWorkspace(snapshot.runId, snapshot.config?.repository || targetRepo);
+      setRunModes((prev) => {
+        if (prev[snapshot.runId]) return prev;
+        const updated = { ...prev, [snapshot.runId]: effectiveMode };
+        try { localStorage.setItem("grapher_run_modes", JSON.stringify(updated)); } catch {}
+        return updated;
+      });
       void planningRecovery.finish(scope);
       setSelected("");
       setPlannerStream((prev) => ({
@@ -2837,6 +2911,7 @@ export default function App() {
                     transcriptRunId={transcriptRunId}
                     activity={activities[state.runId] ?? []}
                     routeType={routeType}
+                    initialPlanMode={runModes[state.runId] || (plannerStream.runId === state.runId ? plannerStream.initialPlanMode : undefined)}
                     selected={selected}
                     setSelected={setSelected}
                     selectedMergerId={selectedMergerId}

@@ -3,10 +3,11 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
-import { planningModelRoles, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
+import { planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import type { ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
+import type { Execution } from "../src/types.ts";
 
 const catalog: ProviderCatalog = {
   providers: [
@@ -175,3 +176,68 @@ test("ProviderAuthAdapter passes device ID to runtime login options", async () =
   assert.ok(capturedOptions, "options were passed to runtime.login");
   assert.equal((capturedOptions as { getDeviceId: () => string }).getDeviceId(), "mock-device-id-1234");
 });
+
+test("resolveExecutionModelAndThinking extracts model and thinking from execution output events", () => {
+  const execution: Execution = {
+    id: "exec-1",
+    node: "task-1",
+    revision: 1,
+    attempt: 1,
+    sessionId: "sess-1",
+    worktree: "/path/to/worktree",
+    before: "abc1234",
+    after: "def5678",
+    status: "done",
+    output: [
+      JSON.stringify({ type: "session", id: "sess-1" }),
+      JSON.stringify({ type: "model_change", provider: "openai-codex", modelId: "gpt-6-sol" }),
+      JSON.stringify({ type: "thinking_level_change", thinkingLevel: "high" }),
+    ].join("\n"),
+    startedAt: 1000,
+    completedAt: 2000,
+  };
+
+  const result = resolveExecutionModelAndThinking(execution, false, legacy, {});
+  assert.equal(result.model, "openai-codex/gpt-6-sol");
+  assert.equal(result.thinkingLevel, "high");
+});
+
+test("resolveExecutionModelAndThinking falls back to config and role models when not in output", () => {
+  const execution: Execution = {
+    id: "exec-2",
+    node: "task-2",
+    revision: 1,
+    attempt: 1,
+    sessionId: "sess-2",
+    worktree: "/path/to/worktree-2",
+    before: "1111111",
+    after: "2222222",
+    status: "done",
+    output: "some regular non-json text\n",
+    startedAt: 1000,
+    completedAt: 2000,
+  };
+
+  const customConfig: Config = {
+    ...defaultConfig,
+    model: "fallback/base",
+    thinkingLevel: "medium",
+    roleModels: {
+      nodeAgent: { model: "custom/agent", thinkingLevel: "low" },
+    },
+  };
+
+  // Node agent role
+  const nodeResult = resolveExecutionModelAndThinking(execution, false, customConfig, {});
+  assert.equal(nodeResult.model, "custom/agent");
+  assert.equal(nodeResult.thinkingLevel, "low");
+
+  // Merger role with env override
+  const mergerResult = resolveExecutionModelAndThinking(execution, true, customConfig, {
+    merger: "env/merger-model",
+    mergerThinking: "xhigh",
+  });
+  assert.equal(mergerResult.model, "env/merger-model");
+  assert.equal(mergerResult.thinkingLevel, "xhigh");
+});
+

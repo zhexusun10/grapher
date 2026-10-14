@@ -6,6 +6,7 @@ import { createServer } from "vite";
 let server, browser, origin;
 let streamResponse;
 let onPlan = () => {};
+let onPlanStream;
 const line = event => JSON.stringify(event) + "\n";
 const assistant = text => line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } });
 const startTool = (id, command) => line({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command } });
@@ -18,6 +19,7 @@ before(async () => {
         if (req.url === "/api/plan_goal_stream") {
           let body = "";
           for await (const chunk of req) body += chunk;
+          if (onPlanStream) return onPlanStream(JSON.parse(body), res);
           onPlan(JSON.parse(body));
           streamResponse = res;
           res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
@@ -29,9 +31,10 @@ before(async () => {
           ]) res.write(`event: planner\ndata: ${JSON.stringify({ event })}\n\n`);
           return;
         }
-        if (!req.url.startsWith("/__history")) return next();
+        if (!req.url.startsWith("/__history") && !req.url.startsWith("/__workspace-footer")) return next();
+        const fixture = req.url.startsWith("/__workspace-footer") ? "workspace-footer" : "frontend-audit";
         res.setHeader("Content-Type", "text/html");
-        res.end(await vite.transformIndexHtml(req.url, '<html><body><div id="root" style="padding:32px"></div><script type="module" src="/scripts/fixtures/frontend-audit.tsx"></script></body></html>'));
+        res.end(await vite.transformIndexHtml(req.url, `<html><body><div id="root" style="padding:32px"></div><script type="module" src="/scripts/fixtures/${fixture}.tsx"></script></body></html>`));
       });
     } }],
   });
@@ -49,6 +52,189 @@ async function newPage(handler) {
   page.on("pageerror", error => errors.push(String(error)));
   return { context, page, errors };
 }
+
+for (const [mode, turn] of [
+  ["serial", "provisional"], ["serial", "initial"], ["serial", "follow-up"], ["graph", "initial"], ["graph", "follow-up"],
+]) {
+  test(`workspace footer: ${mode} ${turn} stays still before model output`, { timeout: 30_000 }, async () => {
+    let releaseOutput;
+    const outputReady = new Promise(resolve => { releaseOutput = resolve; });
+    let currentOutput = line({ type: "grapher_process_started", pid: 123 }), settled = false;
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      const command = new URL(route.request().url()).pathname.slice(5);
+      if (command === "get_execution_output") {
+        if (body.executionId === "current") await outputReady;
+        const content = body.executionId === "current" ? currentOutput : "";
+        const total = Buffer.byteLength(content);
+        return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+          content: content.slice(body.offset ?? 0), startOffset: body.offset ?? 0, nextOffset: total, totalBytes: total,
+          complete: true, status: body.executionId === "current" && !settled ? "running" : "done" } } });
+      }
+      return route.fulfill({ json: { result: command === "list_files" ? { files: [] } : { skills: [] } } });
+    });
+    try {
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await page.goto(`${origin}/__workspace-footer?mode=${mode}&turn=${turn}`, { waitUntil: "domcontentloaded" });
+      const trigger = page.getByRole("button", { name: "Workspace and session details", exact: true });
+      await trigger.waitFor();
+      await page.waitForTimeout(250);
+      if (turn === "follow-up") {
+        await page.evaluate(() => window.audit.send());
+        await page.getByText("Follow-up task", { exact: true }).waitFor();
+      }
+      const working = page.locator(".workspace-details .working-indicator");
+      await working.waitFor();
+      const before = { button: await trigger.evaluate(element => element.getBoundingClientRect().top),
+        working: await working.evaluate(element => element.getBoundingClientRect().top) };
+      await page.evaluate(turn => {
+        window.audit.footerSamples = [];
+        window.audit.sampling = true;
+        const sample = () => {
+          window.audit.footerSamples.push({ button: document.querySelector(".workspace-details-trigger").getBoundingClientRect().top,
+            working: document.querySelector(".workspace-details .working-indicator")?.getBoundingClientRect().top });
+          if (window.audit.sampling) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+        if (turn === "provisional") window.audit.confirmRun();
+        else window.audit.startExecution(100);
+      }, turn);
+      if (turn === "provisional") {
+        await page.waitForTimeout(60);
+        await page.evaluate(() => window.audit.createNode());
+        await page.waitForTimeout(100);
+        await page.evaluate(() => window.audit.startExecution(100));
+      }
+      await page.waitForTimeout(150);
+      releaseOutput();
+      await page.waitForFunction(() => document.querySelector('[data-execution-id="current"]')?.getAttribute("aria-busy") === "false");
+      await page.waitForTimeout(200);
+      const samples = await page.evaluate(() => { window.audit.sampling = false; return window.audit.footerSamples; });
+      assert.ok(samples.length >= 3, "measure painted frames, not just the settled position");
+      assert.ok(samples.every(sample => Math.abs(sample.button - before.button) <= 1 && Math.abs(sample.working - before.working) <= 1),
+        `footer moved before model output: before=${JSON.stringify(before)}, frames=${JSON.stringify(samples)}`);
+      const buttonBox = await trigger.boundingBox(), workingBox = await working.boundingBox(), textBox = await trigger.locator("span").boundingBox();
+      assert.ok(workingBox.y + workingBox.height <= buttonBox.y, "Working is above the details button");
+      assert.ok(Math.abs(workingBox.x - textBox.x) <= 1, "Working aligns with the button text");
+      await trigger.click();
+      await page.waitForTimeout(320);
+      assert.equal(await trigger.getAttribute("aria-expanded"), "true");
+      assert.equal(await working.count(), 0, "expanded details hide Working");
+      await trigger.click();
+      await working.waitFor();
+      currentOutput += assistant("FIRST_MODEL_OUTPUT");
+      await page.getByText("FIRST_MODEL_OUTPUT", { exact: true }).waitFor();
+      settled = true;
+      await page.evaluate(() => window.audit.finish());
+      await working.waitFor({ state: "detached" });
+      assert.deepEqual(errors, []);
+    } finally { releaseOutput(); await context.close(); }
+  });
+}
+
+test("actual App: first Serial message keeps the footer still through approval and execution startup", { timeout: 30_000 }, async () => {
+  const config = { repository: "/mock/first-serial", model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const task = "First Serial task";
+  const draft = { ...empty, runId: "first-serial", config, planType: "serial", phase: "awaiting_approval",
+    graph: { originalGoal: task, nodes: [{ name: "task", task }], edges: [] },
+    nodes: { task: { status: "waiting", revision: 0, instruction: "", error: null } },
+    plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] } };
+  // Approval changes the phase, but the Runtime leaves the node waiting until
+  // its background driver starts preparing the first execution.
+  const approved = { ...draft, approved: true, phase: "running" };
+  const header = line({ type: "grapher_process_started", pid: 123 });
+  const running = { ...approved, nodes: { task: { ...draft.nodes.task, status: "running" } },
+    executions: [{ id: "first-execution", node: "task", status: "running", output: "", outputBytes: Buffer.byteLength(header),
+      revision: 0, attempt: 1, startedAt: 1, completedAt: null, sessionId: "first-session", worktree: config.repository, before: "", after: null }] };
+  let snapshot = empty, response, approveReceived = false, releaseApproval;
+  const approval = new Promise(resolve => { releaseApproval = resolve; });
+  onPlanStream = (body, res) => {
+    assert.equal(body.mode, "serial");
+    response = streamResponse = res;
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    res.write(": pending\n\n");
+  };
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [], repositoryInfo: { path: config.repository, name: "First Serial", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = snapshot; break;
+      case "snapshot_if_changed": result = { version: snapshot.phase + snapshot.executions.length, snapshot: snapshot.runId ? snapshot : null }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "control":
+        assert.equal(body.action, "approve");
+        approveReceived = true;
+        await approval;
+        snapshot = result = approved;
+        break;
+      case "get_execution_output": result = { runId: body.runId, executionId: body.executionId, content: body.offset ? "" : header,
+        startOffset: body.offset ?? 0, nextOffset: Buffer.byteLength(header), totalBytes: Buffer.byteLength(header), complete: true, status: "running" }; break;
+      default: throw new Error(`Unexpected API ${command}`);
+    }
+    try { await route.fulfill({ json: { result } }); } catch {}
+  });
+  try {
+    await context.addInitScript(config => {
+      localStorage.setItem("grapher_plan_mode", "serial");
+      localStorage.setItem("grapher_projects", JSON.stringify([{ id: config.repository, path: config.repository, name: "First Serial", lastOpened: 1 }]));
+    }, config);
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.evaluate(() => {
+      window.footerFrames = [];
+      window.sampleFooter = true;
+      const sample = () => {
+        const button = document.querySelector(".workspace-details-trigger");
+        const working = document.querySelector(".workspace-details .working-indicator");
+        const stream = document.querySelector(".chat-messages-stream");
+        const wrapper = document.querySelector(".workspace-view-wrapper");
+        if (button && stream && Number(getComputedStyle(stream).opacity) > 0.01 && Number(getComputedStyle(wrapper).opacity) > 0.01) {
+          const pane = button.closest(".initial-query-scroll"), composer = pane.parentElement.querySelector(".pane-bottom-chat");
+          window.footerFrames.push({ button: button.getBoundingClientRect().top, working: working?.getBoundingClientRect().top,
+            stream: stream.getBoundingClientRect().top, scroll: pane.scrollTop, composer: composer.getBoundingClientRect().height,
+            composerLayout: composer.offsetHeight, history: !!document.querySelector("[data-execution-id]"),
+            userHeight: document.querySelector(".chat-message-row.user")?.getBoundingClientRect().height });
+        }
+        if (window.sampleFooter) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    const input = page.locator(".landing-screen textarea");
+    await input.fill(task); await input.press("Enter");
+    await page.waitForFunction(() => window.footerFrames.length >= 8);
+    for (let i = 0; !response && i < 100; i++) await page.waitForTimeout(20);
+    assert.ok(response, "Serial planning request started");
+    response.write(`event: run_started\ndata: ${JSON.stringify({ runId: draft.runId })}\n\n`);
+    await page.waitForTimeout(80);
+    snapshot = draft;
+    response.end(`event: complete\ndata: ${JSON.stringify({ snapshot: draft })}\n\n`);
+    for (let i = 0; !approveReceived && i < 100; i++) await page.waitForTimeout(20);
+    assert.ok(approveReceived, "Serial automatically requests approval");
+    await page.waitForTimeout(100);
+    releaseApproval();
+    await page.waitForTimeout(150);
+    snapshot = running;
+    await page.locator('[data-execution-id="first-execution"]').waitFor();
+    await page.waitForTimeout(200);
+    const frames = await page.evaluate(() => { window.sampleFooter = false; return window.footerFrames; });
+    const first = frames[0];
+    const changes = frames.filter((frame, i) => !i || frame.button !== frames[i - 1].button ||
+      frame.working !== frames[i - 1].working || frame.history !== frames[i - 1].history);
+    assert.ok(frames.every(frame => Math.abs(frame.button - first.button) <= 1 && Math.abs(frame.working - first.working) <= 1),
+      `first Serial footer shifted: ${JSON.stringify(changes)}`);
+    assert.deepEqual(errors, []);
+  } finally {
+    releaseApproval(); onPlanStream = undefined; response?.destroy(); streamResponse = undefined; await context.close();
+  }
+});
 
 for (const role of ["node", "planner"]) {
   test(`${role}: tail reads, automatic scrollback, split tools and view-owned caches`, { timeout: 45_000 }, async () => {

@@ -68,6 +68,15 @@ export function ExecutionTranscript(props: Props) {
   return <ExecutionHistory key={`${props.runId}:${props.execution.id}`} {...props} />;
 }
 
+/** Keep pending turns identical to an empty live transcript, including its
+ * history-status line and transcript padding, before an Execution exists. */
+export function ExecutionTranscriptPlaceholder() {
+  return <div aria-hidden="true">
+    <TranscriptHistoryStatus loading={false} />
+    <VirtualizedTranscript compact output="" emptyText="" />
+  </div>;
+}
+
 function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onInitialOutputReady }: Props) {
   const cacheKey = `${runId}:${execution.id}`;
   const paged = execution.outputBytes !== undefined;
@@ -76,7 +85,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
   const windowRef = useRef(window);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
-  const [ready, setReady] = useState(!paged || window !== null);
+  const [ready, setReady] = useState(!paged || window !== null || !settled);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderBusy = useRef(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -112,7 +121,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
       setReady(true); notifyLoading(false);
       return () => abort.abort();
     }
-    notifyLoading(!cached);
+    notifyLoading(!cached && settled);
     const stop = startVisibilityPolling(async () => {
       const before = windowRef.current;
       const offset = before?.end ?? 0;
@@ -163,7 +172,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
   return <div ref={wrapperRef} data-execution-id={execution.id} data-run-id={runId} aria-busy={!ready}>
     {error && <p role="alert">{localizeError(error)} <button onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
     <TranscriptHistoryStatus loading={loadingOlder} />
-    {!ready && !error ? <div className="transcript-loading" role="status" aria-label={t("正在加载历史记录…")}>
+    {settled && !ready && !error ? <div className="transcript-loading" role="status" aria-label={t("正在加载历史记录…")}>
       <Loader2 size={14} className="spin" aria-hidden="true" />
     </div> : <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}
       onReachTop={window?.start && !error ? () => { void loadOlder(); } : undefined}
