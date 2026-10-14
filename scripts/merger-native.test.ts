@@ -92,7 +92,7 @@ test('production Planner writes source directly; Merger repairs node and publica
           assert.ok(system.includes('Do not stage Git/Grapher internals or managed environment/cache scopes'), 'force-staging must preserve internal/environment exclusions');
           assert.ok(system.includes('Preserve valid changes. Do not modify unrelated files.'), 'initial Merger instructions must be appended');
           assert.ok(system.includes('Do not discard the incoming commit.'));
-          assert.ok(system.includes(`Finish with a short, nonempty assistant summary.\\n${pathGuideline}`), 'path convention must directly follow the initial addendum without a blank line');
+          assert.ok(system.includes(`Do not stage Git/Grapher internals or managed environment/cache scopes.\\n${pathGuideline}`), 'path convention must directly follow the initial addendum without a blank line');
         }
         // A continued session carries the original turn's tool results, so
         // count results after the latest user message for this turn.

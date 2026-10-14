@@ -42,6 +42,7 @@ waiting -> running -> done
            failed    dirty -> running
 
 waiting / dirty -> blocked
+blocked -> waiting            (an upstream node runs again)
 ```
 
 - `waiting`: task has not run or is waiting for dependencies.
@@ -49,7 +50,7 @@ waiting / dirty -> blocked
 - `done`: current task result is valid.
 - `dirty`: a change invalidated the current result.
 - `failed`: the execution or protocol failed.
-- `blocked`: dependencies failed or workspace composition could not proceed.
+- `blocked`: dependencies failed or workspace composition could not proceed. Starting an upstream execution returns the node to `waiting` so the new result is composed again.
 
 Nodes remain stable across recorded execution attempts. Historical output and backend-recorded Git snapshots remain inspectable even when a later revision supersedes their result; ordinary files remain tied to their physical directory.
 
@@ -75,7 +76,7 @@ A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `
 - Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains done; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
 - The runtime caps the configured limit at 3. A limit of 0 skips the first feedback request. Execution errors and malformed verdicts still fail normally.
 
-While feedback budget remains, the runtime waits for running nodes that a pending verdict could invalidate; it does not forcibly suspend their processes. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable.
+While feedback budget remains, the runtime waits for running nodes that a pending verdict could invalidate; it does not forcibly suspend their processes. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable. Once a review's verdict is resolved, its feedback edge no longer blocks ready descendants just because an accepted sibling is still running. Scheduling that review again reactivates the barrier; queued unresolved verdicts retain their drain-before-handoff checks.
 
 `Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, target execution/head/revision, and the final response's log-byte range before invalidation clears heads. Restart replays that exact request. Duplicate deliveries are idempotent; a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership.
 
@@ -87,7 +88,9 @@ Live steering does not itself mark a running node dirty. Completed-node follow-u
 
 Business events include graph creation/revision, approval, execution transitions, feedback, human intervention, pause, and publication. Execution output is stored separately in UTF-8 byte-indexed `execution_logs` chunks; terminal events carry structured metadata rather than full transcripts.
 
-Snapshot/history/list requests are metadata-oriented. Node logs load on demand using `(runId, executionId, byteOffset)`; planning output has its own cursor. Execution-log pages default to 256 KiB, with a configurable limit capped at 1 MiB. For settled executions, `full=true` bypasses that page limit; the current UI uses this to load the selected historical transcript in full. Planning-output pages are capped at 256 KiB. The two browser transcript caches each have a 20-entry / 30 MiB limit; those cache limits are not a cap on a selected transcript's size.
+Snapshot/history/list requests are metadata-oriented. Node logs load on demand using `(runId, executionId, byteOffset)`; planning revisions each have their own cursor. Execution-log forward pages default to 256 KiB, with a configurable limit capped at 1 MiB. Planning forward pages are capped at 256 KiB; Planning tail requests accept a `limit` capped at 1 MiB. Both live and settled conversations open from a bounded 512 KiB tail, with 1 MiB targets for older reads (plus the bounded look-behind below). Upward scrolling prefetches within roughly two viewports of the loaded transcript's beginning, rather than waiting for the pane's exact top. Initial filling measures the rendered transcript, not the surrounding task, graph summary or composer, and reads older pages until there are about two viewports of actual history or the beginning is reached. A gray loading label occupies a permanently reserved, separate line; it never overlays messages or changes the reading anchor. There is no load-earlier button. Prepending preserves a retained visible row's pixel position through virtualized height measurements, independently of concurrent live appends, and never enables follow-to-bottom while the user is reading older output. `tail=true` with an optional exclusive `before` cursor returns `startOffset` and `nextOffset`; older reads move only the start cursor, while live reads advance only the end cursor. Tail reads may include boundary look-behind (up to two stored execution chunks, or 256 KiB for Planner). A leading split JSONL record is retained for later reconstruction but is never displayed as raw assistant text. `full=true` remains available for explicit settled-output exports and compatibility callers.
+
+The two browser transcript caches each have a 20-entry / 30 MiB limit, charged against retained text rather than absolute byte cursors. Execution windows are owned by their mounted view and are released when leaving that Node/Serial/Merger view. Planner windows are cached independently by `(runId, planningId)` and, within the cache budget, survive Node-to-Planner navigation and new revisions within the same Conversation. Cold Planner history starts at the newest revision; older revisions load to fill the initial buffer or on upward scroll. The Latest action smoothly traverses the full distance without a pre-jump, tracks the bottom through live output and virtualized height changes, and temporarily disables reading-anchor restoration and automatic bottom snaps. User input or Conversation exit cancels the animation; reduced-motion preferences are respected. Cold, settled thinking history and tool cards start collapsed; their bodies are mounted only on explicit expansion. Active-conversation thinking (SSE or incremental JSONL) may auto-expand, while explicit user collapse remains respected. Folding reduces body-rendering work, not log-page transfer: the current JSONL byte pages still carry thinking and tool details, and expansion reads the already loaded page rather than issuing a per-card network request. Leaving the entire Conversation (another Run, workspace, new-conversation view, or unmount) releases both caches for that Run and cancels its in-flight readers so late responses cannot repopulate them. Deletion invalidates only the affected Run. A live Planner window must revalidate its end cursor through a terminal output page, even if that page has no new text; reaching the previous live byte total is not terminal completeness. These cache limits are not a cap on a selected transcript's size. Focused regressions cover cross-page tools, concurrent live/older reads, repeated switching and stop-with-draft behavior in [conversation history browser tests](../../scripts/conversation-history-ui.test.mjs) and [byte-window tests](../../scripts/transcript-window.test.ts).
 
 Long Git snapshot, node-workspace preparation/copy and publication passes hold the Run mutex. `snapshot_if_changed` reads a transient per-Run activity projection and uses a non-blocking attempt on that mutex, so a poll during such a pass returns the unchanged version plus progress (for example that node workspaces are being copied) instead of queueing behind the I/O. Activity is display-only and never changes durable event state.
 
@@ -130,6 +133,14 @@ After interruption:
   task or inject a synthetic “continue” user message. It does not mark a
   provider failure as successful or silently retry an ordinary failed node;
   ordinary failures still require an explicit node intervention.
+- A continued or retried execution reuses the last prepared attempt's physical
+  working tree as-is: its committed HEAD (including agent commits made before
+  the interruption) and all uncommitted work—including files matching
+  `.gitignore`—are preserved and later force-collected into the result
+  snapshot. Recovery never stashes, checks out or resets that directory. If the
+  recorded inputs changed after preparation, the workspace is missing, or the
+  prepared Git history was rewritten, the retry fails explicitly while
+  retaining the partial work instead of silently rebuilding it.
 - Interrupted planning becomes failed, preserving available output.
 - Interrupted publication or its Merger becomes `publication_failed` for explicit retry.
 - An interrupted node-composition Merger is recorded as failed without entering the publication phase; inspect the node workspace and rerun or resolve it.

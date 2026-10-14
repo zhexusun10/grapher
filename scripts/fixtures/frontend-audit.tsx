@@ -4,16 +4,22 @@ import { SettingsModal } from "../../src/components/modals/SettingsModal";
 import { EditorModal } from "../../src/components/modals/EditorModal";
 import { EditableUserBubble } from "../../src/components/views/ChatBubbles";
 import { PromptBox } from "../../src/components/ui/chatgpt-prompt-input";
-import { FloatingPathsBackground } from "../../src/components/ui/floating-paths";
 import { useSnapshotPolling } from "../../src/hooks/useSnapshotPolling";
 import { runtimeService } from "../../src/services/runtime";
 import { ThinkingCard } from "../../src/components/ThinkingCard";
 import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
+import { ExecutionTranscript, executionTranscriptCache } from "../../src/components/ExecutionTranscript";
+import { PlanningActivity, planningTranscriptCache } from "../../src/components/PlanningActivity";
+import { useConversationTranscriptCache } from "../../src/hooks/useConversationTranscriptCache";
+import { cachedPlanningOutput, planningTranscriptKey } from "../../src/services/transcriptCache";
+import { GraphWorkbench } from "../../src/components/views/GraphWorkbench";
+import { tokens } from "../../src/tokens";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../../src/services/thinkingTranscript";
 import type { TranscriptItem } from "../../src/types";
 import { defaultConfig, emptyGraph, emptySnapshot, type RuntimeActivity, type Snapshot } from "../../src/types";
 import "../../src/styles.css";
 import "../../src/styles-workbench.css";
+import "../../src/styles-planning.css";
 
 const audit = ((window as any).audit = {});
 const config = { ...defaultConfig, repository: "/a", model: "test/old" };
@@ -61,6 +67,90 @@ function PromptFixture() {
     onPaste={() => { audit.pastes = (audit.pastes ?? 0) + 1; }}
     onSubmit={async () => { audit.submissions = (audit.submissions ?? 0) + 1; return true; }} />;
 }
+
+function UnchangedBubbleFixture() {
+  const [draft, setDraft] = useState("Initial message");
+  audit.unchangedSends = 0;
+  return <EditableUserBubble text="Initial message" editing draft={draft} onDraftChange={setDraft}
+    onCancel={() => {}} onSend={() => { audit.unchangedSends += 1; return true; }} />;
+}
+function InterruptPromptFixture() {
+  const [value, setValue] = useState("");
+  audit.interrupts = 0;
+  return <PromptBox isWorking value={value} onChange={event => setValue(event.target.value)}
+    onInterrupt={() => { audit.interrupts += 1; }} onSubmit={() => { audit.submissions = (audit.submissions ?? 0) + 1; return true; }} />;
+}
+function TranscriptFixture() {
+  const outputBytes = Number(new URLSearchParams(location.search).get("bytes"));
+  return <div className="initial-query-scroll" data-transcript-scroll style={{ height: 300, overflowY: "auto" }}>
+    <ExecutionTranscript runId="tail-run" execution={{ id: "tail-exec", node: "worker", status: "completed",
+      output: "", outputBytes, startedAt: 1, completedAt: 2 } as any} />
+  </div>;
+}
+
+function PlannerTranscriptFixture() {
+  return <div className="initial-query-scroll" data-transcript-scroll style={{ height: 300, overflowY: "auto" }}>
+    <PlanningActivity planningIds={["planner-tool-plan"]} showUserTurns running />
+  </div>;
+}
+
+function HistoryRegressionFixture() {
+  const [view, setView] = useState("node");
+  const [running, setRunning] = useState(true);
+  const [planningIds, setPlanningIds] = useState(["planner-previous", "planner-latest"]);
+  useConversationTranscriptCache(view === "exit" ? "" : "regression");
+  const scroll = React.useRef<HTMLDivElement>(null);
+  const params = new URLSearchParams(location.search);
+  const headingHeight = Number(params.get("heading") ?? 300);
+  const footerHeight = Number(params.get("footer") ?? 0);
+  audit.selectHistory = setView;
+  audit.setRunning = setRunning;
+  audit.cachedExecution = () => executionTranscriptCache.get("regression:worker");
+  audit.setPlanningIds = setPlanningIds;
+  audit.cachedPlanning = () => {
+    const latest = planningTranscriptCache.get(planningTranscriptKey("regression", planningIds.at(-1)!));
+    return latest ? { ...latest, text: cachedPlanningOutput("regression", planningIds) } : undefined;
+  };
+  audit.planningCacheKeys = () => [...planningTranscriptCache.keys()];
+  const ready = useCallback(() => { requestAnimationFrame(() => {
+    if (scroll.current) {
+      delete scroll.current.dataset.transcriptHistoryReading;
+      scroll.current.scrollTop = scroll.current.scrollHeight;
+    }
+  }); }, [view]);
+  return <div className="initial-query-scroll" data-shared-scroll ref={scroll} style={{ height: 380, width: 850, flex: "none", overflowY: "auto" }}>
+    <div style={{ height: headingHeight, flexShrink: 0 }}>Conversation heading and task above the transcript</div>
+    {view === "node" && <ExecutionTranscript runId="regression" execution={{ id: "worker", node: "worker", status: running ? "running" : "failed",
+      output: "", outputBytes: 0, startedAt: 1, completedAt: running ? null : 2 } as any} onInitialOutputReady={ready} />}
+    {view === "planner" && <PlanningActivity runId="regression" planningIds={planningIds} running={running} showUserTurns onReady={ready} />}
+    {footerHeight > 0 && <div style={{ height: footerHeight }}>Graph summary below the transcript</div>}
+  </div>;
+}
+
+function LatestScrollFixture() {
+  const longMessage = new URLSearchParams(location.search).get("layout") === "long";
+  const assistant = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
+  const [output, setOutput] = useState(() => longMessage
+    ? assistant(Array.from({ length: 300 }, (_, index) => `Paragraph ${index}: long message 中文🚀 with enough text to span the viewport.\n\n`).join("")) + assistant("LATEST_VISIBLE_MARKER")
+    : Array.from({ length: 500 }, (_, index) => assistant(`Virtualized message ${index}`)).join(""));
+  const [mounted, setMounted] = useState(true);
+  audit.appendLatest = () => setOutput(previous => previous + assistant("APPEND_WHILE_SMOOTH_SCROLLING"));
+  audit.unmountConversation = () => setMounted(false);
+  const state = { ...emptySnapshot, runId: "latest-run", config, phase: "paused", paused: true, approved: true, planType: "serial" as const,
+    graph: { originalGoal: "Latest-scroll regression", nodes: [{ name: "task", task: "Inspect the long conversation" }], edges: [] },
+    nodes: { task: { status: "done" as const, revision: 0, instruction: "", error: null } },
+    executions: [{ id: "latest-execution", node: "task", status: "completed", revision: 0, attempt: 1, output,
+      startedAt: 1, completedAt: 2, sessionId: "latest-session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
+  const noop = () => {};
+  return mounted ? <div style={{ height: 800, display: "flex" }}>
+    <GraphWorkbench state={state} routeType="serial" selected="" setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
+      effectiveMessages={[]} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
+      onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
+      active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
+      nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
+  </div> : <p>Conversation closed</p>;
+}
+
 function PollingFixture() {
   const [snapshot, setSnapshot] = useState<Snapshot>({ ...emptySnapshot, config, runId: "view", phase: "running", graph: { ...emptyGraph, originalGoal: "Initial" } });
   const [ids, setIds] = useState(["broken", "background", "view"]);
@@ -103,22 +193,11 @@ function ThinkingFixture() {
     <section data-thinking-view="history"><VirtualizedTranscript output={output} inline /></section>
   </>;
 }
-function FloatingPathsFixture() {
-  const [active, setActive] = useState(false);
-  const [mounted, setMounted] = useState(true);
-  audit.setBackgroundActive = setActive;
-  audit.unmountBackground = () => setMounted(false);
-  return <React.StrictMode>{mounted &&
-    <div className={`app-background-root ${active ? "landing-active" : ""}`}>
-      <FloatingPathsBackground position={-1} active={active}>
-        <div className={`app-shell ${active ? "landing-active" : ""}`}><main className="main" /></div>
-      </FloatingPathsBackground>
-    </div>
-  }</React.StrictMode>;
-}
 const cases: Record<string, React.ComponentType> = {
-  settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, prompt: PromptFixture, polling: PollingFixture,
-  thinking: ThinkingFixture, background: FloatingPathsFixture,
+  settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, unchangedBubble: UnchangedBubbleFixture,
+  prompt: PromptFixture, interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
+  polling: PollingFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
+  thinking: ThinkingFixture,
 };
 const Component = cases[new URLSearchParams(location.search).get("case") || "settings"];
 createRoot(document.getElementById("root")!).render(<Component />);

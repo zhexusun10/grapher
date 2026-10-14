@@ -54,7 +54,11 @@ try {
     graph: { originalGoal: "merge", nodes: [{ name: "join", task: "Join results" }], edges: [] },
     nodes: { join: { status: "blocked", revision: 1, head: null, instruction: "", error: "conflict" } },
     mergers: [{ id: "merger-1", node: "merge:join", revision: 1, attempt: 1, sessionId: "merger-1",
-      worktree: "/worktrees/join", before: "base", after: null, status: "failed", output: "", startedAt: 1, completedAt: 2 }],
+      worktree: "/worktrees/join", before: "base", after: null, status: "completed", output: "", startedAt: 1, completedAt: 2 }],
+  };
+  const failedMergerState = {
+    ...mergerState,
+    mergers: [{ ...mergerState.mergers[0], id: "merger-failed", status: "failed" }],
   };
   const publicationMergerState = {
     ...mergerState,
@@ -76,6 +80,7 @@ try {
     ["PublicationCompletedCard", "PublicationCompletedCard", { state: { ...state, phase: "completed" }, routeType: "graph" }],
     ["views/GraphWorkbench", "GraphWorkbench", { state, activity: [{ kind: "workspace_prepare", nodes: ["foundation_contract"] }], routeType: "graph", selected: "", setSelected: noop, selectedMergerId: "", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
     ["views/GraphWorkbench", "GraphWorkbench", { state: mergerState, routeType: "graph", selected: "join", setSelected: noop, selectedMergerId: "merger-1", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
+    ["views/GraphWorkbench", "GraphWorkbench", { state: failedMergerState, routeType: "graph", selected: "join", setSelected: noop, selectedMergerId: "merger-failed", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
     ["views/GraphWorkbench", "GraphWorkbench", { state: publicationMergerState, routeType: "graph", selected: "merger:publication", setSelected: noop, selectedMergerId: "publish-merger", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
   ];
   for (const [path, name, props] of cases) {
@@ -88,9 +93,15 @@ try {
       assert.ok(html.includes(t("设置")));
       assert.ok(html.includes(t("界面语言")));
       assert.ok(html.includes(`value="${preference}" selected=""`));
-      assert.match(html, /class="settings-cancel-btn"/);
-      assert.match(html, /class="primary save-config-btn"[^>]*>[\s\S]*?width="18"/);
       assert.ok(!html.includes('role="alertdialog"'), "confirmation is not shown before a language change");
+    }
+    if (name === "ApprovalModal") {
+      // Verify the rendered disclosure, not a particular translation call or sentence.
+      const copy = html.replace(/<[^>]*>/g, " ");
+      assert.match(copy, /\.gitignore/);
+      assert.match(copy, locale === "en" ? /force-stag/i : /强制暂存/);
+      assert.match(copy, locale === "en" ? /merged back/i : /合并回/);
+      assert.match(copy, locale === "en" ? /managed environment scopes.*excluded/i : /受管环境范围除外/);
     }
     if (name === "Sidebar") assert.ok(html.includes(t("暂无工作区")));
     if (name === "GraphWorkbench") {
@@ -99,6 +110,9 @@ try {
         if (props.selected === "merger:publication") {
           assert.ok(html.includes(t("publication merger")), "publication merger heading must render");
           assert.ok(html.includes(t("向 publication merger 追加消息…")), "a settled publication merger still accepts follow-ups");
+        } else if (props.selectedMergerId === "merger-failed") {
+          assert.ok(html.includes(t("merger · {0}", "join")), "merger card heading must render localized copy");
+          assert.ok(html.includes(t("向 merger 发送消息并重跑…")), "failed node merger allows sending message to re-run");
         } else {
           assert.ok(html.includes(t("merger · {0}", "join")), "merger card heading must render localized copy");
           assert.ok(html.includes(t("merger 已结束，只能查看执行记录")), "settled node merger must render the read-only notice");

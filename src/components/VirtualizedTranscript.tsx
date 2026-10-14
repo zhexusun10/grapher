@@ -3,13 +3,19 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallba
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
 import { TranscriptItem } from "../types";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../services/thinkingTranscript";
+import { settleInterruptedItems } from "../services/transcriptSettle";
 import { Terminal } from "lucide-react";
 import { shareJson } from "../services/structuralSharing";
+import { stripPlannerContext } from "../services/plannerText";
 import { VirtualizedList } from "./VirtualizedList";
 import { TranscriptRow } from "./TranscriptRow";
+import { utf8Bytes } from "../lib/BoundedLruCache";
+import { TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 
 interface VirtualizedTranscriptProps {
   output: string;
+  /** Absolute cursor of the first loaded byte (it can start inside a JSONL record). */
+  startOffset?: number;
   className?: string;
   emptyText?: string;
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
@@ -20,7 +26,11 @@ interface VirtualizedTranscriptProps {
   compact?: boolean;
   showUserTurns?: boolean;
   skipFirstUser?: boolean;
+  /** The source execution is terminal: unterminated live markers display as interrupted, not running. */
+  settled?: boolean;
   onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
+  /** Called when the user reaches the top of a shared history scroller. */
+  onReachTop?: () => void;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -46,9 +56,21 @@ function getScrollParent(node: HTMLElement | null): HTMLElement | null {
   return getScrollParent(node.parentElement);
 }
 
+function textContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((part: any) => part?.type === "text")
+    .map((part: any) => typeof part.text === "string" ? part.text : "").join("\n");
+}
+
+function outputText(result: any): string {
+  return textContent(result?.content);
+}
+
 
 export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React.memo(({
   output,
+  startOffset = 0,
   className = "",
   emptyText = t("工作区就绪，等待节点指令输出…"),
   onUserResize,
@@ -56,7 +78,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   compact = false,
   showUserTurns = false,
   skipFirstUser = false,
+  settled = false,
   onEditUser,
+  onReachTop,
 }) => {
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [userDraft, setUserDraft] = useState("");
@@ -65,11 +89,18 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const isUserScrolledUpRef = useRef(false);
   const suppressAutoFollowRef = useRef(false);
   const resumeAutoFollowFrameRef = useRef<number | null>(null);
+  const collapseFollowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Incremental parse state
   const lastProcessedPosRef = useRef<number>(0);
   const itemsRef = useRef<TranscriptItem[]>([]);
   const pendingToolsRef = useRef<Map<string, TranscriptItem>>(new Map());
+  const sourceRef = useRef("output");
+  const byteOffsetRef = useRef(startOffset);
+  const leadingFragmentRef = useRef(startOffset > 0);
+  const inputStartRef = useRef(startOffset);
+  const parseOptionsRef = useRef(`${showUserTurns}:${skipFirstUser}`);
+  const sharedViewport = inline || compact;
   const inTagThinkingRef = useRef<boolean>(false);
   const seenFirstUserRef = useRef(false);
   const userMessageStartsRef = useRef(new Set<string>());
@@ -77,7 +108,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const assistantStartIndexRef = useRef(0);
   const inFinalResponseRef = useRef<boolean>(false);
   const finalResponseSuppressedRef = useRef<boolean>(false);
-  const [itemsVersion, setItemsVersion] = useState(0);
+  const lastRawOutputRef = useRef("");
+  const itemsVersionRef = useRef(0);
+  const liveThinkingIdsRef = useRef<Set<string>>(new Set());
+  const liveThinkingKeysRef = useRef<Set<string>>(new Set());
 
   // Height cache for virtualization
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
@@ -93,7 +127,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const heightFlushScheduledRef = useRef(false);
 
   const measure = useCallback((id: string, height: number) => {
-    if (inline || height <= 0 || itemHeightsRef.current.get(id) === height) return;
+    if (sharedViewport || height <= 0 || itemHeightsRef.current.get(id) === height) return;
     itemHeightsRef.current.set(id, height);
     if (!heightFlushScheduledRef.current) {
       heightFlushScheduledRef.current = true;
@@ -102,7 +136,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         setHeightVersion(value => value + 1);
       });
     }
-  }, [inline]);
+  }, [sharedViewport]);
   const [containerHeight, setContainerHeight] = useState(600);
 
   const parseAvailableOutput = useCallback((rawOutput: string): boolean => {
@@ -111,6 +145,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         lastProcessedPosRef.current = 0;
         itemsRef.current = [];
         pendingToolsRef.current.clear();
+        liveThinkingIdsRef.current.clear();
+        liveThinkingKeysRef.current.clear();
         inTagThinkingRef.current = false;
         seenFirstUserRef.current = false;
         userMessageStartsRef.current.clear();
@@ -118,15 +154,23 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         assistantStartIndexRef.current = 0;
         inFinalResponseRef.current = false;
         finalResponseSuppressedRef.current = false;
+        lastRawOutputRef.current = "";
         return true;
       }
       return false;
     }
 
-    if (rawOutput.length < lastProcessedPosRef.current) {
+    const parseOptions = `${showUserTurns}:${skipFirstUser}`;
+    if (parseOptions !== parseOptionsRef.current || startOffset !== inputStartRef.current || rawOutput.length < lastProcessedPosRef.current ||
+      (lastRawOutputRef.current.length > 0 && !rawOutput.startsWith(lastRawOutputRef.current))) {
+      const isStartOffsetPrepend = startOffset !== inputStartRef.current;
       lastProcessedPosRef.current = 0;
       itemsRef.current = [];
       pendingToolsRef.current.clear();
+      if (!isStartOffsetPrepend) {
+        liveThinkingIdsRef.current.clear();
+        liveThinkingKeysRef.current.clear();
+      }
       inTagThinkingRef.current = false;
       seenFirstUserRef.current = false;
       userMessageStartsRef.current.clear();
@@ -134,18 +178,27 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       assistantStartIndexRef.current = 0;
       inFinalResponseRef.current = false;
       finalResponseSuppressedRef.current = false;
+      lastRawOutputRef.current = "";
     }
 
+    if (lastProcessedPosRef.current === 0) {
+      inputStartRef.current = startOffset;
+      parseOptionsRef.current = parseOptions;
+      byteOffsetRef.current = startOffset;
+      sourceRef.current = "output";
+      leadingFragmentRef.current = startOffset > 0;
+    }
     const unparsed = rawOutput.slice(lastProcessedPosRef.current);
     if (!unparsed) return false;
 
     const lastNewlineIdx = unparsed.lastIndexOf("\n");
     if (lastNewlineIdx === -1) return false;
 
+    const isIncrementalLive = lastProcessedPosRef.current > 0;
     const chunkToProcess = unparsed.slice(0, lastNewlineIdx + 1);
     lastProcessedPosRef.current += chunkToProcess.length;
 
-    const lines = chunkToProcess.split("\n");
+    const lines = chunkToProcess.slice(0, -1).split("\n");
     // Only the tail and unfinished tools are mutated by the parser. Completed
     // history must keep its identity so memoized rows can skip live updates.
     const previousItems = itemsRef.current;
@@ -156,12 +209,101 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       .map(item => [item.toolCallId!, item]));
     pendingToolsRef.current = pendingTools;
 
+    let lineOffset = byteOffsetRef.current;
+    let localId = 0;
+    const rowId = (type: string) => `${type}_${sourceRef.current}_${lineOffset}_${localId++}`;
+    const addToolCall = (toolCallId: string | undefined, toolName: string, args: Record<string, any>, status: "running" | "success" = "running") => {
+      const existing = toolCallId
+        ? currentItems.find(item => item.type === "tool_call" && item.toolCallId === toolCallId)
+        : undefined;
+      const item = existing
+        ? { ...existing, toolName, args: Object.keys(args).length ? args : existing.args, status: existing.result !== undefined ? existing.status : status }
+        : {
+            id: toolCallId || rowId("tool"),
+            type: "tool_call" as const, toolName, toolCallId, args, status, timestamp: Date.now(),
+          };
+      if (existing) currentItems[currentItems.indexOf(existing)] = item;
+      else currentItems.push(item);
+      if (toolCallId && item.status === "running") pendingTools.set(toolCallId, item);
+      else if (toolCallId) pendingTools.delete(toolCallId);
+      return item;
+    };
+
+    const settleToolCall = (toolCallId: string | undefined, toolName: string, result: any, isError: boolean) => {
+      const matched = (toolCallId ? currentItems.find(item => item.type === "tool_call" && item.toolCallId === toolCallId)
+        : [...currentItems].reverse().find(item => item.type === "tool_call" && item.toolName === toolName && item.status === "running")) ??
+        addToolCall(toolCallId, toolName, {});
+      // A tail page can contain the result without the earlier start event.
+      // It still owns a tool card; older pages will backfill its arguments.
+      const resultText = outputText(result);
+      const rawExitCode = result?.details?.exitCode;
+      const exitCode = typeof rawExitCode === "number" ? rawExitCode : null;
+      const failed = isError || result?.isError || (exitCode !== null && exitCode !== 0);
+      const updated = {
+        ...matched,
+        result: resultText,
+        exitCode,
+        truncated: !!(result?.details?.truncation?.truncated || result?.details?.truncated ||
+          resultText.includes("[Showing lines") || resultText.includes("Full output:")),
+        isError: !!failed,
+        status: failed ? "error" as const : "success" as const,
+      };
+      currentItems[currentItems.indexOf(matched)] = updated;
+      if (toolCallId) pendingTools.delete(toolCallId);
+    };
+
+    const pushSessionMessage = (message: any, entryId?: string) => {
+      if (!message || typeof message !== "object") return;
+      if (message.role === "user") {
+        if (!showUserTurns) return;
+        const text = stripPlannerContext(textContent(message.content)).trim();
+        if (!text || (entryId && currentItems.some(item => item.id === `session_user_${entryId}`))) return;
+        const first = !seenFirstUserRef.current;
+        seenFirstUserRef.current = true;
+        if (first && skipFirstUser) return;
+        currentItems.push({ id: `session_user_${entryId || rowId("user")}`, type: "text", role: "user", content: text, timestamp: Date.now() });
+        return;
+      }
+      if (message.role === "toolResult") {
+        const result = { content: message.content, details: message.details, isError: message.isError };
+        settleToolCall(message.toolCallId, message.toolName || "tool", result, !!message.isError);
+        return;
+      }
+      if (message.role !== "assistant" || !Array.isArray(message.content)) return;
+      currentItems = closeThinkingItems(currentItems);
+      assistantStartIndexRef.current = currentItems.length;
+      for (const part of message.content) {
+        if (part?.type === "toolCall") {
+          addToolCall(part.id, part.name || "tool", part.arguments || {});
+        } else if (part?.type === "thinking" && part.thinking?.trim()) {
+          currentItems.push({ id: rowId("think"), type: "thinking", role: "assistant", content: part.thinking, status: "success", timestamp: Date.now() });
+        } else if (part?.type === "text" && typeof part.text === "string" && part.text) {
+          currentItems.push({ id: rowId("text"), type: "text", role: "assistant", content: part.text, timestamp: Date.now() });
+        }
+      }
+    };
+
     for (const rawLine of lines) {
+      lineOffset = byteOffsetRef.current;
+      byteOffsetRef.current += utf8Bytes(rawLine) + 1;
+      localId = 0;
       const line = rawLine.trim();
       if (!line) continue;
-
+      const leadingFragment = leadingFragmentRef.current;
+      leadingFragmentRef.current = false;
+      let parsedJson = false;
       try {
         const event = JSON.parse(line);
+        parsedJson = true;
+        if (!event || typeof event !== "object") continue;
+        if (event.type === "grapher_planning_source") {
+          sourceRef.current = event.planningId || "planner";
+          byteOffsetRef.current = event.startOffset ?? 0;
+          leadingFragmentRef.current = byteOffsetRef.current > 0;
+          currentItems = closeThinkingItems(currentItems);
+          assistantStartIndexRef.current = currentItems.length;
+          continue;
+        }
         inFinalResponseRef.current = false;
         finalResponseSuppressedRef.current = false;
 
@@ -183,16 +325,17 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           seenFirstUserRef.current = true;
           if (first && skipFirstUser) continue;
           const content = event.message.content;
-          const text = Array.isArray(content)
-            ? content.filter((part: { type: string }) => part.type === "text")
-              .map((part: { text?: string }) => part.text || "").join("\n")
-            : "";
-          const display = text.replace(/^User query:\n\n/, "")
-            .replace(/^Current graph node status:\n(?:- [^\n]*\n)*\n/, "");
+          const text = textContent(content);
+          const display = stripPlannerContext(text).trim();
           if (display.trim()) currentItems.push({
-            id: `user_${messageId || `${Date.now()}_${Math.random()}`}`,
+            id: messageId ? `user_${messageId}` : rowId("user"),
             type: "text", role: "user", content: display, timestamp: Date.now(),
           });
+          continue;
+        }
+
+        if (event.type === "message") {
+          pushSessionMessage(event.message, event.id);
           continue;
         }
 
@@ -203,6 +346,18 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         }
 
         const thinkingEvent = event.assistantMessageEvent;
+        if (event.type === "message_update" && thinkingEvent?.type === "toolcall_start") {
+          const tool = thinkingEvent.partial?.content?.[thinkingEvent.contentIndex];
+          addToolCall(thinkingEvent.id || tool?.id, thinkingEvent.toolName || tool?.name || "tool", thinkingEvent.arguments || tool?.arguments || {});
+          continue;
+        }
+
+        if (event.type === "message_update" && thinkingEvent?.type === "toolcall_end" && thinkingEvent.toolCall) {
+          const tool = thinkingEvent.toolCall;
+          addToolCall(tool.id, tool.name || "tool", tool.arguments || {});
+          continue;
+        }
+
         if (event.type === "message_update" &&
           ["thinking_start", "thinking_delta", "thinking_end"].includes(thinkingEvent?.type)) {
           currentItems = updateThinkingItems(currentItems, thinkingEvent, assistantStartIndexRef.current);
@@ -231,7 +386,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                     lastItem.status = "success";
                   } else if (thinkText) {
                     currentItems.push({
-                      id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      id: rowId("think"),
                       type: "thinking",
                       role: "assistant",
                       content: thinkText,
@@ -247,7 +402,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                     lastItem.content = (lastItem.content || "") + remaining;
                   } else {
                     currentItems.push({
-                      id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      id: rowId("think"),
                       type: "thinking",
                       role: "assistant",
                       content: remaining,
@@ -268,7 +423,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                       lastItem.content = (lastItem.content || "") + textBefore;
                     } else {
                       currentItems.push({
-                        id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                        id: rowId("text"),
                         type: "text",
                         role: "assistant",
                         content: textBefore,
@@ -284,7 +439,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                     lastItem.content = (lastItem.content || "") + remaining;
                   } else {
                     currentItems.push({
-                      id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      id: rowId("text"),
                       type: "text",
                       role: "assistant",
                       content: remaining,
@@ -308,7 +463,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             lastItem.content = (lastItem.content || "") + delta;
           } else {
             currentItems.push({
-              id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              id: rowId("text"),
               type: "text",
               role: "assistant",
               content: delta,
@@ -320,70 +475,15 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
         // Tool execution start
         if (event.type === "tool_execution_start") {
-          const lastItem = currentItems[currentItems.length - 1];
-          if (lastItem && lastItem.type === "thinking" && lastItem.status === "running") {
-            lastItem.status = "success";
-          }
+          currentItems = closeThinkingItems(currentItems);
           inTagThinkingRef.current = false;
-
-          const toolItem: TranscriptItem = {
-            id: event.toolCallId || `tool_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-            type: "tool_call",
-            toolName: event.toolName,
-            toolCallId: event.toolCallId,
-            args: event.args || {},
-            status: "running",
-            timestamp: Date.now(),
-          };
-          currentItems.push(toolItem);
-          if (event.toolCallId) {
-            pendingTools.set(event.toolCallId, toolItem);
-          }
+          const toolItem = addToolCall(event.toolCallId, event.toolName || "tool", event.args || {});
+          if (event.toolCallId) pendingTools.set(event.toolCallId, toolItem);
           continue;
         }
 
-        // Tool execution end
         if (event.type === "tool_execution_end") {
-          const matched = event.toolCallId ? pendingTools.get(event.toolCallId) : null;
-          const resultText = (event.result?.content ?? [])
-            .filter((item: { type: string }) => item.type === "text")
-            .map((item: { text: string }) => item.text)
-            .join("\n");
-
-          const rawExitCode = event.result?.details?.exitCode;
-          const exitCode = typeof rawExitCode === "number" ? rawExitCode : null;
-          const isError = !!(event.isError || event.result?.isError || (exitCode !== null && exitCode !== 0));
-          const truncated = !!(
-            event.result?.details?.truncation?.truncated ||
-            event.result?.details?.truncated ||
-            resultText.includes("[Showing lines") ||
-            resultText.includes("Full output:")
-          );
-
-          if (matched) {
-            matched.result = resultText;
-            matched.exitCode = exitCode;
-            matched.truncated = truncated;
-            matched.isError = isError;
-            matched.status = isError ? "error" : "success";
-            if (event.toolCallId) pendingTools.delete(event.toolCallId);
-          } else {
-            // Find in currentItems from end
-            for (let i = currentItems.length - 1; i >= 0; i--) {
-              if (
-                currentItems[i].type === "tool_call" &&
-                currentItems[i].toolName === event.toolName &&
-                currentItems[i].status === "running"
-              ) {
-                currentItems[i].result = resultText;
-                currentItems[i].exitCode = exitCode;
-                currentItems[i].truncated = truncated;
-                currentItems[i].isError = isError;
-                currentItems[i].status = isError ? "error" : "success";
-                break;
-              }
-            }
-          }
+          settleToolCall(event.toolCallId, event.toolName || "tool", event.result, !!event.isError);
           continue;
         }
 
@@ -398,6 +498,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           const message = event.message;
           if (message?.role === "assistant" && Array.isArray(message.content)) {
             currentItems = finalizeThinkingItems(currentItems, message.content, assistantStartIndexRef.current);
+            for (const part of message.content) {
+              if (part?.type === "toolCall") addToolCall(part.id, part.name || "tool", part.arguments || {});
+            }
             // Some saved sessions have only message_end (no text_delta), or
             // were interrupted mid-stream. Recover the final assistant text.
             const fullText = message.content.filter((c: { type: string }) => c.type === "text")
@@ -407,7 +510,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
               .map(item => item.content || "").join("");
             const missing = fullText.startsWith(captured) ? fullText.slice(captured.length) : "";
             if (missing) currentItems.push({
-              id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              id: rowId("text"),
               type: "text", role: "assistant", content: missing, timestamp: Date.now(),
             });
           }
@@ -422,12 +525,22 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
         // Grapher process lifecycle - kept in workspace details, not in chat transcript
         if (event.type === "grapher_process_started" || event.type === "grapher_process_exited") {
-          if (event.type === "grapher_process_exited") currentItems = closeThinkingItems(currentItems);
+          if (event.type === "grapher_process_exited") {
+            currentItems = closeThinkingItems(currentItems);
+            for (const toolCallId of pendingTools.keys()) {
+              const index = currentItems.findIndex(item => item.type === "tool_call" && item.toolCallId === toolCallId);
+              if (index >= 0) currentItems[index] = { ...currentItems[index], status: event.success ? "success" : "error", isError: !event.success };
+            }
+            pendingTools.clear();
+          }
           continue;
         }
 
         // Fallback for unrecognized json event
       } catch {
+        // Never turn a valid protocol record (or the first truncated JSONL
+        // fragment of a tail) into an assistant plaintext bubble.
+        if (parsedJson || leadingFragment) continue;
         const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, "").trim();
         if (cleanLine === "── Final response ──") {
           const lastUserIndex = currentItems.map(item => item.role).lastIndexOf("user");
@@ -449,7 +562,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             lastItem.content = (lastItem.content || "") + "\n" + line;
           } else {
             currentItems.push({
-              id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              id: rowId("text"),
               type: "text",
               role: "assistant",
               content: line,
@@ -468,7 +581,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             continue;
           }
           currentItems.push({
-            id: `err_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            id: rowId("err"),
             type: "system",
             content: line,
             isError: true,
@@ -480,7 +593,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             lastItem.content = (lastItem.content || "") + "\n" + line;
           } else {
             currentItems.push({
-              id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              id: rowId("text"),
               type: "text",
               role: "assistant",
               content: line,
@@ -492,28 +605,44 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       }
     }
 
+    const previousIds = new Set(previousItems.map(item => item.id));
+    currentItems = currentItems.map(item => {
+      if (item.type !== "thinking") return item;
+      const key = `${item.thinkingContentIndex ?? 0}_${item.content?.trim() || ""}`;
+      const isNewInLiveChunk = isIncrementalLive && !previousIds.has(item.id);
+      const isLive = item.status === "running" ||
+        liveThinkingIdsRef.current.has(item.id) ||
+        (key.length > 2 && liveThinkingKeysRef.current.has(key)) ||
+        isNewInLiveChunk;
+      if (isLive) {
+        liveThinkingIdsRef.current.add(item.id);
+        if (item.content?.trim()) {
+          liveThinkingKeysRef.current.add(key);
+        }
+      }
+      const defaultExpanded = isLive;
+      if (item.defaultExpanded === defaultExpanded) return item;
+      return { ...item, defaultExpanded };
+    });
+
     itemsRef.current = shareJson(previousItems, currentItems);
+    lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
-  }, [showUserTurns, skipFirstUser]);
+  }, [showUserTurns, skipFirstUser, startOffset]);
 
-  // Synchronously parse any initial output chunk immediately on mount so frame 0 renders with items populated
-  if (output && lastProcessedPosRef.current === 0 && itemsRef.current.length === 0) {
-    parseAvailableOutput(output);
-  }
-
-  // Incrementally parse output as it arrives synchronously before paint
-  useLayoutEffect(() => {
-    const changed = parseAvailableOutput(output);
-    if (changed) {
-      setItemsVersion((v) => v + 1);
-    }
-  }, [output, parseAvailableOutput]);
+  // Parse before deriving rows. A prepend used to measure the old DOM first,
+  // then replace it in a nested layout update, breaking the scroll anchor.
+  if (parseAvailableOutput(output)) itemsVersionRef.current += 1;
+  const itemsVersion = itemsVersionRef.current;
 
   const parsedItems = itemsRef.current;
   // Retain empty blocks in the parser for later backfill, but exclude them from
   // layout so virtualized history does not reserve space for invisible cards.
-  const items = useMemo(() => parsedItems.filter(item => item.type !== "thinking" ||
-    item.status === "running" || item.content?.trim()), [parsedItems]);
+  const items = useMemo(() => {
+    const visible = settled ? settleInterruptedItems(parsedItems) : parsedItems;
+    return visible.filter(item => item.type !== "thinking" ||
+      item.status === "running" || item.content?.trim());
+  }, [parsedItems, settled]);
 
   const lastScrollTopRef = useRef(0);
   const prevItemsVersionRef = useRef(itemsVersion);
@@ -526,8 +655,19 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     const elRect = el.getBoundingClientRect();
     const parentRect = scrollParent.getBoundingClientRect();
     const topInParent = elRect.top - parentRect.top + scrollParent.scrollTop;
-    return Math.max(0, scrollParent.scrollTop - topInParent);
+    return scrollParent.scrollTop - topInParent;
   }, []);
+
+  const requestOlderNearTop = useCallback((scrollParent: HTMLElement, nextScrollTop = scrollParent.scrollTop) => {
+    if (!onReachTop || scrollParent.dataset.transcriptScrollMode === "latest") return;
+    const relativeTop = getTranscriptRelativeScroll() + nextScrollTop - scrollParent.scrollTop;
+    const threshold = Math.max(480, scrollParent.clientHeight * TRANSCRIPT_VIEWPORT_BUFFER);
+    const nearTranscriptTop = relativeTop >= -threshold && relativeTop <= threshold;
+    const owner = containerRef.current?.closest("[data-execution-id]");
+    const firstExecution = scrollParent.querySelector("[data-execution-id]");
+    const nearPaneTop = !inline && owner && owner === firstExecution && nextScrollTop <= 160;
+    if (nearTranscriptTop || nearPaneTop) onReachTop();
+  }, [getTranscriptRelativeScroll, inline, onReachTop]);
 
   const syncScrollState = useCallback(() => {
     const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
@@ -538,7 +678,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     const prevScrollTop = lastScrollTopRef.current;
     lastScrollTopRef.current = currentScrollTop;
 
-    setScrollTop(currentScrollTop);
+    const isScrollingUp = currentScrollTop < prevScrollTop - 1;
+    if (isScrollingUp) requestOlderNearTop(scrollParent);
+    if (!sharedViewport) {
+      setScrollTop(currentScrollTop);
+    }
 
     // If near bottom, definitely lock to bottom state (prevent elastic bounce from locking scrolled-up)
     if (distanceFromBottom <= 20) {
@@ -552,9 +696,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       return;
     }
 
-    // A growing transcript can leave the scroll position behind temporarily.
-    // Only actual upward movement (or a wheel/touch gesture) disables follow.
-  }, []);
+  }, [requestOlderNearTop]);
 
   const handleExpandedChange = useCallback((id: string, expanded: boolean, card?: HTMLElement) => {
     expandedRows.current.set(id, expanded);
@@ -565,24 +707,41 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
     if (resumeAutoFollowFrameRef.current !== null) {
       cancelAnimationFrame(resumeAutoFollowFrameRef.current);
+      resumeAutoFollowFrameRef.current = null;
     }
-    resumeAutoFollowFrameRef.current = requestAnimationFrame(() => {
-      resumeAutoFollowFrameRef.current = requestAnimationFrame(() => {
-        resumeAutoFollowFrameRef.current = null;
+    if (collapseFollowTimerRef.current !== null) {
+      clearTimeout(collapseFollowTimerRef.current);
+      collapseFollowTimerRef.current = null;
+    }
+
+    if (!expanded) {
+      collapseFollowTimerRef.current = setTimeout(() => {
+        collapseFollowTimerRef.current = null;
         suppressAutoFollowRef.current = false;
         syncScrollState();
+      }, 260);
+    } else {
+      resumeAutoFollowFrameRef.current = requestAnimationFrame(() => {
+        resumeAutoFollowFrameRef.current = requestAnimationFrame(() => {
+          resumeAutoFollowFrameRef.current = null;
+          suppressAutoFollowRef.current = false;
+          syncScrollState();
+        });
       });
-    });
+    }
   }, [onUserResize, syncScrollState]);
 
   useEffect(() => () => {
     if (resumeAutoFollowFrameRef.current !== null) {
       cancelAnimationFrame(resumeAutoFollowFrameRef.current);
     }
+    if (collapseFollowTimerRef.current !== null) {
+      clearTimeout(collapseFollowTimerRef.current);
+    }
   }, []);
 
   useLayoutEffect(() => {
-    if (inline) return;
+    if (sharedViewport) return;
     if (containerRef.current) {
       const scrollParent = getScrollParent(containerRef.current) || containerRef.current;
       if (scrollParent) {
@@ -598,17 +757,17 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         setScrollTop(scrollParent.scrollTop);
       }
     }
-  }, [itemsVersion, heightVersion, containerHeight, inline]);
+  }, [itemsVersion, heightVersion, containerHeight, sharedViewport]);
 
   // Track container height & scroll position
   useEffect(() => {
     const el = containerRef.current;
-    if (!el || inline) return;
+    if (!el) return;
     
     const scrollParent = getScrollParent(el) || el;
 
     const updateDimensions = () => {
-      setContainerHeight(scrollParent.clientHeight || 600);
+      if (!sharedViewport) setContainerHeight(scrollParent.clientHeight || 600);
     };
     updateDimensions();
 
@@ -620,6 +779,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       const distanceFromBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
       if (e.deltaY < -0.5 && distanceFromBottom > 20) {
         isUserScrolledUpRef.current = true;
+        requestOlderNearTop(scrollParent, Math.max(0, scrollParent.scrollTop + e.deltaY));
       }
     };
     let lastTouchY = 0;
@@ -634,6 +794,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         const distanceFromBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
         if (delta > 1 && distanceFromBottom > 20) {
           isUserScrolledUpRef.current = true;
+          requestOlderNearTop(scrollParent);
         }
       }
     };
@@ -650,15 +811,15 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       scrollParent.removeEventListener('touchmove', onTouchMove);
       scrollParent.removeEventListener('scroll', onScroll);
     };
-  }, [syncScrollState, inline]);
+  }, [syncScrollState, sharedViewport, requestOlderNearTop]);
 
   // Virtualization calculations
   const totalCount = items.length;
-  const isVirtual = !inline && totalCount > 35;
+  const isVirtual = !sharedViewport && totalCount > 35;
 
   // Inline rows have their own shared-viewport window; do not also build the
   // legacy private-viewport offsets or read geometry during their render.
-  const offsets = useMemo(() => inline ? [0] : rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion, inline]);
+  const offsets = useMemo(() => sharedViewport ? [0] : rowOffsets(items.map(item => item.id), itemHeightsRef.current), [items, heightVersion, sharedViewport]);
   const totalOffsetsHeight = offsets[offsets.length - 1] ?? 0;
 
   // Scroll correction: when height measurements cause offsets to change,
@@ -689,17 +850,17 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     prevOffsetsRef.current = offsets;
   }, [offsets, getTranscriptRelativeScroll]);
 
-  const relativeScrollTop = inline ? 0 : getTranscriptRelativeScroll();
+  const relativeScrollTop = sharedViewport ? 0 : getTranscriptRelativeScroll();
   const maxScrollTop = Math.max(0, totalOffsetsHeight - containerHeight);
   const targetScrollTop = isUserScrolledUpRef.current
     ? Math.min(relativeScrollTop, maxScrollTop)
     : maxScrollTop;
   const { visibleItems, paddingTop, paddingBottom } = useMemo(() => {
-    if (inline) return { visibleItems: [], paddingTop: 0, paddingBottom: 0 };
+    if (sharedViewport) return { visibleItems: [], paddingTop: 0, paddingBottom: 0 };
     const range = isVirtual ? visibleRows(offsets, targetScrollTop, containerHeight, 30)
       : { start: 0, end: totalCount, paddingTop: 0, paddingBottom: 0 };
     return { visibleItems: items.slice(range.start, range.end), ...range };
-  }, [items, offsets, isVirtual, targetScrollTop, containerHeight, totalCount, inline]);
+  }, [items, offsets, isVirtual, targetScrollTop, containerHeight, totalCount, sharedViewport]);
 
   const startEdit = useCallback((id: string, text: string) => { setEditingUser(id); setUserDraft(text); }, []);
   const cancelEdit = useCallback(() => setEditingUser(null), []);
@@ -717,7 +878,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         style={{ overflowAnchor: "none", minHeight: inline || compact ? 0 : 200 }}
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
-        {inline ? <VirtualizedList items={items} renderRow={renderRow} /> :
+        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} /> :
           <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
             {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{renderRow(item)}</MeasuredRow>)}
           </div>}

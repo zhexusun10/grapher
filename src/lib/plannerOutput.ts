@@ -1,5 +1,6 @@
 // Planner output filtering logic
 // Extracted for use in tests without requiring TSX support
+import { stripPlannerContext } from "../services/plannerText";
 
 export function activePlannerOutput(output: string, edits: Array<{ old_instruction?: string; nextPlanningId?: string }>): string {
   let active = output;
@@ -11,8 +12,8 @@ export function activePlannerOutput(output: string, edits: Array<{ old_instructi
         const event = JSON.parse(line);
         if (event.type !== "message_start" && event.type !== "message_end") return false;
         if (event.message?.role !== "user") return false;
-        const text = (event.message.content || []).filter((part: { type: string }) => part.type === "text")
-          .map((part: { text: string }) => part.text).join("\n");
+        const text = stripPlannerContext((event.message.content || []).filter((part: { type: string }) => part.type === "text")
+          .map((part: { text: string }) => part.text).join("\n"));
         return text === edit.old_instruction || text.endsWith(`\n${edit.old_instruction}`);
       } catch { return false; }
     });

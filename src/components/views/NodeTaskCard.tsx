@@ -7,6 +7,7 @@ import type { ChatMessageVersion } from "../../types";
 export interface NodeTaskCardProps {
   nodeName: string;
   taskText: string;
+  badgeText?: string;
   versions?: ChatMessageVersion[];
   currentVersionIndex?: number;
   onSwitchVersion?: (targetIndex: number) => void;
@@ -39,6 +40,7 @@ function fallbackCopy(text: string, onSuccess: () => void) {
 export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
   nodeName,
   taskText,
+  badgeText,
   versions,
   currentVersionIndex = 0,
   onSwitchVersion,
@@ -101,9 +103,10 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
     }
   };
 
+  const isChanged = draft.trim() !== taskText.trim();
   const handleSave = () => {
     const value = draft.trim();
-    if (!value || disabled) return;
+    if (!value || !isChanged || disabled) return;
     onSave(value);
   };
 
@@ -113,11 +116,8 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
         <div className="node-task-header-left">
           <div className="node-task-badge">
             <Sparkles size={12} className="node-task-badge-icon" />
-            <span>{t("节点任务目标")}</span>
+            <span>{badgeText || t("节点任务目标")}</span>
           </div>
-          <span className="node-task-name" title={nodeName}>
-            {nodeName}
-          </span>
           {versions && versions.length > 1 && onSwitchVersion && (
             <div className="node-task-version-switcher" role="group" aria-label={t("版本历史")}>
               <button
@@ -160,7 +160,7 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
                 <X size={13} />
                 <span>{t("取消")}</span>
               </button>
-              <button
+              {isChanged && <button
                 type="button"
                 className="node-task-tool-btn save"
                 onClick={handleSave}
@@ -170,7 +170,7 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
               >
                 <Check size={13} />
                 <span>{t("保存")}</span>
-              </button>
+              </button>}
             </>
           ) : (
             <>

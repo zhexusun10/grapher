@@ -56,7 +56,7 @@ test('global auto-discovery, deletion and restore persist without editing global
   } finally { f.close(); }
 });
 
-test('only pi-trim and the host adapter reach Partitioner/Merger; trim is mandatory for all roles', async () => {
+test('only pi-trim reaches Partitioner; Merger loads continuity as an exception; trim is mandatory for all roles', async () => {
   const f = fixture();
   try {
     // Even malformed/unreadable user config must not affect restricted roles.
@@ -68,7 +68,13 @@ test('only pi-trim and the host adapter reach Partitioner/Merger; trim is mandat
       assert.ok(resources.args.includes('--no-skills'));
       assert.ok(!resources.args.includes('--skill'));
       assert.deepEqual(resources.extensionFactories, [{ name: workspacePolicyName, factory: workspacePolicy }], 'only the mandatory host policy, no MCP factory');
-      assert.equal(resources.args.filter(arg => arg === '--extension').length, 1);
+      if (role === 'merger') {
+        assert.ok(resources.args.includes(bundledContinuity), 'Merger loads continuity as an exception');
+        assert.equal(resources.args.filter(arg => arg === '--extension').length, 2);
+      } else {
+        assert.ok(!resources.args.includes(bundledContinuity), 'Partitioner does not load continuity');
+        assert.equal(resources.args.filter(arg => arg === '--extension').length, 1);
+      }
     }
     writeFileSync(join(f.global, 'settings.json'), '{}');
     const legacy = JSON.stringify({ overrides: { [trimId]: false } });
@@ -199,19 +205,19 @@ test('bundled continuity defaults on, supports persistent removal/restore and ob
     assert.equal(continuity.required, false);
     assert.equal(continuity.enabled, true);
     assert.equal((await extensionCatalog(f.own)).extensions.find(extension => extension.id === trimId)?.required, true);
-    for (const role of ['planner', 'node']) {
+    for (const role of ['planner', 'node', 'merger']) {
       assert.equal((await executionResources([], f.own, role)).args.filter(arg => arg === bundledContinuity).length, 1);
       for (const flag of ['--no-extensions', '-ne']) {
         assert.ok(!(await executionResources([flag], f.own, role)).args.includes(bundledContinuity));
       }
     }
-    for (const role of ['partition', 'merger']) {
+    for (const role of ['partition']) {
       assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledContinuity));
     }
     const removed = await setExtensionEnabled(f.own, continuityId, false);
     assert.equal(removed.extensions.find(extension => extension.id === continuityId)?.enabled, false);
     assert.equal(JSON.parse(readFileSync(join(f.own, 'extensions.json'), 'utf8')).overrides[continuityId], false);
-    for (const role of ['planner', 'node']) {
+    for (const role of ['planner', 'node', 'merger']) {
       const resources = await executionResources([], f.own, role);
       assert.ok(!resources.args.includes(bundledContinuity));
       assert.ok(resources.args.includes(bundledTrim), 'removal must not affect mandatory trim');
@@ -442,7 +448,8 @@ export default function (pi) {
       const args = ['--mode', 'rpc', '--no-session', '--no-context-files'];
       if (role === 'node') args.push('--approve');
       if (role === 'planner') args.push('--exclude-tools', 'edit,write,ls,find,grep');
-      if (role === 'partition' || role === 'merger') args.push('--no-extensions', '--no-skills');
+      if (role === 'partition') args.push('--no-extensions', '--no-skills');
+      if (role === 'merger') args.push('--no-skills');
       const output = execFileSync(process.execPath, [join(root, 'engine/entrypoint.mjs'), ...args], {
         cwd: f.workspace, encoding: 'utf8', timeout: 20000,
         input: '{"id":"ready","type":"get_state"}\n',

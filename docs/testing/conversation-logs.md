@@ -10,7 +10,7 @@ This page owns maintenance and acceptance methods, **not a published performance
 
 The canonical [event/output contract](../architecture/runtime.md#event-and-output-storage) defines append-only events, UTF-8 byte cursors, metadata-first loading, page sizes and browser cache limits. Do not maintain a second copy of those limits here.
 
-Legacy output remains readable through per-execution compatibility migration without rewriting historical business events during normal reads. See [store.rs](../../backend/src/store.rs) and [transcriptCache.ts](../../src/services/transcriptCache.ts).
+Legacy output remains readable through per-execution compatibility migration without rewriting historical business events during normal reads. The browser opens selected execution/Planner history from a bounded tail and extends it toward older bytes on upward scroll; `full=true` is reserved for explicit full-output callers. See [store.rs](../../backend/src/store.rs) and [transcriptCache.ts](../../src/services/transcriptCache.ts).
 
 ## Offline maintenance
 

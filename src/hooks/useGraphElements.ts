@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import { useMemo, useRef } from "react";
 import { shareById } from "../services/structuralSharing";
 import type { Edge } from "@xyflow/react";
-import { publicationMergerCardId, type FeedbackExhaustion, type Graph, type Plan, type Snapshot } from "../types";
+import { publicationMergerCardId, type FeedbackExhaustion, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../types";
 import { tokens } from "../tokens";
 import type { WorkNode } from "../components/graph/TaskNode";
 
@@ -92,23 +92,28 @@ export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string
 }
 
 /** Derive topology from the snapshot only when its graph/execution inputs change. */
-export function useGraphElements(state: Snapshot, selected: string, recentlyAddedEdgeIds: Set<string>, selectedMergerId = "") {
+export function useGraphElements(
+  state: Snapshot,
+  selected: string,
+  recentlyAddedEdgeIds: Set<string>,
+  selectedMergerId = "",
+  activity: RuntimeActivity[] = [],
+) {
   // Keep the same geometry for nodes and edges. Wider rows leave room for
-  // edge channels; taller layers keep adjacent-layer paths below the cards.
-  const hasMergers = (state.mergers ?? []).some((m) => m.node.startsWith("merge:"));
+  // edge channels; cards in the same layer remain cleanly aligned.
   const graphLayout = useMemo(() => {
     const layers = computeExecutionLayers(state.graph, state.plan);
     const positions = new Map<string, { x: number; y: number; layer: number }>();
     layers.forEach((batch, layer) => batch.forEach((name, index) => {
       positions.set(name, {
         x: (index - (batch.length - 1) / 2) * 300 + 160,
-        y: layer * (hasMergers ? 320 : 210) + 24,
+        y: layer * 210 + 24,
         layer,
       });
     }));
     const xs = Array.from(positions.values(), (position) => position.x);
     return { positions, minX: Math.min(...xs, 160), maxX: Math.max(...xs, 160) + 236 };
-  }, [state.graph, state.plan, hasMergers]);
+  }, [state.graph, state.plan]);
 
   const mergeTargets = useMemo(() => {
     const targets = new Map<string, NonNullable<Snapshot["mergers"]>[number]>();
@@ -145,10 +150,10 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     for (const position of graphLayout.positions.values()) lastLayer = Math.max(lastLayer, position.layer);
     return {
       x: (graphLayout.minX + graphLayout.maxX) / 2 - 118,
-      y: (lastLayer + 1) * (hasMergers ? 320 : 210) + 24,
+      y: (lastLayer + 1) * 210 + 24,
       layer: lastLayer + 1,
     };
-  }, [graphLayout, hasMergers]);
+  }, [graphLayout]);
   // Reuse the card's existing top/bottom/side ports. Route only long edges
   // around intermediate rows; never insert a new port or an off-card junction.
   const edgeRouting = useMemo(() => {
@@ -235,10 +240,10 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
           // highlighted while one of its merger attempts is addressed.
           selected: selected === node.name && !selectedMergerId,
           worktree: nodeAttempts.at(-1)?.worktree ?? "",
-          hasTop: incoming.some((edge) => route(edge)?.targetHandle === "top") || mergeTargets.has(node.name),
+          hasTop: incoming.some((edge) => route(edge)?.targetHandle === "top"),
           hasBottom: outgoing.some((edge) => route(edge)?.sourceHandle === "bottom") ||
             (!!publicationMerger && publicationTargets.has(node.name)),
-          hasLeftTarget: incoming.some((edge) => route(edge)?.targetHandle === "left-target"),
+          hasLeftTarget: incoming.some((edge) => route(edge)?.targetHandle === "left-target") || mergeTargets.has(node.name),
           hasLeftSource: outgoing.some((edge) => route(edge)?.sourceHandle === "left-source"),
           hasRightTarget: incoming.some((edge) => route(edge)?.targetHandle === "right-target"),
           hasRightSource: outgoing.some((edge) => route(edge)?.sourceHandle === "right-source"),
@@ -251,15 +256,23 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     const mergerNodes = Array.from(mergeTargets, ([target, merger]): WorkNode => {
       const node = taskNodesById.get(target)!;
       const attempts = mergerAttempts.get(`merge:${target}`) ?? 0;
+      const targetPos = graphLayout.positions.get(target);
+      const targetLayer = targetPos?.layer ?? 0;
+      const layerPositions = Array.from(graphLayout.positions.values()).filter(p => p.layer === targetLayer);
+      const leftOccupied = layerPositions.some(p => Math.abs(p.x - (node.position.x - 280)) < 150);
+      const placeLeft = !leftOccupied;
+      const mergerX = placeLeft ? node.position.x - 280 : node.position.x + 280;
       return {
         id: `merger:${target}`, type: "work", width: 236,
-        position: { x: node.position.x, y: node.position.y - 155 },
+        position: { x: mergerX, y: node.position.y },
         data: {
           name: `merger · ${target}`, task: t("合并上游分支冲突"),
           status: merger.status === "completed" ? "done" : merger.status === "running" ? "running" : "failed",
-          attempts, hint: t("合并至 {0}", target), reviewer: false, selected: merger.id === selectedMergerId,
-          worktree: merger.worktree, hasTop: true, hasBottom: true,
-          hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
+          attempts, hint: t("合并至 {0}", target), reviewer: false,
+          selected: selected === `merger:${target}` || (selected === target && merger.id === selectedMergerId),
+          worktree: merger.worktree, hasTop: true, hasBottom: false,
+          hasLeftTarget: false, hasLeftSource: !placeLeft,
+          hasRightTarget: false, hasRightSource: placeLeft,
         },
       };
     });
@@ -284,6 +297,47 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
       const edgeId = graphEdgeId(edge);
       const routing = edgeRouting.get(edgeId);
       const isNew = recentlyAddedEdgeIds.has(edgeId);
+
+      let animated = false;
+      if (!isFeedback) {
+        const fromDone = state.nodes[edge.from]?.status === "done";
+        if (fromDone) {
+          if (mergeTargets.has(edge.to)) {
+            const merger = mergeTargets.get(edge.to);
+            animated = merger?.status === "running";
+          } else {
+            const toNode = state.nodes[edge.to];
+            const toStatus = toNode?.status;
+            const toAttempts = indexes.attempts.get(edge.to) ?? [];
+            const latestExec = toAttempts.at(-1);
+
+            const isTerminal = !toNode || toStatus === "done" || toStatus === "failed" || toStatus === "blocked";
+            if (!isTerminal) {
+              const incomingDeps = (indexes.incoming.get(edge.to) ?? []).filter((e) => !e.feedback);
+              const allParentsDone = incomingDeps.length > 0 && incomingDeps.every((e) => state.nodes[e.from]?.status === "done");
+
+              if (allParentsDone) {
+                const isCurrentExecRunning = latestExec != null && (latestExec.status === "running" || toStatus === "running");
+                const isPrepared = isCurrentExecRunning && (
+                  state.events.some((e) => e.type === "prepared" && e.execution_id === latestExec.id) ||
+                  (latestExec.output?.length ?? 0) > 0 ||
+                  (latestExec.outputBytes ?? 0) > 0
+                );
+                const isPreparingActivity = activity.some(
+                  (a) => a.kind === "workspace_prepare" && a.nodes.includes(edge.to)
+                );
+
+                // Workspace is actively transferring when all upstream parents are done,
+                // and the workspace preparation has not yet completed.
+                // As soon as preparation completes (prepared event or output produced),
+                // it immediately turns back into a solid line without waiting for node completion!
+                animated = isPreparingActivity || !isPrepared;
+              }
+            }
+          }
+        }
+      }
+
       return {
         id: edgeId,
         source: edge.from,
@@ -292,7 +346,7 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
         sourceHandle: routing?.sourceHandle ?? "bottom",
         targetHandle: routing?.targetHandle ?? "top",
         className: isNew ? "edge-entering" : undefined,
-        animated: !isFeedback && state.nodes[edge.from]?.status === "running",
+        animated,
         markerEnd: isFeedback ? "url(#workflow-arrow-feedback)" : "url(#workflow-arrow-default)",
         data: { isNew, routeX: routing?.routeX, routeSide: routing?.routeSide },
         style: {
@@ -305,22 +359,53 @@ export function useGraphElements(state: Snapshot, selected: string, recentlyAdde
     const publicationEdges: Edge[] = publicationMerger
       ? Array.from(publicationTargets, (name): Edge => {
           const routing = edgeRouting.get(`publication:${name}`);
+          const isTerminalDone = state.nodes[name]?.status === "done";
+          const isMergerRunning = publicationMerger.status === "running";
           return {
             id: `publication:${name}->merger`, source: name, target: publicationMergerCardId,
             sourceHandle: routing?.sourceHandle ?? "bottom", targetHandle: "top", type: "workflow",
             markerEnd: "url(#workflow-arrow-default)",
+            animated: isTerminalDone && isMergerRunning,
             data: { routeX: routing?.routeX, routeSide: routing?.routeSide },
             style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
           };
         })
       : [];
-    return [...graphEdges, ...publicationEdges, ...Array.from(mergeTargets.keys(), (target): Edge => ({
-      id: `merger:${target}->${target}`, source: `merger:${target}`, target,
-      sourceHandle: "bottom", targetHandle: "top", type: "workflow",
-      markerEnd: "url(#workflow-arrow-default)",
-      style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
-    }))];
-  }, [state.graph.edges, state.nodes, recentlyAddedEdgeIds, edgeRouting, mergeTargets, publicationMerger, publicationTargets]);
+    const mergerEdges: Edge[] = Array.from(mergeTargets.keys(), (target): Edge => {
+      const targetPos = graphLayout.positions.get(target);
+      const layerPositions = Array.from(graphLayout.positions.values()).filter(p => p.layer === targetPos?.layer);
+      const leftOccupied = targetPos ? layerPositions.some(p => Math.abs(p.x - (targetPos.x - 280)) < 150) : false;
+      const placeLeft = !leftOccupied;
+      const merger = mergeTargets.get(target);
+      const isMergerCompleted = merger?.status === "completed";
+      const toNode = state.nodes[target];
+      const toStatus = toNode?.status;
+      const toAttempts = indexes.attempts.get(target) ?? [];
+      const latestTargetExec = toAttempts.at(-1);
+      const isTargetExecRunning = latestTargetExec != null && (latestTargetExec.status === "running" || toStatus === "running");
+      const isTargetPrepared = isTargetExecRunning && (
+        state.events.some((e) => e.type === "prepared" && e.execution_id === latestTargetExec.id) ||
+        (latestTargetExec.output?.length ?? 0) > 0 ||
+        (latestTargetExec.outputBytes ?? 0) > 0
+      );
+      const isTargetPreparingActivity = activity.some(
+        (a) => a.kind === "workspace_prepare" && a.nodes.includes(target)
+      );
+      const isTargetTerminal = !toNode || toStatus === "done" || toStatus === "failed" || toStatus === "blocked";
+      const animated = isMergerCompleted && !isTargetTerminal && (isTargetPreparingActivity || !isTargetPrepared);
+
+      return {
+        id: `merger:${target}->${target}`, source: `merger:${target}`, target,
+        sourceHandle: placeLeft ? "right-source" : "left-source",
+        targetHandle: placeLeft ? "left-target" : "right-target",
+        type: "workflow",
+        markerEnd: "url(#workflow-arrow-default)",
+        animated,
+        style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
+      };
+    });
+    return [...graphEdges, ...publicationEdges, ...mergerEdges];
+  }, [state.graph.edges, state.nodes, state.events, activity, indexes, recentlyAddedEdgeIds, edgeRouting, mergeTargets, publicationMerger, publicationTargets, graphLayout]);
 
   const previous = useRef({ runId: state.runId, nodes, edges });
   const shared = useMemo(() => {

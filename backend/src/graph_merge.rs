@@ -21,15 +21,13 @@ impl MergerConflicts {
     pub(crate) const GIT: Self = Self { git: true };
 }
 
-fn merger_prompt(query: &str, _conflicts: MergerConflicts) -> String {
+pub(crate) fn merger_prompt(query: &str, _conflicts: MergerConflicts) -> String {
     format!(
-        "The user query below is background context for the desired project result, not the task to execute in this session. Your current task is conflict repair using the available file and Bash tools.\n\nUser query:\n{query}\n\n{MERGER_GIT_INSTRUCTIONS}\n\n{MERGER_SUMMARY_INSTRUCTIONS}"
+        "The Workspace Objective below is ONLY to help you decide how conflicting changes should be integrated.\nDo NOT attempt to execute or fulfill this task in this session. Your sole responsibility is Git conflict repair using the available file and Bash tools.\n\nWorkspace Objective:\n<workspace_objective>\n{query}\n</workspace_objective>\n\n{MERGER_GIT_INSTRUCTIONS}"
     )
 }
 
 const MERGER_GIT_INSTRUCTIONS: &str = "Resolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.\nProject snapshots include project files ignored by .gitignore. Stage resolved or changed project paths with git add -f -- <paths>, even when they match .gitignore. Do not stage Git/Grapher internals or managed environment/cache scopes.";
-
-const MERGER_SUMMARY_INSTRUCTIONS: &str = "Finish with a short, nonempty assistant summary.";
 
 /// Git conflict repair is a single Merger execution; environment differences
 /// never create a Merger session.
@@ -392,7 +390,7 @@ mod tests {
     fn git_merger_prompt_preserves_task_context_without_graph_specific_terminology() {
         assert_eq!(
             merger_prompt("Combine results", MergerConflicts::GIT),
-            format!("The user query below is background context for the desired project result, not the task to execute in this session. Your current task is conflict repair using the available file and Bash tools.\n\nUser query:\nCombine results\n\n{}\n\n{}", super::MERGER_GIT_INSTRUCTIONS, super::MERGER_SUMMARY_INSTRUCTIONS)
+            format!("The Workspace Objective below is ONLY to help you decide how conflicting changes should be integrated.\nDo NOT attempt to execute or fulfill this task in this session. Your sole responsibility is Git conflict repair using the available file and Bash tools.\n\nWorkspace Objective:\n<workspace_objective>\nCombine results\n</workspace_objective>\n\n{}", super::MERGER_GIT_INSTRUCTIONS)
         );
     }
 
@@ -400,11 +398,11 @@ mod tests {
     fn merger_treats_original_planning_request_as_context_not_its_current_task() {
         let query = "Create two nodes with the node tool, then stop planning.";
         let prompt = merger_prompt(query, MergerConflicts::GIT);
-        assert!(prompt.starts_with("The user query below is background context"));
-        assert!(prompt.contains(&format!("User query:\n{query}")));
-        assert!(prompt.contains("not the task to execute in this session"));
-        assert!(prompt.contains("Your current task is conflict repair using the available file and Bash tools"));
-        assert!(prompt.ends_with(super::MERGER_SUMMARY_INSTRUCTIONS));
+        assert!(prompt.starts_with("The Workspace Objective below is ONLY to help you decide"));
+        assert!(prompt.contains(&format!("Workspace Objective:\n<workspace_objective>\n{query}\n</workspace_objective>")));
+        assert!(prompt.contains("Do NOT attempt to execute or fulfill this task in this session"));
+        assert!(prompt.contains("Your sole responsibility is Git conflict repair using the available file and Bash tools"));
+        assert!(prompt.ends_with(super::MERGER_GIT_INSTRUCTIONS));
     }
 
     #[test]
@@ -413,7 +411,6 @@ mod tests {
         assert!(prompt.contains("project files ignored by .gitignore"));
         assert!(prompt.contains("git add -f -- <paths>"));
         assert!(prompt.contains("Do not stage Git/Grapher internals or managed environment/cache scopes"));
-        assert!(prompt.contains("short, nonempty assistant summary"));
         assert!(!prompt.contains("git add -f -A"), "Merger must stage explicit project paths, not all environment files");
         assert!(!prompt.contains("environment reconciliation"));
     }

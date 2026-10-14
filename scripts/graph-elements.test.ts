@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { computeExecutionLayers, graphEdgeId, indexFeedbackExhaustion, indexGraphInputs, useGraphElements } from "../src/hooks/useGraphElements.ts";
-import { emptySnapshot, type Execution, type Graph, type Plan, type Snapshot } from "../src/types.ts";
+import { emptySnapshot, type Execution, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../src/types.ts";
 
 const graph: Graph = {
   originalGoal: "Test graph projection",
@@ -103,10 +103,10 @@ function mergerState(): Snapshot {
   };
 }
 
-function projectGraph(state: Snapshot, selected: string, selectedMergerId = "") {
+function projectGraph(state: Snapshot, selected: string, selectedMergerId = "", activity: RuntimeActivity[] = []) {
   let elements: ReturnType<typeof useGraphElements> | undefined;
   function Projection() {
-    elements = useGraphElements(state, selected, new Set(), selectedMergerId);
+    elements = useGraphElements(state, selected, new Set(), selectedMergerId, activity);
     return null;
   }
   renderToStaticMarkup(createElement(Projection));
@@ -195,4 +195,183 @@ test("stale, superseded, invalidated, and removed-route warnings are hidden", ()
   const removed = skippedFeedbackState();
   removed.graph.edges = removed.graph.edges.filter(edge => !edge.feedback);
   assert.equal(indexFeedbackExhaustion(removed).size, 0);
+});
+
+test("downstream edge is dashed only during workspace transfer and immediately turns solid once transfer completes without waiting for node completion", () => {
+  const testGraph: Graph = {
+    originalGoal: "test topology edge animation",
+    nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }, { name: "c", task: "c" }],
+    edges: [
+      { from: "a", to: "b", feedback: false },
+      { from: "b", to: "c", feedback: false },
+    ],
+  };
+
+  // 1. Initial state: a is running, b is waiting.
+  // Downstream edge a -> b should NOT be animated (not dashed) while a is running.
+  const stateRunningA: Snapshot = {
+    ...emptySnapshot,
+    graph: testGraph,
+    nodes: {
+      a: { status: "running", revision: 1, head: null, instruction: "", error: null },
+      b: { status: "waiting", revision: 1, head: null, instruction: "", error: null },
+      c: { status: "waiting", revision: 1, head: null, instruction: "", error: null },
+    },
+  };
+  const projA = projectGraph(stateRunningA, "");
+  const edgeAB_running = projA.edges.find(e => e.source === "a" && e.target === "b")!;
+  const edgeBC_running = projA.edges.find(e => e.source === "b" && e.target === "c")!;
+  assert.equal(edgeAB_running.animated, false, "downstream edge must not be animated/dashed while upstream node is running");
+  assert.equal(edgeBC_running.animated, false);
+
+  // 2. a is done, workspace starts passing to b (b is waiting/preparing, not yet prepared).
+  // Downstream edge a -> b should be animated (dashed).
+  const stateTransferringB: Snapshot = {
+    ...emptySnapshot,
+    graph: testGraph,
+    nodes: {
+      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "running", revision: 1, head: null, instruction: "", error: null },
+      c: { status: "waiting", revision: 1, head: null, instruction: "", error: null },
+    },
+    executions: [{
+      id: "exec-b-1", node: "b", revision: 1, attempt: 1, sessionId: "s-b-1",
+      worktree: "/wt/b", before: "ha", after: null, status: "running",
+      output: "", outputBytes: 0, startedAt: 1, completedAt: null,
+    } as Execution],
+    events: [{ sequence: 1, timestamp: 1, type: "started", node: "b", execution_id: "exec-b-1" }],
+  };
+  const projTransferring = projectGraph(stateTransferringB, "", "", [{ kind: "workspace_prepare", nodes: ["b"] }]);
+  const edgeAB_passing = projTransferring.edges.find(e => e.source === "a" && e.target === "b")!;
+  assert.equal(edgeAB_passing.animated, true, "edge must turn dashed while workspace is transferring to b");
+
+  // 3. Workspace transfer completes (prepared event emitted), but b is STILL RUNNING!
+  // The edge a -> b must IMMEDIATELY turn into a solid line (animated: false),
+  // without waiting for b to finish (status === "done").
+  const statePreparedB: Snapshot = {
+    ...stateTransferringB,
+    events: [
+      { sequence: 1, timestamp: 1, type: "started", node: "b", execution_id: "exec-b-1" },
+      { sequence: 2, timestamp: 2, type: "prepared", node: "b", execution_id: "exec-b-1" },
+    ],
+  };
+  const projPrepared = projectGraph(statePreparedB, "", "", []);
+  const edgeAB_prepared = projPrepared.edges.find(e => e.source === "a" && e.target === "b")!;
+  const edgeBC_stillWaiting = projPrepared.edges.find(e => e.source === "b" && e.target === "c")!;
+  assert.equal(edgeAB_prepared.animated, false, "edge a -> b must immediately turn solid once workspace transfer completes, even though b is still running");
+  assert.equal(edgeBC_stillWaiting.animated, false, "edge b -> c must not be dashed while b is running");
+
+  // 4. b completes: workspace starts passing to c (c is preparing, not yet prepared).
+  // a -> b stays solid, b -> c becomes dashed.
+  const stateTransferringC: Snapshot = {
+    ...emptySnapshot,
+    graph: testGraph,
+    nodes: {
+      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "done", revision: 1, head: "hb", instruction: "", error: null },
+      c: { status: "running", revision: 1, head: null, instruction: "", error: null },
+    },
+    executions: [
+      { id: "exec-b-1", node: "b", status: "completed", completedAt: 3 } as Execution,
+      { id: "exec-c-1", node: "c", status: "running", startedAt: 4, completedAt: null, output: "", outputBytes: 0 } as Execution,
+    ],
+    events: [
+      { sequence: 3, timestamp: 3, type: "finished", node: "b", execution_id: "exec-b-1" },
+      { sequence: 4, timestamp: 4, type: "started", node: "c", execution_id: "exec-c-1" },
+    ],
+  };
+  const projTransferringC = projectGraph(stateTransferringC, "", "", [{ kind: "workspace_prepare", nodes: ["c"] }]);
+  const edgeAB_afterB = projTransferringC.edges.find(e => e.source === "a" && e.target === "b")!;
+  const edgeBC_passing = projTransferringC.edges.find(e => e.source === "b" && e.target === "c")!;
+  assert.equal(edgeAB_afterB.animated, false, "edge a -> b must remain solid");
+  assert.equal(edgeBC_passing.animated, true, "edge b -> c must turn dashed while workspace is transferring to c");
+
+  // 5. c completes workspace transfer: b -> c immediately turns solid while c runs its task.
+  const statePreparedC: Snapshot = {
+    ...stateTransferringC,
+    events: [
+      ...stateTransferringC.events,
+      { sequence: 5, timestamp: 5, type: "prepared", node: "c", execution_id: "exec-c-1" },
+    ],
+  };
+  const projPreparedC = projectGraph(statePreparedC, "", "", []);
+  const edgeBC_prepared = projPreparedC.edges.find(e => e.source === "b" && e.target === "c")!;
+  assert.equal(edgeBC_prepared.animated, false, "edge b -> c must immediately turn solid once workspace transfer completes");
+
+  // 6. c completes: all nodes done, all edges solid.
+  const stateAllDone: Snapshot = {
+    ...emptySnapshot,
+    graph: testGraph,
+    nodes: {
+      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "done", revision: 1, head: "hb", instruction: "", error: null },
+      c: { status: "done", revision: 1, head: "hc", instruction: "", error: null },
+    },
+  };
+  const projAllDone = projectGraph(stateAllDone, "");
+  assert.ok(projAllDone.edges.every(e => !e.animated), "all edges must be solid once all nodes are done");
+});
+
+test("fan-in dependency edges only turn dashed once all upstream parents are done and turn solid once prepared", () => {
+  const fanInGraph: Graph = {
+    originalGoal: "test fan-in edge animation",
+    nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }, { name: "c", task: "c" }],
+    edges: [
+      { from: "a", to: "c", feedback: false },
+      { from: "b", to: "c", feedback: false },
+    ],
+  };
+
+  // a is done, but b is still running. c cannot receive workspace yet.
+  const statePartial: Snapshot = {
+    ...emptySnapshot,
+    graph: fanInGraph,
+    nodes: {
+      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "running", revision: 1, head: null, instruction: "", error: null },
+      c: { status: "waiting", revision: 1, head: null, instruction: "", error: null },
+    },
+  };
+  const projPartial = projectGraph(statePartial, "");
+  const edgeAC_partial = projPartial.edges.find(e => e.source === "a" && e.target === "c")!;
+  const edgeBC_partial = projPartial.edges.find(e => e.source === "b" && e.target === "c")!;
+  assert.equal(edgeAC_partial.animated, false, "edge a -> c must not animate while b is still running");
+  assert.equal(edgeBC_partial.animated, false, "edge b -> c must not animate while b is running");
+
+  // Both a and b are done, c starts workspace transfer. Both edges turn dashed.
+  const stateBothDoneTransferring: Snapshot = {
+    ...emptySnapshot,
+    graph: fanInGraph,
+    nodes: {
+      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "done", revision: 1, head: "hb", instruction: "", error: null },
+      c: { status: "running", revision: 1, head: null, instruction: "", error: null },
+    },
+    executions: [{
+      id: "exec-c-1", node: "c", revision: 1, attempt: 1, sessionId: "s-c-1",
+      worktree: "/wt/c", before: "hb", after: null, status: "running",
+      output: "", outputBytes: 0, startedAt: 1, completedAt: null,
+    } as Execution],
+    events: [{ sequence: 1, timestamp: 1, type: "started", node: "c", execution_id: "exec-c-1" }],
+  };
+  const projBothDone = projectGraph(stateBothDoneTransferring, "", "", [{ kind: "workspace_prepare", nodes: ["c"] }]);
+  const edgeAC_transferring = projBothDone.edges.find(e => e.source === "a" && e.target === "c")!;
+  const edgeBC_transferring = projBothDone.edges.find(e => e.source === "b" && e.target === "c")!;
+  assert.equal(edgeAC_transferring.animated, true, "edge a -> c must turn dashed during workspace transfer to c");
+  assert.equal(edgeBC_transferring.animated, true, "edge b -> c must turn dashed during workspace transfer to c");
+
+  // c completes workspace preparation (prepared event emitted), but c is STILL RUNNING.
+  // Both edges IMMEDIATELY turn back to solid!
+  const stateBothDonePrepared: Snapshot = {
+    ...stateBothDoneTransferring,
+    events: [
+      { sequence: 1, timestamp: 1, type: "started", node: "c", execution_id: "exec-c-1" },
+      { sequence: 2, timestamp: 2, type: "prepared", node: "c", execution_id: "exec-c-1" },
+    ],
+  };
+  const projPrepared = projectGraph(stateBothDonePrepared, "", "", []);
+  const edgeAC_prepared = projPrepared.edges.find(e => e.source === "a" && e.target === "c")!;
+  const edgeBC_prepared = projPrepared.edges.find(e => e.source === "b" && e.target === "c")!;
+  assert.equal(edgeAC_prepared.animated, false, "edge a -> c must immediately turn solid once workspace transfer completes");
+  assert.equal(edgeBC_prepared.animated, false, "edge b -> c must immediately turn solid once workspace transfer completes");
 });

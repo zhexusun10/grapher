@@ -41,6 +41,13 @@
   --status-warning: #F59E0B;
   --status-warning-subtle: #FFFBEB;
 
+  /* 阻塞与等待状态（灰色体系） */
+  --status-blocked: #64748B;
+  --status-blocked-subtle: #F1F5F9;
+  --status-blocked-border: #94A3B8;
+  --status-blocked-text: #475569;
+  --status-waiting: #94A3B8;
+
   /* 遮罩与画布专用令牌 */
   --bg-overlay: rgba(15, 23, 42, 0.45);
   --graph-edge-default: #94A3B8;

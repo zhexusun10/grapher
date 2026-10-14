@@ -1,4 +1,5 @@
 import React, { memo, useCallback, useRef, useState } from "react";
+import { stripPlannerContext } from "../services/plannerText";
 import { motion } from "motion/react";
 import { t } from "../i18n";
 import type { ChatMessage, TranscriptItem } from "../types";
@@ -25,15 +26,15 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   if (item.role === "user") return <motion.div className="chat-message-row user" initial={false}
     animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}>
-    <EditableUserBubble text={item.content || ""} editing={editing} draft={draft} onDraftChange={onDraftChange}
-      onEdit={onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: item.content || "" }) : undefined}
+    <EditableUserBubble text={stripPlannerContext(item.content || "")} editing={editing} draft={draft} onDraftChange={onDraftChange}
+      onEdit={onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: stripPlannerContext(item.content || "") }) : undefined}
       onCancel={() => onCancelEdit?.()}
-      onSend={value => onEditSubmit ? onEditSubmit({ id: item.id, parentId: null, role: "user", text: item.content || "" }, value) : onSendMessage(value)}
+      onSend={value => onEditSubmit ? onEditSubmit({ id: item.id, parentId: null, role: "user", text: stripPlannerContext(item.content || "") }, value) : onSendMessage(value)}
       disabled={locked} />
   </motion.div>;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={streaming} title={t("思考过程")}
-    defaultExpanded={true} expanded={expanded} onExpandedChange={expand} />;
+    defaultExpanded={item.defaultExpanded ?? true} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "text") return <motion.div className="chat-message-row assistant" initial={false} animate={{ opacity: 1, y: 0, scale: 1 }}>
     <div className="chat-bubble-assistant chat-message-assistant"><StreamingAssistantBubble content={item.content || ""} isStreaming={streaming} /></div>
   </motion.div>;

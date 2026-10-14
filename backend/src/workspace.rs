@@ -1792,19 +1792,19 @@ pub(crate) fn prepare_with_merger_expected_for_run(
                 || git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
             {
                 return Err(format!(
-                    "Workspace composition failed at {}: {error}",
+                    "Workspace composition blocked at {}: {error}",
                     path.display()
                 ));
             }
             if let Err(merger_error) = resolve() {
-                return Err(format!("Workspace composition blocked at {}. Resolve and commit the merge in this worktree, then use 'Use resolved workspace'.\nMerger: {merger_error}", path.display()));
+                return Err(format!("Workspace composition blocked at {}. The conflicted worktree is preserved; retry the node to re-attempt composition.\nMerger: {merger_error}", path.display()));
             }
             if git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok()
                 || !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
                 || git(path, &["merge-base", "--is-ancestor", &incoming, "HEAD"]).is_err()
                 || !git(path, &["status", "--porcelain"])?.is_empty()
             {
-                return Err(format!("Workspace composition blocked at {}. Merger did not finish a clean merge preserving the incoming parent; resolve and commit, then use 'Use resolved workspace'.", path.display()));
+                return Err(format!("Workspace composition blocked at {}. Merger did not finish a clean merge preserving the incoming parent; the worktree is preserved and retrying the node re-attempts composition.", path.display()));
             }
         }
     }

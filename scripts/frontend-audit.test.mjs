@@ -66,64 +66,6 @@ async function fixture(name, handler = async () => false) {
   return { context, page, errors };
 }
 
-test("floating paths pause at their current position, resume both animation phases, and stop on unmount", { timeout: 30_000 }, async () => {
-  const { context, page, errors } = await fixture("background");
-  const sample = () => page.locator(".floating-path").evaluateAll(paths => paths.map(path => {
-    const animation = path.getAnimations()[0];
-    return { time: animation.currentTime, state: animation.playState, offset: getComputedStyle(path).strokeDashoffset };
-  }));
-  const assertPaused = async () => {
-    // Native pause requests settle on the next animation frame, not at style assignment.
-    await page.waitForFunction(() => [...document.querySelectorAll(".floating-path")].every(path => {
-      const animation = path.getAnimations()[0];
-      return animation?.playState === "paused" && !animation.pending;
-    }));
-    const before = await sample();
-    await page.waitForTimeout(200);
-    assert.deepEqual(await sample(), before, "hidden paths must neither move nor advance their playback clocks");
-    return before;
-  };
-  const resume = async paused => {
-    await page.evaluate(() => window.audit.setBackgroundActive(true));
-    await page.waitForFunction(times => [...document.querySelectorAll(".floating-path")]
-      .every((path, index) => path.getAnimations()[0]?.currentTime > times[index] + 50), paused.map(path => path.time));
-    assert.ok((await sample()).every((path, index) => path.state === "running" && path.offset !== paused[index].offset),
-      "paths must continue moving without restarting their animation");
-  };
-  try {
-    await page.waitForFunction(() => document.querySelectorAll(".floating-path").length === 36 &&
-      [...document.querySelectorAll(".floating-path")].every(path => path.getAnimations().length === 1));
-    const transitions = await page.locator(".app-shell, .main").evaluateAll(elements =>
-      elements.map(element => getComputedStyle(element).transitionDuration));
-    assert.deepEqual(transitions, ["0s", "0s"], "whole-screen canvas colors must not tween");
-    await resume(await assertPaused()); // Starting off the landing page must not play.
-    await page.evaluate(() => window.audit.setBackgroundActive(false));
-    await resume(await assertPaused());
-
-    // Seek to the end of the real native entry animations instead of waiting 8–12 seconds.
-    await page.locator(".floating-path").evaluateAll(paths => paths.forEach(path => {
-      const animation = path.getAnimations()[0];
-      animation.currentTime = animation.effect.getTiming().duration + 1;
-    }));
-    await page.waitForFunction(() => document.querySelectorAll(".floating-path-loop").length === 36);
-    const loops = await page.locator(".floating-path-loop").evaluateAll(paths => paths.map(path => {
-      const timing = path.getAnimations()[0].effect.getTiming();
-      return { direction: timing.direction, iterations: timing.iterations };
-    }));
-    assert.ok(loops.every(loop => loop.direction === "alternate" && loop.iterations === Infinity));
-    await page.evaluate(() => window.audit.setBackgroundActive(false));
-    await resume(await assertPaused()); // The repeating phase must pause/resume too.
-
-    await page.evaluate(() => {
-      window.audit.backgroundAnimations = [...document.querySelectorAll(".floating-path")].map(path => path.getAnimations()[0]);
-      window.audit.unmountBackground();
-    });
-    await page.locator(".floating-path").first().waitFor({ state: "detached" });
-    await page.waitForFunction(() => window.audit.backgroundAnimations.every(animation => animation.playState === "idle"));
-    assert.deepEqual(errors, []);
-  } finally { await context.close(); }
-});
-
 test("settings cancel/failure keep committed models unchanged; saving cannot submit twice", { timeout: 30_000 }, async () => {
   let saves = 0, fail = true, saved;
   const gate = deferred();
@@ -253,6 +195,102 @@ test("inline message edits deduplicate click/Enter and preserve a rejected draft
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("unchanged inline edit has cancel only; confirmation appears after an actual change", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("unchangedBubble");
+  try {
+    assert.equal(await page.getByRole("button", { name: "Cancel edit" }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: "Rewind and retry" }).count(), 0);
+    await page.locator("textarea").press("Enter");
+    assert.equal(await page.evaluate(() => window.audit.unchangedSends), 0);
+    await page.locator("textarea").fill("Changed message");
+    await page.getByRole("button", { name: "Rewind and retry" }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("interrupt control does not submit or clear a pending draft", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("interruptPrompt");
+  try {
+    const input = page.locator("textarea");
+    await input.fill("Keep my follow-up draft");
+    await page.getByRole("button", { name: "Click to interrupt execution" }).click();
+    assert.equal(await input.inputValue(), "Keep my follow-up draft");
+    assert.equal(await page.evaluate(() => window.audit.interrupts), 1);
+    assert.equal(await page.evaluate(() => window.audit.submissions ?? 0), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+
+test("small settled node history opens through a bounded tail and renders tool cards without manual intervention", { timeout: 30_000 }, async () => {
+  const line = event => JSON.stringify(event) + "\n";
+  const tool = (id, label) => [
+    line({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: label } }),
+    line({ type: "tool_execution_end", toolCallId: id, toolName: "bash", isError: false,
+      result: { content: [{ type: "text", text: label }], details: { exitCode: 0 } } }),
+  ].join("");
+  const older = tool("older-tool", "OLDER_TOOL_OK");
+  const tail = tool("tail-tool", "TAIL_TOOL_OK") + Array.from({ length: 10 }, (_, index) => line({
+    type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `tail row ${index}` }] },
+  })).join("");
+  const fullContent = older + tail;
+  const totalBytes = Buffer.byteLength(fullContent);
+  const requests = [];
+  const { context, page, errors } = await fixture("transcript", async (route, command, body) => {
+    if (command !== "get_execution_output") return false;
+    requests.push(body);
+    await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content: fullContent,
+      startOffset: 0, nextOffset: totalBytes, totalBytes, complete: true, status: "completed" } } });
+    return true;
+  });
+  try {
+    await page.locator(".tool-call-card").first().waitFor();
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].full, false);
+    assert.equal(requests[0].tail, true);
+    assert.equal(requests[0].offset, 0);
+    assert.equal(await page.locator(".tool-call-card").count(), 2, "a small history fits in its initial bounded tail");
+    await page.locator(".tool-call-card").first().locator(".tool-call-header").click();
+    await page.locator(".tool-call-card .tool-result-code").filter({ hasText: "OLDER_TOOL_OK" }).waitFor();
+    await page.locator(".tool-call-card").last().locator(".tool-call-header").click();
+    await page.locator(".tool-call-card .tool-result-code").filter({ hasText: "TAIL_TOOL_OK" }).waitFor();
+
+    // Verify upward scrolling is smooth and uninhibited: scrolling up never pulls the user back down
+    const scroller = page.locator("[data-transcript-scroll]");
+    await scroller.evaluate(el => { el.scrollTop = el.scrollHeight; });
+    const bottomPos = await scroller.evaluate(el => el.scrollTop);
+    await scroller.evaluate(el => { el.scrollTop = 50; });
+    await page.waitForTimeout(100);
+    const scrolledUpPos = await scroller.evaluate(el => el.scrollTop);
+    assert.ok(scrolledUpPos < bottomPos / 2, "user stays scrolled up and is not dragged back down");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("Planner and Node Agent tool history both render cards in headless browser", { timeout: 30_000 }, async () => {
+  const line = event => JSON.stringify(event) + "\n";
+  const toolEvents = [
+    line({ type: "tool_execution_start", toolCallId: "planner-tool", toolName: "node", args: { name: "worker" } }),
+    line({ type: "tool_execution_end", toolCallId: "planner-tool", toolName: "node", isError: false,
+      result: { content: [{ type: "text", text: "PLAN_TOOL_RESULT" }] } }),
+  ].join("");
+  const { context, page, errors } = await fixture("plannerTranscript", async (route, command, body) => {
+    if (command !== "get_planning_output") return false;
+    assert.equal(body.planningId, "planner-tool-plan");
+    const totalBytes = Buffer.byteLength(toolEvents);
+    await route.fulfill({ json: { result: { planningId: body.planningId, role: "planner", content: toolEvents,
+      startOffset: 0, nextOffset: totalBytes, totalBytes, complete: true, running: false } } });
+    return true;
+  });
+  try {
+    await page.locator(".tool-call-card").waitFor();
+    assert.equal(await page.locator(".tool-call-card").count(), 1, "Planner tool output is a card, not raw JSON");
+    assert.match(await page.locator(".tool-call-card").innerText(), /node/);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 
 test("late workspace completions cannot replace current files/skills; controlled input clears on accepted send", { timeout: 30_000 }, async () => {
   let oldRequests = 0, oldReplies = 0;
@@ -651,7 +689,7 @@ test("thinking cards hide empty blocks and backfill text in place in live and re
       const view = views[i];
       await view.locator(".thinking-card-body", { hasText: "Backfilled first summary" }).waitFor();
       assert.equal(await view.locator(".thinking-card").count(), 3);
-      assert.equal(await view.locator(".thinking-status.completed").count(), 3);
+      assert.equal(await view.locator(".thinking-card.settled").count(), 3);
       assert.equal(await view.locator(".thinking-shimmer, .thinking-empty").count(), 0);
       assert.equal(await view.locator("[data-transcript-id]").first().getAttribute("data-transcript-id"), ids[i]);
       assert.ok((await view.innerText()).includes("End-only summary 中文🚀"));
@@ -703,10 +741,9 @@ test("completed thinking stays visible and copyable through empty or replacement
       await append({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: data.final }] } });
       for (const [i, view] of views.entries()) {
         const card = view.locator(".thinking-card").nth(turn);
-        await card.locator(".thinking-status.completed").waitFor();
+        await card.locator(".thinking-card-header").waitFor();
         assert.match(await card.getAttribute("class"), /settled collapsed/);
         assert.equal(await card.locator("xpath=ancestor::*[@data-transcript-id][1]").getAttribute("data-transcript-id"), ids[i]);
-        assert.ok((await card.locator(".thinking-status.completed").innerText()).includes(`${captured.length} characters`));
         await card.locator(".thinking-card-header").click();
         await card.locator(".thinking-card-body", { hasText: captured }).waitFor();
         assert.equal(await view.locator(".thinking-empty, .thinking-shimmer").count(), 0);

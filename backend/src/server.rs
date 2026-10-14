@@ -436,6 +436,9 @@ mod planning_repository_tests;
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
 #[cfg(test)]
+#[path = "transcript_page_tests.rs"]
+mod transcript_page_tests;
+#[cfg(test)]
 #[path = "service_cache_tests.rs"]
 mod service_cache_tests;
 #[cfg(test)]
@@ -2443,12 +2446,9 @@ fn control(
         return Ok(runtime.state.clone());
     }
     if action == "continue_merger" {
-        if node.as_deref() != Some("merger") {
-            return Err("Only the publication merger can continue its conversation".into());
-        }
-        let instruction = instruction.ok_or("Enter a message for the publication merger")?;
+        let instruction = instruction.ok_or("Enter a message for the merger")?;
         if instruction.trim().is_empty() {
-            return Err("Enter a message for the publication merger".into());
+            return Err("Enter a message for the merger".into());
         }
         let execution_id = execution_id.ok_or("Missing merger execution identity")?;
         let (previous, config, session_dir) = {
@@ -2456,19 +2456,25 @@ fn control(
             if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
                 return Err("Run changed while messaging the merger".into());
             }
+            let target_node = node.as_deref().unwrap_or("merger");
             let previous = runtime
                 .state
                 .mergers
                 .iter()
-                .find(|m| m.id == execution_id && m.node == "merger")
+                .find(|m| m.id == execution_id && (m.node == target_node || target_node == "merger"))
                 .cloned()
-                .ok_or("Publication merger execution not found in this Run")?;
+                .ok_or("Merger execution not found in this Run")?;
             if previous.status == "running" {
                 return Err("Steer the running merger instead".into());
             }
+            if previous.node != "merger" && previous.status != "failed" {
+                return Err("Only failed node mergers can be re-run with a follow-up message".into());
+            }
             // The publication writer/materializer owns the source directory
             // while its phase is active; never start a second writer there.
-            if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
+            if previous.node == "merger"
+                && matches!(runtime.state.phase.as_str(), "publishing" | "merging")
+            {
                 return Err("Wait for publication to finish before messaging the merger".into());
             }
             if !std::path::Path::new(&previous.worktree).is_dir() {
@@ -2481,7 +2487,11 @@ fn control(
             // The model turn continues the previous Pi session in its original
             // directory. The new execution owns the native identity so it stays
             // steerable in its own right.
-            let session_dir = runtime.root.join("mergers").join(&previous.id);
+            let session_dir = if runtime.root.join("mergers").join(&previous.session_id).is_dir() {
+                runtime.root.join("mergers").join(&previous.session_id)
+            } else {
+                runtime.root.join("mergers").join(&previous.id)
+            };
             (previous, config, session_dir)
         };
         let id = Uuid::new_v4().to_string();
@@ -2491,7 +2501,7 @@ fn control(
         let before = merger_continuation_before(std::path::Path::new(&previous.worktree))?;
         let execution = Execution {
             id: id.clone(),
-            node: "merger".into(),
+            node: previous.node.clone(),
             revision: previous.revision,
             attempt: previous.attempt + 1,
             session_id: previous.session_id.clone(),
@@ -2499,9 +2509,12 @@ fn control(
             before,
             workspace_lineage: previous.workspace_lineage.clone(),
             after: None,
-            input: None, result: None,
+            input: None,
+            result: None,
             status: "running".into(),
-            output: String::new(), output_bytes: 0, pid: None,
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
             started_at: now(),
             completed_at: None,
             metrics: None,
@@ -2510,7 +2523,9 @@ fn control(
             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
             // Re-check under the Run lock: publication may have started and a
             // scheduled execution may have claimed the workspace meanwhile.
-            if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
+            if previous.node == "merger"
+                && matches!(runtime.state.phase.as_str(), "publishing" | "merging")
+            {
                 return Err("Wait for publication to finish before messaging the merger".into());
             }
             if runtime.path_is_running(std::path::Path::new(&previous.worktree)) {
@@ -2521,7 +2536,7 @@ fn control(
             })?;
             runtime.emit(EventKind::Steered {
                 execution_id: id.clone(),
-                node: "merger".into(),
+                node: previous.node.clone(),
                 instruction: instruction.trim().into(),
                 images: images.clone(),
             })?;
@@ -2570,13 +2585,23 @@ fn control(
                                 });
                             }
                         }
+                    } else if let Some(target_node_name) = worker_previous.node.strip_prefix("merge:") {
+                        if let Ok(mut runtime) = worker_service.runtime.lock() {
+                            if let Some(target_node) = runtime.state.nodes.get_mut(target_node_name) {
+                                if target_node.status == "failed" || target_node.status == "blocked" {
+                                    target_node.status = "dirty".into();
+                                    target_node.error = None;
+                                    target_node.revision += 1;
+                                    if runtime.state.phase == "failed" || runtime.state.phase == "needs_attention" {
+                                        runtime.state.phase = "running".into();
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
                 // Wake the scheduler: the workspace reservation is released.
-                if let Ok(mut generation) = worker_service.drive_signal.0.lock() {
-                    *generation += 1;
-                    worker_service.drive_signal.1.notify_one();
-                }
+                drive(worker_service.clone());
             });
         if let Err(error) = spawned {
             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
@@ -3008,6 +3033,9 @@ fn get_planning_output(
     planning_id: String,
     role: String,
     offset: u64,
+    tail: bool,
+    before: Option<u64>,
+    limit: Option<u64>,
     service: &Arc<Service>,
 ) -> Result<serde_json::Value, String> {
     if !is_valid_planning_id(&planning_id) {
@@ -3051,13 +3079,55 @@ fn get_planning_output(
     }
     let mut file = fs::File::open(file_path).map_err(|e| e.to_string())?;
     let total_bytes = file.metadata().map_err(|e| e.to_string())?.len();
+    // Larger bounded backward pages reduce scrollback round trips. Live forward
+    // reads retain the existing 256 KiB ceiling and byte-cursor contract.
+    let limit = limit.unwrap_or(256 * 1024).clamp(4, if tail { 1024 * 1024 } else { 256 * 1024 });
     if offset > total_bytes {
         return Err("Invalid planning output offset".into());
+    }
+    if tail {
+        let end = before.unwrap_or(total_bytes).min(total_bytes);
+        if end == 0 {
+            return Ok(serde_json::json!({ "planningId": planning_id, "role": role,
+                "content": "", "startOffset": 0, "nextOffset": 0, "totalBytes": total_bytes,
+                "complete": total_bytes == 0, "running": running }));
+        }
+        let candidate = end.saturating_sub(limit);
+        // Include the line containing the candidate when it is cheap to do so.
+        // JSONL consumers can then prepend an older page without losing a
+        // message split at the window boundary.
+        let window_start = candidate.saturating_sub(256 * 1024);
+        file.seek(SeekFrom::Start(window_start)).map_err(|e| e.to_string())?;
+        let mut window = Vec::new();
+        (&mut file).take(candidate.saturating_sub(window_start)).read_to_end(&mut window).map_err(|e| e.to_string())?;
+        let valid_start = window.iter().rposition(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let start = window_start + valid_start as u64;
+        file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        (&mut file).take(end.saturating_sub(start)).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        // A single JSONL record can exceed the look-behind budget. In that
+        // case start may be in a Unicode code point; move to its next boundary
+        // without scanning or loading the entire file.
+        let leading = bytes.iter().take_while(|byte| (**byte & 0xc0) == 0x80).count();
+        let start = start + leading as u64;
+        let bytes = &bytes[leading..];
+        let length = match std::str::from_utf8(bytes) {
+            Ok(_) => bytes.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(_) => return Err("Invalid planning output UTF-8 offset".into()),
+        };
+        let content = std::str::from_utf8(&bytes[..length]).map_err(|e| e.to_string())?;
+        let next_offset = start + length as u64;
+        return Ok(serde_json::json!({ "planningId": planning_id, "role": role,
+            "content": content, "startOffset": start, "nextOffset": next_offset,
+            "totalBytes": total_bytes, "complete": next_offset >= total_bytes, "running": running }));
     }
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
-    file.take(256 * 1024)
+    file.take(limit)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     let length = match std::str::from_utf8(&bytes) {
@@ -3068,7 +3138,7 @@ fn get_planning_output(
     let content = std::str::from_utf8(&bytes[..length]).map_err(|e| e.to_string())?;
     let next_offset = offset + length as u64;
     Ok(serde_json::json!({ "planningId": planning_id, "role": role,
-        "content": content, "nextOffset": next_offset, "totalBytes": total_bytes,
+        "content": content, "startOffset": offset, "nextOffset": next_offset, "totalBytes": total_bytes,
         "complete": next_offset >= total_bytes, "running": running }))
 }
 
@@ -3207,6 +3277,11 @@ fn get_execution_output(
         .map(|_| argument(body, "offset"))
         .transpose()?
         .unwrap_or(0);
+    let tail = body.get("tail").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let before: Option<usize> = body
+        .get("before")
+        .map(|_| argument(body, "before"))
+        .transpose()?;
     let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
     if runtime.state.run_id != run_id { return Err("Run does not match service".into()); }
     let status = runtime.state.executions.iter().chain(&runtime.state.mergers)
@@ -3225,10 +3300,14 @@ fn get_execution_output(
     } else {
         body.get("limit").map(|_| argument::<usize>(body, "limit")).transpose()?.unwrap_or(256 * 1024).clamp(4, 1024 * 1024)
     };
-    let page = runtime.store.execution_log_page(&run_id, &execution_id, offset, limit)?;
+    let page = if tail {
+        runtime.store.execution_log_tail_page(&run_id, &execution_id, before.unwrap_or(total), limit)?
+    } else {
+        runtime.store.execution_log_page(&run_id, &execution_id, offset, limit)?
+    };
     // Legacy events without a checkpoint have no structured metrics. Recover
     // them from the already requested full response, never during Store::load.
-    if status != "running" && offset == 0 && page.complete {
+    if status != "running" && page.start_offset == 0 && page.complete {
         let state = &mut runtime.state;
         if let Some(exec) = state.executions.iter_mut().chain(state.mergers.iter_mut())
             .find(|e| e.id == execution_id && e.metrics.is_none()) {
@@ -3238,8 +3317,58 @@ fn get_execution_output(
         }
     }
     Ok(serde_json::json!({ "runId":run_id, "executionId":execution_id,
-        "content":page.content, "nextOffset":page.next_offset, "totalBytes":page.total_bytes,
+        "content":page.content, "startOffset":page.start_offset, "nextOffset":page.next_offset, "totalBytes":page.total_bytes,
         "complete":page.complete, "status":status }))
+}
+
+fn get_merger_prompt(
+    body: &serde_json::Value,
+    service: &Arc<Service>,
+) -> Result<serde_json::Value, String> {
+    let run_id: String = argument(body, "runId")?;
+    let execution_id: String = argument(body, "executionId")?;
+    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+    if runtime.state.run_id != run_id {
+        return Err("Run does not match service".into());
+    }
+    let prompt_path = runtime
+        .root
+        .join("mergers")
+        .join(&execution_id)
+        .join("system-prompt.md");
+    if prompt_path.is_file() {
+        let content = fs::read_to_string(&prompt_path).map_err(|e| e.to_string())?;
+        return Ok(serde_json::json!({
+            "runId": run_id,
+            "executionId": execution_id,
+            "prompt": content,
+        }));
+    }
+    if let Some(merger) = runtime.state.mergers.iter().find(|m| m.id == execution_id) {
+        let target_node_name = merger.node.strip_prefix("merge:").unwrap_or(&merger.node);
+        let target_task = if target_node_name == "merger" {
+            runtime.state.graph.original_goal.clone()
+        } else {
+            runtime
+                .state
+                .graph
+                .nodes
+                .iter()
+                .find(|n| n.name == target_node_name)
+                .map(|n| n.task.clone())
+                .unwrap_or_else(|| runtime.state.graph.original_goal.clone())
+        };
+        let content = crate::graph_merge::merger_prompt(
+            &target_task,
+            crate::graph_merge::MergerConflicts::GIT,
+        );
+        return Ok(serde_json::json!({
+            "runId": run_id,
+            "executionId": execution_id,
+            "prompt": content,
+        }));
+    }
+    Err("Merger execution not found in run".into())
 }
 
 #[derive(Serialize)]
@@ -3789,6 +3918,7 @@ pub fn dispatch(
             service,
         )?),
         "get_execution_output" => return get_execution_output(&body, service),
+        "get_merger_prompt" => to_value(get_merger_prompt(&body, service)?),
         "get_planning_snapshot" => {
             let id: String = argument(&body, "planningId")?;
             let repository: String = argument(&body, "repository")?;
@@ -3819,6 +3949,13 @@ pub fn dispatch(
                 .map(|_| argument(&body, "offset"))
                 .transpose()?
                 .unwrap_or(0),
+            body.get("tail").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            body.get("before")
+                .map(|_| argument(&body, "before"))
+                .transpose()?,
+            body.get("limit")
+                .map(|_| argument(&body, "limit"))
+                .transpose()?,
             service,
         )?),
         "get_planning" => to_value(get_planning(argument(&body, "planningId")?, service)?),
@@ -3989,6 +4126,7 @@ fn api_service(
         | "save_graph"
         | "delete_run"
         | "get_execution_output"
+        | "get_merger_prompt"
         | "result_descriptor"
         | "launch_result" => {
             if let Some(run_id) = body.get("runId").and_then(serde_json::Value::as_str) {

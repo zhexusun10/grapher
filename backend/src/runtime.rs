@@ -27,6 +27,9 @@ pub struct Job {
     pub feedback_workspace: Option<FeedbackWorkspace>,
     /// The selected worktree already contains the inherited commit; do not rebuild it from refs.
     pub inherit_workspace: bool,
+    /// A failed attempt with durable Prepared evidence. Its own working tree,
+    /// including uncommitted files and agent commits, must not be recomposed.
+    pub preserved_workspace: Option<Execution>,
     /// Physical baseline for one-time copies of files that are outside the
     /// recorded Git commit; normal project outputs are inherited through Git.
     pub copy_from_workspace: Option<String>,
@@ -1519,12 +1522,21 @@ impl Runtime {
         })
     }
 
-    fn busy_feedback_nodes(&self) -> BTreeSet<String> {
+    fn busy_feedback_nodes(&self, pending_sources: &[&str]) -> BTreeSet<String> {
         self.state
             .graph
             .edges
             .iter()
             .filter(|edge| edge.feedback)
+            // Only a future or unresolved verdict can invalidate this scope.
+            // A resolved review must not become busy again just because one
+            // of its accepted descendants is still running.
+            .filter(|edge| {
+                self.state.nodes.get(&edge.from).is_some_and(|node| {
+                    matches!(node.status.as_str(), "waiting" | "dirty" | "running")
+                }) || self.state.pending_feedback.iter().any(|pending| pending.from == edge.from)
+                    || pending_sources.contains(&edge.from.as_str())
+            })
             .filter(|edge| self.feedback_scope_has_running(&edge.from))
             .flat_map(|edge| self.feedback_scope(&edge.from))
             .collect()
@@ -1589,7 +1601,7 @@ impl Runtime {
             };
             limit.saturating_sub(running)
         };
-        let mut busy_feedback = self.busy_feedback_nodes();
+        let mut busy_feedback = self.busy_feedback_nodes(pending_sources);
         // A completed review may still be waiting for its affected running
         // branch to drain. Its consumers must not start on the stale verdict.
         // This is distinct from the feedback target's scope: a consumer of
@@ -1748,6 +1760,34 @@ impl Runtime {
             } else {
                 None
             };
+            let preserved_workspace = resume
+                .filter(|previous| {
+                    previous.status == "failed"
+                        && !self.is_serial()
+                        && !source_direct_run
+                        && self.state.nodes[&node.name].edit_execution_id.is_none()
+                        && self.state.nodes[&node.name].feedback_workspace.is_none()
+                })
+                .and_then(|previous| {
+                    // A preparation-only retry may have failed before emitting
+                    // Prepared. Find the last prepared failed attempt in this
+                    // session, but never reach across a completed result or edit.
+                    self.state.executions.iter().rev()
+                        .filter(|execution| {
+                            execution.node == previous.node
+                                && execution.session_id == previous.session_id
+                                && execution.worktree == previous.worktree
+                                && !self.state.superseded_execution_ids.contains(&execution.id)
+                        })
+                        .take_while(|execution| execution.status == "failed")
+                        .find(|execution| self.state.events.iter().any(|event| matches!(
+                            &event.kind, EventKind::Prepared { execution_id, .. } if execution_id == &execution.id
+                        )))
+                        .cloned()
+                });
+            if let Some(previous) = &preserved_workspace {
+                before = previous.before.clone();
+            }
             let feedback_workspace = self.state.nodes[&node.name].feedback_workspace.clone();
             let fresh_path = || {
                 workspace::normalize_workspace_display_path(
@@ -2163,6 +2203,7 @@ impl Runtime {
                 session_fork,
                 feedback_workspace,
                 inherit_workspace,
+                preserved_workspace,
                 copy_from_workspace,
                 history_edit,
                 feedback_source,
@@ -2741,7 +2782,10 @@ impl Runtime {
                     output_bytes: 0,
                     metrics: None,
                 })?;
-                if error.starts_with("Workspace composition blocked") {
+                if error.starts_with("Workspace composition blocked")
+                    || error.starts_with("Workspace composition failed")
+                    || error.contains("Merger:")
+                {
                     self.emit(EventKind::Blocked {
                         node: execution.node.clone(),
                         error,
@@ -3428,6 +3472,29 @@ fn perform_with_merger_inner(
     let repository = resolve_repository(root, &job.config)?;
     let path = Path::new(&job.execution.worktree);
     let reused = path.is_dir();
+    // Validate before any checkout, copying or native-environment preparation.
+    // An interrupted writer's dirty files belong to that execution, not to an
+    // expendable workspace slot. Never stash, clean or reset them on recovery.
+    let preserved_head = if let Some(previous) = &job.preserved_workspace {
+        if !reused || previous.worktree != job.execution.worktree
+            || previous.node != job.execution.node
+            || previous.session_id != job.execution.session_id
+            || job.history_edit || job.feedback_workspace.is_some()
+        {
+            return Err("Recovery workspace is missing or reassigned; refusing to replace preserved partial work".into());
+        }
+        workspace::verify_prepared_ancestor(path, &previous.before)?;
+        for input in job.parent_heads.iter().chain(std::iter::once(&job.expected_source_head)) {
+            if !input.is_empty() && workspace::git(
+                path, &["merge-base", "--is-ancestor", input, &previous.before],
+            ).is_err() {
+                return Err("Recovery inputs changed after preparation; refusing to reset preserved partial work".into());
+            }
+        }
+        Some(workspace::git(path, &["rev-parse", "HEAD"])?)
+    } else {
+        None
+    };
     let mut selected_environment = job.environment_input.clone();
     if job.history_edit {
         if let (Some(policy), Some(input), Some(previous)) = (
@@ -3615,7 +3682,9 @@ fn perform_with_merger_inner(
         })
         && workspace::repository_status(path, &exclusions).is_ok_and(|status| status.is_empty())
         && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err();
-    let before = if can_inherit {
+    let before = if let Some(head) = preserved_head {
+        head
+    } else if can_inherit {
         inherited_head.unwrap_or_else(|| execution_before.to_string())
     } else if job.source_direct || source_tree {
         execution_before.to_string()

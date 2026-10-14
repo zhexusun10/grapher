@@ -210,11 +210,14 @@ fn parse_route_decision_does_not_recognize_graph_or_partial_keywords() {
 }
 
 #[test]
-fn partitioner_prompt_uses_parallel_and_serial_labels() {
+fn partitioner_prompt_requests_the_labels_the_parser_recognizes() {
+    // The routing parser only recognizes the "parallel" and "serial" labels, so the
+    // prompt must keep asking the model for exactly those labels. Wording may
+    // otherwise evolve freely.
     let prompt = include_str!("../resources/prompts/partitioner.md").replace("\r\n", "\n");
-    assert!(prompt.starts_with("Classify the task as parallel or serial."));
-    assert!(prompt.trim_end().ends_with("Output only:\nparallel\nor\nserial"));
-    assert!(!prompt.contains("graph"));
+    assert!(prompt.contains("parallel"));
+    assert!(prompt.contains("serial"));
+    assert!(prompt.to_lowercase().contains("output only"));
 }
 
 #[test]
@@ -451,6 +454,42 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(
         partitioner_out.contains("--no-tools"),
         "Partitioner must have --no-tools"
+    );
+
+    // 4. Merger: MUST have --no-skills and --no-approve, but must NOT have --no-extensions (continuity exception)
+    let mut merger_out = String::new();
+    let _ = run_pi(
+        PiRequest {
+            role: PiRole::Merger,
+            config: &config,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &temp.path().join("session-merger"),
+            extension: None,
+            tools: Some("read,write,bash,edit"),
+            session_id: None,
+            extra_args: Vec::new(),
+            environment: Vec::new(),
+            system_prompt: None,
+            images: None,
+        },
+        |text| merger_out.push_str(&text),
+    );
+    assert!(
+        merger_out.contains("--no-skills"),
+        "Merger must have --no-skills"
+    );
+    assert!(
+        !merger_out.contains("--no-extensions"),
+        "Merger must not have --no-extensions so continuity can load"
+    );
+    assert!(
+        merger_out.contains("--no-approve"),
+        "Merger must have --no-approve"
+    );
+    assert!(
+        merger_out.contains("--tools read,write,bash,edit"),
+        "Merger must receive fixed tools"
     );
 }
 

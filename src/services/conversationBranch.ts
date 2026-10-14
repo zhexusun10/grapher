@@ -4,10 +4,7 @@ import type { ChatMessageVersion, GraphEvent, Snapshot } from "../types";
  * original durable events and executions remain available for history. */
 export function activeNodeConversationEvents(state: Snapshot, node: string): GraphEvent[] {
   const edits = state.events.filter((event) => event.type === "conversation_edited" && event.nodes?.includes(node));
-  // A node-composition Merger belongs to the node it prepares, so its steered
-  // turns stay in that node's conversation timeline.
-  const mergerNode = `merge:${node}`;
-  const belongs = (event: GraphEvent) => event.node === node || event.target === node || event.node === mergerNode;
+  const belongs = (event: GraphEvent) => event.node === node || event.target === node;
   return state.events.filter((event) => !edits.some((edit) => {
     if (event.sequence >= edit.sequence) return false;
     if (edit.target === node) {

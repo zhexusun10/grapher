@@ -7,6 +7,7 @@ import { ExecutionTranscript, executionTranscriptCache, prefetchExecutionTranscr
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
 import { planningTranscriptCache } from "../src/components/PlanningActivity.tsx";
 import { BoundedLruCache, utf8Bytes } from "../src/lib/BoundedLruCache.ts";
+import { cachedPlanningOutput, invalidateTranscriptCaches, planningTranscriptKey, registerTranscriptReader } from "../src/services/transcriptCache.ts";
 import type { Execution } from "../src/types.ts";
 
 test("settled node requests share work and publish only complete history", async () => {
@@ -90,14 +91,40 @@ test("successful delete and clear invalidate transcript caches", async () => {
   try {
     executionTranscriptCache.set("deleted:one", { text: "a", offset: 1, complete: true });
     executionTranscriptCache.set("retained:two", { text: "b", offset: 1, complete: true });
-    planningTranscriptCache.set("planner", { text: "c", offset: 1, complete: true });
+    planningTranscriptCache.set("deleted:planner", { text: "c", offset: 1, complete: true });
+    planningTranscriptCache.set("retained:planner", { text: "d", offset: 1, complete: true });
     await runtimeService.deleteRun("deleted");
     assert.equal(executionTranscriptCache.has("deleted:one"), false);
     assert.equal(executionTranscriptCache.has("retained:two"), true);
-    assert.equal(planningTranscriptCache.size, 0);
+    assert.equal(planningTranscriptCache.has("deleted:planner"), false);
+    assert.equal(planningTranscriptCache.has("retained:planner"), true);
     await runtimeService.clearHistory();
     assert.equal(executionTranscriptCache.size, 0);
+    assert.equal(planningTranscriptCache.size, 0);
   } finally { globalThis.fetch = original; executionTranscriptCache.clear(); planningTranscriptCache.clear(); }
+});
+
+test("Conversation invalidation cancels both kinds of readers without disturbing another Run", () => {
+  const node = new AbortController(), planner = new AbortController(), other = new AbortController();
+  const dispose = [registerTranscriptReader("execution", "left:node", node),
+    registerTranscriptReader("planning", "left:view:revision", planner),
+    registerTranscriptReader("planning", "other:view:revision", other)];
+  try {
+    invalidateTranscriptCaches("left");
+    assert.equal(node.signal.aborted, true);
+    assert.equal(planner.signal.aborted, true);
+    assert.equal(other.signal.aborted, false);
+  } finally { dispose.forEach(release => release()); }
+});
+
+test("Planner revisions are independently reused and scoped to their Conversation", () => {
+  planningTranscriptCache.clear();
+  try {
+    planningTranscriptCache.set(planningTranscriptKey("run", "p1"), { text: "first\n", offset: 6, complete: true });
+    assert.match(cachedPlanningOutput("run", ["p1", "p2"]), /first/);
+    assert.equal(cachedPlanningOutput("other", ["p1"]), "");
+    assert.equal(planningTranscriptCache.size, 1);
+  } finally { planningTranscriptCache.clear(); }
 });
 
 test("raw Worker stdout cannot hide a saved final assistant message", () => {

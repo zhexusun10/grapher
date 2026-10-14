@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import React, { useState, useMemo, useRef } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   Terminal,
   FileText,
@@ -10,7 +10,6 @@ import {
   Boxes,
   Compass,
   Wrench,
-  ChevronDown,
   ChevronRight,
   CheckCircle2,
   AlertCircle,
@@ -30,6 +29,7 @@ interface ToolCallCardProps {
 
 export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
   ({ item, defaultExpanded = false, expanded, onExpandedChange }) => {
+    const shouldReduceMotion = useReducedMotion();
     const [isCopied, setIsCopied] = useState(false);
     const cardRef = useRef<HTMLDivElement>(null);
 
@@ -146,6 +146,11 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       setTimeout(() => setIsCopied(false), 1800);
     };
 
+    const isInterrupted = useMemo(
+      () => /(?:中断|终止|terminated|interrupted)/i.test(item.result || ""),
+      [item.result]
+    );
+
     return (
       <div
         ref={cardRef}
@@ -163,18 +168,18 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
         >
           <div className="tool-header-left">
             <span className="tool-expand-icon">
-              {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <ChevronRight size={14} className={`tool-expand-chevron ${isExpanded ? "open" : ""}`} />
             </span>
             {meta.icon}
             <span className="tool-badge">{meta.badge}</span>
-            <span className="tool-summary" title={meta.summary}>
+            <span className="tool-summary">
               {meta.summary}
             </span>
           </div>
 
           <div className="tool-header-right">
             {isTruncated && (
-              <span className="tool-truncated-pill" title={t("输出已截断，可通过详情或全量输出文件查看完整日志")}>
+              <span className="tool-truncated-pill">
                 {t("已截断")}</span>
             )}
             {status === "running" && (
@@ -183,15 +188,14 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 <span>{t("执行中...")}</span>
               </span>
             )}
-            {status !== "running" && !isError && !hasSubcommandWarning && (
-              <span
-                className="tool-status success"
-                title={
-                  toolName === "bash"
-                    ? t("执行成功{0}", exitCode !== null ? t("，退出码: {0}", exitCode) : "")
-                    : t("执行成功")
-                }
-              >
+            {status === "interrupted" && (
+              <span className="tool-status interrupted">
+                <AlertCircle size={13} />
+                <span>{t("已中断")}</span>
+              </span>
+            )}
+            {status !== "running" && status !== "interrupted" && !isError && !hasSubcommandWarning && (
+              <span className="tool-status success">
                 <CheckCircle2 size={13} />
                 <span>
                   {toolName === "bash"
@@ -202,31 +206,25 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 </span>
               </span>
             )}
-            {status !== "running" && !isError && hasSubcommandWarning && (
-              <span
-                className="tool-status warning"
-                title={t("命令退出码为 0，但输出中包含被遮蔽的子步骤警告")}
-              >
+            {status !== "running" && status !== "interrupted" && !isError && hasSubcommandWarning && (
+              <span className="tool-status warning">
                 <AlertTriangle size={13} />
                 <span>{t("包含警告/错误")}</span>
               </span>
             )}
             {isError && (
-              <span
-                className="tool-status error"
-                title={
-                  toolName === "bash"
-                    ? t("执行失败{0}", exitCode !== null ? t("，退出码: {0}", exitCode) : t(" (退出码未知)"))
-                    : t("执行失败")
-                }
-              >
+              <span className="tool-status error">
                 <AlertCircle size={13} />
                 <span>
                   {toolName === "bash"
                     ? exitCode !== null
                       ? t("失败 (Exit {0})", exitCode)
-                      : t("失败 (退出码未知)")
-                    : t("失败")}
+                      : isInterrupted
+                        ? t("已中断")
+                        : t("失败 (退出码未知)")
+                    : isInterrupted
+                      ? t("已中断")
+                      : t("失败")}
                 </span>
               </span>
             )}
@@ -234,7 +232,6 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
               type="button"
               className="tool-copy-btn"
               onClick={handleCopy}
-              title={t("复制调用参数与结果")}
             >
               {isCopied ? <Check size={12} /> : <Copy size={12} />}
             </button>
@@ -247,8 +244,11 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
               key="tool-body-anim"
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+              exit={{ height: 0 }}
+              transition={{
+                duration: shouldReduceMotion ? 0 : 0.22,
+                ease: [0.25, 1, 0.5, 1],
+              }}
               style={{ overflow: "hidden" }}
             >
               <div className="tool-call-body">

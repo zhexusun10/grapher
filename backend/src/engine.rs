@@ -776,6 +776,10 @@ fn run_pi_with_timeout(
         command.arg("--approve");
     } else if request.role == PiRole::Planner {
         command.arg("--no-approve");
+    } else if request.role == PiRole::Merger {
+        // Continuity applies to Merger as an exception, so do not pass --no-extensions here.
+        // User extensions/MCP/skills remain excluded at the host launcher boundary.
+        command.args(["--no-skills", "--no-approve"]);
     } else {
         command.args(["--no-extensions", "--no-skills", "--no-approve"]);
     }

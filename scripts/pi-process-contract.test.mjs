@@ -15,9 +15,9 @@ import { root, lock } from './pi-baseline.mjs';
 const resolverUrl = pathToFileURL(join(root, 'pi/packages/coding-agent/src/experimental/source-resolver.ts')).href;
 
 function settleRpc(child, role) {
-  // Match Rust's Planner/Node handoff window. Immediate EOF can race extension
+  // Match Rust's Planner/Node/Merger handoff window. Immediate EOF can race extension
   // and source-loader cleanup on Windows/Node 24 (UV_HANDLE_CLOSING assertion).
-  const timer = setTimeout(() => child.stdin.end(), ['planner', 'node'].includes(role) ? 500 : 0);
+  const timer = setTimeout(() => child.stdin.end(), ['planner', 'node', 'merger'].includes(role) ? 500 : 0);
   child.once('close', () => clearTimeout(timer));
 }
 
@@ -279,12 +279,13 @@ test('bundled continuity recovers capped provider turns only while selected for 
     for (const [role, enabled, noExtensions] of [
       ['planner', true, false], ['node', true, false], ['planner', false, false], ['node', false, false],
       ['node', true, false], ['node', true, true], ['partition', true, true], ['merger', true, true],
+      ['merger', true, false], ['merger', false, false],
     ]) {
       writeFileSync(join(agent, 'extensions.json'), JSON.stringify({ overrides: { 'npm:pi-continuity': enabled } }));
       requests.length = 0;
       const events = await run(role, noExtensions);
       assert.deepEqual(serverErrors, []);
-      const recover = enabled && !noExtensions && (role === 'planner' || role === 'node');
+      const recover = enabled && !noExtensions && (role === 'planner' || role === 'node' || role === 'merger');
       assert.equal(requests.length, recover ? 2 : 1, `${role}: selected=${enabled}, noExtensions=${noExtensions}`);
       const assistants = events.filter(event => event.type === 'message_end' && event.message?.role === 'assistant');
       assert.equal(assistants.at(-1)?.message.stopReason, recover ? 'stop' : 'length');

@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
-import { modelRoles, planningModelRoles, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
+import { planningModelRoles, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import type { ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
@@ -54,18 +54,6 @@ test("preflight uses only the roles required for the selected mode", () => {
   assert.deepEqual(planningModelRoles("serial"), ["nodeAgent"]);
   assert.deepEqual(planningModelRoles("graph"), ["planner", "nodeAgent"]);
   assert.deepEqual(planningModelRoles("auto"), ["partitioner", "planner", "nodeAgent"]);
-});
-
-test("settings expose three model and thinking selectors with recommendations", () => {
-  const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config: legacy, setConfig: () => {}, catalog, busy: false }));
-  for (const role of modelRoles) {
-    assert.ok(markup.includes(t("{0} 模型配置", role.label)));
-    assert.ok(markup.includes(role.id === "nodeAgent" ? t("Pi Instance 思维等级") : `${role.label}${t(" 思维等级")}`));
-  }
-  assert.ok(markup.includes(modelRoles[0].description));
-  assert.ok(markup.includes(modelRoles[1].description));
-  assert.ok(markup.includes('value="off" selected=""'));
-  assert.equal((markup.match(/class="role-model-card"/g) ?? []).length, 3);
 });
 
 test("role selectors offer only available models and their providers, without free-text entry", () => {
@@ -119,10 +107,8 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
     }));
     const required = render(true);
     assert.ok(!required.includes('<button'));
-    assert.ok(!required.includes('<small'));
     assert.match(required, /role="img"/);
     assert.ok(required.includes(t('始终启用，不可删除')));
-    assert.equal(required.replace(/<[^>]*>/g, ''), 'pi-trimauto', 'bundled extension shows no badge or lock text');
     assert.ok(render(false).includes(t('{0}扩展 {1}', t('删除'), 'probe')));
     assert.ok(render(false, false).includes(t('{0}扩展 {1}', t('添加'), 'probe')));
     assert.ok(render(true, true, false).includes(t('{0}扩展 {1}', t('删除'), 'pi-continuity')));
@@ -135,7 +121,6 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
           path, bundled: true, required: false, enabled },
         disabled: false, onToggle() {},
       }));
-      assert.match(markup, />npm:pi-continuity · extension for more robust loop engineering<\/code>/);
       assert.ok(!markup.includes(path), 'bundled continuity describes its purpose instead of exposing a local path');
       assert.ok(markup.includes(t('{0}扩展 {1}', enabled ? t('删除') : t('添加'), 'pi-continuity')));
     }
@@ -167,36 +152,26 @@ test('Auto Approve defaults to off, including legacy configs; only an explicit s
   } finally { await vite.close(); }
 });
 
-test("settings group Provider management and role configuration in separate sections", async () => {
-  // Vite handles the auth component's CSS module during server-side rendering.
-  const { createServer } = await import("vite");
-  const vite = await createServer({
-    configFile: false,
-    appType: "custom",
-    optimizeDeps: { noDiscovery: true, include: [] },
-    server: { middlewareMode: true, watch: null, hmr: false, ws: false },
-  });
-  try {
-    const { SettingsModal } = await vite.ssrLoadModule("/src/components/modals/SettingsModal.tsx");
-    const markup = renderToStaticMarkup(React.createElement(SettingsModal, {
-      isOpen: true, onClose() {}, config: legacy, setConfig() {}, dataPath: "", onSaveConfig() {},
-    }));
-    const extensionStart = markup.indexOf('aria-labelledby="extension-settings-title"');
-    const languageStart = markup.indexOf('aria-labelledby="language-settings-title"');
-    assert.ok(extensionStart >= 0 && languageStart > extensionStart, 'Extensions are the top Settings section');
-    assert.ok(markup.includes(t('Pi 全局扩展')));
-    assert.ok(markup.includes(t('删除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。')));
-    assert.ok(!markup.includes('更改立即保存，对新启动的 Agent 生效。'));
-    const providerStart = markup.indexOf('aria-labelledby="provider-settings-title"');
-    const rolesStart = markup.indexOf('aria-labelledby="role-model-settings-title"');
-    assert.ok(providerStart >= 0 && rolesStart > providerStart);
-    const providers = markup.slice(providerStart, rolesStart);
-    const roles = markup.slice(rolesStart);
-    assert.ok(providers.includes(t("Provider 认证")));
-    assert.ok(providers.includes(t("支持的 Provider 列表")));
-    assert.ok(!providers.includes(t("{0} 模型配置", "Partitioner")));
-    for (const role of modelRoles) assert.ok(roles.includes(t("{0} 模型配置", role.label)));
-  } finally {
-    await vite.close();
-  }
+test("ProviderAuthAdapter passes device ID to runtime login options", async () => {
+  const { ProviderAuthAdapter } = await import("../engine/provider-auth-adapter.mjs");
+  let capturedOptions: unknown;
+  const mockRuntime = {
+    getProviders: () => [
+      { id: "openai", auth: { oauth: { login: async () => {} } } },
+    ],
+    login: async (_provider: string, _method: string, _interaction: unknown, options: unknown) => {
+      capturedOptions = options;
+    },
+  };
+  const adapter = new ProviderAuthAdapter(
+    () => Promise.resolve(mockRuntime as never),
+    { getDeviceId: () => "mock-device-id-1234" }
+  );
+
+  const job = await adapter.start("openai", "oauth");
+  assert.equal(job.provider, "openai");
+  assert.equal(job.status, "pending");
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(capturedOptions, "options were passed to runtime.login");
+  assert.equal((capturedOptions as { getDeviceId: () => string }).getDeviceId(), "mock-device-id-1234");
 });

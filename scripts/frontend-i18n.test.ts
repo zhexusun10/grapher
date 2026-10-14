@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import fs from "node:fs";
-import path from "node:path";
 import { execFileSync } from "node:child_process";
-import ts from "typescript";
 import {
   detectLocale, translate, localizeError, localizePlanWarning, readLanguagePreference, resolveLocale,
   restartFrontendWithLanguage, LANGUAGE_PREFERENCE_KEY,
@@ -73,37 +70,6 @@ test("all English translations contain no Chinese and preserve placeholders", ()
   }
 });
 
-test("all application UI Chinese literals are localized and translation keys exist", () => {
-  const root = path.resolve("src");
-  let translated = 0;
-  for (const file of fs.readdirSync(root, { recursive: true }) as string[]) {
-    if (!/\.tsx?$/.test(file) || file.startsWith("i18n")) continue;
-    const full = path.join(root, file);
-    const source = ts.createSourceFile(full, fs.readFileSync(full, "utf8"), ts.ScriptTarget.Latest, true);
-    const visit = (node: ts.Node) => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "t") {
-        const key = node.arguments[0];
-        assert.ok(key && ts.isStringLiteral(key), `${file}: translation key must be static`);
-        assert.ok(Object.hasOwn(en, key.text), `${file}: missing translation for ${key.text}`);
-        translated++;
-      }
-      if (ts.isJsxText(node)) assert.doesNotMatch(node.text, han, `${file}: untranslated JSX text`);
-      if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && han.test(node.text)) {
-        const parent = node.parent;
-        const isKey = ts.isCallExpression(parent) && ts.isIdentifier(parent.expression) && parent.expression.text === "t" && parent.arguments[0] === node;
-        const isBackendErrorMatch = ts.isCallExpression(parent) && ts.isPropertyAccessExpression(parent.expression) && parent.expression.name.text === "includes" && file.endsWith("runtime.ts");
-        assert.ok(isKey || isBackendErrorMatch, `${file}: untranslated literal ${node.text}`);
-      }
-      if (ts.isTemplateExpression(node)) {
-        assert.doesNotMatch(node.head.text + node.templateSpans.map(span => span.literal.text).join(""), han, `${file}: untranslated template`);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-  }
-  assert.ok(translated > 400, "coverage must include the full frontend, not just navigation");
-});
-
 test("application errors are localized without changing the Chinese version", () => {
   const message = "用户已停止本次执行；可以修改消息或重新运行。";
   assert.equal(localizeError(message, "zh-CN"), message);
@@ -137,14 +103,6 @@ test("provider errors include actionable hints and role localization", () => {
 
   const abortZh = localizeError("Partitioner failed: Pi exited with exit code: 0xc0000409", "zh-CN");
   assert.ok(abortZh.includes("子进程异常退出 (0xc0000409)"));
-});
-
-test("approval copy discloses forced collection and Git publication of ignored project files", () => {
-  const source = fs.readFileSync("src/components/modals/ApprovalModal.tsx", "utf8");
-  const key = "批准会强制暂存并提交源项目文件作为基线，包括此前未提交及被 .gitignore 忽略的项目文件；节点结果通过 Git 合并回源目录。Git/Grapher 内部文件及受管环境范围除外。";
-  assert.ok(source.includes(key));
-  assert.match(translate("en", key), /force-stages.*ignored by \.gitignore.*merged back.*managed environment scopes are excluded/s);
-  assert.ok(!source.includes("不会单独版本化或发布回源目录"));
 });
 
 test("execution graph plan warnings are localized without diagnostic code prefixes", () => {

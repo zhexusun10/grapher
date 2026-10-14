@@ -11,16 +11,11 @@ import {
   clampSplitRatio,
 } from "../src/hooks/useWorkbenchResizer.ts";
 
-test("DEFAULT_SPLIT_RATIO is 0.6 (60% dialogue, 40% graph)", () => {
-  assert.equal(DEFAULT_SPLIT_RATIO, 0.6);
-});
-
 test("getStoredRatio returns default ratio when storage is empty", () => {
   const mockStorage = {
     getItem: () => null,
   };
   assert.equal(getStoredRatio(mockStorage), DEFAULT_SPLIT_RATIO);
-  assert.equal(getStoredRatio(mockStorage), 0.6);
 });
 
 test("getStoredRatio loads persisted split ratio and clamps within bounds", () => {

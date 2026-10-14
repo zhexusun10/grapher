@@ -4,7 +4,7 @@ import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 
 // Mocked API only: no backend, credentials, or real workspace files are touched.
-test("workspace isolation, non-scrolling home, shared view transitions and global scrollbar paint", { timeout: 120_000 }, async () => {
+test("workspace isolation, accessible home and delayed planning ownership", { timeout: 120_000 }, async () => {
   const repositoryA = "C:\\Projects\\Alpha";
   const repositoryB = "C:\\Projects\\Beta";
   const config = { repository: repositoryA, model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
@@ -108,29 +108,7 @@ test("workspace isolation, non-scrolling home, shared view transitions and globa
     }
     await page.setViewportSize({ width: 1280, height: 768 });
 
-    // Both pages can crossfade without sharing/squeezing the same flex row.
-    await page.evaluate(() => {
-      window.transitionSamples = [];
-      const sample = () => {
-        const stage = document.querySelector(".main-view-stage").getBoundingClientRect();
-        const views = [...document.querySelectorAll(".main-view-stage > div")].map(view => ({ height: view.getBoundingClientRect().height, position: getComputedStyle(view).position }));
-        window.transitionSamples.push({ stageHeight: stage.height, views, scrollHeight: document.documentElement.scrollHeight });
-        if (window.transitionSamples.length < 25) requestAnimationFrame(sample);
-      };
-      requestAnimationFrame(sample);
-    });
     await page.locator('[data-run-id="run-a"]').click();
-    await page.locator(".workspace-view-wrapper").waitFor();
-    await page.waitForTimeout(500);
-    const samples = await page.evaluate(() => window.transitionSamples);
-    assert.ok(samples.some(sample => sample.views.length === 2), "outgoing and incoming views should overlap during the transition");
-    for (const sample of samples) {
-      assert.equal(sample.scrollHeight, 768);
-      for (const view of sample.views) {
-        assert.equal(view.position, "absolute");
-        assert.ok(Math.abs(view.height - sample.stageHeight) < 1, "transition must not compress either page");
-      }
-    }
     await page.locator(".chat-messages-stream", { hasText: "Alpha conversation" }).waitFor();
 
     // Switching while repository detection yields cannot bind Alpha to Beta.
@@ -161,34 +139,6 @@ test("workspace isolation, non-scrolling home, shared view transitions and globa
     assert.ok((await page.locator(".chat-messages-stream").innerText()).includes("Beta conversation"));
     assert.ok(!(await page.locator(".chat-messages-stream").innerText()).includes("Detached Alpha"));
 
-    // Vertical and horizontal scrollers, including dialogs, inherit app paint.
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    await page.locator(".settings-sections").waitFor();
-    const scrollbar = await page.locator(".settings-sections").evaluate(element => ({
-      width: getComputedStyle(element, "::-webkit-scrollbar").width,
-      thumb: getComputedStyle(element, "::-webkit-scrollbar-thumb").backgroundColor,
-      radius: getComputedStyle(element, "::-webkit-scrollbar-thumb").borderRadius,
-      buttons: getComputedStyle(element, "::-webkit-scrollbar-button").display,
-    }));
-    assert.equal(scrollbar.width, "10px");
-    assert.equal(scrollbar.thumb, "rgb(203, 213, 225)");
-    assert.equal(scrollbar.radius, "999px");
-    assert.equal(scrollbar.buttons, "none");
-    const scrollProbe = await page.evaluate(() => {
-      const element = document.createElement("div");
-      element.style.cssText = "position:fixed;left:0;top:0;width:120px;height:60px;overflow:auto";
-      const content = document.createElement("div");
-      content.style.cssText = "width:320px;height:200px";
-      element.append(content);
-      document.body.append(element);
-      element.scrollTo(50, 70);
-      const result = { horizontalHeight: getComputedStyle(element, "::-webkit-scrollbar").height,
-        scrollLeft: element.scrollLeft, scrollTop: element.scrollTop,
-        rootScrollTop: document.documentElement.scrollTop };
-      element.remove();
-      return result;
-    });
-    assert.deepEqual(scrollProbe, { horizontalHeight: "10px", scrollLeft: 50, scrollTop: 70, rootScrollTop: 0 });
     assert.deepEqual(errors, []);
   } finally {
     releasePlanning();

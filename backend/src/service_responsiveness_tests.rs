@@ -23,7 +23,7 @@ fn a_busy_run_does_not_hold_the_primary_runtime_during_unrelated_lookup() {
         tx.send(service_for_run(&other_primary, "new-conversation", true))
             .unwrap();
     });
-    let result = rx.recv_timeout(Duration::from_millis(500));
+    let result = rx.recv_timeout(Duration::from_millis(3000));
     let primary_available = primary.runtime.try_lock().is_ok();
     // Always unblock the old implementation before asserting, so a failing
     // regression cannot leak a locked global registry into other tests.

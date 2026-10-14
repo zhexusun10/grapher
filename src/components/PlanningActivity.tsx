@@ -1,137 +1,160 @@
 import { t, localizeError } from "../i18n";
-import { useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
 import { runtimeService } from "../services/runtime";
-import { startVisibilityPolling } from "../services/visibilityPolling";
+import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
 import { useStableCallback } from "../hooks/useStableCallback";
+import { useTranscriptReader } from "../hooks/useTranscriptReader";
+import { useAutoTranscriptHistory } from "../hooks/useAutoTranscriptHistory";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
-
-import { utf8Bytes } from "../lib/BoundedLruCache";
-import { planningTranscriptCache } from "../services/transcriptCache";
+import { cacheTranscriptWindow, composePlanningOutput, planningTranscriptCache, planningTranscriptKey, transcriptFromCache } from "../services/transcriptCache";
 import { activePlannerOutput } from "../lib/plannerOutput";
+import { appendTranscriptPage, prependTranscriptPage, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
+import { markTranscriptPrepend } from "../services/transcriptScroll";
+import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES } from "../services/transcriptPaging";
+import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 export { planningTranscriptCache } from "../services/transcriptCache";
 export { activePlannerOutput } from "../lib/plannerOutput";
 
-export const PlanningActivity = memo(function PlanningActivity({ planningIds, onReady, showUserTurns = false, skipFirstUser = false, onUserResize, onEditUser, edits = [] }: {
+type Props = {
+  runId?: string;
   planningIds: string[];
   onReady?: () => void;
+  onOutputChange?: (output: string) => void;
+  onLoadingChange?: (loading: boolean) => void;
   showUserTurns?: boolean;
   skipFirstUser?: boolean;
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
   onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
   edits?: Array<{ old_instruction?: string; nextPlanningId?: string }>;
-}) {
+  running?: boolean;
+};
+
+/** Read backward through the contiguous loaded suffix, one revision/page at a time. */
+function olderTarget(ids: string[], segments: ReadonlyMap<string, TranscriptWindow>): string | null {
+  for (let index = ids.length - 1; index >= 0; index--) {
+    const window = segments.get(ids[index]);
+    if (!window || window.start > 0) return ids[index];
+  }
+  return null;
+}
+
+export const PlanningActivity = memo(function PlanningActivity(props: Props) {
+  return <PlanningHistory key={`${props.runId ?? ""}:${props.planningIds.join(":")}`} {...props} />;
+});
+
+function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onLoadingChange, showUserTurns = false,
+  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false }: Props) {
   const key = planningIds.join(":");
-  const cached = planningTranscriptCache.get(key);
-  const onReadyRef = useRef(onReady);
-  onReadyRef.current = onReady;
-  const [record, setRecord] = useState(() => ({
-    id: key,
-    content: cached ? cached.text : "",
-  }));
-  const output = record.id === key ? record.content : "";
-  const editKey = JSON.stringify(edits);
-  const activeOutput = useMemo(() => activePlannerOutput(output, edits), [output, editKey]);
-  const [loading, setLoading] = useState(() => !cached);
+  const [initialSegments] = useState(() => {
+    const loaded = new Map<string, TranscriptWindow>();
+    for (const id of planningIds) {
+      const window = transcriptFromCache(planningTranscriptCache.get(planningTranscriptKey(runId, id)));
+      if (window) loaded.set(id, window);
+    }
+    return loaded;
+  });
+  const segments = useRef(initialSegments);
+  const [output, setOutput] = useState(() => composePlanningOutput(planningIds, initialSegments));
+  const [ready, setReady] = useState(!planningIds.length || initialSegments.has(planningIds.at(-1)!));
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const olderBusy = useRef(false);
+  const sectionRef = useRef<HTMLElement>(null);
+  const lifetime = useTranscriptReader("planning", `${runId}:view:${key}`);
+  const notifyReady = useStableCallback(() => onReady?.());
+  const notifyOutput = useStableCallback((text: string) => onOutputChange?.(text));
+  const notifyLoading = useStableCallback((loading: boolean) => onLoadingChange?.(loading));
+  const editUser = useStableCallback((text: string, replacement: string) => onEditUser?.(text, replacement));
+  const editKey = JSON.stringify(edits);
+  const activeOutput = useMemo(() => activePlannerOutput(output, edits), [output, editKey]);
+  // A missing older revision must not make the first loaded user look like the goal.
+  const historyStartsAtBeginning = planningIds.length > 0 && segments.current.get(planningIds[0])?.start === 0;
+  const skipInitialUser = skipFirstUser && historyStartsAtBeginning;
+  const hasOlder = ready && olderTarget(planningIds, segments.current) !== null;
 
-  useLayoutEffect(() => {
-    if (cached?.complete) {
-      onReadyRef.current?.();
-    }
-  }, [cached?.complete]);
+  const publish = useCallback((planningId: string, window: TranscriptWindow) => {
+    segments.current.set(planningId, window);
+    planningTranscriptCache.set(planningTranscriptKey(runId, planningId), cacheTranscriptWindow(window));
+    setOutput(composePlanningOutput(planningIds, segments.current));
+  }, [runId, key]);
+
+  useLayoutEffect(() => { notifyOutput(output); }, [output, notifyOutput]);
+  useLayoutEffect(() => { if (ready) notifyReady(); }, [ready, notifyReady]);
 
   useEffect(() => {
-    const cachedEntry = planningTranscriptCache.get(key);
-    if (cachedEntry?.complete) {
-      setRecord({ id: key, content: cachedEntry.text });
-      setLoading(false);
-      onReadyRef.current?.();
-      return;
-    }
-
     const abort = new AbortController();
-    if (!cachedEntry) {
-      setRecord({ id: key, content: "" });
-      setLoading(true);
-    }
+    const signal = AbortSignal.any([abort.signal, lifetime.current!]);
+    let emptyPages = 0;
     setError("");
-    let stopWaiting = () => {};
-    let wake: (() => void) | undefined;
-    const wait = () => new Promise<void>((resolve) => {
-      wake = resolve;
-      stopWaiting = startVisibilityPolling(async () => { wake = undefined; resolve(); return null; }, 1000);
-    });
-    const poll = async () => {
-      let notifiedReady = false;
+    if (!planningIds.length) { setReady(true); notifyLoading(false); return () => abort.abort(); }
+    notifyLoading(!segments.current.has(planningIds.at(-1)!));
+    const stop = startVisibilityPolling(async () => {
       try {
-        let text = "";
-        let bytes = 0;
-        for (const planningId of planningIds) {
-          let offset = 0;
-          if (text && !text.endsWith("\n")) { text += "\n"; bytes++; }
-          const source = `${JSON.stringify({ type: "grapher_planning_source", planningId })}\n`;
-          text += source;
-          bytes += utf8Bytes(source);
-          while (!abort.signal.aborted) {
-            const page = await runtimeService.getPlanningOutput(planningId, "planner", offset, abort.signal);
-            if (abort.signal.aborted) return;
-            if (page.planningId !== planningId || page.role !== "planner" || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
-              throw new Error(t("规划记录与请求不匹配，请重试。"));
-            }
-            text += page.content;
-            bytes += page.nextOffset - offset;
-            if (page.content) {
-              setRecord({ id: key, content: text });
-              planningTranscriptCache.set(key, { text, offset: bytes, complete: false });
-            }
-            offset = page.nextOffset;
-            if (page.complete) {
-              if (!notifiedReady && (offset > 0 || !page.running)) {
-                notifiedReady = true;
-                setLoading(false);
-                onReadyRef.current?.();
-              }
-              if (!page.running) {
-                // A stopped process may leave its last JSONL record without a
-                // newline; the transcript parser waits for a complete line.
-                if (text && !text.endsWith("\n")) {
-                  text += "\n";
-                  bytes++;
-                  setRecord({ id: key, content: text });
-                }
-                break;
-              }
-              await wait();
-            }
-          }
+        const latestId = planningIds.at(-1)!;
+        // Start at the newest revision. Revalidate any cached live revisions,
+        // but never download missing older revisions just to open a conversation.
+        const toRead = [latestId, ...planningIds.filter(id => id !== latestId && segments.current.has(id))];
+        for (const planningId of toRead) {
+          const current = segments.current.get(planningId);
+          if (current?.settled && current.end === current.total) continue;
+          const offset = current?.end ?? 0;
+          const page = await runtimeService.getPlanningOutput(planningId, "planner", offset, signal, !current, undefined,
+            !current ? INITIAL_TRANSCRIPT_BYTES : undefined);
+          if (signal.aborted) return null;
+          if (page.planningId !== planningId || page.role !== "planner" || page.nextOffset < offset ||
+              (!page.complete && page.nextOffset === offset)) throw new Error(t("执行记录与请求不匹配"));
+          // Older reads may have prepended to this revision while we awaited.
+          const latest = segments.current.get(planningId);
+          const next = latest
+            ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, !page.running)
+            : windowFromPage(page, !page.running);
+          publish(planningId, next); // Also publish empty terminal pages.
+          emptyPages = page.content ? 0 : emptyPages + 1;
+          if (planningId === latestId) { setReady(true); notifyLoading(false); }
         }
-        planningTranscriptCache.set(key, { text, offset: bytes, complete: true });
-      } catch (error) {
-        if (!abort.signal.aborted) setError(error instanceof Error ? error.message : String(error));
-      } finally {
-        if (!abort.signal.aborted) {
-          setLoading(false);
-          if (!notifiedReady) {
-            notifiedReady = true;
-            onReadyRef.current?.();
-          }
-        }
+        setReady(true); notifyLoading(false);
+        const loaded = [...segments.current.values()];
+        if (loaded.some(window => window.end < window.total)) return 0;
+        return loaded.some(window => !window.settled) ? liveOutputDelay(emptyPages) : null;
+      } catch (caught) {
+        if (!signal.aborted) { setError(caught instanceof Error ? caught.message : String(caught)); setReady(true); notifyLoading(false); }
+        return null;
       }
-    };
-    void poll();
-    return () => { abort.abort(); stopWaiting(); wake?.(); };
-  }, [key, retry]);
+    });
+    return () => { abort.abort(); stop(); notifyLoading(false); };
+  }, [key, retry, running, notifyLoading, publish, lifetime]);
 
-  const editUser = useStableCallback((text: string, replacement: string) => onEditUser?.(text, replacement));
-  return <section className="planning-activity" aria-label={t("规划活动记录")}>
-    {loading && !output && <p role="status">{t("正在加载规划活动…")}</p>}
+  const loadOlder = useStableCallback(async (preserveReading = true) => {
+    const signal = lifetime.current;
+    const id = olderTarget(planningIds, segments.current);
+    if (!ready || !id || olderBusy.current || !signal || signal.aborted) return;
+    const before = segments.current.get(id);
+    olderBusy.current = true; setLoadingOlder(true); setError("");
+    if (preserveReading) markTranscriptPrepend(sectionRef.current);
+    try {
+      const page = await runtimeService.getPlanningOutput(id, "planner", 0, signal, true, before?.start, OLDER_TRANSCRIPT_BYTES);
+      if (signal.aborted) return;
+      if (page.planningId !== id || page.role !== "planner") throw new Error(t("执行记录与请求不匹配"));
+      const latest = segments.current.get(id);
+      const next = latest ? prependTranscriptPage(latest, page) : windowFromPage(page, !page.running);
+      publish(id, next);
+    } catch (caught) { if (!signal.aborted) setError(caught instanceof Error ? caught.message : String(caught)); }
+    finally { olderBusy.current = false; if (!signal.aborted) setLoadingOlder(false); }
+  });
+
+  useAutoTranscriptHistory(sectionRef, hasOlder, loadingOlder, error, output,
+    preserveReading => { void loadOlder(preserveReading); });
+
+  return <section ref={sectionRef} className="planning-activity" aria-label={t("规划活动记录")}>
     {error && <p role="alert">{localizeError(error)} <button type="button" onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
-    {!loading && !error && !output && <p>{t("没有可用的规划输出。")}</p>}
+    <TranscriptHistoryStatus loading={loadingOlder} />
+    {ready && !error && !output && <p>{t("没有可用的规划输出。")}</p>}
     {output && <div className="planning-activity-output">
-      <VirtualizedTranscript key={`${key}:${showUserTurns}:${skipFirstUser}:${editKey}`} output={activeOutput} inline
-        showUserTurns={showUserTurns} skipFirstUser={skipFirstUser} onUserResize={onUserResize}
+      <VirtualizedTranscript output={activeOutput} inline
+        onReachTop={hasOlder && !error ? () => { void loadOlder(); } : undefined}
+        showUserTurns={showUserTurns} skipFirstUser={skipInitialUser} onUserResize={onUserResize}
         onEditUser={onEditUser ? editUser : undefined} />
     </div>}
   </section>;
-});
+}

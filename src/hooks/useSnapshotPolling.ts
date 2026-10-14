@@ -4,7 +4,7 @@ import { runtimeService } from "../services/runtime";
 import { startVisibilityPolling } from "../services/visibilityPolling";
 import { mapWithConcurrency } from "../services/boundedRequests";
 
-const livePhases = new Set(["planning", "running", "awaiting_approval", "publishing", "merging", "paused"]);
+const livePhases = new Set(["planning", "running", "awaiting_approval", "publishing", "merging", "paused", "needs_attention"]);
 const workingPhases = new Set(["planning", "running", "publishing", "merging"]);
 
 /** Poll all indexed workspaces, but publish only the selected conversation. */
@@ -21,10 +21,12 @@ export function useSnapshotPolling(
   // Standalone publication-Merger continuations leave the Run phase completed.
   // Their durable execution status, not the phase alone, keeps polling alive.
   const writerRuns = useRef(new Set<string>());
-  const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers">>) => {
+  const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers" | "nodes">>) => {
     if (!status.runId || !status.phase) return;
     phases.current.set(status.runId, status.phase);
-    if ([...(status.executions ?? []), ...(status.mergers ?? [])].some(item => item.status === "running")) writerRuns.current.add(status.runId);
+    const hasRunningWork = [...(status.executions ?? []), ...(status.mergers ?? [])].some(item => item.status === "running") ||
+      Object.values(status.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty");
+    if (hasRunningWork) writerRuns.current.add(status.runId);
     else writerRuns.current.delete(status.runId);
     versions.current.delete(status.runId);
     // Actions supersede polls already in flight, even at the same event sequence.
@@ -47,13 +49,14 @@ export function useSnapshotPolling(
       activeRuns.current.delete(id); writerRuns.current.delete(id);
     }
     if (!ids.length && !viewedRunId) ids.push("");
-    const delay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) ? 750 : 2500;
+    const delay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) || (viewedRunId && (phases.current.get(viewedRunId) === "needs_attention" || viewedHasActiveExecutions)) ? 750 : 2500;
     const poll = async () => {
       // A slow/unavailable background Run cannot serialize the foreground request.
       await mapWithConcurrency(ids, 4, async id => {
         if (cancelled) return;
         const phase = phases.current.get(id);
-        if (phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id)) return;
+        const isViewed = id === viewedRunId;
+        if (!isViewed && phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id)) return;
         const revision = revisions.current.get(id) ?? 0;
         try {
           const { version, snapshot, activity } = await runtimeService.snapshotIfChanged(versions.current.get(id) ?? null, abort.signal, id || undefined);
@@ -65,7 +68,9 @@ export function useSnapshotPolling(
           observeActivity(snapshot?.runId ?? id, activity ?? []);
           if (!snapshot?.runId) return;
           phases.current.set(snapshot.runId, snapshot.phase);
-          if ([...snapshot.executions, ...(snapshot.mergers ?? [])].some(item => item.status === "running")) writerRuns.current.add(snapshot.runId);
+          const hasRunningWork = [...snapshot.executions, ...(snapshot.mergers ?? [])].some(item => item.status === "running") ||
+            Object.values(snapshot.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty");
+          if (hasRunningWork) writerRuns.current.add(snapshot.runId);
           else writerRuns.current.delete(snapshot.runId);
           observeSnapshot(snapshot);
           setSnapshot(previous => previous.runId === snapshot.runId &&

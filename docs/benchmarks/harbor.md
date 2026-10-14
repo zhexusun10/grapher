@@ -2,7 +2,7 @@
 
 Grapher provides a Harbor **custom installed agent** at `benchmark.harbor_agent:GrapherAgent`. Harbor and its datasets are installed separately; this repository does not bundle a benchmark host or claim an aggregate score.
 
-The integration baseline is Harbor **0.23.0**, with the interface pinned in [Linux CI](../../.github/workflows/linux-native.yml) to commit `31668af15560fb50a9d0584816d12726036656cf`. Other Harbor versions need interface verification.
+The integration baseline is Harbor **0.23.0**, with the adapter interface verified against commit `31668af15560fb50a9d0584816d12726036656cf`. Other Harbor versions need interface verification.
 
 ## Linux task environment
 

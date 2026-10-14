@@ -130,12 +130,18 @@ export function EditableUserBubble({
         const end = textarea.value.length;
         textarea.setSelectionRange(end, end);
       }
+      if (!initialSize && bubbleRef.current) {
+        const { width, height } = bubbleRef.current.getBoundingClientRect();
+        if (width > 0 && height > 0) {
+          setInitialSize({ width, height });
+        }
+      }
     }
-  }, [editing]);
+  }, [editing, initialSize]);
 
   const submit = async () => {
     const value = draft.trim();
-    if (!value || disabled || submittingRef.current) return;
+    if (!value || !isChanged || disabled || submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     try {
@@ -161,11 +167,11 @@ export function EditableUserBubble({
   };
 
   const targetText = cleanText || text;
+  const isChanged = draft.trim() !== targetText.trim();
   const isShorter = draft.trim().length < targetText.trim().length;
-  const isLongDraft = draft.trim().length > 40 || draft.includes("\n") || (initialSize ? initialSize.width > 420 : false);
 
   return (
-    <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}${editing && isLongDraft ? " expanded" : ""}`}>
+    <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}`}>
       <div className="chat-bubble-body">
         {editing ? (
           <div className="chat-bubble-actions">
@@ -179,16 +185,18 @@ export function EditableUserBubble({
             >
               <X size={14} />
             </button>
-            <button
-              type="button"
-              className="chat-bubble-action-btn send"
-              onClick={submit}
-              disabled={disabled || submitting || !draft.trim()}
-              title={t("回退并重试 (Enter)")}
-              aria-label={t("回退并重试")}
-            >
-              <ArrowUp size={14} />
-            </button>
+            {isChanged && (
+              <button
+                type="button"
+                className="chat-bubble-action-btn send"
+                onClick={submit}
+                disabled={disabled || submitting || !draft.trim()}
+                title={t("回退并重试 (Enter)")}
+                aria-label={t("回退并重试")}
+              >
+                <ArrowUp size={14} />
+              </button>
+            )}
           </div>
         ) : (
           <div className="chat-bubble-left-tools">
@@ -244,8 +252,8 @@ export function EditableUserBubble({
           {(cleanText || editing) ? (
             <div
               ref={bubbleRef}
-              className={`chat-bubble-user${editing ? " editing" : ""}${editing && isLongDraft ? " expanded" : ""}`}
-              style={editing && initialSize && !isShorter && !isLongDraft ? {
+              className={`chat-bubble-user${editing ? " editing" : ""}`}
+              style={editing && initialSize && !isShorter ? {
                 minWidth: `${initialSize.width}px`,
                 minHeight: `${initialSize.height}px`,
               } : undefined}

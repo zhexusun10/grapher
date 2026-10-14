@@ -63,7 +63,7 @@ export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) 
       <button type="button" className="icon-button" aria-label={t('刷新扩展')} disabled={busy || disabled} onClick={() => void update()}><RefreshCw size={14} /></button>
     </div>
     <p className="section-desc">{t('删除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。')}</p>
-    <p className="section-desc">{t('pi-trim 对所有角色生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。')}</p>
+    <p className="section-desc">{t('pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。')}</p>
     {catalog && <code className="extension-settings-directory">{catalog.globalDirectory}</code>}
     {busy && <p role="status" className="section-desc">{t('正在读取扩展…')}</p>}
     {error && <p role="alert" className="settings-language-error">{localizeError(error)}</p>}

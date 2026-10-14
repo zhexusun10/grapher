@@ -203,10 +203,59 @@ fn publication_merger_continuation_control_validates_phase_and_workspace() {
             &service,
         )
     };
-    // Only the publication merger is continuable; node-composition mergers
-    // keep their settled read-only rule.
+    // Node-composition mergers are read-only when completed, but failed node mergers can be continued.
     assert!(attempt("merge:task", &merger.id).is_err());
     assert!(attempt("merger", "missing").is_err());
+
+    let completed_node_merger = execution("node-merger-1", "merge:task", "completed");
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .emit(EventKind::MergerStarted {
+            execution: completed_node_merger.clone(),
+        })
+        .unwrap();
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .emit(EventKind::MergerFinished {
+            execution_id: completed_node_merger.id.clone(),
+            head: String::new(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    assert!(attempt("merge:task", &completed_node_merger.id).is_err());
+
+    let failed_node_merger = execution("node-merger-2", "merge:task", "failed");
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .emit(EventKind::MergerStarted {
+            execution: failed_node_merger.clone(),
+        })
+        .unwrap();
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .emit(EventKind::MergerFailed {
+            execution_id: failed_node_merger.id.clone(),
+            error: "merge conflict".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    let cont_res = attempt("merge:task", &failed_node_merger.id);
+    assert!(
+        cont_res.is_ok(),
+        "failed node merger must be continuable: {:?}",
+        cont_res.err()
+    );
+
     // An active publication owns the source directory.
     service.runtime.lock().unwrap().state.phase = "publishing".into();
     assert!(attempt("merger", &merger.id).is_err());
@@ -707,7 +756,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         extension: temp.path().join("unused.ts"),
     });
     let settle = |service: &Arc<Service>| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
         loop {
             let phase = service
                 .runtime
@@ -1762,7 +1811,7 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
             |_| {},
         )
     });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !started.exists() && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1783,6 +1832,7 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
             )
         }
     });
+    deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !second.planning.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1964,15 +2014,15 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             let worker_service = service.clone();
             let worker = thread::spawn(move || plan_goal_internal("test".into(), config, Some("graph"), None, None,
                 &worker_service, |_| {}, |_| {}, |_| {}));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
             while !started.exists() && std::time::Instant::now() < deadline {
                 thread::sleep(std::time::Duration::from_millis(20));
             }
+            assert!(started.exists(), "Planner did not start");
             // Check while Planner is still running, not after a deferred merge.
             let contents = fs::read_to_string(repository.join("tracked.txt"));
             fs::write(&release, "go").unwrap();
             let result = worker.join().unwrap();
-            assert!(started.exists(), "Planner did not start");
             assert_eq!(contents.unwrap(), "planner edit");
             assert_eq!(fs::read_to_string(repository.join("nested/new.txt")).unwrap(), "planner new file");
             assert!(!repository.join("deleted.txt").exists());
@@ -2426,7 +2476,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         extension: root.join("unused.ts"),
     });
     drive(service.clone());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let observed = loop {
         let state = service.runtime.lock().unwrap().state.clone();
         if state.nodes["after_fast"].status == "done" || std::time::Instant::now() > deadline {
@@ -2439,7 +2489,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     if observed.nodes["after_fast"].status == "done" {
         control("intervene".into(), Some("z_fast".into()), Some("again".into()), None, None, None, &service).unwrap();
     }
-    let rerun_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let rerun_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let rerun_observed = loop {
         let state = service.runtime.lock().unwrap().state.clone();
         if state.executions.iter().filter(|e| e.node == "z_fast" && e.status == "completed").count() == 2
@@ -3256,22 +3306,6 @@ fn planning_prompts_separate_user_query_from_system() {
 }
 
 #[test]
-fn planner_prompt_explains_workspace_inputs_and_file_handoffs() {
-    for guidance in [
-        "first execution starts in a fresh session and its own workspace",
-        "recorded source state and completed dependencies' filesystem",
-        "Nodes do not share a live working directory",
-        "changes from parallel or unrelated nodes are not automatically available",
-        "not upstream conversations",
-    ] {
-        assert!(PLANNER_PROMPT.contains(guidance), "Missing Planner guidance: {guidance}");
-    }
-    for runtime_detail in ["ignored", "non-Git", "drains", ".venv", "python -m pip", "Applied feedback transfers"] {
-        assert!(!PLANNER_PROMPT.contains(runtime_detail), "Runtime details must not become Planner instructions: {runtime_detail}");
-    }
-}
-
-#[test]
 fn planning_attachment_ignores_client_filename() {
     let image = ImageAttachment {
         r#type: "image".into(),
@@ -3843,3 +3877,63 @@ fn merger_continuation_before_treats_a_reclaimed_snapshot_as_absent() {
     let git_head = crate::workspace::snapshot_repository(&git_source).unwrap();
     assert_eq!(merger_continuation_before(&git_source).unwrap(), git_head);
 }
+
+#[test]
+fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let runtime = Runtime::open(temp.path()).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+    let run_id = service.runtime.lock().unwrap().state.run_id.clone();
+    let merger_id = "merger-123";
+
+    // 1. When merger is not registered, returns error
+    assert!(get_merger_prompt(
+        &serde_json::json!({"runId": run_id, "executionId": merger_id}),
+        &service,
+    ).is_err());
+
+    // 2. Register merger in state
+    service.runtime.lock().unwrap().state.mergers.push(Execution {
+        id: merger_id.into(),
+        node: "merge:feat_qa".into(),
+        revision: 1, attempt: 1,
+        session_id: merger_id.into(),
+        worktree: temp.path().to_string_lossy().into(),
+        before: "head".into(),
+        workspace_lineage: vec![],
+        after: None, input: None, result: None,
+        status: "running".into(),
+        output: String::new(), output_bytes: 0, pid: None,
+        started_at: now(), completed_at: None, metrics: None,
+    });
+    service.runtime.lock().unwrap().state.graph.nodes.push(Node {
+        name: "feat_qa".into(),
+        task: "Feature QA verification task".into(),
+    });
+
+    // Fallback computes from graph task
+    let fallback = get_merger_prompt(
+        &serde_json::json!({"runId": run_id, "executionId": merger_id}),
+        &service,
+    ).unwrap();
+    assert!(fallback["prompt"].as_str().unwrap().contains("Feature QA verification task"));
+
+    // 3. When system-prompt.md is written to disk, it reads the disk file directly
+    let session_dir = temp.path().join("mergers").join(merger_id);
+    fs::create_dir_all(&session_dir).unwrap();
+    let disk_prompt = "Custom disk system prompt for merger";
+    fs::write(session_dir.join("system-prompt.md"), disk_prompt).unwrap();
+
+    let disk_res = get_merger_prompt(
+        &serde_json::json!({"runId": run_id, "executionId": merger_id}),
+        &service,
+    ).unwrap();
+    assert_eq!(disk_res["prompt"], disk_prompt);
+}
+

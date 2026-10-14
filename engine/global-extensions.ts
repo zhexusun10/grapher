@@ -137,7 +137,6 @@ export async function executionResources(args: string[], directory: string, role
       seenExtensions.add(id);
       extensions.push(resource.path);
     }
-    if (discoverExtensions && (state[continuityId] ?? true)) extensions.push(bundledContinuity);
     if (discoverSkills) {
       const seenSkills = new Set<string>();
       for (const resource of [...local.skills, ...global.skills]) {
@@ -158,6 +157,10 @@ export async function executionResources(args: string[], directory: string, role
         }),
       }) });
     }
+  }
+  const continuityAllowed = role === 'planner' || role === 'node' || role === 'merger';
+  if (continuityAllowed && discoverExtensions && (state[continuityId] ?? true)) {
+    extensions.push(bundledContinuity);
   }
   extensions.push(bundledTrim);
   return {

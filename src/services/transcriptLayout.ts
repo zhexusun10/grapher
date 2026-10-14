@@ -15,6 +15,16 @@ export function rowAt(offsets: number[], position: number): number {
   return low;
 }
 
+/** Preserve a retained row, not total height: an append and prepend may commit together. */
+export function retainedRowAnchor(beforeIds: string[], afterIds: string[], before: number[], after: number[], top: number) {
+  const indices = new Map(afterIds.map((id, index) => [id, index]));
+  for (let index = rowAt(before, Math.max(0, top)); index < beforeIds.length; index++) {
+    const nextIndex = indices.get(beforeIds[index]);
+    if (nextIndex !== undefined) return { id: beforeIds[index], delta: after[nextIndex] - before[index] };
+  }
+  return null;
+}
+
 export function visibleRows(offsets: number[], top: number, height: number, overscan = 6) {
   const count = offsets.length - 1;
   const start = Math.max(0, rowAt(offsets, top) - overscan);

@@ -58,7 +58,11 @@ function annotateProviderError(message: string, language: Locale): string {
   if (language === "zh-CN") {
     text = text
       .replace(/^Partitioner failed:\s*/i, "任务分片器 (Partitioner) 失败: ")
-      .replace(/^Planner failed:\s*/i, "任务规划器 (Planner) 失败: ");
+      .replace(/^Planner failed:\s*/i, "任务规划器 (Planner) 失败: ")
+      .replace(
+        /OAuth callback port \(1455\) is in use or restricted\. Check that port 1455 is free, or switch to API Key authentication\./i,
+        "OAuth 回调端口 (1455) 已被占用或权限受限。请检查是否有其他程序占用该端口，或改用 API Key 方式登录。"
+      );
   }
 
   const isBalance =
@@ -68,10 +72,11 @@ function annotateProviderError(message: string, language: Locale): string {
     /credit\s*(?:expired|exceeded|insufficient)/i.test(text);
 
   const isAuth =
-    /\b401\b/i.test(text) ||
+    (/\b401\b/i.test(text) ||
     /invalid[_\s]*api[_\s]*key/i.test(text) ||
     /authentication\s*failed/i.test(text) ||
-    /unauthorized/i.test(text);
+    /unauthorized/i.test(text)) &&
+    !/1455|callback port/i.test(text);
 
   const isRateLimit =
     /\b429\b/i.test(text) ||

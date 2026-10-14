@@ -172,6 +172,16 @@ fn utf8_paging_and_interleaved_cursors_survive_reopen_and_cascade_deletion() {
         if page.complete { break; }
     }
     assert_eq!(restored.as_bytes(), expected.as_bytes());
+    let tail = store.execution_log_tail_page("run", "done", expected.len(), 32 * 1024).unwrap();
+    assert!(expected.ends_with(&tail.content));
+    let mut older = String::new();
+    let mut before = tail.start_offset;
+    while before > 0 {
+        let page = store.execution_log_tail_page("run", "done", before, 32 * 1024).unwrap();
+        older.insert_str(0, &page.content);
+        before = page.start_offset;
+    }
+    assert_eq!(format!("{older}{}", tail.content).as_bytes(), expected.as_bytes());
     assert!(store.execution_log_page("run", "done", 32 * 1024, 1024).is_err());
     assert!(store.execution_log_page("wrong-run", "done", 1, 1024).is_err());
     let db = Connection::open(&path).unwrap();
@@ -187,6 +197,30 @@ fn utf8_paging_and_interleaved_cursors_survive_reopen_and_cascade_deletion() {
     assert_eq!(db.query_row("SELECT COUNT(*) FROM execution_logs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     assert!(store.load("run").is_err());
     store.clear().unwrap();
+}
+
+#[test]
+fn tail_pages_never_discard_a_tool_result_larger_than_the_page() {
+    let temp = TempDir::new().unwrap();
+    let store = Store::open(&temp.path().join("events.db")).unwrap();
+    let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
+    store.append(&mut state, created("repo", None, None)).unwrap();
+    store.append(&mut state, EventKind::Started { execution: execution("done") }).unwrap();
+    let text = format!("{}\n", serde_json::json!({ "type": "tool_execution_end", "toolCallId": "tool",
+        "toolName": "read", "result": { "content": [{ "type": "text", "text": "中文🚀".repeat(100_000) }] } }));
+    store.append(&mut state, EventKind::Output { execution_id: "done".into(), text: text.clone() }).unwrap();
+    let mut before = text.len();
+    let mut restored = String::new();
+    loop {
+        let page = store.execution_log_tail_page("run", "done", before, 32 * 1024).unwrap();
+        assert!(page.start_offset < before);
+        assert_eq!(page.next_offset, before);
+        assert_eq!(page.content, text[page.start_offset..before]);
+        restored.insert_str(0, &page.content);
+        if page.start_offset == 0 { break; }
+        before = page.start_offset;
+    }
+    assert_eq!(restored, text);
 }
 
 #[test]

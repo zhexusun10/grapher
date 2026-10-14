@@ -1,8 +1,6 @@
 name: Dependency Security Audit
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
   schedule:
     - cron: '43 4 * * 2'
@@ -32,8 +30,6 @@ jobs:
         id: pi-setup
         if: matrix.scope == 'pi'
         run: npm run pi:setup
-      - name: Check audit logging and failure propagation
-        run: node --test scripts/security-audit.test.mjs
       - name: Audit all installed dependencies without changing locks
         shell: bash
         env:

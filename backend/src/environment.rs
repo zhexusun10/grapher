@@ -1079,6 +1079,7 @@ impl Environments {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn load_record(
         &self,
         execution: &str,

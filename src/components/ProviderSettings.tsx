@@ -300,7 +300,6 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   );
 
   const configuredProviders = providers.filter((p) => p.configured);
-  const configuredCount = configuredProviders.length;
 
   return (
     <div className="provider-settings-container">
@@ -313,9 +312,6 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           <div>
             <div className="pi-auth-main-title">
               <h5>{t("Provider 认证")}</h5>
-              <span className="auth-stat-badge">
-                {t("已就绪 ")}{configuredCount} / {providers.length}
-              </span>
             </div>
 
           </div>
@@ -368,7 +364,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           <div className="configured-card-header">
             <div className="configured-title-group">
               <Key size={15} className="configured-key-icon" />
-              <strong>{t("已绑定的 API Key 凭据 (")}{configuredProviders.length})</strong>
+              <strong>{t("已绑定的 Provider 凭据 (")}{configuredProviders.length})</strong>
             </div>
             <span className="configured-status-tag">
               <CheckCircle2 size={11} />{t(" 运行环境就绪")}</span>
@@ -385,6 +381,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   <span className={`configured-type-badge ${p.authSource === "env" ? "env-badge" : "stored-badge"}`}>
                     {p.authSource === "env"
                       ? t("环境变量 ({0})", p.authEnvVar || "ENV")
+                      : p.authType === "oauth"
+                      ? t("浏览器授权已保存 (OAuth)")
                       : t("API Key 已保存")}
                   </span>
                 </div>
@@ -396,14 +394,23 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     disabled={busy || pending}
                     onClick={() => {
                       const defaultMethod =
-                        p.methods.find((m) => m.id === "oauth")?.id ??
-                        p.methods[0]?.id ??
-                        "api_key";
+                        p.authType === "oauth"
+                          ? "oauth"
+                          : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
                       void startLogin(p, defaultMethod as "api_key" | "oauth");
                     }}
                     title={t("重新输入以更新密钥")}
                   >
-                    <Key size={12} />{t(" 修改 Key")}</button>
+                    {p.authType === "oauth" ? (
+                      <>
+                        <RefreshCw size={12} />{t(" 重新授权")}
+                      </>
+                    ) : (
+                      <>
+                        <Key size={12} />{t(" 修改 Key")}
+                      </>
+                    )}
+                  </button>
                   <button
                     type="button"
                     className="card-action-btn logout-btn"
@@ -411,7 +418,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     onClick={() => setConfirmDeleteProvider(p)}
                     title={t("彻底删除 / 屏蔽此 API 凭据")}
                   >
-                    <Trash2 size={12} />{t(" 删除 API Key")}</button>
+                    <Trash2 size={12} />{p.authType === "oauth" ? t(" 解除授权") : t(" 删除 API Key")}</button>
                 </div>
               </div>
             ))}
@@ -440,72 +447,141 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           </div>
 
           {/* Method Selector tabs if multiple methods available */}
-          {activeProvider && activeProvider.methods.length > 1 && !login?.prompt && (
+          {activeProvider && activeProvider.methods.length > 1 && (
             <div className="auth-method-tabs">
               {activeProvider.methods.map((m) => (
                 <button
                   key={m.id}
                   type="button"
                   className={`auth-method-tab ${selectedMethod === m.id ? "active" : ""}`}
-                  disabled={busy || pending}
-                  onClick={() => startLogin(activeProvider, m.id)}
+                  disabled={busy}
+                  onClick={() => {
+                    if (selectedMethod !== m.id) {
+                      void startLogin(activeProvider, m.id);
+                    }
+                  }}
                 >
                   {m.id === "oauth" ? <Globe size={14} /> : <Key size={14} />}
-                  <span>{m.name}</span>
+                  <span>
+                    {m.id === "oauth"
+                      ? (activeProvider.id === "openai"
+                          ? t("浏览器登录 (ChatGPT)")
+                          : t("浏览器登录 (OAuth)"))
+                      : t("API Key 登录")}
+                  </span>
                 </button>
               ))}
             </div>
           )}
 
-          {/* Events (OAuth URLs, Device Codes, Instructions) */}
-          {login?.events && login.events.length > 0 && (
-            <div className="login-events-container">
-              {login.events.map((event, i) => (
-                <div key={i} className="login-event-item">
-                  {event.message && <p className="event-msg">{event.message}</p>}
-                  {event.instructions && (
-                    <p className="event-inst">{event.instructions}</p>
-                  )}
-                  {event.userCode && (
-                    <div className="device-code-box">
-                      <div className="device-code-label">{t("设备授权码 (Device Code):")}</div>
-                      <div className="device-code-value">
-                        <code>{event.userCode}</code>
-                        <button
-                          type="button"
-                          className="copy-btn"
-                          onClick={() => copyText(event.userCode!)}
-                          title={t("复制到剪贴板")}
-                        >
-                          {copiedCode ? <Check size={14} /> : <Copy size={14} />}
-                          <span>{copiedCode ? t("已复制") : t("复制")}</span>
-                        </button>
-                      </div>
+          {/* Browser Login Flow (OAuth) */}
+          {selectedMethod === "oauth" && (
+            <>
+              {login?.events && login.events.length > 0 && (
+                <div className="login-events-container">
+                  {login.events.map((event, i) => (
+                    <div key={i} className="login-event-item">
+                      {event.message && <p className="event-msg">{event.message}</p>}
+                      {event.instructions && (
+                        <p className="event-inst">{event.instructions}</p>
+                      )}
+                      {event.userCode && (
+                        <div className="device-code-box">
+                          <div className="device-code-label">{t("设备授权码 (Device Code):")}</div>
+                          <div className="device-code-value">
+                            <code>{event.userCode}</code>
+                            <button
+                              type="button"
+                              className="copy-btn"
+                              onClick={() => copyText(event.userCode!)}
+                              title={t("复制到剪贴板")}
+                            >
+                              {copiedCode ? <Check size={14} /> : <Copy size={14} />}
+                              <span>{copiedCode ? t("已复制") : t("复制")}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      <AuthLink url={event.url || event.verificationUri} />
+                      {event.links?.map((link, index) => (
+                        <AuthLink key={index} url={link.url} label={link.label} />
+                      ))}
                     </div>
-                  )}
-                  <AuthLink url={event.url || event.verificationUri} />
-                  {event.links?.map((link, index) => (
-                    <AuthLink key={index} url={link.url} label={link.label} />
                   ))}
                 </div>
-              ))}
-            </div>
+              )}
+
+              {/* Pending Pulse Waiter */}
+              {pending && (
+                <div className="pending-poll-indicator">
+                  <div className={styles.pulseDot}></div>
+                  <span>{t("正在等待 Pi 内核完成授权校验，请在浏览器中确认...")}</span>
+                </div>
+              )}
+
+              {/* Fallback manual redirect URL input (only if upstream requests manual_code) */}
+              {login?.prompt?.type === "manual_code" && (
+                <div className="oauth-manual-fallback">
+                  <span className="oauth-fallback-hint">
+                    {t("若浏览器未自动跳转完成，可手动粘贴重定向链接：")}
+                  </span>
+                  <div className="oauth-fallback-input-row">
+                    <input
+                      id="auth-answer"
+                      disabled={busy}
+                      type="text"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={answer}
+                      placeholder={
+                        login.prompt.placeholder || "http://127.0.0.1:1455/auth/callback"
+                      }
+                      onChange={(e) => setAnswer(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && answer.trim()) void respond();
+                      }}
+                      className="auth-input-field"
+                    />
+                    <button
+                      type="button"
+                      className="secondary compact-btn"
+                      disabled={busy || !answer.trim()}
+                      onClick={() => void respond()}
+                    >
+                      {t("提交回调链接")}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="prompt-action-row" style={{ marginTop: "4px" }}>
+                {activeProvider?.configured && (
+                  <button
+                    type="button"
+                    className="danger-outline-btn"
+                    disabled={busy}
+                    onClick={() => setConfirmDeleteProvider(activeProvider)}
+                    title={t("从本地删除该凭据")}
+                  >
+                    <Trash2 size={13} />{t(" 解除当前授权")}</button>
+                )}
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={busy}
+                  onClick={handleCancelLogin}
+                >
+                  {t("取消")}</button>
+              </div>
+            </>
           )}
 
-          {/* Pending Pulse Waiter */}
-          {pending && !login?.prompt && (
-            <div className="pending-poll-indicator">
-              <div className={styles.pulseDot}></div>
-              <span>{t("正在等待 Pi 内核完成授权校验，请在浏览器中确认...")}</span>
-            </div>
-          )}
-
-          {/* Input Prompt (e.g. API Key or Select Option) */}
-          {login?.prompt && (
+          {/* API Key / Secret / Select Login Flow */}
+          {selectedMethod !== "oauth" && login?.prompt && (
             <div className="auth-prompt-form">
               <label htmlFor="auth-answer" className="prompt-label">
                 <Key size={14} />
-                <span>{login.prompt.message}</span>
+                <span>{login.prompt.message || t("输入 API Key")}</span>
               </label>
 
               {login.prompt.type === "select" ? (
@@ -529,22 +605,12 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   <input
                     id="auth-answer"
                     disabled={busy}
-                    type={
-                      login.prompt.type === "secret" ||
-                      login.prompt.type === "manual_code"
-                        ? showKey
-                          ? "text"
-                          : "password"
-                        : "text"
-                    }
+                    type={showKey ? "text" : "password"}
                     autoComplete="off"
                     spellCheck={false}
                     value={answer}
                     placeholder={
-                      login.prompt.placeholder ||
-                      (login.prompt.type === "secret"
-                        ? t("输入 API Key (如 sk-...)")
-                        : t("请输入..."))
+                      login.prompt.placeholder || t("输入 API Key (如 sk-...)")
                     }
                     onChange={(e) => setAnswer(e.target.value)}
                     onKeyDown={(e) => {
@@ -552,17 +618,14 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     }}
                     className="auth-input-field"
                   />
-                  {(login.prompt.type === "secret" ||
-                    login.prompt.type === "manual_code") && (
-                    <button
-                      type="button"
-                      className="eye-toggle-btn"
-                      onClick={() => setShowKey(!showKey)}
-                      title={showKey ? t("隐藏") : t("显示")}
-                    >
-                      {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    className="eye-toggle-btn"
+                    onClick={() => setShowKey(!showKey)}
+                    title={showKey ? t("隐藏") : t("显示")}
+                  >
+                    {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
                 </div>
               )}
 
@@ -658,14 +721,23 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                       disabled={busy || pending}
                       onClick={() => {
                         const defaultMethod =
-                          p.methods.find((m) => m.id === "oauth")?.id ??
-                          p.methods[0]?.id ??
-                          "api_key";
+                          p.authType === "oauth"
+                            ? "oauth"
+                            : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
                         void startLogin(p, defaultMethod as "api_key" | "oauth");
                       }}
                       title={t("重新输入密钥或刷新授权")}
                     >
-                      <Key size={12} />{t(" 修改 Key")}</button>
+                      {p.authType === "oauth" ? (
+                        <>
+                          <RefreshCw size={12} />{t(" 重新授权")}
+                        </>
+                      ) : (
+                        <>
+                          <Key size={12} />{t(" 修改 Key")}
+                        </>
+                      )}
+                    </button>
                     <button
                       type="button"
                       className="card-action-btn logout-btn"
@@ -673,7 +745,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                       onClick={() => setConfirmDeleteProvider(p)}
                       title={t("移除本地已保存的 API Key 凭据")}
                     >
-                      <Trash2 size={12} />{t(" 删除 Key")}</button>
+                      <Trash2 size={12} />{p.authType === "oauth" ? t(" 解除授权") : t(" 删除 Key")}</button>
                   </div>
                 ) : (
                   <div className="provider-card-actions">
@@ -684,9 +756,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                         disabled={busy || pending}
                         onClick={() => {
                           const defaultMethod =
-                            p.methods.find((m) => m.id === "oauth")?.id ??
-                            p.methods[0]?.id ??
-                            "api_key";
+                            p.authType === "oauth"
+                              ? "oauth"
+                              : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
                           void startLogin(p, defaultMethod as "api_key" | "oauth");
                         }}
                       >

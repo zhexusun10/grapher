@@ -16,15 +16,18 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   if (item.type === "tool_call") return <div className="transcript-row tool-row"><ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} /></div>;
   if (item.type === "thinking") return <div className="transcript-row thinking-row"><ThinkingCard item={item} isStreaming={item.status === "running"}
-    expanded={expanded} onExpandedChange={expand} /></div>;
+    defaultExpanded={item.defaultExpanded ?? (item.status === "running")} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand} /></div>;
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}><span className="system-pill">{item.content}</span></div>;
   if (item.role === "user") return <div className="transcript-row text-row user"><EditableUserBubble text={item.content || ""}
     editing={editing} draft={draft} onDraftChange={onDraftChange}
     onEdit={onEditUser ? () => onStartEdit(item.id, item.content || "") : undefined}
     onCancel={onCancelEdit} onSend={onEditUser ? text => {
-      void Promise.resolve(onEditUser(item.content || "", text)).then(accepted => { if (accepted !== false) onCancelEdit(); });
+      return Promise.resolve(onEditUser(item.content || "", text)).then(accepted => {
+        if (accepted !== false) onCancelEdit();
+        return accepted === false ? false : true;
+      });
     } : () => {}} /></div>;
   return <div className={`transcript-row text-row ${item.role || "assistant"}`}><div className="transcript-message-bubble">
-    <MarkdownRenderer content={item.content || ""} isStreaming={true} />
+    <MarkdownRenderer content={item.content || ""} isStreaming={item.status === "running"} />
   </div></div>;
 });

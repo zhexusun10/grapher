@@ -51,10 +51,11 @@ function purgeEnvVarsForProvider(providerId) {
 // Versioned transport DTOs only. Provider implementation, credential storage and
 // refresh are owned by the injected upstream ModelRuntime, never by Grapher.
 export class ProviderAuthAdapter {
-  constructor(createRuntime, { timeoutMs = 600000, retentionMs = 60000 } = {}) {
+  constructor(createRuntime, { timeoutMs = 600000, retentionMs = 60000, getDeviceId } = {}) {
     this.createRuntime = createRuntime;
     this.timeoutMs = timeoutMs;
     this.retentionMs = retentionMs;
+    this.getDeviceId = getDeviceId;
     this.jobs = new Map();
   }
 
@@ -133,6 +134,7 @@ export class ProviderAuthAdapter {
         const runtime = await this.createRuntime({ refreshOnCreate: false, signal: job.controller.signal });
         const selected = runtime.getProviders().find(p => p.id === provider);
         if (!selected || !(method === "oauth" ? selected.auth.oauth?.login : selected.auth.apiKey?.login)) throw new Error("unsupported");
+        const deviceId = typeof this.getDeviceId === "function" ? this.getDeviceId() : randomUUID();
         await runtime.login(provider, method, {
           signal: job.controller.signal,
           prompt: prompt => this.prompt(job, prompt),
@@ -141,14 +143,23 @@ export class ProviderAuthAdapter {
             const safe = this.event(event);
             if (safe) job.events = [...job.events.slice(-31), safe];
           },
+        }, {
+          getDeviceId: () => deviceId,
         });
         job.status = "complete";
       } catch (error) {
         job.status = job.controller.signal.aborted ? "cancelled" : "failed";
+        const msg = String(error?.message || error || "");
         // Never expose raw upstream errors: they can contain credential material.
-        job.error = error?.name === "CredentialSynchronizationError"
-          ? "Credentials changed, but model status could not be refreshed. Refresh providers before retrying."
-          : job.status === "cancelled" ? "Authentication cancelled or timed out." : "Authentication failed. Check provider configuration and try again.";
+        if (job.status === "cancelled") {
+          job.error = "Authentication cancelled or timed out.";
+        } else if (error?.name === "CredentialSynchronizationError") {
+          job.error = "Credentials changed, but model status could not be refreshed. Refresh providers before retrying.";
+        } else if (/port \d+ is in use|EADDRINUSE|EACCES.*1455/i.test(msg) || error?.code === "EADDRINUSE" || error?.code === "EACCES") {
+          job.error = "OAuth callback port (1455) is in use or restricted. Check that port 1455 is free, or switch to API Key authentication.";
+        } else {
+          job.error = "Authentication failed. Check provider configuration and try again.";
+        }
       } finally {
         clearTimeout(job.timer);
         job.pending?.reject(new Error("Authentication ended"));

@@ -241,9 +241,10 @@ export interface TranscriptItem {
   args?: Record<string, any>;
   result?: string;
   isError?: boolean;
-  status?: "running" | "success" | "error";
+  status?: "running" | "success" | "error" | "interrupted";
   exitCode?: number | null;
   truncated?: boolean;
   timestamp?: number;
+  defaultExpanded?: boolean;
 }
 

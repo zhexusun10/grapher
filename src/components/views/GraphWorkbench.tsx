@@ -19,12 +19,19 @@ import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { EditableUserBubble } from "./ChatBubbles";
 import { NodeTaskCard } from "./NodeTaskCard";
+import { getMergerSystemPrompt } from "../../services/mergerPrompt";
+import { runtimeService } from "../../services/runtime";
 import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
+import { captureViewScrollState, resolveViewScroll, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking } from "../../lib/nodeWorking";
+import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTranscript } from "../ExecutionTranscript";
-import { planningTranscriptCache, activePlannerOutput } from "../PlanningActivity";
+import { activePlannerOutput } from "../PlanningActivity";
+import { cachedPlanningOutput } from "../../services/transcriptCache";
+import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
+import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { plannerUserTurns } from "../../services/plannerUserTurns";
 import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
@@ -50,8 +57,11 @@ function activityStatusText(activity: RuntimeActivity[]): string | null {
   return null;
 }
 
+/** Planner positions persist within a Conversation; Node views reopen a fresh
+ * bounded tail after their view-owned history has been released. */
 interface GraphWorkbenchProps {
   state: Snapshot;
+  transcriptRunId?: string;
   activity?: RuntimeActivity[];
   routeType: PlanRouteType;
   selected: string;
@@ -205,7 +215,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
       animator.style.height = `${currentH}px`;
       animator.style.opacity = `${currentOp}`;
 
-      if (container && scrollDelta !== 0 && !interruptedRef.current) {
+      if (container && scrollDelta !== 0 && !interruptedRef.current && container.dataset.transcriptScrollMode !== "latest") {
         container.scrollTop = startScrollTop + scrollDelta * ease;
       }
 
@@ -271,6 +281,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
 
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   state,
+  transcriptRunId = state.runId,
   activity = [],
   routeType,
   selected,
@@ -313,10 +324,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   onConversationReady,
 }) => {
   const [attemptId, setAttemptId] = useState("");
+  const [expandedAttemptIds, setExpandedAttemptIds] = useState<Set<string>>(new Set());
   const [editingTaskNode, setEditingTaskNode] = useState("");
   const [taskDraft, setTaskDraft] = useState("");
+  const [historyLoading, setHistoryLoading] = useState(false);
   useEffect(() => {
     setAttemptId("");
+    setExpandedAttemptIds(new Set());
     setEditingTaskNode("");
     setTaskDraft("");
     onCancelEditMessage?.();
@@ -327,23 +341,90 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // The publication Merger has no planner node; it is addressed through the
   // synthetic card selected in the topology.
   const publicationMergerSelected = selected === publicationMergerCardId;
-  const selectedPublicationMerger = useMemo(() => publicationMergerSelected
-    ? (state.mergers ?? []).find((item) => item.id === selectedMergerId && item.node === "merger")
-    : undefined, [publicationMergerSelected, selectedMergerId, state.mergers]);
-  const selectedNode = state.graph.nodes.find((item) => item.name === selected)
-    ?? (selectedPublicationMerger ? { name: publicationMergerCardId, task: t("合并最终回写结果冲突") } : undefined);
-  const selectedState = selectedNode ? state.nodes[selectedNode.name] : undefined;
-  const selectedMerger = useMemo(() => {
-    if (selectedNode?.name === publicationMergerCardId) return selectedPublicationMerger;
-    if (!selectedMergerId || !selectedNode) return undefined;
-    return (state.mergers ?? []).find((item) => item.id === selectedMergerId && item.node === `merge:${selectedNode.name}`);
-  }, [selectedMergerId, selectedNode?.name, state.mergers, selectedPublicationMerger]);
+  const selectedPublicationMerger = useMemo(() => {
+    if (!publicationMergerSelected) return undefined;
+    const publicationMergers = (state.mergers ?? []).filter((item) => item.node === "merger");
+    const running = publicationMergers.find(item => item.status === "running");
+    if (running && (!selectedMergerId || !publicationMergers.some(m => m.id === selectedMergerId && m.status === "running"))) {
+      return running;
+    }
+    return publicationMergers.find((item) => item.id === selectedMergerId) ?? publicationMergers.at(-1);
+  }, [publicationMergerSelected, selectedMergerId, state.mergers]);
+
+  // A node-composition merger also has its own independent card identity and conversation.
+  const isNodeMergerSelected = (selected.startsWith("merger:") && selected !== publicationMergerCardId)
+    || Boolean(selectedMergerId && selected && (state.mergers ?? []).some(m => m.id === selectedMergerId && m.node === `merge:${selected}`));
+  const nodeMergerTarget = isNodeMergerSelected
+    ? (selected.startsWith("merger:") ? selected.slice(7) : selected)
+    : "";
+  const selectedNodeMerger = useMemo(() => {
+    if (!isNodeMergerSelected) return undefined;
+    const targetMergers = (state.mergers ?? []).filter((item) => item.node === `merge:${nodeMergerTarget}`);
+    const running = targetMergers.find(item => item.status === "running");
+    if (running && (!selectedMergerId || !targetMergers.some(m => m.id === selectedMergerId && m.status === "running"))) {
+      return running;
+    }
+    return targetMergers.find((item) => item.id === selectedMergerId) ?? targetMergers.at(-1);
+  }, [isNodeMergerSelected, selectedMergerId, nodeMergerTarget, state.mergers]);
+
+  const selectedMerger = publicationMergerSelected
+    ? selectedPublicationMerger
+    : (isNodeMergerSelected ? selectedNodeMerger : undefined);
   const selectedMergerRunning = selectedMerger?.status === "running";
+
+  const [mergerPrompts, setMergerPrompts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!selectedMerger?.id || !state.runId) return;
+    const mergerId = selectedMerger.id;
+    if (mergerPrompts[mergerId]) return;
+
+    let cancelled = false;
+    runtimeService.getMergerPrompt(state.runId, mergerId)
+      .then((prompt) => {
+        if (!cancelled && prompt) {
+          setMergerPrompts((prev) => ({ ...prev, [mergerId]: prompt }));
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedMerger?.id, state.runId, mergerPrompts]);
+
+  const nodeMergerPrompt = useMemo(() => {
+    if (!isNodeMergerSelected && !selectedPublicationMerger) return "";
+    const originalGoal = state.graph.originalGoal || state.planning?.goal || "";
+    const targetTask = isNodeMergerSelected
+      ? (state.graph.nodes.find((item) => item.name === nodeMergerTarget)?.task || originalGoal)
+      : originalGoal;
+    return getMergerSystemPrompt(targetTask);
+  }, [isNodeMergerSelected, selectedPublicationMerger, nodeMergerTarget, state.graph.nodes, state.graph.originalGoal, state.planning?.goal]);
+
+  const activeMergerPrompt = (selectedMerger?.id ? mergerPrompts[selectedMerger.id] : undefined) || nodeMergerPrompt;
+
+  const selectedNode = (isNodeMergerSelected
+      ? { name: selected, task: activeMergerPrompt }
+      : state.graph.nodes.find((item) => item.name === selected))
+    ?? (selectedPublicationMerger ? { name: publicationMergerCardId, task: activeMergerPrompt } : undefined);
+  const selectedState = selectedNode && !publicationMergerSelected && !isNodeMergerSelected
+    ? state.nodes[selectedNode.name]
+    : undefined;
   // Publication Mergers record their steered turns under the literal node name
-  // "merger", unlike node Mergers' `merge:<node>`.
-  const conversationNode = selectedNode?.name === publicationMergerCardId ? "merger" : (selectedNode?.name ?? "");
-  const selectedNodeLabel = selectedNode?.name === publicationMergerCardId ? t("publication merger") : (selectedNode?.name ?? "");
-  const selectedMergerContinuable = !!selectedMerger && selectedMerger.node === "merger" && !selectedMergerRunning;
+  // "merger", while node Mergers record under `merge:<node>`.
+  const conversationNode = publicationMergerSelected
+    ? "merger"
+    : isNodeMergerSelected
+      ? `merge:${nodeMergerTarget}`
+      : (selectedNode?.name ?? "");
+  const selectedNodeLabel = publicationMergerSelected
+    ? t("publication merger")
+    : isNodeMergerSelected
+      ? t("merger · {0}", nodeMergerTarget)
+      : (selectedNode?.name ?? "");
+  const selectedMergerContinuable = !!selectedMerger && !selectedMergerRunning &&
+    (selectedMerger.node === "merger" || selectedMerger.status === "failed");
   const initialTaskEdit = useMemo(() => {
     if (!selectedNode) return undefined;
     return [...state.events].reverse().find(event => event.type === "conversation_edited" &&
@@ -365,98 +446,117 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         })()
       : localMessages;
     const localRemaining = [...local];
-    const mergerNode = `merge:${conversationNode}`;
+    const rolledBackTurns = new Set<string>();
+    for (const msg of local) {
+      if (msg.versions && msg.currentVersionIndex !== undefined) {
+        for (let i = 0; i < msg.versions.length; i++) {
+          if (i !== msg.currentVersionIndex) {
+            for (const sub of msg.versions[i].subsequentEntries ?? []) {
+              const cleanSub = sub.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
+              if (cleanSub) rolledBackTurns.add(cleanSub);
+            }
+          }
+        }
+      }
+    }
     const recorded = activeNodeConversationEvents(state, conversationNode).filter((event) =>
       ((event.type === "invalidated" && event.human) || (event.type === "conversation_edited" && !event.first_turn)) && event.target === conversationNode && !!event.instruction ||
-      ((event.type === "steered" || event.type === "node_messaged") && (event.node === conversationNode || event.node === mergerNode))
-    ).reverse().filter((event) => {
+      ((event.type === "steered" || event.type === "node_messaged") && event.node === conversationNode)
+    ).filter((event) => {
+      if (event.instruction && rolledBackTurns.has(event.instruction.trim())) return false;
+      return true;
+    }).reverse().filter((event) => {
       // Match each optimistic turn to at most one durable event, from newest
       // to oldest, so repeated identical messages do not disappear.
-      const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction);
+      const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === (event.instruction ?? "").trim());
       if (idx < 0) return true;
       localRemaining.splice(idx, 1);
       // Keep the durable replacement; excluding both turns would make an
       // accepted steer or follow-up disappear from the conversation.
       return true;
-    }).reverse().map((event): ChatMessage => ({
-      id: `event-${event.sequence}`, parentId: null, role: "user",
-      text: event.instruction || "", images: event.images, node: conversationNode, runId: state.runId,
-      executionId: executionIdForMessage(state, event),
-      versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
-      currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
-      delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
-    }));
+    }).reverse().map((event): ChatMessage => {
+      const matchingLocal = local.find((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === (event.instruction ?? "").trim());
+      return {
+        id: `event-${event.sequence}`, parentId: null, role: "user",
+        text: event.instruction || "", images: event.images, node: conversationNode, runId: state.runId,
+        executionId: executionIdForMessage(state, event),
+        versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : matchingLocal?.versions,
+        currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : matchingLocal?.currentVersionIndex,
+        delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
+      };
+    });
     return [...recorded, ...localRemaining];
   }, [selectedNode?.name, conversationNode, effectiveMessages, state.runId, state.events]);
   const attempts = useMemo(() => {
     if (!selectedNode) return [];
-    const list = selectedNode.name === publicationMergerCardId
-      ? (state.mergers ?? []).filter((item) => item.node === "merger")
-      : [...activeNodeExecutions(state, selectedNode.name),
-         ...(state.mergers ?? []).filter((item) => item.node === `merge:${selectedNode.name}`)];
-    return [...list].sort((a, b) => a.startedAt - b.startedAt);
-  }, [selectedNode?.name, state.executions, state.supersededExecutionIds, state.mergers]);
-  // Merger turns belong to a preparation session that has no message-branching
-  // path; keep them conversational but not editable.
-  const mergerExecutionIds = useMemo(() => new Set((state.mergers ?? []).map(item => item.id)), [state.mergers]);
+    if (publicationMergerSelected) {
+      return (state.mergers ?? []).filter((item) => item.node === "merger").sort((a, b) => a.startedAt - b.startedAt);
+    }
+    if (isNodeMergerSelected) {
+      return (state.mergers ?? []).filter((item) => item.node === `merge:${nodeMergerTarget}`).sort((a, b) => a.startedAt - b.startedAt);
+    }
+    return activeNodeExecutions(state, selectedNode.name).sort((a, b) => a.startedAt - b.startedAt);
+  }, [selectedNode?.name, publicationMergerSelected, isNodeMergerSelected, nodeMergerTarget, state.executions, state.supersededExecutionIds, state.mergers]);
   const execution: Execution | undefined = selectedMerger ?? attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
+  const nodeTaskText = selectedNode?.task ?? "";
+  const latestNodeMessage = nodeMessages.length > 0 ? nodeMessages[nodeMessages.length - 1] : undefined;
+  // Keep each human turn in the same conversation as its Pi execution. A
+  // steer is attached to the running execution; a continuation carries the
+  // newly-created execution id. Neither case creates a separate UI session.
   const nodeTurns = useMemo(() => {
     if (!selectedNode) return [];
     const turns: Array<{
       id: string;
       isInitial: boolean;
-      taskText?: string;
       userMessage?: ChatMessage;
       executions: Execution[];
-    }> = [];
-
-    turns.push({
+    }> = [{
       id: `turn-0-${selectedNode.name}`,
       isInitial: true,
-      taskText: selectedNode.task,
       executions: attempts.length > 0 ? [attempts[0]] : [],
-    });
+    }];
+    const assigned = new Set(turns[0].executions.map(item => item.id));
+    let nextAttempt = 1;
 
-    let execIndex = 1;
-    nodeMessages.forEach((msg) => {
-      const execs = msg.delivery ? [] : execIndex < attempts.length ? [attempts[execIndex]] : [];
-      if (!msg.delivery) execIndex++;
-      turns.push({
-        id: msg.id,
-        isInitial: false,
-        userMessage: { ...msg, executionId: execs[0]?.id ?? msg.executionId },
-        executions: execs,
-      });
-    });
-
-    if (attempts.length > 1) {
-      const assigned = new Set(turns.flatMap((t) => t.executions.map((e) => e.id)));
-      const unassigned = attempts.filter((e) => !assigned.has(e.id));
-      if (unassigned.length > 0) {
-        turns[0].executions.push(...unassigned);
-        turns[0].executions.sort((a, b) => a.startedAt - b.startedAt);
+    for (const message of nodeMessages) {
+      const exact = message.executionId
+        ? attempts.find(item => item.id === message.executionId && !assigned.has(item.id))
+        : undefined;
+      let executions: Execution[] = exact ? [exact] : [];
+      if (exact) {
+        assigned.add(exact.id);
+        nextAttempt = Math.max(nextAttempt, attempts.findIndex(item => item.id === exact.id) + 1);
+      } else if (!message.delivery) {
+        // Older snapshots did not persist execution_id on every edit. Keep the
+        // historical attempt ordering as a compatibility fallback.
+        while (nextAttempt < attempts.length && assigned.has(attempts[nextAttempt].id)) nextAttempt += 1;
+        if (nextAttempt < attempts.length) {
+          executions = [attempts[nextAttempt]];
+          assigned.add(attempts[nextAttempt].id);
+          nextAttempt += 1;
+        }
       }
+      turns.push({ id: message.id, isInitial: false, userMessage: message, executions });
     }
 
+    // A browser opened after a run finished may have no durable human event for
+    // an older attempt. Do not hide its output; keep it in the initial turn.
+    const unassigned = attempts.filter(item => !assigned.has(item.id));
+    if (unassigned.length > 0) turns[0].executions.push(...unassigned);
+    turns[0].executions.sort((a, b) => a.startedAt - b.startedAt);
     return turns;
-  }, [selectedNode?.name, selectedNode?.task, attempts, nodeMessages]);
-
-  // A steer adds a user turn to the running execution without creating a new
-  // execution panel. Keep its status after that turn, not above it in the old panel.
-  const nodeWorkingAfterMessage = nodeTurns.length > 1 && nodeTurns[nodeTurns.length - 1].executions.length === 0;
+  }, [selectedNode?.name, attempts, nodeMessages]);
   // While a merger is selected its own process decides the working state, not
   // the node status that covers the whole preparation/execution cycle.
   const isSelectedNodeWorking = selectedMerger
     ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
-    : isNodeWorking(selectedState?.status, execution, pendingRequest,
-        nodeWorkingAfterMessage ? nodeTurns[nodeTurns.length - 1].userMessage : undefined);
+    : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage);
   const conversationViewKey = `${state.runId}:${routeType}:${selected || "planner"}:${execution?.id || ""}`;
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   // Live SSE is ephemeral. After reload or run selection, replay the durable
   // planning JSONL associated with the selected run, never a previous run's stream.
-  const showLivePlanner = !recoveredPlanningId && !failedPlanning &&
-    (isPlanning ||
-      (plannerStream.runId === state.runId && !!state.planningId));
+  const showLivePlanner = !recoveredPlanningId && (isPlanning ||
+    (plannerStream.runId === state.runId && plannerStream.items?.length > 0));
   const savedPlannerId = recoveredPlanningId || (failedPlanning
     ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
     : (routeType === "graph" ? state.planningId : undefined));
@@ -491,13 +591,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }), [state.events]);
   const savedPlannerKey = savedPlannerIds.join(":");
   const [readySavedPlannerKey, setReadySavedPlannerKey] = useState("");
-  const savedPlannerOutput = planningTranscriptCache.get(savedPlannerKey)?.text ?? "";
+  const [savedPlannerRecord, setSavedPlannerRecord] = useState({ key: "", text: "" });
+  const savedPlannerOutput = savedPlannerRecord.key === savedPlannerKey ? savedPlannerRecord.text
+    : cachedPlanningOutput(transcriptRunId, savedPlannerIds);
+  const plannerMessages = useMemo(() => effectiveMessages.filter((msg) => !msg.node || msg.node === "planner"), [effectiveMessages]);
   const persistedUserTurns = useMemo(() => {
-    if (effectiveMessages.length <= 1) return [];
+    if (plannerMessages.length <= 1) return [];
     const turns = plannerUserTurns(activePlannerOutput(savedPlannerOutput, plannerEdits));
-    if (turns[0] === effectiveMessages[0]?.text.trim()) turns.shift();
+    if (turns[0] === plannerMessages[0]?.text.trim()) turns.shift();
     return turns;
-  }, [savedPlannerOutput, plannerEdits, effectiveMessages.length, effectiveMessages[0]?.text]);
+  }, [savedPlannerOutput, plannerEdits, plannerMessages]);
   const remainingPersistedTurns = new Map<string, number>();
   for (const text of persistedUserTurns) {
     remainingPersistedTurns.set(text, (remainingPersistedTurns.get(text) ?? 0) + 1);
@@ -508,7 +611,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     return "undecided";
   }, [routeType, state.planType]);
   const useSavedPlanner = savedPlannerIds.length > 0 &&
-    (!isPlanning || !showLivePlanner || readySavedPlannerKey === savedPlannerKey);
+    (!showLivePlanner || readySavedPlannerKey === savedPlannerKey);
   const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
   const { workbenchRef, isResizing, splitRatio, handleStartResize, handleResetResizer } = useWorkbenchResizer();
   const chatScrollRef = useRef<HTMLDivElement>(null);
@@ -523,9 +626,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const resetChatScrollFrameRef = useRef<number | null>(null);
   const revealChatFrameRef = useRef<number | null>(null);
   const [readyConversationKey, setReadyConversationKey] = useState("");
+  const isConversationReady = readyConversationKey === conversationViewKey;
   const activeConversationViewRef = useRef(conversationViewKey);
   const conversationGenerationRef = useRef(0);
   const isScrollingToBottomRef = useRef(false);
+  const latestScrollRef = useRef<(() => void) | null>(null);
+  const stopLatestScroll = useCallback(() => {
+    if (latestScrollRef.current) {
+      latestScrollRef.current();
+      latestScrollRef.current = null;
+      isUserScrolledUpRef.current = true;
+    }
+    isScrollingToBottomRef.current = false;
+  }, []);
+  const userGestureUpRef = useRef(false);
+  const historyReadingRef = useRef(false);
   const isPreparingConversationRef = useRef(false);
   const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
   const graphFitFrameRef = useRef<number | null>(null);
@@ -545,10 +660,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const [readyGraphRunKey, setReadyGraphRunKey] = useState("");
   const isGraphMountedForRun = readyGraphRunKey === currentRunKey;
 
+  const conversationScrollStateRef = useRef<Map<string, ViewScrollState>>(new Map());
+  const previousNodeViewRef = useRef(Boolean(selected));
+
   if (activeConversationViewRef.current !== conversationViewKey) {
+    if (previousNodeViewRef.current) {
+      // Its byte window is released on unmount, so an old pixel offset no longer
+      // describes the reopened Node's fresh tail. Only Planner positions persist.
+      conversationScrollStateRef.current.delete(activeConversationViewRef.current);
+    } else if (chatScrollRef.current && activeConversationViewRef.current) {
+      conversationScrollStateRef.current.set(activeConversationViewRef.current,
+        captureViewScrollState(chatScrollRef.current, isUserScrolledUpRef.current));
+    }
+    previousNodeViewRef.current = Boolean(selected);
     activeConversationViewRef.current = conversationViewKey;
     conversationGenerationRef.current += 1;
-    isUserScrolledUpRef.current = false;
+    const saved = conversationScrollStateRef.current.get(conversationViewKey);
+    isUserScrolledUpRef.current = saved?.isUserScrolledUp ?? false;
+    historyReadingRef.current = false;
     suppressAutoScrollRef.current = false;
   }
 
@@ -592,25 +721,36 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     lastScrollTopRef.current = scrollTop;
 
     const isScrollingUp = scrollTop < prevScrollTop - 1;
+    if (latestScrollRef.current) { setScrollBottomVisible(false); return; }
+    if (historyReadingRef.current) {
+      setScrollBottomVisible(showLatest);
+      return;
+    }
 
     // When near bottom, definitely lock to bottom state (prevent elastic bounce from locking scrolled-up)
-    if (distanceFromBottom <= 20) {
+    if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && !userGestureUpRef.current) {
       isScrollingToBottomRef.current = false;
       isUserScrolledUpRef.current = false;
       setScrollBottomVisible(false);
       return;
     }
 
-    if (isScrollingToBottomRef.current) {
-      if (isScrollingUp) {
-        isScrollingToBottomRef.current = false;
-        isUserScrolledUpRef.current = true;
-        setScrollBottomVisible(showLatest);
-      }
+    if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && userGestureUpRef.current && scrollTop >= prevScrollTop) {
+      userGestureUpRef.current = false;
+      isUserScrolledUpRef.current = false;
+      isScrollingToBottomRef.current = false;
+      setScrollBottomVisible(false);
       return;
     }
 
-    if (isScrollingUp) {
+    if (isScrollingToBottomRef.current) {
+      // While programmatically scrolling to bottom, keep following down until
+      // reaching the bottom threshold. Do not allow sub-pixel offset jitter or
+      // intermediate row height shifts to abort the scroll down.
+      return;
+    }
+
+    if (isScrollingUp && distanceFromBottom > CONVERSATION_BOTTOM_THRESHOLD) {
       isUserScrolledUpRef.current = true;
       setScrollBottomVisible(showLatest);
       return;
@@ -622,23 +762,41 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [setScrollBottomVisible]);
 
   const scrollToBottom = useCallback(() => {
+    stopLatestScroll();
+    // Explicit Latest takes over from any card reveal/collapse still in flight.
+    expandedCardObserverRef.current?.disconnect();
+    expandedCardObserverRef.current = null;
+    if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
+    expandedCardTimerRef.current = null;
+    if (resumeAutoScrollFrameRef.current !== null) cancelAnimationFrame(resumeAutoScrollFrameRef.current);
+    resumeAutoScrollFrameRef.current = null;
+    suppressAutoScrollRef.current = false;
+    historyReadingRef.current = false;
+    if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
     isUserScrolledUpRef.current = false;
+    userGestureUpRef.current = false;
     isScrollingToBottomRef.current = true;
     setScrollBottomVisible(false);
-    if (chatScrollRef.current) {
-      chatScrollRef.current.scrollTo({
-        top: chatScrollRef.current.scrollHeight,
-        behavior: "smooth",
-      });
-    }
-  }, [setScrollBottomVisible]);
+    const el = chatScrollRef.current;
+    if (!el) return;
+    latestScrollRef.current = smoothScrollToLatest(el, () => {
+      latestScrollRef.current = null;
+      isScrollingToBottomRef.current = false;
+      lastScrollTopRef.current = el.scrollTop;
+      setScrollBottomVisible(false);
+    });
+  }, [stopLatestScroll, setScrollBottomVisible]);
 
   const handleSendMessageWithScroll = useCallback((val: string, options?: PromptBoxSubmitOptions) => {
+    stopLatestScroll();
+    historyReadingRef.current = false;
+    if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
     isUserScrolledUpRef.current = false;
+    userGestureUpRef.current = false;
     isScrollingToBottomRef.current = true;
     setScrollBottomVisible(false);
     return onSendMessage(val, options);
-  }, [onSendMessage, setScrollBottomVisible]);
+  }, [onSendMessage, stopLatestScroll, setScrollBottomVisible]);
 
   // Listen to wheel and touch gestures on chat scroll container to immediately lock auto-scroll upon upward scrolling
   useEffect(() => {
@@ -646,8 +804,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (e.deltaY < -0.5 && distanceFromBottom > 20) {
+      stopLatestScroll();
+      if (e.deltaY > 0.5) {
+        historyReadingRef.current = false;
+        delete el.dataset.transcriptHistoryReading;
+      }
+      if (e.deltaY < -0.5) {
+        userGestureUpRef.current = true;
         isScrollingToBottomRef.current = false;
         isUserScrolledUpRef.current = true;
       }
@@ -655,6 +818,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     let lastTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
+      stopLatestScroll();
       if (e.touches[0]) lastTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
@@ -663,23 +827,55 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         const delta = curY - lastTouchY;
         lastTouchY = curY;
         const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-        if (delta > 1 && distanceFromBottom > 20) {
+        if (delta < -1) {
+          historyReadingRef.current = false;
+          delete el.dataset.transcriptHistoryReading;
+        }
+        if (delta > 1) {
+          userGestureUpRef.current = true;
           isScrollingToBottomRef.current = false;
           isUserScrolledUpRef.current = true;
         }
       }
     };
 
+    const onHistoryPrepend = () => {
+      stopLatestScroll();
+      historyReadingRef.current = true;
+      userGestureUpRef.current = true;
+      isUserScrolledUpRef.current = true;
+      isScrollingToBottomRef.current = false;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return;
+      const up = ["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey);
+      const down = ["ArrowDown", "PageDown", "End"].includes(event.key) || (event.key === " " && !event.shiftKey);
+      if (up || down) stopLatestScroll();
+      if (up) {
+        userGestureUpRef.current = true;
+        isUserScrolledUpRef.current = true;
+        isScrollingToBottomRef.current = false;
+      } else if (down) {
+        historyReadingRef.current = false;
+        delete el.dataset.transcriptHistoryReading;
+      }
+    };
+    el.addEventListener(HISTORY_PREPEND_EVENT, onHistoryPrepend);
+    el.addEventListener("pointerdown", stopLatestScroll);
+    el.addEventListener("keydown", onKeyDown);
     el.addEventListener("wheel", onWheel, { passive: true });
     el.addEventListener("touchstart", onTouchStart, { passive: true });
     el.addEventListener("touchmove", onTouchMove, { passive: true });
 
     return () => {
+      el.removeEventListener(HISTORY_PREPEND_EVENT, onHistoryPrepend);
+      el.removeEventListener("pointerdown", stopLatestScroll);
+      el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("touchstart", onTouchStart);
       el.removeEventListener("touchmove", onTouchMove);
     };
-  }, [conversationViewKey]);
+  }, [conversationViewKey, stopLatestScroll]);
 
   const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
     suppressAutoScrollRef.current = true;
@@ -710,16 +906,30 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         if (expandedCardObserverRef.current === observer) expandedCardObserverRef.current = null;
         expandedCardTimerRef.current = null;
       }, 400);
+    } else {
+      // During collapsing, keep auto-scroll suppressed across the collapse animation
+      // and synchronize prevScrollHeight so height shrinkage does not misinterpret
+      // as an intentional user scroll-up.
+      expandedCardTimerRef.current = setTimeout(() => {
+        if (chatScrollRef.current) {
+          prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+        }
+        suppressAutoScrollRef.current = false;
+        expandedCardTimerRef.current = null;
+        handleChatScroll();
+      }, 260);
     }
 
     if (resumeAutoScrollFrameRef.current !== null) cancelAnimationFrame(resumeAutoScrollFrameRef.current);
-    resumeAutoScrollFrameRef.current = requestAnimationFrame(() => {
+    if (expanded) {
       resumeAutoScrollFrameRef.current = requestAnimationFrame(() => {
-        resumeAutoScrollFrameRef.current = null;
-        suppressAutoScrollRef.current = false;
-        handleChatScroll();
+        resumeAutoScrollFrameRef.current = requestAnimationFrame(() => {
+          resumeAutoScrollFrameRef.current = null;
+          suppressAutoScrollRef.current = false;
+          handleChatScroll();
+        });
       });
-    });
+    }
   }, [handleChatScroll]);
 
   useLayoutEffect(() => {
@@ -747,6 +957,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     expandedCardObserverRef.current?.disconnect();
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
     if (workspaceDetailsTimerRef.current !== null) clearTimeout(workspaceDetailsTimerRef.current);
+    stopLatestScroll();
     if (resumeAutoScrollFrameRef.current !== null) {
       cancelAnimationFrame(resumeAutoScrollFrameRef.current);
     }
@@ -810,11 +1021,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       const heightGrew = currentScrollHeight > prevScrollHeightRef.current + 2;
       prevScrollHeightRef.current = currentScrollHeight;
 
-      if (suppressAutoScrollRef.current || isPreparingConversationRef.current) return;
+      if (suppressAutoScrollRef.current) return;
 
-      // Auto-scroll to bottom ONLY when content actually grows, unless user scrolled up or smooth-scrolling to bottom
-      if (heightGrew && !isUserScrolledUpRef.current && !isScrollingToBottomRef.current) {
+      // Keep the newest output visible while content arrives. This includes the
+      // initial preparation window: returning early there left a freshly opened
+      // history stuck at the top until the user scrolled manually.
+      if (heightGrew && !latestScrollRef.current && (!isUserScrolledUpRef.current || isScrollingToBottomRef.current)) {
         el.scrollTop = currentScrollHeight;
+        lastScrollTopRef.current = currentScrollHeight;
       }
       handleChatScroll();
     });
@@ -829,8 +1043,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   // Auto-scroll to bottom when new messages or streaming content arrives
   useLayoutEffect(() => {
-    if (!isUserScrolledUpRef.current && !isPreparingConversationRef.current && chatScrollRef.current) {
+    if (!latestScrollRef.current && !isUserScrolledUpRef.current && !suppressAutoScrollRef.current && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+      lastScrollTopRef.current = chatScrollRef.current.scrollTop;
     }
   }, [
     effectiveMessages,
@@ -957,9 +1172,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // node failure was caused by stopping the app/process rather than the task.
   const canContinue = !publishing && !publicationFailed &&
     (state.paused || state.canResume === true);
-  const graphPhase = isPlanning && !state.approved
-    ? "planning"
-    : canContinue ? "paused" : state.phase;
+  const graphPhase = resolveGraphPhase({
+    isPlanning,
+    approved: state.approved,
+    paused: state.paused,
+    canResume: state.canResume,
+    publishing,
+    publicationFailed,
+    phase: state.phase,
+    active,
+    nodes: state.nodes,
+    executions: state.executions,
+    mergers: state.mergers,
+    resultExecution: state.resultExecution,
+  });
   const activityStatus = activityStatusText(activity);
   const isWorkspaceWritten = !isPlanning && routeType === "graph" && (
     state.publication?.status === "completed" ||
@@ -1009,7 +1235,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   useEffect(() => {
     if (effectiveMessages.length > prevMsgCountRef.current) {
       prevMsgCountRef.current = effectiveMessages.length;
-      if (!isUserScrolledUpRef.current && chatScrollRef.current) {
+      if (!latestScrollRef.current && !isUserScrolledUpRef.current && chatScrollRef.current) {
         chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
       }
     } else {
@@ -1028,23 +1254,23 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         revealChatFrameRef.current = null;
         if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
         const el = chatScrollRef.current;
-        const isGraphNodeView = Boolean(selectedNode && routeType === "graph");
-        if (el && !isUserScrolledUpRef.current && !isGraphNodeView) {
-          el.scrollTop = el.scrollHeight;
+        if (el) {
+          const resolved = resolveViewScroll(conversationScrollStateRef.current.get(key), el.scrollHeight);
+          if (resolved.restoreSaved) {
+            el.scrollTop = resolved.scrollTop;
+          } else if (!isUserScrolledUpRef.current) {
+            el.scrollTop = el.scrollHeight;
+          }
           lastScrollTopRef.current = el.scrollTop;
         }
         isPreparingConversationRef.current = false;
-        if (isGraphNodeView && el) {
-          const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-          setScrollBottomVisible(distanceFromBottom > el.clientHeight / 2);
-        } else {
-          setScrollBottomVisible(false);
-        }
+        suppressAutoScrollRef.current = false;
+        setScrollBottomVisible(false);
         setReadyConversationKey(key);
         onConversationReady?.();
       });
     });
-  }, [conversationViewKey, selectedNode, routeType, setScrollBottomVisible, onConversationReady]);
+  }, [conversationViewKey, setScrollBottomVisible, onConversationReady]);
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -1053,37 +1279,33 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     prevViewKeyRef.current = conversationViewKey;
 
     if (isNewView) {
+      stopLatestScroll();
       suppressAutoScrollRef.current = false;
       isPreparingConversationRef.current = true;
       isScrollingToBottomRef.current = false;
 
-      const isGraphNodeView = Boolean(selectedNode && routeType === "graph");
-      if (isGraphNodeView) {
-        // 进入 Node Agent 视图时，默认展示顶部节点任务目标 (Task)，避免 1s 后日志加载造成突兀跳跃或重排
-        isUserScrolledUpRef.current = true;
-        el.scrollTop = 0;
-        lastScrollTopRef.current = 0;
-        prevScrollHeightRef.current = el.scrollHeight;
-        setScrollBottomVisible(false);
-      } else {
-        // 进入 Planner 或 Serial 线性对话时直接聚焦到底部最新内容
-        isUserScrolledUpRef.current = false;
-        el.scrollTop = el.scrollHeight;
-        lastScrollTopRef.current = el.scrollTop;
-        prevScrollHeightRef.current = el.scrollHeight;
-        setScrollBottomVisible(false);
+      const resolved = resolveViewScroll(conversationScrollStateRef.current.get(conversationViewKey), el.scrollHeight);
+      isUserScrolledUpRef.current = resolved.isUserScrolledUp;
+      el.scrollTop = resolved.restoreSaved ? resolved.scrollTop : el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
+      prevScrollHeightRef.current = el.scrollHeight;
+      setScrollBottomVisible(false);
 
-        if (resetChatScrollFrameRef.current !== null) {
-          cancelAnimationFrame(resetChatScrollFrameRef.current);
-        }
-        resetChatScrollFrameRef.current = requestAnimationFrame(() => {
-          resetChatScrollFrameRef.current = null;
-          if (chatScrollRef.current && !isUserScrolledUpRef.current) {
-            chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-            lastScrollTopRef.current = chatScrollRef.current.scrollTop;
-          }
-        });
+      if (resetChatScrollFrameRef.current !== null) {
+        cancelAnimationFrame(resetChatScrollFrameRef.current);
       }
+      resetChatScrollFrameRef.current = requestAnimationFrame(() => {
+        resetChatScrollFrameRef.current = null;
+        if (chatScrollRef.current) {
+          const next = resolveViewScroll(conversationScrollStateRef.current.get(conversationViewKey), chatScrollRef.current.scrollHeight);
+          if (next.restoreSaved) {
+            chatScrollRef.current.scrollTop = next.scrollTop;
+          } else if (!isUserScrolledUpRef.current) {
+            chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+          }
+          lastScrollTopRef.current = chatScrollRef.current.scrollTop;
+        }
+      });
     }
 
     // If no execution or planning output needed to trigger onReady, reveal after layout settle
@@ -1091,7 +1313,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       ? Boolean(execution)
       : (routeType === "serial"
           ? Boolean(serialExecutions.length)
-          : (savedPlannerIds.length > 0 && useSavedPlanner && effectiveMessages.length <= 1));
+          : (savedPlannerIds.length > 0 && useSavedPlanner));
 
     if (readyConversationKey !== conversationViewKey && !needsExecutionReady) {
       revealConversation();
@@ -1104,16 +1326,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     execution,
     savedPlannerIds.length,
     useSavedPlanner,
-    effectiveMessages.length,
     serialExecutions.length,
     revealConversation,
+    stopLatestScroll,
     setScrollBottomVisible,
   ]);
 
   const selectGraphNode = useStableCallback((id: string) => {
     if (!id) { setSelected(""); setSelectedMergerId(""); return; }
     if (id === publicationMergerCardId) {
-      const merger = (state.mergers ?? []).filter(item => item.node === "merger").at(-1);
+      const publicationMergers = (state.mergers ?? []).filter(item => item.node === "merger");
+      const runningMerger = publicationMergers.find(item => item.status === "running");
+      const merger = runningMerger ?? publicationMergers.at(-1);
       setSelected(publicationMergerCardId);
       setSelectedMergerId(merger?.id ?? "");
       setAttemptId(merger?.id ?? "");
@@ -1121,8 +1345,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
     if (id.startsWith("merger:")) {
       const target = id.slice(7);
-      const merger = (state.mergers ?? []).filter(item => item.node === `merge:${target}`).at(-1);
-      setSelected(target);
+      const targetMergers = (state.mergers ?? []).filter(item => item.node === `merge:${target}`);
+      const runningMerger = targetMergers.find(item => item.status === "running");
+      const merger = runningMerger ?? targetMergers.at(-1);
+      setSelected(id);
       setSelectedMergerId(merger?.id ?? "");
       setAttemptId(merger?.id ?? "");
     } else {
@@ -1146,11 +1372,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
         style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
       >
+        {historyLoading && (
+          <div className="conversation-history-loading" aria-busy="true">
+            <Loader2 size={26} className="spin" aria-hidden="true" />
+          </div>
+        )}
         {selectedNode && routeType === "graph" ? (
           <div className="initial-query-view">
             <div className="conversation-heading">
               <div className="heading-title-col">
-                <h2>{selectedMerger && selectedNode?.name !== publicationMergerCardId ? t("merger · {0}", selectedNodeLabel) : selectedNodeLabel}</h2>
+                <h2>{selectedNodeLabel}</h2>
               </div>
               <span className={`status ${selectedMerger ? (selectedMerger.status === "completed" ? "done" : selectedMerger.status === "running" ? "running" : "failed") : (selectedState?.status ?? "waiting")}`}>
                 {selectedMerger
@@ -1173,86 +1404,95 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               ref={chatScrollRef}
               onScroll={handleChatScroll}
             >
-              <div className="chat-messages-stream">
+              <div
+                className="chat-messages-stream"
+                style={{
+                  opacity: isConversationReady ? 1 : 0,
+                  transition: isConversationReady ? "opacity 0.12s ease-out" : "none",
+                }}
+              >
+                <NodeTaskCard
+                  nodeName={selectedNode.name}
+                  taskText={nodeTaskText}
+                  badgeText={isNodeMergerSelected || publicationMergerSelected ? t("Merger 系统提示词") : undefined}
+                  versions={initialTaskVersions}
+                  currentVersionIndex={initialTaskVersions ? (initialTaskEdit?.selected_version ?? initialTaskVersions.length - 1) : undefined}
+                  onSwitchVersion={(index) => {
+                    const version = initialTaskVersions?.[index];
+                    const first = attempts[0];
+                    if (version && first && onEditMessageSubmit) {
+                      void onEditMessageSubmit({
+                        id: `task-${selectedNode.name}`,
+                        role: "user",
+                        text: version.text,
+                        node: selectedNode.name,
+                        executionId: version.executionId ?? first.id,
+                        runId: state.runId,
+                      }, version.text, index);
+                    }
+                  }}
+                  editing={editingTaskNode === selectedNode.name}
+                  draft={taskDraft}
+                  onDraftChange={setTaskDraft}
+                  onEdit={!isNodeMergerSelected && selected !== publicationMergerCardId && (!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "running") ? () => {
+                    onCancelEditMessage?.();
+                    setEditingTaskNode(selectedNode.name);
+                    setTaskDraft(selectedNode.task);
+                  } : undefined}
+                  onCancel={() => setEditingTaskNode("")}
+                  disabled={locked || (state.approved && selectedState?.status === "dirty") || taskDraft.trim() === selectedNode.task}
+                  onSave={(value) => {
+                    const saveTask = () => {
+                      onSave({
+                        ...state.graph,
+                        nodes: state.graph.nodes.map((node) =>
+                          node.name === selectedNode.name ? { ...node, task: value } : node
+                        ),
+                      });
+                      setEditingTaskNode("");
+                    };
+                    if (state.approved) {
+                      const first = attempts[0];
+                      if (first && onEditMessageSubmit) {
+                        void Promise.resolve(onEditMessageSubmit({
+                          id: `task-${selectedNode.name}`,
+                          role: "user",
+                          text: selectedNode.task,
+                          node: selectedNode.name,
+                          executionId: first.id,
+                          runId: state.runId,
+                        }, value)).then((accepted) => {
+                          if (accepted !== false) setEditingTaskNode("");
+                        });
+                      } else {
+                        onRequestConfirmation({
+                          title: t("修改未执行的 Task？"),
+                          message: t("此节点尚无 Pi 对话可分支，将创建新的待审批运行。"),
+                          confirmText: t("确认修改"),
+                          danger: true,
+                          onConfirm: saveTask,
+                        });
+                      }
+                      return;
+                    }
+                    saveTask();
+                  }}
+                />
+
                 {nodeTurns.map((turn) => (
                   <React.Fragment key={turn.id}>
-                    {turn.isInitial ? (
-                      <NodeTaskCard
-                        nodeName={selectedNode.name}
-                        taskText={turn.taskText || selectedNode.task}
-                        versions={initialTaskVersions}
-                        currentVersionIndex={initialTaskVersions ? (initialTaskEdit?.selected_version ?? initialTaskVersions.length - 1) : undefined}
-                        onSwitchVersion={(index) => {
-                          const version = initialTaskVersions?.[index];
-                          const first = attempts[0];
-                          if (version && first && onEditMessageSubmit) {
-                            void onEditMessageSubmit({
-                              id: `task-${selectedNode.name}`,
-                              role: "user",
-                              text: version.text,
-                              node: selectedNode.name,
-                              executionId: version.executionId ?? first.id,
-                              runId: state.runId,
-                            }, version.text, index);
-                          }
-                        }}
-                        editing={editingTaskNode === selectedNode.name}
-                        draft={taskDraft}
-                        onDraftChange={setTaskDraft}
-                        onEdit={selected !== publicationMergerCardId && (!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "running") ? () => {
-                          onCancelEditMessage?.();
-                          setEditingTaskNode(selectedNode.name);
-                          setTaskDraft(selectedNode.task);
-                        } : undefined}
-                        onCancel={() => setEditingTaskNode("")}
-                        disabled={locked || (state.approved && selectedState?.status === "dirty") || taskDraft.trim() === selectedNode.task}
-                        onSave={(value) => {
-                          const saveTask = () => {
-                            onSave({
-                              ...state.graph,
-                              nodes: state.graph.nodes.map((node) =>
-                                node.name === selectedNode.name ? { ...node, task: value } : node
-                              ),
-                            });
-                            setEditingTaskNode("");
-                          };
-                          if (state.approved) {
-                            const first = attempts[0];
-                            if (first && onEditMessageSubmit) {
-                              void Promise.resolve(onEditMessageSubmit({
-                                id: `task-${selectedNode.name}`,
-                                role: "user",
-                                text: selectedNode.task,
-                                node: selectedNode.name,
-                                executionId: first.id,
-                                runId: state.runId,
-                              }, value)).then((accepted) => {
-                                if (accepted !== false) setEditingTaskNode("");
-                              });
-                            } else {
-                              onRequestConfirmation({
-                                title: t("修改未执行的 Task？"),
-                                message: t("此节点尚无 Pi 对话可分支，将创建新的待审批运行。"),
-                                confirmText: t("确认修改"),
-                                danger: true,
-                                onConfirm: saveTask,
-                              });
-                            }
-                            return;
-                          }
-                          saveTask();
-                        }}
-                      />
-                    ) : turn.userMessage ? (
-                      <div key={turn.userMessage.id} className="chat-message-row user">
+                    {turn.userMessage && (
+                      <div className="chat-message-row user">
                         <EditableUserBubble
-                          text={turn.userMessage.text.replace(/^\[@[^\]]+\]\s*/, "")}
+                          text={turn.userMessage.text.replace(/^\[@[^\]]+\]\s*/, "").trim()}
                           images={turn.userMessage.images}
                           files={turn.userMessage.files}
                           editing={editingMessage?.id === turn.userMessage.id}
                           draft={editPrefillText ?? ""}
                           onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                          onEdit={onEditMessage && turn.userMessage.delivery !== "node_messaged" && !mergerExecutionIds.has(turn.userMessage.executionId ?? "") ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!); } : undefined}
+                          onEdit={onEditMessage && (selectedMerger || turn.userMessage.delivery !== "node_messaged")
+                            ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!) }
+                            : undefined}
                           onCancel={() => onCancelEditMessage?.()}
                           onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
                           disabled={locked}
@@ -1261,11 +1501,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           onSwitchVersion={(idx) => onSwitchMessageVersion?.(turn.userMessage!, idx)}
                         />
                       </div>
-                    ) : null}
-
+                    )}
                     {turn.executions.map((exec) => {
                       const isLatestAttempt = exec.id === execution?.id;
-
+                      const isExpanded = isLatestAttempt || expandedAttemptIds.has(exec.id) || turn.executions.length === 1;
                       return (
                         <motion.div
                           key={exec.id}
@@ -1274,22 +1513,48 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ duration: 0.3 }}
                         >
-                          <div className="session-label">
-                            <strong>Pi Session</strong>
-                            <span className={`status-badge ${exec.status}`}>
-                              {statusText[exec.status as Status] ?? exec.status}
-                            </span>
-                            <ExecutionTiming execution={exec} />
-                          </div>
-                          <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                            <ExecutionTranscript
-                              key={exec.id}
-                              runId={state.runId}
-                              execution={exec}
-                              onUserResize={handleExpandableContentChange}
-                              onInitialOutputReady={isLatestAttempt ? revealConversation : undefined}
-                            />
-                          </div>
+                          {attempts.length > 1 && (
+                            <div
+                              className="session-label session-label-toggle"
+                              onClick={() => {
+                                setExpandedAttemptIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(exec.id)) next.delete(exec.id);
+                                  else next.add(exec.id);
+                                  return next;
+                                });
+                                if (isNodeMergerSelected || publicationMergerSelected) {
+                                  setSelectedMergerId(exec.id);
+                                  setAttemptId(exec.id);
+                                }
+                              }}
+                              style={{ cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", justifyContent: "space-between" }}
+                              title={isExpanded ? t("点击收起执行记录") : t("点击展开执行记录并加载日志")}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <span className={`status-badge ${exec.status}`}>
+                                  {statusText[exec.status as Status] ?? exec.status}
+                                </span>
+                                <span style={{ fontSize: 13, fontWeight: 500 }}>
+                                  {t("#{0} 尝试", exec.attempt || 1)}
+                                </span>
+                                <ExecutionTiming execution={exec} />
+                              </div>
+                              <span style={{ fontSize: 12, opacity: 0.65, marginLeft: "auto" }}>
+                                {isExpanded ? t("点击收起执行记录") : t("点击展开执行记录并加载日志")}
+                              </span>
+                            </div>
+                          )}
+                          {isExpanded && (
+                            <div style={{ display: "flex", flexDirection: "column", marginTop: attempts.length > 1 ? 4 : 0 }}>
+                              <ExecutionTranscript
+                                runId={state.runId}
+                                execution={exec}
+                                onUserResize={handleExpandableContentChange}
+                                onInitialOutputReady={isLatestAttempt ? revealConversation : undefined}
+                              />
+                            </div>
+                          )}
                         </motion.div>
                       );
                     })}
@@ -1308,7 +1573,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <p>Session ID: {execution.sessionId}</p>
                     <p>Commit Before: {execution.before || t("未快照")}</p>
                     <p>Commit After: {execution.after === "" ? t("源目录直改（无快照）") : execution.after ?? "pending"}</p>
-                    <p className="details-tip">{t("Graph Execution Instance 使用用户仓库旁的独立 worktree；Serial Execution Instance 直接使用用户目录。")}</p>
                   </WorkspaceDetailsPanel>
                 )}
 
@@ -1322,16 +1586,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 {selectedState?.error && (
                   <div className="node-error" style={{ marginTop: 12 }}>
                     {localizeError(selectedState.error)}
-                    {selectedState.status === "blocked" && (
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={locked || active}
-                        onClick={() => onControl("resolve")}
-                      >
-                        Use resolved workspace
-                      </button>
-                    )}
                   </div>
                 )}
               </div>
@@ -1379,7 +1633,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     ? (selectedMergerRunning
                       ? t("向 merger 实时发送 Steer（当前工具调用后生效）…")
                       : selectedMergerContinuable
-                      ? t("向 publication merger 追加消息…")
+                      ? (selectedMerger.status === "failed"
+                        ? t("向 merger 发送消息并重跑…")
+                        : t("向 publication merger 追加消息…"))
                       : t("merger 已结束，只能查看执行记录"))
                     : isSelectedNodeWorking
                     ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", selectedNode.name)
@@ -1406,7 +1662,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               ref={chatScrollRef}
               onScroll={handleChatScroll}
             >
-              <div className="chat-messages-stream">
+              <div
+                className="chat-messages-stream"
+                style={{
+                  opacity: isConversationReady ? 1 : 0,
+                  transition: isConversationReady ? "opacity 0.12s ease-out" : "none",
+                }}
+              >
                 {routeType === "serial" ? (
                   <div className="serial-turns-container" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     {serialTurns.map((turn) => (
@@ -1510,33 +1772,33 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   </div>
                 ) : (
                   <>
-                    {effectiveMessages.length > 0 && (
+                    {plannerMessages.length > 0 && (
                       <motion.div
-                        key={effectiveMessages[0].id}
-                        className={`chat-message-row ${effectiveMessages[0].role}`}
+                        key={plannerMessages[0].id}
+                        className={`chat-message-row ${plannerMessages[0].role}`}
                         initial={false}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
                       >
-                        {effectiveMessages[0].role === "user" ? (
+                        {plannerMessages[0].role === "user" ? (
                           <EditableUserBubble
-                            text={effectiveMessages[0].text.trim()}
-                            images={effectiveMessages[0].images}
-                            files={effectiveMessages[0].files}
-                            editing={editingMessage?.id === effectiveMessages[0].id}
+                            text={plannerMessages[0].text.trim()}
+                            images={plannerMessages[0].images}
+                            files={plannerMessages[0].files}
+                            editing={editingMessage?.id === plannerMessages[0].id}
                             draft={editPrefillText ?? ""}
                             onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                            onEdit={onEditMessage ? () => onEditMessage(effectiveMessages[0]) : undefined}
+                            onEdit={onEditMessage ? () => onEditMessage(plannerMessages[0]) : undefined}
                             onCancel={() => onCancelEditMessage?.()}
-                            onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(effectiveMessages[0], value) : onSendMessage(value)}
+                            onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(plannerMessages[0], value) : onSendMessage(value)}
                             disabled={locked && !isPlanning}
-                            versions={effectiveMessages[0].versions}
-                            currentVersionIndex={effectiveMessages[0].currentVersionIndex}
-                            onSwitchVersion={(idx) => onSwitchMessageVersion?.(effectiveMessages[0], idx)}
+                            versions={plannerMessages[0].versions}
+                            currentVersionIndex={plannerMessages[0].currentVersionIndex}
+                            onSwitchVersion={(idx) => onSwitchMessageVersion?.(plannerMessages[0], idx)}
                           />
                         ) : (
-                          <div className={`chat-bubble-${effectiveMessages[0].role} chat-message-${effectiveMessages[0].role}`}>
-                            <MarkdownRenderer content={effectiveMessages[0].text} />
+                          <div className={`chat-bubble-${plannerMessages[0].role} chat-message-${plannerMessages[0].role}`}>
+                            <MarkdownRenderer content={plannerMessages[0].text} />
                           </div>
                         )}
                       </motion.div>
@@ -1569,13 +1831,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <div style={!useSavedPlanner ? { display: "none" } : undefined}>
                         <PlanningActivity
                           key={savedPlannerKey}
+                          runId={transcriptRunId}
                           planningIds={savedPlannerIds}
                           showUserTurns={!isPlanning || !!recoveredPlanningId}
-                          skipFirstUser={effectiveMessages.length > 0}
+                          skipFirstUser={plannerMessages.length > 0}
+                          running={isPlanning || !!recoveredPlanningId}
                           onReady={() => {
                             setReadySavedPlannerKey(savedPlannerKey);
                             revealConversation();
                           }}
+                          onOutputChange={(text) => setSavedPlannerRecord(previous =>
+                            previous.key === savedPlannerKey && previous.text === text ? previous : { key: savedPlannerKey, text })}
+                          onLoadingChange={setHistoryLoading}
                           onUserResize={handleExpandableContentChange}
                           edits={plannerEdits}
                           onEditUser={onEditMessageSubmit ? (text, replacement) =>
@@ -1586,7 +1853,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
 
                     {/* 保留当前对话中的跟进消息；实时流已有同一消息时不重复渲染。 */}
-                    {effectiveMessages.slice(1).filter((msg) => {
+                    {plannerMessages.slice(1).filter((msg) => {
+                      if (msg.node && msg.node !== "planner") return false;
                       if (renderLivePlanner && plannerStream.items?.some((item: TranscriptItem) =>
                         item.role === "user" && item.id === msg.id)) return false;
                       // Keep an acknowledged steer visible across navigation
@@ -1636,6 +1904,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               isStreaming={isPlanning && plannerStream.plannerThinkingActive}
                               title={t("思考过程")}
                               defaultExpanded={true}
+                              autoExpandWhileStreaming={true}
                               onExpandedChange={handleExpandableContentChange}
                             />
                           )}
@@ -1698,7 +1967,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 >
                   <div className="plan-summary-header">
                     <span>{t("执行拓扑概览")}</span>
-                    <span className={`phase-tag ${state.phase}`}>{phaseText[state.phase] ?? t("草稿")}</span>
+                    <span className={`phase-tag ${graphPhase}`}>{phaseText[graphPhase] ?? t("草稿")}</span>
                   </div>
 
                   <div className="plan-stats-row">

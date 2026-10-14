@@ -66,4 +66,4 @@ npm.cmd run build
 
 Coverage includes Bash/native tool semantics, concurrent Graph workflows, workspace inheritance/publication, cancellation of selected descendant writers, and interrupted-run recovery. Unknown third-party tools, detached services, and other crash conditions still require independent checks.
 
-For offline extension tests, install `ripgrep` and `fd` first; see [Testing](../development/testing.md#search-tools-and-offline-runs). The [Windows CI workflow](../../.github/workflows/windows-native.yml) records the checks configured for the hosted runner, not a guarantee for every Windows installation.
+For offline extension tests, install `ripgrep` and `fd` first; see [Testing](../development/testing.md#search-tools-and-offline-runs). The Windows leg of the scheduled [planner-source workflow](../../.github/workflows/planner-source.yml) records the checks configured for the hosted runner, not a guarantee for every Windows installation.

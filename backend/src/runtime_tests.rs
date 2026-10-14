@@ -5,6 +5,10 @@ use tempfile::TempDir;
 #[path = "feedback_workspace_tests.rs"]
 mod feedback_workspace;
 
+#[cfg(feature = "fixture")]
+#[path = "recovery_workspace_tests.rs"]
+mod recovery_workspace;
+
 fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
@@ -475,6 +479,159 @@ fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
 }
 
 #[test]
+fn resolved_feedback_allows_ready_descendants_while_sibling_runs() {
+    // Reproduce the two accepted reviews in the BranchB graph: node 13 must
+    // not stop nodes 11/14/15 from consuming node 10's completed result.
+    let graph = Graph {
+        original_goal: "accepted reviews do not serialize downstream work".into(),
+        nodes: ["04", "06", "08", "09", "10", "13", "11", "14", "15", "16"]
+            .into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() })
+            .collect(),
+        edges: [
+            ("04", "06", false),
+            ("06", "04", true),
+            ("06", "08", false),
+            ("08", "09", false),
+            ("09", "08", true),
+            ("09", "10", false),
+            ("09", "13", false),
+            ("10", "11", false),
+            ("10", "14", false),
+            ("10", "15", false),
+            ("11", "16", false),
+            ("13", "16", false),
+            ("14", "16", false),
+            ("15", "16", false),
+        ]
+        .into_iter()
+        .map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback })
+        .collect(),
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph.clone());
+    let mut config = runtime.state.config.clone().unwrap();
+    config.max_parallel = 0;
+    config.max_feedback = 3;
+    runtime.edit_draft_graph(graph, config).unwrap();
+    runtime.approve().unwrap();
+    for name in ["04", "06", "08", "09"] {
+        let jobs = runtime.jobs().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].execution.node, name);
+        let output = if jobs[0].feedback_source { "<ACCEPT>" } else { "done" };
+        runtime.finish(&jobs[0].execution, Ok((runtime.state.base.clone(), output.into()))).unwrap();
+    }
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["10", "13"]);
+    assert!(runtime.state.pending_feedback.is_empty());
+    for from in ["06", "09"] {
+        assert!(runtime.state.events.iter().any(|event| matches!(
+            &event.kind, EventKind::Feedback { from: source, accepted: true, .. } if source == from
+        )));
+    }
+    let evaluation = jobs.iter().find(|job| job.execution.node == "10").unwrap();
+    runtime.finish(&evaluation.execution, Ok((runtime.state.base.clone(), "evaluated".into()))).unwrap();
+    // Replay the durable projection, without restarting/recovering live workers.
+    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(runtime.state.nodes["13"].status, "running");
+    assert!(runtime.state.pending_feedback.is_empty());
+    assert!(runtime.state.feedback_counts.is_empty(), "acceptance does not exhaust the feedback budget");
+    let consumers = runtime.jobs().unwrap();
+    assert_eq!(consumers.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["11", "14", "15"]);
+    assert_eq!(runtime.state.nodes["13"].status, "running");
+    assert_eq!(runtime.state.nodes["16"].status, "waiting");
+    assert!(runtime.jobs().unwrap().is_empty());
+}
+
+#[test]
+fn queued_feedback_keeps_scope_blocked_until_related_workers_drain() {
+    for verdict in ["<ACCEPT>", "<FEEDBACK>"] {
+        let graph = Graph {
+            original_goal: "queued verdict retains its drain barrier".into(),
+            nodes: ["owner", "review", "slow", "fast", "after_fast", "consumer", "other", "after_other"]
+                .into_iter()
+                .map(|name| Node { name: name.into(), task: name.into() })
+                .collect(),
+            edges: [
+                ("owner", "review", false),
+                ("owner", "slow", false),
+                ("owner", "fast", false),
+                ("fast", "after_fast", false),
+                ("review", "consumer", false),
+                ("review", "owner", true),
+                ("other", "after_other", false),
+            ]
+            .into_iter()
+            .map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback })
+            .collect(),
+        };
+        let (_temp, _source, mut runtime) = setup(true, graph.clone());
+        let mut config = runtime.state.config.clone().unwrap();
+        config.max_parallel = 4;
+        runtime.edit_draft_graph(graph, config).unwrap();
+        runtime.approve().unwrap();
+        let roots = runtime.jobs().unwrap();
+        let owner = roots.iter().find(|job| job.execution.node == "owner").unwrap();
+        runtime.finish(&owner.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+        let jobs = runtime.jobs().unwrap();
+        assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["review", "slow", "fast"]);
+        let fast = jobs.iter().find(|job| job.execution.node == "fast").unwrap();
+        runtime.finish(&fast.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+        let review = jobs.iter().find(|job| job.execution.node == "review").unwrap();
+        runtime.finish(&review.execution, Ok((runtime.state.base.clone(), verdict.into()))).unwrap();
+        let other = roots.iter().find(|job| job.execution.node == "other").unwrap();
+        runtime.finish(&other.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+        runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+        assert_eq!(runtime.state.nodes["review"].status, "done");
+        assert_eq!(runtime.state.nodes["slow"].status, "running");
+        assert_eq!(runtime.state.pending_feedback.len(), 1);
+        let independent = runtime.jobs().unwrap();
+        assert_eq!(independent.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["after_other"]);
+        assert_eq!(runtime.state.nodes["after_fast"].status, "waiting");
+        assert_eq!(runtime.state.nodes["consumer"].status, "waiting");
+        assert_eq!(runtime.state.pending_feedback.len(), 1, "{verdict} must still wait for the related worker");
+    }
+}
+
+#[test]
+fn resolved_feedback_barrier_reactivates_when_review_is_rerun() {
+    let graph = Graph {
+        original_goal: "a new review can invalidate its target again".into(),
+        nodes: ["owner", "review", "related", "after_related"]
+            .into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() })
+            .collect(),
+        edges: [
+            ("owner", "review", false),
+            ("owner", "related", false),
+            ("related", "after_related", false),
+            ("review", "owner", true),
+        ]
+        .into_iter()
+        .map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback })
+        .collect(),
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let owner = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&owner.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    for job in runtime.jobs().unwrap() {
+        let output = if job.feedback_source { "<ACCEPT>" } else { "done" };
+        runtime.finish(&job.execution, Ok((runtime.state.base.clone(), output.into()))).unwrap();
+    }
+    let related = runtime.jobs().unwrap().remove(0);
+    assert_eq!(related.execution.node, "after_related");
+    assert!(runtime.state.pending_feedback.is_empty());
+    runtime.intervene("review", "review the owner again").unwrap();
+    assert_eq!(runtime.state.nodes["review"].status, "dirty");
+    assert!(runtime.jobs().unwrap().is_empty(), "a new verdict must wait for the affected worker");
+    runtime.finish(&related.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    let review = runtime.jobs().unwrap().remove(0);
+    assert_eq!(review.execution.node, "review");
+    assert!(review.feedback_source);
+}
+
+#[test]
 fn named_parents_resolve_against_their_own_run_refs() {
     let (temp, source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
@@ -800,6 +957,46 @@ fn interrupted_nodes_and_blocked_descendants_resume_from_the_topology_control() 
     assert_eq!(resumed[0].resume_execution_id.as_deref(), Some(interrupted.id.as_str()));
     assert_eq!(resumed[0].execution.session_id, interrupted.session_id);
     assert_ne!(resumed[0].execution.id, interrupted.id);
+}
+
+#[test]
+fn starting_an_upstream_node_returns_its_blocked_descendants_to_waiting() {
+    let graph = Graph {
+        original_goal: "recover blocked descendants".into(),
+        nodes: ["first", "after", "last", "second", "other"].into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() })
+            .collect(),
+        edges: vec![
+            Edge { from: "first".into(), to: "after".into(), feedback: false },
+            Edge { from: "after".into(), to: "last".into(), feedback: false },
+            Edge { from: "second".into(), to: "other".into(), feedback: false },
+        ],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 2);
+    let first = jobs.iter().find(|job| job.execution.node == "first").unwrap().execution.clone();
+    let second = jobs.iter().find(|job| job.execution.node == "second").unwrap().execution.clone();
+    runtime.finish(&first, Err("boom".into())).unwrap();
+    runtime.finish(&second, Err("boom".into())).unwrap();
+    runtime.jobs().unwrap(); // Both failed roots block their branches.
+    for name in ["after", "last", "other"] {
+        assert_eq!(runtime.state.nodes[name].status, "blocked");
+        assert!(runtime.state.nodes[name].error.is_some());
+    }
+
+    // Retrying one root clears only its own blocked dependency branch, and the
+    // scheduler waits for the new result instead of the failed one.
+    runtime.intervene("first", "retry the first root").unwrap();
+    let retried = runtime.jobs().unwrap().remove(0);
+    assert_eq!(retried.execution.node, "first");
+    for name in ["after", "last"] {
+        assert_eq!(runtime.state.nodes[name].status, "waiting");
+        assert!(runtime.state.nodes[name].error.is_none());
+    }
+    assert_eq!(runtime.state.nodes["other"].status, "blocked");
+    assert!(runtime.state.nodes["other"].error.is_some());
 }
 
 #[test]
@@ -1960,6 +2157,94 @@ fn running_merger_reserves_its_workspace() {
 }
 
 #[test]
+fn failed_node_merger_marks_posterior_node_blocked_and_descendants_recover_on_node_start() {
+    let graph = Graph {
+        original_goal: "merger failure blocks target node".into(),
+        nodes: ["left", "right", "join", "after"].into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() })
+            .collect(),
+        edges: vec![
+            Edge { from: "left".into(), to: "join".into(), feedback: false },
+            Edge { from: "right".into(), to: "join".into(), feedback: false },
+            Edge { from: "join".into(), to: "after".into(), feedback: false },
+        ],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 2);
+    let left = jobs.iter().find(|j| j.execution.node == "left").unwrap().execution.clone();
+    let right = jobs.iter().find(|j| j.execution.node == "right").unwrap().execution.clone();
+    runtime.finish(&left, Ok(("head-left".into(), "ok".into()))).unwrap();
+    runtime.finish(&right, Ok(("head-right".into(), "ok".into()))).unwrap();
+
+    // Now start a merger for node "join".
+    let merger_id = Uuid::new_v4().to_string();
+    let merger = Execution {
+        id: merger_id.clone(),
+        node: "merge:join".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: merger_id.clone(),
+        worktree: "test-tree".into(),
+        before: "head-left".into(),
+        workspace_lineage: vec![],
+        after: None, input: None, result: None,
+        status: "running".into(),
+        output: String::new(), output_bytes: 0, pid: None,
+        started_at: now(), completed_at: None, metrics: None,
+    };
+    runtime.emit(EventKind::MergerStarted { execution: merger.clone() }).unwrap();
+
+    // Merger fails: its corresponding posterior node "join" must be "blocked", NOT "failed".
+    runtime.emit(EventKind::MergerFailed {
+        execution_id: merger_id.clone(),
+        error: "conflict could not be resolved".into(),
+        output_bytes: 0,
+        metrics: None,
+    }).unwrap();
+
+    assert_eq!(runtime.state.nodes["join"].status, "blocked");
+    assert!(runtime.state.nodes["join"].error.as_deref().unwrap().contains("Merger failed"));
+
+    // Schedule passes: descendants of "join" ("after") are blocked as well.
+    runtime.jobs().unwrap();
+    assert_eq!(runtime.state.nodes["after"].status, "blocked");
+
+    // Sending a message to the failed merger starts a new merger execution.
+    // Downstream blocked nodes must NOT become "waiting" yet; they remain blocked.
+    let merger_retry_id = Uuid::new_v4().to_string();
+    let mut retry_merger = merger.clone();
+    retry_merger.id = merger_retry_id.clone();
+    retry_merger.attempt = 2;
+    runtime.emit(EventKind::MergerStarted { execution: retry_merger.clone() }).unwrap();
+    runtime.emit(EventKind::Steered {
+        execution_id: merger_retry_id.clone(),
+        node: "merge:join".into(),
+        instruction: "please fix conflict".into(),
+        images: None,
+    }).unwrap();
+
+    // Nodes still remain blocked while the merger is retrying.
+    assert_eq!(runtime.state.nodes["join"].status, "blocked");
+    assert_eq!(runtime.state.nodes["after"].status, "blocked");
+
+    // Once the merger finishes and "join" starts running (Started), its descendants return to "waiting".
+    runtime.emit(EventKind::MergerFinished {
+        execution_id: merger_retry_id,
+        head: "merged-head".into(),
+        output_bytes: 0,
+        metrics: None,
+    }).unwrap();
+
+    // Emitting Started for "join" resets its blocked descendants to waiting.
+    let mut join_exec = merger.clone();
+    join_exec.node = "join".into();
+    runtime.emit(EventKind::Started { execution: join_exec }).unwrap();
+    assert_eq!(runtime.state.nodes["after"].status, "waiting");
+}
+
+#[test]
 fn reset_cleans_only_its_run_worktrees() {
     let (temp, source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
@@ -2734,4 +3019,63 @@ fn mid_run_completed_node_message_keeps_worktree_semantics() {
     let retry = runtime.jobs().unwrap().remove(0);
     assert!(!retry.source_direct);
     assert_ne!(Path::new(&retry.execution.worktree), source);
+}
+
+#[test]
+fn failed_node_intervention_resumes_running_phase_and_clears_needs_attention() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&job.execution, Err("Model error".into())).unwrap();
+    runtime.jobs().unwrap();
+    assert_eq!(runtime.state.phase, "needs_attention");
+    assert_eq!(runtime.state.nodes["task"].status, "failed");
+
+    // Intervening sets the node to dirty and transitions phase to running
+    runtime.intervene("task", "retry please").unwrap();
+    assert_eq!(runtime.state.nodes["task"].status, "dirty");
+    assert_eq!(runtime.state.phase, "running");
+
+    // When the job is dispatched, Started is emitted and phase remains running
+    let retry_job = runtime.jobs().unwrap().remove(0);
+    assert_eq!(runtime.state.nodes["task"].status, "running");
+    assert_eq!(runtime.state.phase, "running");
+
+    // If phase somehow stayed needs_attention before Started or Steered, verify they clear it
+    runtime.state.phase = "needs_attention".into();
+    runtime.emit(EventKind::Started { execution: retry_job.execution.clone() }).unwrap();
+    assert_eq!(runtime.state.phase, "running");
+
+    runtime.state.phase = "needs_attention".into();
+    runtime.emit(EventKind::Steered {
+        execution_id: retry_job.execution.id.clone(),
+        node: "task".into(),
+        instruction: "steer msg".into(),
+        images: None,
+    }).unwrap();
+    assert_eq!(runtime.state.phase, "running");
+
+    runtime.state.phase = "needs_attention".into();
+    let merger_exec = Execution {
+        id: "merger-1".into(),
+        node: "merge:task".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "s1".into(),
+        worktree: "w1".into(),
+        before: String::new(),
+        workspace_lineage: vec![],
+        after: None,
+        input: None,
+        result: None,
+        status: "running".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: 0,
+        completed_at: None,
+        metrics: None,
+    };
+    runtime.emit(EventKind::MergerStarted { execution: merger_exec }).unwrap();
+    assert_eq!(runtime.state.phase, "running");
 }

@@ -912,6 +912,22 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               </div>
             )}
 
+            {isWorking && (hasText || selectedFile) && onInterrupt && (
+              <button
+                type="button"
+                className="prompt-box-icon-btn prompt-box-interrupt-btn"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onInterrupt();
+                }}
+                disabled={isSubmitting || isPreparing}
+                title={t("点击打断执行")}
+                aria-label={t("点击打断执行")}
+              >
+                <Square size={compact ? 9 : 11} className="prompt-box-stop-icon" />
+              </button>
+            )}
+
             <button
               type="button"
               onClick={(e) => {

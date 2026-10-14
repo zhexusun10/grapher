@@ -82,3 +82,23 @@ test('message versions survive reload and nested edits', () => {
   assert.deepEqual(versionsForEdit(state, state.events[2]).map(version => version.text),
     ['original', 'replacement', 'third']);
 });
+
+test('message rollback matches stripped node prefixes and rolls back subsequent turns', () => {
+  const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, '').trim();
+  const baseEntries = [
+    { id: 'msg-1', text: '[@merge:06_feature_qa] continue solve the conflict' },
+    { id: 'msg-2', text: '[@merge:06_feature_qa] second follow-up turn' },
+  ];
+  const targetClean = 'continue solve the conflict';
+  const targetIndex = baseEntries.findIndex((e) =>
+    e.id === 'event-5' ||
+    stripPrefix(e.text) === targetClean
+  );
+  assert.equal(targetIndex, 0, 'matches turn 0 despite different ID and [@node] prefix');
+  const prevEntries = baseEntries.slice(0, targetIndex);
+  const subsequentEntries = baseEntries.slice(targetIndex + 1);
+  assert.equal(prevEntries.length, 0);
+  assert.equal(subsequentEntries.length, 1);
+  assert.equal(subsequentEntries[0].id, 'msg-2');
+});
+

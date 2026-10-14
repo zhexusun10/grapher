@@ -22,6 +22,7 @@ const boundedCommands = new Set([
   "detect_repository", "repository_status", "get_planning", "list_plannings",
   "get_planning_snapshot", "get_execution_output", "get_planning_output",
   "provider_auth", "pi_extensions", "list_skills", "list_files", "environment_capabilities",
+  "get_merger_prompt",
 ]);
 const metadataTimeoutMs = 15_000;
 
@@ -205,14 +206,20 @@ export const runtimeService = {
     }
     return finalSnapshot;
   },
-  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false) =>
-    request<{ runId: string; executionId: string; content: string; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
-      "get_execution_output", { runId, executionId, offset, full }, signal),
+  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number) =>
+    request<{ runId: string; executionId: string; content: string; startOffset?: number; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
+      "get_execution_output", { runId, executionId, offset, full, ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
+  getMergerPrompt: async (runId: string, executionId: string, signal?: AbortSignal): Promise<string> => {
+    const res = await request<{ runId: string; executionId: string; prompt: string }>(
+      "get_merger_prompt", { runId, executionId }, signal
+    );
+    return res.prompt;
+  },
   getPlanningSnapshot: (planningId: string, repository: string, signal?: AbortSignal) =>
     request<Snapshot>("get_planning_snapshot", { planningId, repository }, signal),
-  getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal) =>
-    request<{ planningId: string; role: string; content: string; nextOffset: number; totalBytes: number; complete: boolean; running: boolean }>(
-      "get_planning_output", { planningId, role, offset }, signal),
+  getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal, tail = false, before?: number, limit?: number) =>
+    request<{ planningId: string; role: string; content: string; startOffset?: number; nextOffset: number; totalBytes: number; complete: boolean; running: boolean }>(
+      "get_planning_output", { planningId, role, offset, ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
   getPlanning: (planningId: string, signal?: AbortSignal) => request<PlanningSummary>("get_planning", { planningId }, signal),
   listPlannings: (repository?: string, signal?: AbortSignal) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}, signal),
   control: (action: string, extra?: Record<string, unknown>) => request<Snapshot>("control", { action, ...extra }),

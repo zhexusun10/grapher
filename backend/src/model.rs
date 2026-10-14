@@ -924,8 +924,7 @@ impl Snapshot {
 
 fn is_interrupted_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    error.contains("用户已停止本次执行")
-        || lower.contains("application stopped during this execution")
+    lower.contains("application stopped during this execution")
         || lower.contains("execution was interrupted")
         || lower.contains("0xc000013a")
         || lower.contains("exit code: 130")
@@ -1111,12 +1110,33 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.status = "running".into();
             node.error = None;
             state.executions.push(execution.clone());
+            if state.phase == "needs_attention" {
+                state.phase = if state.paused { "paused" } else { "running" }.into();
+            }
+            // Running an upstream node removes the reason its dependency
+            // descendants were blocked: they return to waiting and the
+            // scheduler decides again when the new result is available.
+            for name in crate::compiler::downstream(&state.graph, &execution.node) {
+                if name == execution.node {
+                    continue;
+                }
+                if let Some(node) = state.nodes.get_mut(&name) {
+                    if node.status == "blocked" {
+                        node.status = "waiting".into();
+                        node.error = None;
+                    }
+                }
+            }
         }
         EventKind::SourceSnapshotted { .. }
         | EventKind::SourceFilesRecorded { .. }
         | EventKind::WorkspaceFilesChanged { .. }
-        | EventKind::Steered { .. }
         | EventKind::NodeMessaged { .. } => {}
+        EventKind::Steered { .. } => {
+            if state.phase == "needs_attention" {
+                state.phase = if state.paused { "paused" } else { "running" }.into();
+            }
+        }
         EventKind::EnvironmentPolicyRequested => {
             if !state.approved
                 && state.environment_policy.is_none()
@@ -1675,6 +1695,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if let Some(publication) = &mut state.publication {
                     publication.status = "merging".into();
                 }
+            } else if state.phase == "needs_attention" {
+                state.phase = if state.paused { "paused" } else { "running" }.into();
             }
         }
         EventKind::MergerFinished {
@@ -1723,7 +1745,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             output_bytes,
             metrics,
         } => {
-            if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
+            let target_node_name = if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
                 execution.status = "failed".into();
                 // Runtime persists the annotation before this terminal event.
                 // Replay restores byte counts from the log table, not text.
@@ -1742,6 +1764,15 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     })
                 });
                 execution.output = String::new();
+                execution.node.strip_prefix("merge:").map(|s| s.to_string())
+            } else {
+                None
+            };
+            if let Some(target_name) = target_node_name {
+                if let Some(node) = state.nodes.get_mut(&target_name) {
+                    node.status = "blocked".into();
+                    node.error = Some(format!("Workspace composition blocked: Merger failed: {error}"));
+                }
             }
         }
         EventKind::Settled => {

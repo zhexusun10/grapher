@@ -24,6 +24,7 @@ import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "
 import { appendItemDelta } from "./services/transcriptUpdates";
 import { mapWithConcurrency } from "./services/boundedRequests";
 import { useSnapshotState } from "./hooks/useSnapshotState";
+import { useConversationTranscriptCache } from "./hooks/useConversationTranscriptCache";
 import { useFrameBatchedState } from "./hooks/useFrameBatchedState";
 import { useStableCallback } from "./hooks/useStableCallback";
 
@@ -172,7 +173,9 @@ export default function App() {
     });
   }, []);
   const hasActiveExecutions = state.executions.some(item => item.status === "running") ||
-    (state.mergers ?? []).some(item => item.status === "running");
+    (state.mergers ?? []).some(item => item.status === "running") ||
+    Object.values(state.nodes).some(item => item.status === "running" || item.status === "dirty") ||
+    state.resultExecution?.status === "running";
   const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions);
 
   const [dataPath, setDataPath] = useState("");
@@ -334,7 +337,11 @@ export default function App() {
 
   const publishing = state.phase === "publishing" || state.phase === "merging";
   const publicationFailed = state.phase === "publication_failed";
-  const active = publishing || publicationFailed || Object.values(state.nodes).some((node) => node.status === "running");
+  const active = publishing || publicationFailed ||
+    Object.values(state.nodes).some((node) => node.status === "running" || node.status === "dirty") ||
+    state.executions.some((item) => item.status === "running") ||
+    (state.mergers ?? []).some((item) => item.status === "running") ||
+    state.resultExecution?.status === "running";
   const locked = busy || !!recoveredPlanning || repositoryBlocked;
   const backendPlanning = state.phase === "planning";
   const isAgentWorking = active || isPlanning || backendPlanning;
@@ -388,6 +395,12 @@ export default function App() {
   };
 
   const [plannerStream, setPlannerStream, queuePlannerStream] = useFrameBatchedState(initialPlannerStream);
+  // Legacy/orphaned Planner histories may be visible before a Run is recovered.
+  // They still need an owner so leaving the Conversation releases their RAM.
+  const visiblePlanningId = recoveredPlanning?.planningId || failedPlanning?.planningId || state.planningId;
+  const transcriptRunId = state.runId || plannerStream.runId || recoveredPlanning?.runId || failedPlanning?.runId ||
+    (visiblePlanningId ? `planning@${visiblePlanningId}` : "");
+  useConversationTranscriptCache(transcriptRunId);
 
   const applyForegroundSnapshot = (snapshot: Snapshot, generation: number) => {
     if (snapshot.runId && snapshot.config?.repository) {
@@ -449,13 +462,16 @@ export default function App() {
       return false;
     }
     const selectedNode = state.graph.nodes.find(item => item.name === selected);
-    const targetNodeName = selectedNode?.name ||
-      (selected === publicationMergerCardId ? "merger" : (routeType === "serial" ? state.graph.nodes[0]?.name : undefined));
+    const isNodeMerger = selected.startsWith("merger:") && selected !== publicationMergerCardId;
+    const nodeMergerTarget = isNodeMerger ? selected.slice(7) : "";
+    const mergerNodeName = isNodeMerger ? `merge:${nodeMergerTarget}` : (selected === publicationMergerCardId ? "merger" : undefined);
+    const targetNodeName = mergerNodeName || selectedNode?.name ||
+      (routeType === "serial" ? state.graph.nodes[0]?.name : undefined);
     // A selected merger card owns the composer only while its native process is
     // alive; a settled merger is read-only history.
-    const selectedMerger = selectedMergerId
-      ? (state.mergers ?? []).find(item => item.id === selectedMergerId &&
-          (selected === publicationMergerCardId ? item.node === "merger" : item.node === `merge:${selected}`))
+    const selectedMerger = (isNodeMerger || selected === publicationMergerCardId)
+      ? ((state.mergers ?? []).find(item => item.id === selectedMergerId && item.node === mergerNodeName)
+          ?? (state.mergers ?? []).filter(item => item.node === mergerNodeName).at(-1))
       : undefined;
     // A publication Merger stays addressable through its lifecycle; other node
     // messages remain blocked while publication is in progress.
@@ -509,8 +525,8 @@ export default function App() {
     if (selectedMerger) {
       const running = selectedMerger.status === "running";
       // A settled publication merger still accepts follow-ups; a settled
-      // node-composition merger is read-only history.
-      if (!running && selectedMerger.node !== "merger") {
+      // node-composition merger is read-only history unless it failed.
+      if (!running && selectedMerger.node !== "merger" && selectedMerger.status !== "failed") {
         setError(t("merger 已结束，只能查看执行记录"));
         return false;
       }
@@ -565,7 +581,9 @@ export default function App() {
     if (targetNodeName) {
       return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${text}` : text));
     }
-    if ((routeType === "graph" || state.graph.nodes.length > 0) && state.runId && state.phase !== "planning_failed") {
+    // A Run with a persisted Planner identity is still the same conversation,
+    // even while its graph is empty or the route decision is undecided.
+    if ((routeType === "graph" || state.graph.nodes.length > 0 || !!state.planningId) && state.runId && state.phase !== "planning_failed") {
       void handlePlanGoal(text, options, "graph", state.runId);
     } else {
       const baseGoal = state.graph.originalGoal || goal;
@@ -1822,7 +1840,18 @@ export default function App() {
       setError(repositoryStatus?.error || t("正在确认项目绑定，请稍后重试。"));
       return;
     }
-    if (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed") {
+    const isNodeMerger = selected.startsWith("merger:") && selected !== publicationMergerCardId;
+    const nodeMergerTarget = isNodeMerger ? selected.slice(7) : "";
+    const currentMergerNode = isNodeMerger ? `merge:${nodeMergerTarget}` : (selected === publicationMergerCardId ? "merger" : undefined);
+    const mergerExecutionById = targetMsg.executionId ? (state.mergers ?? []).find(m => m.id === targetMsg.executionId) : undefined;
+    const isMergerMessage = Boolean(
+      targetMsg.node === "merger" ||
+      targetMsg.node?.startsWith("merge:") ||
+      mergerExecutionById ||
+      (currentMergerNode && (targetMsg.node === currentMergerNode || !targetMsg.node))
+    );
+
+    if (!isMergerMessage && (state.phase === "publishing" || state.phase === "merging" || state.phase === "publication_failed")) {
       setError(t("发布期间不能修改消息，请等待发布结束或处理发布失败。"));
       return false;
     }
@@ -1861,6 +1890,63 @@ export default function App() {
       }
       const selectedText = selectedVersionData.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
       if (!selectedText) return false;
+
+      if (isMergerMessage) {
+        const mergerTargetNode = targetMsg.node && (targetMsg.node === "merger" || targetMsg.node.startsWith("merge:"))
+          ? targetMsg.node
+          : (mergerExecutionById?.node ?? currentMergerNode ?? "merger");
+        const targetMerger = mergerExecutionById
+          ?? (state.mergers ?? []).filter(m => m.node === mergerTargetNode).at(-1)
+          ?? (state.mergers ?? []).find(m => m.id === selectedMergerId);
+
+        if (!targetMerger) {
+          setError(t("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。"));
+          return false;
+        }
+        const running = targetMerger.status === "running";
+        if (!running && targetMerger.node !== "merger" && targetMerger.status !== "failed") {
+          setError(t("merger 已结束，只能查看执行记录"));
+          return false;
+        }
+        const selectedMessage = {
+          ...targetMsg,
+          text: selectedText,
+          images: selectedVersionData.images,
+          currentVersionIndex: selectedVersion,
+        };
+        try {
+          if (!await requireEditRepository()) return false;
+          let snapshot = await runtimeService.control(running ? "steer" : "continue_merger", {
+            runId: state.runId,
+            node: targetMerger.node,
+            executionId: targetMerger.id,
+            instruction: selectedText,
+            images: selectedVersionData.images,
+          });
+          if (snapshot.paused) snapshot = await runtimeService.control("resume", { runId: snapshot.runId });
+          if (!applyForegroundSnapshot(snapshot, generation)) return false;
+          const base = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
+          const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
+          const cleanTarget = stripPrefix(cleanExisting || targetMsg.text);
+          const index = base.findIndex(entry =>
+            (targetMsg.id && entry.id === targetMsg.id) ||
+            stripPrefix(entry.text) === cleanTarget ||
+            stripPrefix(entry.text) === stripPrefix(targetMsg.text)
+          );
+          const next = index >= 0 ? [...base] : [...base, selectedMessage];
+          if (index >= 0) next[index] = selectedMessage;
+          const subsequent = selectedVersionData.subsequentEntries ?? [];
+          setSessionEntries(index >= 0 ? [...next.slice(0, index + 1), ...subsequent] : next);
+          const nextMerger = (snapshot.mergers ?? []).filter(item => item.node === targetMerger.node).at(-1);
+          if (nextMerger && nextMerger.id !== targetMerger.id) setSelectedMergerId(nextMerger.id);
+          setEditingMessage(null);
+          setEditPrefillText("");
+          return true;
+        } catch (error) {
+          return reportEditError(error);
+        }
+      }
+
       const selectedNode = state.graph.nodes.find((item) => item.name === selected);
       const selectedNodeName = targetMsg.node || (selectedNode ? selectedNode.name : (
         routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined
@@ -1907,11 +1993,18 @@ export default function App() {
         if (!await acceptNodeEdit(snap)) return false;
         if (isInitialGoal) setGoal(selectedText);
         setSessionEntries(prev => {
-          const index = prev.findIndex(entry => entry.id === targetMsg.id);
+          const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
+          const cleanTarget = stripPrefix(cleanExisting || targetMsg.text);
+          const index = prev.findIndex(entry =>
+            (targetMsg.id && entry.id === targetMsg.id) ||
+            stripPrefix(entry.text) === cleanTarget ||
+            stripPrefix(entry.text) === stripPrefix(targetMsg.text)
+          );
           if (index < 0) return [selectedMessage];
           const next = [...prev];
           next[index] = selectedMessage;
-          return next.slice(0, index + 1);
+          const subsequent = selectedVersionData.subsequentEntries ?? [];
+          return [...next.slice(0, index + 1), ...subsequent];
         });
         setEditingMessage(null);
         setEditPrefillText("");
@@ -2055,8 +2148,118 @@ export default function App() {
       return;
     }
 
-    const msgIdx = sessionEntries.findIndex((e) => e.id === targetMsg.id);
-    const targetIndex = msgIdx !== -1 ? msgIdx : sessionEntries.findIndex((e) => e.text.trim() === targetMsg.text.trim());
+    if (isMergerMessage) {
+      const mergerTargetNode = targetMsg.node && (targetMsg.node === "merger" || targetMsg.node.startsWith("merge:"))
+        ? targetMsg.node
+        : (mergerExecutionById?.node ?? currentMergerNode ?? "merger");
+      const targetMerger = mergerExecutionById
+        ?? (state.mergers ?? []).filter(m => m.node === mergerTargetNode).at(-1)
+        ?? (state.mergers ?? []).find(m => m.id === selectedMergerId);
+
+      if (!targetMerger) {
+        setError(t("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。"));
+        return false;
+      }
+      const running = targetMerger.status === "running";
+      if (!running && targetMerger.node !== "merger" && targetMerger.status !== "failed") {
+        setError(t("merger 已结束，只能查看执行记录"));
+        setEditingMessage(null);
+        setEditPrefillText("");
+        return false;
+      }
+
+      const baseEntries = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
+      const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
+      const cleanTarget = stripPrefix(cleanExisting || targetMsg.text);
+      const targetIndex = baseEntries.findIndex((e) =>
+        (targetMsg.id && e.id === targetMsg.id) ||
+        stripPrefix(e.text) === cleanTarget ||
+        stripPrefix(e.text) === stripPrefix(targetMsg.text)
+      );
+
+      let rolledBackEntries: ChatMessage[];
+      let updatedMsg: ChatMessage;
+
+      if (targetIndex !== -1) {
+        const current = baseEntries[targetIndex];
+        const prevEntries = baseEntries.slice(0, targetIndex);
+        const parentId = prevEntries.length > 0 ? prevEntries[prevEntries.length - 1].id : null;
+
+        const initialVersion: ChatMessageVersion = {
+          id: "v1",
+          text: current.text,
+          files: current.files,
+          images: current.images,
+          timestamp: current.timestamp || Date.now(),
+          subsequentEntries: baseEntries.slice(targetIndex + 1),
+        };
+        const newVersion: ChatMessageVersion = {
+          id: `v${Date.now()}`,
+          text: cleanText,
+          files: parsedExisting.attachments,
+          images: targetMsg.images,
+          timestamp: Date.now(),
+          subsequentEntries: [],
+        };
+        const versions = [...(current.versions || [initialVersion]), newVersion];
+
+        updatedMsg = {
+          ...current,
+          text: cleanText,
+          files: parsedExisting.attachments,
+          timestamp: Date.now(),
+          parentId,
+          versions,
+          currentVersionIndex: versions.length - 1,
+        };
+        rolledBackEntries = [...prevEntries, updatedMsg];
+      } else {
+        const versions = [
+          ...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, images: targetMsg.images, timestamp: targetMsg.timestamp || Date.now() }]),
+          { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
+        ];
+        updatedMsg = {
+          ...targetMsg,
+          text: cleanText,
+          files: parsedExisting.attachments,
+          timestamp: Date.now(),
+          versions,
+          currentVersionIndex: versions.length - 1,
+        };
+        rolledBackEntries = [...baseEntries, updatedMsg];
+      }
+
+      return run(async () => {
+        try {
+          if (!await requireEditRepository()) return false;
+          let snapshot = await runtimeService.control(running ? "steer" : "continue_merger", {
+            runId: state.runId,
+            node: targetMerger.node,
+            executionId: targetMerger.id,
+            instruction: cleanText,
+            images: targetMsg.images,
+          });
+          if (snapshot.paused) snapshot = await runtimeService.control("resume", { runId: snapshot.runId });
+          if (!applyForegroundSnapshot(snapshot, generation)) return false;
+          setSessionEntries(rolledBackEntries);
+          const nextMerger = (snapshot.mergers ?? []).filter(item => item.node === targetMerger.node).at(-1);
+          if (nextMerger && nextMerger.id !== targetMerger.id) setSelectedMergerId(nextMerger.id);
+          setEditingMessage(null);
+          setEditPrefillText("");
+          return true;
+        } catch (error) {
+          return reportEditError(error);
+        }
+      });
+    }
+
+    const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
+    const cleanTarget = stripPrefix(cleanExisting || targetMsg.text);
+    const targetIndex = sessionEntries.findIndex((e) =>
+      (targetMsg.id && e.id === targetMsg.id) ||
+      stripPrefix(e.text) === cleanTarget ||
+      stripPrefix(e.text) === stripPrefix(targetMsg.text)
+    );
 
     let rolledBackEntries: ChatMessage[];
     let updatedMsg: ChatMessage;
@@ -2169,6 +2372,7 @@ export default function App() {
     effectiveMessages,
     routeType,
     selected,
+    selectedMergerId,
     isPlanning,
     active,
     config,
@@ -2183,10 +2387,13 @@ export default function App() {
   const handleSwitchMessageVersion = useCallback((message: ChatMessage, index: number) => {
     const version = message.versions?.[index];
     if (!version || index === message.currentVersionIndex) return;
-    const execution = version.executionId ? state.executions.find(item => item.id === version.executionId) : undefined;
+    const execution = version.executionId
+      ? (state.executions.find(item => item.id === version.executionId)
+         ?? (state.mergers ?? []).find(item => item.id === version.executionId))
+      : undefined;
     void handleEditMessageSubmit({ ...message, images: version.images,
       executionId: execution?.id ?? message.executionId }, version.text, index);
-  }, [handleEditMessageSubmit]);
+  }, [handleEditMessageSubmit, state.executions, state.mergers]);
 
   const initialize = useCallback(async () => {
     setBootstrapLoading(true);
@@ -2322,7 +2529,13 @@ export default function App() {
     }
   }, [isPlanning, state.runId, plannerStream.runId]);
 
-  const { nodes, edges } = useGraphElements(state, selected, recentlyAddedEdgeIds, selectedMergerId);
+  const { nodes, edges } = useGraphElements(
+    state,
+    selected,
+    recentlyAddedEdgeIds,
+    selectedMergerId,
+    activities[state.runId] ?? [],
+  );
 
   const isLandingView = !state.runId && state.graph.nodes.length === 0 &&
     !isPlanning &&
@@ -2500,6 +2713,7 @@ export default function App() {
                   <GraphWorkbench
                     key={foregroundGeneration.current}
                     state={state}
+                    transcriptRunId={transcriptRunId}
                     activity={activities[state.runId] ?? []}
                     routeType={routeType}
                     selected={selected}

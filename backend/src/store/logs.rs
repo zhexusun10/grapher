@@ -32,6 +32,7 @@ fn insert_chunks(db: &Connection, run: &str, id: &str, start: usize, text: &str,
 #[serde(rename_all = "camelCase")]
 pub struct LogPage {
     pub content: String,
+    pub start_offset: usize,
     pub next_offset: usize,
     pub total_bytes: usize,
     pub complete: bool,
@@ -100,7 +101,7 @@ impl Store {
     pub fn execution_log_page(&self, run: &str, id: &str, offset: usize, limit: usize) -> Result<LogPage, String> {
         let total = self.log_bytes(run, id)?;
         if offset > total { return Err("Invalid output offset".into()); }
-        if offset == total { return Ok(LogPage { content: String::new(), next_offset: offset, total_bytes: total, complete: true }); }
+        if offset == total { return Ok(LogPage { content: String::new(), start_offset: offset, next_offset: offset, total_bytes: total, complete: true }); }
         let start: i64 = self.connection.query_row(
             "SELECT offset FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<=?3 ORDER BY offset DESC LIMIT 1",
             params![id, run, offset as i64], |r| r.get(0),
@@ -125,7 +126,51 @@ impl Store {
             next = block_start + to;
             if to < bytes { break; }
         }
-        Ok(LogPage { content, next_offset: next, total_bytes: total, complete: next == total })
+        Ok(LogPage { content, start_offset: offset, next_offset: next, total_bytes: total, complete: next == total })
+    }
+
+    /// Read a bounded tail of a log. The returned start offset is aligned to a
+    /// stored chunk boundary (and includes one preceding chunk when possible),
+    /// so callers can prepend older pages without losing a line split at the
+    /// edge of the window.
+    pub fn execution_log_tail_page(&self, run: &str, id: &str, before: usize, limit: usize) -> Result<LogPage, String> {
+        let total = self.log_bytes(run, id)?;
+        let end = before.min(total);
+        if end == 0 {
+            return Ok(LogPage { content: String::new(), start_offset: 0, next_offset: 0, total_bytes: total, complete: total == 0 });
+        }
+        let candidate = end.saturating_sub(limit);
+        let chunk_start: usize = self.connection.query_row(
+            "SELECT offset FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<=?3 ORDER BY offset DESC LIMIT 1",
+            params![id, run, candidate as i64], |r| r.get::<_, i64>(0),
+        ).map_err(|e| e.to_string())? as usize;
+        let start: usize = self.connection.query_row(
+            "SELECT offset FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<?3 ORDER BY offset DESC LIMIT 1",
+            params![id, run, chunk_start as i64], |r| r.get::<_, i64>(0),
+        ).optional().map_err(|e| e.to_string())?.map(|value: i64| value as usize).unwrap_or(chunk_start);
+        let mut stmt = self.connection.prepare(
+            "SELECT offset,bytes,text FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset>=?3 AND offset<?4 ORDER BY offset",
+        ).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![id, run, start as i64, end as i64]).map_err(|e| e.to_string())?;
+        let mut content = String::new();
+        let mut next = start;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let block_start = row.get::<_, i64>(0).map_err(|e| e.to_string())? as usize;
+            let bytes = row.get::<_, i64>(1).map_err(|e| e.to_string())? as usize;
+            let text: String = row.get(2).map_err(|e| e.to_string())?;
+            if text.len() != bytes || block_start > next { return Err("Corrupt execution log".into()); }
+            let from = next.saturating_sub(block_start);
+            if from > text.len() || !text.is_char_boundary(from) { return Err("Invalid output offset".into()); }
+            let to = floor_boundary(&text, end.saturating_sub(block_start));
+            if to < from { return Err("Invalid output offset".into()); }
+            content.push_str(&text[from..to]);
+            next = block_start + to;
+            if to < bytes { break; }
+        }
+        // Keep the complete byte range, including a possible leading JSONL
+        // fragment. Dropping through its newline can drop an entire tool result
+        // and can return a non-progressing empty page for a long record.
+        Ok(LogPage { content, start_offset: start, next_offset: next, total_bytes: total, complete: next == total })
     }
 
     // Only this compatibility path materializes legacy log text. Normal load

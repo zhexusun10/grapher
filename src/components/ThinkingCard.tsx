@@ -11,6 +11,7 @@ interface ThinkingCardProps {
   isStreaming?: boolean;
   title?: string;
   defaultExpanded?: boolean;
+  autoExpandWhileStreaming?: boolean;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
   className?: string;
@@ -23,6 +24,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     isStreaming: directStreaming,
     title = t("思维链推理 (Chain of Thought)"),
     defaultExpanded = true,
+    autoExpandWhileStreaming = true,
     expanded,
     onExpandedChange,
     className = "",
@@ -37,7 +39,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const bodyRef = useRef<HTMLDivElement>(null);
     const userScrolledUpRef = useRef(false);
 
-    const isExpanded = expanded ?? (userToggled !== null ? userToggled : defaultExpanded || isStreaming);
+    const isExpanded = expanded ?? (userToggled !== null ? userToggled : defaultExpanded || (autoExpandWhileStreaming && isStreaming));
 
     // Auto-scroll within the thinking box while streaming if user hasn't scrolled up
     useEffect(() => {
@@ -91,36 +93,31 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
           title={isExpanded ? t("点击折叠思维链") : t("点击展开思维链")}
         >
           <div className="thinking-header-left">
+            <span className="thinking-expand-icon">
+              {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </span>
             <div className={`thinking-icon-box ${isStreaming ? "pulse" : ""}`}>
               {isStreaming ? <Sparkles size={14} /> : <Brain size={14} />}
             </div>
             <span className="thinking-title">{title}</span>
-            {isStreaming ? (
-              <span className="thinking-status streaming">
-                <span className="thinking-pulse-dot" />
-                {t("思考中...")}</span>
-            ) : (
-              <span className="thinking-status completed">
-                {t("已完成 ")}{charCount > 0 ? t("({0} 字符)", charCount) : ""}
-              </span>
-            )}
           </div>
 
           <div className="thinking-header-right">
+            {isStreaming && (
+              <span className="thinking-status streaming">
+                <span className="thinking-pulse-dot" />
+                <span>{t("思考中...")}</span>
+              </span>
+            )}
             {charCount > 0 && (
               <button
                 type="button"
                 className="thinking-copy-btn"
                 onClick={handleCopy}
-                title={t("复制思维链内容")}
               >
-                {isCopied ? <Check size={12} className="text-success" /> : <Copy size={12} />}
-                <span>{isCopied ? t("已复制") : t("复制")}</span>
+                {isCopied ? <Check size={12} /> : <Copy size={12} />}
               </button>
             )}
-            <div className="thinking-toggle-btn">
-              {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            </div>
           </div>
         </div>
 
