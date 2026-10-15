@@ -423,6 +423,8 @@ export const en: Record<string, string> = {
   "发送以实时调整方向 (Steer)": "Send to steer execution in real time",
   "点击打断执行": "Click to interrupt execution",
   "发送消息": "Send message",
+  "放大输入框": "Expand input",
+  "收起输入框": "Collapse input",
   "取消修改 (Esc)": "Cancel edit (Esc)",
   "关闭 (Esc)": "Close (Esc)",
   "取消修改": "Cancel edit",

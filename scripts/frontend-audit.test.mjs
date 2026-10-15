@@ -48,7 +48,8 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
     if (await handler(route, command, body)) return;
     const defaults = { provider_auth: catalog, pi_extensions: { globalDirectory: "mock", extensions: [] },
       environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true },
-      list_files: { files: [] }, list_skills: { skills: [] } };
+      list_files: { files: [] }, list_skills: { skills: [] },
+      write_workspace_file: { success: true }, delete_workspace_file: { success: true } };
     if (Object.hasOwn(defaults, command)) return route.fulfill({ json: { result: defaults[command] } });
     errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ status: 500, json: { error: `Unexpected API: ${command}` } });
@@ -419,6 +420,128 @@ test("Planner and Node Agent tool history both render cards in headless browser"
   } finally { await context.close(); }
 });
 
+
+for (const fixtureName of ["prompt", "compactPrompt"]) {
+  test(`${fixtureName} expands only when full and preserves edits, selection and focus when toggled`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(fixtureName);
+    try {
+      const input = page.locator("textarea");
+      const expand = page.getByRole("button", { name: "Expand input", exact: true });
+      const collapse = page.getByRole("button", { name: "Collapse input", exact: true });
+      await input.fill("Short draft");
+      assert.equal(await expand.count(), 0);
+      const draft = Array.from({ length: 40 }, (_, index) => `Draft line ${index}: editable 中文 content`).join("\n");
+      await input.fill(draft);
+      await expand.waitFor();
+      const originalHeight = (await input.boundingBox()).height;
+      const buttonBounds = await expand.boundingBox();
+      const inputBounds = await input.boundingBox();
+      assert.ok(buttonBounds.x + buttonBounds.width <= inputBounds.x + inputBounds.width);
+      assert.ok(Math.abs(buttonBounds.y - inputBounds.y) < buttonBounds.height, "toggle is at the input's top right");
+      await input.evaluate(element => { element.setSelectionRange(5, 12); element.scrollTop = 60; });
+      await expand.click();
+      await collapse.waitFor();
+      assert.equal(await collapse.getAttribute("aria-expanded"), "true");
+      assert.deepEqual(await input.evaluate(element => ({ start: element.selectionStart, end: element.selectionEnd, focused: document.activeElement === element })),
+        { start: 5, end: 12, focused: true });
+      assert.equal(await input.inputValue(), draft);
+      assert.ok((await input.boundingBox()).height > originalHeight);
+      const expandedBounds = await page.locator(".prompt-box-container").boundingBox();
+      assert.ok(Math.abs(expandedBounds.height - page.viewportSize().height * 0.8) < 2, "expanded composer occupies 80% of the viewport");
+      await input.press("ControlOrMeta+End");
+      await input.press("Shift+Enter");
+      await page.keyboard.insertText("Edited while expanded");
+      const editedDraft = await input.inputValue();
+      assert.ok(editedDraft.endsWith("\nEdited while expanded"));
+      await collapse.click();
+      await expand.waitFor();
+      assert.equal(await input.inputValue(), editedDraft);
+      assert.equal((await input.boundingBox()).height, originalHeight);
+      await expand.click();
+      await input.press("Escape");
+      await expand.waitFor();
+      assert.equal(await input.inputValue(), editedDraft);
+      assert.equal(await page.evaluate(() => window.audit.cancels ?? 0), 0, "Escape collapses without cancelling the draft");
+      await input.fill("Short again");
+      await expand.waitFor({ state: "detached" });
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("prompt expansion responds to container width, external values and viewport height", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("prompt");
+  try {
+    const input = page.locator("textarea");
+    const box = page.locator(".prompt-box-container");
+    const expand = page.getByRole("button", { name: "Expand input", exact: true });
+    await input.fill("Responsive editing text ".repeat(20));
+    assert.equal(await expand.count(), 0);
+    await box.evaluate(element => { element.style.width = "260px"; });
+    await expand.waitFor();
+    await box.evaluate(element => { element.style.width = "100%"; });
+    await expand.waitFor({ state: "detached" });
+    await page.evaluate(() => window.audit.setValue("Externally restored draft\n".repeat(40)));
+    await expand.click();
+    await page.getByRole("button", { name: "Collapse input", exact: true }).waitFor();
+    await page.setViewportSize({ width: 900, height: 600 });
+    await page.waitForFunction(() => Math.abs(document.querySelector(".prompt-box-container").getBoundingClientRect().height - innerHeight * 0.8) < 2);
+    assert.equal(await input.inputValue(), "Externally restored draft\n".repeat(40));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("expanded prompt retains a rejected submission and collapses only after acceptance", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("prompt");
+  try {
+    const input = page.locator("textarea");
+    const draft = "Keep the full expanded draft\n".repeat(40).trim();
+    await input.fill(draft);
+    await page.getByRole("button", { name: "Expand input", exact: true }).click();
+    const collapse = page.getByRole("button", { name: "Collapse input", exact: true });
+    await page.evaluate(() => { window.audit.deferSubmit = true; });
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await page.waitForFunction(() => typeof window.audit.resolve === "function");
+    assert.equal(await collapse.isDisabled(), true);
+    assert.equal(await input.isDisabled(), true);
+    await page.evaluate(() => { window.audit.resolve(false); delete window.audit.resolve; });
+    await page.waitForFunction(() => !document.querySelector("textarea").disabled);
+    assert.equal(await input.inputValue(), draft);
+    assert.equal(await collapse.getAttribute("aria-expanded"), "true");
+    await input.press("Enter");
+    await page.waitForFunction(() => typeof window.audit.resolve === "function");
+    await page.evaluate(() => window.audit.resolve(true));
+    await page.waitForFunction(() => document.querySelector("textarea").value === "");
+    assert.equal(await collapse.count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Expand input", exact: true }).count(), 0);
+    assert.equal(await page.evaluate(() => window.audit.lastMessage), draft);
+    assert.equal(await page.evaluate(() => window.audit.submissions), 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("Escape dismisses suggestions before collapsing the expanded prompt and does not interrupt IME", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("prompt");
+  try {
+    const input = page.locator("textarea");
+    await input.fill("Multiline draft\n".repeat(40) + "@");
+    await page.getByRole("button", { name: "Expand input", exact: true }).click();
+    const collapse = page.getByRole("button", { name: "Collapse input", exact: true });
+    await page.locator(".prompt-box-suggestions-popover").waitFor();
+    await input.press("Escape");
+    await page.locator(".prompt-box-suggestions-popover").waitFor({ state: "detached" });
+    assert.equal(await collapse.getAttribute("aria-expanded"), "true");
+    await input.dispatchEvent("compositionstart");
+    await input.press("Escape");
+    assert.equal(await collapse.getAttribute("aria-expanded"), "true");
+    await input.dispatchEvent("compositionend");
+    await input.press("Escape");
+    await page.getByRole("button", { name: "Expand input", exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.audit.cancels ?? 0), 0);
+    assert.equal(await page.evaluate(() => window.audit.submissions ?? 0), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("late workspace completions cannot replace current files/skills; controlled input clears on accepted send", { timeout: 30_000 }, async () => {
   let oldRequests = 0, oldReplies = 0;

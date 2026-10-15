@@ -1381,6 +1381,11 @@ a,
   transition: transform 0.2s ease;
 }
 
+/* Give the expanded editor clear space instead of overlapping the welcome copy. */
+.landing-center-content:has(.prompt-box-container.expanded) .landing-title-container {
+  visibility: hidden;
+}
+
 @media (max-width: 960px) {
   .landing-title-container {
     right: 50%;
@@ -1573,6 +1578,28 @@ a,
 .prompt-box-textarea-row {
   width: 100%;
   display: flex;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.prompt-box-container.expanded {
+  height: 80vh;
+  height: 80dvh;
+}
+
+.prompt-box-container.expanded .prompt-box-textarea-row {
+  flex: 1;
+  min-height: 0;
+}
+
+.prompt-box-expand-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.prompt-box-expand-btn:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--border-default);
 }
 
 .prompt-box-textarea {
@@ -1585,7 +1612,10 @@ a,
   font-size: 16px;
   line-height: 1.5;
   resize: none;
-  padding: 4px 2px 2px 2px;
+  min-width: 0;
+  overflow-y: auto;
+  /* Reserve the toggle's space even while hidden so its arrival cannot rewrap text. */
+  padding: 4px 36px 2px 2px;
   box-sizing: border-box;
 }
 
@@ -1599,7 +1629,7 @@ a,
 .prompt-box-container.compact .prompt-box-textarea {
   font-size: 14px;
   line-height: 1.45;
-  padding: 2px 2px 0 2px;
+  padding: 2px 30px 0 2px;
 }
 
 .prompt-box-textarea::placeholder {
@@ -1615,6 +1645,7 @@ a,
   width: 100%;
   margin-top: 6px;
   padding-top: 2px;
+  flex-shrink: 0;
 }
 
 .prompt-box-container.compact .prompt-box-actions-row {

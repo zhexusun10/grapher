@@ -9,6 +9,8 @@ import {
   Square,
   FileText,
   Sparkles,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 import { runtimeService } from "../../services/runtime";
 import { formatFileSize, getFileIcon } from "../../utils/attachmentUtils";
@@ -92,6 +94,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const fileInputRef = useRef<HTMLInputElement | null>(null);
 
     const [internalValue, setInternalValue] = useState("");
+    const [isExpanded, setIsExpanded] = useState(false);
+    const [canExpand, setCanExpand] = useState(false);
+    const textareaId = useId();
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [isDraggingOver, setIsDraggingOver] = useState(false);
@@ -357,17 +362,42 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       [currentText, triggerStart, cursorPos, onChange]
     );
 
-    // Auto-adjust textarea height
-    useLayoutEffect(() => {
+    // Keep the normal auto-growing input, with an explicit expanded editing mode.
+    const resizeTextarea = useCallback(() => {
       const textarea = internalTextareaRef.current;
-      if (textarea) {
+      if (!textarea) return;
+      const scrollTop = textarea.scrollTop;
+      if (isExpanded) {
+        textarea.style.height = "100%";
+      } else {
         textarea.style.height = "auto";
         const maxHeight = compact ? 140 : 200;
         const minHeight = compact ? 36 : 46;
-        const targetHeight = Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight));
-        textarea.style.height = `${targetHeight}px`;
+        const contentHeight = textarea.scrollHeight;
+        setCanExpand(contentHeight >= maxHeight);
+        textarea.style.height = `${Math.max(minHeight, Math.min(contentHeight, maxHeight))}px`;
       }
-    }, [currentText, compact]);
+      textarea.scrollTop = scrollTop;
+    }, [compact, isExpanded]);
+
+    useLayoutEffect(() => {
+      resizeTextarea();
+    }, [currentText, resizeTextarea]);
+
+    // Wrapping can change when the window or workbench split is resized, too.
+    useLayoutEffect(() => {
+      const textarea = internalTextareaRef.current;
+      if (!textarea) return;
+      let width = textarea.getBoundingClientRect().width;
+      const observer = new ResizeObserver(() => {
+        const nextWidth = textarea.getBoundingClientRect().width;
+        if (nextWidth === width) return;
+        width = nextWidth;
+        resizeTextarea();
+      });
+      observer.observe(textarea);
+      return () => observer.disconnect();
+    }, [resizeTextarea]);
 
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const nextVal = e.target.value;
@@ -513,9 +543,27 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       if (currentAttachment) {
         setIsPreparing(true);
         try {
+          if (!currentAttachment.type.startsWith("image/")) {
+            try {
+              await currentAttachment.text();
+            } catch {
+              await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result as string);
+                reader.onerror = reject;
+                reader.readAsText(currentAttachment);
+              });
+            }
+          }
           await runtimeService.writeWorkspaceFile(currentAttachment, repository, { runId, node });
         } catch (err) {
-          console.warn("Failed to ensure file written to workspace before submit:", err);
+          console.error("Failed to process attached file:", err);
+          submittingRef.current = false;
+          if (mountedRef.current) {
+            setAttachmentError(t("无法读取附件，请重新选择文件后重试。"));
+            setIsSubmitting(false);
+          }
+          return;
         } finally {
           if (mountedRef.current) setIsPreparing(false);
         }
@@ -565,6 +613,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         }
 
         setInternalValue("");
+        setIsExpanded(false);
         onChange?.({ target: { value: "" } } as React.ChangeEvent<HTMLTextAreaElement>);
         setCursorPos(0);
         setDismissedTrigger(null);
@@ -619,7 +668,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         e.preventDefault();
         handleSubmitAction();
       } else if (e.key === "Escape") {
-        onCancel?.();
+        if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
+        if (isExpanded) {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsExpanded(false);
+        } else {
+          onCancel?.();
+        }
       }
     };
 
@@ -628,10 +684,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     return (
       <motion.div
         layoutId={layoutId || undefined}
-        // Keep the shared handoff, without stretching the text or stacking page motion.
+        // Keep the shared handoff; expanded editing must stay viewport-anchored on resize.
         layout={layoutId ? "position" : undefined}
-        transition={{ layout: { type: "tween", duration: reduceMotion ? 0 : 0.3, ease: [0.25, 0.1, 0.25, 1] } }}
-        className={`prompt-box-container ${compact ? "compact" : "landing"} ${disabled ? "disabled" : ""} ${isDraggingOver ? "dragging-over" : ""} ${className}`}
+        transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : 0.3, ease: [0.25, 0.1, 0.25, 1] } }}
+        className={`prompt-box-container ${compact ? "compact" : "landing"} ${isExpanded ? "expanded" : ""} ${disabled ? "disabled" : ""} ${isDraggingOver ? "dragging-over" : ""} ${className}`}
         onClick={() => {
           if (!disabled && !isBusy) {
             internalTextareaRef.current?.focus();
@@ -810,6 +866,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               if (typeof forwardedRef === "function") forwardedRef(el);
               else if (forwardedRef) forwardedRef.current = el;
             }}
+            id={restProps.id ?? textareaId}
             name="message"
             rows={1}
             value={currentText}
@@ -844,6 +901,25 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             disabled={disabled || isBusy || isPreparing || isSubmitting}
             className="prompt-box-textarea"
           />
+          {(canExpand || isExpanded) && (
+            <button
+              type="button"
+              className="prompt-box-icon-btn prompt-box-expand-btn"
+              aria-label={isExpanded ? t("收起输入框") : t("放大输入框")}
+              title={isExpanded ? t("收起输入框") : t("放大输入框")}
+              aria-expanded={isExpanded}
+              aria-controls={restProps.id ?? textareaId}
+              disabled={disabled || isBusy || isPreparing || isSubmitting}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={(event) => {
+                event.stopPropagation();
+                setIsExpanded((expanded) => !expanded);
+                internalTextareaRef.current?.focus({ preventScroll: true });
+              }}
+            >
+              {isExpanded ? <Minimize2 size={compact ? 14 : 16} /> : <Maximize2 size={compact ? 14 : 16} />}
+            </button>
+          )}
         </div>
 
         {/* Controls / Actions Row */}

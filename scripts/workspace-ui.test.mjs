@@ -108,6 +108,31 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     }
     await page.setViewportSize({ width: 1280, height: 768 });
 
+    // Expanded editing stays inside the real home layout without welcome-copy overlap.
+    const homeInput = page.locator(".landing-screen textarea");
+    const longDraft = "Editable home draft\n".repeat(40);
+    await homeInput.fill(longDraft);
+    await page.getByRole("button", { name: "Expand input", exact: true }).click();
+    for (const height of [900, 768, 480, 360]) {
+      await page.setViewportSize({ width: 1280, height });
+      const metrics = await page.evaluate(() => {
+        const prompt = document.querySelector(".landing-screen .prompt-box-container").getBoundingClientRect();
+        const title = document.querySelector(".landing-title-container");
+        const titleRect = title.getBoundingClientRect();
+        return { top: prompt.top, bottom: prompt.bottom, height: prompt.height,
+          titleOverlaps: title.checkVisibility({ checkVisibilityCSS: true }) && titleRect.bottom > prompt.top && titleRect.top < prompt.bottom,
+          documentHeight: document.documentElement.scrollHeight };
+      });
+      assert.ok(Math.abs(metrics.height - height * 0.8) < 2);
+      assert.ok(metrics.top >= 0 && metrics.bottom <= height, `expanded editor remains in the viewport: ${JSON.stringify(metrics)}`);
+      assert.equal(metrics.documentHeight, height);
+      assert.equal(metrics.titleOverlaps, false);
+      assert.equal(await homeInput.inputValue(), longDraft);
+    }
+    await page.getByRole("button", { name: "Collapse input", exact: true }).click();
+    await homeInput.fill("");
+    await page.setViewportSize({ width: 1280, height: 768 });
+
     await page.locator('[data-run-id="run-a"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Alpha conversation" }).waitFor();
 

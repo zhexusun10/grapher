@@ -3,8 +3,7 @@
 > **Don't orchestrate agents. Compile work.**
 >
 
-[![Linux CI](https://github.com/zhexusun10/grapher/actions/workflows/linux-native.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/linux-native.yml)
-[![Windows CI](https://github.com/zhexusun10/grapher/actions/workflows/windows-native.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/windows-native.yml)
+[![CI](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 

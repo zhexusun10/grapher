@@ -58,14 +58,22 @@ function BubbleFixture() {
       return new Promise<boolean>(resolve => { audit.resolve = resolve; });
     }} />;
 }
-function PromptFixture() {
+function PromptFixture({ compact = false, uncontrolled = false }: { compact?: boolean; uncontrolled?: boolean }) {
   const [repository, setRepository] = useState("/a");
   const [value, setValue] = useState("");
   audit.switchRepository = () => { setRepository("/b"); setValue(""); };
+  audit.setValue = setValue;
   audit.value = value;
-  return <PromptBox repository={repository} value={value} onChange={event => setValue(event.target.value)}
+  return <PromptBox compact={compact} repository={repository} value={uncontrolled ? undefined : value}
+    onChange={uncontrolled ? undefined : event => setValue(event.target.value)}
+    onCancel={() => { audit.cancels = (audit.cancels ?? 0) + 1; }}
     onPaste={() => { audit.pastes = (audit.pastes ?? 0) + 1; }}
-    onSubmit={async () => { audit.submissions = (audit.submissions ?? 0) + 1; return true; }} />;
+    onSubmit={async message => {
+      audit.submissions = (audit.submissions ?? 0) + 1;
+      audit.lastMessage = message;
+      if (audit.deferSubmit) return new Promise<boolean>(resolve => { audit.resolve = resolve; });
+      return true;
+    }} />;
 }
 
 function UnchangedBubbleFixture() {
@@ -203,7 +211,8 @@ function ThinkingFixture() {
 }
 const cases: Record<string, React.ComponentType> = {
   settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, unchangedBubble: UnchangedBubbleFixture,
-  prompt: PromptFixture, interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
+  prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
+  interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
   polling: PollingFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
   thinking: ThinkingFixture,
 };
