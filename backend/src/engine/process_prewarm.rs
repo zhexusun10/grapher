@@ -72,6 +72,7 @@ fn schedule(config: &Config, role: PiRole, refill: bool) -> Result<(), String> {
         command
             .args(["--grapher-prewarm", mode(role)])
             .env("GRAPHER_MODE", mode(role))
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

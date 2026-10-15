@@ -5,6 +5,7 @@ import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
+import { isRuntimeEventsConnected, subscribeExecutionOutput, subscribeRuntimeEventsConnect } from "../services/runtimeEvents";
 import { cacheTranscriptWindow, executionTranscriptCache, registerTranscriptReader, transcriptFromCache } from "../services/transcriptCache";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
 import { markTranscriptPrepend } from "../services/transcriptScroll";
@@ -85,13 +86,15 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
   const windowRef = useRef(window);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
-  const [ready, setReady] = useState(!paged || window !== null || !settled);
+  const [ready, setReady] = useState(!paged || window !== null || (!settled && !execution.outputBytes));
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderBusy = useRef(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const announcedRef = useRef(false);
   const lifetime = useTranscriptReader("execution", cacheKey);
   const notifyLoading = useStableCallback((loading: boolean) => onLoadingChange?.(loading));
+  const hasOlder = ready && Boolean(window?.start);
+  const displayedText = paged ? (window ? renderTranscriptWindow(window) : "") : execution.output;
 
   // Node histories are view-owned. Going back to Planner releases their RAM,
   // including on collapse, Node-to-Node navigation and Conversation exit.
@@ -102,51 +105,6 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
     executionTranscriptCache.set(cacheKey, cacheTranscriptWindow(next));
     setWindow(next);
   }, [cacheKey]);
-
-  useLayoutEffect(() => {
-    if (ready && onInitialOutputReady && !announcedRef.current) {
-      announcedRef.current = true;
-      onInitialOutputReady(execution.id);
-    }
-  }, [ready, onInitialOutputReady, execution.id]);
-
-  useEffect(() => {
-    if (!paged) { setReady(true); notifyLoading(false); return; }
-    const abort = new AbortController();
-    const signal = AbortSignal.any([abort.signal, lifetime.current!]);
-    let emptyPages = 0;
-    setError("");
-    const cached = windowRef.current;
-    if (cached?.settled && settled && cached.end === cached.total && cached.end >= (execution.outputBytes ?? cached.total)) {
-      setReady(true); notifyLoading(false);
-      return () => abort.abort();
-    }
-    notifyLoading(!cached && settled);
-    const stop = startVisibilityPolling(async () => {
-      const before = windowRef.current;
-      const offset = before?.end ?? 0;
-      try {
-        const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, signal, false, !before, undefined,
-          !before ? INITIAL_TRANSCRIPT_BYTES : undefined);
-        if (signal.aborted) return null;
-        if (page.runId !== runId || page.executionId !== execution.id || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
-          throw new Error(t("执行记录与请求不匹配"));
-        }
-        const latest = windowRef.current;
-        const next = latest
-          ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, page.status !== "running")
-          : windowFromPage(page, page.status !== "running");
-        publish(next); // Empty terminal pages still update settled/total.
-        setReady(true); notifyLoading(false);
-        emptyPages = page.content ? 0 : emptyPages + 1;
-        return !page.complete ? 0 : page.status === "running" ? liveOutputDelay(emptyPages) : null;
-      } catch (caught) {
-        if (!signal.aborted) { setError(String(caught)); setReady(true); notifyLoading(false); }
-        return null;
-      }
-    });
-    return () => { abort.abort(); stop(); notifyLoading(false); };
-  }, [runId, execution.id, execution.status, paged, settled, retry, publish, notifyLoading, lifetime]);
 
   const loadOlder = useStableCallback(async (preserveReading = true) => {
     const before = windowRef.current;
@@ -165,11 +123,68 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
     finally { olderBusy.current = false; if (!signal.aborted) setLoadingOlder(false); }
   });
 
-  useAutoTranscriptHistory(wrapperRef, ready && !!window?.start, loadingOlder, error, window?.start,
-    preserveReading => { void loadOlder(preserveReading); });
+  const initialReady = useAutoTranscriptHistory(wrapperRef, hasOlder, loadingOlder, error, window,
+    preserveReading => { void loadOlder(preserveReading); }, ready);
 
-  const displayedText = paged ? (window ? renderTranscriptWindow(window) : "") : execution.output;
-  return <div ref={wrapperRef} data-execution-id={execution.id} data-run-id={runId} aria-busy={!ready}>
+  useLayoutEffect(() => {
+    notifyLoading(!initialReady);
+    return () => notifyLoading(false);
+  }, [initialReady, notifyLoading]);
+  useLayoutEffect(() => {
+    if (initialReady && !announcedRef.current) {
+      announcedRef.current = true;
+      onInitialOutputReady?.(execution.id);
+    }
+  }, [initialReady, onInitialOutputReady, execution.id]);
+
+  useEffect(() => {
+    if (!paged) { setReady(true); return; }
+    const abort = new AbortController();
+    const signal = AbortSignal.any([abort.signal, lifetime.current!]);
+    let emptyPages = 0;
+    setError("");
+    const cached = windowRef.current;
+    if (cached?.settled && settled && cached.end === cached.total && cached.end >= (execution.outputBytes ?? cached.total)) {
+      setReady(true);
+      return () => abort.abort();
+    }
+    const stop = startVisibilityPolling(async () => {
+      const before = windowRef.current;
+      const offset = before?.end ?? 0;
+      try {
+        const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, signal, false, !before, undefined,
+          !before ? INITIAL_TRANSCRIPT_BYTES : undefined);
+        if (signal.aborted) return null;
+        if (page.runId !== runId || page.executionId !== execution.id || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
+          throw new Error(t("执行记录与请求不匹配"));
+        }
+        const latest = windowRef.current;
+        const next = latest
+          ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, page.status !== "running")
+          : windowFromPage(page, page.status !== "running");
+        publish(next); // Empty terminal pages still update settled/total.
+        setReady(true);
+        emptyPages = page.content ? 0 : emptyPages + 1;
+        if (!page.complete) return 0;
+        if (page.status !== "running") return null;
+        return isRuntimeEventsConnected() ? Number.POSITIVE_INFINITY : liveOutputDelay(emptyPages);
+      } catch (caught) {
+        if (!signal.aborted) { setError(String(caught)); setReady(true); }
+        return null;
+      }
+    });
+    const unsubscribeOutput = settled ? () => {} : subscribeExecutionOutput(runId, execution.id, event => {
+      const current = windowRef.current;
+      if (!event.settled && current && current.end >= event.totalBytes) return;
+      stop.wake();
+    });
+    const unsubscribeConnect = settled ? () => {} : subscribeRuntimeEventsConnect(() => {
+      stop.wake();
+    });
+    return () => { unsubscribeOutput(); unsubscribeConnect(); abort.abort(); stop(); };
+  }, [runId, execution.id, execution.status, paged, settled, retry, publish, lifetime]);
+
+  return <div ref={wrapperRef} data-execution-id={execution.id} data-run-id={runId} aria-busy={!initialReady}>
     {error && <p role="alert">{localizeError(error)} <button onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
     <TranscriptHistoryStatus loading={loadingOlder} />
     {settled && !ready && !error ? <div className="transcript-loading" role="status" aria-label={t("正在加载历史记录…")}>

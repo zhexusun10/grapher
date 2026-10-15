@@ -53,21 +53,32 @@ fn activity() -> &'static ActivityBoard {
 }
 
 fn set_activity(run: &str, key: &str, kind: &str, node: &str) {
+    let mut changed = false;
     if let Ok(mut runs) = activity().runs.lock() {
-        runs.entry(run.into())
+        let entry = (kind.to_owned(), node.to_owned());
+        let prev = runs
+            .entry(run.into())
             .or_default()
-            .insert(key.into(), (kind.into(), node.into()));
+            .insert(key.into(), entry.clone());
+        changed = prev.as_ref() != Some(&entry);
+    }
+    if changed {
+        notify_snapshot_changed(run, "");
     }
 }
 
 fn clear_activity(run: &str, key: &str) {
+    let mut changed = false;
     if let Ok(mut runs) = activity().runs.lock() {
         if let Some(entries) = runs.get_mut(run) {
-            entries.remove(key);
+            changed = entries.remove(key).is_some();
             if entries.is_empty() {
                 runs.remove(run);
             }
         }
+    }
+    if changed {
+        notify_snapshot_changed(run, "");
     }
 }
 
@@ -4251,10 +4262,190 @@ pub fn dispatch(
     Ok(value)
 }
 
+enum RuntimeSignal {
+    SnapshotChanged {
+        run_id: String,
+        version: String,
+    },
+    OutputAvailable {
+        run_id: String,
+        execution_id: String,
+        total_bytes: usize,
+        settled: bool,
+    },
+}
+
+const MAX_SSE_SUBSCRIBERS: usize = 8;
+static ACTIVE_SSE_CLIENTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static NEXT_SSE_SUBSCRIBER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static SSE_SUBSCRIBERS: OnceLock<Mutex<Vec<(u64, std::sync::mpsc::SyncSender<Vec<u8>>)>>> =
+    OnceLock::new();
+static SSE_SIGNAL_TX: OnceLock<std::sync::mpsc::Sender<RuntimeSignal>> = OnceLock::new();
+
+fn sse_subscribers() -> &'static Mutex<Vec<(u64, std::sync::mpsc::SyncSender<Vec<u8>>)>> {
+    SSE_SUBSCRIBERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn sse_signal_sender() -> &'static std::sync::mpsc::Sender<RuntimeSignal> {
+    SSE_SIGNAL_TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<RuntimeSignal>();
+        let _ = thread::Builder::new()
+            .name("grapher-sse-coalescer".into())
+            .spawn(move || run_sse_coalescer(rx));
+        tx
+    })
+}
+
+fn run_sse_coalescer(rx: std::sync::mpsc::Receiver<RuntimeSignal>) {
+    let debounce = std::time::Duration::from_millis(45);
+    while let Ok(first) = rx.recv() {
+        let deadline = std::time::Instant::now() + debounce;
+        let mut snapshots: BTreeMap<String, String> = BTreeMap::new();
+        let mut outputs: BTreeMap<(String, String), (usize, bool)> = BTreeMap::new();
+        let mut current = Some(first);
+        loop {
+            if let Some(signal) = current.take() {
+                match signal {
+                    RuntimeSignal::SnapshotChanged { run_id, version } => {
+                        let entry = snapshots.entry(run_id).or_default();
+                        if !version.is_empty() {
+                            *entry = version;
+                        }
+                    }
+                    RuntimeSignal::OutputAvailable {
+                        run_id,
+                        execution_id,
+                        total_bytes,
+                        settled,
+                    } => {
+                        let entry = outputs
+                            .entry((run_id, execution_id))
+                            .or_insert((total_bytes, settled));
+                        entry.0 = entry.0.max(total_bytes);
+                        entry.1 |= settled;
+                    }
+                }
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match rx.recv_timeout(deadline - now) {
+                Ok(next) => current = Some(next),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        let mut payload = Vec::new();
+        for (run_id, version) in snapshots {
+            let data = serde_json::json!({ "runId": run_id, "version": version });
+            payload.extend_from_slice(
+                format!("event: snapshot_changed\ndata: {data}\n\n").as_bytes(),
+            );
+        }
+        for ((run_id, execution_id), (total_bytes, settled)) in outputs {
+            let data = serde_json::json!({
+                "runId": run_id,
+                "executionId": execution_id,
+                "totalBytes": total_bytes,
+                "settled": settled,
+            });
+            payload.extend_from_slice(
+                format!("event: output_available\ndata: {data}\n\n").as_bytes(),
+            );
+        }
+        if !payload.is_empty() {
+            broadcast_sse_bytes(&payload);
+        }
+    }
+}
+
+fn broadcast_sse_bytes(bytes: &[u8]) {
+    let Ok(mut subscribers) = sse_subscribers().lock() else {
+        return;
+    };
+    subscribers.retain(|(_, tx)| {
+        !matches!(
+            tx.try_send(bytes.to_vec()),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_))
+        )
+    });
+    ACTIVE_SSE_CLIENTS.store(subscribers.len(), Ordering::SeqCst);
+}
+
+pub(crate) fn notify_snapshot_changed(run_id: &str, version: &str) {
+    if ACTIVE_SSE_CLIENTS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let _ = sse_signal_sender().send(RuntimeSignal::SnapshotChanged {
+        run_id: run_id.to_owned(),
+        version: version.to_owned(),
+    });
+}
+
+pub(crate) fn notify_output_available(
+    run_id: &str,
+    execution_id: &str,
+    total_bytes: usize,
+    settled: bool,
+) {
+    if ACTIVE_SSE_CLIENTS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let _ = sse_signal_sender().send(RuntimeSignal::OutputAvailable {
+        run_id: run_id.to_owned(),
+        execution_id: execution_id.to_owned(),
+        total_bytes,
+        settled,
+    });
+}
+
+fn subscribe_runtime_events() -> SseStreamReceiver {
+    let _ = sse_signal_sender();
+    let id = NEXT_SSE_SUBSCRIBER_ID.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+    let _ = tx.try_send(b": connected\n\n".to_vec());
+    if let Ok(mut subscribers) = sse_subscribers().lock() {
+        while subscribers.len() >= MAX_SSE_SUBSCRIBERS {
+            let (_, oldest_tx) = subscribers.remove(0);
+            let _ = oldest_tx.try_send(Vec::new());
+        }
+        subscribers.push((id, tx));
+        ACTIVE_SSE_CLIENTS.store(subscribers.len(), Ordering::SeqCst);
+    }
+    SseStreamReceiver {
+        rx,
+        current: Vec::new(),
+        pos: 0,
+        subscriber_id: Some(id),
+    }
+}
+
+fn close_all_sse_subscribers() {
+    if let Ok(mut subscribers) = sse_subscribers().lock() {
+        for (_, tx) in subscribers.drain(..) {
+            let _ = tx.try_send(Vec::new());
+        }
+        ACTIVE_SSE_CLIENTS.store(0, Ordering::SeqCst);
+    }
+}
+
 struct SseStreamReceiver {
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
     current: Vec<u8>,
     pos: usize,
+    subscriber_id: Option<u64>,
+}
+
+impl Drop for SseStreamReceiver {
+    fn drop(&mut self) {
+        if let Some(id) = self.subscriber_id {
+            if let Ok(mut subscribers) = sse_subscribers().lock() {
+                subscribers.retain(|(sub_id, _)| *sub_id != id);
+                ACTIVE_SSE_CLIENTS.store(subscribers.len(), Ordering::SeqCst);
+            }
+        }
+    }
 }
 
 impl std::io::Read for SseStreamReceiver {
@@ -4265,24 +4456,26 @@ impl std::io::Read for SseStreamReceiver {
             self.pos += n;
             return Ok(n);
         }
-        match self.rx.recv() {
+        let next = match self.rx.recv_timeout(std::time::Duration::from_secs(15)) {
             Ok(bytes) => {
                 if bytes.is_empty() {
                     return Ok(0);
                 }
-                let n = bytes.len().min(buf.len());
-                buf[..n].copy_from_slice(&bytes[..n]);
-                if n < bytes.len() {
-                    self.current = bytes;
-                    self.pos = n;
-                } else {
-                    self.current.clear();
-                    self.pos = 0;
-                }
-                Ok(n)
+                bytes
             }
-            Err(_) => Ok(0),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => b": keep-alive\n\n".to_vec(),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
+        };
+        let n = next.len().min(buf.len());
+        buf[..n].copy_from_slice(&next[..n]);
+        if n < next.len() {
+            self.current = next;
+            self.pos = n;
+        } else {
+            self.current.clear();
+            self.pos = 0;
         }
+        Ok(n)
     }
 }
 
@@ -4564,6 +4757,7 @@ pub fn run() -> Result<(), String> {
             crate::engine::terminate_all();
             crate::native::shutdown_runtime();
             crate::provider_auth::shutdown();
+            close_all_sse_subscribers();
             shutdown_server.unblock();
         }
     });
@@ -4699,6 +4893,32 @@ fn handle_http_request(
     }
     let url = request.url().split('?').next().unwrap_or("/").to_string();
     if let Some(command) = url.strip_prefix("/api/") {
+        if command == "events" && request.method() == &tiny_http::Method::Get {
+            let cross_site = request.headers().iter().any(|h| {
+                h.field.equiv("Sec-Fetch-Site")
+                    && h.value.as_str().eq_ignore_ascii_case("cross-site")
+            });
+            if cross_site {
+                let _ = request
+                    .respond(Response::from_string("Cross-site SSE rejected").with_status_code(403));
+                return;
+            }
+            let stream = subscribe_runtime_events();
+            let mut response = Response::empty(200)
+                .with_data(stream, None)
+                .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
+                .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
+                .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
+                .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
+            if let Some(ref origin) = req_origin {
+                if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
+                {
+                    response = response.with_header(hdr);
+                }
+            }
+            let _ = request.respond(response);
+            return;
+        }
         // JSON-only POST + exact Host/Origin checks limit browser access.
         // This is still an unauthenticated, trusted-user local API.
         let is_json = request.headers().iter().any(|h| {
@@ -4866,16 +5086,23 @@ fn handle_http_request(
                 rx,
                 current: Vec::new(),
                 pos: 0,
+                subscriber_id: None,
             };
             let mut response = Response::empty(200)
                 .with_data(stream, None)
                 .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
                 .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
                 .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
-                .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
+                .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap())
+                .with_header(Header::from_bytes("X-Grapher-Events", "1").unwrap());
             if let Some(ref origin) = req_origin {
                 if let Ok(hdr) =
                     Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
+                {
+                    response = response.with_header(hdr);
+                }
+                if let Ok(hdr) =
+                    Header::from_bytes("Access-Control-Expose-Headers", "X-Grapher-Events")
                 {
                     response = response.with_header(hdr);
                 }
@@ -4906,9 +5133,14 @@ fn handle_http_request(
         let mut response = Response::from_string(body.to_string())
             .with_status_code(status)
             .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
-            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+            .with_header(Header::from_bytes("X-Grapher-Events", "1").unwrap());
         if let Some(ref origin) = req_origin {
             if let Ok(hdr) = Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()) {
+                response = response.with_header(hdr);
+            }
+            if let Ok(hdr) = Header::from_bytes("Access-Control-Expose-Headers", "X-Grapher-Events")
+            {
                 response = response.with_header(hdr);
             }
         }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } fr
 import type { RuntimeActivity, Snapshot } from "../types";
 import { runtimeService } from "../services/runtime";
 import { startVisibilityPolling } from "../services/visibilityPolling";
+import { isRuntimeEventsConnected, subscribeRuntimeEventsConnect, subscribeSnapshotChanges } from "../services/runtimeEvents";
 import { mapWithConcurrency } from "../services/boundedRequests";
 
 const livePhases = new Set(["planning", "running", "awaiting_approval", "publishing", "merging", "paused", "needs_attention"]);
@@ -18,6 +19,8 @@ export function useSnapshotPolling(
   heldRunId = "",
 ) {
   const versions = useRef(new Map<string, string>());
+  const notifiedVersions = useRef(new Map<string, string>());
+  const dirtyRuns = useRef(new Set<string>());
   const phases = useRef(new Map<string, string>());
   const revisions = useRef(new Map<string, number>());
   const activeRuns = useRef(new Set<string>());
@@ -35,6 +38,7 @@ export function useSnapshotPolling(
     if (hasRunningWork) writerRuns.current.add(status.runId);
     else writerRuns.current.delete(status.runId);
     versions.current.delete(status.runId);
+    notifiedVersions.current.delete(status.runId);
     // Actions supersede polls already in flight, even at the same event sequence.
     revisions.current.set(status.runId, (revisions.current.get(status.runId) ?? 0) + 1);
   }, []);
@@ -52,17 +56,27 @@ export function useSnapshotPolling(
     for (const id of phases.current.keys()) {
       if (retained.has(id)) continue;
       phases.current.delete(id); versions.current.delete(id); revisions.current.delete(id);
+      notifiedVersions.current.delete(id); dirtyRuns.current.delete(id);
       activeRuns.current.delete(id); writerRuns.current.delete(id);
     }
     if (!ids.length && !viewedRunId) ids.push("");
-    const delay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) || (viewedRunId && (phases.current.get(viewedRunId) === "needs_attention" || viewedHasActiveExecutions)) ? 750 : 2500;
+    const fallbackDelay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) || (viewedRunId && (phases.current.get(viewedRunId) === "needs_attention" || viewedHasActiveExecutions)) ? 750 : 2500;
+    const nextDelay = () => {
+      if (dirtyRuns.current.size > 0) return 150;
+      if (isRuntimeEventsConnected()) return Number.POSITIVE_INFINITY;
+      return fallbackDelay();
+    };
     const poll = async () => {
+      const targetIds = isRuntimeEventsConnected() && dirtyRuns.current.size > 0
+        ? [...dirtyRuns.current]
+        : ids;
+      dirtyRuns.current.clear();
       // A slow/unavailable background Run cannot serialize the foreground request.
-      await mapWithConcurrency(ids, 4, async id => {
+      await mapWithConcurrency(targetIds, 4, async id => {
         if (cancelled) return;
         const phase = phases.current.get(id);
         const isViewed = id === viewedRunId;
-        if (!isViewed && phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id)) return;
+        if (!isViewed && phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id) && !notifiedVersions.current.has(id)) return;
         const revision = revisions.current.get(id) ?? 0;
         try {
           const { version, snapshot, activity } = await runtimeService.snapshotIfChanged(versions.current.get(id) ?? null, abort.signal, id || undefined);
@@ -100,6 +114,13 @@ export function useSnapshotPolling(
             return;
           }
           versions.current.set(id, version);
+          const targetVersion = notifiedVersions.current.get(id);
+          if (targetVersion && targetVersion !== version) {
+            // The Run mutex was busy during try_lock(); retry shortly.
+            dirtyRuns.current.add(id);
+          } else {
+            notifiedVersions.current.delete(id);
+          }
           if (activity?.length) activeRuns.current.add(id);
           else activeRuns.current.delete(id);
           observeActivity(snapshot?.runId ?? id, activity ?? []);
@@ -116,10 +137,35 @@ export function useSnapshotPolling(
           if (!cancelled) console.warn("Snapshot poll error:", id, error);
         }
       });
-      return cancelled ? null : delay();
+      return cancelled ? null : nextDelay();
     };
-    const stopPolling = startVisibilityPolling(poll, delay());
-    return () => { cancelled = true; stopPolling(); abort.abort(); };
+    const stopPolling = startVisibilityPolling(poll, nextDelay());
+    const unsubscribeSnapshot = subscribeSnapshotChanges(event => {
+      const targetId = event.runId || (ids.includes("") ? "" : viewedRunId);
+      if (targetId && !retained.has(targetId) && targetId !== viewedRunId) return;
+      if (event.version && versions.current.get(targetId) === event.version && targetId !== heldRunIdRef.current) {
+        return;
+      }
+      if (event.version) {
+        notifiedVersions.current.set(targetId, event.version);
+      }
+      dirtyRuns.current.add(targetId);
+      stopPolling.wake();
+    });
+    const unsubscribeConnect = subscribeRuntimeEventsConnect(reconnected => {
+      if (reconnected) {
+        for (const id of ids) dirtyRuns.current.add(id);
+        stopPolling.wake();
+      } else if (activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? ""))) {
+        for (const id of ids) {
+          if (workingPhases.has(phases.current.get(id) ?? "") || writerRuns.current.has(id) || activeRuns.current.has(id) || id === viewedRunId) {
+            dirtyRuns.current.add(id);
+          }
+        }
+        stopPolling.wake();
+      }
+    });
+    return () => { cancelled = true; unsubscribeSnapshot(); unsubscribeConnect(); stopPolling(); abort.abort(); };
   }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, viewedPhase, viewedHasActiveExecutions]);
   return setBackendStatus;
 }

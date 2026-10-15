@@ -75,9 +75,10 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const prefixChanged = beforeIds.length > 0 && ids[0] !== beforeIds[0];
   const parent = parentRef.current;
   const followingLatest = parent?.dataset.transcriptScrollMode === "latest";
-  let anchor = followingLatest || (parent && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1)
+  const readingHistory = !followingLatest && parent?.dataset.transcriptHistoryReading === "true";
+  let anchor = !readingHistory || (parent && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1)
     ? null : readingAnchor.current;
-  if (!followingLatest && prefixChanged && parent && ref.current) {
+  if (readingHistory && prefixChanged && parent && ref.current) {
     const top = parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top;
     if (top + parent.clientHeight > 0) {
       const retained = retainedRowAnchor(beforeIds, ids, previousOffsets.current, offsets, top);
@@ -90,6 +91,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   if (anchorIndex < 0) anchor = null;
   const anchorTop = anchor && parent
     ? offsets[anchorIndex] - (anchor.visualTop - parent.getBoundingClientRect().top - parent.clientTop) : null;
+  const preparingBottom = !followingLatest && !readingHistory &&
+    parent?.dataset.transcriptPreparing === "true";
   const updateViewport = useCallback(() => {
     const element = ref.current, parent = parentRef.current;
     if (!element || !parent) {
@@ -162,6 +165,9 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       if (row) parent.scrollTop += row.getBoundingClientRect().top - retained.visualTop;
       restoredScrollTop.current = parent.scrollTop;
       updateViewport();
+    } else if (preparingBottom && parent) {
+      if (before !== offsets) parent.scrollTop = parent.scrollHeight;
+      updateViewport();
     }
     // Ordinary measurements retain the reading anchor too, without confusing
     // first measurements during a scroll with a history prepend.
@@ -178,10 +184,11 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     }
     previousOffsets.current = offsets;
     previousOffsetIds.current = ids;
-  }, [offsets, ids, viewport.top, anchor, followingLatest, updateViewport]);
+  }, [offsets, ids, viewport.top, anchor, followingLatest, preparingBottom, updateViewport]);
   const virtual = typeof window !== "undefined" && viewport.hasScroller && items.length > 35;
-  const top = anchorTop ?? viewport.top;
   const height = parent?.clientHeight || viewport.height;
+  const totalHeight = offsets.at(-1) ?? 0;
+  const top = anchorTop ?? (preparingBottom ? Math.max(viewport.top, totalHeight - height) : viewport.top);
   const range = virtual ? visibleRows(offsets, top, height, 16)
     : { start: 0, end: items.length, paddingTop: 0, paddingBottom: 0 };
   return <div ref={ref} style={{ display: "flex", flexDirection: "column", gap,

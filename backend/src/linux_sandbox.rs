@@ -263,7 +263,8 @@ pub fn execution_command(
     command
         .current_dir(&current)
         .env("PI_CODING_AGENT_DIR", pi_dir)
-        .env("TMPDIR", &session);
+        .env("TMPDIR", &session)
+        .env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
 }
 

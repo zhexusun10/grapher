@@ -254,6 +254,17 @@ impl Runtime {
 
     pub fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+        crate::server::notify_snapshot_changed(&self.state.run_id, &self.snapshot_version());
+    }
+
+    fn execution_bytes(&self, execution_id: &str) -> usize {
+        self.state
+            .executions
+            .iter()
+            .chain(&self.state.mergers)
+            .find(|e| e.id == execution_id)
+            .map(|e| e.output.len().max(e.output_bytes))
+            .unwrap_or(0)
     }
 
     pub fn emit(&mut self, mut kind: EventKind) -> Result<(), String> {
@@ -361,8 +372,48 @@ impl Runtime {
                 }
             }
         }
+        let output_target = match &kind {
+            EventKind::Output { execution_id, .. } => {
+                Some((execution_id.clone(), self.execution_bytes(execution_id)))
+            }
+            _ => None,
+        };
+        let terminal_target = match &kind {
+            EventKind::Finished { execution_id, .. }
+            | EventKind::Failed {
+                execution_id: Some(execution_id),
+                ..
+            }
+            | EventKind::MergerFinished { execution_id, .. }
+            | EventKind::MergerFailed { execution_id, .. } => Some(execution_id.clone()),
+            _ => None,
+        };
         self.store.append(&mut self.state, kind)?;
-        self.touch();
+        if let Some((execution_id, before_bytes)) = output_target {
+            let after_bytes = self.execution_bytes(&execution_id);
+            if before_bytes == 0 && after_bytes > 0 {
+                self.touch();
+            } else {
+                self.revision = self.revision.wrapping_add(1);
+            }
+            crate::server::notify_output_available(
+                &self.state.run_id,
+                &execution_id,
+                after_bytes,
+                false,
+            );
+        } else {
+            self.touch();
+            if let Some(execution_id) = terminal_target {
+                let after_bytes = self.execution_bytes(&execution_id);
+                crate::server::notify_output_available(
+                    &self.state.run_id,
+                    &execution_id,
+                    after_bytes,
+                    true,
+                );
+            }
+        }
         Ok(())
     }
 
@@ -375,8 +426,57 @@ impl Runtime {
         for kind in &events {
             crate::cleanup::remember_event(&self.root, &self.store, &self.state, kind)?;
         }
+        let mut has_non_output = false;
+        let mut targets: std::collections::BTreeMap<String, (usize, bool)> =
+            std::collections::BTreeMap::new();
+        for kind in &events {
+            match kind {
+                EventKind::Output { execution_id, .. } => {
+                    let before = self.execution_bytes(execution_id);
+                    targets.entry(execution_id.clone()).or_insert((before, false));
+                }
+                EventKind::Finished { execution_id, .. }
+                | EventKind::Failed {
+                    execution_id: Some(execution_id),
+                    ..
+                }
+                | EventKind::MergerFinished { execution_id, .. }
+                | EventKind::MergerFailed { execution_id, .. } => {
+                    has_non_output = true;
+                    let before = self.execution_bytes(execution_id);
+                    targets
+                        .entry(execution_id.clone())
+                        .or_insert((before, false))
+                        .1 = true;
+                }
+                _ => {
+                    has_non_output = true;
+                }
+            }
+        }
         self.store.append_batch(&mut self.state, events)?;
-        self.touch();
+        let mut crossed_zero = false;
+        let mut notifications = Vec::with_capacity(targets.len());
+        for (execution_id, (before_bytes, settled)) in targets {
+            let after_bytes = self.execution_bytes(&execution_id);
+            if before_bytes == 0 && after_bytes > 0 {
+                crossed_zero = true;
+            }
+            notifications.push((execution_id, after_bytes, settled));
+        }
+        if has_non_output || crossed_zero {
+            self.touch();
+        } else {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        for (execution_id, after_bytes, settled) in notifications {
+            crate::server::notify_output_available(
+                &self.state.run_id,
+                &execution_id,
+                after_bytes,
+                settled,
+            );
+        }
         Ok(())
     }
 

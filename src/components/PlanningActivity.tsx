@@ -60,6 +60,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
   const [retry, setRetry] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderBusy = useRef(false);
+  const announcedRef = useRef(false);
   const sectionRef = useRef<HTMLElement>(null);
   const lifetime = useTranscriptReader("planning", `${runId}:view:${key}`);
   const notifyReady = useStableCallback(() => onReady?.());
@@ -79,16 +80,45 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     setOutput(composePlanningOutput(planningIds, segments.current));
   }, [runId, key]);
 
+  const loadOlder = useStableCallback(async (preserveReading = true) => {
+    const signal = lifetime.current;
+    const id = olderTarget(planningIds, segments.current);
+    if (!ready || !id || olderBusy.current || !signal || signal.aborted) return;
+    const before = segments.current.get(id);
+    olderBusy.current = true; setLoadingOlder(true); setError("");
+    if (preserveReading) markTranscriptPrepend(sectionRef.current);
+    try {
+      const page = await runtimeService.getPlanningOutput(id, "planner", 0, signal, true, before?.start, OLDER_TRANSCRIPT_BYTES);
+      if (signal.aborted) return;
+      if (page.planningId !== id || page.role !== "planner") throw new Error(t("执行记录与请求不匹配"));
+      const latest = segments.current.get(id);
+      const next = latest ? prependTranscriptPage(latest, page) : windowFromPage(page, !page.running);
+      publish(id, next);
+    } catch (caught) { if (!signal.aborted) setError(caught instanceof Error ? caught.message : String(caught)); }
+    finally { olderBusy.current = false; if (!signal.aborted) setLoadingOlder(false); }
+  });
+
+  const initialReady = useAutoTranscriptHistory(sectionRef, hasOlder, loadingOlder, error, activeOutput,
+    preserveReading => { void loadOlder(preserveReading); }, ready);
+
   useLayoutEffect(() => { notifyOutput(output); }, [output, notifyOutput]);
-  useLayoutEffect(() => { if (ready) notifyReady(); }, [ready, notifyReady]);
+  useLayoutEffect(() => {
+    notifyLoading(!initialReady);
+    return () => notifyLoading(false);
+  }, [initialReady, notifyLoading]);
+  useLayoutEffect(() => {
+    if (initialReady && !announcedRef.current) {
+      announcedRef.current = true;
+      notifyReady();
+    }
+  }, [initialReady, notifyReady]);
 
   useEffect(() => {
     const abort = new AbortController();
     const signal = AbortSignal.any([abort.signal, lifetime.current!]);
     let emptyPages = 0;
     setError("");
-    if (!planningIds.length) { setReady(true); notifyLoading(false); return () => abort.abort(); }
-    notifyLoading(!segments.current.has(planningIds.at(-1)!));
+    if (!planningIds.length) { setReady(true); return () => abort.abort(); }
     const stop = startVisibilityPolling(async () => {
       try {
         const latestId = planningIds.at(-1)!;
@@ -111,42 +141,21 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
             : windowFromPage(page, !page.running);
           publish(planningId, next); // Also publish empty terminal pages.
           emptyPages = page.content ? 0 : emptyPages + 1;
-          if (planningId === latestId) { setReady(true); notifyLoading(false); }
+          if (planningId === latestId) setReady(true);
         }
-        setReady(true); notifyLoading(false);
+        setReady(true);
         const loaded = [...segments.current.values()];
         if (loaded.some(window => window.end < window.total)) return 0;
         return loaded.some(window => !window.settled) ? liveOutputDelay(emptyPages) : null;
       } catch (caught) {
-        if (!signal.aborted) { setError(caught instanceof Error ? caught.message : String(caught)); setReady(true); notifyLoading(false); }
+        if (!signal.aborted) { setError(caught instanceof Error ? caught.message : String(caught)); setReady(true); }
         return null;
       }
     });
-    return () => { abort.abort(); stop(); notifyLoading(false); };
-  }, [key, retry, running, notifyLoading, publish, lifetime]);
+    return () => { abort.abort(); stop(); };
+  }, [key, retry, running, publish, lifetime]);
 
-  const loadOlder = useStableCallback(async (preserveReading = true) => {
-    const signal = lifetime.current;
-    const id = olderTarget(planningIds, segments.current);
-    if (!ready || !id || olderBusy.current || !signal || signal.aborted) return;
-    const before = segments.current.get(id);
-    olderBusy.current = true; setLoadingOlder(true); setError("");
-    if (preserveReading) markTranscriptPrepend(sectionRef.current);
-    try {
-      const page = await runtimeService.getPlanningOutput(id, "planner", 0, signal, true, before?.start, OLDER_TRANSCRIPT_BYTES);
-      if (signal.aborted) return;
-      if (page.planningId !== id || page.role !== "planner") throw new Error(t("执行记录与请求不匹配"));
-      const latest = segments.current.get(id);
-      const next = latest ? prependTranscriptPage(latest, page) : windowFromPage(page, !page.running);
-      publish(id, next);
-    } catch (caught) { if (!signal.aborted) setError(caught instanceof Error ? caught.message : String(caught)); }
-    finally { olderBusy.current = false; if (!signal.aborted) setLoadingOlder(false); }
-  });
-
-  useAutoTranscriptHistory(sectionRef, hasOlder, loadingOlder, error, output,
-    preserveReading => { void loadOlder(preserveReading); });
-
-  return <section ref={sectionRef} className="planning-activity" aria-label={t("规划活动记录")}>
+  return <section ref={sectionRef} className="planning-activity" aria-label={t("规划活动记录")} aria-busy={!initialReady}>
     {error && <p role="alert">{localizeError(error)} <button type="button" onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
     <TranscriptHistoryStatus loading={loadingOlder} />
     {ready && !error && !output && <p>{t("没有可用的规划输出。")}</p>}
@@ -154,6 +163,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
       <VirtualizedTranscript output={activeOutput} inline
         onReachTop={hasOlder && !error ? () => { void loadOlder(); } : undefined}
         showUserTurns={showUserTurns} skipFirstUser={skipInitialUser} onUserResize={onUserResize}
+        settled={!running}
         onEditUser={onEditUser ? editUser : undefined} />
     </div>}
   </section>;

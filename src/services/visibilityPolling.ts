@@ -1,22 +1,28 @@
 type Visibility = Pick<Document, "hidden" | "addEventListener" | "removeEventListener">;
 
-/** Serial polling with bounded hidden-tab work. Returning null settles permanently.
+export type PollingController = (() => void) & {
+  wake: () => void;
+};
+
+/** Serial polling with bounded hidden-tab work. Returning null settles permanently;
+ * returning Infinity suspends timer polling until woken by wake() or visibilitychange.
  * Becoming visible wakes the current cursor immediately, including during an in-flight
  * request; it never starts a second overlapping request.
  */
 export function startVisibilityPolling(
   poll: () => Promise<number | null>, initialDelay = 0,
   visibility: Visibility = document, hiddenDelay = 10_000,
-): () => void {
+): PollingController {
   let stopped = false, busy = false, wake = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const stop = () => {
+  const stop = (() => {
     stopped = true;
     clearTimeout(timer);
     visibility.removeEventListener("visibilitychange", changed);
-  };
+  }) as PollingController;
   const schedule = (delay: number) => {
     clearTimeout(timer);
+    if (!Number.isFinite(delay)) return;
     timer = setTimeout(run, visibility.hidden ? Math.max(hiddenDelay, delay) : delay);
   };
   const run = async () => {
@@ -37,6 +43,11 @@ export function startVisibilityPolling(
     if (stopped) return;
     if (busy) { if (!visibility.hidden) wake = true; return; }
     schedule(visibility.hidden ? hiddenDelay : 0);
+  };
+  stop.wake = () => {
+    if (stopped) return;
+    if (busy) { wake = true; return; }
+    schedule(0);
   };
   visibility.addEventListener("visibilitychange", changed);
   schedule(initialDelay);

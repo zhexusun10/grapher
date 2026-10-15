@@ -122,3 +122,124 @@ fn a_busy_renamed_alias_fails_fast_instead_of_opening_a_second_writer() {
     assert!(Arc::ptr_eq(&resolved, &busy));
     invalidate_service_cache(temp.path(), None);
 }
+
+#[test]
+fn sse_event_stream_coalesces_outputs_and_suppresses_mid_stream_snapshot_storms() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut stream = subscribe_runtime_events();
+    let mut connected_buf = [0u8; 64];
+    let n = std::io::Read::read(&mut stream, &mut connected_buf).unwrap();
+    assert_eq!(&connected_buf[..n], b": connected\n\n");
+
+    let mut runtime = Runtime::open_lazy(temp.path()).unwrap();
+    runtime.state.run_id = "sse-run".into();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": temp.path(), "model": "mock/model", "maxParallel": 1
+    }))
+    .unwrap();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "test sse".into(),
+                nodes: vec![Node {
+                    name: "node-1".into(),
+                    task: "work".into(),
+                }],
+                edges: vec![],
+            },
+            config,
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Started {
+            execution: Execution {
+                id: "exec-1".into(),
+                node: "node-1".into(),
+                revision: 0,
+                attempt: 1,
+                session_id: "sess-1".into(),
+                worktree: temp.path().to_string_lossy().into_owned(),
+                before: String::new(),
+                workspace_lineage: vec![],
+                after: None,
+                input: None,
+                result: None,
+                status: "running".into(),
+                output: String::new(),
+                output_bytes: 0,
+                pid: None,
+                started_at: now(),
+                completed_at: None,
+                metrics: None,
+            },
+        })
+        .unwrap();
+    // First output chunk (0 -> 6 bytes) emits both snapshot_changed and output_available.
+    runtime
+        .emit_outputs(vec![EventKind::Output {
+            execution_id: "exec-1".into(),
+            text: "first\n".into(),
+        }])
+        .unwrap();
+
+    let mut batch1 = vec![0u8; 1024];
+    let n1 = std::io::Read::read(&mut stream, &mut batch1).unwrap();
+    let frame1 = String::from_utf8_lossy(&batch1[..n1]);
+    assert!(
+        frame1.contains("event: snapshot_changed"),
+        "Creation, start and first output byte must emit snapshot_changed: {frame1}"
+    );
+    assert!(
+        frame1.contains("\"executionId\":\"exec-1\"") && frame1.contains("\"totalBytes\":6"),
+        "First output chunk must emit output_available with totalBytes=6: {frame1}"
+    );
+
+    // Subsequent burst of output chunks (>0 -> >0 bytes) must coalesce into one
+    // output_available with the final byte count and MUST NOT emit snapshot_changed.
+    runtime
+        .emit_outputs(vec![
+            EventKind::Output {
+                execution_id: "exec-1".into(),
+                text: "second\n".into(),
+            },
+            EventKind::Output {
+                execution_id: "exec-1".into(),
+                text: "third\n".into(),
+            },
+        ])
+        .unwrap();
+
+    let mut batch2 = vec![0u8; 1024];
+    let n2 = std::io::Read::read(&mut stream, &mut batch2).unwrap();
+    let frame2 = String::from_utf8_lossy(&batch2[..n2]);
+    assert!(
+        !frame2.contains("event: snapshot_changed"),
+        "Mid-stream output chunks must not trigger snapshot_changed storms: {frame2}"
+    );
+    assert!(
+        frame2.contains("event: output_available")
+            && frame2.contains("\"totalBytes\":19")
+            && frame2.contains("\"settled\":false"),
+        "Burst chunks must coalesce to totalBytes=19: {frame2}"
+    );
+
+    // Terminal event emits both snapshot_changed and output_available with settled=true.
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: "exec-1".into(),
+            head: String::new(),
+            output: String::new(),
+            output_bytes: 19,
+            metrics: None,
+        })
+        .unwrap();
+    let mut batch3 = vec![0u8; 1024];
+    let n3 = std::io::Read::read(&mut stream, &mut batch3).unwrap();
+    let frame3 = String::from_utf8_lossy(&batch3[..n3]);
+    assert!(frame3.contains("event: snapshot_changed"));
+    assert!(frame3.contains("\"settled\":true"));
+
+    drop(stream);
+}

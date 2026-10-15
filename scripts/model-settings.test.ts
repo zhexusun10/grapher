@@ -107,14 +107,14 @@ function renderRoles(config: Config, models: ProviderCatalog | undefined, envOve
 }
 
 test("thinking selectors use per-model Pi capabilities, including inherited models and Partitioner without off", () => {
-  const [partitioner, planner, node] = renderRoles(legacy, catalog);
-  for (const field of [partitioner, planner, node]) assert.deepEqual(field.values, ["off", "low", "high"]);
+  const [node, planner, partitioner] = renderRoles(legacy, catalog);
+  for (const field of [node, planner, partitioner]) assert.deepEqual(field.values, ["off", "low", "high"]);
   const config = updateRoleModelConfig(legacy, "nodeAgent", { model: "example/restricted", thinkingLevel: "xhigh" });
   const roles = renderRoles(config, catalog);
   for (const field of roles) assert.deepEqual(field.values, ["low", "high", "max"]);
-  assert.match(roles[0].select, /value="low" selected=""/);
+  assert.match(roles[0].select, /value="max" selected=""/);
   assert.match(roles[1].select, /value="max" selected=""/);
-  assert.match(roles[2].select, /value="max" selected=""/);
+  assert.match(roles[2].select, /value="low" selected=""/);
   assert.equal(config.thinkingLevel, "xhigh", "rendering must not mutate persisted settings");
 });
 
@@ -128,7 +128,7 @@ test("single-level models have a disabled selector and preserve the intent of se
   assert.equal(config.thinkingLevel, "high");
   assert.equal(config.roleModels?.planner?.thinkingLevel, "high");
   assert.equal(normalizeModelThinkingLevels(normalized, catalog), normalized, "normalization is idempotent");
-  const [partitioner, planner, node] = renderRoles(config, catalog);
+  const [node, planner, partitioner] = renderRoles(config, catalog);
   for (const field of [partitioner, node]) {
     assert.deepEqual(field.values, ["off"]);
     assert.match(field.select, /<select[^>]*disabled=""/);
@@ -184,7 +184,7 @@ test("capability refreshes and model switches use backend fallbacks rather than 
 });
 
 test("environment overrides stay visible without changing the saved model's supported choices", () => {
-  const [partitioner] = renderRoles(legacy, catalog, { partitioner: "example/plain", partitionerThinking: "off" });
+  const [, , partitioner] = renderRoles(legacy, catalog, { partitioner: "example/plain", partitionerThinking: "off" });
   assert.deepEqual(partitioner.values, ["off", "low", "high"]);
   assert.ok(partitioner.card.includes(`${t("环境变量覆盖：")}example/plain · off`));
   for (const field of renderRoles(legacy, catalog, {}, true)) assert.match(field.select, /<select[^>]*disabled=""/);

@@ -374,7 +374,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
   const [editingTaskNode, setEditingTaskNode] = useState("");
   const [taskDraft, setTaskDraft] = useState("");
-  const [historyLoading, setHistoryLoading] = useState(false);
   useEffect(() => {
     setAttemptId("");
     setExpandedAttemptIds(new Set());
@@ -743,17 +742,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const conversationGenerationRef = useRef(0);
   const isScrollingToBottomRef = useRef(false);
   const latestScrollRef = useRef<(() => void) | null>(null);
+  const setUserScrolledUp = useCallback((scrolledUp: boolean) => {
+    isUserScrolledUpRef.current = scrolledUp;
+    const el = chatScrollRef.current;
+    if (!el) return;
+    if (scrolledUp || !isPreparingConversationRef.current) delete el.dataset.transcriptPreparing;
+    else el.dataset.transcriptPreparing = "true";
+  }, []);
   const stopLatestScroll = useCallback(() => {
     if (latestScrollRef.current) {
       latestScrollRef.current();
       latestScrollRef.current = null;
-      isUserScrolledUpRef.current = true;
+      setUserScrolledUp(true);
     }
     isScrollingToBottomRef.current = false;
-  }, []);
+  }, [setUserScrolledUp]);
   const userGestureUpRef = useRef(false);
   const historyReadingRef = useRef(false);
-  const isPreparingConversationRef = useRef(false);
+  const isPreparingConversationRef = useRef(true);
+  const readyExecutionIdsRef = useRef(new Set<string>());
   const graphCanvasRef = useRef<HTMLDivElement>(null);
   const scrollBottomBtnRef = useRef<HTMLButtonElement>(null);
   const setScrollBottomVisible = useCallback((visible: boolean) => {
@@ -785,6 +792,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     isUserScrolledUpRef.current = saved?.isUserScrolledUp ?? false;
     historyReadingRef.current = false;
     suppressAutoScrollRef.current = false;
+    isPreparingConversationRef.current = true;
+    readyExecutionIdsRef.current.clear();
   }
 
   const handleChatScroll = useCallback(() => {
@@ -806,14 +815,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // When near bottom, definitely lock to bottom state (prevent elastic bounce from locking scrolled-up)
     if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && !userGestureUpRef.current) {
       isScrollingToBottomRef.current = false;
-      isUserScrolledUpRef.current = false;
+      setUserScrolledUp(false);
       setScrollBottomVisible(false);
       return;
     }
 
     if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && userGestureUpRef.current && scrollTop >= prevScrollTop) {
       userGestureUpRef.current = false;
-      isUserScrolledUpRef.current = false;
+      setUserScrolledUp(false);
       isScrollingToBottomRef.current = false;
       setScrollBottomVisible(false);
       return;
@@ -827,7 +836,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     if (isScrollingUp && distanceFromBottom > CONVERSATION_BOTTOM_THRESHOLD) {
-      isUserScrolledUpRef.current = true;
+      setUserScrolledUp(true);
       setScrollBottomVisible(showLatest);
       return;
     }
@@ -835,7 +844,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // A resize or a newly mounted transcript can change the distance without
     // any user scroll. Do not mistake that for an intentional scroll-up.
     setScrollBottomVisible(isUserScrolledUpRef.current && showLatest);
-  }, [setScrollBottomVisible]);
+  }, [setScrollBottomVisible, setUserScrolledUp]);
 
   const scrollToBottom = useCallback(() => {
     stopLatestScroll();
@@ -847,7 +856,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     suppressAutoScrollRef.current = false;
     historyReadingRef.current = false;
     if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
-    isUserScrolledUpRef.current = false;
+    setUserScrolledUp(false);
     userGestureUpRef.current = false;
     isScrollingToBottomRef.current = true;
     setScrollBottomVisible(false);
@@ -859,14 +868,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       lastScrollTopRef.current = el.scrollTop;
       setScrollBottomVisible(false);
     });
-  }, [stopLatestScroll, setScrollBottomVisible]);
+  }, [stopLatestScroll, setScrollBottomVisible, setUserScrolledUp]);
 
   const handleSendMessageWithScroll = useCallback(async (val: string, options?: PromptBoxSubmitOptions) => {
     const submittedDraft = composerDrafts?.get(composerDraftKey);
     stopLatestScroll();
     historyReadingRef.current = false;
     if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
-    isUserScrolledUpRef.current = false;
+    setUserScrolledUp(false);
     userGestureUpRef.current = false;
     isScrollingToBottomRef.current = true;
     setScrollBottomVisible(false);
@@ -877,7 +886,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       composerDrafts?.delete(composerDraftKey);
     }
     return accepted !== false;
-  }, [onSendMessage, stopLatestScroll, setScrollBottomVisible, composerDrafts, composerDraftKey]);
+  }, [onSendMessage, stopLatestScroll, setScrollBottomVisible, setUserScrolledUp, composerDrafts, composerDraftKey]);
 
   // Listen to wheel and touch gestures on chat scroll container to immediately lock auto-scroll upon upward scrolling
   useEffect(() => {
@@ -893,7 +902,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       if (e.deltaY < -0.5) {
         userGestureUpRef.current = true;
         isScrollingToBottomRef.current = false;
-        isUserScrolledUpRef.current = true;
+        setUserScrolledUp(true);
       }
     };
 
@@ -907,7 +916,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         const curY = e.touches[0].clientY;
         const delta = curY - lastTouchY;
         lastTouchY = curY;
-        const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
         if (delta < -1) {
           historyReadingRef.current = false;
           delete el.dataset.transcriptHistoryReading;
@@ -915,7 +923,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         if (delta > 1) {
           userGestureUpRef.current = true;
           isScrollingToBottomRef.current = false;
-          isUserScrolledUpRef.current = true;
+          setUserScrolledUp(true);
         }
       }
     };
@@ -924,7 +932,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       stopLatestScroll();
       historyReadingRef.current = true;
       userGestureUpRef.current = true;
-      isUserScrolledUpRef.current = true;
+      setUserScrolledUp(true);
       isScrollingToBottomRef.current = false;
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -934,7 +942,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       if (up || down) stopLatestScroll();
       if (up) {
         userGestureUpRef.current = true;
-        isUserScrolledUpRef.current = true;
+        setUserScrolledUp(true);
         isScrollingToBottomRef.current = false;
       } else if (down) {
         historyReadingRef.current = false;
@@ -956,11 +964,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       el.removeEventListener("touchstart", onTouchStart);
       el.removeEventListener("touchmove", onTouchMove);
     };
-  }, [conversationViewKey, stopLatestScroll]);
+  }, [conversationViewKey, stopLatestScroll, setUserScrolledUp]);
 
   const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
     suppressAutoScrollRef.current = true;
-    isUserScrolledUpRef.current = true;
+    setUserScrolledUp(true);
     expandedCardObserverRef.current?.disconnect();
     expandedCardObserverRef.current = null;
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
@@ -1061,12 +1069,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
       expandedCardTimerRef.current = null;
       if (!hasExpandedBelow) {
-        isUserScrolledUpRef.current = false;
+        setUserScrolledUp(false);
         suppressAutoScrollRef.current = false;
       }
       handleChatScroll();
     }, 600);
-  }, [handleChatScroll]);
+  }, [handleChatScroll, setUserScrolledUp]);
 
   const isAttemptExpanded = useCallback((execId: string) => {
     if (!showExecutionRecords) return true;
@@ -1085,16 +1093,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     if (willExpand) {
       if (!hasExpandedBelow) {
-        isUserScrolledUpRef.current = false;
+        setUserScrolledUp(false);
         userGestureUpRef.current = false;
         suppressAutoScrollRef.current = false;
       } else {
-        isUserScrolledUpRef.current = true;
+        setUserScrolledUp(true);
         suppressAutoScrollRef.current = true;
       }
     } else {
       suppressAutoScrollRef.current = true;
-      isUserScrolledUpRef.current = true;
+      setUserScrolledUp(true);
     }
 
     if (isLatest) {
@@ -1213,6 +1221,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
       const currentScrollHeight = el.scrollHeight;
       const heightGrew = currentScrollHeight > prevScrollHeightRef.current + 2;
+      const heightShrankWhilePreparing = isPreparingConversationRef.current &&
+        currentScrollHeight < prevScrollHeightRef.current - 2;
       prevScrollHeightRef.current = currentScrollHeight;
 
       if (suppressAutoScrollRef.current) return;
@@ -1220,9 +1230,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       // Keep the newest output visible while content arrives. This includes the
       // initial preparation window: returning early there left a freshly opened
       // history stuck at the top until the user scrolled manually.
-      if (heightGrew && !latestScrollRef.current && (!isUserScrolledUpRef.current || isScrollingToBottomRef.current)) {
+      if ((heightGrew || heightShrankWhilePreparing) && !latestScrollRef.current && (!isUserScrolledUpRef.current || isScrollingToBottomRef.current)) {
         el.scrollTop = currentScrollHeight;
-        lastScrollTopRef.current = currentScrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
+      } else if (!isUserScrolledUpRef.current && !latestScrollRef.current) {
+        lastScrollTopRef.current = el.scrollTop;
       }
       handleChatScroll();
     });
@@ -1433,34 +1445,57 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, [effectiveMessages.length]);
 
+  const syncViewScroll = useCallback((key: string) => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const resolved = resolveViewScroll(conversationScrollStateRef.current.get(key), el.scrollHeight);
+    if (resolved.restoreSaved) {
+      el.scrollTop = resolved.scrollTop;
+    } else if (!isUserScrolledUpRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+    lastScrollTopRef.current = el.scrollTop;
+    prevScrollHeightRef.current = el.scrollHeight;
+  }, []);
+
   const revealConversation = useCallback(() => {
     const key = conversationViewKey;
     const generation = conversationGenerationRef.current;
     if (activeConversationViewRef.current !== key) return;
+    syncViewScroll(key);
     if (revealChatFrameRef.current !== null) cancelAnimationFrame(revealChatFrameRef.current);
     // Let the transcript parse and measure its rows before the first visible frame.
     revealChatFrameRef.current = requestAnimationFrame(() => {
+      if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
+      syncViewScroll(key);
       revealChatFrameRef.current = requestAnimationFrame(() => {
         revealChatFrameRef.current = null;
         if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
-        const el = chatScrollRef.current;
-        if (el) {
-          const resolved = resolveViewScroll(conversationScrollStateRef.current.get(key), el.scrollHeight);
-          if (resolved.restoreSaved) {
-            el.scrollTop = resolved.scrollTop;
-          } else if (!isUserScrolledUpRef.current) {
-            el.scrollTop = el.scrollHeight;
-          }
-          lastScrollTopRef.current = el.scrollTop;
-        }
+        syncViewScroll(key);
         isPreparingConversationRef.current = false;
+        if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptPreparing;
         suppressAutoScrollRef.current = false;
         setScrollBottomVisible(false);
         setReadyConversationKey(key);
         onConversationReady?.();
       });
     });
-  }, [conversationViewKey, setScrollBottomVisible, onConversationReady]);
+  }, [conversationViewKey, syncViewScroll, setScrollBottomVisible, onConversationReady]);
+
+  const visibleExecutionIds = useMemo(() => {
+    if (selectedNode && routeType === "graph") {
+      return nodeTurns.flatMap(turn => turn.executions).filter(exec => isAttemptExpanded(exec.id)).map(exec => exec.id);
+    }
+    return routeType === "serial" ? serialTurns.flatMap(turn => turn.executions).map(exec => exec.id) : [];
+  }, [selectedNode, routeType, nodeTurns, serialTurns, isAttemptExpanded]);
+
+  const handleExecutionOutputReady = useCallback((execId: string) => {
+    readyExecutionIdsRef.current.add(execId);
+    if (!isConversationReady && visibleExecutionIds.every(id => readyExecutionIdsRef.current.has(id))) {
+      revealConversation();
+    }
+  }, [isConversationReady, visibleExecutionIds, revealConversation]);
+
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -1475,7 +1510,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       isScrollingToBottomRef.current = false;
 
       const resolved = resolveViewScroll(conversationScrollStateRef.current.get(conversationViewKey), el.scrollHeight);
-      isUserScrolledUpRef.current = resolved.isUserScrolledUp;
+      setUserScrolledUp(resolved.isUserScrolledUp);
       el.scrollTop = resolved.restoreSaved ? resolved.scrollTop : el.scrollHeight;
       lastScrollTopRef.current = el.scrollTop;
       prevScrollHeightRef.current = el.scrollHeight;
@@ -1486,51 +1521,32 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
       resetChatScrollFrameRef.current = requestAnimationFrame(() => {
         resetChatScrollFrameRef.current = null;
-        if (chatScrollRef.current) {
-          const next = resolveViewScroll(conversationScrollStateRef.current.get(conversationViewKey), chatScrollRef.current.scrollHeight);
-          if (next.restoreSaved) {
-            chatScrollRef.current.scrollTop = next.scrollTop;
-          } else if (!isUserScrolledUpRef.current) {
-            chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-          }
-          lastScrollTopRef.current = chatScrollRef.current.scrollTop;
-        }
+        syncViewScroll(conversationViewKey);
       });
     }
 
-    // If no execution or planning output needed to trigger onReady, reveal after layout settle
-    const hasExpandedExecution = selectedNode && routeType === "graph"
-      ? Boolean(execution && attempts.some(a => isAttemptExpanded(a.id)))
-      : (routeType === "serial"
-          ? Boolean(serialExecutions.length)
-          : (savedPlannerIds.length > 0 && useSavedPlanner));
-
-    if (readyConversationKey !== conversationViewKey && !hasExpandedExecution) {
-      revealConversation();
-    }
-
-    // Safety fallback: ensure conversation is revealed even if an output event fails to fire
-    const safetyTimer = setTimeout(() => {
-      if (!historyLoading && activeConversationViewRef.current === conversationViewKey && readyConversationKey !== conversationViewKey) {
-        revealConversation();
-      }
-    }, 350);
-    return () => clearTimeout(safetyTimer);
+    // Readiness includes the initial viewport fill, not just the newest turn's
+    // first byte page. A timer must not reveal unfinished history on a slow read.
+    // Readers also announce errors/empty logs so those remain visible and retryable.
+    const needsPlanner = !selectedNode && routeType !== "serial" && savedPlannerIds.length > 0 && useSavedPlanner;
+    const outputReady = visibleExecutionIds.every(id => readyExecutionIdsRef.current.has(id)) &&
+      (!needsPlanner || readySavedPlannerKey === savedPlannerKey);
+    if (readyConversationKey !== conversationViewKey && outputReady) revealConversation();
   }, [
     conversationViewKey,
     readyConversationKey,
-    historyLoading,
     selectedNode,
     routeType,
-    execution,
-    attempts,
-    isAttemptExpanded,
+    visibleExecutionIds,
     savedPlannerIds.length,
+    savedPlannerKey,
+    readySavedPlannerKey,
     useSavedPlanner,
-    serialExecutions.length,
     revealConversation,
+    syncViewScroll,
     stopLatestScroll,
     setScrollBottomVisible,
+    setUserScrolledUp,
   ]);
 
   const selectGraphNode = useStableCallback((id: string) => {
@@ -1598,7 +1614,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             </div>
 
             <div
-              className="initial-query-scroll"
+              className={`initial-query-scroll ${isConversationReady ? "conversation-ready" : "conversation-preparing"}`}
+              data-transcript-preparing={!isConversationReady && !isUserScrolledUpRef.current ? "true" : undefined}
               ref={chatScrollRef}
               onScroll={handleChatScroll}
               style={conversationRevealStyle}
@@ -1702,7 +1719,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       </div>
                     )}
                     {turn.executions.map((exec) => {
-                      const isLatestAttempt = exec.id === latestAttemptId;
                       const isExpanded = isAttemptExpanded(exec.id);
                       return (
                         <motion.div
@@ -1724,7 +1740,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                 runId={state.runId}
                                 execution={exec}
                                 onUserResize={handleExpandableContentChange}
-                                onInitialOutputReady={isLatestAttempt || !isAttemptExpanded(latestAttemptId) ? revealConversation : undefined}
+                                onInitialOutputReady={handleExecutionOutputReady}
                               />
                             </div>
                           )}
@@ -1844,7 +1860,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         ) : (
           <div className="initial-query-view">
             <div
-              className="initial-query-scroll"
+              className={`initial-query-scroll ${isConversationReady ? "conversation-ready" : "conversation-preparing"}`}
+              data-transcript-preparing={!isConversationReady && !isUserScrolledUpRef.current ? "true" : undefined}
               ref={chatScrollRef}
               onScroll={handleChatScroll}
               style={conversationRevealStyle}
@@ -1901,8 +1918,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         )}
 
                         {turn.executions.map((exec) => {
-                          const isLatestSerial = exec.id === serialExecutions[serialExecutions.length - 1]?.id;
-
                           return (
                             <motion.div
                               key={exec.id}
@@ -1917,7 +1932,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   runId={state.runId}
                                   execution={exec}
                                   onUserResize={handleExpandableContentChange}
-                                  onInitialOutputReady={isLatestSerial ? revealConversation : undefined}
+                                  onInitialOutputReady={handleExecutionOutputReady}
                                 />
                               </div>
                             </motion.div>
@@ -2024,11 +2039,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           running={isPlanning || !!recoveredPlanningId}
                           onReady={() => {
                             setReadySavedPlannerKey(savedPlannerKey);
-                            revealConversation();
+                            if (!isConversationReady) revealConversation();
                           }}
                           onOutputChange={(text) => setSavedPlannerRecord(previous =>
                             previous.key === savedPlannerKey && previous.text === text ? previous : { key: savedPlannerKey, text })}
-                          onLoadingChange={setHistoryLoading}
                           onUserResize={handleExpandableContentChange}
                           edits={plannerEdits}
                           onEditUser={onEditMessageSubmit ? (text, replacement) =>
@@ -2091,6 +2105,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               title={t("思考过程")}
                               defaultExpanded={true}
                               autoExpandWhileStreaming={true}
+                              animateAppear={false}
                               onExpandedChange={handleExpandableContentChange}
                             />
                           )}

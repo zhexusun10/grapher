@@ -19,9 +19,9 @@ function backfillThinkingContent(captured = "", incoming?: string): string {
   return captured;
 }
 
-function thinkingItem(contentIndex?: number): TranscriptItem {
+function thinkingItem(contentIndex?: number, id?: string): TranscriptItem {
   return {
-    id: `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    id: id || `think_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     type: "thinking", role: "assistant", content: "", status: "running",
     thinkingContentIndex: contentIndex, timestamp: Date.now(),
   };
@@ -64,7 +64,7 @@ function findThinkingInsertIndex(items: TranscriptItem[], contentIndex: number |
 }
 
 /** One card per contentIndex within one assistant message, for live SSE and replay. */
-export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpdate, messageStart = 0): TranscriptItem[] {
+export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpdate, messageStart = 0, id?: string): TranscriptItem[] {
   let index = blockIndex(items, update.contentIndex, messageStart);
   // Older events may not carry an index. A new start after an end is a new block.
   if (update.type === "thinking_start" && update.contentIndex === undefined && index >= 0 && items[index].status !== "running") {
@@ -74,7 +74,7 @@ export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpd
   const next = closed === items ? items.slice() : closed;
   if (index < 0) {
     index = findThinkingInsertIndex(next, update.contentIndex, messageStart);
-    next.splice(index, 0, thinkingItem(update.contentIndex));
+    next.splice(index, 0, thinkingItem(update.contentIndex, id));
   }
   const item = { ...next[index] };
   if (update.type === "thinking_delta") {

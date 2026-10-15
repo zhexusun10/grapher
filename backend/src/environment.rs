@@ -1193,6 +1193,7 @@ pub(crate) fn clean_command(
     if let Some(path) = binding {
         command.env("GRAPHER_LAUNCH_BINDING", native::host_path(path));
     }
+    command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(())
 }
 

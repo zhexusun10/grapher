@@ -35,7 +35,13 @@ export function managedBashCommand(command) {
 export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
   if (!file) return;
   const launch = JSON.parse(readFileSync(file, 'utf8'));
-  const protectedKeys = key => /^(GRAPHER_|PI_|GIT_)/i.test(key) || /^(PATH|NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS)$/i.test(key);
+  // Runtime-owned identity/policy variables. PYTHONDONTWRITEBYTECODE is a host
+  // invariant (no interpreter bytecode inside the project tree that `stage_scoped`
+  // would then force-collect into Git), so declared variables and activation
+  // hooks may neither set nor delete it.
+  const protectedKeys = key => /^(GRAPHER_|PI_|GIT_)/i.test(key)
+    || key.toUpperCase() === 'PYTHONDONTWRITEBYTECODE'
+    || /^(PATH|NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS)$/i.test(key);
   if (typeof launch.entry !== 'string' || !isAbsolute(launch.entry) ||
       typeof launch.shell !== 'string' || !isAbsolute(launch.shell) || !existsSync(launch.shell) ||
       !Array.isArray(launch.path) || !launch.path.length || !launch.path.every(value => typeof value === 'string' && isAbsolute(value)) ||
@@ -91,6 +97,7 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
     throw new Error('Declared default entry/PATH is unavailable or changed by the hook; no fallback');
   }
   Object.assign(process.env, deviceEnvironment);
+  process.env.PYTHONDONTWRITEBYTECODE = '1';
   activePath = process.env.PATH;
   active = Object.freeze(launch);
 }
@@ -100,7 +107,10 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
 // read/write/edit/search remain in the same cwd; only Bash launch is overridden.
 export function managedBashOptions(options) {
   if (!active) return options;
+  // The bash tool supplies the full shell environment; Pi's user_bash path may
+  // omit it entirely. Keep the same Runtime bytecode policy in both cases.
   const env = { ...options.env };
+  env.PYTHONDONTWRITEBYTECODE = '1';
   for (const key of Object.keys(env)) if (/^(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS)$/i.test(key)) delete env[key];
   env.PATH = activePath;
   Object.assign(env, deviceEnvironment);

@@ -861,6 +861,10 @@ fn run_pi_with_timeout(
     for (key, value) in &request.environment {
         command.env(key, value);
     }
+    // Runtime-owned bytecode policy. Applied after caller-supplied bindings so a
+    // project/launch variable cannot re-enable interpreter caches inside the
+    // project tree that `stage_scoped` will then force-collect into Git.
+    command.env("PYTHONDONTWRITEBYTECODE", "1");
     // The host owns the instance identity. Never inherit another agent's role
     // or directory mapping from the parent process or role-specific overrides.
     command.env(

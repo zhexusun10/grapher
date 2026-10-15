@@ -360,7 +360,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
         if (event.type === "message_update" &&
           ["thinking_start", "thinking_delta", "thinking_end"].includes(thinkingEvent?.type)) {
-          currentItems = updateThinkingItems(currentItems, thinkingEvent, assistantStartIndexRef.current);
+          const thinkId = rowId("think");
+          currentItems = updateThinkingItems(currentItems, thinkingEvent, assistantStartIndexRef.current, thinkId);
           continue;
         }
 
@@ -619,7 +620,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     currentItems = currentItems.map(item => {
       const isNewInLiveChunk = isIncrementalLive && !previousIds.has(item.id);
       if ((item.type === "thinking" || item.type === "tool_call") && item.animateAppear === undefined) {
-        item = { ...item, animateAppear: !settled && (item.status === "running" || isNewInLiveChunk) };
+        const shouldAnimate = !settled && (inline ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
+        item = { ...item, animateAppear: shouldAnimate };
       }
       if (item.type !== "thinking") return item;
       const key = `${item.thinkingContentIndex ?? 0}_${item.content?.trim() || ""}`;

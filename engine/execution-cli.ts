@@ -6,6 +6,7 @@ import { applyLaunchBinding, managedLaunch } from './launch-binding.mjs';
 import { spawn } from 'node:child_process';
 
 configureExecutionRetries();
+process.env.PYTHONDONTWRITEBYTECODE = '1';
 let args = process.argv.slice(2);
 if (args[0] === '--grapher-prewarm') {
   if (args.length !== 2) throw new Error('Invalid prepared-host arguments');

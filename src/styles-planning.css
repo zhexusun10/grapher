@@ -27,7 +27,7 @@
 }
 
 .conversation-pane.full-width .chat-messages-stream,
-.conversation-pane.full-width .initial-query-scroll > div:not(.chat-messages-stream),
+.conversation-pane.full-width .initial-query-scroll>div:not(.chat-messages-stream),
 .conversation-pane.full-width .planning-summary-card,
 .conversation-pane.full-width .plan-summary-card,
 .conversation-pane.full-width .workspace-written-completed-card {
@@ -68,6 +68,7 @@
 .workbench.historical-settled .plan-summary-card,
 .workbench.historical-settled .workspace-written-completed-card,
 .workbench.historical-settled .planning-summary-card,
+.workbench.historical-settled .thinking-card,
 .workbench.historical-settled .initial-query-scroll>div:not(.chat-messages-stream) {
   opacity: 1 !important;
   transform: none !important;
@@ -75,7 +76,13 @@
 
 .workbench.historical-settled .task-node,
 .workbench.historical-settled .graph-pane,
-.workbench.historical-settled .workbench-resizer {
+.workbench.historical-settled .workbench-resizer,
+.workbench.historical-settled .thinking-card {
+  animation: none !important;
+  transform: none !important;
+}
+
+.initial-query-scroll.conversation-preparing .thinking-card {
   animation: none !important;
   transform: none !important;
 }
@@ -119,23 +126,28 @@
   border: 1px solid rgba(99, 102, 241, 0.28);
 }
 
-/* Shared entrance effect; content/status updates keep the same animation. */
+/* Shared entrance effect; exactly matches text message entrance animation. */
 @keyframes transcript-card-appear {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(8px) scale(0.98);
   }
 
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
-@media (prefers-reduced-motion: no-preference) {
+.tool-call-card.appear-active,
+.thinking-card.appear-active {
+  animation: transcript-card-appear 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
   .tool-call-card.appear-active,
   .thinking-card.appear-active {
-    animation: transcript-card-appear 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: none;
   }
 }
 
@@ -213,19 +225,6 @@
 .thinking-icon-glyph {
   display: grid;
   place-items: center;
-  animation: thinking-icon-appear 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes thinking-icon-appear {
-  0% {
-    opacity: 0.3;
-    transform: scale(0.8);
-  }
-
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
 }
 
 .thinking-icon-box.pulse {
@@ -336,6 +335,7 @@
   color: var(--text-primary);
   max-height: 420px;
   overflow-y: auto;
+  overflow-anchor: none;
   border-top: 1px solid rgba(139, 92, 246, 0.1);
   background: #fdfdfe;
 }
@@ -348,6 +348,10 @@
 .thinking-card-body .thinking-markdown p {
   margin: 6px 0;
   color: #334155;
+}
+
+.thinking-card-body .thinking-markdown p:last-child {
+  margin-bottom: 0;
 }
 
 .thinking-card-body .thinking-markdown code {
@@ -402,9 +406,12 @@
 }
 
 @keyframes thinking-cursor-blink {
-  0%, 100% {
+
+  0%,
+  100% {
     opacity: 1;
   }
+
   50% {
     opacity: 0.15;
   }
@@ -452,9 +459,12 @@
 }
 
 @keyframes tool-running-glow {
-  0%, 100% {
+
+  0%,
+  100% {
     opacity: 0.3;
   }
+
   50% {
     opacity: 1;
   }
@@ -548,6 +558,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   .tool-expand-chevron,
   .thinking-expand-chevron {
     transition: none;
@@ -619,23 +630,6 @@
   gap: 4px;
   font-size: 11px;
   font-weight: 500;
-  animation: tool-status-pop 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes tool-status-pop {
-  0% {
-    opacity: 0.5;
-    transform: scale(0.92);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-.tool-status.success svg,
-.tool-status.error svg {
-  animation: tool-icon-pop 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
 @keyframes tool-icon-pop {
@@ -643,6 +637,7 @@
     transform: scale(0.6);
     opacity: 0.2;
   }
+
   100% {
     transform: scale(1);
     opacity: 1;
@@ -962,12 +957,19 @@
 }
 
 .system-pill {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
   font-size: 11px;
+  line-height: 1.45;
   color: var(--text-muted);
   background: rgba(255, 255, 255, 0.04);
-  padding: 3px 9px;
+  padding: 4px 10px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.04);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .system-row.error .system-pill {
@@ -1017,7 +1019,7 @@
 .scroll-to-bottom-btn {
   position: absolute;
   bottom: calc(var(--composer-height, 110px) + 12px);
-  right: 20px;
+  right: 32px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -1038,7 +1040,7 @@
 }
 
 .conversation-pane.full-width .scroll-to-bottom-btn {
-  left: min(calc(100% - 90px), calc(50% + 430px + 14px));
+  left: min(calc(100% - 70px), calc(50% + 430px + 14px));
   right: auto;
 }
 
@@ -1069,8 +1071,11 @@
   justify-content: center;
   color: #91a7b7;
 }
+
 @media (prefers-reduced-motion: reduce) {
-  .transcript-loading .spin { animation: none; }
+  .transcript-loading .spin {
+    animation: none;
+  }
 }
 
 .transcript-empty-state {

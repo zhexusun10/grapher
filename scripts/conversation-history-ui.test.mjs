@@ -829,3 +829,201 @@ test("actual App stop preserves a sent Planner follow-up and the next unsent dra
     assert.deepEqual(errors, []);
   } finally { streamResponse?.destroy(); streamResponse = undefined; await context.close(); }
 });
+
+test("switching conversations on a large viewport never flashes the top user prompt during multi-page or multi-turn history fill", { timeout: 45_000 }, async () => {
+  const config = { repository: "/mock/large-switch", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const longHistory = tag => Array.from({ length: 65 }, (_, i) =>
+    startTool(`${tag}-tool-${i}`, `echo ${tag}-${i}`) + endTool(`${tag}-tool-${i}`, `RESULT_${tag}_${i}`) +
+    assistant(`${tag} assistant message ${i}`)).join("");
+  // Estimated virtual-row padding exceeds two viewports, but the measured
+  // folded cards do not. Readiness must use their actual rendered height.
+  const shortTail = tag => (tag === "serial-paged"
+    ? Array.from({ length: 46 }, (_, i) => startTool(`${tag}-tail-${i}`, `echo ${i}`) +
+      endTool(`${tag}-tail-${i}`, "x".repeat(4000))).join("")
+    : startTool(`${tag}-tail`, `echo ${tag}-tail`) + endTool(`${tag}-tail`, "x".repeat(4000))) +
+    assistant(`BOTTOM_MARKER_${tag}`);
+
+  const runs = {
+    "graph-paged": {
+      ...empty, runId: "graph-paged", config, planType: "graph", phase: "completed", approved: true,
+      planningId: "plan-latest",
+      graph: { originalGoal: "TOP_USER_GOAL_graph-paged", nodes: [{ name: "worker", task: "Worker task" }], edges: [] },
+      plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
+      nodes: { worker: { status: "done", revision: 1, instruction: "", error: null } },
+      events: [
+        { type: "created", sequence: 1, planning_id: "plan-older", timestamp: 1 },
+        { type: "graph_revised", sequence: 2, planning_id: "plan-latest", timestamp: 2 },
+      ],
+    },
+    "serial-paged": {
+      ...empty, runId: "serial-paged", config, planType: "serial", phase: "completed", approved: true,
+      graph: { originalGoal: "TOP_USER_GOAL_serial-paged", nodes: [{ name: "task", task: "TOP_USER_GOAL_serial-paged" }], edges: [] },
+      nodes: { task: { status: "done", revision: 1, instruction: "", error: null } },
+      executions: [{ id: "exec-paged", node: "task", status: "completed", output: "", outputBytes: 100_000,
+        revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s-1", worktree: "/mock", before: "", after: "" }],
+    },
+    "serial-multiturn": {
+      ...empty, runId: "serial-multiturn", config, planType: "serial", phase: "completed", approved: true,
+      graph: { originalGoal: "TOP_USER_GOAL_serial-multiturn", nodes: [{ name: "task", task: "TOP_USER_GOAL_serial-multiturn" }], edges: [] },
+      nodes: { task: { status: "done", revision: 2, instruction: "Follow-up instruction", error: null } },
+      executions: [
+        { id: "exec-turn-1", node: "task", status: "completed", output: "", outputBytes: 50_000,
+          revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s-2", worktree: "/mock", before: "", after: "" },
+        { id: "exec-turn-2", node: "task", status: "completed", output: "", outputBytes: 1_000,
+          revision: 2, attempt: 2, startedAt: 3, completedAt: 4, sessionId: "s-2", worktree: "/mock", before: "", after: "" },
+      ],
+      events: [
+        { type: "invalidated", sequence: 1, target: "task", human: true, instruction: "Follow-up instruction", timestamp: 3 },
+      ],
+    },
+  };
+
+  const serialPagedPrefix = longHistory("serial-paged");
+  const serialPagedTail = shortTail("serial-paged");
+  const serialPagedFull = serialPagedPrefix + serialPagedTail;
+  let failHistory = false;
+
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (failHistory && ["get_planning_output", "get_execution_output"].includes(command)) {
+      return route.fulfill({ status: 500, json: { error: "Mock transcript read failed" } });
+    }
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: Object.keys(runs),
+        repositoryInfo: { path: config.repository, name: "Large Switch", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = runs[body.runId] || empty; break;
+      case "snapshot_if_changed": result = { version: body.runId, snapshot: null }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": {
+        if (body.planningId === "plan-older") {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const content = longHistory("graph-paged");
+          result = { planningId: body.planningId, role: "planner", content, startOffset: 0,
+            nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, running: false };
+        } else {
+          const content = shortTail("graph-paged");
+          result = { planningId: body.planningId, role: "planner", content, startOffset: 0,
+            nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, running: false };
+        }
+        break;
+      }
+      case "get_execution_output": {
+        if (body.executionId === "exec-paged") {
+          const total = Buffer.byteLength(serialPagedFull);
+          const prefixBytes = Buffer.byteLength(serialPagedPrefix);
+          if (body.before !== undefined) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            result = { runId: body.runId, executionId: body.executionId, content: serialPagedPrefix,
+              startOffset: 0, nextOffset: prefixBytes, totalBytes: total, complete: false, status: "completed" };
+          } else {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            result = { runId: body.runId, executionId: body.executionId, content: serialPagedTail,
+              startOffset: prefixBytes, nextOffset: total, totalBytes: total, complete: true, status: "completed" };
+          }
+        } else if (body.executionId === "exec-turn-1") {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const content = longHistory("serial-multiturn");
+          result = { runId: body.runId, executionId: body.executionId, content, startOffset: 0,
+            nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, status: "completed" };
+        } else {
+          const content = shortTail("serial-multiturn");
+          result = { runId: body.runId, executionId: body.executionId, content, startOffset: 0,
+            nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, status: "completed" };
+        }
+        break;
+      }
+      default: throw new Error(`Unexpected API ${command}`);
+    }
+    try { await route.fulfill({ json: { result } }); } catch {}
+  });
+
+  try {
+    await page.setViewportSize({ width: 1440, height: 1350 });
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => { window.switchCache = await import("/src/services/transcriptCache.ts"); });
+
+    const switchAndMeasure = async runId => {
+      await page.evaluate(targetRunId => {
+        window.switchSamples = [];
+        window.samplingSwitch = true;
+        const sample = () => {
+          const scroll = document.querySelector(".initial-query-scroll");
+          const stream = document.querySelector(".chat-messages-stream");
+          const topPrompt = [...document.querySelectorAll(".chat-bubble-user")].find(el =>
+            el.textContent?.includes(`TOP_USER_GOAL_${targetRunId}`));
+          if (scroll && stream && topPrompt) {
+            const scrollOpacity = Number(getComputedStyle(scroll).opacity);
+            const streamOpacity = Number(getComputedStyle(stream).opacity);
+            if (scrollOpacity > 0.01 && streamOpacity > 0.01) {
+              const scrollRect = scroll.getBoundingClientRect();
+              const promptRect = topPrompt.getBoundingClientRect();
+              window.switchSamples.push({
+                scrollTop: scroll.scrollTop,
+                scrollHeight: scroll.scrollHeight,
+                clientHeight: scroll.clientHeight,
+                distanceFromBottom: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+                historyFilled: targetRunId === "graph-paged"
+                  ? window.switchCache.planningTranscriptCache.has("graph-paged:plan-older")
+                  : targetRunId === "serial-paged"
+                    ? window.switchCache.executionTranscriptCache.get("serial-paged:exec-paged")?.startOffset === 0
+                    : window.switchCache.executionTranscriptCache.has("serial-multiturn:exec-turn-1") &&
+                      window.switchCache.executionTranscriptCache.has("serial-multiturn:exec-turn-2"),
+                topPromptVisible: promptRect.bottom > scrollRect.top + 4 && promptRect.top < scrollRect.bottom,
+              });
+            }
+          }
+          if (window.samplingSwitch) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      }, runId);
+
+      await page.locator(`.run-item[data-run-id="${runId}"]`).click();
+      await page.getByText(`BOTTOM_MARKER_${runId}`, { exact: true }).waitFor();
+      await page.waitForFunction(() => {
+        const scroll = document.querySelector(".initial-query-scroll");
+        return scroll && Number(getComputedStyle(scroll).opacity) > 0.99;
+      });
+      await page.waitForTimeout(120);
+      const samples = await page.evaluate(() => {
+        window.samplingSwitch = false;
+        return window.switchSamples;
+      });
+      assert.ok(samples.length >= 3, `${runId}: expected visible frame samples`);
+      for (const frame of samples) {
+        assert.equal(frame.historyFilled, true,
+          `${runId}: history appeared before the initial viewport fill: ${JSON.stringify(frame)}`);
+        assert.equal(frame.topPromptVisible, false,
+          `${runId}: top user prompt flashed on screen during switch: ${JSON.stringify(frame)}`);
+        assert.ok(frame.distanceFromBottom <= 35,
+          `${runId}: visible frame was not anchored at the bottom: ${JSON.stringify(frame)}`);
+      }
+    };
+    for (const reducedMotion of ["no-preference", "reduce"]) {
+      await page.emulateMedia({ reducedMotion });
+      for (const runId of ["graph-paged", "serial-paged", "serial-multiturn", "graph-paged", "serial-paged"]) {
+        await switchAndMeasure(runId);
+      }
+    }
+    // Without a time-based reveal, a failed read must still show its error and
+    // permit retry instead of leaving the conversation permanently transparent.
+    for (const runId of ["graph-paged", "serial-paged"]) {
+      failHistory = true;
+      await page.locator(`.run-item[data-run-id="${runId}"]`).click();
+      const alert = page.getByRole("alert").filter({ hasText: "Mock transcript read failed" });
+      await alert.waitFor({ state: "visible" });
+      await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
+      failHistory = false;
+      await alert.getByRole("button", { name: "Retry", exact: true }).click();
+      await page.getByText(`BOTTOM_MARKER_${runId}`, { exact: true }).waitFor();
+      await alert.waitFor({ state: "detached" });
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});

@@ -124,10 +124,6 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
             variables: BTreeMap::from([
                 ("HOME".into(), "{workspace}/.agent-home".into()),
                 ("USERPROFILE".into(), "{workspace}/.agent-home".into()),
-                (
-                    "PYTHONPYCACHEPREFIX".into(),
-                    "{workspace}/.runtime-cache/pycache".into(),
-                ),
                 ("PYTHONUTF8".into(), "1".into()),
                 ("PYTHONIOENCODING".into(), "utf-8".into()),
                 ("CONDA_ALWAYS_COPY".into(), "true".into()),

@@ -32,7 +32,7 @@ try {
   try {
     disabled = JSON.parse(readFileSync(join(dir, "disabled-providers.json"), "utf8"));
   } catch {}
-  const childEnv = { ...process.env };
+  const childEnv = { ...process.env, PYTHONDONTWRITEBYTECODE: "1" };
   if (Array.isArray(disabled)) {
     for (const p of disabled) {
       const vars = KNOWN_PROVIDER_ENV_VARS[p];

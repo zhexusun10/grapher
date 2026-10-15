@@ -16,6 +16,7 @@ interface ThinkingCardProps {
   defaultExpanded?: boolean;
   autoExpandWhileStreaming?: boolean;
   expanded?: boolean;
+  animateAppear?: boolean;
   onExpandedChange?: (expanded: boolean, card?: HTMLElement) => void;
   className?: string;
 }
@@ -29,6 +30,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     defaultExpanded = true,
     autoExpandWhileStreaming = true,
     expanded,
+    animateAppear: directAnimateAppear,
     onExpandedChange,
     className = "",
   }) => {
@@ -42,21 +44,38 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const cardRef = useRef<HTMLDivElement>(null);
     const bodyRef = useRef<HTMLDivElement>(null);
     const userScrolledUpRef = useRef(false);
+    const lastScrollTopRef = useRef(0);
+    const wasStreamingRef = useRef(isStreaming);
 
     const isExpanded = expanded ?? (userToggled !== null ? userToggled : defaultExpanded || (autoExpandWhileStreaming && isStreaming));
 
     // Auto-scroll within the thinking box while streaming if user hasn't scrolled up
     useEffect(() => {
-      if (isStreaming && isExpanded && !userScrolledUpRef.current && bodyRef.current) {
+      const justFinished = wasStreamingRef.current && !isStreaming;
+      wasStreamingRef.current = isStreaming;
+      if ((isStreaming || justFinished) && isExpanded && !userScrolledUpRef.current && bodyRef.current) {
         bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+        lastScrollTopRef.current = bodyRef.current.scrollTop;
       }
     }, [smoothContent, isStreaming, isExpanded]);
 
     const handleScroll = () => {
       const el = bodyRef.current;
       if (!el) return;
-      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      userScrolledUpRef.current = distFromBottom > 32;
+      const { scrollTop, scrollHeight, clientHeight } = el;
+      const distFromBottom = scrollHeight - scrollTop - clientHeight;
+      const prevScrollTop = lastScrollTopRef.current;
+      lastScrollTopRef.current = scrollTop;
+
+      if (distFromBottom <= 32) {
+        userScrolledUpRef.current = false;
+        return;
+      }
+
+      // Only lock scrolled-up if the user actually scrolled upwards (scrollTop decreased)
+      if (scrollTop < prevScrollTop - 1 && distFromBottom > 32) {
+        userScrolledUpRef.current = true;
+      }
     };
 
     const handleCopy = (e: React.MouseEvent) => {
@@ -70,14 +89,18 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     };
 
     const toggleExpand = () => {
-      setUserToggled(!isExpanded);
-      onExpandedChange?.(!isExpanded, cardRef.current ?? undefined);
+      const nextExpanded = !isExpanded;
+      setUserToggled(nextExpanded);
+      if (nextExpanded) {
+        userScrolledUpRef.current = false;
+      }
+      onExpandedChange?.(nextExpanded, cardRef.current ?? undefined);
     };
 
     // Calculate approximate token/char stats
     const charCount = rawContent.trim() ? (isStreaming && smoothContent ? smoothContent : rawContent).length : 0;
 
-    const animateAppear = useCardAppear(item?.id, isStreaming, item?.timestamp, item?.animateAppear);
+    const animateAppear = useCardAppear(item?.id, isStreaming, item?.timestamp, directAnimateAppear ?? item?.animateAppear);
 
     // An empty provider block says nothing about the other thinking already received.
     // Keep its item for possible backfill, but do not render a misleading completion card.
@@ -117,10 +140,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
                 <motion.span
                   key="thinking-streaming-status"
                   className="thinking-status streaming"
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  transition={{ duration: 0.2 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15 }}
                 >
                   <span className="thinking-pulse-dot" />
                   <span>{t("思考中...")}</span>
@@ -149,8 +172,12 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
           >
             {smoothContent.trim() ? (
               <div className="thinking-content-container">
-                <MarkdownRenderer content={smoothContent} isStreaming={isStreaming} className="thinking-markdown" />
-                {isStreaming && <span className="thinking-streaming-cursor" />}
+                <MarkdownRenderer
+                  content={smoothContent}
+                  isStreaming={isStreaming}
+                  streamingCursor={isStreaming}
+                  className="thinking-markdown"
+                />
               </div>
             ) : (
               <div className="thinking-shimmer">

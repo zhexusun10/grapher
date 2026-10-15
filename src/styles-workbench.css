@@ -2388,15 +2388,17 @@ button.session-label-toggle:focus-visible {
 }
 
 .node-error {
-  font-size: 10px;
-  line-height: 1.8;
+  box-sizing: border-box;
+  font-size: 11.5px;
+  line-height: 1.5;
   color: var(--status-danger-text);
   background: var(--status-danger-subtle);
   border: 1px solid var(--status-danger-border);
   border-radius: 6px;
-  padding: 12px;
-  margin: 12px 0;
+  padding: 10px 12px;
+  margin: 8px 0;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .node-error button {

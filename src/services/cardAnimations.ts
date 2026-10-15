@@ -11,7 +11,8 @@ const presentedCardIds = new Set<string>();
 export function useCardAppear(id: string | undefined, isLive: boolean, timestamp?: number, animateAppear?: boolean): boolean {
   const [animate] = useState(() => {
     if (id && presentedCardIds.has(id)) return false;
-    return animateAppear ?? (isLive || (typeof timestamp === "number" && Date.now() - timestamp < 4000));
+    if (animateAppear !== undefined) return animateAppear;
+    return isLive || (typeof timestamp === "number" && Date.now() - timestamp < 4000);
   });
   useEffect(() => {
     if (id) presentedCardIds.add(id);

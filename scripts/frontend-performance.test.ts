@@ -7,6 +7,14 @@ import { shareById, shareJson } from "../src/services/structuralSharing.ts";
 import { StreamingMarkdownCache, repairStreamingMarkdown, sanitizeHtml } from "../src/services/streamingMarkdown.ts";
 import { mapWithConcurrency } from "../src/services/boundedRequests.ts";
 import { liveOutputDelay, startVisibilityPolling } from "../src/services/visibilityPolling.ts";
+import {
+  dispatchOutputAvailableForTest,
+  dispatchSnapshotChangedForTest,
+  isRuntimeEventsConnected,
+  setRuntimeEventsConnectedForTest,
+  subscribeExecutionOutput,
+  subscribeSnapshotChanges,
+} from "../src/services/runtimeEvents.ts";
 import { runtimeService } from "../src/services/runtime.ts";
 import { emptySnapshot, type TranscriptItem } from "../src/types.ts";
 
@@ -212,4 +220,56 @@ test("visibility polling wakes cursors, never overlaps requests and cleans up te
   visibility.dispatchEvent(new Event("visibilitychange"));
   await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(terminal, 1);
   assert.deepEqual([0, 1, 2, 3, 20].map(liveOutputDelay), [150, 300, 600, 1200, 1200]);
+});
+
+test("SSE push-wake suspends empty polling at Infinity, ignores unwatched nodes and short-circuits already synced bytes", async () => {
+  class Visibility extends EventTarget { hidden = false; }
+  const visibility = new Visibility();
+  let pulls = 0;
+  let syncedBytes = 100;
+  const stop = startVisibilityPolling(async () => {
+    pulls++;
+    return isRuntimeEventsConnected() ? Number.POSITIVE_INFINITY : 150;
+  }, 0, visibility as unknown as Document, 10_000);
+  setRuntimeEventsConnectedForTest(true);
+  const unsubOutput = subscribeExecutionOutput("run-1", "watched-node", event => {
+    if (!event.settled && syncedBytes >= event.totalBytes) return;
+    syncedBytes = event.totalBytes;
+    stop.wake();
+  });
+  let snapshotWakes = 0;
+  const unsubSnapshot = subscribeSnapshotChanges(event => {
+    if (event.runId === "run-1") snapshotWakes++;
+  });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(pulls, 1, "initial pull runs once and suspends at Infinity");
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(pulls, 1, "no timer polling while SSE is connected and idle");
+
+    // 1. Signal for another running node in the DAG is ignored before reaching watched-node.
+    dispatchOutputAvailableForTest({ runId: "run-1", executionId: "other-parallel-node", totalBytes: 5000 });
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(pulls, 1, "unwatched node output never triggers a pull");
+
+    // 2. Signal for watched-node with totalBytes <= syncedBytes is swallowed in memory.
+    dispatchOutputAvailableForTest({ runId: "run-1", executionId: "watched-node", totalBytes: 100 });
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(pulls, 1, "already synced byte offset is swallowed in memory");
+
+    // 3. Signal for watched-node with new bytes wakes the poller in 0ms.
+    dispatchOutputAvailableForTest({ runId: "run-1", executionId: "watched-node", totalBytes: 240 });
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(pulls, 2, "new bytes wake the poller immediately");
+    assert.equal(syncedBytes, 240);
+
+    // 4. Snapshot signal routes to snapshot subscribers.
+    dispatchSnapshotChangedForTest({ runId: "run-1", version: "1:2" });
+    assert.equal(snapshotWakes, 1);
+  } finally {
+    unsubOutput();
+    unsubSnapshot();
+    stop();
+    setRuntimeEventsConnectedForTest(false);
+  }
 });

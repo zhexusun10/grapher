@@ -50,7 +50,7 @@ async function app(handler) {
   await page.goto(origin, { waitUntil: "domcontentloaded" });
   return { context, page, errors, calls };
 }
-const nodeModel = page => page.locator(".role-model-card").nth(2).locator("select").first();
+const nodeModel = page => page.locator(".role-model-card").nth(0).locator("select").first();
 async function openSettings(page) {
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.locator(".settings-modal").waitFor();
@@ -205,13 +205,13 @@ test("model-specific thinking levels update inherited roles, remain independent 
     const model = i => cards.nth(i).locator("select").first();
     const thinking = i => cards.nth(i).locator("select").nth(1);
     const levels = i => thinking(i).locator("option").evaluateAll(options => options.map(option => option.value));
-    assert.deepEqual(await levels(2), ["off", "low", "high"]);
+    assert.deepEqual(await levels(0), ["off", "low", "high"]);
     await nodeModel(page).selectOption("test/new");
     for (const i of [0, 1, 2]) {
       assert.deepEqual(await levels(i), ["low", "high", "max"], "inherited model capabilities follow Node Agent");
       assert.equal(await thinking(i).inputValue(), "low", "Pi clamps unsupported off to low");
     }
-    await thinking(2).selectOption("max");
+    await thinking(0).selectOption("max");
     await model(1).selectOption("test/old"); await thinking(1).selectOption("high");
     await nodeModel(page).selectOption("test/plain");
     for (const i of [0, 2]) {
@@ -223,7 +223,7 @@ test("model-specific thinking levels update inherited roles, remain independent 
     assert.equal(await thinking(1).inputValue(), "high", "an explicitly selected Planner model stays independent");
     await page.getByLabel("Filter available models by provider").selectOption("other");
     assert.equal(await nodeModel(page).inputValue(), "test/plain");
-    assert.deepEqual(await levels(2), ["off"], "provider filtering does not change the selected model's capabilities");
+    assert.deepEqual(await levels(0), ["off"], "provider filtering does not change the selected model's capabilities");
     await page.locator(".save-config-btn").click();
     await page.locator(".settings-modal").waitFor({ state: "detached" });
     assert.equal(saved.model, "test/plain"); assert.equal(saved.thinkingLevel, "off");
@@ -246,7 +246,7 @@ test("saving an incompatible legacy level persists the Pi-adjusted value display
   });
   try {
     await page.locator('[data-run-id="fast"]').waitFor(); await openSettings(page);
-    const thinking = page.locator(".role-model-card").nth(2).locator("select").nth(1);
+    const thinking = page.locator(".role-model-card").nth(0).locator("select").nth(1);
     assert.equal(await thinking.inputValue(), "high");
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).thinkingLevel), "max", "opening settings must not persist corrections");
     await page.locator(".save-config-btn").click();

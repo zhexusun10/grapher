@@ -40,6 +40,25 @@ still part of the project's Git history and still participates in Git merges,
 but it is not a Runtime collection boundary. A regular file that is created
 under an ignored directory is still part of the node's Git result.
 
+### Interpreter bytecode
+
+Every process Runtime launches for the Agent — source Planner/Node/Serial,
+private Graph nodes, Mergers, prewarmed hosts and managed launches — carries
+`PYTHONDONTWRITEBYTECODE=1`, set after any caller or launch binding so neither
+can re-enable it. Python then compiles modules in memory and writes no
+`__pycache__`/`.pyc` into the project tree, so a test or import run cannot leave
+bytecode churn that a later snapshot commit would collect. The managed
+`PYTHONPYCACHEPREFIX` redirect is therefore no longer declared by the automatic
+environment policy: Runtime owns bytecode policy uniformly instead of giving a
+managed cache scope its own rules.
+
+This changes what agents *create*, not what a project already tracks. A `.pyc`
+that the user's own Git history committed stays an ordinary tracked project
+file: it is collected, merged and published like any other project file, and
+`git status` still reports it. Program/model behavior is unaffected — bytecode
+is a cache, and CPU/NPU kernel caches such as Triton, TorchInductor and CUDA
+JIT outputs are separate systems that this policy does not touch.
+
 There is no automatic large-file rejection. A large project file is collected
 by Git like any other project file. Git will read/hash it and may create a
 large object; projects that need different storage must use an explicit Git

@@ -1,5 +1,6 @@
 import { t } from "../i18n";
 import { invalidateTranscriptCaches } from "./transcriptCache";
+import { enableRuntimeEvents } from "./runtimeEvents";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
 import type { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, EnvironmentCapabilities, ResultDescriptor, RuntimeActivity } from "../types";
 
@@ -49,6 +50,9 @@ async function requestBody<T>(command: string, body: Record<string, unknown>, si
     if (snapshotMutations.has(command)) historyRequests.clear();
     if (signal?.aborted) throw error;
     throw new Error(t("无法连接后端，请在终端运行 npm run backend。"));
+  }
+  if (response.headers?.get("x-grapher-events") === "1") {
+    enableRuntimeEvents();
   }
   const data = await response.json().catch(() => {
     if (snapshotMutations.has(command)) historyRequests.clear();
@@ -127,6 +131,9 @@ export const runtimeService = {
       signal,
     });
 
+    if (response.headers?.get("x-grapher-events") === "1") {
+      enableRuntimeEvents();
+    }
     if (!response.ok) {
       let errMsg = t("规划请求失败 ({0})", response.status);
       try {

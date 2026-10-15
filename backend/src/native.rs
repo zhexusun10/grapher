@@ -298,6 +298,7 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
     command.env_remove("GRAPHER_EXECUTION_KIND");
     clear_git_environment(&mut command);
     bind_trusted_git(&mut command)?;
+    command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
 }
 
@@ -356,6 +357,7 @@ pub fn execution_command(
             .env("PI_CODING_AGENT_DIR", agent_dir()?);
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
+        command.env("PYTHONDONTWRITEBYTECODE", "1");
         return Ok(command);
     }
     #[cfg(target_os = "windows")]
@@ -401,6 +403,7 @@ fn unsandboxed_command(engine: &Path, current: &Path) -> Result<Command, String>
         .env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     clear_git_environment(&mut command);
     bind_trusted_git(&mut command)?;
+    command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
 }
 
@@ -546,6 +549,20 @@ mod tests {
             .and_then(|(_, value)| value)
             .expect("bootstrap Git binding is required");
         assert_eq!(Path::new(value), git);
+    }
+
+    #[test]
+    fn engine_command_binds_python_dont_write_bytecode() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let cmd = command(PiRole::NodeAgent, &repo, &repo).unwrap();
+        let value = cmd
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("PYTHONDONTWRITEBYTECODE"))
+            .and_then(|(_, value)| value)
+            .expect("PYTHONDONTWRITEBYTECODE binding is required");
+        assert_eq!(value, "1");
     }
 
     #[test]

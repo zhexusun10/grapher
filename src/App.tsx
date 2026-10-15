@@ -27,6 +27,7 @@ import { useSnapshotState } from "./hooks/useSnapshotState";
 import { useConversationTranscriptCache } from "./hooks/useConversationTranscriptCache";
 import { useFrameBatchedState } from "./hooks/useFrameBatchedState";
 import { useStableCallback } from "./hooks/useStableCallback";
+import { resetPresentedCardIds } from "./services/cardAnimations";
 
 import { TaskNode } from "./components/graph/TaskNode";
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
@@ -400,6 +401,7 @@ export default function App() {
   }, []);
 
   const resetSessionMessages = useCallback(() => {
+    resetPresentedCardIds();
     setSessionEntries([]);
     setEditingMessage(null);
     setEditPrefillText("");
@@ -1258,6 +1260,10 @@ export default function App() {
     if (isPlanning && !allowWhilePlanning) {
       setError(t("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。"));
       return Promise.resolve(false);
+    }
+
+    if (!revisionRunId || forceFresh) {
+      resetPresentedCardIds();
     }
 
     const isContinuing = !forceFresh && Boolean(revisionRunId || (routeType === "graph" && state.graph.nodes.length > 0 && state.runId));

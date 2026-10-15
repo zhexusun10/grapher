@@ -3,6 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ThinkingCard } from "../src/components/ThinkingCard.tsx";
+import { injectStreamingCursor } from "../src/components/MarkdownRenderer.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
 import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../src/services/thinkingTranscript.ts";
@@ -344,4 +345,26 @@ test("tail-paged message_end backfills thinking before streamed assistant text",
   assert.ok(textIdx !== -1, "Text should be present");
   assert.ok(thinkIdx < textIdx, `Thinking card (at ${thinkIdx}) should appear before assistant text (at ${textIdx})`);
 });
+
+test("streaming cursor is injected inline on the latest line and not pushed to an empty trailing line", () => {
+  const cursor = '<span class="thinking-streaming-cursor"></span>';
+  const injectedParagraph = injectStreamingCursor("<p>First line</p>\n<p>Latest line</p>\n", cursor);
+  assert.match(injectedParagraph, /<p>Latest line<span class="thinking-streaming-cursor"><\/span><\/p>/);
+
+  const injectedList = injectStreamingCursor("<ol>\n<li>Item 1</li>\n<li>Item 2</li>\n</ol>\n", cursor);
+  assert.match(injectedList, /<li>Item 2<span class="thinking-streaming-cursor"><\/span><\/li>/);
+
+  const injectedCode = injectStreamingCursor("<pre><code>console.log('hi');</code></pre>\n", cursor);
+  assert.match(injectedCode, /console\.log\('hi'\);<span class="thinking-streaming-cursor"><\/span><\/code><\/pre>/);
+
+  const renderedCard = renderToStaticMarkup(createElement(ThinkingCard, {
+    content: "Step 1: check files\n\nStep 2: latest action line",
+    isStreaming: true,
+    defaultExpanded: true,
+  }));
+  // Cursor should be inline within the latest paragraph, not following after </p> or outside the markdown div
+  assert.match(renderedCard, /latest action line<span class="thinking-streaming-cursor"><\/span><\/p>/);
+  assert.doesNotMatch(renderedCard, /<\/div><span class="thinking-streaming-cursor">/);
+});
+
 
