@@ -1151,14 +1151,14 @@ impl Runtime {
         })
     }
 
-    /// Saving a new model opts only failed nodes into explicit Continue recovery.
-    /// Do not invalidate results, dispatch jobs, or rewrite historical attempts.
-    pub fn update_failed_node_models(&mut self, config: &Config) -> Result<(), String> {
+    /// Synchronize settings to unstarted nodes and opt failed nodes into explicit
+    /// Continue recovery. Never dispatch jobs or rewrite results/history here.
+    pub fn update_node_models(&mut self, config: &Config) -> Result<(), String> {
         config.validate_model_settings()?;
         let Some(original) = self.state.config.as_ref() else {
             return Ok(());
         };
-        if !self.state.approved || matches!(self.state.phase.as_str(),
+        if matches!(self.state.phase.as_str(),
             "completed" | "publishing" | "merging" | "publication_failed") {
             return Ok(());
         }
@@ -1167,19 +1167,24 @@ impl Runtime {
             return Ok(());
         }
         let original = original.node_agent_settings();
+        let started: BTreeSet<_> = self.state.executions.iter()
+            .map(|execution| execution.node.as_str()).collect();
         let nodes: Vec<_> = self.state.nodes.iter().filter_map(|(name, node)| {
-            (node.status == "failed"
-                && node.model_config.as_ref().unwrap_or(&original) != &settings
+            let unstarted = matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")
+                && !started.contains(name.as_str());
+            let failed = node.status == "failed"
                 && self.state.executions.iter().rev()
                     .find(|execution| execution.node == *name
                         && !self.state.superseded_execution_ids.contains(&execution.id))
-                    .is_some_and(|execution| execution.status == "failed"))
+                    .is_some_and(|execution| execution.status == "failed");
+            ((unstarted || failed)
+                && node.model_config.as_ref().unwrap_or(&original) != &settings)
                 .then(|| name.clone())
         }).collect();
         if nodes.is_empty() {
             return Ok(());
         }
-        self.emit(EventKind::FailedNodeModelsUpdated { nodes, settings })
+        self.emit(EventKind::NodeModelsUpdated { nodes, settings })
     }
 
     fn queue_node_recovery(&mut self) -> Result<(), String> {

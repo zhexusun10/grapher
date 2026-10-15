@@ -617,9 +617,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
     const previousIds = new Set(previousItems.map(item => item.id));
     currentItems = currentItems.map(item => {
+      const isNewInLiveChunk = isIncrementalLive && !previousIds.has(item.id);
+      if ((item.type === "thinking" || item.type === "tool_call") && item.animateAppear === undefined) {
+        item = { ...item, animateAppear: !settled && (item.status === "running" || isNewInLiveChunk) };
+      }
       if (item.type !== "thinking") return item;
       const key = `${item.thinkingContentIndex ?? 0}_${item.content?.trim() || ""}`;
-      const isNewInLiveChunk = isIncrementalLive && !previousIds.has(item.id);
       const isLive = item.status === "running" ||
         liveThinkingIdsRef.current.has(item.id) ||
         (key.length > 2 && liveThinkingKeysRef.current.has(key)) ||
@@ -638,7 +641,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     itemsRef.current = shareJson(previousItems, currentItems);
     lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
-  }, [showUserTurns, skipFirstUser, startOffset]);
+  }, [showUserTurns, skipFirstUser, startOffset, settled]);
 
   // Parse before deriving rows. A prepend used to measure the old DOM first,
   // then replace it in a nested layout update, breaking the scroll anchor.

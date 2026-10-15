@@ -1,7 +1,7 @@
 import { t, localizeError } from "../../i18n";
 import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
-import type { ReactFlowInstance } from "@xyflow/react";
 import { GraphCanvas } from "../graph/GraphCanvas";
+import { useGraphViewport } from "../../hooks/useGraphViewport";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   Code2, ArrowLeft,
@@ -652,7 +652,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // Recovery discovers the planning ID before the route is known. Mount the
     // durable activity poller now, rather than waiting for the finished graph.
     if ((!recoveredPlanningId && routeType !== "graph") ||
-        (isPlanning && !recoveredPlanningId && !plannerStream.runId && !plannerStream.isContinuation)) return [];
+        (isPlanning && !recoveredPlanningId && !plannerStream.isContinuation)) return [];
     const ids = state.events
       .filter((event) => event.type === "created" || event.type === "graph_revised")
       .map((event) => event.planning_id)
@@ -664,10 +664,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       seen.add(id);
       // Only suppress a durable turn while it is actively streaming. Once
       // planning stops, the JSONL is authoritative even if SSE was partial.
-      return !(isPlanning && showLivePlanner && plannerStream.items?.length > 0 &&
-        plannerStream.representedPlanningIds?.includes(id));
+      if (isPlanning && showLivePlanner && (id === savedPlannerId || plannerStream.representedPlanningIds?.includes(id))) {
+        return false;
+      }
+      return true;
     });
-  }, [routeType, isPlanning, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.runId, plannerStream.isContinuation, plannerStream.items, plannerStream.representedPlanningIds]);
+  }, [routeType, isPlanning, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.isContinuation, plannerStream.representedPlanningIds]);
   const plannerEdits = useMemo(() => state.events.flatMap((event, index) => {
     if (event.type !== "planner_conversation_edited") return [];
     const nextPlanningId = state.events.slice(index + 1).find(item =>
@@ -735,7 +737,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // and publication cards, only after history and its initial scroll have settled.
   const conversationRevealStyle: React.CSSProperties = {
     opacity: isConversationReady ? 1 : 0,
-    transition: isConversationReady && !reduceMotion ? "opacity 0.28s ease-in-out" : "none",
+    transition: isConversationReady && !reduceMotion ? "opacity 0.14s ease-out" : "none",
   };
   const activeConversationViewRef = useRef(conversationViewKey);
   const conversationGenerationRef = useRef(0);
@@ -752,8 +754,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const userGestureUpRef = useRef(false);
   const historyReadingRef = useRef(false);
   const isPreparingConversationRef = useRef(false);
-  const graphFlowRef = useRef<ReactFlowInstance<any, any> | null>(null);
-  const graphFitFrameRef = useRef<number | null>(null);
+  const graphCanvasRef = useRef<HTMLDivElement>(null);
   const scrollBottomBtnRef = useRef<HTMLButtonElement>(null);
   const setScrollBottomVisible = useCallback((visible: boolean) => {
     const btn = scrollBottomBtnRef.current;
@@ -765,10 +766,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
     }
   }, []);
-  const graphRunRef = useRef(currentRunKey);
-  const [readyGraphRunKey, setReadyGraphRunKey] = useState("");
-  const isGraphMountedForRun = readyGraphRunKey === currentRunKey;
-
   const conversationScrollStateRef = useRef<Map<string, ViewScrollState>>(new Map());
   const previousNodeViewRef = useRef(Boolean(selected));
 
@@ -789,36 +786,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     historyReadingRef.current = false;
     suppressAutoScrollRef.current = false;
   }
-
-  const centerGraph = useCallback((instance: ReactFlowInstance<any, any>, targetKey = currentRunKey) => {
-    if (graphRunRef.current !== targetKey) return;
-    graphFlowRef.current = instance;
-    if (graphFitFrameRef.current !== null) cancelAnimationFrame(graphFitFrameRef.current);
-
-    // Two animation frames do not guarantee that ReactFlow's ResizeObserver
-    // has measured every node. Fitting early can use only part of the graph.
-    const fitWhenMeasured = async () => {
-      graphFitFrameRef.current = null;
-      if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
-      const flowNodes = instance.getNodes();
-      if (flowNodes.some(node => {
-        const measured = instance.getInternalNode(node.id)?.measured;
-        return !measured?.width || !measured?.height;
-      })) {
-        graphFitFrameRef.current = requestAnimationFrame(fitWhenMeasured);
-        return;
-      }
-      await instance.fitView({ padding: 0.24, minZoom: 0.3, maxZoom: 1.6, duration: 0 });
-      if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
-      // Commit the fitted viewport before starting the panel's entrance fade.
-      graphFitFrameRef.current = requestAnimationFrame(() => {
-        graphFitFrameRef.current = null;
-        if (graphFlowRef.current !== instance || graphRunRef.current !== targetKey) return;
-        setReadyGraphRunKey(targetKey);
-      });
-    };
-    graphFitFrameRef.current = requestAnimationFrame(fitWhenMeasured);
-  }, [currentRunKey]);
 
   const handleChatScroll = useCallback(() => {
     if (!chatScrollRef.current) return;
@@ -1198,10 +1165,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (revealChatFrameRef.current !== null) {
       cancelAnimationFrame(revealChatFrameRef.current);
     }
-    if (graphFitFrameRef.current !== null) {
-      cancelAnimationFrame(graphFitFrameRef.current);
-    }
-    graphFlowRef.current = null;
   }, []);
 
   const workspaceDetailsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1454,37 +1417,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const showGraphPane = routeType === "graph" && (hasGraphContent || (!isPlanning && state.graph.nodes.length > 0));
 
   const animatedNodes = useAnimatedNodes(nodes, state.runId);
-  const prevNodesCountRef = useRef(nodes.length);
-  const prevEdgesCountRef = useRef(edges.length);
-
-  useLayoutEffect(() => {
-    if (graphRunRef.current === currentRunKey && showGraphPane) return;
-    graphRunRef.current = currentRunKey;
-    graphFlowRef.current = null;
-    if (graphFitFrameRef.current !== null) cancelAnimationFrame(graphFitFrameRef.current);
-    graphFitFrameRef.current = null;
-    setReadyGraphRunKey("");
-    prevNodesCountRef.current = nodes.length;
-    prevEdgesCountRef.current = edges.length;
-  }, [currentRunKey, showGraphPane, nodes.length, edges.length]);
-
-  useEffect(() => {
-    if (nodes.length > 0 && nodes.length !== prevNodesCountRef.current) {
-      prevNodesCountRef.current = nodes.length;
-      if (graphFlowRef.current && isPlanning && isGraphMountedForRun) {
-        void graphFlowRef.current.fitView({ padding: 0.24, duration: 400, minZoom: 0.3, maxZoom: 1.5 });
-      }
-    }
-  }, [nodes.length, isPlanning, isGraphMountedForRun]);
-
-  useEffect(() => {
-    if (edges.length > 0 && edges.length !== prevEdgesCountRef.current) {
-      prevEdgesCountRef.current = edges.length;
-      if (graphFlowRef.current && isPlanning && isGraphMountedForRun) {
-        void graphFlowRef.current.fitView({ padding: 0.24, duration: 450, minZoom: 0.3, maxZoom: 1.5 });
-      }
-    }
-  }, [edges.length, isPlanning, isGraphMountedForRun]);
+  const { ready: isGraphMountedForRun, initialize: centerGraph } = useGraphViewport(
+    currentRunKey, showGraphPane, nodes, edges, isPlanning, graphCanvasRef,
+  );
 
   const prevMsgCountRef = useRef(effectiveMessages.length);
   useEffect(() => {
@@ -1848,7 +1783,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             </button>
             <motion.div
               className="pane-bottom-chat"
-              initial={{ opacity: 0 }}
+              initial={false}
               animate={{ opacity: 1 }}
               transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
             >
@@ -2384,7 +2319,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               </div>
 
-              <div className="graph-canvas">
+              <div className="graph-canvas" ref={graphCanvasRef}>
                 <GraphCanvas runKey={currentRunKey} ready={isGraphMountedForRun}
                   nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
                   onInit={centerGraph} onSelect={selectGraphNode} />

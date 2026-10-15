@@ -3,6 +3,77 @@ import test from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 
+async function waitForComposerSettled(page, selector) {
+  await page.locator(selector).evaluate(box => new Promise((resolve, reject) => {
+    let previous = box.getBoundingClientRect();
+    let stable = 0;
+    const started = performance.now();
+    const sample = () => {
+      const rect = box.getBoundingClientRect();
+      const movement = Math.abs(rect.x - previous.x) + Math.abs(rect.bottom - previous.bottom);
+      stable = movement < 0.1 ? stable + 1 : 0;
+      previous = rect;
+      if (stable >= 4) return resolve();
+      if (performance.now() - started > 5000) return reject(new Error("Composer did not settle"));
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }));
+}
+
+// Include ancestors: an input with opacity:1 still disappears under a fading view.
+async function assertOpaqueComposerNavigation(page, navigate) {
+  await page.evaluate(() => {
+    window.navigationComposerFrames = [];
+    window.sampleNavigationComposer = true;
+    const sample = () => {
+      const homeActive = document.querySelector(".app-shell").classList.contains("landing-active");
+      const view = document.querySelector(homeActive ? ".landing-screen" : ".workspace-view-wrapper");
+      const box = view?.querySelector(".prompt-box-container");
+      let opacity = box ? 1 : 0;
+      for (let element = box; element; element = element.parentElement) {
+        const style = getComputedStyle(element);
+        opacity *= Number(style.opacity);
+        if (style.visibility === "hidden" || style.display === "none") opacity = 0;
+      }
+      const send = box?.querySelector(".prompt-box-send-btn");
+      const rect = send?.getBoundingClientRect();
+      const painted = rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      const attach = box?.querySelector(".prompt-box-left-actions .prompt-box-icon-btn");
+      const attachRect = attach?.getBoundingClientRect();
+      const attachPainted = attachRect && document.elementFromPoint(attachRect.x + attachRect.width / 2, attachRect.y + attachRect.height / 2);
+      const boxRect = box?.getBoundingClientRect();
+      const visibleButtons = [...document.querySelectorAll(".prompt-box-send-btn")].filter(button =>
+        button.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })).length;
+      window.navigationComposerFrames.push({ homeActive, opacity, visibleButtons,
+        sendPainted: !!painted && send.contains(painted), paintedClass: painted?.getAttribute("class"),
+        sendTop: rect?.top, sendBottom: rect?.bottom, viewportHeight: innerHeight,
+        attachPainted: !!attachPainted && attach.contains(attachPainted),
+        boxTop: boxRect?.top, boxBottom: boxRect?.bottom,
+        controlsInViewport: [rect, attachRect].every(bounds => bounds && bounds.top >= 0 &&
+          bounds.bottom <= innerHeight && bounds.left >= 0 && bounds.right <= innerWidth) });
+      if (window.sampleNavigationComposer) requestAnimationFrame(sample);
+    };
+    sample();
+  });
+  try {
+    await navigate();
+    await page.waitForTimeout(400);
+  } finally {
+    await page.evaluate(() => { window.sampleNavigationComposer = false; });
+  }
+  const frames = await page.evaluate(() => window.navigationComposerFrames);
+  assert.ok(frames.length > 0);
+  for (const frame of frames) {
+    assert.ok(frame.opacity > 0.99 && frame.visibleButtons === 1 && frame.sendPainted &&
+      frame.attachPainted && frame.controlsInViewport,
+      `navigation keeps the input and both controls visible, even when draft heights differ: ${JSON.stringify(frame)}`);
+    assert.ok(Math.abs(frame.boxBottom - frames[0].boxBottom) < 1 &&
+      Math.abs(frame.sendBottom - frames[0].sendBottom) < 1,
+      `different-height drafts keep the composer and controls bottom-anchored: ${JSON.stringify(frame)}`);
+  }
+}
+
 for (const reducedMotion of ["no-preference", "reduce"]) {
   test(`conversation switching opens the final layout and centered graph (${reducedMotion})`, { timeout: 60_000 }, async () => {
     const repository = "/mock/project";
@@ -242,7 +313,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       }
       await page.locator('[data-run-id="b"]').click();
       await assertGraphVisible("b");
-      await page.waitForFunction(() => getComputedStyle(document.querySelector(".pane-bottom-chat .prompt-box-container")).transform === "none");
+      await waitForComposerSettled(page, ".pane-bottom-chat .prompt-box-container");
       await page.evaluate(() => {
         window.recordComposerFrames = [];
         window.sampleRecordComposer = true;
@@ -303,17 +374,26 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           title?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
           input?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
       }, undefined, { timeout: 5000 });
-      await page.waitForFunction(() => getComputedStyle(document.querySelector(".pane-bottom-chat .prompt-box-container")).transform === "none");
+      await waitForComposerSettled(page, ".pane-bottom-chat .prompt-box-container");
       const sourceComposer = await page.locator(".pane-bottom-chat .prompt-box-container").boundingBox();
       await page.evaluate(() => {
         window.homeComposerFrames = [];
         window.sampleHomeComposer = true;
         const sample = () => {
           const box = document.querySelector(".landing-screen .prompt-box-container");
-          const home = box?.closest(".landing-screen");
-          if (box && Number(getComputedStyle(home).opacity) > 0.01) {
+          if (box) {
             const rect = box.getBoundingClientRect();
-            window.homeComposerFrames.push({ x: rect.x, y: rect.y });
+            let opacity = 1;
+            for (let element = box; element; element = element.parentElement) {
+              const style = getComputedStyle(element);
+              opacity *= Number(style.opacity);
+              if (style.visibility === "hidden" || style.display === "none") opacity = 0;
+            }
+            const send = box.querySelector(".prompt-box-send-btn");
+            const sendRect = send.getBoundingClientRect();
+            const painted = document.elementFromPoint(sendRect.x + sendRect.width / 2, sendRect.y + sendRect.height / 2);
+            window.homeComposerFrames.push({ x: rect.x, y: rect.y, opacity,
+              sendPainted: !!painted && send.contains(painted) });
           }
           if (window.sampleHomeComposer) requestAnimationFrame(sample);
         };
@@ -322,9 +402,14 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       await page.getByRole("button", { name: "New conversation", exact: true }).click();
       await page.locator(".graph-pane").waitFor({ state: "detached" });
       await assertHomeVisible();
-      await page.waitForFunction(() => getComputedStyle(document.querySelector(".landing-screen .prompt-box-container")).transform === "none");
+      await waitForComposerSettled(page, ".landing-screen .prompt-box-container");
       const homeFrames = await page.evaluate(() => { window.sampleHomeComposer = false; return window.homeComposerFrames; });
       const destinationComposer = await page.locator(".landing-screen .prompt-box-container").boundingBox();
+      assert.ok(homeFrames.length > 0, "returning home samples the input from its first mounted frame");
+      for (const frame of homeFrames) {
+        assert.ok(frame.opacity > 0.99 && frame.sendPainted,
+          `returning home must not fade, hide or cover the input through any ancestor: ${JSON.stringify(frame)}`);
+      }
       if (reducedMotion === "no-preference") {
         const distance = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
         assert.ok(distance(sourceComposer, destinationComposer) > 4, "node and home composers have different positions");
@@ -353,7 +438,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       // and without ghosting duplicate send buttons during the handoff.
       await page.getByRole("button", { name: "New conversation", exact: true }).click();
       await assertHomeVisible();
-      await page.waitForFunction(() => getComputedStyle(document.querySelector(".landing-screen .prompt-box-container")).transform === "none");
+      await waitForComposerSettled(page, ".landing-screen .prompt-box-container");
       const homeBox = await page.locator(".landing-screen .prompt-box-container").boundingBox();
 
       await page.evaluate(() => {
@@ -361,17 +446,24 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         window.sampleHomeToNoGraph = true;
         const start = performance.now();
         const sample = () => {
-          const box = document.querySelector(".pane-bottom-chat .prompt-box-container") ||
-                            document.querySelector(".landing-screen .prompt-box-container");
+          const homeActive = document.querySelector(".app-shell").classList.contains("landing-active");
+          const box = document.querySelector(homeActive
+            ? ".landing-screen .prompt-box-container" : ".pane-bottom-chat .prompt-box-container");
           if (box) {
             const rect = box.getBoundingClientRect();
             const visibleSendButtons = [...document.querySelectorAll(".prompt-box-send-btn")].filter(
               btn => btn.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
             );
+            let opacity = 1;
+            for (let element = box; element; element = element.parentElement) {
+              const style = getComputedStyle(element);
+              opacity *= Number(style.opacity);
+              if (style.visibility === "hidden" || style.display === "none") opacity = 0;
+            }
             window.homeToNoGraphFrames.push({
               time: Math.round(performance.now() - start),
               x: rect.x, y: rect.y, width: rect.width, height: rect.height,
-              visibleButtons: visibleSendButtons.length,
+              visibleButtons: visibleSendButtons.length, opacity,
             });
           }
           if (window.sampleHomeToNoGraph) requestAnimationFrame(sample);
@@ -386,7 +478,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         const scroll = document.querySelector(".initial-query-scroll");
         return stream && scroll && +getComputedStyle(stream).opacity > 0 && +getComputedStyle(scroll).opacity > 0;
       });
-      await page.waitForFunction(() => getComputedStyle(document.querySelector(".pane-bottom-chat .prompt-box-container")).transform === "none");
+      await waitForComposerSettled(page, ".pane-bottom-chat .prompt-box-container");
 
       const switchFrames = await page.evaluate(() => {
         window.sampleHomeToNoGraph = false;
@@ -399,8 +491,59 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       assert.ok(Math.abs(homeBox.x - finalSwitchBox.x) <= 2, "composer stays centered horizontally");
       assert.ok(Math.abs(homeBottom - finalSwitchBottom) <= 2, "composer bottom remains viewport-anchored between home and conversation");
       for (const frame of switchFrames) {
-        assert.ok(frame.visibleButtons <= 1, "departing landing screen does not ghost an extra visible send button");
+        assert.ok(frame.visibleButtons === 1 && frame.opacity > 0.99,
+          `home/history navigation keeps one opaque input instead of a full-view fade: ${JSON.stringify(frame)}`);
       }
+
+      // Serial history, Planner history and restored multiline home drafts must
+      // stay opaque too, including a reversal before the previous home exits.
+      const newConversation = page.getByRole("button", { name: "New conversation", exact: true });
+      await assertOpaqueComposerNavigation(page, () => newConversation.click());
+      await assertHomeVisible();
+      const homeDraft = "Restored very long home draft 中文\n".repeat(40);
+      await page.locator(".landing-screen textarea").fill(homeDraft);
+      await page.waitForFunction(() => !document.querySelector(".landing-screen .prompt-box-container").hasAttribute("data-resizing"));
+      await assertOpaqueComposerNavigation(page, () => page.locator('[data-run-id="a"]').click());
+      await assertGraphVisible("a");
+      await assertOpaqueComposerNavigation(page, () => newConversation.click());
+      assert.equal(await page.locator(".landing-screen textarea").inputValue(), homeDraft);
+      await assertOpaqueComposerNavigation(page, async () => {
+        await page.locator('[data-run-id="d"]').evaluate(card => card.click());
+        await page.waitForFunction(() => !document.querySelector(".app-shell").classList.contains("landing-active"));
+        await newConversation.evaluate(button => button.click());
+      });
+      await assertHomeVisible();
+      assert.equal(await page.locator(".landing-screen textarea").inputValue(), homeDraft);
+
+      // Run-to-Run handoffs must also handle a tall destination, not only a tall
+      // departing draft. Node-specific drafts must not change Planner's draft.
+      await assertOpaqueComposerNavigation(page, () => page.locator('[data-run-id="b"]').click());
+      await assertGraphVisible("b");
+      await assertOpaqueComposerNavigation(page, () => page.locator('.react-flow__node[data-id="shared"]').click());
+      const nodeDraft = "Very long node draft 中文\n".repeat(40);
+      await composer.fill(nodeDraft);
+      await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat .prompt-box-container").hasAttribute("data-resizing"));
+      await assertOpaqueComposerNavigation(page, () => page.locator(".back-to-query-btn").click());
+      assert.equal(await composer.inputValue(), drafts.get("b"));
+      await assertOpaqueComposerNavigation(page, () => page.locator('[data-run-id="d"]').click());
+      await assertOpaqueComposerNavigation(page, () => page.locator('[data-run-id="b"]').click());
+      await assertOpaqueComposerNavigation(page, () => page.locator('.react-flow__node[data-id="shared"]').click());
+      assert.equal(await composer.inputValue(), nodeDraft);
+      await assertOpaqueComposerNavigation(page, () => newConversation.click());
+
+      // A smaller viewport must not hide either control, including a handoff
+      // from the 80dvh expanded editor into a short history input and back.
+      for (const height of [480, 360]) {
+        await page.setViewportSize({ width: 1280, height });
+        await waitForComposerSettled(page, ".landing-screen .prompt-box-container");
+        await page.getByRole("button", { name: "Expand input", exact: true }).click();
+        await page.waitForFunction(() => !document.querySelector(".landing-screen .prompt-box-container").hasAttribute("data-resizing"));
+        await assertOpaqueComposerNavigation(page, () => page.locator('[data-run-id="d"]').click());
+        await assertOpaqueComposerNavigation(page, () => newConversation.click());
+        await assertHomeVisible();
+        assert.equal(await page.locator(".landing-screen textarea").inputValue(), homeDraft);
+      }
+      await page.setViewportSize({ width: 1280, height: 768 });
 
       // Superseded initialization callbacks must not restore an older graph.
       for (const id of ["a", "c", "b", "d"]) {

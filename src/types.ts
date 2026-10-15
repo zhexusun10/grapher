@@ -246,5 +246,7 @@ export interface TranscriptItem {
   truncated?: boolean;
   timestamp?: number;
   defaultExpanded?: boolean;
+  // Presentation provenance: replay timestamps alone do not make history new.
+  animateAppear?: boolean;
 }
 

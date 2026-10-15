@@ -39,9 +39,9 @@ Built on [Pi](https://github.com/earendil-works/pi).
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
-![Grapher UI showing parallel frontend and backend tasks, integration, and a bounded review feedback edge before approval](assets/execution-graph.png)
+![Grapher UI showing compiled execution graph with user prompt, planning tool calls, and 16-node dependency topology](assets/execution-graph.png)
 
-*Actual Grapher UI with a demo graph awaiting approval. Fixture data, not a live-model run or benchmark.*
+*Actual Grapher UI showing a 16-node execution graph compiled and executed for a multi-stage machine learning task.*
 
 ## Why Grapher?
 

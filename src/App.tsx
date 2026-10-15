@@ -1,7 +1,7 @@
 import { t, localizeError } from "./i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Loader2, X } from "lucide-react";
-import { motion, AnimatePresence, LayoutGroup, useReducedMotion } from "motion/react";
+import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 
 import {
   defaultConfig, emptyGraph, emptySnapshot, publicationMergerCardId,
@@ -50,7 +50,6 @@ const nodeTypes = { work: TaskNode };
 const edgeTypes = { workflow: SmoothWorkflowEdge };
 
 export default function App() {
-  const reduceMotion = useReducedMotion();
   const [state, setState] = useSnapshotState(emptySnapshot);
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     try {
@@ -117,6 +116,7 @@ export default function App() {
   const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [isOpeningProject, setIsOpeningProject] = useState(false);
   const foregroundGeneration = useRef(0);
   const workbenchIdentityRef = useRef({ runId: "", key: "initial" });
   // Session-local unsent text outlives a mounted workbench, but never crosses Runs.
@@ -879,44 +879,52 @@ export default function App() {
     return scope;
   };
 
-  const handleOpenProject = () => run(async () => {
-    const pending = planningRecovery.capture(config.repository);
-    const info = await runtimeService.pickRepository();
-    if (!planningRecovery.current(pending)) return;
-    if (info) {
-      const normalizedPath = normalizeWorkspacePath(info.path);
-      const scope = detachForeground(normalizedPath);
-      setRepoInfo({ ...info, path: normalizedPath });
-      setConfig((prev) => ({ ...prev, repository: normalizedPath }));
-      const item: ProjectItem = {
-        id: normalizedPath,
-        name: info.name,
-        path: normalizedPath,
-        branch: info.branch,
-        clean: info.clean,
-        isShadow: info.isShadow,
-        lastOpened: Date.now(),
-      };
-      setProjects((prev) => {
-        const next = [item, ...prev.filter((p) => workspaceKey(p.path) !== workspaceKey(normalizedPath))];
-        try {
-          localStorage.setItem("grapher_projects", JSON.stringify(next));
-        } catch { }
-        return next;
-      });
-      const nextSnapshot = emptySnapshot;
-      resetSessionMessages();
-      setState(nextSnapshot);
-      setRouteType("undecided");
-      setPlannerStream(initialPlannerStream);
-      setGoal("");
-      setSelected("");
-      setError("");
-      void planningRecovery.restore(scope, nextSnapshot);
-    } else {
-      void planningRecovery.restore(pending, state);
-    }
-  });
+  const handleOpenProject = () => {
+    if (isOpeningProject) return;
+    setIsOpeningProject(true);
+    return run(async () => {
+      try {
+        const pending = planningRecovery.capture(config.repository);
+        const info = await runtimeService.pickRepository();
+        if (!planningRecovery.current(pending)) return;
+        if (info) {
+          const normalizedPath = normalizeWorkspacePath(info.path);
+          const scope = detachForeground(normalizedPath);
+          setRepoInfo({ ...info, path: normalizedPath });
+          setConfig((prev) => ({ ...prev, repository: normalizedPath }));
+          const item: ProjectItem = {
+            id: normalizedPath,
+            name: info.name,
+            path: normalizedPath,
+            branch: info.branch,
+            clean: info.clean,
+            isShadow: info.isShadow,
+            lastOpened: Date.now(),
+          };
+          setProjects((prev) => {
+            const next = [item, ...prev.filter((p) => workspaceKey(p.path) !== workspaceKey(normalizedPath))];
+            try {
+              localStorage.setItem("grapher_projects", JSON.stringify(next));
+            } catch { }
+            return next;
+          });
+          const nextSnapshot = emptySnapshot;
+          resetSessionMessages();
+          setState(nextSnapshot);
+          setRouteType("undecided");
+          setPlannerStream(initialPlannerStream);
+          setGoal("");
+          setSelected("");
+          setError("");
+          void planningRecovery.restore(scope, nextSnapshot);
+        } else {
+          void planningRecovery.restore(pending, state);
+        }
+      } finally {
+        setIsOpeningProject(false);
+      }
+    });
+  };
 
   const handleSelectProject = (proj: ProjectItem) => {
     if (workspaceKey(config.repository) === workspaceKey(proj.path)) return;
@@ -1041,19 +1049,21 @@ export default function App() {
         });
 
         if (generation === foregroundGeneration.current && workspaceKey(config.repository) === key) {
-          if (remainingProjects.length > 0) {
-            handleSelectProject(remainingProjects[0]);
-          } else {
-            detachForeground("");
-            setPlannerStream(initialPlannerStream);
-            setConfig((prev) => ({ ...prev, repository: "" }));
-            setRepoInfo(null);
-            setState(emptySnapshot);
-            setGoal("");
-            setSelected("");
-            resetSessionMessages();
-            setRouteType("undecided");
-          }
+          detachForeground("");
+          setPlannerStream(initialPlannerStream);
+          setConfig((prev) => {
+            const next = { ...prev, repository: "" };
+            try { localStorage.setItem("grapher_config", JSON.stringify(next)); } catch { }
+            return next;
+          });
+          setRepoInfo(null);
+          setState(emptySnapshot);
+          setGoal("");
+          setLandingGoal(loadLandingDraft(""));
+          setSelected("");
+          resetSessionMessages();
+          setRouteType("undecided");
+          setError("");
         }
       }),
     });
@@ -2878,6 +2888,7 @@ export default function App() {
             activeRepo={config.repository}
             onSelectProject={actions.selectProject}
             onOpenProject={actions.openProject}
+            isOpeningProject={isOpeningProject}
             onRemoveProject={actions.removeProject}
             runs={runs}
             runLabels={runLabels}
@@ -2955,6 +2966,7 @@ export default function App() {
               </AnimatePresence>
             </div>
 
+            {/* Shared inputs must stay opaque; only local content/decorations fade. */}
             <LayoutGroup id="main-conversation">
             <div className="main-view-stage">
             <AnimatePresence initial={false}>
@@ -2975,10 +2987,12 @@ export default function App() {
                 <motion.div
                   key="workspace-view"
                   className="workspace-view-wrapper"
-                  initial={{ opacity: 0 }}
+                  initial={false}
                   animate={{ opacity: 1 }}
+                  // Presence can retain the source while its composer moves.
+                  // Hide it immediately, without fading the incoming input.
                   exit={{ opacity: 0 }}
-                  transition={{ duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] }}
+                  transition={{ duration: 0 }}
                 >
                   <PublicationPanel
                     key={state.runId.startsWith("pending-") ? "provisional" : state.runId}

@@ -3624,7 +3624,7 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn saving_node_model_settings_targets_only_the_requested_failed_run() {
+fn saving_node_model_settings_targets_failed_and_unstarted_nodes_only_in_the_requested_run() {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path().join("source");
     fs::create_dir(&repository).unwrap();
@@ -3648,12 +3648,16 @@ fn saving_node_model_settings_targets_only_the_requested_failed_run() {
             let mut runtime = service.runtime.lock().unwrap();
             runtime.emit(EventKind::Created {
                 graph: Graph {
-                    nodes: vec![Node { name: "task".into(), task: "test".into() }],
+                    nodes: vec![
+                        Node { name: "task".into(), task: "test".into() },
+                        Node { name: "pending".into(), task: "wait for task".into() },
+                    ],
+                    edges: vec![Edge { from: "task".into(), to: "pending".into(), feedback: false }],
                     ..Graph::default()
                 },
                 config: config.clone(), planning_id: None, planning: None,
             }).unwrap();
-            runtime.set_route("serial").unwrap();
+            runtime.set_route("graph").unwrap();
             runtime.approve().unwrap();
             let job = runtime.jobs().unwrap().remove(0);
             runtime.finish(&job.execution, Err("Provider quota exhausted".into())).unwrap();
@@ -3677,6 +3681,11 @@ fn saving_node_model_settings_targets_only_the_requested_failed_run() {
     assert_eq!(result["snapshot"]["canResume"], true);
     assert_eq!(result["snapshot"]["nodes"]["task"]["status"], "failed");
     assert_eq!(result["snapshot"]["nodes"]["task"]["modelConfig"]["model"], "new/coder");
+    assert_eq!(result["snapshot"]["nodes"]["task"]["modelRetry"], true);
+    assert_eq!(result["snapshot"]["nodes"]["pending"]["status"], "blocked");
+    assert_eq!(result["snapshot"]["nodes"]["pending"]["modelConfig"]["model"], "new/coder");
+    assert_eq!(result["snapshot"]["nodes"]["pending"]["modelRetry"], false);
+    assert_eq!(result["snapshot"]["executions"].as_array().unwrap().len(), 1);
     assert_eq!(result["snapshot"]["config"]["model"], "old/model");
     assert!(!second.driving.load(Ordering::SeqCst), "saving is not Continue");
     assert_eq!(serde_json::to_value(&first.runtime.lock().unwrap().state).unwrap(), first_before);

@@ -50,7 +50,10 @@ cheap.
 The user's desktop folder is not an accepted binding: [detection and
 binding validation](../../backend/src/workspace.rs) refuse it before a shadow
 repository is created, so forced collection cannot walk unrelated personal
-data. Bind an actual project directory instead.
+data. Bind an actual project directory instead. Workspaces exceeding 10GB are
+also rejected by validation to prevent out-of-memory or system stalls from
+unmanaged large datasets or build caches; large files must be kept outside the
+workspace or a deeper subfolder selected.
 
 ## Shadow repository lifecycle
 

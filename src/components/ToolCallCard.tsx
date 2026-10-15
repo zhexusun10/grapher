@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import React, { useState, useMemo, useRef } from "react";
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
-import { shouldCardAnimateAppear } from "../services/cardAnimations";
+import { useCardAppear } from "../services/cardAnimations";
 import {
   Terminal,
   FileText,
@@ -151,9 +151,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       [item.result]
     );
 
-    const animateAppear = useMemo(() => {
-      return shouldCardAnimateAppear(item.id, status === "running", item.timestamp);
-    }, [item.id, status, item.timestamp]);
+    const animateAppear = useCardAppear(item.id, status === "running", item.timestamp, item.animateAppear);
 
     return (
       <div

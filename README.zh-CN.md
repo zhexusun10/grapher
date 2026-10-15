@@ -16,9 +16,9 @@
 
 [快速开始](#快速开始) · [工作方式](#工作方式) · [架构](docs/architecture/overview.md) · [English](README.md)
 
-![Grapher 真实界面：审批前的示例图，包含前后端并行任务、集成和有界审查反馈](assets/execution-graph.png)
+![Grapher 真实界面：完成多节点复杂依赖拓扑图编译与执行，包含需求提示词、规划过程工具调用与执行拓扑图](assets/execution-graph-zh.png)
 
-*真实 Grapher 界面，展示等待审批的示例图。使用固定样例数据，不是真实模型执行记录或性能测试。*
+*真实 Grapher 界面，展示复杂任务编译生成的 16 节点执行拓扑图与规划全流程记录。*
 
 ## 为什么选择 Grapher？
 

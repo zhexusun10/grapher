@@ -99,11 +99,20 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const reduceMotion = useReducedMotion();
     const isPresent = useIsPresent();
     const containerRef = useRef<HTMLDivElement | null>(null);
+    const flowRef = useRef<HTMLDivElement | null>(null);
     const resizeFromRef = useRef<number | null>(null);
     const resizeAnimationRef = useRef<Animation | null>(null);
     const hasMeasuredHeightRef = useRef(false);
     const internalTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const followInputEndRef = useRef(false);
+    const revealInputEnd = useCallback(() => {
+      const textarea = internalTextareaRef.current;
+      if (followInputEndRef.current && textarea && document.activeElement === textarea &&
+          textarea.selectionStart === textarea.value.length && textarea.selectionEnd === textarea.value.length) {
+        textarea.scrollTop = textarea.scrollHeight;
+      }
+    }, []);
 
     const [internalValue, setInternalValue] = useState(() => String(defaultValue));
     const [isExpanded, setIsExpanded] = useState(false);
@@ -186,8 +195,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     useEffect(() => {
       if (value === undefined) return;
       setInternalValue(value);
-      if (!value) return;
-      const timer = setTimeout(() => internalTextareaRef.current?.focus(), 40);
+      // A user's own edit already has focus. Refocusing on every controlled
+      // value update can disturb the browser's caret scroll after a paste.
+      if (!value || document.activeElement === internalTextareaRef.current) return;
+      const timer = setTimeout(() => internalTextareaRef.current?.focus({ preventScroll: true }), 40);
       return () => clearTimeout(timer);
     }, [value]);
 
@@ -382,9 +393,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       [currentText, triggerStart, cursorPos, onChange]
     );
 
-    // Measure the same natural textarea heights, then animate the whole box.
-    // Cancel before measuring so an in-flight height/fill rule cannot become the
-    // Keep the normal auto-growing input, with an explicit expanded editing mode.
+    // Measure natural textarea heights, then animate the box. Preserve a reader's
+    // scroll position, but keep a newly inserted end-of-draft caret visible at
+    // the animated height, not just at the measured final height.
     const resizeTextarea = useCallback(() => {
       const textarea = internalTextareaRef.current;
       const box = containerRef.current;
@@ -394,6 +405,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         // Editing must not cancel an in-flight expansion (or its copy-exit delay).
         textarea.style.height = "100%";
         textarea.style.overflowY = "auto";
+        revealInputEnd();
+        if (!resizeAnimationRef.current) followInputEndRef.current = false;
         return;
       }
       const from = resizeFromRef.current ?? box.getBoundingClientRect().height;
@@ -420,7 +433,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       const target = box.getBoundingClientRect();
       const measuredBefore = hasMeasuredHeightRef.current;
       hasMeasuredHeightRef.current = true;
-      if (!measuredBefore || reduceMotion || Math.abs(from - target.height) < 1) return;
+      if (!measuredBefore || reduceMotion || Math.abs(from - target.height) < 1) {
+        revealInputEnd();
+        followInputEndRef.current = false;
+        return;
+      }
       box.setAttribute("data-resizing", "");
       const animation = box.animate([
         { height: `${from}px` },
@@ -432,16 +449,39 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         fill: "backwards",
       });
       resizeAnimationRef.current = animation;
+      // The backwards fill temporarily shrinks the textarea again. Restore the
+      // end against this actual viewport before the first animated paint.
+      revealInputEnd();
       animation.onfinish = () => {
         if (resizeAnimationRef.current !== animation) return;
         resizeAnimationRef.current = null;
         box.removeAttribute("data-resizing");
+        revealInputEnd();
+        followInputEndRef.current = false;
       };
-    }, [compact, isExpanded, currentText, reduceMotion, expandDelay]);
+    }, [compact, isExpanded, currentText, reduceMotion, expandDelay, revealInputEnd]);
 
     useLayoutEffect(() => {
       resizeTextarea();
     }, [currentText, resizeTextarea]);
+
+    // The shared projection measures a zero-height bottom anchor, not the box's
+    // changing top edge. Reserve the real height in flow so transcript padding
+    // and landing layout still see the complete composer, including attachments
+    // and every frame of an expanded-editor resize.
+    useLayoutEffect(() => {
+      const box = containerRef.current;
+      const flow = flowRef.current;
+      if (!layoutId || !box || !flow) return;
+      const reserveHeight = () => {
+        const height = `${box.getBoundingClientRect().height}px`;
+        if (flow.style.height !== height) flow.style.height = height;
+      };
+      reserveHeight();
+      const observer = new ResizeObserver(reserveHeight);
+      observer.observe(box);
+      return () => observer.disconnect();
+    }, [layoutId]);
 
     // Wrapping can change when the window or workbench split is resized, too.
     useLayoutEffect(() => {
@@ -450,13 +490,15 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       let width = textarea.getBoundingClientRect().width;
       const observer = new ResizeObserver(() => {
         const nextWidth = textarea.getBoundingClientRect().width;
-        if (nextWidth === width) return;
-        width = nextWidth;
-        resizeTextarea();
+        if (nextWidth !== width) {
+          width = nextWidth;
+          resizeTextarea();
+        }
+        revealInputEnd();
       });
       observer.observe(textarea);
       return () => observer.disconnect();
-    }, [resizeTextarea]);
+    }, [resizeTextarea, revealInputEnd]);
 
     useLayoutEffect(() => {
       const box = containerRef.current;
@@ -470,6 +512,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const nextVal = e.target.value;
       const nextPos = e.target.selectionStart ?? nextVal.length;
+      followInputEndRef.current = nextPos === nextVal.length && e.target.selectionEnd === nextVal.length;
       animateSendArrowRef.current = true;
       setInternalValue(nextVal);
       setCursorPos(nextPos);
@@ -699,6 +742,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(e.key)) {
+        followInputEndRef.current = false;
+      }
       restProps.onKeyDown?.(e);
       if (e.defaultPrevented) return;
       if (showSuggestions) {
@@ -751,21 +797,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     const canSubmit = (hasText || !!selectedFile) && !disabled && !isBusy && !isPreparing && !isSubmitting;
 
-    return (
+    const prompt = (
       <motion.div
         ref={containerRef}
-        layoutId={layoutId || undefined}
-        // Keep the shared handoff; expanded editing must stay viewport-anchored on resize.
-        layout={layoutId ? "position" : undefined}
-        // The departing Run can unmount immediately: a shared opacity crossfade
-        // would fade this input in from nothing while its position is moving.
-        layoutCrossfade={false}
-        // Keep local height edits out of position projection. The dependency
-        // must differ between instances or shared layout skips Run-to-Run handoffs.
-        layoutDependency={isPresent ? textareaId : undefined}
         initial={false}
         animate={{ opacity: 1 }}
-        transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
         className={`prompt-box-container ${compact ? "compact" : "landing"} ${isExpanded ? "expanded" : ""} ${disabled ? "disabled" : ""} ${isDraggingOver ? "dragging-over" : ""} ${className}`}
         onClick={() => {
           if (!disabled && !isBusy) {
@@ -959,6 +995,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               restProps.onKeyUp?.(e);
             }}
             onSelect={(e) => {
+              if (e.currentTarget.selectionStart !== e.currentTarget.value.length ||
+                  e.currentTarget.selectionEnd !== e.currentTarget.value.length) followInputEndRef.current = false;
               setCursorPos(e.currentTarget.selectionStart || 0);
               restProps.onSelect?.(e);
             }}
@@ -966,7 +1004,20 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               setCursorPos(e.currentTarget.selectionStart || 0);
               restProps.onFocus?.(e);
             }}
+            onPointerDown={(e) => {
+              followInputEndRef.current = false;
+              restProps.onPointerDown?.(e);
+            }}
+            onWheel={(e) => {
+              followInputEndRef.current = false;
+              restProps.onWheel?.(e);
+            }}
+            onTouchMove={(e) => {
+              followInputEndRef.current = false;
+              restProps.onTouchMove?.(e);
+            }}
             onBlur={(e) => {
+              followInputEndRef.current = false;
               if (triggerMode !== null) {
                 setDismissedTrigger({ start: triggerStart, query: triggerQuery });
               }
@@ -1146,6 +1197,24 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           </motion.div>
         </motion.div>
       </motion.div>
+    );
+
+    if (!layoutId) return prompt;
+    return (
+      <div ref={flowRef} className={`prompt-box-flow ${compact ? "compact" : ""}`}>
+        <motion.div
+          className="prompt-box-anchor"
+          layoutId={layoutId}
+          layout="position"
+          layoutCrossfade={false}
+          // Local height changes must not restart a navigation handoff.
+          layoutDependency={isPresent ? textareaId : undefined}
+          initial={false}
+          transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
+        >
+          {prompt}
+        </motion.div>
+      </div>
     );
   }
 );

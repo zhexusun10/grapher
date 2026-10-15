@@ -35,10 +35,12 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
     <motion.div
       className="landing-screen"
       inert={!isPresent}
-      initial={{ opacity: 0 }}
+      // Fading this ancestor also fades the shared composer after its handoff.
+      // Keep it opaque and animate only the welcome copy below.
+      initial={false}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] }}
+      transition={{ duration: 0 }}
     >
       <div className="landing-center-content">
         <div className="landing-title-container">
@@ -65,7 +67,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
               className="landing-title"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              transition={{ duration: 0.25 }}
+              transition={{ duration: reduceMotion ? 0 : 0.25 }}
             >
               Build Anything
             </motion.p>
@@ -73,7 +75,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
               className="landing-title"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              transition={{ duration: 0.25, delay: 0.05 }}
+              transition={{ duration: reduceMotion ? 0 : 0.25, delay: reduceMotion ? 0 : 0.05 }}
             >
               With Grapher.
             </motion.p>
@@ -81,7 +83,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
               className="landing-subtitle"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              transition={{ duration: 0.25, delay: 0.1 }}
+              transition={{ duration: reduceMotion ? 0 : 0.25, delay: reduceMotion ? 0 : 0.1 }}
             >
               Don't orchestrate agents. Compile work.
             </motion.p>

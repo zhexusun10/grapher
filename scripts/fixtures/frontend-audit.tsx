@@ -7,6 +7,7 @@ import { PromptBox } from "../../src/components/ui/chatgpt-prompt-input";
 import { useSnapshotPolling } from "../../src/hooks/useSnapshotPolling";
 import { runtimeService } from "../../src/services/runtime";
 import { ThinkingCard } from "../../src/components/ThinkingCard";
+import { ToolCallCard } from "../../src/components/ToolCallCard";
 import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
 import { ExecutionTranscript, executionTranscriptCache } from "../../src/components/ExecutionTranscript";
 import { PlanningActivity, planningTranscriptCache } from "../../src/components/PlanningActivity";
@@ -137,10 +138,13 @@ function HistoryRegressionFixture() {
 
 function LatestScrollFixture() {
   const layout = new URLSearchParams(location.search).get("layout");
+  const live = layout === "live-tool";
+  const nodeView = live && new URLSearchParams(location.search).get("view") === "node";
   const assistant = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
   const [output, setOutput] = useState(() => {
     if (layout === "long") return assistant(Array.from({ length: 300 }, (_, index) => `Paragraph ${index}: long message 中文🚀 with enough text to span the viewport.\n\n`).join("")) + assistant("LATEST_VISIBLE_MARKER");
     const history = Array.from({ length: 80 }, (_, index) => assistant(`Virtualized message ${index}`)).join("");
+    if (live) return history;
     const content = Array.from({ length: 30 }, (_, index) => `Card output line ${index}`).join("\n\n");
     if (layout === "thinking-card") return history + JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: content }] } }) + "\n";
     if (layout === "tool-card") return history + [
@@ -151,18 +155,19 @@ function LatestScrollFixture() {
   });
   const [mounted, setMounted] = useState(true);
   audit.appendLatest = () => setOutput(previous => previous + assistant("APPEND_WHILE_SMOOTH_SCROLLING"));
+  audit.appendToolEvents = (events: unknown[]) => setOutput(previous => previous + events.map(event => JSON.stringify(event) + "\n").join(""));
   audit.unmountConversation = () => setMounted(false);
-  const state = { ...emptySnapshot, runId: "latest-run", config, phase: "paused", paused: true, approved: true, planType: "serial" as const,
+  const state = { ...emptySnapshot, runId: "latest-run", config, phase: live ? "running" : "paused", paused: !live, approved: true, planType: nodeView ? "graph" : "serial",
     graph: { originalGoal: "Latest-scroll regression", nodes: [{ name: "task", task: "Inspect the long conversation" }], edges: [] },
-    nodes: { task: { status: "done" as const, revision: 0, instruction: "", error: null } },
-    executions: [{ id: "latest-execution", node: "task", status: "completed", revision: 0, attempt: 1, output,
-      startedAt: 1, completedAt: 2, sessionId: "latest-session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
+    nodes: { task: { status: live ? "running" : "done", revision: 0, instruction: "", error: null } },
+    executions: [{ id: "latest-execution", node: "task", status: live ? "running" : "completed", revision: 0, attempt: 1, output,
+      startedAt: 1, completedAt: live ? null : 2, sessionId: "latest-session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
   const noop = () => {};
   return mounted ? <div style={{ height: 800, display: "flex" }}>
-    <GraphWorkbench state={state} routeType="serial" selected="" setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
+    <GraphWorkbench state={state} routeType={nodeView ? "graph" : "serial"} selected={nodeView ? "task" : ""} setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
       effectiveMessages={[]} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
       onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
-      active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
+      active={live} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
       nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
   </div> : <p>Conversation closed</p>;
 }
@@ -209,12 +214,61 @@ function ThinkingFixture() {
     <section data-thinking-view="history"><VirtualizedTranscript output={output} inline /></section>
   </>;
 }
+function CardPresentationFixture() {
+  const params = new URLSearchParams(location.search);
+  const type = params.get("type") === "tool" ? "tool" : "thinking";
+  const node = params.get("source") === "node";
+  const [visible, setVisible] = useState(false);
+  const [generation, setGeneration] = useState(0);
+  const [item, setItem] = useState<TranscriptItem>();
+  const [output, setOutput] = useState("");
+  const line = (event: unknown) => JSON.stringify(event) + "\n";
+  audit.showCards = (historical = false) => {
+    const id = `presentation-${type}`;
+    setItem({ id, type: type === "tool" ? "tool_call" : "thinking", status: historical ? "success" : "running",
+      content: "Already generated reasoning", toolName: "bash", args: { command: "echo presentation" },
+      timestamp: historical ? 1 : Date.now() });
+    const initial = type === "tool"
+      ? line({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: "echo presentation" } })
+      : line({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Already generated reasoning" } });
+    const completed = type === "tool"
+      ? line({ type: "tool_execution_end", toolCallId: id, toolName: "bash", result: { content: "done" } })
+      : line({ type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } });
+    setOutput(initial + (historical ? completed : ""));
+    setVisible(true);
+  };
+  audit.updateCard = (settle = false) => {
+    setItem(previous => previous && { ...previous, status: settle ? "success" : "running",
+      content: previous.content + " updated", args: { command: "echo updated" }, timestamp: Date.now() });
+    setOutput(previous => previous + (type === "tool"
+      ? line(settle
+        ? { type: "tool_execution_end", toolCallId: "presentation-tool", toolName: "bash", result: { content: "done" } }
+        : { type: "tool_execution_start", toolCallId: "presentation-tool", toolName: "bash", args: { command: "echo updated" } })
+      : line({ type: "message_update", assistantMessageEvent: { type: settle ? "thinking_end" : "thinking_delta", contentIndex: 0, delta: " updated" } })));
+  };
+  // A fast operation can start and finish inside the same polled JSONL chunk.
+  audit.appendCompletedCard = () => setOutput(previous => previous + (type === "tool" ? [
+    { type: "tool_execution_start", toolCallId: "next-tool", toolName: "bash", args: { command: "echo next" } },
+    { type: "tool_execution_end", toolCallId: "next-tool", toolName: "bash", result: { content: "done" } },
+  ] : [
+    { type: "message_start", message: { role: "assistant", content: [] } },
+    { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "New reasoning" } },
+    { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } },
+  ]).map(line).join(""));
+  audit.remountCards = () => setGeneration(previous => previous + 1);
+  const Mode = params.has("strict") ? React.StrictMode : React.Fragment;
+  return <Mode><section key={generation} data-card-presentation={generation}>
+    {visible && (node ? <VirtualizedTranscript output={output} compact /> : item && (type === "tool"
+      ? <ToolCallCard item={item} /> : <ThinkingCard item={item} />))}
+  </section></Mode>;
+}
+
 const cases: Record<string, React.ComponentType> = {
   settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, unchangedBubble: UnchangedBubbleFixture,
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
   polling: PollingFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
-  thinking: ThinkingFixture,
+  thinking: ThinkingFixture, cardPresentation: CardPresentationFixture,
 };
 const Component = cases[new URLSearchParams(location.search).get("case") || "settings"];
 createRoot(document.getElementById("root")!).render(<Component />);

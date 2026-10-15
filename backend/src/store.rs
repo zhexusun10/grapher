@@ -47,6 +47,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::DraftEdited { .. } => "draft_edited",
         EventKind::Paused { .. } => "paused",
         EventKind::FailedNodeModelsUpdated { .. } => "failed_node_models_updated",
+        EventKind::NodeModelsUpdated { .. } => "node_models_updated",
         EventKind::RecoveryQueued { .. } => "recovery_queued",
         EventKind::StopRequested => "stop_requested",
         EventKind::Rejected => "rejected",

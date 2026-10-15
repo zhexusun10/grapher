@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Default workspace/engine caches to the OS cache directory (Windows: `%LOCALAPPDATA%\Grapher`), preserving existing runtime histories and legacy execution paths.
 - Upgrade the pinned Pi engine to the official stable 1.2.0 release (exact `v1.2.0` tag), refreshing the checksummed model catalog and reviewed dependency profile; the profile drops the removed experimental `client`, `protocol` and `server` workspaces and adds `@silvia-odwyer/photon` for Durable image handling.
 - Extend the Pi contracts with Azure provider/API, credential-migration, retired 1.2.0 catalog, OpenRouter router placeholder-price and `before_agent_start` user/custom event-union regressions; revalidate extensions, prepared hosts and Windows production execution against Pi 1.2.0.
-- Upgrade the bundled `pi-continuity` extension from 0.1.1 to 0.2.0, adding bounded polling for subscription usage limits without an advertised reset time.
+- Upgrade the bundled `pi-continuity` extension from 0.2.0 to 0.2.1, expanding the default continuation budgets (16 resumes and 12 stream attempts per user request), broadening transient-error and output-truncation classification, and hardening malformed-message guards. The bounded 15-minute usage-limit polling added in 0.2.0 is unchanged.
 
 ### Fixed
 

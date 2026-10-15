@@ -235,6 +235,37 @@ mod workspace_guard_tests {
             |name| (name == "HOME").then(|| PathBuf::from("/home/test"))
         ));
     }
+
+    #[test]
+    fn workspace_size_limit_rejects_oversized_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("my-project");
+        fs::create_dir_all(&project).unwrap();
+
+        // Write small files: total 200 bytes
+        fs::write(project.join("a.txt"), vec![b'a'; 100]).unwrap();
+        fs::write(project.join("b.txt"), vec![b'b'; 100]).unwrap();
+
+        // Under limit (1000 bytes) succeeds
+        assert!(check_workspace_size(&project, 1000).is_ok());
+
+        // Over limit (150 bytes) fails with actionable message
+        let err = check_workspace_size(&project, 150).unwrap_err();
+        assert!(err.contains("10GB"));
+        assert!(err.contains("数据集"));
+
+        // Files in .git and .grapher* are excluded from project size
+        let git_dir = project.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("large_pack"), vec![b'x'; 500]).unwrap();
+
+        let grapher_dir = project.join(".grapher-worktrees");
+        fs::create_dir_all(&grapher_dir).unwrap();
+        fs::write(grapher_dir.join("worktree_cache"), vec![b'y'; 500]).unwrap();
+
+        // Still passes with 200 bytes of actual project files
+        assert!(check_workspace_size(&project, 250).is_ok());
+    }
 }
 
 /// Desktop folders are not valid project workspaces. Runtime collection is
@@ -276,18 +307,99 @@ fn is_desktop_workspace(
     roots.iter().any(|root| normalize(root) == target)
 }
 
+pub const MAX_WORKSPACE_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GB
+
+pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
+    let mut total_bytes: u64 = 0;
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(current_dir) = stack.pop() {
+        let entries = match fs::read_dir(&current_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            // Never follow symlinks or Windows junctions
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                // Exclude .git and internal .grapher* directories
+                if file_name == ".git" || file_name.starts_with(".grapher") {
+                    continue;
+                }
+                stack.push(path);
+            } else if metadata.is_file() {
+                total_bytes = total_bytes.saturating_add(metadata.len());
+                if total_bytes > max_bytes {
+                    return Err(
+                        "工作区体积超过 10GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cached_check_workspace_size(canonical_root: &Path) -> Result<(), String> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CACHE: Mutex<Option<HashMap<PathBuf, (Instant, Result<(), String>)>>> = Mutex::new(None);
+
+    let now = Instant::now();
+    let ttl = Duration::from_secs(30);
+
+    {
+        if let Ok(mut lock) = CACHE.lock() {
+            let map = lock.get_or_insert_with(HashMap::new);
+            if let Some((timestamp, cached_res)) = map.get(canonical_root) {
+                if now.duration_since(*timestamp) < ttl {
+                    return cached_res.clone();
+                }
+            }
+        }
+    }
+
+    let result = check_workspace_size(canonical_root, MAX_WORKSPACE_BYTES);
+
+    if let Ok(mut lock) = CACHE.lock() {
+        let map = lock.get_or_insert_with(HashMap::new);
+        if map.len() > 50 {
+            map.retain(|_, (t, _)| now.duration_since(*t) < ttl);
+        }
+        map.insert(canonical_root.to_path_buf(), (now, result.clone()));
+    }
+
+    result
+}
+
 fn prohibited_workspace_reason(candidate: &Path) -> Option<String> {
     let probe = candidate
         .canonicalize()
         .unwrap_or_else(|_| candidate.to_path_buf());
-    is_desktop_workspace(&probe, std::env::consts::OS, |name| {
+    if is_desktop_workspace(&probe, std::env::consts::OS, |name| {
         std::env::var_os(name).map(PathBuf::from)
-    })
-    .then(|| {
-        "不能选择系统桌面作为项目工作区：Grapher 会强制把工作区内所有文件收录进 Git 快照（无视 .gitignore），\
-         而桌面通常包含大量无关个人数据，会让运行长时间卡住。请选择具体的项目或代码仓库目录。"
-            .to_string()
-    })
+    }) {
+        return Some(
+            "不能选择系统桌面作为项目工作区：Grapher 会强制把工作区内所有文件收录进 Git 快照（无视 .gitignore），\
+             而桌面通常包含大量无关个人数据，会让运行长时间卡住。请选择具体的项目或代码仓库目录。"
+                .to_string(),
+        );
+    }
+    if let Err(reason) = cached_check_workspace_size(&probe) {
+        return Some(reason);
+    }
+    None
 }
 
 pub fn is_standard_git(path: &Path) -> bool {
@@ -673,8 +785,9 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
         let branch = git(&top_level, &["rev-parse", "--abbrev-ref", "HEAD"])
             .unwrap_or_else(|_| "HEAD".into());
         let head = git(&top_level, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
-        let status = git(&top_level, &["status", "--porcelain"]).unwrap_or_default();
-        let clean = status.trim().is_empty();
+        // 避免在添加/检测工作区时全量递归扫描大仓库的 untracked 状态导致 CPU 与 I/O 过载；
+        // 前端仅消费分支与提交元信息，初始 clean 状态默认为 true。
+        let clean = true;
 
         Ok(Some(RepositoryInfo {
             path: path_str,

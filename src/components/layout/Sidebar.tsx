@@ -1,6 +1,6 @@
 import { t } from "../../i18n";
 import React, { useState } from "react";
-import { Folder, Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Folder, Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
 import { ProjectItem } from "../../types";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
 
@@ -27,6 +27,7 @@ interface SidebarProps {
   loadError?: string;
   retrying?: boolean;
   onRetryLoad?: () => void;
+  isOpeningProject?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = React.memo(({
@@ -50,6 +51,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   loadError,
   retrying = false,
   onRetryLoad,
+  isOpeningProject = false,
 }) => {
   const [isCollapsed, setIsCollapsed] = useState(() => {
     try {
@@ -111,8 +113,10 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             className="sidebar-add-btn icon-tiny-btn"
             aria-label={t("添加或打开本地 Git 仓库")}
             onClick={onOpenProject}
+            disabled={isOpeningProject}
+            aria-busy={isOpeningProject}
           >
-            <Plus size={18} />
+            {isOpeningProject ? <Loader2 size={16} className="sidebar-btn-spin" /> : <Plus size={18} />}
           </button>
         </div>
       </div>
@@ -143,10 +147,13 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             );
           })
         ) : (
-          <div className="empty-projects-hint" onClick={onOpenProject}>
-            <Folder size={24} />
-            <span>{t("暂无工作区")}</span>
-            <small>{t("点击打开本地项目文件夹")}</small>
+          <div
+            className={`empty-projects-hint ${isOpeningProject ? "disabled" : ""}`}
+            onClick={isOpeningProject ? undefined : onOpenProject}
+          >
+            {isOpeningProject ? <Loader2 size={24} className="sidebar-btn-spin" /> : <Folder size={24} />}
+            <span>{isOpeningProject ? t("正在打开...") : t("暂无工作区")}</span>
+            <small>{isOpeningProject ? t("等待选择本地项目文件夹") : t("点击打开本地项目文件夹")}</small>
           </div>
         )}
       </div>

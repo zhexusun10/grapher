@@ -537,8 +537,8 @@ fn bootstrap_projection(
             None
         }
     };
-    // Settings describe future Runs. Explicit failed-node model updates are
-    // recorded separately; the current Run keeps its original config.
+    // Settings describe future Runs. Model updates for unstarted/failed nodes
+    // are recorded separately; the current Run keeps its original config.
     let mut config = saved_config_on_disk
         .or(active_config)
         .or_else(|| {
@@ -728,7 +728,7 @@ fn save_config_projection(
     let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(runtime.root.join("config.json"), bytes).map_err(|e| e.to_string())?;
     if run_id.is_some() {
-        runtime.update_failed_node_models(&config)?;
+        runtime.update_node_models(&config)?;
     }
     drop(runtime);
     #[cfg(not(feature = "fixture"))]

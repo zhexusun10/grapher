@@ -149,8 +149,8 @@ h3 {
   overflow: hidden;
   position: relative;
   isolation: isolate;
-  background: var(--bg-canvas);
-  transition: background-color 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  /* The persistent root paints the canvas; do not repaint it on navigation. */
+  background: transparent;
 }
 
 .app-background-root {
@@ -224,15 +224,6 @@ h3 {
   mask-image: none;
 }
 
-/* Switch the canvas immediately; only the decorative background layer fades. */
-.app-shell.landing-active {
-  background: transparent;
-}
-
-.app-shell.landing-active .main {
-  background: transparent;
-}
-
 /* 侧边栏 (悬浮圆角卡片模式) */
 .sidebar {
   --sidebar-content-width: 230px;
@@ -255,16 +246,22 @@ h3 {
   overflow: hidden;
   transition:
     width var(--sidebar-width-duration) var(--sidebar-anim-ease),
-    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease),
-    padding var(--sidebar-width-duration) var(--sidebar-anim-ease);
+    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease);
+  /* Padding is deliberately not transitioned: it moves the content layer's
+     origin, which would drag the rail controls with the animating width. */
 }
 
-/* ---------- Expanded state content sizing ---------- */
-.sidebar:not(.is-collapsed) .sidebar-brand-row,
-.sidebar:not(.is-collapsed) .nav-section,
+/* ---------- Content sizing ---------- */
+/* The rail rows keep one fixed width in both states. The sidebar clips this
+   layer, so only the panel edge animates while collapsing: a control that
+   changes position when the state changes is still a click target, whereas a
+   control that slides with the animating width moves out from under the
+   pointer and its click is dispatched to a shared ancestor instead. */
+.sidebar .sidebar-brand-row,
+.sidebar .nav-section,
+.sidebar .sidebar-bottom,
 .sidebar:not(.is-collapsed) .projects-list,
-.sidebar:not(.is-collapsed) .runs-list,
-.sidebar:not(.is-collapsed) .sidebar-bottom {
+.sidebar:not(.is-collapsed) .runs-list {
   width: var(--sidebar-content-width, 230px);
   min-width: var(--sidebar-content-width, 230px);
   flex-shrink: 0;
@@ -380,16 +377,19 @@ a,
 .sidebar.is-collapsed .sidebar-brand-row,
 .sidebar.is-collapsed .nav-section,
 .sidebar.is-collapsed .sidebar-bottom {
-  width: 100% !important;
-  min-width: 0 !important;
-  justify-content: center !important;
-  padding-left: 0 !important;
-  padding-right: 0 !important;
+  /* Keep the fixed layer and left-align the rail inside it, so the controls
+     sit at the collapsed resting position from the first animation frame. */
+  width: var(--sidebar-content-width, 230px) !important;
+  min-width: var(--sidebar-content-width, 230px) !important;
+  justify-content: flex-start !important;
+  padding-left: 5px !important;
+  padding-right: 4px !important;
 }
 
 .sidebar.is-collapsed .sidebar-bottom {
   display: flex !important;
-  align-items: center !important;
+  /* Column layout: cross-axis start keeps the rail button at the left edge. */
+  align-items: flex-start !important;
 }
 
 .sidebar.is-collapsed .nav-section {
@@ -403,7 +403,8 @@ a,
   height: 32px !important;
   min-width: 0 !important;
   padding: 0 !important;
-  margin: 0 auto !important;
+  /* Auto margins would centre the control in the still-wide content layer. */
+  margin: 0 !important;
   box-sizing: border-box;
 }
 
@@ -415,7 +416,7 @@ a,
   gap: 0 !important;
   justify-content: center !important;
   align-items: center !important;
-  margin: 0 auto !important;
+  margin: 0 !important;
   border-radius: 7px;
   box-sizing: border-box;
 }
@@ -871,6 +872,26 @@ a,
   outline-offset: 2px;
 }
 
+.sidebar-add-btn:disabled,
+.nav-section .icon-tiny-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+  pointer-events: none;
+}
+
+.sidebar-btn-spin {
+  animation: sidebarBtnSpin 0.9s linear infinite;
+}
+
+@keyframes sidebarBtnSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .nav-section {
   display: flex;
   align-items: center;
@@ -1212,13 +1233,12 @@ a,
   display: flex;
   flex-direction: column;
   padding: 0 12px;
-  background: var(--bg-canvas);
+  background: transparent;
   position: relative;
   overflow: hidden;
-  transition: background-color 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Both views overlap in one fixed stage during a crossfade, never in page flow. */
+/* Keep shared-composer handoffs in one fixed stage, never in page flow. */
 .main-view-stage {
   flex: 1;
   min-width: 0;
@@ -1232,6 +1252,13 @@ a,
 .main-view-stage > .workspace-view-wrapper {
   position: absolute;
   inset: 0;
+}
+
+/* Rapidly reversing navigation can retain an exiting view. Keep the active
+   view above it so the shared composer is never covered by stale content. */
+.app-shell.landing-active .landing-screen,
+.app-shell:not(.landing-active) .workspace-view-wrapper {
+  z-index: 1;
 }
 
 .app-shell:not(.landing-active) .landing-screen,
@@ -1346,14 +1373,13 @@ a,
   display: flex;
   align-items: stretch;
   justify-content: center;
-  padding: clamp(16px, 4vh, 32px) 24px 26px;
+  /* Match workbench margin (12), border (1), and chat bottom padding (14). */
+  padding: clamp(16px, 4vh, 32px) 24px 27px;
   width: 100%;
   height: 100%;
   position: relative;
   overflow: hidden;
   overscroll-behavior: none;
-  will-change: transform, opacity;
-  transform: translateZ(0);
 }
 
 .landing-center-content {
@@ -1453,6 +1479,34 @@ a,
   color: var(--status-danger-text);
   font-size: 12px;
   padding: 4px 0;
+}
+
+/* Reserve the intrinsic composer height while shared navigation projects only
+   its bottom anchor. Different draft heights must grow upward, never push the
+   controls below the viewport or scale the text/buttons during a handoff. */
+.prompt-box-flow {
+  position: relative;
+  width: 100%;
+  max-width: 680px;
+  flex-shrink: 0;
+}
+
+.prompt-box-flow.compact {
+  max-width: 100%;
+}
+
+.prompt-box-anchor {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 0;
+}
+
+.prompt-box-anchor > .prompt-box-container {
+  position: absolute;
+  bottom: 0;
+  left: 0;
 }
 
 /* ChatGPT Prompt Box 全新独立与缩放组件 */
@@ -1594,11 +1648,10 @@ a,
   min-height: 0;
 }
 
-/* Fill the animated height without showing a scrollbar for its temporary size.
-   Normal overflow is restored when the box reaches its measured target height. */
+/* Fill the animated height. The measured overflow/padding stays in effect so a
+   scrollbar can never appear or disappear mid-growth and rewrap the text. */
 .prompt-box-container[data-resizing] .prompt-box-textarea {
   height: 100% !important;
-  overflow-y: hidden !important;
 }
 
 .prompt-box-expand-btn {
@@ -1623,6 +1676,9 @@ a,
   resize: none;
   min-width: 0;
   overflow-y: auto;
+  /* Reserve the scrollbar track from the first draft so growing past the capped
+     height cannot narrow the text and visibly rewrap it. */
+  scrollbar-gutter: stable;
   /* Reserve the toggle's space even while hidden so its arrival cannot rewrap text. */
   padding: 4px 36px 2px 2px;
   box-sizing: border-box;

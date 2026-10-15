@@ -62,6 +62,16 @@ There is no global pool limiting nodes across Runs, and no shared cap for Planne
 
 Failure blocks dependent branches; unrelated work continues. Pause stops new dispatches without forcibly terminating active model calls. Stop/cancel is a separate process-lifecycle action.
 
+Saving changed Node Agent model/thinking settings from a conversation records
+per-node overrides for every node that has never had an execution, including
+unapproved drafts and nodes waiting for dependencies or blocked before their first
+attempt. Their first dispatch uses those settings. Saving does not dispatch work,
+approve a draft, unpause a Run, or rewrite its original configuration. Nodes that
+have already executed retain their settings, except for the explicit failed-node
+recovery below; a waiting/dirty status alone does not make a node never-started.
+Overrides survive replay and repeated saves update the previous override. A
+pre-dispatch override does not opt a later provider failure into Continue recovery.
+
 Scheduling enforces one writer per physical Run directory and retains directories required by pending feedback/repair. Allocation, reuse and reclamation follow the [workspace directory contract](workspace-snapshots-and-feedback.md#allocation-and-ownership).
 
 Source locks cover approval and recorded Git snapshots after approved Planner revisions, not the Planner's live Bash/model session. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce Git conflicts, surfaced by each execution/publication result.
@@ -134,13 +144,14 @@ After interruption:
   provider failure as successful or silently retry an ordinary failed node.
   Ordinary failures require an explicit node intervention, or a changed Node
   Agent model/thinking selection saved for the current conversation followed
-  by Continue. Saving with that Run ID records per-node settings only for its
-  currently failed nodes; it keeps their failure/error evidence and does not
-  dispatch work. Continue resumes those unfinished turns with the new settings
-  and unblocks their dependency descendants without disturbing completed or
-  unrelated branches. The override is replayable across restart and retained
+  by Continue. Alongside never-started nodes, saving with that Run ID records
+  per-node settings for its currently failed nodes; it keeps their failure/error
+  evidence and does not dispatch work. Continue resumes those unfinished turns
+  with the new settings and unblocks their dependency descendants without
+  disturbing completed or unrelated branches. The override is replayable across restart and retained
   for that node's subsequent attempts; environment overrides still take
-  precedence. Other nodes and the Run's original configuration remain unchanged.
+  precedence. Running/completed nodes, previously executed non-failed nodes,
+  other Runs, and the Run's original configuration remain unchanged.
   See [model recovery regressions](../../backend/src/node_model_tests.rs) and
   [settings browser tests](../../scripts/bootstrap-settings-ui.test.mjs).
 - A continued or retried execution reuses the last prepared attempt's physical

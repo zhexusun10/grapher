@@ -34,7 +34,7 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
             let original = serde_json::to_value(&runtime.state.config).unwrap();
             let config = replacement(runtime.state.config.as_ref().unwrap());
             let error = runtime.state.nodes["task"].error.clone();
-            runtime.update_failed_node_models(&config).unwrap();
+            runtime.update_node_models(&config).unwrap();
             assert_eq!(runtime.state.nodes["task"].status, "failed");
             assert_eq!(runtime.state.nodes["task"].error, error);
             assert_eq!(runtime.state.executions.len(), 1, "saving never dispatches a retry");
@@ -42,7 +42,7 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
             assert_eq!(crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"], true);
             assert_eq!(serde_json::to_value(&runtime.state.config).unwrap(), original);
             let version = runtime.snapshot_version();
-            runtime.update_failed_node_models(&config).unwrap();
+            runtime.update_node_models(&config).unwrap();
             assert_eq!(runtime.snapshot_version(), version, "identical saves are idempotent");
 
             let root = runtime.root.clone();
@@ -69,7 +69,7 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
 }
 
 #[test]
-fn failed_node_model_change_does_not_modify_other_nodes_or_run_settings() {
+fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_done_nodes() {
     let graph = Graph {
         nodes: ["failed", "done", "running", "after", "pending"].into_iter()
             .map(|name| Node { name: name.into(), task: name.into() }).collect(),
@@ -90,15 +90,24 @@ fn failed_node_model_change_does_not_modify_other_nodes_or_run_settings() {
     let running = jobs.iter().find(|job| job.execution.node == "running").unwrap();
     runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
     runtime.finish(&done.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.nodes["after"].status, "blocked");
+    assert_eq!(runtime.state.nodes["pending"].status, "waiting");
     let before = serde_json::to_value(&runtime.state).unwrap();
     let mut settings = replacement(&config);
     settings.repository = "not-the-run-repository".into();
     settings.max_parallel = 1;
     settings.max_feedback = 0;
-    runtime.update_failed_node_models(&settings).unwrap();
+    runtime.update_node_models(&settings).unwrap();
     let after = serde_json::to_value(&runtime.state).unwrap();
-    for name in ["done", "running", "after", "pending"] {
+    for name in ["done", "running"] {
         assert_eq!(after["nodes"][name], before["nodes"][name]);
+    }
+    for name in ["after", "pending"] {
+        let mut expected = before["nodes"][name].clone();
+        expected["modelConfig"] = serde_json::to_value(settings.node_agent_settings()).unwrap();
+        expected["modelRetry"] = serde_json::json!(false);
+        assert_eq!(after["nodes"][name], expected, "only settings change for {name}");
     }
     assert_eq!(after["config"], before["config"]);
     assert_eq!(after["executions"], before["executions"]);
@@ -122,6 +131,112 @@ fn failed_node_model_change_does_not_modify_other_nodes_or_run_settings() {
 }
 
 #[test]
+fn unstarted_node_models_follow_settings_in_drafts_and_before_dispatch() {
+    for route in ["graph", "serial"] {
+        for approved in [false, true] {
+            let (_temp, _source, mut runtime) = setup(true, single());
+            runtime.set_route(route).unwrap();
+            if approved {
+                runtime.approve().unwrap();
+                runtime.pause(true).unwrap();
+            }
+            let original = runtime.state.config.clone().unwrap();
+            let before = serde_json::to_value(&runtime.state).unwrap();
+            let mut config = replacement(&original);
+            runtime.update_node_models(&config).unwrap();
+            assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
+            assert_eq!(runtime.state.nodes["task"].status, "waiting");
+            assert_eq!(runtime.state.nodes["task"].model_retry, Some(false));
+            assert_eq!(runtime.state.phase, before["phase"].as_str().unwrap());
+            assert_eq!(runtime.state.approved, approved);
+            assert!(runtime.state.executions.is_empty(), "saving never dispatches work");
+            assert!(!runtime.state.can_resume(), "unstarted overrides are not failure recovery");
+            let version = runtime.snapshot_version();
+            runtime.update_node_models(&config).unwrap();
+            assert_eq!(runtime.snapshot_version(), version);
+
+            // Reverting to the Run's original selection must replace the override too.
+            runtime.update_node_models(&original).unwrap();
+            assert_eq!(runtime.state.nodes["task"].model_config, Some(original.node_agent_settings()));
+            config.role_models.get_mut("nodeAgent").unwrap().thinking_level = Some("low".into());
+            runtime.update_node_models(&config).unwrap();
+            assert_eq!(serde_json::to_value(&runtime.state.config).unwrap(), before["config"]);
+
+            let root = runtime.root.clone();
+            drop(runtime);
+            let mut runtime = Runtime::open(&root).unwrap();
+            assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
+            if approved { runtime.pause(false).unwrap(); } else { runtime.approve().unwrap(); }
+            let job = runtime.jobs().unwrap().remove(0);
+            assert_eq!(job.config.node_agent_settings(), config.node_agent_settings());
+            assert!(!job.continuation);
+            assert_eq!(job.execution.attempt, 1);
+        }
+    }
+}
+
+#[test]
+fn prestart_model_settings_do_not_opt_later_failures_into_continue() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    let mut config = replacement(runtime.state.config.as_ref().unwrap());
+    runtime.update_node_models(&config).unwrap();
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&job.execution, Err("Provider quota exhausted".into())).unwrap();
+    runtime.jobs().unwrap();
+    assert!(!runtime.state.can_resume());
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert!(!runtime.state.can_resume(), "a prestart save is not a post-failure recovery decision");
+    runtime.update_node_models(&config).unwrap();
+    assert!(!runtime.state.can_resume(), "an unchanged save cannot opt in to recovery");
+    config.role_models.get_mut("nodeAgent").unwrap().thinking_level = Some("low".into());
+    runtime.update_node_models(&config).unwrap();
+    assert!(runtime.state.can_resume(), "changed settings while failed still enable Continue");
+}
+
+#[test]
+fn previously_started_waiting_blocked_and_dirty_nodes_keep_their_models() {
+    for status in ["waiting", "blocked", "dirty"] {
+        let (_temp, _source, mut runtime) = setup(true, single());
+        runtime.approve().unwrap();
+        let job = runtime.jobs().unwrap().remove(0);
+        runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+        // These states can also represent rescheduled work, not just a first attempt.
+        runtime.state.nodes.get_mut("task").unwrap().status = status.into();
+        runtime.state.superseded_execution_ids.push(job.execution.id.clone());
+        let version = runtime.snapshot_version();
+        runtime.update_node_models(&replacement(runtime.state.config.as_ref().unwrap())).unwrap();
+        assert_eq!(runtime.snapshot_version(), version);
+        assert!(runtime.state.nodes["task"].model_config.is_none());
+    }
+}
+
+#[test]
+fn legacy_failed_node_model_events_and_snapshots_keep_continue_recovery() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&job.execution, Err("Provider failed".into())).unwrap();
+    runtime.jobs().unwrap();
+    let settings = replacement(runtime.state.config.as_ref().unwrap()).node_agent_settings();
+    runtime.emit(EventKind::FailedNodeModelsUpdated {
+        nodes: vec!["task".into()], settings: settings.clone(),
+    }).unwrap();
+    assert!(runtime.state.can_resume());
+    let root = runtime.root.clone();
+    drop(runtime);
+    let runtime = Runtime::open(&root).unwrap();
+    assert_eq!(runtime.state.nodes["task"].model_config, Some(settings));
+    assert!(runtime.state.can_resume());
+    let mut legacy = serde_json::to_value(&runtime.state).unwrap();
+    legacy["nodes"]["task"].as_object_mut().unwrap().remove("modelRetry");
+    let legacy: Snapshot = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.can_resume(), "old checkpoints without a retry flag remain recoverable");
+}
+
+#[test]
 fn unrelated_settings_do_not_opt_provider_failures_into_continue() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
@@ -134,7 +249,7 @@ fn unrelated_settings_do_not_opt_provider_failures_into_continue() {
         model: "replacement/planner".into(), thinking_level: Some("max".into()),
     });
     config.auto_approve = true;
-    runtime.update_failed_node_models(&config).unwrap();
+    runtime.update_node_models(&config).unwrap();
     assert_eq!(runtime.snapshot_version(), version);
     assert!(!runtime.state.can_resume());
     runtime.pause(false).unwrap();
@@ -143,7 +258,7 @@ fn unrelated_settings_do_not_opt_provider_failures_into_continue() {
 
     // Legacy defaults and thinking-only changes are also effective node settings.
     config.thinking_level = "high".into();
-    runtime.update_failed_node_models(&config).unwrap();
+    runtime.update_node_models(&config).unwrap();
     assert!(runtime.state.can_resume());
     assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
 }

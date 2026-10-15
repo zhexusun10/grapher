@@ -340,10 +340,14 @@ pub struct NodeState {
     pub edit_execution_id: Option<String>,
     #[serde(default)]
     pub human_instruction: bool,
-    /// Model settings explicitly synchronized while this node was failed.
-    /// Other nodes and the Run's original configuration remain unchanged.
+    /// Model settings synchronized before first dispatch or while failed.
+    /// Running/completed nodes and the Run's original config stay unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_config: Option<RoleModelConfig>,
+    /// Only changes saved while failed opt the node into model-change recovery.
+    /// Legacy snapshots omit this flag and used model_config as the retry hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_retry: Option<bool>,
     /// Continue this node's Pi session directly after an interruption or model change.
     /// This is not a human intervention and does not add a new task instruction.
     #[serde(default)]
@@ -382,6 +386,7 @@ impl Default for NodeState {
             edit_execution_id: None,
             human_instruction: false,
             model_config: None,
+            model_retry: None,
             continuation: false,
             shared_workspace: false,
             baseline_head: None,
@@ -493,7 +498,12 @@ pub enum EventKind {
     Paused {
         paused: bool,
     },
+    /// Legacy failed-only settings event, retained for persisted replay.
     FailedNodeModelsUpdated {
+        nodes: Vec<String>,
+        settings: RoleModelConfig,
+    },
+    NodeModelsUpdated {
         nodes: Vec<String>,
         settings: RoleModelConfig,
     },
@@ -873,7 +883,8 @@ impl Snapshot {
 
     pub fn model_retry_nodes(&self) -> Vec<String> {
         self.nodes.iter().filter_map(|(name, node)| {
-            if node.status != "failed" || node.model_config.is_none() {
+            if node.status != "failed" || node.model_config.is_none()
+                || node.model_retry == Some(false) {
                 return None;
             }
             self.executions.iter().rev()
@@ -1125,6 +1136,20 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if let Some(node) = state.nodes.get_mut(name) {
                     if node.status == "failed" {
                         node.model_config = Some(settings.clone());
+                        node.model_retry = Some(true);
+                    }
+                }
+            }
+        }
+        EventKind::NodeModelsUpdated { nodes, settings } => {
+            for name in nodes {
+                let never_executed = !state.executions.iter()
+                    .any(|execution| execution.node == *name);
+                if let Some(node) = state.nodes.get_mut(name) {
+                    if node.status == "failed"
+                        || (never_executed && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")) {
+                        node.model_config = Some(settings.clone());
+                        node.model_retry = Some(node.status == "failed");
                     }
                 }
             }

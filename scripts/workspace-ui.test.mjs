@@ -166,6 +166,9 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
         window.autosizeFrames.push({ height: bounds.height, bottom: bounds.bottom, actionsBottom: actions.bottom,
           inputInset: input.top - bounds.top, inputWidth: input.width, text: textarea.value,
           scrollbarVisible: getComputedStyle(textarea).overflowY !== "hidden" && textarea.scrollHeight > textarea.clientHeight,
+          inputBottomGap: textarea.scrollHeight - textarea.clientHeight - textarea.scrollTop,
+          caretAtEnd: textarea.selectionStart === textarea.value.length && textarea.selectionEnd === textarea.value.length,
+          focused: document.activeElement === textarea,
           pillX: pill.left - mode.left, pillY: pill.top - mode.top,
           pillWidth: pill.width - mode.width, pillHeight: pill.height - mode.height });
         if (window.sampleAutosize) requestAnimationFrame(sample);
@@ -188,6 +191,23 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
           "ordinary textarea growth and shrinking animate through intermediate heights");
       }
     }
+    // Native insertion into the real controlled home composer must keep its
+    // final line visible while the shared-anchor box grows and afterwards.
+    const pastedDraft = "超长粘贴段落 with wrapping content ".repeat(1200) + "\nLAST_LINE\n";
+    await homeInput.focus();
+    const pasteStart = await page.evaluate(() => window.autosizeFrames.length);
+    await page.keyboard.insertText(pastedDraft);
+    await page.waitForFunction(() => !document.querySelector(".landing-screen .prompt-box-container").hasAttribute("data-resizing"));
+    await page.waitForTimeout(100);
+    const pastedFrames = await page.evaluate(({ pasteStart, pastedDraft }) =>
+      window.autosizeFrames.slice(pasteStart).filter(frame => frame.text === pastedDraft), { pasteStart, pastedDraft });
+    assert.ok(pastedFrames.length > 0);
+    for (const frame of pastedFrames) {
+      assert.ok(frame.focused && frame.caretAtEnd && frame.inputBottomGap <= 2,
+        `pasting must not scroll away from the last line: ${JSON.stringify(frame)}`);
+    }
+    await homeInput.fill("");
+    await page.waitForFunction(() => !document.querySelector(".landing-screen .prompt-box-container").hasAttribute("data-resizing"));
     const autosizeFrames = await page.evaluate(() => { window.sampleAutosize = false; return window.autosizeFrames; });
     const initialFrame = autosizeFrames[0];
     assert.ok(autosizeFrames.length > 0);
@@ -429,6 +449,99 @@ test("workspace removal commits backend deletion before pruning indexes and surv
     assert.deepEqual(errors, []);
   } finally {
     releaseDeletion();
+    await browser?.close();
+    await server.close();
+  }
+});
+
+test("removing active workspace returns to home landing page instead of switching to remaining workspace conversation", { timeout: 90_000 }, async () => {
+  const repositoryA = "C:\\Projects\\Alpha";
+  const repositoryB = "C:\\Projects\\Beta";
+  const config = { repository: repositoryA, model: "test/model", maxParallel: 1, maxFeedback: 3 };
+  const makeSnapshot = (runId, repository, goal) => ({
+    runId, config: { ...config, repository }, planType: "graph", phase: "completed",
+    graph: { originalGoal: goal, nodes: [], edges: [] }, nodes: {}, plan: null,
+    executions: [], mergers: [], events: [], approved: false, paused: false, base: "", feedbackCounts: {},
+  });
+  const snapshots = {
+    "run-a": makeSnapshot("run-a", repositoryA, "Alpha conversation"),
+    "run-b": makeSnapshot("run-b", repositoryB, "Beta conversation"),
+  };
+  const empty = { ...makeSnapshot("", repositoryA, ""), config: null, phase: "draft" };
+  const info = repository => ({ path: repository, name: repository.includes("Beta") ? "Beta" : "Alpha", branch: "main", head: "", clean: true });
+  const errors = [];
+  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-home-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false } });
+  let browser;
+  try {
+    await server.listen();
+    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    const context = await browser.newContext({ locale: "en-US", reducedMotion: "reduce" });
+    await context.addInitScript(({ repositoryA, repositoryB, config }) => {
+      localStorage.setItem("grapher_language_v1", "en");
+      localStorage.setItem("grapher_projects", JSON.stringify([
+        { id: repositoryA, path: repositoryA, name: "Alpha", branch: "main", clean: true, lastOpened: 2 },
+        { id: repositoryB, path: repositoryB, name: "Beta", branch: "main", clean: true, lastOpened: 1 },
+      ]));
+      localStorage.setItem("grapher_workspace_runs", JSON.stringify({ [repositoryA]: ["run-a"], [repositoryB]: ["run-b"] }));
+      localStorage.setItem("grapher_run_labels", JSON.stringify({ "run-a": "Alpha conversation", "run-b": "Beta conversation" }));
+      localStorage.setItem("grapher_run_modes", JSON.stringify({ "run-a": "graph", "run-b": "graph" }));
+      localStorage.setItem("grapher_config", JSON.stringify(config));
+    }, { repositoryA, repositoryB, config });
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      const body = route.request().postDataJSON();
+      let result;
+      switch (command) {
+        case "bootstrap": case "save_config":
+          result = { config, snapshot: empty, runs: Object.keys(snapshots), repositoryInfo: info(repositoryA), dataPath: "/mock/.grapher" }; break;
+        case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
+        case "snapshot_if_changed": result = { version: "mock-1", snapshot: snapshots[body.runId] || null }; break;
+        case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+        case "detect_repository": result = info(body.path || body.repository); break;
+        case "list_plannings": result = []; break;
+        case "list_files": result = { files: [] }; break;
+        case "list_skills": result = { skills: [] }; break;
+        case "provider_auth": result = { providers: [{ id: "test", name: "Test", methods: [], configured: true }], models: [], warning: null }; break;
+        case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "environment_capabilities": result = { platform: "windows", arch: "x86_64", nativeWorkspace: true }; break;
+        case "delete_workspace":
+          assert.equal(body.repository, repositoryA);
+          delete snapshots["run-a"];
+          result = ["run-a"];
+          break;
+        default:
+          errors.push(`Unexpected API: ${command}`);
+          return route.fulfill({ status: 400, json: { error: `Unexpected API: ${command}` } });
+      }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage();
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="run-a"]').waitFor();
+    await page.locator('[data-run-id="run-a"]').click();
+    await page.locator(".chat-messages-stream", { hasText: "Alpha conversation" }).waitFor();
+
+    // Remove active workspace Alpha
+    await page.locator(".project-workspace-item", { hasText: "Alpha" }).click({ button: "right" });
+    await page.locator(".context-menu-item.danger").click();
+    const dialog = page.getByRole("alertdialog");
+    await dialog.getByRole("button", { name: "Remove workspace", exact: true }).click();
+
+    // Verify it returns to home landing screen rather than navigating into Beta conversation
+    await page.locator(".landing-screen").waitFor();
+    assert.equal(await page.locator(".chat-messages-stream").count(), 0);
+    assert.equal(await page.locator(".project-workspace-item").count(), 1);
+    assert.equal(await page.locator(".project-workspace-item.active").count(), 0);
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_projects")).map(p => p.name)), ["Beta"]);
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).repository), "");
+
+    // User can still manually navigate to Beta if they choose to
+    await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    await page.locator(".chat-messages-stream", { hasText: "Beta conversation" }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally {
     await browser?.close();
     await server.close();
   }

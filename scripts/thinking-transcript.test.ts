@@ -87,6 +87,8 @@ test("active agent conversation auto-opens running COT while settled history sta
   const live = renderToStaticMarkup(createElement(ThinkingCard, { content: "Live reasoning", isStreaming: true, defaultExpanded: false }));
   assert.match(live, /thinking-card streaming expanded/);
   assert.match(live, /thinking-card-body/);
+  assert.match(live, /<span class="thinking-title">Chain of Thought<\/span>/);
+  assert.doesNotMatch(live, /思维链推理/);
 });
 
 test("thinking_end settles the original card without replacing captured thinking or mutating state", () => {

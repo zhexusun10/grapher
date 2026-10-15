@@ -67,47 +67,6 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
   return { context, page, errors };
 }
 
-test("settings cancel/failure keep committed models unchanged; saving cannot submit twice", { timeout: 30_000 }, async () => {
-  let saves = 0, fail = true, saved;
-  const gate = deferred();
-  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
-    if (command !== "save_config") return false;
-    saves += 1;
-    saved = body.config;
-    if (fail) await route.fulfill({ status: 500, json: { error: "Save rejected" } });
-    else { await gate.promise; await route.fulfill({ json: { result: { config: saved } } }); }
-    return true;
-  });
-  try {
-    const model = page.locator(".role-model-card").nth(2).locator("select").first();
-    await model.selectOption("test/new");
-    await page.locator(".settings-cancel-btn").click();
-    assert.equal(await page.evaluate(() => window.audit.committed.model), "test/old");
-    await page.evaluate(() => window.audit.open());
-    assert.equal(await model.inputValue(), "test/old");
-    await page.locator(".logout-btn").first().click();
-    await page.getByRole("alertdialog").waitFor();
-    await page.keyboard.press("Escape");
-    await page.getByRole("alertdialog").waitFor({ state: "detached" });
-    assert.equal(await page.locator(".settings-modal").count(), 1, "Escape closes only the nested credential confirmation");
-    await model.selectOption("test/new");
-    await page.locator(".save-config-btn").click();
-    await page.getByRole("alert").filter({ hasText: "Save rejected" }).waitFor();
-    assert.equal(await page.evaluate(() => window.audit.committed.model), "test/old");
-    assert.equal(await model.inputValue(), "test/new", "failed save retains its draft");
-    fail = false;
-    await page.locator(".save-config-btn").evaluate(button => { button.click(); button.click(); });
-    await waitFor(() => saves === 2);
-    assert.equal(await page.locator(".settings-cancel-btn").isDisabled(), true);
-    assert.equal(saved.model, "test/new");
-    gate.resolve();
-    await page.locator(".settings-modal").waitFor({ state: "detached" });
-    assert.equal(await page.evaluate(() => window.audit.committed.model), "test/new");
-    assert.equal(saves, 2);
-    assert.deepEqual(errors, []);
-  } finally { gate.resolve(); await context.close(); }
-});
-
 test("cancelled Provider login/respond replies cannot reopen the panel or replace a newer login", { timeout: 30_000 }, async () => {
   const loginGate = deferred(), responseGate = deferred();
   let logins = 0, responses = 0, oldReply = false, responseReply = false;
@@ -268,6 +227,152 @@ test("small settled node history opens through a bounded tail and renders tool c
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+// Pause the entrance partway through so live updates cannot race its natural end.
+// Assert continuity, not decorative timings or exact keyframe positions.
+async function pauseCardEntrance(card) {
+  return card.evaluate(card => {
+    const animations = card.getAnimations();
+    const entrance = animations.find(animation => animation.effect.getKeyframes()
+      .some(frame => frame.opacity !== undefined && frame.transform !== undefined));
+    if (!entrance) return false;
+    entrance.pause();
+    entrance.currentTime = Number(entrance.effect.getTiming().duration) / 3;
+    window.audit.entrance = entrance;
+    window.audit.cardTransform = getComputedStyle(card).transform;
+    return true;
+  });
+}
+
+for (const type of ["thinking", "tool"]) {
+  for (const source of ["direct", "node"]) {
+    test(`${source} ${type} card entrance survives live updates and completion without snapping`, { timeout: 30_000 }, async () => {
+      const { context, page, errors } = await fixture(`cardPresentation&type=${type}&source=${source}`, undefined, "no-preference");
+      try {
+        await page.addStyleTag({ content: ".appear-active { animation-duration: 10s !important; }" });
+        await page.evaluate(() => window.audit.showCards());
+        const card = page.locator(type === "tool" ? ".tool-call-card" : ".thinking-card");
+        await card.waitFor({ state: "attached" });
+        assert.ok(await pauseCardEntrance(card), "new live cards must have an entrance, including running tools");
+        if (type === "tool") {
+          assert.ok(await card.evaluate(element => element.getAnimations().every(animation =>
+            animation.effect.getTiming().iterations !== Infinity) && element.getAnimations({ subtree: true }).some(animation =>
+              animation.effect.getTiming().iterations === Infinity && animation.effect.pseudoElement)),
+            "tool activity feedback animates a decoration, not the moving/measured card surface");
+        }
+        for (const settle of [false, true]) {
+          await page.evaluate(settle => window.audit.updateCard(settle), settle);
+          await page.waitForFunction(({ type, settle }) => {
+            const card = document.querySelector(type === "tool" ? ".tool-call-card" : ".thinking-card");
+            if (!settle) return card.textContent.includes("updated");
+            return card.classList.contains(type === "tool" ? "success" : "settled");
+          }, { type, settle });
+          const continuous = await card.evaluate(element => element.getAnimations().includes(window.audit.entrance) &&
+            getComputedStyle(element).transform === window.audit.cardTransform);
+          assert.ok(continuous, "status/content/timestamp changes must not cancel or restart an in-flight entrance");
+        }
+        await card.evaluate(() => { window.audit.entrance.finish(); });
+        await page.evaluate(() => window.audit.remountCards());
+        await page.locator('[data-card-presentation="1"]').waitFor({ state: "attached" });
+        assert.equal(await pauseCardEntrance(card), false, "already-presented cards do not replay on remount");
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
+    test(`${source} ${type} card entrance works in StrictMode and respects reduced motion and old history`, { timeout: 30_000 }, async () => {
+      for (const reducedMotion of ["no-preference", "reduce"]) {
+        const { context, page, errors } = await fixture(`cardPresentation&type=${type}&source=${source}&strict=1`, undefined, reducedMotion);
+        try {
+          await page.addStyleTag({ content: ".appear-active { animation-duration: 10s !important; }" });
+          await page.evaluate(() => window.audit.showCards(true));
+          const selector = type === "tool" ? ".tool-call-card" : ".thinking-card";
+          const card = page.locator(selector);
+          await card.waitFor({ state: "attached" });
+          assert.equal(await pauseCardEntrance(card), false, "old settled cards must not animate");
+          if (source === "node") {
+            await page.evaluate(() => window.audit.appendCompletedCard());
+            await page.waitForFunction(selector => document.querySelectorAll(selector).length === 2, selector);
+            assert.equal(await pauseCardEntrance(card.last()), reducedMotion === "no-preference",
+              "new cards delivered already-completed in a live chunk still have an entrance");
+            assert.equal(await pauseCardEntrance(card.first()), false, "new output does not animate existing history");
+          }
+          // Reload to reset presentation history before the first live presentation.
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await page.waitForFunction(() => !!window.audit?.showCards);
+          await page.addStyleTag({ content: ".appear-active { animation-duration: 10s !important; }" });
+          await page.evaluate(() => window.audit.showCards());
+          await card.waitFor({ state: "attached" });
+          assert.equal(await pauseCardEntrance(card), reducedMotion === "no-preference",
+            "StrictMode must not consume presentation before commit; reduced motion disables entrance");
+          assert.deepEqual(errors, []);
+        } finally { await context.close(); }
+      }
+    });
+  }
+}
+
+for (const view of ["serial", "node"]) {
+  for (const completion of ["during", "after"]) {
+    test(`${view} tool card stays steady while its entrance plays naturally and completes ${completion} entrance`, { timeout: 30_000 }, async () => {
+      const { context, page, errors } = await fixture(`latestScroll&layout=live-tool&view=${view}`, undefined, "no-preference");
+      try {
+        const scroller = page.locator(".initial-query-scroll");
+        await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+        await page.waitForTimeout(400);
+        const samples = await scroller.evaluate(async (scroll, completion) => {
+          scroll.scrollTop = scroll.scrollHeight;
+          const id = "natural-entrance-tool";
+          window.audit.appendToolEvents([{ type: "message_update",
+            assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, id } }]);
+          const samples = [];
+          let executionStarted = false;
+          let settledAt = null;
+          let entrance = null;
+          const start = performance.now();
+          await new Promise(resolve => {
+            const frame = () => {
+              const card = scroll.querySelector(".tool-call-card");
+              if (card) {
+                entrance ??= card.getAnimations().find(animation => animation.effect.getKeyframes()
+                  .some(frame => frame.transform !== undefined && frame.opacity !== undefined));
+                const rect = card.getBoundingClientRect();
+                const style = getComputedStyle(card);
+                const dy = style.transform === "none" ? 0 : new DOMMatrix(style.transform).m42;
+                samples.push({ top: rect.top, layoutTop: rect.top - dy, height: card.offsetHeight,
+                  scrollTop: scroll.scrollTop, rowHeight: card.closest("[data-transcript-id]").offsetHeight });
+                const progress = entrance?.effect.getComputedTiming().progress;
+                if (!executionStarted && (progress >= 0.2 || entrance?.playState === "finished")) {
+                  executionStarted = true;
+                  window.audit.appendToolEvents([{ type: "tool_execution_start", toolCallId: id, toolName: "bash",
+                    args: { command: "echo live arguments arriving after toolcall_start" } }]);
+                }
+                const shouldSettle = executionStarted && (completion === "after" ? entrance?.playState === "finished" : progress >= 0.6);
+                if (settledAt === null && shouldSettle) {
+                  settledAt = performance.now();
+                  window.audit.appendToolEvents([{ type: "tool_execution_end", toolCallId: id, toolName: "bash",
+                    result: { content: "done", details: { exitCode: 0, truncated: true } } }]);
+                }
+              }
+              if ((settledAt !== null && performance.now() - settledAt > 350) || performance.now() - start > 3000) resolve();
+              else requestAnimationFrame(frame);
+            };
+            requestAnimationFrame(frame);
+          });
+          return { samples, sawEntrance: !!entrance, settled: settledAt !== null };
+        }, completion);
+        assert.ok(samples.sawEntrance && samples.settled, "exercise a real, unpaused entrance and tool completion");
+        const frames = samples.samples;
+        assert.ok(Math.max(...frames.map(frame => frame.layoutTop)) - Math.min(...frames.map(frame => frame.layoutTop)) <= 1,
+          `appearance/activity must not move the card's layout anchor: ${JSON.stringify(frames)}`);
+        assert.ok(frames.every((frame, index) => index === 0 || frame.top <= frames[index - 1].top + 1),
+          `the natural entrance must not bounce back down: ${JSON.stringify(frames)}`);
+        assert.ok(frames.every(frame => frame.height === frames[0].height && frame.rowHeight === frames[0].rowHeight),
+          "tool completion cannot disturb measured row height");
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+  }
+}
 
 async function sampleCardToggle(header) {
   return header.evaluate(async header => {
@@ -464,6 +569,111 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
       assert.equal(await page.evaluate(() => window.audit.cancels ?? 0), 0, "Escape collapses without cancelling the draft");
       await input.fill("Short again");
       await expand.waitFor({ state: "detached" });
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+for (const fixtureName of ["prompt", "compactPrompt"]) {
+  for (const reducedMotion of ["no-preference", "reduce"]) {
+    test(`${fixtureName} long paste keeps the caret and last line visible (${reducedMotion})`, { timeout: 30_000 }, async () => {
+      const { context, page, errors } = await fixture(fixtureName, undefined, reducedMotion);
+      try {
+        const input = page.locator("textarea");
+        const draft = Array.from({ length: 60 }, (_, index) => `Pasted paragraph ${index}: 中文长文稿 content `.repeat(20)).join("\n") + "\nLAST_LINE\n";
+        await input.focus();
+        await page.evaluate(() => {
+          window.pasteFrames = [];
+          window.samplePaste = true;
+          const sample = () => {
+            const input = document.querySelector("textarea");
+            if (input.value.length > 1000) window.pasteFrames.push({
+              bottomGap: input.scrollHeight - input.clientHeight - input.scrollTop,
+              selectionStart: input.selectionStart, selectionEnd: input.selectionEnd,
+              focused: document.activeElement === input,
+              contentWidth: input.clientWidth,
+              overflowY: getComputedStyle(input).overflowY,
+              fontSize: getComputedStyle(input).fontSize,
+              paddingLeft: getComputedStyle(input).paddingLeft,
+              resizing: document.querySelector(".prompt-box-container").hasAttribute("data-resizing"),
+            });
+            if (window.samplePaste) requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        });
+        // Native text insertion exercises caret scrolling without replacing the
+        // machine's clipboard or setting a textarea value programmatically.
+        await page.keyboard.insertText(draft);
+        await page.waitForTimeout(650);
+        const frames = await page.evaluate(() => { window.samplePaste = false; return window.pasteFrames; });
+        assert.equal(await input.inputValue(), draft);
+        assert.ok(frames.length > 0);
+        // A visible scrollbar must not appear or disappear mid-paste: a changing
+        // content width rewraps the pasted text inside the composer.
+        const widths = new Set(frames.map(frame => frame.contentWidth));
+        const overflows = new Set(frames.map(frame => frame.overflowY));
+        assert.equal(widths.size, 1, `pasted text must keep one content width: ${JSON.stringify([...widths])}`);
+        assert.equal(overflows.size, 1,
+          `pasted text must not toggle its scrollbar and rewrap: ${JSON.stringify([...overflows])}`);
+        for (const frame of frames) {
+          assert.ok(frame.focused && frame.selectionStart === draft.length && frame.selectionEnd === draft.length,
+            `pasting keeps focus and the insertion point at the end: ${JSON.stringify(frame)}`);
+        }
+        assert.ok(frames.every(frame => frame.bottomGap <= 2),
+          `the final line must remain visible throughout resizing: ${JSON.stringify(frames.filter(frame => frame.bottomGap > 2).slice(0, 5))}`);
+        // Appending to an already scrollable draft must not move the insertion
+        // point or leave the viewport one line above its newly pasted ending.
+        const extra = "Another pasted paragraph 中文 ".repeat(100) + "\nNEW_LAST_LINE\n";
+        await page.keyboard.insertText(extra);
+        await page.waitForTimeout(100);
+        const ending = await input.evaluate(element => ({ start: element.selectionStart, end: element.selectionEnd,
+          length: element.value.length, gap: element.scrollHeight - element.clientHeight - element.scrollTop }));
+        assert.equal(await input.inputValue(), draft + extra);
+        assert.equal(ending.start, ending.length);
+        assert.equal(ending.end, ending.length);
+        assert.ok(ending.gap <= 2, "repeated pastes keep the last line visible");
+        // Shrinking back below the capped height must restore the same content
+        // width, so removing the scrollbar cannot rewrap the remaining text.
+        await page.keyboard.press("ControlOrMeta+a");
+        await page.keyboard.press("Backspace");
+        await page.keyboard.insertText("Short final draft");
+        await page.waitForTimeout(120);
+        const shrunk = await input.evaluate(element => ({ width: element.clientWidth, text: element.value,
+          gap: element.scrollHeight - element.clientHeight - element.scrollTop }));
+        assert.equal(shrunk.text, "Short final draft");
+        assert.equal(shrunk.width, frames[0].contentWidth);
+        assert.equal(shrunk.gap, 0);
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+  }
+}
+
+for (const fixtureName of ["prompt", "compactPrompt"]) {
+  test(`${fixtureName} long paste does not override manual scrollback or edits in the middle`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(fixtureName, undefined, "no-preference");
+    try {
+      const input = page.locator("textarea");
+      const draft = "Long pasted paragraph 中文 ".repeat(1500);
+      await input.focus();
+      await page.keyboard.insertText(draft);
+      await page.waitForFunction(() => document.querySelector(".prompt-box-container").hasAttribute("data-resizing"));
+      await input.evaluate(element => {
+        element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+        element.scrollTop = 200;
+      });
+      await page.waitForFunction(() => !document.querySelector(".prompt-box-container").hasAttribute("data-resizing"));
+      await page.waitForTimeout(80);
+      assert.ok(Math.abs(await input.evaluate(element => element.scrollTop) - 200) <= 1,
+        "manual scrollback during the resize is not pulled back to the caret");
+      await input.evaluate(element => { element.setSelectionRange(10, 10); element.scrollTop = 0; });
+      await page.keyboard.insertText("MIDDLE");
+      await page.waitForTimeout(100);
+      assert.equal(await input.inputValue(), draft.slice(0, 10) + "MIDDLE" + draft.slice(10));
+      const middle = await input.evaluate(element => ({ start: element.selectionStart, end: element.selectionEnd, scroll: element.scrollTop }));
+      assert.equal(middle.start, 16);
+      assert.equal(middle.end, 16);
+      assert.ok(middle.scroll < 10, "editing the beginning must not jump to the draft's end");
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });

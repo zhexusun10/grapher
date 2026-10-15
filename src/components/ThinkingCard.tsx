@@ -1,12 +1,12 @@
 import { t } from "../i18n";
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Brain, ChevronRight, Copy, Check, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { TranscriptItem } from "../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { useSmoothStreamText } from "../hooks/useSmoothStreamText";
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
-import { shouldCardAnimateAppear } from "../services/cardAnimations";
+import { useCardAppear } from "../services/cardAnimations";
 
 interface ThinkingCardProps {
   item?: TranscriptItem;
@@ -25,7 +25,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     item,
     content: directContent,
     isStreaming: directStreaming,
-    title = t("思维链推理 (Chain of Thought)"),
+    title = "Chain of Thought",
     defaultExpanded = true,
     autoExpandWhileStreaming = true,
     expanded,
@@ -77,9 +77,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // Calculate approximate token/char stats
     const charCount = rawContent.trim() ? (isStreaming && smoothContent ? smoothContent : rawContent).length : 0;
 
-    const animateAppear = useMemo(() => {
-      return shouldCardAnimateAppear(item?.id, isStreaming, item?.timestamp);
-    }, [item?.id, isStreaming, item?.timestamp]);
+    const animateAppear = useCardAppear(item?.id, isStreaming, item?.timestamp, item?.animateAppear);
 
     // An empty provider block says nothing about the other thinking already received.
     // Keep its item for possible backfill, but do not render a misleading completion card.

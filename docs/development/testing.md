@@ -70,7 +70,7 @@ should not require test or workflow edits.
 
 | Command | Scope / prerequisites |
 | --- | --- |
-| `npm run test:ui` | Mocked-API browser interactions, stalled bootstrap/history/Provider catalog/settings recovery, graph switching, settings and managed result controls; installed Playwright Chromium or `GRAPHER_BROWSER_CHANNEL` (Windows defaults to Edge), no credentials/backend |
+| `npm run test:ui` | Mocked-API browser interactions, stalled bootstrap/history/Provider catalog/settings recovery, graph switching and Planner auto-fit, settings and managed result controls; installed Playwright Chromium or `GRAPHER_BROWSER_CHANNEL` (Windows defaults to Edge), no credentials/backend |
 | `npm run test:pi` | Pinned Pi CLI/SDK and provider/auth transport; isolated auth; no paid model |
 | `npm run test:extensions` | Real Pi extension tools and Planner graph mutations; compatible `rg`/`fd` required |
 | `npm run test:environment` | Rust empty-start admission/discovery/E/L/resources/private copies, launch binding and production pinned Pi/native Python acceptance without user policy input. Windows includes real Job CPU/memory enforcement; device-lock tests include process/crash release. Python 3.11+/Git/Bash plus Linux bubblewrap or macOS Seatbelt required. Optional offline Windows Conda/CUDA profile described below; [contract/evidence](../architecture/native-environments.md) |
