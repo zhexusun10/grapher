@@ -25,7 +25,8 @@ try {
   await once(listener, 'listening');
   const port = listener.address().port;
   await new Promise(resolve => listener.close(resolve));
-  backend = spawn(resolve('backend/target/debug/grapher'), [], {
+  const target = resolve(process.env.CARGO_TARGET_DIR || 'backend/target');
+  backend = spawn(join(target, 'debug/grapher'), [], {
     env: { ...process.env, GRAPHER_DATA_DIR: join(root, 'data'), GRAPHER_PORT: String(port) },
     stdio: ['ignore', 'ignore', 'pipe'],
   });

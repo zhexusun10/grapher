@@ -128,11 +128,19 @@ function HistoryRegressionFixture() {
 }
 
 function LatestScrollFixture() {
-  const longMessage = new URLSearchParams(location.search).get("layout") === "long";
+  const layout = new URLSearchParams(location.search).get("layout");
   const assistant = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
-  const [output, setOutput] = useState(() => longMessage
-    ? assistant(Array.from({ length: 300 }, (_, index) => `Paragraph ${index}: long message 中文🚀 with enough text to span the viewport.\n\n`).join("")) + assistant("LATEST_VISIBLE_MARKER")
-    : Array.from({ length: 500 }, (_, index) => assistant(`Virtualized message ${index}`)).join(""));
+  const [output, setOutput] = useState(() => {
+    if (layout === "long") return assistant(Array.from({ length: 300 }, (_, index) => `Paragraph ${index}: long message 中文🚀 with enough text to span the viewport.\n\n`).join("")) + assistant("LATEST_VISIBLE_MARKER");
+    const history = Array.from({ length: 80 }, (_, index) => assistant(`Virtualized message ${index}`)).join("");
+    const content = Array.from({ length: 30 }, (_, index) => `Card output line ${index}`).join("\n\n");
+    if (layout === "thinking-card") return history + JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: content }] } }) + "\n";
+    if (layout === "tool-card") return history + [
+      { type: "tool_execution_start", toolCallId: "bottom-tool", toolName: "bash", args: { command: "echo bottom-card" } },
+      { type: "tool_execution_end", toolCallId: "bottom-tool", toolName: "bash", result: { content: [{ type: "text", text: content }], details: { exitCode: 0 } } },
+    ].map(event => JSON.stringify(event) + "\n").join("");
+    return Array.from({ length: 500 }, (_, index) => assistant(`Virtualized message ${index}`)).join("");
+  });
   const [mounted, setMounted] = useState(true);
   audit.appendLatest = () => setOutput(previous => previous + assistant("APPEND_WHILE_SMOOTH_SCROLLING"));
   audit.unmountConversation = () => setMounted(false);

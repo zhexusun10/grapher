@@ -107,6 +107,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const foregroundGeneration = useRef(0);
+  const workbenchIdentityRef = useRef({ runId: "", key: "initial" });
   const historyPrefetchRef = useRef<AbortController | null>(null);
   useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
@@ -135,6 +136,7 @@ export default function App() {
     }
   });
   const pendingRunLabelIdsRef = useRef(new Set<string>());
+  const deletedRunIdsRef = useRef(new Set<string>());
 
   const [recentlyAddedEdgeIds, setRecentlyAddedEdgeIds] = useState<Set<string>>(new Set());
   // Newly created topology nodes keep a short-lived entrance class, mirroring
@@ -157,7 +159,7 @@ export default function App() {
         setRunLabels(prev => {
           const updated = { ...prev };
           for (const [id, goal] of results) {
-            if (updated[id] === undefined) {
+            if (updated[id] === undefined && !deletedRunIdsRef.current.has(id)) {
               updated[id] = goal;
             }
           }
@@ -236,6 +238,7 @@ export default function App() {
   }));
 
   const recordRunToWorkspace = (runId: string, repo: string) => {
+    if (deletedRunIdsRef.current.has(runId)) return;
     setWorkspaceRuns((prev) => {
       const updated = bindRunToWorkspace(prev, runId, repo);
       if (updated === prev) return prev;
@@ -277,6 +280,10 @@ export default function App() {
       return copy;
     });
 
+    // The accepted backend identity still belongs to the mounted Conversation.
+    if (workbenchIdentityRef.current.runId === oldId) {
+      workbenchIdentityRef.current = { ...workbenchIdentityRef.current, runId: newId };
+    }
     setState((prev) => (prev.runId === oldId ? { ...prev, runId: newId } : prev));
     setPlannerStream((prev) => (prev.runId === oldId ? { ...prev, runId: newId } : prev));
     const cached = messagesByRunRef.current.get(oldId);
@@ -716,7 +723,7 @@ export default function App() {
           }
         }).catch(() => { });
       }
-    } else if (data.repositoryInfo) {
+    } else if (storedProjects === null && data.repositoryInfo) {
       const info = { ...data.repositoryInfo, path: normalizeWorkspacePath(data.repositoryInfo.path) };
       const item: ProjectItem = {
         id: info.path,
@@ -969,27 +976,51 @@ export default function App() {
     setConfirmModal({
       title: t("移除工作区"),
       message: t("确定从工作区列表中移除「{0}」吗？", project.name),
-      detail: t("路径: {0}\n这仅会从工作区列表中移除索引，不会删除磁盘上的代码文件。", project.path),
+      detail: t("路径: {0}\n将删除此工作区的所有会话、日志和专属缓存，不会删除源项目代码文件。", project.path),
       confirmText: t("移除工作区"),
       danger: true,
-      onConfirm: () => {
+      onConfirm: () => run(async () => {
         const pathToRemove = project.path;
-        const remainingProjects = projects.filter((p) => workspaceKey(p.path) !== workspaceKey(pathToRemove));
-        setProjects(remainingProjects);
-        try {
-          localStorage.setItem("grapher_projects", JSON.stringify(remainingProjects));
-        } catch { }
-
+        const key = workspaceKey(pathToRemove);
+        const generation = foregroundGeneration.current;
+        const indexedIds = workspaceRuns[key] || [];
+        if (indexedIds.some(id => id.startsWith("pending-"))) {
+          throw new Error(t("工作区仍有正在进行的任务，请先停止并等待结束。"));
+        }
+        // Do not remove browser indexes until the backend commits the entire
+        // workspace deletion, including conversations absent from this browser.
+        const deletedIds = new Set([...indexedIds, ...await runtimeService.deleteWorkspace(pathToRemove)]);
+        deletedIds.forEach(id => {
+          deletedRunIdsRef.current.add(id);
+          messagesByRunRef.current.delete(id);
+        });
+        const remainingProjects = projects.filter((p) => workspaceKey(p.path) !== key);
+        setProjects(prev => {
+          const remaining = prev.filter(p => workspaceKey(p.path) !== key);
+          try { localStorage.setItem("grapher_projects", JSON.stringify(remaining)); } catch { }
+          return remaining;
+        });
         setWorkspaceRuns((prev) => {
-          const copy = { ...prev };
-          delete copy[workspaceKey(pathToRemove)];
-          try {
-            localStorage.setItem("grapher_workspace_runs", JSON.stringify(copy));
-          } catch { }
+          const copy: Record<string, string[]> = {};
+          for (const [repo, ids] of Object.entries(prev)) {
+            if (repo !== key) copy[repo] = ids.filter(id => !deletedIds.has(id));
+          }
+          try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(copy)); } catch { }
           return copy;
         });
+        const forgetLabels = (prev: Record<string, string>) => Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id)));
+        setRunLabels(prev => {
+          const next = forgetLabels(prev);
+          try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
+          return next;
+        });
+        setRunModes(prev => {
+          const next = Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id)));
+          try { localStorage.setItem("grapher_run_modes", JSON.stringify(next)); } catch { }
+          return next;
+        });
 
-        if (workspaceKey(config.repository) === workspaceKey(pathToRemove)) {
+        if (generation === foregroundGeneration.current && workspaceKey(config.repository) === key) {
           if (remainingProjects.length > 0) {
             handleSelectProject(remainingProjects[0]);
           } else {
@@ -1004,7 +1035,7 @@ export default function App() {
             setRouteType("undecided");
           }
         }
-      },
+      }),
     });
   };
 
@@ -1013,6 +1044,7 @@ export default function App() {
     if (!runIdToDelete.startsWith("pending-")) {
       await runtimeService.deleteRun(runIdToDelete);
     }
+    deletedRunIdsRef.current.add(runIdToDelete);
     setWorkspaceRuns((prev) => {
       const copy: Record<string, string[]> = {};
       for (const [repo, idList] of Object.entries(prev)) {
@@ -2731,6 +2763,13 @@ export default function App() {
     recentlyAddedNodeNames,
   );
 
+  // Change the view identity only when the target snapshot is accepted, not
+  // when navigation begins. Otherwise the old Conversation remounts and flashes
+  // while its replacement's metadata is still in flight.
+  if (workbenchIdentityRef.current.runId !== state.runId) {
+    workbenchIdentityRef.current = { runId: state.runId, key: state.runId || "initial" };
+  }
+
   const isLandingView = !state.runId && state.graph.nodes.length === 0 &&
     !isPlanning &&
     !recoveredPlanning &&
@@ -2757,7 +2796,6 @@ export default function App() {
     const generation = foregroundGeneration.current;
     run(async () => {
       clearRunUnread(id);
-      if (id !== state.runId) setPlannerStream(initialPlannerStream);
       // Logs must never block opening a card; validate ownership before displaying it.
       let snapshot: Snapshot;
       try { snapshot = await runtimeService.snapshotForRun(id, controller.signal); }
@@ -2773,6 +2811,7 @@ export default function App() {
       setRouteType(deduceRouteType(snapshot));
       setGoal(snapshot.graph.originalGoal || (id ? runLabels[id] : "") || "");
       if (id !== state.runId) {
+        setPlannerStream(initialPlannerStream);
         setSessionEntries(messagesByRunRef.current.get(id) ?? []);
         setEditingMessage(null);
         setEditPrefillText("");
@@ -2906,7 +2945,7 @@ export default function App() {
                   />
 
                   <GraphWorkbench
-                    key={foregroundGeneration.current}
+                    key={workbenchIdentityRef.current.key}
                     state={state}
                     transcriptRunId={transcriptRunId}
                     activity={activities[state.runId] ?? []}

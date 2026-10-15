@@ -119,7 +119,7 @@ for (const [mode, turn] of [
       await trigger.click();
       await page.waitForTimeout(320);
       assert.equal(await trigger.getAttribute("aria-expanded"), "true");
-      assert.equal(await working.count(), 0, "expanded details hide Working");
+      assert.equal(await working.count(), 1, "expanded details keep Working visible");
       await trigger.click();
       await working.waitFor();
       currentOutput += assistant("FIRST_MODEL_OUTPUT");

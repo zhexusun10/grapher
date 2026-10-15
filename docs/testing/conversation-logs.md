@@ -24,6 +24,12 @@ npm run migrate
 
 Do not delete the database to resolve a format issue or run migration against a live backend. Keep sensitive backups outside the public repository.
 
+## Diagnosing database size
+
+Inspect the database read-only before treating it as a disposable cache. Retained conversations own their `execution_logs`; completed publication removes private project worktrees, not conversation history. Compare log byte totals and row counts with `PRAGMA page_count`, `page_size`, and `freelist_count`. Older small output packets can leave many rows and index entries, and unused space inside live B-tree pages is distinct from whole pages on the freelist. New writes fill bounded chunks across batches; normal reads/startup do not repack old transcripts.
+
+Conversation and workspace deletion remove their event, checkpoint and log records transactionally. A few tombstones/source-protection records intentionally survive to prevent stale writers and unsafe filesystem deletion. Online deletion performs bounded incremental page reclamation, so a successful logical deletion does not promise immediate removal of every freed page from the physical file. Use the backed-up, offline maintenance flow above when physical compaction is needed; it does not delete retained conversation history or automatically rechunk modern logs.
+
 ## Acceptance prerequisites
 
 The [harness](../../scripts/conversation-acceptance.mjs) requires:
@@ -51,7 +57,7 @@ npm run test:conversation-acceptance
 | `GRAPHER_BROWSER_CHANNEL` | `msedge` on Windows, `chromium` elsewhere |
 | `PYTHON` | `python`; Python 3.11+ executable |
 
-The harness builds the UI and a separate fixture/acceptance backend, launches isolated HTTP/browser/worker processes, and retains reproducible copies. It does not require paid model calls or migrate the original source.
+The harness builds the UI and a separate fixture/acceptance backend, launches isolated HTTP/browser/worker processes, and retains reproducible copies. Its Cargo builds share one invocation-owned OS temporary target, reclaimed after its backends stop even when an acceptance case fails; an explicit `CARGO_TARGET_DIR` is reused and never deleted. Copied databases, sessions, reports and failure traces remain in the acceptance evidence directory, not the disposable target. It does not require paid model calls or migrate the original source.
 
 Debug-only environment switches produce partial debugging, not full acceptance. Only a full run verifying every required case can report acceptance success.
 

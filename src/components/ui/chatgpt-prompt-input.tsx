@@ -56,10 +56,10 @@ interface PromptBoxProps
 }
 
 
-const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string; title: string }> = [
-  { id: "auto", label: "Auto", title: t("智能路由：由 Partitioner 评估任务并自动选择单 Agent 或拓扑图架构") },
-  { id: "serial", label: "Serial", title: t("单 Agent：跳过 Partitioner，直接启动单 Agent 执行") },
-  { id: "graph", label: "Graph", title: t("拓扑图：跳过 Partitioner，直接启动 Planner 规划生成协作拓扑图") },
+const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string }> = [
+  { id: "auto", label: "Auto" },
+  { id: "serial", label: "Serial" },
+  { id: "graph", label: "Graph" },
 ];
 
 export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
@@ -692,7 +692,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                     e.stopPropagation();
                     setDismissedTrigger({ start: triggerStart, query: triggerQuery });
                   }}
-                  title={t("关闭 (Esc)")}
                   aria-label={t("关闭 (Esc)")}
                 >
                   <span className="suggestions-header-hints">
@@ -725,7 +724,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                             )}
                           </div>
                           {item.subtitle && (
-                            <span className="suggestion-item-subtitle" title={item.subtitle}>
+                            <span className="suggestion-item-subtitle">
                               {item.subtitle}
                             </span>
                           )}
@@ -766,7 +765,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                       type="button"
                       onClick={handleRemoveFile}
                       className="prompt-box-image-remove-btn"
-                      title={t("移除图片")}
                       aria-label={t("移除图片")}
                     >
                       <X size={12} />
@@ -780,7 +778,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                       {getFileIcon(selectedFile.name)}
                     </span>
                     <div className="prompt-box-file-info">
-                      <span className="prompt-box-file-name" title={selectedFile.name}>
+                      <span className="prompt-box-file-name">
                         {selectedFile.name}
                       </span>
                       <span className="prompt-box-file-size">
@@ -791,7 +789,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                       type="button"
                       onClick={handleRemoveFile}
                       className="prompt-box-file-remove-btn"
-                      title={t("移除文件")}
                       aria-label={t("移除文件")}
                     >
                       <X size={12} />
@@ -861,7 +858,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 fileInputRef.current?.click();
               }}
               className="prompt-box-icon-btn"
-              title={t("添加文本、代码（.ipynb/.py等）或图片附件")}
               aria-label={t("添加文本、代码或图片附件")}
               disabled={disabled || isBusy || isPreparing || isSubmitting}
             >
@@ -884,7 +880,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                         e.stopPropagation();
                         onPlanModeChange(item.id);
                       }}
-                      title={item.title}
                     >
                       {isSelected && (
                         <motion.div
@@ -913,7 +908,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   onInterrupt();
                 }}
                 disabled={isSubmitting || isPreparing}
-                title={t("点击打断执行")}
                 aria-label={t("点击打断执行")}
               >
                 <Square size={compact ? 9 : 11} className="prompt-box-stop-icon" />
@@ -938,13 +932,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   ? "active"
                   : ""
               }`}
-              title={
-                isWorking
-                  ? hasText || selectedFile
-                    ? t("发送以实时调整方向 (Steer)")
-                    : t("点击打断执行")
-                  : t("发送消息")
-              }
               aria-label={
                 isWorking
                   ? hasText || selectedFile

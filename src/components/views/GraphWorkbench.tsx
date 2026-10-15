@@ -8,7 +8,7 @@ import {
   Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
   AlertCircle
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   Snapshot, PlanRouteType, PlanMode, RepositoryInfo, Config,
   Graph, Execution, Status, PlanningSummary, TranscriptItem,
@@ -138,6 +138,21 @@ function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = fa
   </button>;
 }
 
+/** The composer overlays the scroller instead of taking space in its layout.
+ * Reveal content against its actual top edge, including multiline drafts,
+ * attachments and queued-message banners, not the scroller's covered bottom.
+ */
+function getConversationViewport(scroll: HTMLElement) {
+  const bounds = scroll.getBoundingClientRect();
+  const top = bounds.top + scroll.clientTop;
+  const scrollBottom = top + scroll.clientHeight;
+  const composer = scroll.parentElement?.querySelector<HTMLElement>(".pane-bottom-chat");
+  const overlay = composer?.getBoundingClientRect();
+  const bottom = overlay && overlay.height > 0 && overlay.bottom > top
+    ? Math.max(top, Math.min(scrollBottom, overlay.top)) : scrollBottom;
+  return { top, bottom, height: bottom - top };
+}
+
 interface WorkspaceDetailsPanelProps {
   showWorking?: boolean;
   children: React.ReactNode;
@@ -200,11 +215,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
     interruptedRef.current = false;
 
     if (container) {
-      const containerRect = container.getBoundingClientRect();
-      const paneView = container.closest(".initial-query-view") || container.parentElement;
-      const composerEl = paneView?.querySelector(".pane-bottom-chat") as HTMLElement | null;
-      const composerRect = composerEl ? composerEl.getBoundingClientRect() : null;
-      const visibleBottom = composerRect ? composerRect.top - 12 : containerRect.bottom - 12;
+      const visibleBottom = getConversationViewport(container).bottom - 12;
 
       if (nextOpen) {
         const panelRect = panel.getBoundingClientRect();
@@ -273,7 +284,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
 
   return (
     <div ref={panelRef} className={`workspace-details ${isOpen ? "open" : ""}`} style={{ marginTop: 12 }}>
-      {showWorking && !isOpen && (
+      {showWorking && (
         <div className="working-indicator" role="status" aria-live="polite">
           <span className="working-indicator-dot" />
           Working…
@@ -706,11 +717,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const prevScrollHeightRef = useRef(0);
   const prevViewKeyRef = useRef("");
   const suppressAutoScrollRef = useRef(false);
-  const resumeAutoScrollFrameRef = useRef<number | null>(null);
   const resetChatScrollFrameRef = useRef<number | null>(null);
   const revealChatFrameRef = useRef<number | null>(null);
   const [readyConversationKey, setReadyConversationKey] = useState("");
   const isConversationReady = readyConversationKey === conversationViewKey;
+  const reduceMotion = useReducedMotion();
+  // Reveal the entire scrollable view together, including the topology overview
+  // and publication cards, only after history and its initial scroll have settled.
+  const conversationRevealStyle: React.CSSProperties = {
+    opacity: isConversationReady ? 1 : 0,
+    transition: isConversationReady && !reduceMotion ? "opacity 0.28s ease-in-out" : "none",
+  };
   const activeConversationViewRef = useRef(conversationViewKey);
   const conversationGenerationRef = useRef(0);
   const isScrollingToBottomRef = useRef(false);
@@ -851,8 +868,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     expandedCardObserverRef.current = null;
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
     expandedCardTimerRef.current = null;
-    if (resumeAutoScrollFrameRef.current !== null) cancelAnimationFrame(resumeAutoScrollFrameRef.current);
-    resumeAutoScrollFrameRef.current = null;
     suppressAutoScrollRef.current = false;
     historyReadingRef.current = false;
     if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
@@ -964,7 +979,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     suppressAutoScrollRef.current = true;
     isUserScrolledUpRef.current = true;
     expandedCardObserverRef.current?.disconnect();
+    expandedCardObserverRef.current = null;
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
+    // Keep automatic bottom following paused for the full animation; resuming
+    // after two frames would fight the reveal and push the header offscreen.
+    const finishResize = () => {
+      if (chatScrollRef.current) prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+      suppressAutoScrollRef.current = false;
+      handleChatScroll();
+    };
 
     // Follow the card during its opening animation, without jumping past the
     // header when the expanded content is taller than the viewport.
@@ -972,7 +995,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       const reveal = () => {
         const scroll = chatScrollRef.current;
         if (!scroll || !scroll.contains(card)) return;
-        const viewport = scroll.getBoundingClientRect();
+        const viewport = getConversationViewport(scroll);
         const bounds = card.getBoundingClientRect();
         const available = viewport.height - 24;
         const delta = bounds.height > available
@@ -982,36 +1005,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       };
       const observer = new ResizeObserver(reveal);
       observer.observe(card);
+      const composer = chatScrollRef.current?.parentElement?.querySelector(".pane-bottom-chat");
+      if (composer) observer.observe(composer);
       expandedCardObserverRef.current = observer;
       expandedCardTimerRef.current = setTimeout(() => {
         reveal();
         observer.disconnect();
         if (expandedCardObserverRef.current === observer) expandedCardObserverRef.current = null;
         expandedCardTimerRef.current = null;
+        finishResize();
       }, 400);
     } else {
       // During collapsing, keep auto-scroll suppressed across the collapse animation
       // and synchronize prevScrollHeight so height shrinkage does not misinterpret
       // as an intentional user scroll-up.
       expandedCardTimerRef.current = setTimeout(() => {
-        if (chatScrollRef.current) {
-          prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
-        }
-        suppressAutoScrollRef.current = false;
         expandedCardTimerRef.current = null;
-        handleChatScroll();
+        finishResize();
       }, 260);
-    }
-
-    if (resumeAutoScrollFrameRef.current !== null) cancelAnimationFrame(resumeAutoScrollFrameRef.current);
-    if (expanded) {
-      resumeAutoScrollFrameRef.current = requestAnimationFrame(() => {
-        resumeAutoScrollFrameRef.current = requestAnimationFrame(() => {
-          resumeAutoScrollFrameRef.current = null;
-          suppressAutoScrollRef.current = false;
-          handleChatScroll();
-        });
-      });
     }
   }, [handleChatScroll]);
 
@@ -1038,7 +1049,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         lastScrollTopRef.current = scrollEl.scrollTop;
       } else {
         // There is an expanded attempt below: reveal the bottom of this execution panel
-        const viewport = scrollEl.getBoundingClientRect();
+        const viewport = getConversationViewport(scrollEl);
         const bounds = panelEl.getBoundingClientRect();
         const delta = bounds.bottom - viewport.bottom + 16;
         if (delta > 0) {
@@ -1165,9 +1176,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
     if (workspaceDetailsTimerRef.current !== null) clearTimeout(workspaceDetailsTimerRef.current);
     stopLatestScroll();
-    if (resumeAutoScrollFrameRef.current !== null) {
-      cancelAnimationFrame(resumeAutoScrollFrameRef.current);
-    }
     if (resetChatScrollFrameRef.current !== null) {
       cancelAnimationFrame(resetChatScrollFrameRef.current);
     }
@@ -1551,7 +1559,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     // Safety fallback: ensure conversation is revealed even if an output event fails to fire
     const safetyTimer = setTimeout(() => {
-      if (activeConversationViewRef.current === conversationViewKey && readyConversationKey !== conversationViewKey) {
+      if (!historyLoading && activeConversationViewRef.current === conversationViewKey && readyConversationKey !== conversationViewKey) {
         revealConversation();
       }
     }, 350);
@@ -1559,6 +1567,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [
     conversationViewKey,
     readyConversationKey,
+    historyLoading,
     selectedNode,
     routeType,
     execution,
@@ -1600,6 +1609,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   return (
     <section
+      // Keep exit animations and split-width transitions within one Conversation.
+      key={currentRunKey}
       className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${isPlanning ? "planning-active" : "historical-settled"}`}
       ref={workbenchRef}
       style={{
@@ -1643,13 +1654,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               className="initial-query-scroll"
               ref={chatScrollRef}
               onScroll={handleChatScroll}
+              style={conversationRevealStyle}
             >
               <div
                 className="chat-messages-stream"
-                style={{
-                  opacity: isConversationReady ? 1 : 0,
-                  transition: isConversationReady ? "opacity 0.12s ease-out" : "none",
-                }}
+                style={{ opacity: isConversationReady ? 1 : 0 }}
               >
                 <NodeTaskCard
                   nodeName={selectedNode.name}
@@ -1796,14 +1805,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                   onAfterToggle={handleWorkspaceDetailsAfterToggle}
                 >
-                  <p>Worktree: {execution?.worktree || config.repository || t("准备工作区…")}</p>
-                  <p>Session ID: {execution?.sessionId || t("等待初始化…")}</p>
-                  <p>Commit Before: {execution?.before || t("未快照")}</p>
-                  <p>Commit After: {execution ? (execution.after === "" ? t("源目录直改（无快照）") : execution.after ?? "pending") : "pending"}</p>
+                  <p>worktree: {execution?.worktree || config.repository || "preparing workspace…"}</p>
+                  <p>session id: {execution?.sessionId || "waiting for initialization…"}</p>
+                  <p>commit before: {execution?.before || "not snapshotted"}</p>
+                  <p>commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
                   {snapshotModelInfo && (
                     <>
-                      <p>Model: {snapshotModelInfo.model}</p>
-                      <p>Thinking Level: {snapshotModelInfo.thinkingLevel}</p>
+                      <p>model: {snapshotModelInfo.model}</p>
+                      <p>thinking level: {snapshotModelInfo.thinkingLevel}</p>
                     </>
                   )}
                 </WorkspaceDetailsPanel>
@@ -1888,13 +1897,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               className="initial-query-scroll"
               ref={chatScrollRef}
               onScroll={handleChatScroll}
+              style={conversationRevealStyle}
             >
               <div
                 className="chat-messages-stream"
-                style={{
-                  opacity: isConversationReady ? 1 : 0,
-                  transition: isConversationReady ? "opacity 0.12s ease-out" : "none",
-                }}
+                style={{ opacity: isConversationReady ? 1 : 0 }}
               >
                 {routeType === "serial" ? (
                   <div className="serial-turns-container" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1984,19 +1991,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                       onAfterToggle={handleWorkspaceDetailsAfterToggle}
                     >
-                      <p>{t("工作目录: ")}{serialExecution?.worktree || config.repository || repoInfo?.name || t("准备工作区…")}</p>
-                      <p>{t("会话实例: ")}{serialExecution?.sessionId || t("等待初始化…")}</p>
-                      {(() => {
-                        if (!serialExecution) return null;
-                        if (serialExecution.pid) return <p>{t("进程 PID: ")}{serialExecution.pid}</p>;
-                        const pidMatch = serialExecution.output.match(/"type":"grapher_process_started"[^}]*"pid":(\d+)/) ||
-                                         serialExecution.output.match(/"pid":(\d+)/);
-                        return pidMatch ? <p>{t("沙箱进程 PID: ")}{pidMatch[1]}</p> : null;
-                      })()}
+                      <p>working directory: {serialExecution?.worktree || config.repository || repoInfo?.name || "preparing workspace…"}</p>
+                      <p>session id: {serialExecution?.sessionId || "waiting for initialization…"}</p>
                       {serialModelInfo && (
                         <>
-                          <p>Model: {serialModelInfo.model}</p>
-                          <p>Thinking Level: {serialModelInfo.thinkingLevel}</p>
+                          <p>model: {serialModelInfo.model}</p>
+                          <p>thinking level: {serialModelInfo.thinkingLevel}</p>
                         </>
                       )}
                     </WorkspaceDetailsPanel>

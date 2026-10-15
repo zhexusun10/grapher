@@ -2309,7 +2309,7 @@ button.session-label-toggle:focus-visible {
   width: 100%;
   list-style: none;
   user-select: none;
-  min-height: 24px;
+  min-height: 20px;
   gap: 8px;
 }
 
@@ -2384,13 +2384,18 @@ button.session-label-toggle:focus-visible {
 .workspace-details-body {
   padding-top: 6px;
   font-size: 11px;
-  line-height: 1.6;
+  line-height: 1.5;
+}
+
+.workspace-details-body > :first-child,
+.workspace-details p:first-child {
+  padding-top: 0;
 }
 
 .workspace-details p {
   margin: 0;
   padding-top: 4px;
-  line-height: 1.6;
+  line-height: 1.5;
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10.5px;
 }
@@ -2400,7 +2405,7 @@ button.session-label-toggle:focus-visible {
   font-size: 10.5px;
   color: var(--text-tertiary, #888);
   font-style: italic;
-  padding-top: 6px;
+  padding-top: 4px;
 }
 
 .node-error {

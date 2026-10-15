@@ -11,7 +11,7 @@ const skillsRequests = new Map<string, number>();
 const historyRequests = new Map<string, Promise<Snapshot>>();
 const snapshotMutations = new Set([
   "save_graph", "save_config", "plan_goal", "control", "edit_planner", "edit_node",
-  "load_run", "reset_workspace", "clear_history", "delete_run", "launch_result", "cancel_result",
+  "load_run", "reset_workspace", "clear_history", "delete_run", "delete_workspace", "launch_result", "cancel_result",
 ]);
 
 // Bound metadata/default-settings waits, not model streams, approvals, native
@@ -264,6 +264,11 @@ export const runtimeService = {
   deleteRun: async (runId: string) => {
     await request<void>("delete_run", { runId });
     invalidateTranscriptCaches(runId);
+  },
+  deleteWorkspace: async (repository: string) => {
+    const deleted = await request<string[]>("delete_workspace", { repository });
+    for (const runId of deleted) invalidateTranscriptCaches(runId);
+    return deleted;
   },
   listFiles: async (repository?: string, forceRefresh = false): Promise<string[]> => {
     const key = repository || "__default__";

@@ -47,6 +47,22 @@ export function closeThinkingItems(items: TranscriptItem[], messageStart = 0): T
   return next;
 }
 
+function findThinkingInsertIndex(items: TranscriptItem[], contentIndex: number | undefined, messageStart: number): number {
+  const start = Math.max(0, Math.min(messageStart, items.length));
+  for (let i = start; i < items.length; i++) {
+    const item = items[i];
+    // Any assistant text item or tool call in this message must come after thinking.
+    if ((item.type === "text" && item.role !== "user") || item.type === "tool_call") {
+      return i;
+    }
+    // Maintain ascending order of thinking items by thinkingContentIndex.
+    if (contentIndex !== undefined && item.type === "thinking" && item.thinkingContentIndex !== undefined && item.thinkingContentIndex > contentIndex) {
+      return i;
+    }
+  }
+  return items.length;
+}
+
 /** One card per contentIndex within one assistant message, for live SSE and replay. */
 export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpdate, messageStart = 0): TranscriptItem[] {
   let index = blockIndex(items, update.contentIndex, messageStart);
@@ -57,8 +73,8 @@ export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpd
   const closed = update.type === "thinking_start" && index < 0 ? closeThinkingItems(items, messageStart) : items;
   const next = closed === items ? items.slice() : closed;
   if (index < 0) {
-    index = next.length;
-    next.push(thinkingItem(update.contentIndex));
+    index = findThinkingInsertIndex(next, update.contentIndex, messageStart);
+    next.splice(index, 0, thinkingItem(update.contentIndex));
   }
   const item = { ...next[index] };
   if (update.type === "thinking_delta") {

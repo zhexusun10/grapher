@@ -28,6 +28,29 @@ fn insert_chunks(db: &Connection, run: &str, id: &str, start: usize, text: &str,
     Ok(())
 }
 
+/// Fill the last partial block across writer batches too. Flushing live output
+/// must not turn every small stdout packet into a permanent row and index entry.
+/// Only the suffix grows; all previously committed UTF-8 byte offsets stay valid.
+fn append_chunks(db: &Connection, run: &str, id: &str, mut start: usize, mut text: &str) -> Result<(), String> {
+    if text.is_empty() { return Ok(()); }
+    let last = db.query_row(
+        "SELECT offset,bytes FROM execution_logs WHERE execution_id=?1 AND run_id=?2 ORDER BY offset DESC LIMIT 1",
+        params![id, run], |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some((offset, bytes)) = last {
+        if bytes < CHUNK_BYTES && offset.checked_add(bytes) == Some(start) {
+            let end = floor_boundary(text, CHUNK_BYTES - bytes);
+            if end > 0 {
+                db.execute("UPDATE execution_logs SET bytes=bytes+?1,text=text||?2 WHERE execution_id=?3 AND run_id=?4 AND offset=?5",
+                    params![end, &text[..end], id, run, offset]).map_err(|e| e.to_string())?;
+                start += end;
+                text = &text[end..];
+            }
+        }
+    }
+    insert_chunks(db, run, id, start, text, false)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogPage {
@@ -80,7 +103,7 @@ impl Store {
         for (execution_id, text) in &texts {
             let cached = self.execution_offsets.borrow().get(execution_id).copied();
             let offset = match cached { Some(offset) => offset, None => self.log_bytes(&state.run_id, execution_id)? };
-            insert_chunks(&tx, &state.run_id, execution_id, offset, text, false)?;
+            append_chunks(&tx, &state.run_id, execution_id, offset, text)?;
             offsets.insert(execution_id.clone(), offset + text.len());
         }
         tx.commit().map_err(|e| e.to_string())?;

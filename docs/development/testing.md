@@ -15,6 +15,42 @@ npm test
 
 `npm test` uses Rust fixtures; no paid model is required. Frontend tests exercise UI logic and isolated browser smoke cases, not provider quality. They do not fetch external sites, judge prose correctness, enforce freshness from a timestamp, or prove provider/sandbox/benchmark claims. See [Documentation maintenance](documentation.md) for the review and exploration checks.
 
+## Rust build storage
+
+`backend/Cargo.toml` disables debug symbols and incremental compilation in the
+`dev` and `test` profiles. Routine builds still reuse Cargo's compiled dependency
+artifacts in the fixed target directory; source edits do not create a new target
+root. Release optimization is unchanged. For a deliberate debugging session,
+override `CARGO_PROFILE_DEV_DEBUG` / `CARGO_PROFILE_TEST_DEBUG` and, if desired,
+`CARGO_INCREMENTAL`; these explicit settings are not overridden by the launchers.
+
+Use disposable targets only when an independent build is needed:
+
+```sh
+npm run test:isolated -- --locked
+npm run test:temporary -- test:bindings
+npm run test:build-cache
+```
+
+`test:isolated` runs the normal Rust fixture suite; `test:temporary` wraps an
+entire named npm script, so its build and all subsequent test processes share
+one `CARGO_TARGET_DIR`. Targets created by
+[`temporary-target.mjs`](../../scripts/temporary-target.mjs) live under the OS
+temporary directory and are removed after command completion/failure. The
+runner forwards interrupt/termination to its own command tree and waits for its
+exit before cleanup. A caller-supplied `CARGO_TARGET_DIR` remains reusable and
+is **never** deleted. Locked files or changed ownership/redirected roots defer
+cleanup with a warning rather than guessing that deletion is safe. Forced
+termination of the runner itself (for example SIGKILL/power loss) can leave a
+marked directory behind; this is not an automatic sweep of old/user directories.
+
+Normal `npm test`, `npm run backend`, and `npm run dev` keep their reusable
+build cache. No build hook runs `cargo clean`, removes an active backend, clears
+the Cargo registry, or deletes runtime data. Native harnesses must finish their
+own child-process cleanup before returning. `test:build-cache` verifies target
+ownership, successful/failed commands, caller overrides, links, exit codes and
+host-specific locked-file/signal behavior.
+
 ## Keep tests focused on behavior
 
 Retain regression coverage for scheduling/replay, publication, workspace and
@@ -63,13 +99,13 @@ Local deterministic model responses exercise production integration without paid
 - [Planner source CI](../../.github/workflows/planner-source.yml) runs weekly (and on manual dispatch) on macOS, Windows, and Linux. It covers the snapshot/replay fixtures, real Planner Bash contract, native launcher tests, Linux bubblewrap preflight and namespace boundaries, the full backend library suite and native Bash/Pi acceptance on Windows (it does not expect filesystem permission rejection from Windows Graph), managed-environment state/launch/native acceptance with Python 3.12, macOS Seatbelt child-process tests, and production Planner/Merger acceptance. Windows acceptance includes extended-drive-prefix paths; shared tests use Unicode and spaces. Pushes and pull requests do not trigger it; run the focused local suites above instead.
 - [Dependency Security Audit](../../.github/workflows/security-audit.yml) runs weekly (and on manual dispatch) npm audits for Grapher and the reviewed Pi dependency profile, plus RustSec auditing for `backend/Cargo.lock`. Audit evidence is uploaded even when a high-severity finding fails the job. The current Grapher root and reviewed Pi profile audits are clean; a direct audit of the upstream `pi/` tree reports optional/example `node-forge`/Gondolin and dev-only `braces`/`micromatch`/`fast-glob`/`shelljs`/`shx` findings, which are excluded from the runtime profile. Treat any new finding in the reviewed profile as an open baseline risk until it is reviewed.
 
-If a development backend binary is already running on Windows, isolate integration builds instead of stopping that service:
+If a development backend binary is already running on Windows, isolate integration builds instead of stopping that service. `npm run test:temporary -- test:bindings` (or another suite above) supplies a disposable target to the complete build/test chain and cleans it afterwards. For intentional reuse across several commands, set an explicit directory instead:
 
 ```powershell
 $env:CARGO_TARGET_DIR = Join-Path $PWD '.grapher/verification-target'
 ```
 
-Extension, project-binding and Windows native harnesses honor `CARGO_TARGET_DIR`. Select the relevant suites above; this setting is not permission to upgrade Pi or restart agents. Offline tool provisioning is described below.
+Extension, project-binding and Windows native harnesses honor `CARGO_TARGET_DIR`. Explicit directories remain caller-owned; remove them only when their builds/test backends have stopped. Select the relevant suites above; this setting is not permission to upgrade Pi or restart agents. Offline tool provisioning is described below.
 
 macOS native checks require working Seatbelt/`sandbox-exec` on an actual host. A configured CI matrix is not evidence that its jobs passed; check the individual platform results. Windows drive/UNC prefix normalization tests do not establish access to a real network share.
 

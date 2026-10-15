@@ -1,6 +1,7 @@
 import { t } from "../i18n";
 import React, { useState, useMemo, useRef } from "react";
-import { motion, AnimatePresence, useReducedMotion } from "motion/react";
+import { CollapsibleCardBody } from "./CollapsibleCardBody";
+import { shouldCardAnimateAppear } from "../services/cardAnimations";
 import {
   Terminal,
   FileText,
@@ -29,7 +30,6 @@ interface ToolCallCardProps {
 
 export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
   ({ item, defaultExpanded = false, expanded, onExpandedChange }) => {
-    const shouldReduceMotion = useReducedMotion();
     const [isCopied, setIsCopied] = useState(false);
     const cardRef = useRef<HTMLDivElement>(null);
 
@@ -151,12 +151,16 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
       [item.result]
     );
 
+    const animateAppear = useMemo(() => {
+      return shouldCardAnimateAppear(item.id, status === "running", item.timestamp);
+    }, [item.id, status, item.timestamp]);
+
     return (
       <div
         ref={cardRef}
-        className={`tool-call-card ${meta.type} ${status} ${
-          isError ? "error" : hasSubcommandWarning ? "warning" : ""
-        }`}
+        className={`tool-call-card ${meta.type} ${status}${
+          isError ? " error" : hasSubcommandWarning ? " warning" : ""
+        }${animateAppear ? " appear-active" : ""}`}
         data-testid="tool-call-card"
       >
         <div
@@ -164,6 +168,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
           onClick={toggleExpanded}
           onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleExpanded(); } }}
           role="button"
+          aria-expanded={isExpanded}
           tabIndex={0}
         >
           <div className="tool-header-left">
@@ -232,76 +237,64 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
               type="button"
               className="tool-copy-btn"
               onClick={handleCopy}
+              aria-label={t("复制调用参数与结果")}
+              title={t("复制调用参数与结果")}
             >
-              {isCopied ? <Check size={12} /> : <Copy size={12} />}
+              {isCopied ? <Check size={12} className="copy-icon-check" /> : <Copy size={12} className="copy-icon-copy" />}
             </button>
           </div>
         </div>
 
-        <AnimatePresence initial={false}>
-          {isExpanded && (
-            <motion.div
-              key="tool-body-anim"
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0 }}
-              transition={{
-                duration: shouldReduceMotion ? 0 : 0.22,
-                ease: [0.25, 1, 0.5, 1],
-              }}
-              style={{ overflow: "hidden" }}
-            >
-              <div className="tool-call-body">
-                {toolName === "bash" && (
-                  <div className="tool-meta-bar">
-                    <div className="tool-meta-item">
-                      <span className="meta-lbl">{t("退出码:")}</span>
-                      <span
-                        className={`meta-val ${
-                          exitCode === 0 ? "success" : exitCode !== null ? "error" : "neutral"
-                        }`}
-                      >
-                        {exitCode !== null ? exitCode : t("退出码未知")}
-                      </span>
-                    </div>
-                    <div className="tool-meta-item">
-                      <span className="meta-lbl">{t("输出状态:")}</span>
-                      <span className={`meta-val ${isTruncated ? "warning" : "neutral"}`}>
-                        {isTruncated ? t("已截断 (Truncated)") : t("完整 (Complete)")}
-                      </span>
-                    </div>
-                    {args.command && (
-                      <div className="tool-meta-item cmd-full">
-                        <span className="meta-lbl">{t("命令:")}</span>
-                        <code className="meta-val-code">{args.command}</code>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {Object.keys(args).length > 0 && (
-                  <div className="tool-args-section">
-                    <div className="section-label">{t("参数 (Arguments)")}</div>
-                    <pre className="tool-args-code">
-                      {JSON.stringify(args, null, 2)}
-                    </pre>
-                  </div>
-                )}
-
-                {item.result !== undefined && item.result !== null && (
-                  <div className="tool-result-section">
-                    <div className="section-label">
-                      {isError ? t("错误输出 (Error Output)") : t("执行结果 (Result Output)")}
-                    </div>
-                    <pre className={`tool-result-code ${isError ? "error" : ""}`}>
-                      {item.result.trim() || t("(无文本输出)")}
-                    </pre>
+        <CollapsibleCardBody expanded={isExpanded}>{() => (
+          <div className="tool-call-body">
+            {toolName === "bash" && (
+              <div className="tool-meta-bar">
+                <div className="tool-meta-item">
+                  <span className="meta-lbl">{t("退出码:")}</span>
+                  <span
+                    className={`meta-val ${
+                      exitCode === 0 ? "success" : exitCode !== null ? "error" : "neutral"
+                    }`}
+                  >
+                    {exitCode !== null ? exitCode : t("退出码未知")}
+                  </span>
+                </div>
+                <div className="tool-meta-item">
+                  <span className="meta-lbl">{t("输出状态:")}</span>
+                  <span className={`meta-val ${isTruncated ? "warning" : "neutral"}`}>
+                    {isTruncated ? t("已截断 (Truncated)") : t("完整 (Complete)")}
+                  </span>
+                </div>
+                {args.command && (
+                  <div className="tool-meta-item cmd-full">
+                    <span className="meta-lbl">{t("命令:")}</span>
+                    <code className="meta-val-code">{args.command}</code>
                   </div>
                 )}
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            )}
+
+            {Object.keys(args).length > 0 && (
+              <div className="tool-args-section">
+                <div className="section-label">{t("参数 (Arguments)")}</div>
+                <pre className="tool-args-code">
+                  {JSON.stringify(args, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            {item.result !== undefined && item.result !== null && (
+              <div className="tool-result-section">
+                <div className="section-label">
+                  {isError ? t("错误输出 (Error Output)") : t("执行结果 (Result Output)")}
+                </div>
+                <pre className={`tool-result-code ${isError ? "error" : ""}`}>
+                  {item.result.trim() || t("(无文本输出)")}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}</CollapsibleCardBody>
       </div>
     );
   }

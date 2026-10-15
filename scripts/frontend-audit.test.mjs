@@ -38,8 +38,8 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function fixture(name, handler = async () => false) {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+async function fixture(name, handler = async () => false, reducedMotion = "reduce") {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion });
   await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
   const errors = [];
   await context.route("**/api/*", async route => {
@@ -267,6 +267,134 @@ test("small settled node history opens through a bounded tail and renders tool c
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+async function sampleCardToggle(header) {
+  return header.evaluate(async header => {
+    const card = header.parentElement;
+    const scroll = card.closest(".initial-query-scroll");
+    const samples = [];
+    const sample = () => {
+      const value = { top: card.getBoundingClientRect().top, height: card.getBoundingClientRect().height,
+        bottomGap: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight };
+      if (JSON.stringify(samples.at(-1)) !== JSON.stringify(value)) samples.push(value);
+    };
+    sample();
+    scroll.addEventListener("scroll", sample);
+    header.click();
+    const start = performance.now();
+    await new Promise(resolve => {
+      const frame = () => {
+        sample();
+        if (performance.now() - start < 450) requestAnimationFrame(frame);
+        else resolve();
+      };
+      requestAnimationFrame(frame);
+    });
+    scroll.removeEventListener("scroll", sample);
+    return samples;
+  });
+}
+
+async function assertCardAboveComposer(card) {
+  const bounds = await card.evaluate(card => {
+    const scroll = card.closest(".initial-query-scroll").getBoundingClientRect();
+    const composer = card.closest(".initial-query-view").querySelector(".pane-bottom-chat").getBoundingClientRect();
+    const header = card.querySelector('[aria-expanded]').getBoundingClientRect();
+    const content = card.getBoundingClientRect();
+    return { viewportTop: scroll.top, visibleBottom: Math.min(scroll.bottom, composer.top),
+      headerTop: header.top, headerBottom: header.bottom, cardBottom: content.bottom, cardHeight: content.height };
+  });
+  assert.ok(bounds.headerTop >= bounds.viewportTop - 1 && bounds.headerBottom <= bounds.visibleBottom + 1,
+    `the header must remain visible above the composer: ${JSON.stringify(bounds)}`);
+  if (bounds.cardHeight <= bounds.visibleBottom - bounds.viewportTop - 24) {
+    assert.ok(bounds.cardBottom <= bounds.visibleBottom + 1,
+      `a card that fits must not be covered by the composer: ${JSON.stringify(bounds)}`);
+  }
+  return bounds;
+}
+
+for (const type of ["tool", "thinking"]) {
+  test(`${type} card at the conversation bottom opens and closes without a scroll jump`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(`latestScroll&layout=${type}-card`, undefined, "no-preference");
+    try {
+      const card = page.locator(type === "tool" ? ".tool-call-card" : ".thinking-card");
+      const header = card.locator(type === "tool" ? ".tool-call-header" : ".thinking-card-header");
+      const body = card.locator(type === "tool" ? ".tool-call-body" : ".thinking-card-body");
+      const scroller = page.locator(".initial-query-scroll");
+      await card.waitFor();
+      await page.waitForTimeout(400);
+      assert.equal(await body.count(), 0, "folded history must not mount the body");
+      for (let repeat = 0; repeat < 2; repeat++) {
+        await header.scrollIntoViewIfNeeded();
+        const opening = await sampleCardToggle(header);
+        assert.ok(opening.some(sample => sample.height > opening[0].height + 5 && sample.height < opening.at(-1).height - 5),
+          "opening reveals content progressively");
+        assert.equal(await header.getAttribute("aria-expanded"), "true");
+        await body.waitFor();
+        await assertCardAboveComposer(card);
+        await scroller.evaluate(element => { element.scrollTop = element.scrollHeight; });
+        await page.waitForTimeout(100);
+        const samples = await sampleCardToggle(header);
+        const first = samples[0], last = samples.at(-1);
+        assert.ok(samples.every(sample => sample.bottomGap <= first.bottomGap + 3),
+          `closing at the bottom must not open a transient scroll gap: ${JSON.stringify(samples)}`);
+        assert.ok(first.height > last.height + 100, "the expanded card has substantial content");
+        assert.ok(samples.some(sample => sample.height > last.height + 5 && sample.height < first.height - 5),
+          "closing passes through intermediate heights rather than unmounting instantly");
+        const min = Math.min(first.top, last.top) - 3, max = Math.max(first.top, last.top) + 3;
+        assert.ok(samples.every(sample => sample.top >= min && sample.top <= max),
+          `the header cannot jump outside its start/end positions: ${JSON.stringify(samples)}`);
+        assert.ok(samples.every((sample, index) => index === 0 || sample.top >= samples[index - 1].top - 3),
+          `bottom clamping must not bounce the header back up: ${JSON.stringify(samples)}`);
+        await body.waitFor({ state: "detached" });
+        assert.equal(await header.getAttribute("aria-expanded"), "false");
+      }
+      // Reversing a transition must retain the final requested state and content.
+      await header.evaluate(async header => {
+        for (let toggle = 0; toggle < 3; toggle++) {
+          header.click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        }
+      });
+      await page.waitForTimeout(400);
+      assert.equal(await header.getAttribute("aria-expanded"), "true");
+      await body.waitFor({ state: "visible" });
+      await header.press("Space");
+      await body.waitFor({ state: "detached" });
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+for (const type of ["tool", "thinking"]) {
+  test(`${type} card reveal respects a multiline composer and a short conversation pane`, { timeout: 30_000 }, async () => {
+    const draft = Array.from({ length: 12 }, (_, index) => `Unsent draft line ${index}`).join("\n");
+    for (const paneHeight of [800, 540]) {
+      const { context, page, errors } = await fixture(`latestScroll&layout=${type}-card`, undefined, "no-preference");
+      try {
+        const card = page.locator(type === "tool" ? ".tool-call-card" : ".thinking-card");
+        const header = card.locator('[aria-expanded]');
+        const input = page.locator(".pane-bottom-chat textarea");
+        await card.waitFor();
+        await page.locator(".workbench").evaluate((element, height) => { element.parentElement.style.height = `${height}px`; }, paneHeight);
+        await input.fill(draft);
+        await page.waitForTimeout(400);
+        await header.click();
+        await page.waitForTimeout(450);
+        const bounds = await assertCardAboveComposer(card);
+        if (paneHeight === 540) {
+          assert.ok(bounds.cardHeight > bounds.visibleBottom - bounds.viewportTop,
+            "the short pane exercises a card taller than the unobscured viewport");
+        }
+        await header.press("Space");
+        await page.waitForTimeout(350);
+        await assertCardAboveComposer(card);
+        assert.equal(await input.inputValue(), draft, "resizing cards must preserve the unsent multiline draft");
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    }
+  });
+}
 
 test("Planner and Node Agent tool history both render cards in headless browser", { timeout: 30_000 }, async () => {
   const line = event => JSON.stringify(event) + "\n";

@@ -4,6 +4,16 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+# Keep routine development/fixture builds small. Dependency artifacts still
+# reuse Cargo's cache; opt into symbols/incremental locally when debugging.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
+
 [features]
 default = []
 fixture = []

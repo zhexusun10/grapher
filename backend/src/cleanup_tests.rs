@@ -492,6 +492,61 @@ fn deletion_and_cleanup_manifest_rollback_together_on_database_failure() {
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
+#[test]
+fn workspace_batch_deletion_is_atomic_and_cascades_database_and_owned_files() {
+    let (temp, source, mut runtime) = setup();
+    let mut ids = Vec::new();
+    let mut directories = Vec::new();
+    for index in 0..2 {
+        if index > 0 { runtime.create(graph(), runtime.state.config.clone().unwrap()).unwrap(); }
+        let id = runtime.state.run_id.clone();
+        let node = Uuid::new_v4().to_string();
+        failed_execution(&mut runtime, &node);
+        runtime.emit(EventKind::Output { execution_id: node.clone(), text: "retained history\n".into() }).unwrap();
+        let session = runtime.root.join("sessions").join(node);
+        let workspace = temp.path().join(".grapher-worktrees").join(&id);
+        directory(&session);
+        directory(&workspace);
+        directories.extend([session, workspace]);
+        ids.push(id);
+    }
+    let db = rusqlite::Connection::open(runtime.root.join("events.sqlite")).unwrap();
+    db.execute_batch(&format!("CREATE TRIGGER deny_second BEFORE DELETE ON events WHEN OLD.run_id='{}' BEGIN SELECT RAISE(ABORT,'batch failure'); END;", ids[1])).unwrap();
+    assert!(runtime.delete_runs(&ids).unwrap_err().contains("batch failure"));
+    for id in &ids {
+        assert!(runtime.store.contains_run(id).unwrap());
+        assert!(!runtime.store.run_was_deleted(id).unwrap());
+    }
+    assert!(directories.iter().all(|path| path.is_dir()));
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+    assert_eq!(runtime.state.run_id, ids[1]);
+    db.execute_batch("DROP TRIGGER deny_second").unwrap();
+    runtime.delete_runs(&ids).unwrap();
+    for id in &ids {
+        for table in ["events", "checkpoints", "execution_logs", "run_owned_directories", "cleanup_tasks", "workspace_cleanup_done"] {
+            let rows: i64 = db.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE run_id=?1"), [id], |r| r.get(0)).unwrap();
+            assert_eq!(rows, 0, "{table} retained a deleted conversation");
+        }
+        assert!(runtime.store.run_was_deleted(id).unwrap(), "stale-writer tombstones must survive");
+    }
+    assert!(runtime.state.run_id.is_empty());
+    assert!(directories.iter().all(|path| !path.exists()));
+    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "keep user files");
+}
+
+#[test]
+fn workspace_batch_rejects_active_conversations_before_deleting_any_history() {
+    let (_temp, _source, mut runtime) = setup();
+    let first = runtime.state.run_id.clone();
+    runtime.create(graph(), runtime.state.config.clone().unwrap()).unwrap();
+    let second = runtime.state.run_id.clone();
+    runtime.state.phase = "launching_result".into();
+    assert!(runtime.delete_runs(&[first.clone(), second.clone()]).unwrap_err().contains("running"));
+    assert!(runtime.store.contains_run(&first).unwrap());
+    assert!(runtime.store.contains_run(&second).unwrap());
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+}
+
 #[cfg(windows)]
 #[test]
 fn locked_session_files_leave_retryable_cleanup_not_orphaned_ownership() {

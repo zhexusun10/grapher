@@ -298,7 +298,8 @@ fn failed_log_commit_never_advances_projection_or_offset_cursor() {
     store.append(&mut state, EventKind::Started { execution: execution("done") }).unwrap();
     store.append(&mut state, EventKind::Output { execution_id: "done".into(), text: "before\n".into() }).unwrap();
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON execution_logs WHEN NEW.text='reject' BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+    db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON execution_logs WHEN NEW.text='reject' BEGIN SELECT RAISE(ABORT,'injected failure'); END;
+        CREATE TRIGGER fail_log_update BEFORE UPDATE ON execution_logs WHEN NEW.text LIKE '%reject%' BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
     assert!(store.append_batch(&mut state, vec![
         EventKind::Output { execution_id: "done".into(), text: "reject".into() },
         EventKind::Output { execution_id: "other".into(), text: "also rollback".into() },
@@ -306,10 +307,52 @@ fn failed_log_commit_never_advances_projection_or_offset_cursor() {
     assert_eq!(state.executions[0].output, "before\n");
     assert_eq!(store.log_bytes("run", "done").unwrap(), 7);
     assert_eq!(store.log_bytes("run", "other").unwrap(), 0);
-    db.execute_batch("DROP TRIGGER fail_log;").unwrap();
+    db.execute_batch("DROP TRIGGER fail_log; DROP TRIGGER fail_log_update;").unwrap();
     store.append(&mut state, EventKind::Output { execution_id: "done".into(), text: "after🚀\n".into() }).unwrap();
     assert_eq!(store.execution_log_page("run", "done", 0, usize::MAX).unwrap().content, "before\nafter🚀\n");
     assert_eq!(store.log_bytes("run", "done").unwrap(), state.executions[0].output.len());
+}
+
+#[test]
+fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte_cursors() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("events.db");
+    let mut store = Store::open(&path).unwrap();
+    let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
+    store.append(&mut state, created("repo", None, None)).unwrap();
+    for id in ["done", "live"] {
+        store.append(&mut state, EventKind::Started { execution: execution(id) }).unwrap();
+    }
+    let mut expected = String::new();
+    let mut saved_cursor = 0;
+    for i in 0..512 {
+        let text = format!("{i}:中文🚀\n").repeat(12);
+        store.append_batch(&mut state, vec![
+            EventKind::Output { execution_id: "done".into(), text: text.clone() },
+            EventKind::Output { execution_id: "live".into(), text: "other\n".into() },
+        ]).unwrap();
+        expected.push_str(&text);
+        if i == 0 { saved_cursor = expected.len(); }
+        if i % 64 == 0 { store = Store::open(&path).unwrap(); }
+    }
+    let db = Connection::open(&path).unwrap();
+    let rows: usize = db.query_row("SELECT COUNT(*) FROM execution_logs WHERE execution_id='done'", [], |r| r.get(0)).unwrap();
+    assert!(rows <= expected.len() / (32 * 1024 - 3) + 1, "small writes left {rows} permanent rows");
+    let mut previous = 0;
+    let mut statement = db.prepare("SELECT offset,bytes,text FROM execution_logs WHERE execution_id='done' ORDER BY offset").unwrap();
+    for row in statement.query_map([], |r| Ok((r.get::<_, usize>(0)?, r.get::<_, usize>(1)?, r.get::<_, String>(2)?))).unwrap() {
+        let (offset, bytes, text) = row.unwrap();
+        assert_eq!(offset, previous);
+        assert_eq!(bytes, text.len());
+        assert!(bytes <= 32 * 1024);
+        previous += bytes;
+    }
+    assert_eq!(previous, expected.len());
+    assert_eq!(store.execution_log_page("run", "done", 0, usize::MAX).unwrap().content, expected);
+    assert_eq!(store.execution_log_page("run", "done", saved_cursor, usize::MAX).unwrap().content, expected[saved_cursor..]);
+    assert_eq!(store.execution_log_page("run", "live", 0, usize::MAX).unwrap().content, "other\n".repeat(512));
+    let tail = store.execution_log_tail_page("run", "done", saved_cursor, 32 * 1024).unwrap();
+    assert_eq!(tail.content, expected[..saved_cursor]);
 }
 
 #[test]

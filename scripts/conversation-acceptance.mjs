@@ -12,15 +12,14 @@ import net from 'node:net';
 import os from 'node:os';
 import { chromium } from '@playwright/test';
 import { workerBody } from './fixtures/conversation-acceptance-worker.mjs';
+import { createTemporaryTarget } from './temporary-target.mjs';
 
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 const md5 = text => createHash('md5').update(text, 'utf8').digest('hex');
 const root = resolve(process.env.GRAPHER_ACCEPTANCE_DIR || `.grapher/acceptance/${new Date().toISOString().replace(/[:.]/g, '-')}`);
 const source = resolve(process.env.GRAPHER_ACCEPTANCE_SOURCE || '.grapher/events.sqlite');
-const target = resolve('backend/target/acceptance');
+let buildTarget, target, executable, benchmark;
 const suffix = process.platform === 'win32' ? '.exe' : '';
-const executable = join(target, 'release', `grapher${suffix}`);
-const benchmark = join(target, 'release', 'examples', `conversation_acceptance${suffix}`);
 const evidence = { startedAt: new Date().toISOString(), platform: process.platform, machine: { cpu: os.cpus()[0]?.model, memoryBytes: os.totalmem(), arch: process.arch, os: os.release(), node: process.version }, root, cases: {} };
 const children = new Set();
 const proxies = new Set();
@@ -190,6 +189,11 @@ try {
   evidence.fixtures = manifest;
   evidence.mode = debugging ? 'partial-debug-not-acceptance' : 'full';
   npmWithEnv(['run', 'build'], {});
+  buildTarget = await createTemporaryTarget({ env });
+  target = buildTarget.directory;
+  env.CARGO_TARGET_DIR = target;
+  executable = join(target, 'release', `grapher${suffix}`);
+  benchmark = join(target, 'release', 'examples', `conversation_acceptance${suffix}`);
   cargo('build', '--release', '--manifest-path', 'backend/Cargo.toml', '--no-default-features', '--features', 'fixture,acceptance', '--target-dir', target, '--bin', 'grapher', '--example', 'conversation_acceptance');
   const browserChannel = process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === 'win32' ? 'msedge' : 'chromium');
   browser = await chromium.launch({ channel: browserChannel, headless: true });
@@ -416,6 +420,12 @@ try {
   await browser?.close();
   for (const proxy of proxies) { proxy.closeAllConnections(); await new Promise(done => proxy.close(done)); }
   for (const child of children) await stop(child);
-  await writeFile(join(root, 'report.json'), JSON.stringify(evidence, null, 2));
-  console.log(`Acceptance evidence: ${join(root, 'report.json')}`);
+  // Only reclaim this invocation's compiler target after its backends stop.
+  // Reports, copied databases, sessions and failure traces remain untouched.
+  try {
+    await writeFile(join(root, 'report.json'), JSON.stringify(evidence, null, 2));
+    console.log(`Acceptance evidence: ${join(root, 'report.json')}`);
+  } finally {
+    await buildTarget?.cleanup();
+  }
 }

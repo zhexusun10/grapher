@@ -326,3 +326,20 @@ test("PlannerTranscript live stream defaults both running and completed thinking
   assert.match(htmlCompleted, /Settled planner reasoning while on page/);
 });
 
+test("tail-paged message_end backfills thinking before streamed assistant text", () => {
+  // Simulates a tail page where earlier thinking deltas were cut off, but text_delta was received,
+  // followed by message_end containing both thinking and text content.
+  const html = render([
+    update("text_delta", 3, { delta: "Assistant response text that was streamed first" }),
+    end([
+      { type: "thinking", thinking: "Late backfilled thinking" },
+      { type: "text", text: "Assistant response text that was streamed first" },
+    ]),
+  ]);
+  const thinkIdx = html.indexOf("thinking-card");
+  const textIdx = html.indexOf("Assistant response text");
+  assert.ok(thinkIdx !== -1, "Thinking card should be present");
+  assert.ok(textIdx !== -1, "Text should be present");
+  assert.ok(thinkIdx < textIdx, `Thinking card (at ${thinkIdx}) should appear before assistant text (at ${textIdx})`);
+});
+

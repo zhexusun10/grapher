@@ -2893,6 +2893,52 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove a binding's conversations, never the source project or shared engine
+/// cache. Resolve ownership from the database, not the browser's run index.
+fn delete_workspace(repository: String, service: &Arc<Service>) -> Result<Vec<String>, String> {
+    if repository.trim().is_empty() || !std::path::Path::new(&repository).is_absolute() {
+        return Err("An absolute workspace repository is required".into());
+    }
+    let (root, mut ids) = {
+        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        let mut ids = Vec::new();
+        for id in runtime.store.runs()? {
+            let state = runtime.store.load(&id)?;
+            if state.config.as_ref().is_some_and(|config| same_repository_binding(&config.repository, &repository)) {
+                ids.push(id);
+            }
+        }
+        (runtime.root.clone(), ids)
+    };
+    ids.sort();
+    if ids.is_empty() { return Ok(ids); }
+    let services = ids.iter().map(|id| service_for_run(service, id, false)).collect::<Result<Vec<_>, _>>()?;
+    // Keep every affected Run locked until the batch commits. Try-lock rather
+    // than waiting while holding another Run; never hold the registry here.
+    let mut runtimes = Vec::new();
+    for (id, target) in ids.iter().zip(&services) {
+        let runtime = target.runtime.try_lock().map_err(|_| "Workspace is busy; wait for its operations to finish")?;
+        if target.driving.load(Ordering::SeqCst) || target.planning.load(Ordering::SeqCst) || runtime.active()
+            || runtime.state.phase == "planning"
+        {
+            return Err("Cannot remove a workspace while one of its conversations is active".into());
+        }
+        if runtime.state.run_id != *id
+            || !runtime.state.config.as_ref().is_some_and(|config| same_repository_binding(&config.repository, &repository))
+        {
+            return Err("Workspace ownership changed; refresh before removing it".into());
+        }
+        runtimes.push(runtime);
+    }
+    #[cfg(not(feature = "fixture"))]
+    crate::engine::invalidate_warm_node();
+    runtimes[0].delete_runs(&ids)?;
+    for runtime in &mut runtimes { runtime.forget_deleted_runs(&ids); }
+    drop(runtimes);
+    for id in &ids { invalidate_service_cache(&root, Some(id)); }
+    Ok(ids)
+}
+
 fn retry_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
     let tasks = service.runtime.lock().map_err(|error| error.to_string())?.store.pending_cleanups()?;
     for task in tasks {
@@ -4153,6 +4199,7 @@ pub fn dispatch(
         "reset_workspace" => to_value(reset_workspace(service)?),
         "clear_history" => to_value(clear_history(service)?),
         "delete_run" => to_value(delete_run(argument(&body, "runId")?, service)?),
+        "delete_workspace" => to_value(delete_workspace(argument(&body, "repository")?, service)?),
         "get_cleanup_status" => to_value(service.runtime.lock().map_err(|error| error.to_string())?.store.pending_cleanups()?),
         _ => return Err("Unknown command".into()),
     };

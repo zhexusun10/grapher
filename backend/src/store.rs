@@ -669,32 +669,41 @@ impl Store {
         run_id: &str,
         cleanup: Option<&crate::cleanup::Manifest>,
     ) -> Result<(), String> {
+        self.delete_runs([(run_id, cleanup)])
+    }
+
+    /// A workspace removal deletes every conversation in one transaction, not
+    /// a partially successful loop of independent conversation deletions.
+    pub fn delete_runs_with_cleanup(
+        &self,
+        cleanups: &[(String, crate::cleanup::Manifest)],
+    ) -> Result<(), String> {
+        self.delete_runs(cleanups.iter().map(|(id, manifest)| (id.as_str(), Some(manifest))))
+    }
+
+    fn delete_runs<'a>(
+        &self,
+        runs: impl IntoIterator<Item = (&'a str, Option<&'a crate::cleanup::Manifest>)>,
+    ) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
-        let tx = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|e| e.to_string())?;
-        // The cleanup manifest commits with the tombstone and event deletion.
-        // A crash or locked file after commit cannot erase cleanup ownership.
-        if let Some(cleanup) = cleanup {
-            self.insert_cleanup(&tx, run_id, cleanup)?;
+        let tx = self.connection.unchecked_transaction().map_err(|e| e.to_string())?;
+        for (run_id, cleanup) in runs {
+            // Ownership and tombstones commit with ALL event/log deletions.
+            // A crash or locked file after commit cannot orphan cleanup.
+            if let Some(cleanup) = cleanup {
+                self.insert_cleanup(&tx, run_id, cleanup)?;
+            }
+            tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)", [run_id])
+                .map_err(|e| e.to_string())?;
+            tx.execute("UPDATE workspace_selection SET run_id=NULL WHERE run_id=?1", [run_id])
+                .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM checkpoints WHERE run_id=?1", [run_id])
+                .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM events WHERE run_id=?1", [run_id])
+                .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM execution_logs WHERE run_id=?1", [run_id])
+                .map_err(|e| e.to_string())?;
         }
-        tx.execute(
-            "INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)",
-            [run_id],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE workspace_selection SET run_id=NULL WHERE run_id=?1",
-            [run_id],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM checkpoints WHERE run_id=?1", [run_id])
-            .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM events WHERE run_id=?1", [run_id])
-            .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM execution_logs WHERE run_id=?1", [run_id])
-            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         self.execution_offsets.borrow_mut().clear();
         self.reclaim_deleted_pages();

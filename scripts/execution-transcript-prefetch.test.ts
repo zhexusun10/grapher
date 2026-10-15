@@ -104,6 +104,43 @@ test("successful delete and clear invalidate transcript caches", async () => {
   } finally { globalThis.fetch = original; executionTranscriptCache.clear(); planningTranscriptCache.clear(); }
 });
 
+test("workspace deletion invalidates every backend-owned conversation only after commit", async () => {
+  const original = globalThis.fetch;
+  const controllers = [new AbortController(), new AbortController(), new AbortController()];
+  const release = [
+    registerTranscriptReader("execution", "workspace-one:node", controllers[0]),
+    registerTranscriptReader("planning", "workspace-two:planner", controllers[1]),
+    registerTranscriptReader("execution", "unrelated:node", controllers[2]),
+  ];
+  let reject = true;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, "/api/delete_workspace");
+    assert.equal(JSON.parse(String(init?.body)).repository, "/workspace");
+    return reject
+      ? new Response(JSON.stringify({ error: "workspace is active" }), { status: 400 })
+      : new Response(JSON.stringify({ result: ["workspace-one", "workspace-two"] }));
+  };
+  try {
+    for (const run of ["workspace-one", "workspace-two", "unrelated"]) {
+      executionTranscriptCache.set(`${run}:node`, { text: "node", offset: 4, complete: true });
+      planningTranscriptCache.set(`${run}:planner`, { text: "planner", offset: 7, complete: true });
+    }
+    await assert.rejects(runtimeService.deleteWorkspace("/workspace"), /active/);
+    assert.equal(executionTranscriptCache.size, 3);
+    assert.equal(planningTranscriptCache.size, 3);
+    assert.ok(controllers.every(controller => !controller.signal.aborted));
+    reject = false;
+    assert.deepEqual(await runtimeService.deleteWorkspace("/workspace"), ["workspace-one", "workspace-two"]);
+    assert.deepEqual([...executionTranscriptCache.keys()], ["unrelated:node"]);
+    assert.deepEqual([...planningTranscriptCache.keys()], ["unrelated:planner"]);
+    assert.deepEqual(controllers.map(controller => controller.signal.aborted), [true, true, false]);
+  } finally {
+    globalThis.fetch = original;
+    release.forEach(dispose => dispose());
+    executionTranscriptCache.clear(); planningTranscriptCache.clear();
+  }
+});
+
 test("Conversation invalidation cancels both kinds of readers without disturbing another Run", () => {
   const node = new AbortController(), planner = new AbortController(), other = new AbortController();
   const dispose = [registerTranscriptReader("execution", "left:node", node),

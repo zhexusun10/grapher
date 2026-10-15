@@ -115,6 +115,26 @@
   border: 1px solid rgba(99, 102, 241, 0.28);
 }
 
+/* Shared entrance effect; content/status updates keep the same animation. */
+@keyframes transcript-card-appear {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tool-call-card.appear-active,
+  .thinking-card.appear-active {
+    animation: transcript-card-appear 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
 /* ==========================================================================
    Thinking Card (Chain of Thought / Reasoning Stream)
    ========================================================================== */
@@ -128,13 +148,13 @@
   background: rgba(139, 92, 246, 0.035);
   overflow: hidden;
   margin: 4px 2px;
-  transition: border-color 0.2s ease, background 0.2s ease;
+  transition: border-color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
 }
 
 .thinking-card.streaming {
-  border-color: rgba(139, 92, 246, 0.4);
-  background: linear-gradient(180deg, rgba(139, 92, 246, 0.06) 0%, rgba(139, 92, 246, 0.02) 100%);
-  box-shadow: 0 0 16px rgba(139, 92, 246, 0.08);
+  border-color: rgba(139, 92, 246, 0.45);
+  background: rgba(139, 92, 246, 0.055);
+  box-shadow: 0 0 16px rgba(139, 92, 246, 0.12), inset 0 1px 0 rgba(139, 92, 246, 0.15);
 }
 
 .thinking-card-header {
@@ -183,6 +203,25 @@
   display: grid;
   place-items: center;
   flex-shrink: 0;
+  transition: background-color 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.thinking-icon-glyph {
+  display: grid;
+  place-items: center;
+  animation: thinking-icon-appear 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes thinking-icon-appear {
+  0% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .thinking-icon-box.pulse {
@@ -399,17 +438,28 @@
   background: var(--bg-canvas);
   overflow: hidden;
   margin: 4px 2px;
-  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.25s ease, background-color 0.25s ease, box-shadow 0.25s ease;
 }
 
 .tool-call-card:hover {
   border-color: var(--border-subtle);
 }
 
+@keyframes tool-running-glow {
+  0%, 100% {
+    border-color: rgba(59, 130, 246, 0.45);
+    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2), 0 0 6px rgba(59, 130, 246, 0.1);
+  }
+  50% {
+    border-color: rgba(59, 130, 246, 0.75);
+    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35), 0 0 12px rgba(59, 130, 246, 0.22);
+  }
+}
+
 .tool-call-card.running {
   border-color: rgba(59, 130, 246, 0.65);
   background: rgba(59, 130, 246, 0.035);
-  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.25), 0 0 8px rgba(59, 130, 246, 0.18);
+  animation: tool-running-glow 2.4s ease-in-out infinite;
 }
 
 .tool-call-card.error {
@@ -464,13 +514,22 @@
   place-items: center;
 }
 
-.tool-expand-chevron {
+.tool-expand-chevron,
+.thinking-expand-chevron {
   transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   color: var(--text-muted);
 }
 
-.tool-expand-chevron.open {
+.tool-expand-chevron.open,
+.thinking-expand-chevron.open {
   transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-expand-chevron,
+  .thinking-expand-chevron {
+    transition: none;
+  }
 }
 
 .tool-icon {
@@ -538,6 +597,43 @@
   gap: 4px;
   font-size: 11px;
   font-weight: 500;
+  animation: tool-status-pop 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes tool-status-pop {
+  0% {
+    opacity: 0.5;
+    transform: scale(0.92);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.tool-status.success svg,
+.tool-status.error svg {
+  animation: tool-icon-pop 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes tool-icon-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.2;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.copy-icon-check {
+  color: #10b981;
+  animation: tool-icon-pop 0.22s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.copy-icon-copy {
+  transition: transform 0.15s ease;
 }
 
 .tool-status.running {

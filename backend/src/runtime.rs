@@ -643,37 +643,46 @@ impl Runtime {
     }
 
     pub fn delete_run(&mut self, run_id: &str) -> Result<(), String> {
-        let stored;
-        let target = if self.state.run_id == run_id {
-            &self.state
-        } else {
-            stored = self.store.load(run_id)?;
-            &stored
-        };
-        if matches!(target.phase.as_str(), "planning" | "publishing" | "merging")
-            || target.nodes.values().any(|node| node.status == "running")
-            || target.mergers.iter().any(|merger| merger.status == "running")
-        {
-            return Err("Cannot delete a running execution".into());
-        }
-        let manifest = crate::cleanup::manifest(&self.root, &self.store, target, true)?;
-        let deleting_current = self.state.run_id == run_id;
-        self.store
-            .delete_run_with_cleanup(run_id, Some(&manifest))?;
-        if deleting_current {
-            let current_config = self.state.config.clone();
-            self.state = Snapshot {
-                config: current_config,
-                ..Snapshot::default()
+        self.delete_runs(&[run_id.to_owned()])
+    }
+
+    pub fn delete_runs(&mut self, run_ids: &[String]) -> Result<(), String> {
+        let mut cleanups = Vec::new();
+        for run_id in run_ids {
+            let stored;
+            let target = if self.state.run_id == *run_id {
+                &self.state
+            } else {
+                stored = self.store.load(run_id)?;
+                &stored
             };
-            self.touch();
+            if matches!(target.phase.as_str(), "planning" | "publishing" | "merging" | "launching_result")
+                || target.nodes.values().any(|node| node.status == "running")
+                || target.mergers.iter().any(|merger| merger.status == "running")
+                || target.result_execution.as_ref().is_some_and(|result| result.status == "running")
+            {
+                return Err("Cannot delete a running execution".into());
+            }
+            cleanups.push((run_id.clone(), crate::cleanup::manifest(&self.root, &self.store, target, true)?));
         }
-        // Logical deletion has committed. Report filesystem failures through
-        // the durable queue, not an error that would retain a stale UI/service.
-        if let Err(error) = self.retry_cleanup(run_id) {
-            eprintln!("[Grapher] Run {run_id} deleted; filesystem cleanup remains queued: {error}");
+        // Validate the whole batch before either SQL deletion or filesystem I/O.
+        self.store.delete_runs_with_cleanup(&cleanups)?;
+        self.forget_deleted_runs(run_ids);
+        // Logical deletion has committed. Filesystem failures remain retryable
+        // without making the browser retain a conversation that no longer exists.
+        for run_id in run_ids {
+            if let Err(error) = self.retry_cleanup(run_id) {
+                eprintln!("[Grapher] Run {run_id} deleted; filesystem cleanup remains queued: {error}");
+            }
         }
         Ok(())
+    }
+
+    pub(crate) fn forget_deleted_runs(&mut self, run_ids: &[String]) {
+        if run_ids.contains(&self.state.run_id) {
+            self.state = Snapshot { config: self.state.config.clone(), ..Snapshot::default() };
+            self.touch();
+        }
     }
 
     pub fn load_run(&mut self, run_id: &str) -> Result<Snapshot, String> {

@@ -724,21 +724,13 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       collapseFollowTimerRef.current = null;
     }
 
-    if (!expanded) {
-      collapseFollowTimerRef.current = setTimeout(() => {
-        collapseFollowTimerRef.current = null;
-        suppressAutoFollowRef.current = false;
-        syncScrollState();
-      }, 260);
-    } else {
-      resumeAutoFollowFrameRef.current = requestAnimationFrame(() => {
-        resumeAutoFollowFrameRef.current = requestAnimationFrame(() => {
-          resumeAutoFollowFrameRef.current = null;
-          suppressAutoFollowRef.current = false;
-          syncScrollState();
-        });
-      });
-    }
+    // Keep auto-follow suppressed across the full 220ms collapse/expand animation
+    // so intermediate height frames do not fight the reveal or trigger premature scroll snapping.
+    collapseFollowTimerRef.current = setTimeout(() => {
+      collapseFollowTimerRef.current = null;
+      suppressAutoFollowRef.current = false;
+      syncScrollState();
+    }, 260);
   }, [onUserResize, syncScrollState]);
 
   useEffect(() => () => {
