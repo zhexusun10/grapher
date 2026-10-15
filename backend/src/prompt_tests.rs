@@ -3622,6 +3622,73 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
     assert!(catalog.get().is_none()); // Invalid format still fails before the lookup.
 }
 
+#[cfg(feature = "fixture")]
+#[test]
+fn saving_node_model_settings_targets_only_the_requested_failed_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source");
+    fs::create_dir(&repository).unwrap();
+    fs::write(repository.join("task.txt"), "source").unwrap();
+    crate::workspace::git(&repository, &["init", "-q"]).unwrap();
+    crate::workspace::snapshot_repository(&repository).unwrap();
+    let primary = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "old/model", "thinkingLevel": "off", "maxParallel": 2
+    })).unwrap();
+    let make_failed = || {
+        let id = Uuid::new_v4().to_string();
+        let service = service_for_run(&primary, &id, true).unwrap();
+        {
+            let mut runtime = service.runtime.lock().unwrap();
+            runtime.emit(EventKind::Created {
+                graph: Graph {
+                    nodes: vec![Node { name: "task".into(), task: "test".into() }],
+                    ..Graph::default()
+                },
+                config: config.clone(), planning_id: None, planning: None,
+            }).unwrap();
+            runtime.set_route("serial").unwrap();
+            runtime.approve().unwrap();
+            let job = runtime.jobs().unwrap().remove(0);
+            runtime.finish(&job.execution, Err("Provider quota exhausted".into())).unwrap();
+            runtime.jobs().unwrap();
+        }
+        (id, service)
+    };
+    let (_first_id, first) = make_failed();
+    let (second_id, second) = make_failed();
+    let first_before = serde_json::to_value(&first.runtime.lock().unwrap().state).unwrap();
+    let primary_before = primary.runtime.lock().unwrap().snapshot_version();
+    let mut updated = config.clone();
+    updated.role_models = serde_json::from_value(serde_json::json!({
+        "nodeAgent": { "model": "new/coder", "thinkingLevel": "high" }
+    })).unwrap();
+    let body = serde_json::json!({"runId": second_id, "config": updated, "detail": "metadata"});
+    let selected = api_service(&primary, "save_config", &body).unwrap();
+    assert!(Arc::ptr_eq(&selected, &second));
+    let result = dispatch(&selected, "save_config", body.clone()).unwrap();
+    assert_eq!(result["snapshot"]["runId"], second_id);
+    assert_eq!(result["snapshot"]["canResume"], true);
+    assert_eq!(result["snapshot"]["nodes"]["task"]["status"], "failed");
+    assert_eq!(result["snapshot"]["nodes"]["task"]["modelConfig"]["model"], "new/coder");
+    assert_eq!(result["snapshot"]["config"]["model"], "old/model");
+    assert!(!second.driving.load(Ordering::SeqCst), "saving is not Continue");
+    assert_eq!(serde_json::to_value(&first.runtime.lock().unwrap().state).unwrap(), first_before);
+    assert_eq!(primary.runtime.lock().unwrap().snapshot_version(), primary_before);
+    let root = second.runtime.lock().unwrap().root.clone();
+    let saved = fs::read(root.join("config.json")).unwrap();
+    let mut mismatched = body;
+    mismatched["config"]["repository"] = serde_json::json!(temp.path().join("other"));
+    assert!(dispatch(&selected, "save_config", mismatched).unwrap_err().contains("repository"));
+    assert_eq!(fs::read(root.join("config.json")).unwrap(), saved);
+}
+
 #[test]
 fn save_config_updates_bootstrap_and_persists() {
     let temp_dir = tempfile::tempdir().unwrap();

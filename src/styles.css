@@ -150,6 +150,7 @@ h3 {
   position: relative;
   isolation: isolate;
   background: var(--bg-canvas);
+  transition: background-color 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .app-background-root {
@@ -1214,6 +1215,7 @@ a,
   background: var(--bg-canvas);
   position: relative;
   overflow: hidden;
+  transition: background-color 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Both views overlap in one fixed stage during a crossfade, never in page flow. */
@@ -1344,7 +1346,7 @@ a,
   display: flex;
   align-items: stretch;
   justify-content: center;
-  padding: clamp(16px, 4vh, 32px) 24px;
+  padding: clamp(16px, 4vh, 32px) 24px 26px;
   width: 100%;
   height: 100%;
   position: relative;
@@ -1366,9 +1368,6 @@ a,
 }
 
 .landing-title-container {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
   position: absolute;
   top: 38%;
   right: 0;
@@ -1376,14 +1375,16 @@ a,
   width: -moz-fit-content;
   width: fit-content;
   max-width: 100%;
-  gap: 2px;
   transform: translateX(clamp(0px, 12.5vw, 200px));
   transition: transform 0.2s ease;
 }
 
-/* Give the expanded editor clear space instead of overlapping the welcome copy. */
-.landing-center-content:has(.prompt-box-container.expanded) .landing-title-container {
-  visibility: hidden;
+/* Copy fade/exit motion must not overwrite the responsive horizontal placement. */
+.landing-title-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
 }
 
 @media (max-width: 960px) {
@@ -1587,9 +1588,17 @@ a,
   height: 80dvh;
 }
 
-.prompt-box-container.expanded .prompt-box-textarea-row {
+.prompt-box-container.expanded .prompt-box-textarea-row,
+.prompt-box-container[data-resizing] .prompt-box-textarea-row {
   flex: 1;
   min-height: 0;
+}
+
+/* Fill the animated height without showing a scrollbar for its temporary size.
+   Normal overflow is restored when the box reaches its measured target height. */
+.prompt-box-container[data-resizing] .prompt-box-textarea {
+  height: 100% !important;
+  overflow-y: hidden !important;
 }
 
 .prompt-box-expand-btn {
@@ -1671,7 +1680,11 @@ a,
   background: transparent;
   border: none;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease,
+    opacity 0.15s ease;
   flex-shrink: 0;
 }
 
@@ -1843,7 +1856,12 @@ a,
   color: var(--text-inverse);
   border: none;
   cursor: pointer;
-  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  transition:
+    background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.18s cubic-bezier(0.16, 1, 0.3, 1);
   opacity: 0.35;
 }
 

@@ -16,7 +16,7 @@ export interface ResultEntry { name: string; result: CompositeResult; workspace:
 export interface ResultDescriptor { schema: number; runId: string; result: CompositeResult; config: EnvironmentConfig; workspace: string; entries?: ResultEntry[]; defaultEntry?: string }
 export interface EnvironmentCapabilities { platform: string; arch: string; nativeWorkspace: boolean; fixedPhysicalLayout: boolean; namespaceLayout: boolean; basicSnapshots: boolean; extendedMetadata: boolean; sharedWorkingLayers: boolean; fullSystemSnapshot: boolean; gpuVerified: boolean; resourceQuotas: boolean; cpuQuota: boolean; memoryQuota: boolean; deviceLeases: boolean; storage: string }
 export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; environment?: EnvironmentConfig | null }
-interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; result?: CompositeResult | null }
+interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; result?: CompositeResult | null; modelConfig?: RoleModelConfig }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
 interface ExecutionMetrics {
   durationSeconds: number;
@@ -102,7 +102,7 @@ export interface Snapshot {
   events: GraphEvent[];
   approved: boolean;
   paused: boolean;
-  /** Backend-authoritative hint that interrupted node work can be restarted. */
+  /** Backend hint for interrupted work or failed nodes with explicitly updated models. */
   canResume?: boolean;
   stopRequested?: boolean;
   phase: string;
@@ -146,7 +146,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "medium", maxParallel: 0, maxFeedback: 3, autoApprove: false };
+export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: 0, maxFeedback: 3, autoApprove: false };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},

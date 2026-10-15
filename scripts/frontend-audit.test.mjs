@@ -23,7 +23,7 @@ const catalog = {
 before(async () => {
   server = await createServer({
     cacheDir: "node_modules/.vite-frontend-audit",
-    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false },
+    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false },
     plugins: [{ name: "frontend-audit-fixtures", configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         if (!req.url.startsWith("/__audit")) return next();
@@ -464,6 +464,32 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
       assert.equal(await page.evaluate(() => window.audit.cancels ?? 0), 0, "Escape collapses without cancelling the draft");
       await input.fill("Short again");
       await expand.waitFor({ state: "detached" });
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+for (const fixtureName of ["prompt", "compactPrompt"]) {
+  test(`${fixtureName} restores normal autosizing after edits during animated collapse`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(fixtureName, undefined, "no-preference");
+    try {
+      const input = page.locator("textarea");
+      await input.fill("Short draft");
+      const defaultHeight = (await input.boundingBox()).height;
+      await input.fill("Long draft line\n".repeat(40));
+      await page.getByRole("button", { name: "Expand input", exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector(".prompt-box-container").hasAttribute("data-resizing"));
+      const expandedHeight = (await page.locator(".prompt-box-container").boundingBox()).height;
+      await page.getByRole("button", { name: "Collapse input", exact: true }).click();
+      await page.waitForFunction(height => {
+        const box = document.querySelector(".prompt-box-container");
+        return box.hasAttribute("data-resizing") && box.getBoundingClientRect().height < height - 2;
+      }, expandedHeight);
+      await input.fill("Short again");
+      await page.waitForFunction(() => !document.querySelector(".prompt-box-container").hasAttribute("data-resizing"));
+      assert.equal((await input.boundingBox()).height, defaultHeight, "normal default height is restored");
+      assert.equal(await page.getByRole("button", { name: "Expand input", exact: true }).count(), 0);
+      assert.equal(await input.inputValue(), "Short again");
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });

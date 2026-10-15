@@ -1,4 +1,5 @@
 import { t } from "../i18n";
+import type { ThinkingLevel } from "../types";
 import { withRequestTimeout } from "./requestTimeout";
 
 interface ProviderMethod { id: "api_key" | "oauth"; name: string }
@@ -11,7 +12,13 @@ export interface ProviderInfo {
   authSource?: "stored" | "env" | null;
   authEnvVar?: string | null;
 }
-interface ModelInfo { provider: string; id: string; name: string; api: string; contextWindow: number; available: boolean }
+interface ModelInfo {
+  provider: string; id: string; name: string; api: string; contextWindow: number; available: boolean;
+  // Optional while an older Provider/Auth host is still running. Never infer
+  // capabilities from model names or assume all reasoning levels are supported.
+  thinkingLevels?: ThinkingLevel[];
+  thinkingLevelFallbacks?: Partial<Record<ThinkingLevel, ThinkingLevel>>;
+}
 export interface ProviderCatalog { providers: ProviderInfo[]; models: ModelInfo[]; warning: string | null }
 interface AuthPrompt { id: string; type: "text" | "secret" | "select" | "manual_code"; message: string; placeholder?: string; options?: { id: string; label: string; description?: string }[] }
 interface AuthEvent { type: string; message?: string; url?: string; instructions?: string; userCode?: string; verificationUri?: string; links?: { url: string; label?: string }[] }

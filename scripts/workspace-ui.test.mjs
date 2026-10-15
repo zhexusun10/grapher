@@ -3,6 +3,46 @@ import test from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 
+// Observe the full transition, not just its final rectangle: a position projection
+// can otherwise hide a jump behind an eventually correct composer layout.
+async function sampleHomeComposerToggle(page, expanded, collapsedHeight) {
+  await page.waitForFunction(() => getComputedStyle(document.querySelector(".landing-screen .prompt-box-container")).transform === "none");
+  return page.evaluate(({ expanded, collapsedHeight }) => new Promise((resolve, reject) => {
+    const box = document.querySelector(".landing-screen .prompt-box-container");
+    const title = document.querySelector(".landing-title-copy");
+    const samples = [];
+    const started = performance.now();
+    let settled = 0;
+    const sample = () => {
+      const rect = box.getBoundingClientRect();
+      const style = getComputedStyle(title);
+      const activeMode = box.querySelector(".prompt-box-mode-btn.active").getBoundingClientRect();
+      const pill = box.querySelector(".prompt-box-mode-pill-indicator").getBoundingClientRect();
+      const frame = { top: rect.top, bottom: rect.bottom, height: rect.height,
+        opacity: Number(style.opacity), visibility: style.visibility,
+        pillOffsetX: pill.left - activeMode.left, pillOffsetY: pill.top - activeMode.top,
+        pillWidthError: pill.width - activeMode.width, pillHeightError: pill.height - activeMode.height };
+      samples.push(frame);
+      // Cursor updates cause React renders while height is animated, as in real editing.
+      if (box.hasAttribute("data-resizing")) {
+        const input = box.querySelector("textarea");
+        const cursor = samples.length % input.value.length;
+        input.setSelectionRange(cursor, cursor);
+        input.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowRight", bubbles: true }));
+      }
+      const targetHeight = expanded ? innerHeight * 0.8 : collapsedHeight;
+      const atTarget = Math.abs(rect.height - targetHeight) < 1 && !box.hasAttribute("data-resizing") &&
+        (expanded ? frame.visibility === "hidden" : frame.visibility === "visible" && frame.opacity === 1);
+      settled = atTarget ? settled + 1 : 0;
+      if (settled >= 4) return resolve(samples);
+      if (performance.now() - started > 5000) return reject(new Error(`Composer did not settle: ${JSON.stringify(frame)}`));
+      requestAnimationFrame(sample);
+    };
+    sample();
+    box.querySelector(".prompt-box-expand-btn").click();
+  }), { expanded, collapsedHeight });
+}
+
 // Mocked API only: no backend, credentials, or real workspace files are touched.
 test("workspace isolation, accessible home and delayed planning ownership", { timeout: 120_000 }, async () => {
   const repositoryA = "C:\\Projects\\Alpha";
@@ -26,7 +66,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
   let releasePlanning;
   let planningRequested = false;
   const planningGate = new Promise(resolve => { releasePlanning = resolve; });
-  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false } });
+  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
   let browser;
   try {
     await server.listen();
@@ -110,14 +150,76 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
 
     // Expanded editing stays inside the real home layout without welcome-copy overlap.
     const homeInput = page.locator(".landing-screen textarea");
+    const defaultTextareaHeight = (await homeInput.boundingBox()).height;
+    await page.waitForFunction(() => getComputedStyle(document.querySelector(".landing-screen .prompt-box-container")).transform === "none");
+    await page.evaluate(() => {
+      window.autosizeFrames = [];
+      window.sampleAutosize = true;
+      const sample = () => {
+        const box = document.querySelector(".landing-screen .prompt-box-container");
+        const bounds = box.getBoundingClientRect();
+        const actions = box.querySelector(".prompt-box-actions-row").getBoundingClientRect();
+        const mode = box.querySelector(".prompt-box-mode-btn.active").getBoundingClientRect();
+        const pill = box.querySelector(".prompt-box-mode-pill-indicator").getBoundingClientRect();
+        const textarea = box.querySelector("textarea");
+        const input = textarea.getBoundingClientRect();
+        window.autosizeFrames.push({ height: bounds.height, bottom: bounds.bottom, actionsBottom: actions.bottom,
+          inputInset: input.top - bounds.top, inputWidth: input.width, text: textarea.value,
+          scrollbarVisible: getComputedStyle(textarea).overflowY !== "hidden" && textarea.scrollHeight > textarea.clientHeight,
+          pillX: pill.left - mode.left, pillY: pill.top - mode.top,
+          pillWidth: pill.width - mode.width, pillHeight: pill.height - mode.height });
+        if (window.sampleAutosize) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    for (const text of ["Short draft", "Two\nlines", "More lines\n".repeat(5), "Scrollable draft\n".repeat(40), "Two\nlines", ""]) {
+      const first = await page.evaluate(() => window.autosizeFrames.length);
+      const before = (await page.locator(".landing-screen .prompt-box-container").boundingBox()).height;
+      await homeInput.fill(text);
+      await page.waitForFunction(() => !document.querySelector(".landing-screen .prompt-box-container").hasAttribute("data-resizing"));
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const step = await page.evaluate(({ first, text }) => window.autosizeFrames.slice(first).filter(frame => frame.text === text), { first, text });
+      const after = step.at(-1).height;
+      if (!step.at(-1).scrollbarVisible) {
+        assert.ok(step.every(frame => !frame.scrollbarVisible), "text that fits its final height must not flash a scrollbar while growing");
+      }
+      if (Math.abs(after - before) > 2) {
+        assert.ok(step.some(frame => frame.height > Math.min(before, after) + 1 && frame.height < Math.max(before, after) - 1),
+          "ordinary textarea growth and shrinking animate through intermediate heights");
+      }
+    }
+    const autosizeFrames = await page.evaluate(() => { window.sampleAutosize = false; return window.autosizeFrames; });
+    const initialFrame = autosizeFrames[0];
+    assert.ok(autosizeFrames.length > 0);
+    for (const frame of autosizeFrames) {
+      assert.ok(Math.abs(frame.bottom - initialFrame.bottom) < 1 && Math.abs(frame.actionsBottom - initialFrame.actionsBottom) < 1,
+        `ordinary auto-growing and shrinking keep the input and controls bottom-anchored: ${JSON.stringify(frame)}`);
+      assert.ok(Math.abs(frame.inputInset - initialFrame.inputInset) < 1 && Math.abs(frame.inputWidth - initialFrame.inputWidth) < 1,
+        "ordinary text edits do not project or stretch the textarea");
+      assert.ok(Math.abs(frame.pillX) < 1 && Math.abs(frame.pillY) < 1 && Math.abs(frame.pillWidth) < 1 && Math.abs(frame.pillHeight) < 1,
+        `mode pill does not move independently during ordinary autosizing: ${JSON.stringify(frame)}`);
+    }
     const longDraft = "Editable home draft\n".repeat(40);
     await homeInput.fill(longDraft);
-    await page.getByRole("button", { name: "Expand input", exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector(".landing-screen .prompt-box-container").hasAttribute("data-resizing"));
+    const collapsedHeight = (await page.locator(".landing-screen .prompt-box-container").boundingBox()).height;
+    const expanding = await sampleHomeComposerToggle(page, true, collapsedHeight);
+    assert.ok(expanding.some(frame => frame.opacity > 0 && frame.opacity < 1 && Math.abs(frame.height - collapsedHeight) < 1),
+      "welcome copy fades out before the composer grows");
+    assert.ok(expanding.some(frame => frame.height > collapsedHeight + 2 && frame.height < 768 * 0.8 - 2),
+      "expansion animates through intermediate heights");
+    for (const frame of expanding) {
+      assert.ok(Math.abs(frame.bottom - expanding[0].bottom) < 1, `expansion keeps the composer's bottom anchored: ${JSON.stringify(expanding)}`);
+      if (frame.height > collapsedHeight + 2) assert.ok(frame.opacity < 0.01, "copy is gone before expansion");
+      assert.ok(Math.abs(frame.pillOffsetX) < 1 && Math.abs(frame.pillOffsetY) < 1 &&
+        Math.abs(frame.pillWidthError) < 1 && Math.abs(frame.pillHeightError) < 1,
+        `mode pill stays attached to its selected button while expanding: ${JSON.stringify(frame)}`);
+    }
     for (const height of [900, 768, 480, 360]) {
       await page.setViewportSize({ width: 1280, height });
       const metrics = await page.evaluate(() => {
         const prompt = document.querySelector(".landing-screen .prompt-box-container").getBoundingClientRect();
-        const title = document.querySelector(".landing-title-container");
+        const title = document.querySelector(".landing-title-copy");
         const titleRect = title.getBoundingClientRect();
         return { top: prompt.top, bottom: prompt.bottom, height: prompt.height,
           titleOverlaps: title.checkVisibility({ checkVisibilityCSS: true }) && titleRect.bottom > prompt.top && titleRect.top < prompt.bottom,
@@ -129,9 +231,48 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
       assert.equal(metrics.titleOverlaps, false);
       assert.equal(await homeInput.inputValue(), longDraft);
     }
-    await page.getByRole("button", { name: "Collapse input", exact: true }).click();
-    await homeInput.fill("");
     await page.setViewportSize({ width: 1280, height: 768 });
+    const collapsing = await sampleHomeComposerToggle(page, false, collapsedHeight);
+    assert.ok(collapsing.some(frame => frame.height > collapsedHeight + 2 && frame.height < 768 * 0.8 - 2),
+      "collapse animates through intermediate heights instead of snapping");
+    assert.ok(collapsing.some(frame => frame.height > collapsedHeight + 2 && frame.opacity > 0.05 && frame.visibility === "visible"),
+      "welcome copy returns during collapse rather than waiting for the height animation to finish");
+    for (const frame of collapsing) {
+      assert.ok(Math.abs(frame.bottom - collapsing[0].bottom) < 1, `collapse keeps the composer's bottom anchored without a jump: ${JSON.stringify(collapsing)}`);
+      assert.ok(Math.abs(frame.pillOffsetX) < 1 && Math.abs(frame.pillOffsetY) < 1 &&
+        Math.abs(frame.pillWidthError) < 1 && Math.abs(frame.pillHeightError) < 1,
+        `mode pill stays attached to its selected button while collapsing: ${JSON.stringify(frame)}`);
+    }
+    assert.equal(await homeInput.inputValue(), longDraft);
+
+    // Escape can reverse expansion, including while the copy is still fading.
+    await page.getByRole("button", { name: "Expand input", exact: true }).evaluate(button => button.click());
+    await homeInput.press("Escape");
+    await page.waitForFunction(() => {
+      const box = document.querySelector(".landing-screen .prompt-box-container");
+      const title = document.querySelector(".landing-title-copy");
+      return !box.classList.contains("expanded") && !box.hasAttribute("data-resizing") && getComputedStyle(title).opacity === "1";
+    });
+    assert.ok(Math.abs((await page.locator(".landing-screen .prompt-box-container").boundingBox()).height - collapsedHeight) < 1);
+    assert.equal(await homeInput.inputValue(), longDraft);
+    await homeInput.fill("");
+    await page.waitForFunction(() => !document.querySelector(".landing-screen .prompt-box-container").hasAttribute("data-resizing"));
+    assert.ok(Math.abs((await homeInput.boundingBox()).height - defaultTextareaHeight) < 0.1, "the default textarea height is unchanged");
+
+    // Landing input box draft persists when switching to other pages (conversations) and across reloads.
+    const persistentDraft = "Draft that must survive switching to other pages and reload";
+    await homeInput.fill(persistentDraft);
+    await page.locator('[data-run-id="run-a"]').click();
+    await page.locator(".chat-messages-stream", { hasText: "Alpha conversation" }).waitFor();
+    await page.getByRole("button", { name: "New conversation", exact: true }).click();
+    await page.locator(".landing-screen textarea").waitFor();
+    assert.equal(await page.locator(".landing-screen textarea").inputValue(), persistentDraft,
+      "landing draft survives switching to conversation page and returning via New conversation");
+    await page.reload({ waitUntil: "networkidle" });
+    await page.locator(".landing-screen textarea").waitFor();
+    assert.equal(await page.locator(".landing-screen textarea").inputValue(), persistentDraft,
+      "landing draft survives full page reload");
+    await page.locator(".landing-screen textarea").fill("");
 
     await page.locator('[data-run-id="run-a"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Alpha conversation" }).waitFor();

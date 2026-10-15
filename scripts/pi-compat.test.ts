@@ -8,7 +8,7 @@ import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/
 import { bundledTrim, bundledContinuity } from '../engine/global-extensions.ts';
 import { buildSystemPromptState } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
 import {
-  ModelRuntime, SettingsManager, resolveToCwd,
+  ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities,
   createBashToolDefinition, createLocalBashOperations,
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
   createLsToolDefinition, createFindToolDefinition, createGrepToolDefinition,
@@ -129,6 +129,30 @@ test('Pi SDK surface required by Grapher remains available', () => {
   // This private upstream entrypoint is invoked only after the host retry
   // policy is installed; importing it in a test would start the CLI.
   accessSync(fileURLToPath(new URL('../pi/packages/coding-agent/src/cli.ts', import.meta.url)));
+});
+
+test('model thinking capabilities follow Pi reasoning flags, sparse maps and clamping', async () => {
+  const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
+  const base = runtime.getModel('azure', 'gpt-4o-mini')!;
+  const offOnly = getModelThinkingCapabilities({ ...base, reasoning: false });
+  assert.deepEqual(offOnly.thinkingLevels, ['off']);
+  assert.deepEqual(offOnly.thinkingLevelFallbacks, { minimal: 'off', low: 'off', medium: 'off', high: 'off', xhigh: 'off', max: 'off' });
+  assert.deepEqual(getModelThinkingCapabilities({ ...base, reasoning: true, thinkingLevelMap: undefined }), {
+    thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'], thinkingLevelFallbacks: { xhigh: 'high', max: 'high' },
+  });
+  const restricted = getModelThinkingCapabilities({ ...base, reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' } });
+  assert.deepEqual(restricted, {
+    thinkingLevels: ['low', 'high', 'max'], thinkingLevelFallbacks: { off: 'low', minimal: 'low', medium: 'high', xhigh: 'max' },
+  });
+  const fixed = getModelThinkingCapabilities({ ...base, reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: 'high', xhigh: null, max: null } });
+  assert.deepEqual(fixed.thinkingLevels, ['high']);
+  assert.equal(fixed.thinkingLevelFallbacks.off, 'high');
+  assert.equal(fixed.thinkingLevelFallbacks.max, 'high');
+  const extended = getModelThinkingCapabilities({ ...base, reasoning: true, thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } });
+  assert.deepEqual(extended.thinkingLevels, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(extended.thinkingLevelFallbacks, {});
 });
 
 test('Azure provider rename requires credential migration while preserving its environment variable and API ids', async () => {

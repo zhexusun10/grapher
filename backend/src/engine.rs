@@ -442,7 +442,7 @@ impl PiModelConfig {
         let key = match role {
             PiRole::Partitioner => "partitioner",
             PiRole::Planner => "planner",
-            // Merger is also a Pi Instance and follows Node Agent settings
+            // Merger is also a Node Agent and follows Node Agent settings
             // unless MERGER_MODEL / MERGER_THINKING explicitly override them.
             PiRole::NodeAgent | PiRole::Merger => "nodeAgent",
         };
@@ -458,7 +458,7 @@ impl PiModelConfig {
             .or_else(|| settings.and_then(|value| value.thinking_level.clone()))
             .unwrap_or_else(|| {
                 if role == PiRole::Partitioner {
-                    "off".into()
+                    "low".into()
                 } else {
                     base_config.thinking_level.clone()
                 }
@@ -825,7 +825,7 @@ fn run_pi_with_timeout(
     if request.role == PiRole::Partitioner
         && !request.extra_args.iter().any(|arg| *arg == "--thinking")
     {
-        command.args(["--thinking", "off"]);
+        command.args(["--thinking", "low"]);
     }
     if let Some(system_prompt) = request.system_prompt {
         let prompt_path = if Path::new(system_prompt).is_file() {
@@ -2267,7 +2267,7 @@ sys.stdin.read()
             PiModelConfig::resolve(PiRole::Partitioner, &config)
                 .thinking
                 .as_deref(),
-            Some("off")
+            Some("low")
         );
         std::env::set_var("PLANNER_THINKING", "high");
         assert_eq!(
@@ -2283,7 +2283,7 @@ sys.stdin.read()
     }
 
     #[test]
-    fn partitioner_model_follows_base_config_model_with_thinking_off() {
+    fn partitioner_model_follows_base_config_model_with_thinking_low() {
         let _guard = lock_env();
         std::env::remove_var("PARTITIONER_MODEL");
         std::env::remove_var("PARTITIONER_THINKING");
@@ -2305,10 +2305,10 @@ sys.stdin.read()
             role_models: Default::default(),
         };
 
-        // Legacy Partitioner follows the base model and defaults to thinking off
+        // Legacy Partitioner follows the base model and defaults to thinking low
         let partitioner_cfg = PiModelConfig::resolve(PiRole::Partitioner, &custom_config);
         assert_eq!(partitioner_cfg.model, "anthropic/claude-3-7-sonnet");
-        assert_eq!(partitioner_cfg.thinking, Some("off".to_string()));
+        assert_eq!(partitioner_cfg.thinking, Some("low".to_string()));
 
         // Planner and NodeAgent should also inherit custom base_config.model
         let planner_cfg = PiModelConfig::resolve(PiRole::Planner, &custom_config);
@@ -2319,7 +2319,7 @@ sys.stdin.read()
     }
 
     #[test]
-    fn partitioner_thinking_defaults_to_off() {
+    fn partitioner_thinking_defaults_to_low() {
         let _guard = lock_env();
         std::env::remove_var("PARTITIONER_THINKING");
 
@@ -2343,7 +2343,7 @@ sys.stdin.read()
         // When base_config.model is empty, model remains empty (no qwen3.8-flash fallback)
         let cfg = PiModelConfig::resolve(PiRole::Partitioner, &config);
         assert_eq!(cfg.model, "");
-        assert_eq!(cfg.thinking, Some("off".to_string()));
+        assert_eq!(cfg.thinking, Some("low".to_string()));
     }
 
     #[test]
@@ -2428,7 +2428,7 @@ sys.stdin.read()
             "partitioner": {"model": "example/small"},
             "planner": {"thinkingLevel": "max"}
         })).unwrap();
-        assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &partial).thinking.as_deref(), Some("off"));
+        assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &partial).thinking.as_deref(), Some("low"));
         assert_eq!(PiModelConfig::resolve(PiRole::Planner, &partial).model, "legacy/default");
         assert_eq!(PiModelConfig::resolve(PiRole::Planner, &partial).thinking.as_deref(), Some("max"));
         assert_eq!(PiModelConfig::resolve(PiRole::NodeAgent, &partial).thinking.as_deref(), Some("medium"));

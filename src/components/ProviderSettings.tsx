@@ -20,6 +20,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
+import { CollapsibleCardBody } from "./CollapsibleCardBody";
 import styles from "./ProviderSettings.module.css";
 import {
   providerAuth,
@@ -66,6 +67,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const [confirmDeleteProvider, setConfirmDeleteProvider] = useState<ProviderInfo | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [showProviders, setShowProviders] = useState(false);
+  const [showConfigured, setShowConfigured] = useState(true);
 
   const mounted = useRef(false);
   const activeId = useRef<string | undefined>(undefined);
@@ -361,68 +363,95 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       {/* Active Configured Credentials Section */}
       {configuredProviders.length > 0 && (
         <div className="configured-credentials-card">
-          <div className="configured-card-header">
+          <div
+            className="configured-card-header"
+            onClick={() => setShowConfigured(!showConfigured)}
+            role="button"
+            tabIndex={0}
+            aria-expanded={showConfigured}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setShowConfigured(!showConfigured);
+              }
+            }}
+            style={{ cursor: "pointer", userSelect: "none" }}
+          >
             <div className="configured-title-group">
               <Key size={15} className="configured-key-icon" />
               <strong>{t("已绑定的 Provider 凭据 (")}{configuredProviders.length})</strong>
             </div>
-            <span className="configured-status-tag">
-              <CheckCircle2 size={11} />{t(" 运行环境就绪")}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span className="configured-status-tag">
+                <CheckCircle2 size={11} />{t(" 运行环境就绪")}
+              </span>
+              <ChevronDown
+                size={16}
+                style={{
+                  transition: "transform 0.2s ease",
+                  transform: showConfigured ? "rotate(180deg)" : "rotate(0deg)",
+                }}
+              />
+            </div>
           </div>
 
-          <div className="configured-list">
-            {configuredProviders.map((p) => (
-              <div key={p.id} className="configured-row">
-                <div className="configured-info">
-                  <div className="configured-name-wrap">
-                    <span className="configured-name">{p.name}</span>
-                    <code className="configured-id">{p.id}</code>
+          <CollapsibleCardBody expanded={showConfigured}>
+            {() => (
+              <div className="configured-list">
+                {configuredProviders.map((p) => (
+                  <div key={p.id} className="configured-row">
+                    <div className="configured-info">
+                      <div className="configured-name-wrap">
+                        <span className="configured-name">{p.name}</span>
+                        <code className="configured-id">{p.id}</code>
+                      </div>
+                      <span className={`configured-type-badge ${p.authSource === "env" ? "env-badge" : "stored-badge"}`}>
+                        {p.authSource === "env"
+                          ? t("环境变量 ({0})", p.authEnvVar || "ENV")
+                          : p.authType === "oauth"
+                          ? t("浏览器授权已保存 (OAuth)")
+                          : t("API Key 已保存")}
+                      </span>
+                    </div>
+
+                    <div className="configured-actions">
+                      <button
+                        type="button"
+                        className="card-action-btn reauth-btn"
+                        disabled={busy || pending}
+                        onClick={() => {
+                          const defaultMethod =
+                            p.authType === "oauth"
+                              ? "oauth"
+                              : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
+                          void startLogin(p, defaultMethod as "api_key" | "oauth");
+                        }}
+                        title={t("重新输入以更新密钥")}
+                      >
+                        {p.authType === "oauth" ? (
+                          <>
+                            <RefreshCw size={12} />{t(" 重新授权")}
+                          </>
+                        ) : (
+                          <>
+                            <Key size={12} />{t(" 修改 Key")}
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="card-action-btn logout-btn"
+                        disabled={busy || pending}
+                        onClick={() => setConfirmDeleteProvider(p)}
+                        title={t("彻底删除 / 屏蔽此 API 凭据")}
+                      >
+                        <Trash2 size={12} />{p.authType === "oauth" ? t(" 解除授权") : t(" 删除 API Key")}</button>
+                    </div>
                   </div>
-                  <span className={`configured-type-badge ${p.authSource === "env" ? "env-badge" : "stored-badge"}`}>
-                    {p.authSource === "env"
-                      ? t("环境变量 ({0})", p.authEnvVar || "ENV")
-                      : p.authType === "oauth"
-                      ? t("浏览器授权已保存 (OAuth)")
-                      : t("API Key 已保存")}
-                  </span>
-                </div>
-
-                <div className="configured-actions">
-                  <button
-                    type="button"
-                    className="card-action-btn reauth-btn"
-                    disabled={busy || pending}
-                    onClick={() => {
-                      const defaultMethod =
-                        p.authType === "oauth"
-                          ? "oauth"
-                          : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
-                      void startLogin(p, defaultMethod as "api_key" | "oauth");
-                    }}
-                    title={t("重新输入以更新密钥")}
-                  >
-                    {p.authType === "oauth" ? (
-                      <>
-                        <RefreshCw size={12} />{t(" 重新授权")}
-                      </>
-                    ) : (
-                      <>
-                        <Key size={12} />{t(" 修改 Key")}
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    className="card-action-btn logout-btn"
-                    disabled={busy || pending}
-                    onClick={() => setConfirmDeleteProvider(p)}
-                    title={t("彻底删除 / 屏蔽此 API 凭据")}
-                  >
-                    <Trash2 size={12} />{p.authType === "oauth" ? t(" 解除授权") : t(" 删除 API Key")}</button>
-                </div>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          </CollapsibleCardBody>
         </div>
       )}
 
@@ -677,103 +706,124 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       )}
 
       {/* Provider List Grid */}
-      <div className="providers-grid-title" onClick={() => setShowProviders(!showProviders)} style={{ cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div
+        className="providers-grid-title"
+        onClick={() => setShowProviders(!showProviders)}
+        role="button"
+        tabIndex={0}
+        aria-expanded={showProviders}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setShowProviders(!showProviders);
+          }
+        }}
+        style={{ cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", userSelect: "none" }}
+      >
         <div style={{ display: "flex", flexDirection: "column" }}>
           <span>{t("支持的 Provider 列表")}</span>
           <small>{t("点击任意 Provider 可一键发起 ")}<code>/login</code>{t(" 或管理凭据")}</small>
         </div>
-        {showProviders ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        <ChevronDown
+          size={16}
+          style={{
+            transition: "transform 0.2s ease",
+            transform: showProviders ? "rotate(180deg)" : "rotate(0deg)",
+          }}
+        />
       </div>
 
-      {showProviders && (
-      <div className="providers-card-grid">
-        {filteredProviders.map((p) => {
-          const isSelected = activeProvider?.id === p.id;
-          return (
-            <div
-              key={p.id}
-              className={`provider-card ${p.configured ? "configured" : ""} ${isSelected ? "selected" : ""}`}
-            >
-              <div className="provider-card-header">
-                <div className="provider-brand-info">
-                  <span className="provider-name">{p.name}</span>
-                  <code className="provider-id">{p.id}</code>
-                </div>
+      <CollapsibleCardBody expanded={showProviders}>
+        {() => (
+          <div className="providers-card-grid">
+            {filteredProviders.map((p) => {
+              const isSelected = activeProvider?.id === p.id;
+              return (
                 <div
-                  className={`provider-badge ${p.configured ? "badge-configured" : "badge-unconfigured"}`}
+                  key={p.id}
+                  className={`provider-card ${p.configured ? "configured" : ""} ${isSelected ? "selected" : ""}`}
                 >
-                  {p.configured ? (
-                    <>
-                      <CheckCircle2 size={11} />{t(" 已配置")}{p.authType ? ` (${p.authType})` : ""}
-                    </>
-                  ) : (
-                    t("未配置")
-                  )}
-                </div>
-              </div>
-
-              <div className="provider-card-footer">
-                {p.configured ? (
-                  <div className="provider-card-actions">
-                    <button
-                      type="button"
-                      className="card-action-btn reauth-btn"
-                      disabled={busy || pending}
-                      onClick={() => {
-                        const defaultMethod =
-                          p.authType === "oauth"
-                            ? "oauth"
-                            : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
-                        void startLogin(p, defaultMethod as "api_key" | "oauth");
-                      }}
-                      title={t("重新输入密钥或刷新授权")}
+                  <div className="provider-card-header">
+                    <div className="provider-brand-info">
+                      <span className="provider-name">{p.name}</span>
+                      <code className="provider-id">{p.id}</code>
+                    </div>
+                    <div
+                      className={`provider-badge ${p.configured ? "badge-configured" : "badge-unconfigured"}`}
                     >
-                      {p.authType === "oauth" ? (
+                      {p.configured ? (
                         <>
-                          <RefreshCw size={12} />{t(" 重新授权")}
+                          <CheckCircle2 size={11} />{t(" 已配置")}{p.authType ? ` (${p.authType})` : ""}
                         </>
                       ) : (
-                        <>
-                          <Key size={12} />{t(" 修改 Key")}
-                        </>
+                        t("未配置")
                       )}
-                    </button>
-                    <button
-                      type="button"
-                      className="card-action-btn logout-btn"
-                      disabled={busy || pending}
-                      onClick={() => setConfirmDeleteProvider(p)}
-                      title={t("移除本地已保存的 API Key 凭据")}
-                    >
-                      <Trash2 size={12} />{p.authType === "oauth" ? t(" 解除授权") : t(" 删除 Key")}</button>
+                    </div>
                   </div>
-                ) : (
-                  <div className="provider-card-actions">
-                    {p.methods.length > 0 ? (
-                      <button
-                        type="button"
-                        className="card-action-btn login-btn"
-                        disabled={busy || pending}
-                        onClick={() => {
-                          const defaultMethod =
-                            p.authType === "oauth"
-                              ? "oauth"
-                              : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
-                          void startLogin(p, defaultMethod as "api_key" | "oauth");
-                        }}
-                      >
-                        <LogIn size={13} />{t(" 登录 (/login)")}</button>
+
+                  <div className="provider-card-footer">
+                    {p.configured ? (
+                      <div className="provider-card-actions">
+                        <button
+                          type="button"
+                          className="card-action-btn reauth-btn"
+                          disabled={busy || pending}
+                          onClick={() => {
+                            const defaultMethod =
+                              p.authType === "oauth"
+                                ? "oauth"
+                                : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
+                            void startLogin(p, defaultMethod as "api_key" | "oauth");
+                          }}
+                          title={t("重新输入密钥或刷新授权")}
+                        >
+                          {p.authType === "oauth" ? (
+                            <>
+                              <RefreshCw size={12} />{t(" 重新授权")}
+                            </>
+                          ) : (
+                            <>
+                              <Key size={12} />{t(" 修改 Key")}
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          className="card-action-btn logout-btn"
+                          disabled={busy || pending}
+                          onClick={() => setConfirmDeleteProvider(p)}
+                          title={t("移除本地已保存的 API Key 凭据")}
+                        >
+                          <Trash2 size={12} />{p.authType === "oauth" ? t(" 解除授权") : t(" 删除 Key")}</button>
+                      </div>
                     ) : (
-                      <span className="env-only-hint">{t("由环境变量或系统配置")}</span>
+                      <div className="provider-card-actions">
+                        {p.methods.length > 0 ? (
+                          <button
+                            type="button"
+                            className="card-action-btn login-btn"
+                            disabled={busy || pending}
+                            onClick={() => {
+                              const defaultMethod =
+                                p.authType === "oauth"
+                                  ? "oauth"
+                                  : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
+                              void startLogin(p, defaultMethod as "api_key" | "oauth");
+                            }}
+                          >
+                            <LogIn size={13} />{t(" 登录 (/login)")}</button>
+                        ) : (
+                          <span className="env-only-hint">{t("由环境变量或系统配置")}</span>
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CollapsibleCardBody>
 
       {busy && (
         <div className="provider-status-loading">

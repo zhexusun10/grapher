@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
-import { planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
+import { normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import type { ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
@@ -15,7 +15,12 @@ const catalog: ProviderCatalog = {
     { id: "closed", name: "Unavailable Provider", methods: [], configured: false, authType: null },
   ],
   models: [
-    { provider: "example", id: "default", name: "Ready Model", api: "test", contextWindow: 1000, available: true },
+    { provider: "example", id: "default", name: "Ready Model", api: "test", contextWindow: 1000, available: true,
+      thinkingLevels: ["off", "low", "high"], thinkingLevelFallbacks: { minimal: "low", medium: "high", xhigh: "high", max: "high" } },
+    { provider: "example", id: "plain", name: "Plain Model", api: "test", contextWindow: 1000, available: true,
+      thinkingLevels: ["off"], thinkingLevelFallbacks: { minimal: "off", low: "off", medium: "off", high: "off", xhigh: "off", max: "off" } },
+    { provider: "example", id: "restricted", name: "Restricted Model", api: "test", contextWindow: 1000, available: true,
+      thinkingLevels: ["low", "high", "max"], thinkingLevelFallbacks: { off: "low", minimal: "low", medium: "high", xhigh: "max" } },
     { provider: "example", id: "hidden", name: "Unavailable Model", api: "test", contextWindow: 1000, available: false },
     { provider: "closed", id: "old", name: "Old Model", api: "test", contextWindow: 1000, available: false },
   ],
@@ -24,8 +29,8 @@ const catalog: ProviderCatalog = {
 
 const legacy: Config = { ...defaultConfig, model: "example/default", thinkingLevel: "high" };
 
-test("legacy settings inherit models but Partitioner defaults to thinking off", () => {
-  assert.deepEqual(roleModelConfig(legacy, "partitioner"), { model: "example/default", thinkingLevel: "off" });
+test("legacy settings inherit models but Partitioner defaults to thinking low", () => {
+  assert.deepEqual(roleModelConfig(legacy, "partitioner"), { model: "example/default", thinkingLevel: "low" });
   assert.deepEqual(roleModelConfig(legacy, "planner"), { model: "example/default", thinkingLevel: "high" });
   assert.deepEqual(roleModelConfig(legacy, "nodeAgent"), { model: "example/default", thinkingLevel: "high" });
 });
@@ -91,6 +96,98 @@ test("credential catalog updates remove and restore choices without changing sav
   assert.ok(render(loggedOut).includes(`${t("已选模型不可用：")}example/default`));
   assert.ok(!render(catalog).includes(t("已选模型不可用：")));
   assert.deepEqual(config.roleModels?.planner, { model: "example/default", thinkingLevel: "low" });
+});
+
+function renderRoles(config: Config, models: ProviderCatalog | undefined, envOverrides = {}, busy = false) {
+  const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config, setConfig: () => {}, catalog: models, envOverrides, busy }));
+  return [...markup.matchAll(/<section class="role-model-card"[\s\S]*?<\/section>/g)].map(([card]) => {
+    const select = [...card.matchAll(/<select\b[\s\S]*?<\/select>/g)][1][0];
+    return { card, select, values: [...select.matchAll(/<option[^>]*value="([^"]*)"/g)].map(match => match[1]) };
+  });
+}
+
+test("thinking selectors use per-model Pi capabilities, including inherited models and Partitioner without off", () => {
+  const [partitioner, planner, node] = renderRoles(legacy, catalog);
+  for (const field of [partitioner, planner, node]) assert.deepEqual(field.values, ["off", "low", "high"]);
+  const config = updateRoleModelConfig(legacy, "nodeAgent", { model: "example/restricted", thinkingLevel: "xhigh" });
+  const roles = renderRoles(config, catalog);
+  for (const field of roles) assert.deepEqual(field.values, ["low", "high", "max"]);
+  assert.match(roles[0].select, /value="low" selected=""/);
+  assert.match(roles[1].select, /value="max" selected=""/);
+  assert.match(roles[2].select, /value="max" selected=""/);
+  assert.equal(config.thinkingLevel, "xhigh", "rendering must not mutate persisted settings");
+});
+
+test("single-level models have a disabled selector and preserve the intent of separately configured roles", () => {
+  const config = updateRoleModelConfig({ ...legacy, model: "example/plain" }, "planner", { model: "example/restricted" });
+  const normalized = normalizeModelThinkingLevels(config, catalog);
+  assert.equal(normalized.thinkingLevel, "off");
+  assert.equal(normalized.roleModels?.nodeAgent?.thinkingLevel, "off");
+  assert.equal(roleModelConfig(normalized, "planner").thinkingLevel, "high");
+  assert.equal(normalized.roleModels?.planner?.model, "example/restricted");
+  assert.equal(config.thinkingLevel, "high");
+  assert.equal(config.roleModels?.planner?.thinkingLevel, "high");
+  assert.equal(normalizeModelThinkingLevels(normalized, catalog), normalized, "normalization is idempotent");
+  const [partitioner, planner, node] = renderRoles(config, catalog);
+  for (const field of [partitioner, node]) {
+    assert.deepEqual(field.values, ["off"]);
+    assert.match(field.select, /<select[^>]*disabled=""/);
+    assert.match(field.select, /value="off" selected=""/);
+  }
+  assert.doesNotMatch(planner.select, /<select[^>]*disabled=""/);
+});
+
+test("a fixed reasoning level stays enabled in Pi but is not adjustable; full-capability models still offer all levels", () => {
+  const fixed: ProviderCatalog = { ...catalog, models: catalog.models.map(model => model.id === "default"
+    ? { ...model, thinkingLevels: ["high"], thinkingLevelFallbacks: { off: "high", low: "high" } } : model) };
+  for (const field of renderRoles(legacy, fixed)) {
+    assert.deepEqual(field.values, ["high"]);
+    assert.match(field.select, /<select[^>]*disabled=""/);
+    assert.match(field.select, /value="high" selected=""/);
+  }
+  const all = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+  const extended: ProviderCatalog = { ...catalog, models: catalog.models.map(model => ({ ...model, thinkingLevels: [...all], thinkingLevelFallbacks: {} })) };
+  for (const field of renderRoles(legacy, extended)) assert.deepEqual(field.values, all);
+});
+
+test("normalizing Node Agent preserves an unknown model's inherited thinking intent", () => {
+  const config: Config = { ...legacy, model: "example/plain", roleModels: { planner: { model: "closed/old" } } };
+  const normalized = normalizeModelThinkingLevels(config, catalog);
+  assert.equal(normalized.thinkingLevel, "off");
+  assert.deepEqual(normalized.roleModels?.planner, { model: "closed/old", thinkingLevel: "high" });
+  assert.equal(config.roleModels?.planner?.thinkingLevel, undefined);
+});
+
+test("unknown capabilities disable controls and never invent seven choices or overwrite saved values", () => {
+  for (const models of [undefined, { ...catalog, models: catalog.models.map(({ thinkingLevels, thinkingLevelFallbacks, ...model }) => model) }]) {
+    assert.equal(normalizeModelThinkingLevels(legacy, models), legacy);
+    for (const field of renderRoles(legacy, models)) {
+      assert.equal(field.values.length, 1);
+      assert.match(field.select, /<select[^>]*disabled=""/);
+      assert.match(field.select, /<option[^>]*disabled=""/);
+      assert.ok(field.card.includes(t("暂未获取该模型的思维等级，请刷新 Provider 状态。")));
+    }
+  }
+  const unavailable = updateRoleModelConfig(legacy, "planner", { model: "closed/old", thinkingLevel: "max" });
+  assert.equal(normalizeModelThinkingLevels(unavailable, catalog), unavailable);
+});
+
+test("capability refreshes and model switches use backend fallbacks rather than a frontend level heuristic", () => {
+  const refreshed: ProviderCatalog = { ...catalog, models: catalog.models.map(model => model.id === "default"
+    ? { ...model, thinkingLevels: ["minimal", "max"], thinkingLevelFallbacks: { low: "max", off: "max", high: "max" } } : model) };
+  const normalized = normalizeModelThinkingLevels(legacy, refreshed);
+  assert.equal(roleModelConfig(normalized, "partitioner").thinkingLevel, "max", "the backend fallback is authoritative even if minimal is first");
+  assert.equal(roleModelConfig(normalized, "planner").thinkingLevel, "max");
+  assert.equal(normalized.thinkingLevel, "max");
+  const switched = normalizeModelThinkingLevels(updateRoleModelConfig(normalized, "nodeAgent", { model: "example/plain" }), catalog);
+  for (const role of ["partitioner", "planner", "nodeAgent"] as const) assert.equal(roleModelConfig(switched, role).thinkingLevel, "off");
+});
+
+test("environment overrides stay visible without changing the saved model's supported choices", () => {
+  const [partitioner] = renderRoles(legacy, catalog, { partitioner: "example/plain", partitionerThinking: "off" });
+  assert.deepEqual(partitioner.values, ["off", "low", "high"]);
+  assert.ok(partitioner.card.includes(`${t("环境变量覆盖：")}example/plain · off`));
+  for (const field of renderRoles(legacy, catalog, {}, true)) assert.match(field.select, /<select[^>]*disabled=""/);
 });
 
 test('only required pi-trim is locked; bundled continuity and user extensions remain selectable', async () => {
@@ -200,6 +297,21 @@ test("resolveExecutionModelAndThinking extracts model and thinking from executio
   const result = resolveExecutionModelAndThinking(execution, false, legacy, {});
   assert.equal(result.model, "openai-codex/gpt-6-sol");
   assert.equal(result.thinkingLevel, "high");
+});
+
+test("failed-node model overrides provide the next attempt's fallback without rewriting recorded model events", () => {
+  const execution: Execution = {
+    id: "retry", node: "task", revision: 1, attempt: 2, sessionId: "same-session", worktree: "/worktree",
+    before: "base", after: null, status: "running", output: "", startedAt: 1000, completedAt: null,
+  };
+  const replacement = { model: "replacement/coder", thinkingLevel: "high" as const };
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, false, legacy, {}, replacement), replacement);
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, false, legacy, {
+    nodeAgent: "env/model", nodeAgentThinking: "off",
+  }, replacement), { model: "env/model", thinkingLevel: "off" });
+  assert.equal(resolveExecutionModelAndThinking(execution, true, legacy, {}, replacement).model, legacy.model);
+  execution.output = JSON.stringify({ type: "model_change", provider: "recorded", modelId: "original" });
+  assert.equal(resolveExecutionModelAndThinking(execution, false, legacy, {}, replacement).model, "recorded/original");
 });
 
 test("resolveExecutionModelAndThinking falls back to config and role models when not in output", () => {

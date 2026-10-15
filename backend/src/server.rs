@@ -537,7 +537,8 @@ fn bootstrap_projection(
             None
         }
     };
-    // Settings describe the next run; the current run keeps its event-backed config.
+    // Settings describe future Runs. Explicit failed-node model updates are
+    // recorded separately; the current Run keeps its original config.
     let mut config = saved_config_on_disk
         .or(active_config)
         .or_else(|| {
@@ -554,7 +555,7 @@ fn bootstrap_projection(
                 .unwrap_or_default(),
             model: String::new(),
             role_models: Default::default(),
-            thinking_level: "medium".into(),
+            thinking_level: "low".into(),
             max_parallel: 0,
             max_feedback: 3,
             auto_approve: false,
@@ -702,20 +703,33 @@ fn save_graph(
 
 #[cfg(test)]
 fn save_config(config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
-    save_config_projection(config, service, false)
+    save_config_projection(config, None, service, false)
 }
 
 fn save_config_projection(
     mut config: Config,
+    run_id: Option<String>,
     service: &Arc<Service>,
     metadata: bool,
 ) -> Result<Bootstrap, String> {
     config.environment = None; // Native admission is Runtime-owned, never a UI default.
     config.validate_model_settings()?;
     config.max_feedback = 3;
-    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+    let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+    if let Some(run_id) = &run_id {
+        if runtime.state.run_id != *run_id {
+            return Err("Run changed while saving settings".into());
+        }
+        if !runtime.state.config.as_ref().is_some_and(|current|
+            same_repository_binding(&current.repository, &config.repository)) {
+            return Err("Settings repository does not match the selected Run".into());
+        }
+    }
     let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(runtime.root.join("config.json"), bytes).map_err(|e| e.to_string())?;
+    if run_id.is_some() {
+        runtime.update_failed_node_models(&config)?;
+    }
     drop(runtime);
     #[cfg(not(feature = "fixture"))]
     {
@@ -4104,6 +4118,7 @@ pub fn dispatch(
         )?),
         "save_config" => to_value(save_config_projection(
             argument(&body, "config")?,
+            argument(&body, "runId")?,
             service,
             metadata,
         )?),
@@ -4324,6 +4339,7 @@ fn api_service(
         | "edit_node"
         | "edit_planner"
         | "save_graph"
+        | "save_config"
         | "delete_run"
         | "get_execution_output"
         | "get_merger_prompt"

@@ -305,6 +305,12 @@ test('bundled continuity recovers capped provider turns only while selected for 
 test('Provider/Auth IPC returns a catalog after input EOF without exposing credentials', () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-pi-provider-'));
   try {
+    writeFileSync(join(dir, 'models.json'), JSON.stringify({ providers: { 'thinking-audit': {
+      baseUrl: 'http://127.0.0.1:1/v1', api: 'openai-completions', apiKey: 'local-audit-only',
+      models: [{ id: 'restricted', reasoning: true, input: ['text'], contextWindow: 128000, maxTokens: 4096,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' } }],
+    } } }));
     const env = {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
@@ -337,6 +343,18 @@ test('Provider/Auth IPC returns a catalog after input EOF without exposing crede
     assert.ok(catalog.result.providers.every(p => typeof p.id === 'string' && Array.isArray(p.methods)));
     assert.ok(Array.isArray(catalog.result.models) && catalog.result.models.length > 0);
     assert.ok(catalog.result.models.every(m => typeof m.id === 'string' && typeof m.provider === 'string' && typeof m.available === 'boolean'));
+    const vocabulary = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    for (const model of catalog.result.models) {
+      assert.ok(Array.isArray(model.thinkingLevels) && model.thinkingLevels.every(level => vocabulary.includes(level)));
+      assert.ok(model.thinkingLevelFallbacks && Object.values(model.thinkingLevelFallbacks).every(level => model.thinkingLevels.includes(level)));
+    }
+    const restricted = catalog.result.models.find(model => model.provider === 'thinking-audit');
+    assert.deepEqual(restricted.thinkingLevels, ['low', 'high', 'max'], 'custom models use the same upstream capability lookup');
+    assert.deepEqual(restricted.thinkingLevelFallbacks, { off: 'low', minimal: 'low', medium: 'high', xhigh: 'max' });
+    const plain = catalog.result.models.find(model => model.provider === 'azure' && model.id === 'gpt-4o-mini');
+    assert.deepEqual(plain.thinkingLevels, ['off']);
+    assert.equal(plain.thinkingLevelFallbacks.high, 'off');
+    assert.ok(!output.includes('local-audit-only'), 'model metadata must not expose custom provider credentials');
     assert.ok(catalog.result.providers.some(provider => provider.id === 'azure'));
     assert.ok(!catalog.result.providers.some(provider => provider.id === 'azure-openai-responses'));
     const azure = catalog.result.models.filter(model => model.provider === 'azure');

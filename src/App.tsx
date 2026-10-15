@@ -35,6 +35,7 @@ import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
 import { Sidebar } from "./components/layout/Sidebar";
 import { bindRunToWorkspace, normalizeWorkspacePath, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey } from "./services/workspaceConversations";
+import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { GraphWorkbench } from "./components/views/GraphWorkbench";
@@ -97,6 +98,16 @@ export default function App() {
     if (!status.valid) throw new Error(status.error || t("项目绑定已失效，请重新选择目录。"));
   };
   const [goal, setGoal] = useState("");
+  const [landingGoal, setLandingGoal] = useState<string>(() => loadLandingDraft(config.repository));
+
+  useEffect(() => {
+    setLandingGoal(loadLandingDraft(config.repository));
+  }, [config.repository]);
+
+  const handleLandingGoalChange = useCallback((val: string) => {
+    setLandingGoal(val);
+    saveLandingDraft(config.repository, val);
+  }, [config.repository]);
   const [selected, setSelected] = useState<string>("");
   const [selectedMergerId, setSelectedMergerId] = useState<string>("");
   // A merger card is only meaningful together with its owning node selection.
@@ -108,6 +119,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const foregroundGeneration = useRef(0);
   const workbenchIdentityRef = useRef({ runId: "", key: "initial" });
+  // Session-local unsent text outlives a mounted workbench, but never crosses Runs.
+  const composerDraftsRef = useRef(new Map<string, Map<string, string>>());
   const historyPrefetchRef = useRef<AbortController | null>(null);
   useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
@@ -280,6 +293,11 @@ export default function App() {
       return copy;
     });
 
+    const drafts = composerDraftsRef.current.get(oldId);
+    if (drafts) {
+      composerDraftsRef.current.set(newId, drafts);
+      composerDraftsRef.current.delete(oldId);
+    }
     // The accepted backend identity still belongs to the mounted Conversation.
     if (workbenchIdentityRef.current.runId === oldId) {
       workbenchIdentityRef.current = { ...workbenchIdentityRef.current, runId: newId };
@@ -993,7 +1011,9 @@ export default function App() {
         deletedIds.forEach(id => {
           deletedRunIdsRef.current.add(id);
           messagesByRunRef.current.delete(id);
+          composerDraftsRef.current.delete(id);
         });
+        clearLandingDraft(pathToRemove);
         const remainingProjects = projects.filter((p) => workspaceKey(p.path) !== key);
         setProjects(prev => {
           const remaining = prev.filter(p => workspaceKey(p.path) !== key);
@@ -1073,6 +1093,7 @@ export default function App() {
       return copy;
     });
     messagesByRunRef.current.delete(runIdToDelete);
+    composerDraftsRef.current.delete(runIdToDelete);
     if (state.runId === runIdToDelete && generation === foregroundGeneration.current) {
       const scope = detachForeground(config.repository);
       const deleteGeneration = foregroundGeneration.current;
@@ -1104,6 +1125,7 @@ export default function App() {
       } else {
         setState(emptySnapshot);
         setGoal("");
+        setLandingGoal(loadLandingDraft(config.repository));
         setSelected("");
         resetSessionMessages();
         setRouteType("undecided");
@@ -1135,6 +1157,7 @@ export default function App() {
     setRouteType("undecided");
     setPlannerStream(initialPlannerStream);
     setGoal("");
+    setLandingGoal(loadLandingDraft(config.repository));
     setSelected("");
     setError("");
   };
@@ -1148,8 +1171,11 @@ export default function App() {
     if (generation !== foregroundGeneration.current) return false;
     const nextConfig = { ...draftConfig, repository: repoPath, maxFeedback: 3 };
     try {
-      const boot = await runtimeService.saveConfig(nextConfig);
+      const boot = await runtimeService.saveConfig(nextConfig, state.runId || undefined);
       if (generation !== foregroundGeneration.current) return false;
+      if (boot.snapshot?.runId === state.runId && state.runId) {
+        applyForegroundSnapshot(boot.snapshot, generation);
+      }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
     } catch (error) {
       throw new Error(t("保存设置失败：{0}", String(error)));
@@ -1212,8 +1238,8 @@ export default function App() {
     // rejecting the message as a second concurrent conversation.
     allowWhilePlanning?: boolean
   ) => {
-    const targetGoal = (inputGoal !== undefined ? inputGoal : goal).trim();
-    if (!targetGoal) return Promise.resolve();
+    const targetGoal = (inputGoal !== undefined ? inputGoal : (landingGoal || goal)).trim();
+    if (!targetGoal) return Promise.resolve(false);
     if (!isBootstrapReady) {
       setError(t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。"));
       return Promise.resolve(false);
@@ -1232,7 +1258,7 @@ export default function App() {
     if (!targetRepo) {
       setModal("settings");
       setError(t("请先在左侧工作区选择绑定的本地 Git 仓库。"));
-      return Promise.resolve();
+      return Promise.resolve(false);
     }
     const scope = planningRecovery.begin(targetRepo);
     let startedRunId: string | undefined;
@@ -1242,6 +1268,8 @@ export default function App() {
     if (!isContinuing) {
       provisionalRunId = `pending-${Date.now()}`;
       setGoal("");
+      setLandingGoal("");
+      clearLandingDraft(targetRepo);
       setIsPlanning(true);
       setRouteType(effectiveMode === "auto" ? "undecided" : effectiveMode);
       setSelected("");
@@ -1974,7 +2002,11 @@ export default function App() {
       }));
     } catch (err: any) {
       if (!planningRecovery.current(scope)) return;
-      if (provisionalRunId && !startedRunId) setGoal(targetGoal);
+      if (provisionalRunId && !startedRunId) {
+        setGoal(targetGoal);
+        setLandingGoal(targetGoal);
+        saveLandingDraft(targetRepo, targetGoal);
+      }
       const isAbort =
         err?.name === "AbortError" ||
         String(err?.message || err).includes("AbortError") ||
@@ -2770,6 +2802,13 @@ export default function App() {
     workbenchIdentityRef.current = { runId: state.runId, key: state.runId || "initial" };
   }
 
+  const draftConversationKey = state.runId || JSON.stringify([workspaceKey(config.repository), "unbound"]);
+  let composerDrafts = composerDraftsRef.current.get(draftConversationKey);
+  if (!composerDrafts) {
+    composerDrafts = new Map<string, string>();
+    composerDraftsRef.current.set(draftConversationKey, composerDrafts);
+  }
+
   const isLandingView = !state.runId && state.graph.nodes.length === 0 &&
     !isPlanning &&
     !recoveredPlanning &&
@@ -2794,12 +2833,18 @@ export default function App() {
     const controller = new AbortController();
     historyPrefetchRef.current = controller;
     const generation = foregroundGeneration.current;
-    run(async () => {
+    void (async () => {
       clearRunUnread(id);
       // Logs must never block opening a card; validate ownership before displaying it.
       let snapshot: Snapshot;
       try { snapshot = await runtimeService.snapshotForRun(id, controller.signal); }
-      catch (error) { if (controller.signal.aborted) return; throw error; }
+      catch (error) {
+        if (controller.signal.aborted) return;
+        if (generation === foregroundGeneration.current) {
+          setError(error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error));
+        }
+        return;
+      }
       if (controller.signal.aborted || generation !== foregroundGeneration.current) return;
       if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
       if (!snapshotBelongsToWorkspace(snapshot, config.repository)) {
@@ -2817,7 +2862,7 @@ export default function App() {
         setEditPrefillText("");
       }
       setSelected("");
-    });
+    })();
   });
 
   return (
@@ -2916,8 +2961,8 @@ export default function App() {
               {isLandingView ? (
                 <LandingView
                   key="landing-view"
-                  goal={goal}
-                  setGoal={setGoal}
+                  goal={landingGoal}
+                  setGoal={handleLandingGoalChange}
                   onPlanGoal={actions.plan}
                   isBusy={busy || isPlanning || repositoryBlocked}
                   planMode={planMode}
@@ -2948,6 +2993,7 @@ export default function App() {
                     key={workbenchIdentityRef.current.key}
                     state={state}
                     transcriptRunId={transcriptRunId}
+                    composerDrafts={composerDrafts}
                     activity={activities[state.runId] ?? []}
                     routeType={routeType}
                     initialPlanMode={runModes[state.runId] || (plannerStream.runId === state.runId ? plannerStream.initialPlanMode : undefined)}

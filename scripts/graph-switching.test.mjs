@@ -29,7 +29,8 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
     const empty = { ...makeSnapshot("", []), planningId: undefined, config: null, phase: "draft", approved: false };
     const repositoryInfo = { path: repository, name: "Project", branch: "main", head: "", clean: true };
     const errors = [];
-    const server = await createServer({ cacheDir: "node_modules/.vite-graph-switching", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false } });
+    let rejectNodeMessage = false;
+    const server = await createServer({ cacheDir: "node_modules/.vite-graph-switching", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
     let browser;
     try {
       await server.listen();
@@ -63,6 +64,13 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
             result = { runId: body.runId, executionId: body.executionId, content, startOffset: 0,
               nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, status: "completed" }; break;
           }
+          case "control":
+            assert.equal(body.action, "intervene");
+            if (rejectNodeMessage) {
+              await route.fulfill({ status: 500, json: { error: "Mock rejected draft" } });
+              return;
+            }
+            result = snapshots[body.runId]; break;
           case "repository_status": result = { repository, valid: true, error: null }; break;
           case "detect_repository": result = repositoryInfo; break;
           case "list_plannings": result = []; break;
@@ -92,20 +100,47 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         assert.deepEqual(await page.locator(".graph-canvas .react-flow__node").evaluateAll(nodes => nodes.map(node => node.dataset.id).sort()), expected);
       };
       const switchAndMeasure = async id => {
+        await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat .prompt-box-container")?.hasAttribute("data-resizing"));
+        const sourceComposer = await page.evaluate(() => {
+          const workbench = document.querySelector(".workbench");
+          const box = workbench?.querySelector(".prompt-box-container");
+          if (!box) return null;
+          const rect = box.getBoundingClientRect();
+          return { x: rect.x, y: rect.y, graph: !!workbench.querySelector(".graph-pane") };
+        });
         // Sample painted target content from the first frame, not after Playwright
         // has waited for the layout/animation to become stable.
         await page.evaluate(({ id, expectedNames }) => {
           window.switchFrames = [];
           window.summaryFrames = [];
+          window.composerFrames = [];
           window.workbenchChanges = 0;
           window.switchSamplingDone = false;
           let previousWorkbench = document.querySelector(".workbench");
+          const sourceWorkbench = previousWorkbench;
           const started = performance.now();
           const sample = () => {
             const workbench = document.querySelector(".workbench");
             if (workbench !== previousWorkbench) {
               if (workbench) window.workbenchChanges++;
               previousWorkbench = workbench;
+            }
+            const composer = workbench !== sourceWorkbench && workbench?.querySelector(".prompt-box-container");
+            if (composer) {
+              const rect = composer.getBoundingClientRect();
+              const arrow = composer.querySelector(".prompt-box-send-btn > span");
+              const transform = arrow ? new DOMMatrixReadOnly(getComputedStyle(arrow).transform) : null;
+              const angle = transform ? Math.atan2(transform.b, transform.a) * 180 / Math.PI : 0;
+              const expectedAngle = composer.querySelector("textarea").value.trim() ? -90 : 0;
+              const send = composer.querySelector(".prompt-box-send-btn");
+              const sendRect = send.getBoundingClientRect();
+              const attach = composer.querySelector(".prompt-box-left-actions .prompt-box-icon-btn");
+              const painted = document.elementFromPoint(sendRect.x + sendRect.width / 2, sendRect.y + sendRect.height / 2);
+              window.composerFrames.push({ x: rect.x, y: rect.y,
+                sendPainted: !!painted && send.contains(painted), paintedTag: painted?.getAttribute("class"),
+                arrowPresent: !!arrow, attachOpacity: Number(getComputedStyle(attach).opacity),
+                opacity: Number(getComputedStyle(composer).opacity), arrowError: Math.abs(angle - expectedAngle),
+                visible: composer.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) });
             }
             const output = [...document.querySelectorAll(".planning-activity-output, [data-execution-id]")].find(el => el.textContent.includes(`TRANSCRIPT_${id}:`));
             const stream = output?.closest(".chat-messages-stream");
@@ -138,9 +173,34 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           document.querySelector(`[data-run-id="${id}"]`).click();
         }, { id, expectedNames: Object.keys(snapshots[id].nodes).sort() });
         await page.waitForFunction(() => window.switchSamplingDone);
-        const { frames, summaries, changes } = await page.evaluate(() => ({
+        const { frames, summaries, changes, composers } = await page.evaluate(() => ({
           frames: window.switchFrames, summaries: window.summaryFrames, changes: window.workbenchChanges,
+          composers: window.composerFrames,
         }));
+        if (sourceComposer && sourceComposer.graph !== hasGraph(id) && reducedMotion === "no-preference") {
+          const distance = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+          const destination = composers.at(-1);
+          assert.ok(destination && distance(sourceComposer, destination) > 4, `${id}: split and full-width inputs occupy different positions`);
+          assert.ok(composers.some(frame => distance(frame, sourceComposer) > 1 && distance(frame, destination) > 1),
+            `${id}: graph/full-width navigation preserves the composer's position animation in both directions`);
+          const dx = destination.x - sourceComposer.x, dy = destination.y - sourceComposer.y;
+          const length = Math.hypot(dx, dy);
+          let previousProgress = -1;
+          for (const frame of composers) {
+            const progress = ((frame.x - sourceComposer.x) * dx + (frame.y - sourceComposer.y) * dy) / (length * length);
+            assert.ok(progress + 1 / length >= previousProgress, `${id}: input movement must not jump backwards or restart mid-handoff`);
+            previousProgress = Math.max(previousProgress, progress);
+          }
+        }
+        if (sourceComposer) {
+          assert.ok(composers.length > 0, `${id}: incoming input must be painted`);
+          for (const frame of composers) {
+            assert.ok(frame.visible && frame.opacity > 0.99, `${id}: the shared input stays opaque instead of flashing during navigation`);
+            assert.ok(frame.arrowPresent && frame.arrowError < 0.1, `${id}: navigation must not replay or replace the idle send arrow`);
+            assert.ok(frame.attachOpacity > 0.99, `${id}: navigation must not briefly dim the restored input controls`);
+            assert.ok(frame.sendPainted, `${id}: the moving input must not be clipped or covered: ${JSON.stringify(frame)}`);
+          }
+        }
         assert.equal(changes, 1, `${id}: switching must not remount the previous conversation while metadata loads`);
         assert.ok(frames.length > 0, `target ${id} must be painted`);
         const last = frames.at(-1);
@@ -168,22 +228,185 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         }
       };
       // Cover every direction, including both no-graph entry and return paths.
-      for (const id of ["c", "d", "c", "d", "a", "b", "c", "a", "d"]) await switchAndMeasure(id);
+      // Drafts are owned by their conversation, not by the currently mounted input.
+      const drafts = new Map();
+      const composer = page.locator(".pane-bottom-chat textarea");
+      for (const id of ["c", "d", "c", "d", "a", "b", "c", "a", "d"]) {
+        await switchAndMeasure(id);
+        assert.equal(await composer.inputValue(), drafts.get(id) ?? "", `${id}: restores only its own unsent text`);
+        if (!drafts.has(id)) {
+          const draft = id === "b" ? "Long graph draft\n".repeat(24) : `Unsent draft for ${id}\n中文内容 and a second line`;
+          await composer.fill(draft);
+          drafts.set(id, draft);
+        }
+      }
       await page.locator('[data-run-id="b"]').click();
       await assertGraphVisible("b");
+      await page.waitForFunction(() => getComputedStyle(document.querySelector(".pane-bottom-chat .prompt-box-container")).transform === "none");
+      await page.evaluate(() => {
+        window.recordComposerFrames = [];
+        window.sampleRecordComposer = true;
+        const sample = () => {
+          const box = document.querySelector(".pane-bottom-chat .prompt-box-container");
+          const rect = box.getBoundingClientRect();
+          const actions = box.querySelector(".prompt-box-actions-row").getBoundingClientRect();
+          window.recordComposerFrames.push({ x: rect.x, bottom: rect.bottom, width: rect.width, actionsBottom: actions.bottom,
+            visible: box.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) });
+          if (window.sampleRecordComposer) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
+      for (const text of ["More lines\n".repeat(4), "Short", "Scrollable input\n".repeat(40), drafts.get("b")]) {
+        await composer.fill(text);
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      }
+      const recordFrames = await page.evaluate(() => { window.sampleRecordComposer = false; return window.recordComposerFrames; });
+      assert.ok(recordFrames.length > 0);
+      for (const frame of recordFrames) {
+        const first = recordFrames[0];
+        assert.ok(frame.visible, "the record-page input never disappears while editing");
+        assert.ok(Math.abs(frame.x - first.x) < 1 && Math.abs(frame.width - first.width) < 1 &&
+          Math.abs(frame.bottom - first.bottom) < 1 && Math.abs(frame.actionsBottom - first.actionsBottom) < 1,
+          `record-page auto-growing/shrinking does not displace the input or controls: ${JSON.stringify(frame)}`);
+      }
       await page.locator('.react-flow__node[data-id="shared"]').click();
       await assertGraphVisible("b");
+      assert.equal(await composer.inputValue(), "", "node draft is separate from Planner");
+      await composer.fill("Unsent shared-node draft");
+      await page.locator(".back-to-query-btn").click();
+      assert.equal(await composer.inputValue(), drafts.get("b"));
+      await page.locator('.react-flow__node[data-id="shared"]').click();
+      assert.equal(await composer.inputValue(), "Unsent shared-node draft");
+      rejectNodeMessage = true;
+      await composer.press("Enter");
+      await page.getByRole("alert").filter({ hasText: "Mock rejected draft" }).waitFor();
+      await page.locator(".floating-error-close").click();
+      await page.getByRole("alert").filter({ hasText: "Mock rejected draft" }).waitFor({ state: "detached" });
+      await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat textarea").disabled);
+      await page.locator(".back-to-query-btn").click();
+      await page.locator('.react-flow__node[data-id="shared"]').click();
+      assert.equal(await composer.inputValue(), "Unsent shared-node draft", "rejection preserves the target's draft across navigation");
+      rejectNodeMessage = false;
+      await composer.press("Enter");
+      await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea").value === "");
+      await page.locator(".back-to-query-btn").click();
+      assert.equal(await composer.inputValue(), drafts.get("b"), "acceptance does not clear Planner's draft");
+      await page.locator('.react-flow__node[data-id="shared"]').click();
+      assert.equal(await composer.inputValue(), "", "an accepted draft does not reappear on return");
+      await composer.fill("Unsent shared-node draft");
 
+      const assertHomeVisible = () => page.waitForFunction(() => {
+        const home = document.querySelector(".landing-screen");
+        const title = home?.querySelector(".landing-title-copy");
+        const input = home?.querySelector("textarea");
+        return home && getComputedStyle(home).opacity === "1" && !home.inert &&
+          title?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+          input?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+      }, undefined, { timeout: 5000 });
+      await page.waitForFunction(() => getComputedStyle(document.querySelector(".pane-bottom-chat .prompt-box-container")).transform === "none");
+      const sourceComposer = await page.locator(".pane-bottom-chat .prompt-box-container").boundingBox();
+      await page.evaluate(() => {
+        window.homeComposerFrames = [];
+        window.sampleHomeComposer = true;
+        const sample = () => {
+          const box = document.querySelector(".landing-screen .prompt-box-container");
+          const home = box?.closest(".landing-screen");
+          if (box && Number(getComputedStyle(home).opacity) > 0.01) {
+            const rect = box.getBoundingClientRect();
+            window.homeComposerFrames.push({ x: rect.x, y: rect.y });
+          }
+          if (window.sampleHomeComposer) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
       await page.getByRole("button", { name: "New conversation", exact: true }).click();
       await page.locator(".graph-pane").waitFor({ state: "detached" });
+      await assertHomeVisible();
+      await page.waitForFunction(() => getComputedStyle(document.querySelector(".landing-screen .prompt-box-container")).transform === "none");
+      const homeFrames = await page.evaluate(() => { window.sampleHomeComposer = false; return window.homeComposerFrames; });
+      const destinationComposer = await page.locator(".landing-screen .prompt-box-container").boundingBox();
+      if (reducedMotion === "no-preference") {
+        const distance = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+        assert.ok(distance(sourceComposer, destinationComposer) > 4, "node and home composers have different positions");
+        assert.ok(homeFrames.some(frame => distance(frame, sourceComposer) > 1 && distance(frame, destinationComposer) > 1),
+          "returning home preserves the shared composer position animation, not just a crossfade");
+      }
+      assert.equal(await page.locator(".landing-screen textarea").inputValue(), "", "node draft does not leak into home");
       await page.locator('[data-run-id="b"]').click();
       await assertGraphVisible("b");
+      assert.equal(await composer.inputValue(), drafts.get("b"));
+
+      // Re-enter while the previous home is still exiting, not only after a
+      // completed transition. Its copy and composer must recover their opacity.
+      await page.getByRole("button", { name: "New conversation", exact: true }).click();
+      await assertHomeVisible();
+      await page.locator('[data-run-id="b"]').evaluate(card => card.click());
+      await page.waitForFunction(() => !document.querySelector(".app-shell").classList.contains("landing-active"));
+      await page.getByRole("button", { name: "New conversation", exact: true }).evaluate(button => button.click());
+      await assertHomeVisible();
+      await page.locator('[data-run-id="b"]').click();
+      await assertGraphVisible("b");
+      assert.equal(await composer.inputValue(), drafts.get("b"));
+
+      // Switching from home to a conversation without a graph (serial / no graph)
+      // must preserve the composer's resting position without abrupt vertical jitter
+      // and without ghosting duplicate send buttons during the handoff.
+      await page.getByRole("button", { name: "New conversation", exact: true }).click();
+      await assertHomeVisible();
+      await page.waitForFunction(() => getComputedStyle(document.querySelector(".landing-screen .prompt-box-container")).transform === "none");
+      const homeBox = await page.locator(".landing-screen .prompt-box-container").boundingBox();
+
+      await page.evaluate(() => {
+        window.homeToNoGraphFrames = [];
+        window.sampleHomeToNoGraph = true;
+        const start = performance.now();
+        const sample = () => {
+          const box = document.querySelector(".pane-bottom-chat .prompt-box-container") ||
+                            document.querySelector(".landing-screen .prompt-box-container");
+          if (box) {
+            const rect = box.getBoundingClientRect();
+            const visibleSendButtons = [...document.querySelectorAll(".prompt-box-send-btn")].filter(
+              btn => btn.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+            );
+            window.homeToNoGraphFrames.push({
+              time: Math.round(performance.now() - start),
+              x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+              visibleButtons: visibleSendButtons.length,
+            });
+          }
+          if (window.sampleHomeToNoGraph) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
+
+      await page.locator('.run-item[data-run-id="d"]').click();
+      await page.waitForFunction(() => !document.querySelector(".app-shell").classList.contains("landing-active"));
+      await page.waitForFunction(() => {
+        const stream = document.querySelector(".chat-messages-stream");
+        const scroll = document.querySelector(".initial-query-scroll");
+        return stream && scroll && +getComputedStyle(stream).opacity > 0 && +getComputedStyle(scroll).opacity > 0;
+      });
+      await page.waitForFunction(() => getComputedStyle(document.querySelector(".pane-bottom-chat .prompt-box-container")).transform === "none");
+
+      const switchFrames = await page.evaluate(() => {
+        window.sampleHomeToNoGraph = false;
+        return window.homeToNoGraphFrames;
+      });
+      assert.ok(switchFrames.length > 0, "frames captured during Home -> No-graph transition");
+      const finalSwitchBox = switchFrames.at(-1);
+      const homeBottom = homeBox.y + homeBox.height;
+      const finalSwitchBottom = finalSwitchBox.y + finalSwitchBox.height;
+      assert.ok(Math.abs(homeBox.x - finalSwitchBox.x) <= 2, "composer stays centered horizontally");
+      assert.ok(Math.abs(homeBottom - finalSwitchBottom) <= 2, "composer bottom remains viewport-anchored between home and conversation");
+      for (const frame of switchFrames) {
+        assert.ok(frame.visibleButtons <= 1, "departing landing screen does not ghost an extra visible send button");
+      }
 
       // Superseded initialization callbacks must not restore an older graph.
       for (const id of ["a", "c", "b", "d"]) {
-        await page.locator(`[data-run-id="${id}"]`).evaluate(card => card.click());
+        await page.locator(`.run-item[data-run-id="${id}"]`).evaluate(card => card.click());
       }
-      await page.locator('[data-run-id="a"]').click();
+      await page.locator('.run-item[data-run-id="a"]').click();
       await assertGraphVisible("a");
       assert.deepEqual(errors, []);
     } finally { await browser?.close(); await server.close(); }

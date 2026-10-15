@@ -1151,8 +1151,42 @@ impl Runtime {
         })
     }
 
-    fn queue_interrupted_recovery(&mut self) -> Result<(), String> {
-        let roots = self.state.interrupted_nodes();
+    /// Saving a new model opts only failed nodes into explicit Continue recovery.
+    /// Do not invalidate results, dispatch jobs, or rewrite historical attempts.
+    pub fn update_failed_node_models(&mut self, config: &Config) -> Result<(), String> {
+        config.validate_model_settings()?;
+        let Some(original) = self.state.config.as_ref() else {
+            return Ok(());
+        };
+        if !self.state.approved || matches!(self.state.phase.as_str(),
+            "completed" | "publishing" | "merging" | "publication_failed") {
+            return Ok(());
+        }
+        let settings = config.node_agent_settings();
+        if settings.model.is_empty() {
+            return Ok(());
+        }
+        let original = original.node_agent_settings();
+        let nodes: Vec<_> = self.state.nodes.iter().filter_map(|(name, node)| {
+            (node.status == "failed"
+                && node.model_config.as_ref().unwrap_or(&original) != &settings
+                && self.state.executions.iter().rev()
+                    .find(|execution| execution.node == *name
+                        && !self.state.superseded_execution_ids.contains(&execution.id))
+                    .is_some_and(|execution| execution.status == "failed"))
+                .then(|| name.clone())
+        }).collect();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        self.emit(EventKind::FailedNodeModelsUpdated { nodes, settings })
+    }
+
+    fn queue_node_recovery(&mut self) -> Result<(), String> {
+        let mut roots = self.state.interrupted_nodes();
+        roots.extend(self.state.model_retry_nodes());
+        roots.sort();
+        roots.dedup();
         if roots.is_empty() {
             return Ok(());
         }
@@ -1162,8 +1196,8 @@ impl Runtime {
         for root in roots {
             recovery.extend(downstream(&self.state.graph, &root));
         }
-        // Do not disturb a completed branch. Only interrupted failures and the
-        // blocked/failed work that depends on them are eligible for retry.
+        // Do not disturb a completed branch. Only explicitly recoverable failures
+        // and the blocked/failed work that depends on them are eligible for retry.
         recovery.retain(|name| {
             self.state
                 .nodes
@@ -1194,7 +1228,7 @@ impl Runtime {
                 &self.root,
                 self.state.config.as_ref().ok_or("Missing config")?,
             )?;
-            self.queue_interrupted_recovery()?;
+            self.queue_node_recovery()?;
         }
         self.emit(EventKind::Paused { paused })
     }
@@ -2028,7 +2062,7 @@ impl Runtime {
             };
             let state = &self.state.nodes[&node.name];
             let task = if continuation {
-                // The Pi continuation boundary restores the interrupted turn
+                // The Pi continuation boundary restores the unfinished turn
                 // from the existing session; do not resend the original task.
                 String::new()
             } else if state.instruction.is_empty() {
@@ -2201,11 +2235,15 @@ impl Runtime {
             } else {
                 None
             };
+            let mut node_config = config.clone();
+            if let Some(settings) = &self.state.nodes[&node.name].model_config {
+                node_config.role_models.insert("nodeAgent".into(), settings.clone());
+            }
             jobs.push(Job {
                 execution,
                 run_id: self.state.run_id.clone(),
                 parent_heads,
-                config: config.clone(),
+                config: node_config,
                 task,
                 images,
                 resume_execution_id,

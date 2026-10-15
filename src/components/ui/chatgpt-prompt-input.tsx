@@ -1,6 +1,6 @@
 import { t } from "../../i18n";
 import React, { useState, useRef, useLayoutEffect, useEffect, useId, useCallback, useMemo } from "react";
-import { motion, AnimatePresence, useReducedMotion } from "motion/react";
+import { motion, AnimatePresence, useIsPresent, useReducedMotion } from "motion/react";
 import {
   ArrowUp,
   Paperclip,
@@ -51,12 +51,16 @@ interface PromptBoxProps
   onPlanModeChange?: (mode: "auto" | "serial" | "graph") => void;
   onCancel?: () => void;
   layoutId?: string;
+  expandDelay?: number;
+  onExpandedChange?: (expanded: boolean) => void;
   className?: string;
   repository?: string;
   runId?: string;
   node?: string;
 }
 
+export const PROMPT_BOX_RESIZE_DURATION = 0.3;
+const COMPOSER_EASE = [0.22, 1, 0.36, 1] as const;
 
 const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string }> = [
   { id: "auto", label: "Auto" },
@@ -81,6 +85,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       onPlanModeChange,
       onCancel,
       layoutId,
+      defaultValue = "",
+      expandDelay = 0,
+      onExpandedChange,
       className = "",
       repository,
       runId,
@@ -90,12 +97,23 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     forwardedRef
   ) => {
     const reduceMotion = useReducedMotion();
+    const isPresent = useIsPresent();
+    const containerRef = useRef<HTMLDivElement | null>(null);
+    const resizeFromRef = useRef<number | null>(null);
+    const resizeAnimationRef = useRef<Animation | null>(null);
+    const hasMeasuredHeightRef = useRef(false);
     const internalTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-    const [internalValue, setInternalValue] = useState("");
+    const [internalValue, setInternalValue] = useState(() => String(defaultValue));
     const [isExpanded, setIsExpanded] = useState(false);
     const [canExpand, setCanExpand] = useState(false);
+    const changeExpanded = (expanded: boolean) => {
+      if (expanded === isExpanded) return;
+      resizeFromRef.current = containerRef.current?.getBoundingClientRect().height ?? null;
+      setIsExpanded(expanded);
+      onExpandedChange?.(expanded);
+    };
     const textareaId = useId();
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -106,6 +124,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const [isSubmitting, setIsSubmitting] = useState(false);
     const submittingRef = useRef(false);
     const pillLayoutId = useId();
+    const animateSendArrowRef = useRef(false);
     const composingRef = useRef(false);
     const compositionEndedAtRef = useRef(0);
     const mountedRef = useRef(true);
@@ -344,6 +363,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         const nextText = `${before}${item.value}${after}`;
         const newCursor = before.length + item.value.length;
 
+        animateSendArrowRef.current = true;
         setInternalValue(nextText);
         if (onChange) {
           onChange({ target: { value: nextText } } as any);
@@ -362,23 +382,62 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       [currentText, triggerStart, cursorPos, onChange]
     );
 
+    // Measure the same natural textarea heights, then animate the whole box.
+    // Cancel before measuring so an in-flight height/fill rule cannot become the
     // Keep the normal auto-growing input, with an explicit expanded editing mode.
     const resizeTextarea = useCallback(() => {
       const textarea = internalTextareaRef.current;
-      if (!textarea) return;
+      const box = containerRef.current;
+      if (!textarea || !box) return;
+      const explicitToggle = resizeFromRef.current !== null;
+      if (isExpanded && !explicitToggle) {
+        // Editing must not cancel an in-flight expansion (or its copy-exit delay).
+        textarea.style.height = "100%";
+        textarea.style.overflowY = "auto";
+        return;
+      }
+      const from = resizeFromRef.current ?? box.getBoundingClientRect().height;
+      resizeFromRef.current = null;
+      resizeAnimationRef.current?.cancel();
+      resizeAnimationRef.current = null;
+      box.removeAttribute("data-resizing");
       const scrollTop = textarea.scrollTop;
       if (isExpanded) {
         textarea.style.height = "100%";
+        textarea.style.overflowY = "auto";
       } else {
+        textarea.style.overflowY = "hidden";
         textarea.style.height = "auto";
         const maxHeight = compact ? 140 : 200;
         const minHeight = compact ? 36 : 46;
-        const contentHeight = textarea.scrollHeight;
+        const contentHeight = currentText.trim() ? textarea.scrollHeight : minHeight;
         setCanExpand(contentHeight >= maxHeight);
         textarea.style.height = `${Math.max(minHeight, Math.min(contentHeight, maxHeight))}px`;
+        textarea.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
       }
       textarea.scrollTop = scrollTop;
-    }, [compact, isExpanded]);
+
+      const target = box.getBoundingClientRect();
+      const measuredBefore = hasMeasuredHeightRef.current;
+      hasMeasuredHeightRef.current = true;
+      if (!measuredBefore || reduceMotion || Math.abs(from - target.height) < 1) return;
+      box.setAttribute("data-resizing", "");
+      const animation = box.animate([
+        { height: `${from}px` },
+        { height: isExpanded ? "80dvh" : `${target.height}px` },
+      ], {
+        duration: PROMPT_BOX_RESIZE_DURATION * 1000,
+        delay: explicitToggle && isExpanded ? expandDelay * 1000 : 0,
+        easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+        fill: "backwards",
+      });
+      resizeAnimationRef.current = animation;
+      animation.onfinish = () => {
+        if (resizeAnimationRef.current !== animation) return;
+        resizeAnimationRef.current = null;
+        box.removeAttribute("data-resizing");
+      };
+    }, [compact, isExpanded, currentText, reduceMotion, expandDelay]);
 
     useLayoutEffect(() => {
       resizeTextarea();
@@ -399,9 +458,19 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       return () => observer.disconnect();
     }, [resizeTextarea]);
 
+    useLayoutEffect(() => {
+      const box = containerRef.current;
+      return () => {
+        resizeAnimationRef.current?.cancel();
+        resizeAnimationRef.current = null;
+        box?.removeAttribute("data-resizing");
+      };
+    }, []);
+
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const nextVal = e.target.value;
       const nextPos = e.target.selectionStart ?? nextVal.length;
+      animateSendArrowRef.current = true;
       setInternalValue(nextVal);
       setCursorPos(nextPos);
       const textBefore = nextVal.slice(0, nextPos);
@@ -612,8 +681,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           if (accepted === false || !mountedRef.current) return;
         }
 
+        animateSendArrowRef.current = true;
         setInternalValue("");
-        setIsExpanded(false);
+        changeExpanded(false);
         onChange?.({ target: { value: "" } } as React.ChangeEvent<HTMLTextAreaElement>);
         setCursorPos(0);
         setDismissedTrigger(null);
@@ -672,7 +742,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         if (isExpanded) {
           e.preventDefault();
           e.stopPropagation();
-          setIsExpanded(false);
+          changeExpanded(false);
         } else {
           onCancel?.();
         }
@@ -683,10 +753,19 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     return (
       <motion.div
+        ref={containerRef}
         layoutId={layoutId || undefined}
         // Keep the shared handoff; expanded editing must stay viewport-anchored on resize.
         layout={layoutId ? "position" : undefined}
-        transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : 0.3, ease: [0.25, 0.1, 0.25, 1] } }}
+        // The departing Run can unmount immediately: a shared opacity crossfade
+        // would fade this input in from nothing while its position is moving.
+        layoutCrossfade={false}
+        // Keep local height edits out of position projection. The dependency
+        // must differ between instances or shared layout skips Run-to-Run handoffs.
+        layoutDependency={isPresent ? textareaId : undefined}
+        initial={false}
+        animate={{ opacity: 1 }}
+        transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
         className={`prompt-box-container ${compact ? "compact" : "landing"} ${isExpanded ? "expanded" : ""} ${disabled ? "disabled" : ""} ${isDraggingOver ? "dragging-over" : ""} ${className}`}
         onClick={() => {
           if (!disabled && !isBusy) {
@@ -913,7 +992,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               onMouseDown={(event) => event.preventDefault()}
               onClick={(event) => {
                 event.stopPropagation();
-                setIsExpanded((expanded) => !expanded);
+                changeExpanded(!isExpanded);
                 internalTextareaRef.current?.focus({ preventScroll: true });
               }}
             >
@@ -923,12 +1002,25 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         </div>
 
         {/* Controls / Actions Row */}
-        <div className="prompt-box-actions-row">
+        <motion.div
+          className="prompt-box-actions-row"
+          layout="position"
+          layoutDependency={isPresent ? textareaId : undefined}
+          transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
+        >
           {/* Left Action Buttons */}
-          <div className="prompt-box-left-actions">
+          <motion.div
+            className="prompt-box-left-actions"
+            layout="position"
+            layoutDependency={isPresent ? textareaId : undefined}
+            transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
+          >
             {/* Attach Image/File Button */}
-            <button
+            <motion.button
               type="button"
+              layout="position"
+              layoutDependency={isPresent ? textareaId : undefined}
+              transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
               onClick={(e) => {
                 e.stopPropagation();
                 fileInputRef.current?.click();
@@ -938,13 +1030,25 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               disabled={disabled || isBusy || isPreparing || isSubmitting}
             >
               <Paperclip size={compact ? 15 : 18} />
-            </button>
-          </div>
+            </motion.button>
+          </motion.div>
 
           {/* Right Action Button: Mode Selector + Send/Interrupt Button */}
-          <div className="prompt-box-right-actions">
+          <motion.div
+            className="prompt-box-right-actions"
+            layout="position"
+            layoutDependency={isPresent ? textareaId : undefined}
+            transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
+          >
             {planMode !== undefined && onPlanModeChange && (
-              <div className="prompt-box-mode-selector" role="group" aria-label={t("执行规划模式")}>
+              <motion.div
+                className="prompt-box-mode-selector"
+                role="group"
+                aria-label={t("执行规划模式")}
+                layout="position"
+                layoutDependency={isPresent ? textareaId : undefined}
+                transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
+              >
                 {MODE_OPTIONS.map((item) => {
                   const isSelected = planMode === item.id;
                   return (
@@ -972,12 +1076,15 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                     </button>
                   );
                 })}
-              </div>
+              </motion.div>
             )}
 
             {isWorking && (hasText || selectedFile) && onInterrupt && (
-              <button
+              <motion.button
                 type="button"
+                layout="position"
+                layoutDependency={isPresent ? textareaId : undefined}
+                transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
                 className="prompt-box-icon-btn prompt-box-interrupt-btn"
                 onClick={(event) => {
                   event.stopPropagation();
@@ -987,11 +1094,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 aria-label={t("点击打断执行")}
               >
                 <Square size={compact ? 9 : 11} className="prompt-box-stop-icon" />
-              </button>
+              </motion.button>
             )}
 
-            <button
-              type="button"
+            <motion.button
+              type="submit"
+              layout="position"
+              layoutDependency={isPresent ? textareaId : undefined}
+              transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
               onClick={(e) => {
                 e.stopPropagation();
                 if (isWorking && !hasText && !selectedFile) {
@@ -1021,17 +1131,20 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               ) : isPreparing || isSubmitting ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
               ) : (
-                <motion.span
-                  animate={{ rotate: hasText ? -90 : 0 }}
-                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                <span
+                  style={{
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    transform: `rotate(${hasText ? -90 : 0}deg)`,
+                    transition: animateSendArrowRef.current && isPresent && !reduceMotion
+                      ? "transform 0.22s cubic-bezier(0.16, 1, 0.3, 1)" : "none",
+                  }}
                 >
                   <ArrowUp size={compact ? 15 : 18} />
-                </motion.span>
+                </span>
               )}
-            </button>
-          </div>
-        </div>
+            </motion.button>
+          </motion.div>
+        </motion.div>
       </motion.div>
     );
   }

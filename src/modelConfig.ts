@@ -1,17 +1,18 @@
 import { t } from "./i18n";
 import type { Config, Execution, ModelRole, RoleModelConfig, ThinkingLevel } from "./types";
+import type { ProviderCatalog } from "./services/providerAuth";
 
 export const modelRoles: Array<{ id: ModelRole; label: string; description: string }> = [
-  { id: "partitioner", label: "Partitioner", description: t("负责判断任务走 Serial 还是 Graph。推荐选择小型、低延迟模型，思维链默认关闭。") },
+  { id: "partitioner", label: "Partitioner", description: t("负责判断任务走 Serial 还是 Graph。推荐选择小型、低延迟模型。") },
   { id: "planner", label: "Planner", description: t("负责分析项目并生成协作拓扑图。推荐选择中大型模型，以获得更可靠的规划能力。") },
-  { id: "nodeAgent", label: "Node Agent / Pi Instance", description: t("负责 Serial 与 Graph 节点的实际执行。其他未单独设置的角色使用此模型作为默认值；合并实例也使用此配置。") },
+  { id: "nodeAgent", label: "Node Agent", description: t("负责 Serial 与 Graph 节点的实际执行。其他未单独设置的角色使用此模型作为默认值。") },
 ];
 
 export function roleModelConfig(config: Config, role: ModelRole, envOverrides: Record<string, string> = {}): Required<RoleModelConfig> {
   const settings = config.roleModels?.[role];
   return {
     model: envOverrides[role]?.trim() || settings?.model?.trim() || config.model.trim(),
-    thinkingLevel: (envOverrides[`${role}Thinking`] || settings?.thinkingLevel || (role === "partitioner" ? "off" : config.thinkingLevel || "medium")) as ThinkingLevel,
+    thinkingLevel: (envOverrides[`${role}Thinking`] || settings?.thinkingLevel || (role === "partitioner" ? "low" : config.thinkingLevel || "low")) as ThinkingLevel,
   };
 }
 
@@ -29,6 +30,33 @@ export function updateRoleModelConfig(config: Config, role: ModelRole, patch: Pa
   };
 }
 
+// Project a settings draft using Pi's own clamping results. Unknown capabilities
+// leave saved values untouched, including unavailable or retired models.
+export function normalizeModelThinkingLevels(config: Config, catalog?: ProviderCatalog): Config {
+  const resolved = new Map<ModelRole, ThinkingLevel>();
+  for (const { id } of modelRoles) {
+    const settings = roleModelConfig(config, id);
+    const model = catalog?.models.find(item => `${item.provider}/${item.id}` === settings.model);
+    const levels = model?.thinkingLevels;
+    let level = settings.thinkingLevel;
+    if (levels?.length && !levels.includes(level)) {
+      const fallback = model?.thinkingLevelFallbacks?.[level];
+      if (fallback && levels.includes(fallback)) level = fallback;
+    }
+    resolved.set(id, level);
+  }
+  let normalized = config;
+  // Resolve every role against the original intent before updating the legacy
+  // default; otherwise clamping Node Agent could change another model's intent.
+  for (const role of ["nodeAgent", "partitioner", "planner"] as const) {
+    const thinkingLevel = resolved.get(role);
+    if (thinkingLevel && thinkingLevel !== roleModelConfig(normalized, role).thinkingLevel) {
+      normalized = updateRoleModelConfig(normalized, role, { thinkingLevel });
+    }
+  }
+  return normalized;
+}
+
 export function planningModelRoles(mode: "auto" | "serial" | "graph"): ModelRole[] {
   return mode === "serial" ? ["nodeAgent"] : mode === "graph" ? ["planner", "nodeAgent"] : ["partitioner", "planner", "nodeAgent"];
 }
@@ -37,7 +65,8 @@ export function resolveExecutionModelAndThinking(
   execution: Execution,
   isMerger: boolean,
   config: Config,
-  envOverrides: Record<string, string> = {}
+  envOverrides: Record<string, string> = {},
+  nodeModelConfig?: RoleModelConfig
 ): { model: string; thinkingLevel: string } {
   let modelFromOutput: string | undefined;
   let thinkingFromOutput: string | undefined;
@@ -67,18 +96,18 @@ export function resolveExecutionModelAndThinking(
     }
   }
 
-  const nodeSettings = config.roleModels?.nodeAgent;
+  const nodeSettings = (!isMerger && nodeModelConfig) || config.roleModels?.nodeAgent;
   const configModel = isMerger
     ? (envOverrides.merger?.trim() || envOverrides.nodeAgent?.trim() || nodeSettings?.model?.trim() || config.model?.trim() || "")
     : (envOverrides.nodeAgent?.trim() || nodeSettings?.model?.trim() || config.model?.trim() || "");
 
   const configThinking = isMerger
-    ? (envOverrides.mergerThinking?.trim() || envOverrides.nodeAgentThinking?.trim() || nodeSettings?.thinkingLevel || config.thinkingLevel || "medium")
-    : (envOverrides.nodeAgentThinking?.trim() || nodeSettings?.thinkingLevel || config.thinkingLevel || "medium");
+    ? (envOverrides.mergerThinking?.trim() || envOverrides.nodeAgentThinking?.trim() || nodeSettings?.thinkingLevel || config.thinkingLevel || "low")
+    : (envOverrides.nodeAgentThinking?.trim() || nodeSettings?.thinkingLevel || config.thinkingLevel || "low");
 
   return {
     model: modelFromOutput || configModel || t("未设置模型"),
-    thinkingLevel: thinkingFromOutput || configThinking || "medium",
+    thinkingLevel: thinkingFromOutput || configThinking || "low",
   };
 }
 

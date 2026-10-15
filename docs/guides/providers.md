@@ -53,12 +53,12 @@ A model identifier uses **`provider/model`**. In Settings, choose models and thi
 
 | Role | Purpose | Default behavior |
 | --- | --- | --- |
-| Partitioner | Fast route classification | Inherits the default model; thinking defaults to `off` |
+| Partitioner | Fast route classification | Inherits the default model; thinking defaults to `low` |
 | Planner | Graph design and repository inspection | Inherits default model/thinking unless overridden |
-| Node Agent / Pi Instance | Coding tasks | Inherits default model/thinking unless overridden |
+| Node Agent | Coding tasks | Inherits default model/thinking unless overridden |
 | Merger | Node composition, Planner publication, and final publication conflicts | Uses Node Agent settings unless overridden by environment |
 
-Role settings are stored as `roleModels.partitioner`, `.planner`, and `.nodeAgent`. Legacy `model`/`thinkingLevel` remain defaults. Saving settings affects subsequent Runs, not already-running sessions.
+Role settings are stored as `roleModels.partitioner`, `.planner`, and `.nodeAgent`. Legacy `model`/`thinkingLevel` remain defaults. Saving settings affects subsequent Runs, not already-running sessions. When saving from an existing conversation, changed Node Agent model/thinking settings also synchronize to its currently failed nodes. Saving does not retry them automatically: use **Continue** to resume with the new settings, preserving each node's session and unfinished workspace. Running, completed and not-yet-started nodes keep their existing settings; historical attempts and the Run's original configuration are not rewritten. See [recovery](../architecture/runtime.md#recovery-and-ownership).
 
 Smaller low-latency models may suit the Partitioner; graph planning and difficult coding can need stronger models. This is a configuration choice, not a quality or speed guarantee.
 
@@ -75,7 +75,7 @@ MERGER_MODEL      / MERGER_THINKING
 
 The legacy `*_TIMEOUT_SECONDS` role variables are ignored. Production role sessions have no Grapher-imposed per-role deadline; stop/cancel ends a session. A benchmark runner can impose a separate end-to-end trial budget.
 
-Available thinking levels depend on the selected model. The UI reports effective overrides; check them when a role appears to ignore a saved selection.
+Available thinking levels come from the pinned Pi backend for each selected model, including custom model definitions. Settings offers only those levels; a model with just one supported level has a disabled selector. Inherited role models use the Node Agent default model's capabilities. When switching models or saving an incompatible older setting, Grapher uses Pi's own level-clamping results and shows the adjusted draft before saving. If capabilities are missing, the selector is disabled and existing values are preserved until provider status is refreshed. Environment overrides still take precedence over the saved model and level; the UI reports those overrides, so check them when a role appears to ignore a saved selection.
 
 The backend removes inherited `PI_MODEL`, `PI_THINKING`, `PI_PROVIDER`, `PI_REASONING_LEVEL`, `PI_SESSION_ID`, and `PI_SESSION_FILE` before passing explicit role/session configuration. Set Grapher's documented role overrides, not an outer Pi session's identity.
 

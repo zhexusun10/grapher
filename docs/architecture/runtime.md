@@ -131,8 +131,18 @@ After interruption:
   same Pi session/workspace and uses the bundled `pi-continuity` public session
   boundary to continue the unfinished turn; it does not resend the original
   task or inject a synthetic “continue” user message. It does not mark a
-  provider failure as successful or silently retry an ordinary failed node;
-  ordinary failures still require an explicit node intervention.
+  provider failure as successful or silently retry an ordinary failed node.
+  Ordinary failures require an explicit node intervention, or a changed Node
+  Agent model/thinking selection saved for the current conversation followed
+  by Continue. Saving with that Run ID records per-node settings only for its
+  currently failed nodes; it keeps their failure/error evidence and does not
+  dispatch work. Continue resumes those unfinished turns with the new settings
+  and unblocks their dependency descendants without disturbing completed or
+  unrelated branches. The override is replayable across restart and retained
+  for that node's subsequent attempts; environment overrides still take
+  precedence. Other nodes and the Run's original configuration remain unchanged.
+  See [model recovery regressions](../../backend/src/node_model_tests.rs) and
+  [settings browser tests](../../scripts/bootstrap-settings-ui.test.mjs).
 - A continued or retried execution reuses the last prepared attempt's physical
   working tree as-is: its committed HEAD (including agent commits made before
   the interruption) and all uncommitted work—including files matching

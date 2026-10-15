@@ -250,37 +250,14 @@
   animation: spin 1s linear infinite;
 }
 
-.conversation-history-loading {
-  position: absolute;
-  inset: 0;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in srgb, var(--bg-surface) 82%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  color: var(--brand-default);
-  pointer-events: auto;
-  border-radius: inherit;
-  transition: opacity 0.2s ease;
-}
-
-.conversation-history-loading .spin {
-  width: 26px;
-  height: 26px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .conversation-history-loading .spin { animation: none; }
-}
 
 .initial-query-view {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  /* The scroller clips history; the shared composer must cross view boundaries. */
+  overflow: visible;
   position: relative;
 }
 
@@ -1506,7 +1483,9 @@ button.session-label-toggle:focus-visible {
   background: var(--bg-surface);
   border-top-left-radius: 18px;
   border-bottom-left-radius: 18px;
-  overflow: hidden;
+  /* Keep a moving composer visible across split/full-width panes. The outer
+   * workbench still clips the workspace's rounded border and viewport. */
+  overflow: visible;
   /* Splitting into graph mode slides the conversation pane open smoothly;
    * manual resizer drags opt out via .workbench.resizing. */
   transition: width 0.34s cubic-bezier(0.22, 1, 0.36, 1), max-width 0.34s cubic-bezier(0.22, 1, 0.36, 1);
@@ -2674,6 +2653,14 @@ button.session-label-toggle:focus-visible {
   font-size: 12px;
 }
 
+.settings-language-row select:focus,
+.settings-language-row select:focus-visible,
+.settings-language-row select:active {
+  outline: none !important;
+  box-shadow: none !important;
+  border-color: var(--border-default);
+}
+
 .settings-language-error {
   margin-top: 8px;
   color: var(--status-danger);
@@ -2730,6 +2717,19 @@ button.session-label-toggle:focus-visible {
 .role-model-card p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
 .role-model-card .form-grid { grid-template-columns: minmax(0, 2fr) minmax(130px, 1fr); }
 .role-model-card .form-field { min-width: 0; }
+.settings-modal select:focus,
+.settings-modal select:focus-visible,
+.settings-modal select:active,
+.role-model-settings select:focus,
+.role-model-settings select:focus-visible,
+.role-model-settings select:active,
+.role-model-card select:focus,
+.role-model-card select:focus-visible,
+.role-model-card select:active {
+  outline: none !important;
+  box-shadow: none !important;
+  border-color: var(--border-default) !important;
+}
 .role-model-card .provider-filter-select { max-width: 100%; }
 .role-model-effective, .role-model-warning { display: block; margin-top: 8px; font-size: 11px; overflow-wrap: anywhere; }
 .role-model-effective { color: var(--text-secondary); }
@@ -2755,6 +2755,11 @@ button.session-label-toggle:focus-visible {
 .settings-toggle-row strong { font-size: 13px; font-weight: 600; }
 .settings-toggle-row small { font-size: 12px; color: var(--text-secondary); }
 .settings-toggle-row input { width: 18px; height: 18px; flex: none; accent-color: var(--brand-default); cursor: pointer; }
+.settings-toggle-row input:focus,
+.settings-toggle-row input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
 
 .form-grid {
   display: grid;
@@ -2804,10 +2809,17 @@ button.session-label-toggle:focus-visible {
 }
 
 .form-field input:focus,
-.form-field select:focus,
 .form-field textarea:focus {
   border-color: var(--brand-default);
   outline: none;
+}
+
+.form-field select:focus,
+.form-field select:focus-visible,
+.form-field select:active {
+  border-color: var(--border-default) !important;
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 .save-config-btn {

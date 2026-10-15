@@ -167,6 +167,21 @@ pub struct Config {
 }
 
 impl Config {
+    /// Saved Node Agent settings, before process-level environment overrides.
+    pub fn node_agent_settings(&self) -> RoleModelConfig {
+        let settings = self.role_models.get("nodeAgent");
+        RoleModelConfig {
+            model: settings
+                .map(|settings| settings.model.trim())
+                .filter(|model| !model.is_empty())
+                .unwrap_or(self.model.trim())
+                .into(),
+            thinking_level: Some(settings
+                .and_then(|settings| settings.thinking_level.clone())
+                .unwrap_or_else(|| self.thinking_level.clone())),
+        }
+    }
+
     pub fn validate_model_settings(&self) -> Result<(), String> {
         const LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
         if !LEVELS.contains(&self.thinking_level.as_str()) {
@@ -197,7 +212,7 @@ fn default_max_feedback() -> usize {
 }
 
 fn default_thinking_level() -> String {
-    "medium".into()
+    "low".into()
 }
 
 #[cfg(feature = "fixture")]
@@ -325,7 +340,11 @@ pub struct NodeState {
     pub edit_execution_id: Option<String>,
     #[serde(default)]
     pub human_instruction: bool,
-    /// Continue this node's Pi session directly after a host/process interruption.
+    /// Model settings explicitly synchronized while this node was failed.
+    /// Other nodes and the Run's original configuration remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_config: Option<RoleModelConfig>,
+    /// Continue this node's Pi session directly after an interruption or model change.
     /// This is not a human intervention and does not add a new task instruction.
     #[serde(default)]
     pub continuation: bool,
@@ -362,6 +381,7 @@ impl Default for NodeState {
             instruction_images: None,
             edit_execution_id: None,
             human_instruction: false,
+            model_config: None,
             continuation: false,
             shared_workspace: false,
             baseline_head: None,
@@ -473,7 +493,11 @@ pub enum EventKind {
     Paused {
         paused: bool,
     },
-    /// Marks failed/blocked work caused by an interrupted execution as ready
+    FailedNodeModelsUpdated {
+        nodes: Vec<String>,
+        settings: RoleModelConfig,
+    },
+    /// Marks failed/blocked work eligible for explicit recovery as ready
     /// for a new Execution Instance. This is deliberately separate from a
     /// human invalidation: it keeps the recovery decision in the Runtime and
     /// makes restart recovery append-only and replayable.
@@ -829,10 +853,7 @@ impl Snapshot {
             .collect()
     }
 
-    /// Whether the saved projection contains node work that can be restarted
-    /// after a process/application interruption. This is a backend-owned
-    /// display/control hint, not a completion claim.
-    pub fn can_resume_interrupted(&self) -> bool {
+    fn recovery_is_idle(&self) -> bool {
         self.approved
             && !matches!(
                 self.phase.as_str(),
@@ -844,7 +865,29 @@ impl Snapshot {
                 .chain(self.mergers.iter())
                 .any(|execution| execution.status == "running")
             && !self.nodes.values().any(|node| node.status == "running")
-            && !self.interrupted_nodes().is_empty()
+    }
+
+    pub fn can_resume_interrupted(&self) -> bool {
+        self.recovery_is_idle() && !self.interrupted_nodes().is_empty()
+    }
+
+    pub fn model_retry_nodes(&self) -> Vec<String> {
+        self.nodes.iter().filter_map(|(name, node)| {
+            if node.status != "failed" || node.model_config.is_none() {
+                return None;
+            }
+            self.executions.iter().rev()
+                .find(|execution| execution.node == *name
+                    && !self.superseded_execution_ids.contains(&execution.id))
+                .filter(|execution| execution.status == "failed")
+                .map(|_| name.clone())
+        }).collect()
+    }
+
+    /// Backend-owned recovery hint; neither a retry nor a completion claim.
+    pub fn can_resume(&self) -> bool {
+        self.recovery_is_idle()
+            && (!self.interrupted_nodes().is_empty() || !self.model_retry_nodes().is_empty())
     }
 
     pub fn compute_run_metrics(&self) -> RunMetrics {
@@ -1077,6 +1120,15 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             state.phase = if *paused { "paused" } else { "running" }.into();
         }
+        EventKind::FailedNodeModelsUpdated { nodes, settings } => {
+            for name in nodes {
+                if let Some(node) = state.nodes.get_mut(name) {
+                    if node.status == "failed" {
+                        node.model_config = Some(settings.clone());
+                    }
+                }
+            }
+        }
         EventKind::RecoveryQueued { nodes, continuation_nodes } => {
             for name in nodes {
                 let Some(node) = state.nodes.get_mut(name) else {
@@ -1086,7 +1138,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     continue;
                 }
                 let continuation = continuation_nodes.contains(name)
-                    && node.error.as_deref().is_some_and(is_interrupted_error);
+                    && (node.model_config.is_some()
+                        || node.error.as_deref().is_some_and(is_interrupted_error));
                 let has_previous_result = node.head.is_some()
                     || state.executions.iter().any(|execution| {
                         execution.node == *name

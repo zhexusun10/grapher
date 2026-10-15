@@ -64,6 +64,7 @@ function activityStatusText(activity: RuntimeActivity[]): string | null {
 interface GraphWorkbenchProps {
   state: Snapshot;
   transcriptRunId?: string;
+  composerDrafts?: Map<string, string>;
   activity?: RuntimeActivity[];
   routeType: PlanRouteType;
   initialPlanMode?: PlanMode;
@@ -324,6 +325,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   state,
   transcriptRunId = state.runId,
+  composerDrafts,
   activity = [],
   routeType,
   initialPlanMode,
@@ -552,9 +554,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       execution,
       isMerger,
       state.config || config,
-      envOverrides
+      envOverrides,
+      execution.id === latestAttemptId ? state.nodes[execution.node]?.modelConfig : undefined
     );
-  }, [execution, isMerger, state.config, config, envOverrides]);
+  }, [execution, isMerger, latestAttemptId, state.nodes, state.config, config, envOverrides]);
   const nodeTaskText = selectedNode?.task ?? "";
   const latestNodeMessage = nodeMessages.length > 0 ? nodeMessages[nodeMessages.length - 1] : undefined;
   // Keep each human turn in the same conversation as its Pi execution. A
@@ -628,6 +631,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     return state.runId || state.graph.originalGoal || "initial";
   }, [state.runId, state.graph.originalGoal]);
   const conversationViewKey = `${currentRunKey}:${routeType}:${selected || "planner"}`;
+  const composerDraftKey = JSON.stringify([selected, selectedMerger?.id ?? ""]);
+  const handleComposerChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const text = event.target.value;
+    if (text) composerDrafts?.set(composerDraftKey, text);
+    else composerDrafts?.delete(composerDraftKey);
+  };
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   // Live SSE is ephemeral. After reload or run selection, replay the durable
   // planning JSONL associated with the selected run, never a previous run's stream.
@@ -885,7 +894,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     });
   }, [stopLatestScroll, setScrollBottomVisible]);
 
-  const handleSendMessageWithScroll = useCallback((val: string, options?: PromptBoxSubmitOptions) => {
+  const handleSendMessageWithScroll = useCallback(async (val: string, options?: PromptBoxSubmitOptions) => {
+    const submittedDraft = composerDrafts?.get(composerDraftKey);
     stopLatestScroll();
     historyReadingRef.current = false;
     if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
@@ -893,8 +903,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     userGestureUpRef.current = false;
     isScrollingToBottomRef.current = true;
     setScrollBottomVisible(false);
-    return onSendMessage(val, options);
-  }, [onSendMessage, stopLatestScroll, setScrollBottomVisible]);
+    const accepted = await onSendMessage(val, options);
+    // Acceptance may arrive after this view unmounts. Clear only its own draft,
+    // and never a newer draft entered after navigating back to this conversation.
+    if (accepted !== false && composerDrafts?.get(composerDraftKey) === submittedDraft) {
+      composerDrafts?.delete(composerDraftKey);
+    }
+    return accepted !== false;
+  }, [onSendMessage, stopLatestScroll, setScrollBottomVisible, composerDrafts, composerDraftKey]);
 
   // Listen to wheel and touch gestures on chat scroll container to immediately lock auto-scroll upon upward scrolling
   useEffect(() => {
@@ -1290,9 +1306,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       serialExecution,
       false,
       state.config || config,
-      envOverrides
+      envOverrides,
+      serialNodeState?.modelConfig
     );
-  }, [serialExecution, state.config, config, envOverrides]);
+  }, [serialExecution, serialNodeState?.modelConfig, state.config, config, envOverrides]);
 
   const serialTurns = useMemo(() => {
     if (routeType !== "serial") return [];
@@ -1407,7 +1424,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
   // A poll can return the old draft while the Planner is revising it. The
   // backend also exposes recoverable interruption state for Runs whose last
-  // node failure was caused by stopping the app/process rather than the task.
+  // node failed due to interruption or has an explicitly updated model.
   const canContinue = !publishing && !publicationFailed &&
     (state.paused || state.canResume === true);
   const graphPhase = resolveGraphPhase({
@@ -1623,11 +1640,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
         style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
       >
-        {historyLoading && (
-          <div className="conversation-history-loading" aria-busy="true">
-            <Loader2 size={26} className="spin" aria-hidden="true" />
-          </div>
-        )}
         {selectedNode && routeType === "graph" ? (
           <div className="initial-query-view">
             <div className="conversation-heading">
@@ -1857,6 +1869,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
               <PromptBox
+                key={composerDraftKey}
+                defaultValue={composerDrafts?.get(composerDraftKey) ?? ""}
+                onChange={handleComposerChange}
                 layoutId="conversation-composer"
                 repository={config?.repository}
                 runId={state.runId}
@@ -2294,6 +2309,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
               <PromptBox
+                key={composerDraftKey}
+                defaultValue={composerDrafts?.get(composerDraftKey) ?? ""}
+                onChange={handleComposerChange}
                 layoutId="conversation-composer"
                 repository={config?.repository}
                 runId={state.runId}

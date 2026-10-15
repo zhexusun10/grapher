@@ -62,7 +62,7 @@ npm run pi:build
 
 | Role | Policy |
 | --- | --- |
-| Partitioner | No tools, context files, user extensions, MCP or skills; bundled `pi-trim` only; thinking defaults to `off` |
+| Partitioner | No tools, context files, user extensions, MCP or skills; bundled `pi-trim` only; thinking defaults to `low` |
 | Planner | `node`, `edge`, `read`, `bash` plus selected global extension/MCP tools and skills; no automatic project context files |
 | Node Agent | Pi native tools, selected global extensions/MCP/skills, and trusted workspace resources |
 | Merger | Pi default prompt; Git-conflict repair appends the Git repair addendum (`--append-system-prompt`), while follow-ups send the user's instruction unchanged with no new Merger-specific system prompt; fixed tools; bundled `pi-trim` and `pi-continuity` (as an exception for robust merge resolution); no user extensions, MCP, skills or automatic context files |

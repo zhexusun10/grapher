@@ -108,7 +108,7 @@ export const runtimeService = {
   cancelResult: (runId: string) => request<{ requested: boolean }>("cancel_result", { runId }),
   compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config, runId?: string) => request<Snapshot>("save_graph", { graph, config, runId }),
-  saveConfig: (config: Config) => request<Bootstrap>("save_config", { config }),
+  saveConfig: (config: Config, runId?: string) => request<Bootstrap>("save_config", { config, ...(runId ? { runId } : {}) }),
   planGoal: (goal: string, config: Config, mode?: string) => request<Snapshot>("plan_goal", { goal, config, mode }),
   async planGoalStream(
     goal: string,

@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch, Languages, RefreshCw } from "lucide-react";
 import { Config } from "../../types";
+import { normalizeModelThinkingLevels } from "../../modelConfig";
 import type { ProviderCatalog } from "../../services/providerAuth";
 import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
@@ -40,7 +41,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     setSaving(true);
     setSaveError("");
     try {
-      await onSaveConfig({ ...draftConfig, autoApprove });
+      await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove });
     } catch (error) {
       setSaveError(String(error));
     } finally {
@@ -104,6 +105,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 
         <div className="settings-modal-content">
           <div className="settings-sections">
+            <section className="settings-card" aria-labelledby="provider-settings-title">
+              <div className="settings-card-title">
+                <ShieldCheck size={16} />
+                <h4 id="provider-settings-title">{t("模型与 Provider")}</h4>
+              </div>
+              <ProviderSettings onCatalogChange={setCatalog} onBusyChange={setCatalogBusy} />
+            </section>
+
+            <section className="settings-card" aria-labelledby="role-model-settings-title">
+              <div className="settings-card-title">
+                <Terminal size={16} />
+                <h4 id="role-model-settings-title">{t("角色模型配置")}</h4>
+              </div>
+              <RoleModelSettings config={draftConfig} setConfig={setDraftConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy || saving} />
+            </section>
+
             <ExtensionSettings disabled={saving} />
             <section className="settings-card" aria-labelledby="language-settings-title">
               <div className="settings-card-title">
@@ -129,22 +146,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 </select>
               </div>
               {languageError && <p role="alert" className="settings-language-error">{languageError}</p>}
-            </section>
-
-            <section className="settings-card" aria-labelledby="provider-settings-title">
-              <div className="settings-card-title">
-                <ShieldCheck size={16} />
-                <h4 id="provider-settings-title">{t("模型与 Provider")}</h4>
-              </div>
-              <ProviderSettings onCatalogChange={setCatalog} onBusyChange={setCatalogBusy} />
-            </section>
-
-            <section className="settings-card" aria-labelledby="role-model-settings-title">
-              <div className="settings-card-title">
-                <Terminal size={16} />
-                <h4 id="role-model-settings-title">{t("角色模型配置")}</h4>
-              </div>
-              <RoleModelSettings config={draftConfig} setConfig={setDraftConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy || saving} />
             </section>
 
             {/* 图纸审批 */}

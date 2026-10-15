@@ -665,10 +665,10 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         PiModelConfig::resolve(PiRole::Partitioner, &base_config)
             .thinking
             .as_deref(),
-        Some("off")
+        Some("low")
     );
     std::env::set_var("PARTITIONER_THINKING", "medium");
-    // Partitioner defaults to off, but an explicit role override is respected.
+    // Partitioner defaults to low, but an explicit role override is respected.
     assert_eq!(
         PiModelConfig::resolve(PiRole::Partitioner, &base_config)
             .thinking

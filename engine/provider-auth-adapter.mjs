@@ -51,11 +51,12 @@ function purgeEnvVarsForProvider(providerId) {
 // Versioned transport DTOs only. Provider implementation, credential storage and
 // refresh are owned by the injected upstream ModelRuntime, never by Grapher.
 export class ProviderAuthAdapter {
-  constructor(createRuntime, { timeoutMs = 600000, retentionMs = 60000, getDeviceId } = {}) {
+  constructor(createRuntime, { timeoutMs = 600000, retentionMs = 60000, getDeviceId, getThinkingCapabilities } = {}) {
     this.createRuntime = createRuntime;
     this.timeoutMs = timeoutMs;
     this.retentionMs = retentionMs;
     this.getDeviceId = getDeviceId;
+    this.getThinkingCapabilities = getThinkingCapabilities;
     this.jobs = new Map();
   }
 
@@ -98,6 +99,7 @@ export class ProviderAuthAdapter {
         name: m.name,
         api: m.api,
         contextWindow: m.contextWindow,
+        ...this.getThinkingCapabilities(m),
         available: available.has(`${m.provider}/${m.id}`)
       })),
       warning: runtime.getError() ? "Some provider/model configuration could not be loaded; inspect local configuration." : null,

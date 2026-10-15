@@ -1,6 +1,9 @@
 use super::*;
 use tempfile::TempDir;
 
+#[path = "node_model_tests.rs"]
+mod node_models;
+
 #[cfg(feature = "fixture")]
 #[path = "feedback_workspace_tests.rs"]
 mod feedback_workspace;

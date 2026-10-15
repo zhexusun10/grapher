@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { motion, useIsPresent, useReducedMotion } from "motion/react";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { PlanMode } from "../../types";
@@ -15,6 +15,8 @@ interface LandingViewProps {
   repository?: string;
 }
 
+const TITLE_EXIT_DURATION = 0.2;
+
 export const LandingView: React.FC<LandingViewProps> = React.memo(({
   goal,
   setGoal,
@@ -28,6 +30,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
 }) => {
   const reduceMotion = useReducedMotion();
   const isPresent = useIsPresent();
+  const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   return (
     <motion.div
       className="landing-screen"
@@ -38,42 +41,57 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
       transition={{ duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] }}
     >
       <div className="landing-center-content">
-        <motion.div
-          className="landing-title-container"
-          exit={{
-            opacity: 0,
-            y: reduceMotion ? 0 : -14,
-            transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] },
-          }}
-        >
-          <motion.p
-            className="landing-title"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.25 }}
+        <div className="landing-title-container">
+          <motion.div
+            className="landing-title-copy"
+            initial={false}
+            animate={{
+              opacity: isComposerExpanded ? 0 : 1,
+              y: reduceMotion || !isComposerExpanded ? 0 : -14,
+              visibility: isComposerExpanded ? "hidden" : "visible",
+            }}
+            transition={{
+              opacity: { duration: reduceMotion ? 0 : TITLE_EXIT_DURATION },
+              y: { duration: reduceMotion ? 0 : TITLE_EXIT_DURATION },
+              visibility: { duration: 0, delay: !reduceMotion && isComposerExpanded ? TITLE_EXIT_DURATION : 0 },
+            }}
+            exit={{
+              opacity: 0,
+              y: reduceMotion ? 0 : -14,
+              transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] },
+            }}
           >
-            Build Anything
-          </motion.p>
-          <motion.p
-            className="landing-title"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.25, delay: 0.05 }}
-          >
-            With Grapher.
-          </motion.p>
-          <motion.p
-            className="landing-subtitle"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.25, delay: 0.1 }}
-          >
-            Don't orchestrate agents. Compile work.
-          </motion.p>
-        </motion.div>
+            <motion.p
+              className="landing-title"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.25 }}
+            >
+              Build Anything
+            </motion.p>
+            <motion.p
+              className="landing-title"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.25, delay: 0.05 }}
+            >
+              With Grapher.
+            </motion.p>
+            <motion.p
+              className="landing-subtitle"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.25, delay: 0.1 }}
+            >
+              Don't orchestrate agents. Compile work.
+            </motion.p>
+          </motion.div>
+        </div>
         <div style={{ width: "100%", position: "relative", flexShrink: 0 }}>
           <PromptBox
             layoutId="conversation-composer"
+            expandDelay={TITLE_EXIT_DURATION}
+            onExpandedChange={setIsComposerExpanded}
             repository={repository}
             value={goal}
             onChange={(e) => setGoal(e.target.value)}

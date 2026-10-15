@@ -391,13 +391,27 @@ test('native managed environment: install once, real Pi tools, editable/launcher
       if (state.executions.length > 1 && state.executions.at(-1).status === 'failed') throw new Error(JSON.stringify(state.nodes) + '\n' + diagnostics);
       return state.nodes.writer.status === 'done' && state;
     }, 'retry discovery of the created failed-partial environment');
-    assert.equal(repaired.executions.length, 2);
-    assert.equal(repaired.nodes.downstream.status, 'blocked', 'Environment recovery does not invent business completion');
-    assert.deepEqual(repaired.executions[0].input, blocked.executions[0].input, 'Failed input evidence stays immutable');
-    assert.equal(repaired.executions[1].worktree, blocked.executions[0].worktree);
-    assert.equal(repaired.executions[1].status, 'completed');
+    const writerExecutions = repaired.executions.filter((execution: any) => execution.node === 'writer');
+    assert.ok(writerExecutions.length >= 2, 'the failed attempt stays as append-only evidence next to its retry');
+    assert.equal(writerExecutions[0].status, 'failed'); assert.equal(writerExecutions[0].result, undefined);
+    assert.deepEqual(writerExecutions[0].input, blocked.executions[0].input, 'Failed input evidence stays immutable');
+    const retried = writerExecutions.at(-1);
+    assert.equal(retried.status, 'completed');
+    assert.equal(retried.worktree, blocked.executions[0].worktree, 'the created environment is reused, not rebuilt');
+    // The retried upstream returns its blocked dependency descendant to
+    // `waiting`, so the recovered writer must not claim that node's result.
+    assert.equal(repaired.nodes.downstream.result, undefined, 'Environment recovery does not invent business completion');
+    const recovered = await until(async () => {
+      const state = await api('snapshot', { runId: background.runId });
+      if (['needs_attention', 'publication_failed', 'paused'].includes(state.phase)) throw new Error(JSON.stringify(state.nodes) + '\n' + diagnostics);
+      return state.phase === 'completed' && state;
+    }, 'retried upstream re-enters normal scheduling');
+    const downstreamExecutions = recovered.executions.filter((execution: any) => execution.node === 'downstream');
+    assert.equal(recovered.nodes.downstream.status, 'done');
+    assert.equal(downstreamExecutions.length, 1);
+    assert.deepEqual(downstreamExecutions[0].result, recovered.nodes.downstream.result, 'downstream completion comes from its own execution');
     if (!ml) {
-      const launch = JSON.parse(await readFile(join(data, 'environments', background.runId, 'launches', `${repaired.executions[1].result.launchRef}.json`), 'utf8'));
+      const launch = JSON.parse(await readFile(join(data, 'environments', background.runId, 'launches', `${retried.result.launchRef}.json`), 'utf8'));
       assert.equal(launch.environment.kind, conda ? 'conda' : 'venv');
     }
     if (!ml) {

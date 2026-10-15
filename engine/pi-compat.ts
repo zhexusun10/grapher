@@ -17,6 +17,19 @@ export {
 } from '../pi/packages/coding-agent/src/index.ts';
 export type { ExtensionAPI, BashOperations } from '../pi/packages/coding-agent/src/index.ts';
 
+import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from '../pi/packages/ai/src/index.ts';
+
+// This is the protocol vocabulary, not a list of levels every model supports.
+const thinkingLevels: ModelThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export function getModelThinkingCapabilities(model: Model<Api>) {
+  const supported = getSupportedThinkingLevels(model);
+  const fallbacks: Partial<Record<ModelThinkingLevel, ModelThinkingLevel>> = {};
+  for (const level of thinkingLevels) {
+    if (!supported.includes(level)) fallbacks[level] = clampThinkingLevel(model, level);
+  }
+  return { thinkingLevels: supported, thinkingLevelFallbacks: fallbacks };
+}
+
 // Private path, MCP-config and CLI-setup touchpoints remain centralized here.
 export { loadMcpConfig } from '../pi/packages/coding-agent/src/extensions/mcp/config.ts';
 export type { LoadedMcpConfig, McpServerEntry } from '../pi/packages/coding-agent/src/index.ts';
