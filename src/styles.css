@@ -1916,6 +1916,9 @@ a,
 .prompt-box-textarea::placeholder {
   color: var(--text-secondary);
   opacity: 0.7;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 /* 控制按钮栏 */

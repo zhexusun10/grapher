@@ -486,6 +486,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     : isNodeMergerSelected
       ? t("merger · {0}", nodeMergerTarget)
       : (selectedNode?.name ?? "");
+  const placeholderNodeName = useMemo(() => {
+    if (!selectedNode?.name) return "";
+    return selectedNode.name.length > 16
+      ? `${selectedNode.name.slice(0, 14)}…`
+      : selectedNode.name;
+  }, [selectedNode?.name]);
   const selectedMergerContinuable = !!selectedMerger && !selectedMergerRunning &&
     (selectedMerger.node === "merger" || selectedMerger.status === "failed");
   const initialTaskEdit = useMemo(() => {
@@ -1917,10 +1923,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             : t("向 publication merger 追加消息…"))
                           : t("merger 已结束，只能查看执行记录"))
                       : isSelectedNodeWorking
-                        ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", selectedNode.name)
+                        ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", placeholderNodeName)
                         : selectedState?.status === "completed"
-                          ? t("向 @{0} 发送消息并继续执行…", selectedNode.name)
-                          : t("向 @{0} 发送介入指令…", selectedNode.name)
+                          ? t("向 @{0} 发送消息并继续执行…", placeholderNodeName)
+                          : t("向 @{0} 发送介入指令…", placeholderNodeName)
                 }
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
