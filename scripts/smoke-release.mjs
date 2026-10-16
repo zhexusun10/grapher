@@ -24,9 +24,10 @@ Object.assign(env, {
   PI_OFFLINE: '1',
 });
 let child;
+let launcher;
 let logs = '';
 const stopProcess = async process_ => {
-  if (!process_.pid || process_.exitCode !== null || process_.signalCode !== null) return;
+  if (!process_ || !process_.pid || process_.exitCode !== null || process_.signalCode !== null) return;
   const exited = new Promise(resolve => process_.once('close', resolve));
   if (process.platform === 'win32') {
     try { execFileSync('taskkill', ['/PID', String(process_.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
@@ -182,7 +183,7 @@ try {
   const launcherPort = launcherListener.address().port;
   await new Promise(resolve => launcherListener.close(resolve));
   const launcherEnvFull = { ...env, GRAPHER_PORT: String(launcherPort), GRAPHER_DATA_DIR: join(directory, 'launcher-data') };
-  const launcher = spawn(process.platform === 'win32' ? 'cmd.exe' : join(installation, 'start.sh'),
+  launcher = spawn(process.platform === 'win32' ? 'cmd.exe' : join(installation, 'start.sh'),
     process.platform === 'win32' ? ['/d', '/c', join(installation, 'start.bat')] : [], {
     cwd: directory, env: launcherEnvFull, stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -206,6 +207,6 @@ try {
   console.log(`Release smoke passed: ${platform}-${arch} (CLI, provider IPC, extensions, Graph runtime, backend, UI and launcher)`);
 } finally {
   await stopProcess(child);
-  await stopProcess(typeof launcher === 'undefined' ? null : launcher);
+  await stopProcess(launcher);
   rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
 }
