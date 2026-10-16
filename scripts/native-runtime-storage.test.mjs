@@ -23,6 +23,7 @@ export function verifyBaseline() {}
   writeFileSync(join(scripts, 'pi-dependencies.mjs'), 'export function verifyPiDependencies() {}');
   writeFileSync(join(scripts, 'bundled-extensions.mjs'), 'export const bundledExtensionNames = []; export function verifyBundledExtensions() {}');
   writeFileSync(join(scripts, 'cargo.mjs'), '');
+  writeFileSync(join(scripts, 'model-data-manifest.mjs'), 'export function regenerateModelDataManifest() {}');
   writeFileSync(join(root, 'package.json'), '{"name":"grapher","type":"module"}');
   const run = (destination, runtimeParent = parent) => spawnSync(process.execPath, [join(scripts, 'prepare-native-runtime.mjs')], {
     cwd: root, encoding: 'utf8', timeout: 10000,
