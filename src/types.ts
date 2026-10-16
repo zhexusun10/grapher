@@ -1,7 +1,7 @@
 import { t } from "./i18n/index.ts";
 export type Status = "waiting" | "running" | "paused" | "blocked" | "completed" | "failed" | "dirty";
-interface GraphNode { name: string; task: string }
-interface GraphEdge { from: string; to: string; feedback: boolean }
+export interface GraphNode { name: string; task: string }
+export interface GraphEdge { from: string; to: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

@@ -11,7 +11,7 @@ import {
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   Snapshot, PlanRouteType, PlanMode, RepositoryInfo, Config,
-  Graph, Execution, Status, PlanningSummary, TranscriptItem,
+  Graph, GraphNode, Execution, Status, PlanningSummary, TranscriptItem,
   ChatMessage, RuntimeActivity, publicationMergerCardId
 } from "../../types";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
@@ -42,6 +42,7 @@ import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
 import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
+import { computeExecutionLayers } from "../../hooks/useGraphElements";
 import { PublicationCompletedCard } from "../PublicationCompletedCard";
 import { EnvironmentResult } from "../EnvironmentResult";
 import { PlannerTranscript } from "../PlannerTranscript";
@@ -1301,6 +1302,27 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     state.phase,
   ]);
 
+  const summaryNodes = useMemo(() => {
+    if (!state.graph.nodes.length) return [];
+    const nodeMap = new Map(state.graph.nodes.map((node) => [node.name, node]));
+    const layers = computeExecutionLayers(state.graph, state.plan);
+    const seen = new Set<string>();
+    const ordered: GraphNode[] = [];
+    for (const name of layers.flat()) {
+      const node = nodeMap.get(name);
+      if (node && !seen.has(name)) {
+        seen.add(name);
+        ordered.push(node);
+      }
+    }
+    for (const node of state.graph.nodes) {
+      if (!seen.has(node.name)) {
+        ordered.push(node);
+      }
+    }
+    return ordered;
+  }, [state.graph, state.plan]);
+
   const serialNode = routeType === "serial" && state.graph.nodes.length > 0 ? state.graph.nodes[0] : undefined;
   const serialNodeState = serialNode ? state.nodes[serialNode.name] : undefined;
   const serialExecutions = useMemo(() => {
@@ -2267,7 +2289,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       {t("节点列表（点击聚焦查看详细日志与独立沙箱）：")}
                     </span>
                     <div className="nodes-chips">
-                      {state.graph.nodes.map((node) => {
+                      {summaryNodes.map((node) => {
                         const nState = state.nodes[node.name];
                         return (
                           <button
@@ -2275,7 +2297,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             key={node.name}
                             className="node-chip"
                             onClick={() => { setSelected(node.name); setSelectedMergerId(""); }}
-                            title={node.task}
                           >
                             <span className={`chip-dot ${nState?.status ?? "waiting"}`} />
                             <span className="chip-name">{node.name}</span>
