@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useEffect, useRef } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 /** Animate intrinsic content without measuring an auto -> 0 height transition.
@@ -9,12 +10,17 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
  */
 export function CollapsibleCardBody({ expanded, children }: { expanded: boolean; children: () => ReactNode }) {
   const reduceMotion = useReducedMotion();
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+  }, []);
+
   return (
     <AnimatePresence initial={false}>
       {expanded && (
         <motion.div
           key="card-body"
-          initial={{ gridTemplateRows: "0fr", opacity: 0 }}
+          initial={mountedRef.current && !reduceMotion ? { gridTemplateRows: "0fr", opacity: 0 } : false}
           animate={{ gridTemplateRows: "1fr", opacity: 1 }}
           exit={{ gridTemplateRows: "0fr", opacity: 0 }}
           transition={{ duration: reduceMotion ? 0 : 0.22, ease: [0.25, 1, 0.5, 1] }}

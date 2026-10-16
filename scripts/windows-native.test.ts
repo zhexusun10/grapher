@@ -35,7 +35,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
   const toolRequests: string[] = [];
   const failures: unknown[] = [];
   const repositories = new Map<string, string>();
-  const config = (repository: string) => ({ repository, model: 'windows-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1 });
+  const config = (repository: string) => ({ repository, model: 'windows-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1, postTaskReview: false });
   const git = (repository: string, ...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=NUL', '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repository, encoding: 'utf8' }).trim();
   const modelServer = createServer(async (request, response) => {
     try {

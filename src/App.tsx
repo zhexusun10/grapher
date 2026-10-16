@@ -792,9 +792,43 @@ export default function App() {
     // selected project (which may differ for concurrent conversations).
     const indexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
       .filter(id => !id.startsWith("pending-"));
-    // Publish each validated card instead of making every conversation wait for
-    // the slowest history. Unknown browser ownership stays hidden until checked.
+    // Publish validated cards preserving canonical order, without letting one stalled
+    // history keep all cards loading or causing items to jump and re-order.
     let historyFailed = false;
+    const validatedSnapshots = new Map<string, Snapshot>();
+    let publishScheduled = false;
+
+    const buildValidatedRuns = (): Record<string, string[]> => {
+      const result: Record<string, string[]> = {};
+      for (const snap of validatedSnapshots.values()) {
+        if (!snap.config?.repository) continue;
+        const owner = workspaceKey(snap.config.repository);
+        if (!result[owner]) result[owner] = [];
+      }
+      for (const owner of Object.keys(result)) {
+        result[owner] = indexedIds.filter(id => {
+          const snap = validatedSnapshots.get(id);
+          return snap && snapshotBelongsToWorkspace(snap, owner);
+        });
+      }
+      return result;
+    };
+
+    const schedulePublish = () => {
+      if (publishScheduled) return;
+      publishScheduled = true;
+      queueMicrotask(() => {
+        publishScheduled = false;
+        if (!planningRecovery.current(scope)) return;
+        const nextRuns = buildValidatedRuns();
+        const activeRuns = nextRuns[workspaceKey(activeRepo)] || [];
+        setWorkspaceRuns(nextRuns);
+        if (activeRuns.length > 0) {
+          setIsSidebarReady(true);
+        }
+      });
+    };
+
     const snapshots = await mapWithConcurrency(indexedIds, 8, async id => {
       if (!planningRecovery.current(scope)) return null;
       const snapshot = data.snapshot.runId === id ? data.snapshot : await runtimeService.history(id).catch(() => {
@@ -810,8 +844,8 @@ export default function App() {
         return next;
       });
       if (snapshot.config?.repository) {
-        setWorkspaceRuns(prev => bindRunToWorkspace(prev, id, snapshot.config!.repository));
-        setIsSidebarReady(true);
+        validatedSnapshots.set(id, snapshot);
+        schedulePublish();
       }
       return snapshot;
     });
@@ -1176,7 +1210,7 @@ export default function App() {
 
   const handleCloseSettings = useCallback(() => setModal(null), []);
 
-  const handleSaveConfig = useCallback((draftConfig: Config) => run(async () => {
+  const handleSaveConfig = useCallback(async (draftConfig: Config): Promise<boolean> => {
     const generation = foregroundGeneration.current;
     // Settings change models/defaults, not the selected workspace. Rediscovery
     // or Git status here can stall saving behind an unrelated large tree scan.
@@ -1188,7 +1222,10 @@ export default function App() {
       const boot = await runtimeService.saveConfig(nextConfig, state.runId || undefined);
       if (generation !== foregroundGeneration.current) return false;
       if (boot.snapshot?.runId === state.runId && state.runId) {
-        applyForegroundSnapshot(boot.snapshot, generation);
+        if (snapshotBelongsToWorkspace(boot.snapshot, config.repository)) {
+          setState(boot.snapshot);
+          observeRunSnapshot(boot.snapshot);
+        }
       }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
     } catch (error) {
@@ -1213,7 +1250,8 @@ export default function App() {
     }
     setModal(null);
     setError("");
-  }), [config.repository, repoInfo, state.runId, run]);
+    return true;
+  }, [config.repository, repoInfo, state.runId, observeRunSnapshot, setState]);
 
   const save = (graph: Graph) => run(async () => {
     const generation = foregroundGeneration.current;
@@ -1918,6 +1956,7 @@ export default function App() {
                   result: resText,
                   exitCode,
                   truncated,
+                  durationMs: typeof pEvent.durationMs === "number" ? pEvent.durationMs : t.durationMs,
                   isError: isErr,
                   status: isErr ? ("error" as const) : ("success" as const),
                 });

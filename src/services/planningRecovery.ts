@@ -1,8 +1,22 @@
 import type { PlanningSummary, Snapshot } from "../types";
+import { workspaceKey } from "./workspaceConversations";
 
 export function hasCurrentPlanningRun(snapshot: Snapshot, repository: string) {
-  return snapshot.config?.repository === repository && !!snapshot.runId &&
-    ["planning", "planning_failed", "awaiting_approval", "running", "completed", "publishing", "merging"].includes(snapshot.phase);
+  if (!snapshot.runId || !snapshot.config?.repository || !repository) return false;
+  return (
+    workspaceKey(snapshot.config.repository) === workspaceKey(repository) &&
+    [
+      "planning",
+      "planning_failed",
+      "awaiting_approval",
+      "running",
+      "paused",
+      "needs_attention",
+      "completed",
+      "publishing",
+      "merging",
+    ].includes(snapshot.phase)
+  );
 }
 
 export function planningRecoveryDelay(planningId: string | undefined, idleAttempts: number) {

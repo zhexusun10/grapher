@@ -29,7 +29,10 @@ test('production Planner writes source directly; Merger repairs node and publica
     '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args,
   ], { cwd: repository, encoding: 'utf8' }).trim();
   // Exercise Windows' canonical extended prefix through the real HTTP/CLI path.
-  const config = (repository: string) => ({ repository: toNamespacedPath(repository), model: 'merger-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1 });
+  // The post-task Planner review is a Planning turn accepted by its own harness; this
+  // deterministic local model must only answer the Merger/node turns under test, so
+  // the review would otherwise write the source out from under these assertions.
+  const config = (repository: string) => ({ repository: toNamespacedPath(repository), model: 'merger-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1, postTaskReview: false });
   const modelServer = createServer(async (request, response) => {
     try {
       const chunks = [];
@@ -307,14 +310,20 @@ test('production Planner writes source directly; Merger repairs node and publica
         }
       }
       if (kind === 'planner' && !fail) {
-        // Failed approved revisions keep both the old graph and their source writes.
-        await assert.rejects(revise(`${label} FAILED_REVISION`, state.runId, repository), /Graph must contain at least one node/);
+        // A revision the Planner cannot apply keeps both the old graph and its
+        // source writes. Deleting a node whose result this run already published
+        // is refused where the Planner can still react, so the turn ends on the
+        // untouched graph instead of producing an empty one.
+        await revise(`${label} FAILED_REVISION`, state.runId, repository);
         const failedState = await api('snapshot', { runId: state.runId });
         assert.deepEqual(failedState.graph, state.graph);
         assert.equal(failedState.base, state.base);
         assert.deepEqual(failedState.executions, state.executions);
-        assert.ok(failedState.events.some((event: any) => event.type === 'source_snapshotted'),
-          `${label}: source writes must be durable\n${diagnostics}`);
+        assert.equal(failedState.phase, 'completed', 'a refused revision does not re-enter execution');
+        assert.equal(failedState.nodes.verify.status, 'done', 'a published node survives the refused edit');
+        // The Planner writes the user's source directly, so its own writes must
+        // survive a revision that changed nothing; the next dispatch collects
+        // them as that job's source.
         assert.equal((await readFile(join(repository, 'shared.txt'), 'utf8')).trim(), 'failed revision');
 
         // The next node receives the new source PLUS the retained parent's output.

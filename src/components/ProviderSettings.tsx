@@ -53,7 +53,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   onCatalogChange: (catalog: ProviderCatalog | undefined) => void;
   onBusyChange: (busy: boolean) => void;
 }) {
-  const [catalog, setCatalog] = useState<ProviderCatalog>();
+  const [catalog, setCatalog] = useState<ProviderCatalog | undefined>(() => providerAuth.getCachedCatalog() ?? undefined);
   const [activeProvider, setActiveProvider] = useState<ProviderInfo | null>(null);
   const [selectedMethod, setSelectedMethod] = useState<"api_key" | "oauth">("api_key");
   const [login, setLogin] = useState<LoginState>();
@@ -66,7 +66,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const [confirmDeleteProvider, setConfirmDeleteProvider] = useState<ProviderInfo | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [showProviders, setShowProviders] = useState(false);
-  const [showConfigured, setShowConfigured] = useState(false);
+  const [showConfigured, setShowConfigured] = useState(true);
 
   const mounted = useRef(false);
   const activeId = useRef<string | undefined>(undefined);
@@ -78,12 +78,13 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
 
   async function load(refresh = false) {
     const generation = ++catalogGeneration.current;
-    setBusy(true);
+    if (refresh || !catalog) setBusy(true);
     setError("");
     try {
       const result = await providerAuth.catalog(refresh);
       if (mounted.current && generation === catalogGeneration.current) {
         setCatalog(result);
+        providerAuth.setCachedCatalog(result);
         setActiveProvider(current => current ? result.providers.find(p => p.id === current.id) ?? current : null);
       }
     } catch (err) {
@@ -112,7 +113,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   useEffect(() => {
     if (login?.status === "complete") {
       activeId.current = undefined;
-      void load();
+      void load(true);
     }
   }, [login?.id, login?.status]);
 
@@ -229,7 +230,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       // does not silently change any role's saved model configuration.
       setCatalog((prev) => {
         if (!prev) return prev;
-        return {
+        const updated = {
           ...prev,
           providers: prev.providers.map((prov) =>
             prov.id === p.id
@@ -240,6 +241,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             m.provider === p.id ? { ...m, available: false } : m
           ),
         };
+        providerAuth.setCachedCatalog(updated);
+        return updated;
       });
       await load();
       if (!mounted.current) return;
@@ -380,7 +383,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
               <ChevronDown
                 size={16}
                 style={{
-                  transition: "transform 0.2s ease",
+                  transition: mounted.current ? "transform 0.2s ease" : "none",
                   transform: showConfigured ? "rotate(180deg)" : "rotate(0deg)",
                 }}
               />
@@ -719,7 +722,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
         <ChevronDown
           size={16}
           style={{
-            transition: "transform 0.2s ease",
+            transition: mounted.current ? "transform 0.2s ease" : "none",
             transform: showProviders ? "rotate(180deg)" : "rotate(0deg)",
           }}
         />

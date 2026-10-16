@@ -4,7 +4,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch, Languages, RefreshCw } from "lucide-react";
 import { Config } from "../../types";
 import { normalizeModelThinkingLevels } from "../../modelConfig";
-import type { ProviderCatalog } from "../../services/providerAuth";
+import { providerAuth, type ProviderCatalog } from "../../services/providerAuth";
 import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
 import { ExtensionSettings } from "../ExtensionSettings";
@@ -53,8 +53,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       setSaveError(String(error));
     }
   };
-  const [catalog, setCatalog] = useState<ProviderCatalog>();
-  const [catalogBusy, setCatalogBusy] = useState(true);
+  const [catalog, setCatalog] = useState<ProviderCatalog | undefined>(() => providerAuth.getCachedCatalog() ?? undefined);
+  const [catalogBusy, setCatalogBusy] = useState(() => !providerAuth.getCachedCatalog());
   const [pendingLanguage, setPendingLanguage] = useState<LanguagePreference | null>(null);
   const [languageError, setLanguageError] = useState("");
   const languageLabels: Record<LanguagePreference, string> = {

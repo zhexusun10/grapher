@@ -306,6 +306,7 @@ export const en: Record<string, string> = {
   "已截断 (Truncated)": "Truncated",
   "完整 (Complete)": "Complete",
   "命令:": "Command:",
+  "命令耗时:": "Took",
   "参数 (Arguments)": "Arguments",
   "错误输出 (Error Output)": "Error output",
   "执行结果 (Result Output)": "Result output",

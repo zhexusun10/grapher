@@ -145,6 +145,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   .tool-call-card.appear-active,
   .thinking-card.appear-active {
     animation: none;
@@ -695,6 +696,28 @@
   font-size: 11px;
 }
 
+/* Bottom line of an expanded tool body: the duration reported by the runtime. */
+.tool-timing {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.tool-timing-lbl {
+  white-space: nowrap;
+  user-select: none;
+}
+
+.tool-timing-val {
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
 .tool-meta-item {
   display: flex;
   align-items: center;
@@ -995,8 +1018,16 @@
   line-height: 1.68;
 }
 
-.planning-activity .transcript-row.text-row.user {
+.planning-activity .transcript-row.text-row.user,
+.transcript-row.text-row.user {
   align-items: flex-end;
+  margin-top: 8px;
+  margin-bottom: 8px;
+}
+
+.planner-transcript .chat-message-row.user.planner-user-turn {
+  margin-top: 8px;
+  margin-bottom: 8px;
 }
 
 .planning-activity .transcript-row.text-row.user .transcript-message-bubble {

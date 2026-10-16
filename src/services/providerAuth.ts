@@ -42,11 +42,79 @@ async function callBody<T>(operation: string, fields: Record<string, unknown>, s
   if (!response.ok || body.error) throw new Error(body.error || "Provider/Auth Adapter unavailable");
   return body.result as T;
 }
+const CATALOG_STORAGE_KEY = "grapher_provider_catalog_cache";
+
+function loadStorageCatalog(): ProviderCatalog | null {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      const saved = sessionStorage.getItem(CATALOG_STORAGE_KEY);
+      if (saved) return JSON.parse(saved);
+    }
+  } catch {}
+  return null;
+}
+
+function saveStorageCatalog(catalog: ProviderCatalog | null) {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      if (catalog) {
+        sessionStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(catalog));
+      } else {
+        sessionStorage.removeItem(CATALOG_STORAGE_KEY);
+      }
+    }
+  } catch {}
+}
+
+let cachedCatalog: ProviderCatalog | null = loadStorageCatalog();
+let inFlightCatalog: Promise<ProviderCatalog> | null = null;
+
 export const providerAuth = {
-  catalog: (refresh = false) => call<ProviderCatalog>("catalog", { refresh }),
+  getCachedCatalog: () => cachedCatalog,
+  setCachedCatalog: (catalog: ProviderCatalog | null) => {
+    cachedCatalog = catalog;
+    saveStorageCatalog(catalog);
+  },
+  catalog: async (refresh = false): Promise<ProviderCatalog> => {
+    if (!refresh && cachedCatalog) {
+      return cachedCatalog;
+    }
+    if (inFlightCatalog) {
+      return inFlightCatalog;
+    }
+    inFlightCatalog = call<ProviderCatalog>("catalog", { refresh })
+      .then((result) => {
+        cachedCatalog = result;
+        saveStorageCatalog(result);
+        return result;
+      })
+      .finally(() => {
+        inFlightCatalog = null;
+      });
+    return inFlightCatalog;
+  },
   login: (provider: string, method: string) => call<LoginState>("login", { provider, method }),
-  poll: (id: string) => call<LoginState>("poll", { id }),
-  respond: (id: string, promptId: string, value: string) => call<LoginState>("respond", { id, promptId, value }),
+  poll: async (id: string) => {
+    const res = await call<LoginState>("poll", { id });
+    if (res.status === "complete") {
+      cachedCatalog = null;
+      saveStorageCatalog(null);
+    }
+    return res;
+  },
+  respond: async (id: string, promptId: string, value: string) => {
+    const res = await call<LoginState>("respond", { id, promptId, value });
+    if (res.status === "complete") {
+      cachedCatalog = null;
+      saveStorageCatalog(null);
+    }
+    return res;
+  },
   cancel: (id: string) => call<LoginState>("cancel", { id }),
-  logout: (provider: string) => call<{ loggedOut: boolean }>("logout", { provider }),
+  logout: async (provider: string) => {
+    const res = await call<{ loggedOut: boolean }>("logout", { provider });
+    cachedCatalog = null;
+    saveStorageCatalog(null);
+    return res;
+  },
 };

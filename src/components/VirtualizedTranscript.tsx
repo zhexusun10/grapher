@@ -229,7 +229,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       return item;
     };
 
-    const settleToolCall = (toolCallId: string | undefined, toolName: string, result: any, isError: boolean) => {
+    const settleToolCall = (toolCallId: string | undefined, toolName: string, result: any, isError: boolean, durationMs?: number) => {
       const matched = (toolCallId ? currentItems.find(item => item.type === "tool_call" && item.toolCallId === toolCallId)
         : [...currentItems].reverse().find(item => item.type === "tool_call" && item.toolName === toolName && item.status === "running")) ??
         addToolCall(toolCallId, toolName, {});
@@ -247,6 +247,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           resultText.includes("[Showing lines") || resultText.includes("Full output:")),
         isError: !!failed,
         status: failed ? "error" as const : "success" as const,
+        // Replayed `message` events carry no duration; never drop a known one.
+        durationMs: typeof durationMs === "number" ? durationMs : matched.durationMs,
       };
       currentItems[currentItems.indexOf(matched)] = updated;
       if (toolCallId) pendingTools.delete(toolCallId);
@@ -266,7 +268,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       }
       if (message.role === "toolResult") {
         const result = { content: message.content, details: message.details, isError: message.isError };
-        settleToolCall(message.toolCallId, message.toolName || "tool", result, !!message.isError);
+        // Pi measures the tool with a monotonic clock and reports it both on
+        // `tool_execution_end` and on the persisted `toolResult` message.
+        settleToolCall(message.toolCallId, message.toolName || "tool", result, !!message.isError, message.durationMs);
         return;
       }
       if (message.role !== "assistant" || !Array.isArray(message.content)) return;
@@ -484,7 +488,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         }
 
         if (event.type === "tool_execution_end") {
-          settleToolCall(event.toolCallId, event.toolName || "tool", event.result, !!event.isError);
+          settleToolCall(event.toolCallId, event.toolName || "tool", event.result, !!event.isError, event.durationMs);
           continue;
         }
 

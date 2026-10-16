@@ -56,12 +56,17 @@ test("aborted requests retain their cancellation error instead of reporting a ba
 });
 
 test("a durable planning or failed planning Run stays attached to its workspace", () => {
-  for (const phase of ["planning", "planning_failed"]) {
+  for (const phase of ["planning", "planning_failed", "paused", "needs_attention", "awaiting_approval", "running"]) {
     const snapshot = { runId: "saved-run", phase, config: { repository: "/project" } } as Snapshot;
     assert.equal(hasCurrentPlanningRun(snapshot, "/project"), true);
     assert.equal(hasCurrentPlanningRun(snapshot, "/other-project"), false);
     assert.equal(hasCurrentPlanningRun({ ...snapshot, runId: "" }, "/project"), false);
   }
+  // Windows path aliases, slash differences, and casing resolve to the same workspace
+  const windowsSnapshot = { runId: "win-run", phase: "paused", config: { repository: "C:\\Users\\repo" } } as Snapshot;
+  assert.equal(hasCurrentPlanningRun(windowsSnapshot, "c:/users/repo"), true);
+  assert.equal(hasCurrentPlanningRun(windowsSnapshot, "C:/Users/repo/"), true);
+  assert.equal(hasCurrentPlanningRun(windowsSnapshot, "C:\\Users\\other"), false);
 });
 
 test("a terminal Planner revision completes without waiting for SSE EOF", { timeout: 2000 }, async () => {

@@ -246,6 +246,9 @@ export interface TranscriptItem {
   status?: "running" | "success" | "error" | "interrupted";
   exitCode?: number | null;
   truncated?: boolean;
+  // Monotonic tool duration measured by the runtime (Pi) and relayed by the
+  // backend: `tool_execution_end.durationMs`, or the `toolResult` message field.
+  durationMs?: number;
   timestamp?: number;
   defaultExpanded?: boolean;
   // Presentation provenance: replay timestamps alone do not make history new.

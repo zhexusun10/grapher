@@ -1030,15 +1030,16 @@ a,
 .sidebar-skeleton-wrap {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 4px 0;
+  gap: 4px;
+  padding: 0;
   width: var(--sidebar-content-width, 230px);
 }
 
 .sidebar-skeleton-item {
-  height: 36px;
+  height: 40px;
+  min-height: 40px;
   border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(0, 0, 0, 0.08);
   background: transparent;
   box-sizing: border-box;
 }
@@ -1049,6 +1050,7 @@ a,
   justify-content: flex-start;
   width: var(--sidebar-content-width, 230px);
   min-width: var(--sidebar-content-width, 230px);
+  min-height: 40px;
   flex-shrink: 0;
   box-sizing: border-box;
   text-align: left;

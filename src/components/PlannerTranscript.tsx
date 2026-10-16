@@ -24,7 +24,7 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
 }) {
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
-  if (item.role === "user") return <motion.div className="chat-message-row user" initial={false}
+  if (item.role === "user") return <motion.div className="chat-message-row user planner-user-turn" initial={false}
     animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}>
     <EditableUserBubble text={stripPlannerContext(item.content || "")} editing={editing} draft={draft} onDraftChange={onDraftChange}
       onEdit={onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: stripPlannerContext(item.content || "") }) : undefined}
@@ -68,5 +68,5 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
     expanded={expanded.current.get(item.id)} onExpandedChange={expand}
     onDraftChange={props.onDraftChange || noop} onEditMessage={props.onEditMessage} onCancelEdit={props.onCancelEdit}
     onEditSubmit={props.onEditSubmit} onSendMessage={props.onSendMessage} />;
-  return <VirtualizedList items={props.items} renderRow={renderRow} gap={8} />;
+  return <div className="planner-transcript"><VirtualizedList items={props.items} renderRow={renderRow} gap={8} /></div>;
 });

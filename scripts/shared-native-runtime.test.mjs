@@ -87,7 +87,9 @@ test('Windows projects/backends share a persistent engine and default workspaces
         return payload.result;
       };
       await until(backend, async () => { try { await backend.api('snapshot'); return true; } catch { return false; } }, 'Backend not ready');
-      backend.config = { repository: source, model: 'cache-test/node', thinkingLevel: 'off', maxParallel: 1, maxFeedback: 0 };
+      // This harness answers only its own single node task; the post-task Planner
+      // review is accepted elsewhere and must not consume this model.
+      backend.config = { repository: source, model: 'cache-test/node', thinkingLevel: 'off', maxParallel: 1, maxFeedback: 0, postTaskReview: false };
       await backend.api('save_config', { config: backend.config });
       return backend;
     };

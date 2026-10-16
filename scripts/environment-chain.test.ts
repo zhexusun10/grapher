@@ -174,7 +174,9 @@ test('default environment discovery binds one private venv across a parallel Gra
         { from: 'create', to: 'verify', feedback: false }, { from: 'verify', to: 'report', feedback: false },
       ],
     };
-    const config = { repository: source, model: 'environment-chain/chain', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 1 };
+    // The post-task Planner review is accepted by its own harness; this deterministic
+    // local model only speaks this Run's chain tasks, so opt the review out.
+    const config = { repository: source, model: 'environment-chain/chain', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 1, postTaskReview: false };
     const saved = await api('save_graph', { graph, config });
     assert.equal(saved.environmentPolicy, 'automatic-pending', 'no client environment policy is supplied');
     const runId = saved.runId;

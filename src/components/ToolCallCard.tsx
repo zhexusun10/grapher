@@ -20,6 +20,7 @@ import {
   Check,
 } from "lucide-react";
 import { TranscriptItem } from "../types";
+import { formatToolDuration } from "../utils/toolTiming";
 
 interface ToolCallCardProps {
   item: TranscriptItem;
@@ -152,6 +153,13 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     );
 
     const animateAppear = useCardAppear(item.id, status === "running", item.timestamp, item.animateAppear);
+
+    // Only the duration the runtime measured and the backend relayed is
+    // shown; a command that is still running has no such value yet.
+    const timing = useMemo(() => {
+      if (toolName !== "bash" || typeof item.durationMs !== "number") return null;
+      return { label: t("命令耗时:"), value: formatToolDuration(item.durationMs) };
+    }, [toolName, item.durationMs]);
 
     return (
       <div
@@ -289,6 +297,12 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 <pre className={`tool-result-code ${isError ? "error" : ""}`}>
                   {item.result.trim() || t("(无文本输出)")}
                 </pre>
+              </div>
+            )}
+            {timing && (
+              <div className="tool-timing">
+                <span className="tool-timing-lbl">{timing.label}</span>
+                <span className="tool-timing-val">{timing.value}</span>
               </div>
             )}
           </div>

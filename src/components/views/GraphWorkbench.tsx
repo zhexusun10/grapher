@@ -2380,25 +2380,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <div>
                       {graphPhase === "awaiting_approval" ? (
                         <>
-                          <button type="button" className="text-button" disabled={locked} onClick={() => onControl("reject")}>
+                          <button key="reject-btn" type="button" className="text-button" disabled={locked} onClick={() => onControl("reject")}>
                             Reject
                           </button>
-                          <button type="button" className="primary" disabled={locked} onClick={onOpenApproval}>
+                          <button key="approve-btn" type="button" className="primary" disabled={locked} onClick={onOpenApproval}>
                             <Play size={13} fill="currentColor" />Approve
                           </button>
                         </>
                       ) : state.approved ? (
-                        <>
-                          <button
-                            type="button"
-                            className="primary"
-                            disabled={locked || publishing || publicationFailed || state.phase === "completed" || graphPhase === "pausing"}
-                            onClick={() => onControl(canContinue ? "resume" : "pause")}
-                          >
-                            {canContinue ? <Play size={13} /> : <Pause size={13} />}
-                            {graphPhase === "pausing" ? t("正在暂停") : canContinue ? t("继续") : t("暂停")}
-                          </button>
-                        </>
+                        <button
+                          key="execution-control-btn"
+                          type="button"
+                          className="primary"
+                          disabled={locked || publishing || publicationFailed || state.phase === "completed" || graphPhase === "pausing"}
+                          onClick={() => onControl(canContinue ? "resume" : "pause")}
+                        >
+                          {canContinue ? <Play size={13} /> : <Pause size={13} />}
+                          {graphPhase === "pausing" ? t("正在暂停") : canContinue ? t("继续") : t("暂停")}
+                        </button>
                       ) : null}
                     </div>
                   </div>

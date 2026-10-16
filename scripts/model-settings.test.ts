@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
 import { normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
-import type { ProviderCatalog } from "../src/services/providerAuth.ts";
+import { providerAuth, type ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
 import type { Execution } from "../src/types.ts";
 
@@ -360,5 +360,43 @@ test("resolveExecutionModelAndThinking falls back to config and role models when
   });
   assert.equal(mergerResult.model, "env/merger-model");
   assert.equal(mergerResult.thinkingLevel, "xhigh");
+});
+
+test("providerAuth catalog cache stores and returns synchronously without redundant fetches", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+  try {
+    globalThis.fetch = async () => {
+      fetchCount++;
+      return new Response(JSON.stringify({
+        result: {
+          providers: [{ id: "mock-provider", name: "Mock", configured: true }],
+          models: [],
+          warning: null,
+        },
+      }), { headers: { "Content-Type": "application/json" } });
+    };
+
+    providerAuth.setCachedCatalog(null);
+    assert.equal(providerAuth.getCachedCatalog(), null);
+
+    const first = await providerAuth.catalog();
+    assert.equal(fetchCount, 1);
+    assert.equal(first.providers[0].id, "mock-provider");
+    assert.deepEqual(providerAuth.getCachedCatalog(), first);
+
+    // Second call without refresh should use the cache synchronously
+    const second = await providerAuth.catalog(false);
+    assert.equal(fetchCount, 1, "did not trigger another fetch");
+    assert.equal(second, first);
+
+    // Refresh should bypass the cache
+    const third = await providerAuth.catalog(true);
+    assert.equal(fetchCount, 2, "refresh bypassed the cache");
+    assert.equal(third.providers[0].id, "mock-provider");
+  } finally {
+    globalThis.fetch = originalFetch;
+    providerAuth.setCachedCatalog(null);
+  }
 });
 
