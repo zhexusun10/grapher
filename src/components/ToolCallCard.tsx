@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { TranscriptItem } from "../types";
 import { formatToolDuration } from "../utils/toolTiming";
+import { truncateToolText } from "../services/toolOutput";
 
 interface ToolCallCardProps {
   item: TranscriptItem;
@@ -37,6 +38,9 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     const toolName = item.toolName || "tool";
     const args = item.args || {};
     const status = item.status || "success";
+    // Also protect direct/live card callers that do not use the JSONL parser.
+    const resultPreview = useMemo(() => truncateToolText(item.result || ""), [item.result]);
+    const resultText = resultPreview.text;
 
     // Extract structured exit code
     const exitCode = useMemo(() => {
@@ -48,22 +52,18 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     // Detect if output was truncated
     const isTruncated = useMemo(() => {
-      if (item.truncated) return true;
-      if (item.result) {
-        return item.result.includes("[Showing lines") || item.result.includes("Full output:");
-      }
-      return false;
-    }, [item.truncated, item.result]);
+      return !!(item.truncated || resultPreview.truncated || resultText.includes("[Showing lines") || resultText.includes("Full output:"));
+    }, [item.truncated, resultPreview.truncated, resultText]);
 
     // Detect masked subcommand step errors or real test failures (avoiding false positives from mere word FAIL)
     const hasSubcommandWarning = useMemo(() => {
-      if (isError || exitCode !== 0 || !item.result) return false;
-      const text = item.result;
+      if (isError || exitCode !== 0 || !resultText) return false;
+      const text = resultText;
       return (
         text.includes("[grapher:step_error") ||
         /\b(?:not ok\s+\d+|✖\s+[^\n]+|AssertionError:)\b/.test(text)
       );
-    }, [isError, exitCode, item.result]);
+    }, [isError, exitCode, resultText]);
 
     const [localExpanded, setIsExpanded] = useState(defaultExpanded);
     const isExpanded = expanded ?? localExpanded;
@@ -141,15 +141,15 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     const handleCopy = (e: React.MouseEvent) => {
       e.stopPropagation();
-      const textToCopy = item.result || JSON.stringify(args, null, 2);
+      const textToCopy = resultText || JSON.stringify(args, null, 2);
       navigator.clipboard.writeText(textToCopy);
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 1800);
     };
 
     const isInterrupted = useMemo(
-      () => /(?:中断|终止|terminated|interrupted)/i.test(item.result || ""),
-      [item.result]
+      () => /(?:中断|终止|terminated|interrupted)/i.test(resultText),
+      [resultText]
     );
 
     const animateAppear = useCardAppear(item.id, status === "running", item.timestamp, item.animateAppear);
@@ -295,7 +295,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                   {isError ? t("错误输出 (Error Output)") : t("执行结果 (Result Output)")}
                 </div>
                 <pre className={`tool-result-code ${isError ? "error" : ""}`}>
-                  {item.result.trim() || t("(无文本输出)")}
+                  {resultText.trim() || t("(无文本输出)")}
                 </pre>
               </div>
             )}

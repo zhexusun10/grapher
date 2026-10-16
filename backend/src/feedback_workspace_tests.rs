@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(feature = "fixture")]
+#[path = "feedback_batch_tests.rs"]
+mod batch;
+
 fn graph(names: &[&str]) -> Graph {
     Graph { original_goal: "workspace feedback".into(),
         nodes: names.iter().map(|name| Node { name: (*name).into(), task: (*name).into() }).collect(),
@@ -32,8 +36,9 @@ case "$GRAPHER_NODE_NAME" in
     test -f .cache/source && test -f .cache/owner || exit 18
     mkdir -p reports
     echo evidence > reports/audit.json
+    echo evidence > "reports/$GRAPHER_NODE_NAME.txt"
     echo evidence > .cache/review
-    if grep -q fixed owner.txt; then verdict=ACCEPT; else verdict=FEEDBACK; fi
+    if grep -q fixed owner.txt || [ "$GRAPHER_NODE_NAME" = review_accept ]; then verdict=ACCEPT; else verdict=FEEDBACK; fi
     printf '%s\n' "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Read reports/audit.json.\\n<$verdict>\"}]}}"
     exit 0 ;;
   related)
@@ -151,18 +156,41 @@ fn pending_feedback_survives_restart_and_replays_its_exact_output_range() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn concurrent_old_generation_reviews_do_not_overwrite_the_first_handoff() {
-    let (_temp, _source, mut runtime) = configured(&["owner", "review_one", "review_two"], 3);
+fn parallel_feedback_merges_only_feedback_senders_and_forks_owner_history() {
+    let (_temp, _source, mut runtime) = configured(&["owner", "review_one", "review_two", "review_accept"], 3);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
+    history(&runtime, &owner, "OWNER PRIVATE HISTORY");
     let reviews = runtime.jobs().unwrap();
-    for review in &reviews { execute(&mut runtime, review); }
+    assert_eq!(reviews.len(), 3);
+    execute(&mut runtime, &reviews[0]);
+    assert!(runtime.jobs().unwrap().is_empty(), "wait for already-running senders, not future ones");
+    for review in &reviews[1..] { execute(&mut runtime, review); }
+    for review in &reviews { history(&runtime, review, "REVIEW PRIVATE HISTORY"); }
     let repair = runtime.jobs().unwrap().remove(0);
-    assert_eq!(repair.execution.worktree, reviews[0].execution.worktree);
-    assert_eq!(runtime.state.feedback_counts.len(), 1);
-    assert!(runtime.state.events.iter().any(|event| matches!(&event.kind,
-        EventKind::FeedbackResolved { execution_id, disposition } if execution_id == &reviews[1].execution.id && disposition == "superseded")));
+    assert_eq!(repair.execution.node, "owner");
+    assert!(reviews.iter().all(|review| review.execution.worktree != repair.execution.worktree));
+    assert_eq!(repair.feedback_workspace.as_ref().unwrap().additional_sources.len(), 1);
+    assert!(repair.task.contains("Feedback from review_one:\nRead reports/audit.json."));
+    assert!(repair.task.contains("Feedback from review_two:\nRead reports/audit.json."));
+    assert!(!repair.task.contains("Feedback from review_accept"));
+    assert_eq!(runtime.state.feedback_counts.len(), 2);
     assert!(runtime.state.pending_feedback.is_empty());
+    assert_eq!(runtime.state.events.iter().filter(|event| matches!(&event.kind,
+        EventKind::Invalidated { target, human: false, .. } if target == "owner")).count(), 1);
+    execute(&mut runtime, &repair);
+    let path = Path::new(&repair.execution.worktree);
+    assert!(path.join("reports/review_one.txt").is_file());
+    assert!(path.join("reports/review_two.txt").is_file());
+    assert!(!path.join("reports/review_accept.txt").exists());
+    for review in reviews.iter().filter(|review| review.execution.node != "review_accept") {
+        workspace::verify_prepared_ancestor(path, runtime.state.executions.iter()
+            .find(|execution| execution.id == review.execution.id).unwrap().after.as_ref().unwrap()).unwrap();
+    }
+    let session = fs::read_to_string(runtime.root.join("sessions").join(&repair.execution.id)
+        .join(format!("grapher_{}.jsonl", repair.execution.session_id))).unwrap();
+    assert!(session.contains("OWNER PRIVATE HISTORY"));
+    assert!(!session.contains("REVIEW PRIVATE HISTORY"));
 }
 
 #[cfg(feature = "fixture")]
@@ -388,4 +416,266 @@ fn modified_completed_workspace_blocks_feedback_handoff() {
     let repair = runtime.jobs().unwrap().remove(0);
     let result = perform(&repair, &runtime.root, &[], |_| {}, |_| panic!("must not start model"));
     assert!(result.unwrap_err().contains("Feedback workspace changed after completion"));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn failed_feedback_repair_adopts_its_committed_residue_on_retry() {
+    let (temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+    let owner = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &owner);
+    let review = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &review);
+    let repair = runtime.jobs().unwrap().remove(0);
+    assert_eq!(repair.execution.node, "owner");
+    assert_eq!(repair.execution.worktree, review.execution.worktree);
+    let pin_head = repair.feedback_workspace.as_ref().unwrap().head.clone();
+    // First repair attempt: commit residue, then fail without recording it.
+    let script = temp.path().join("agent.sh");
+    let original = fs::read_to_string(&script).unwrap();
+    fs::write(&script, original.replace("      echo fixed > owner.txt",
+        "      echo residue > residue.txt\n      git add -A\n      git -c user.name=residue -c user.email=residue@invalid commit -qm residue\n      exit 19")).unwrap();
+    let root = runtime.root.clone();
+    let result = perform(&repair, &root, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
+        execution_id: repair.execution.id.clone(), head,
+    }));
+    assert!(result.is_err());
+    runtime.finish(&repair.execution, result).unwrap();
+    assert_eq!(runtime.state.nodes["owner"].status, "failed");
+    // The residue advanced the worktree past the pinned head, clean but unrecorded.
+    let worktree = Path::new(&repair.execution.worktree);
+    let residue_head = workspace::git(worktree, &["rev-parse", "HEAD"]).unwrap();
+    assert_ne!(residue_head, pin_head);
+    // The retry adopts the residue as its base instead of refusing the handoff.
+    fs::write(&script, original).unwrap();
+    history(&runtime, &repair, "OWNER REPAIR HISTORY");
+    runtime.intervene("owner", "Continue the failed repair").unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    assert!(retry.session_fork.as_ref().is_some_and(|previous| {
+        previous.status == "failed" && previous.worktree == repair.execution.worktree
+    }));
+    execute(&mut runtime, &retry);
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
+    let retry_execution = runtime.state.executions.iter().rev()
+        .find(|execution| execution.id == retry.execution.id).unwrap();
+    assert_eq!(retry_execution.before, residue_head);
+    let final_head = retry_execution.after.clone().unwrap();
+    assert!(workspace::git(worktree, &["merge-base", "--is-ancestor", &residue_head, &final_head]).is_ok());
+    assert_eq!(fs::read_to_string(worktree.join("residue.txt")).unwrap().trim(), "residue");
+    assert_eq!(fs::read_to_string(worktree.join("owner.txt")).unwrap().trim(), "fixed");
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
+    // Mirrors the production wedge: the failed attempt died before or without
+    // persisting its Pi session, so the retry's resume falls back to the
+    // original target session (completed) instead of the failed attempt.
+    // Attribution must come from the run's execution history, not from the
+    // forked session, or the workspace stays wedged.
+    let (temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+    let owner = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &owner);
+    let review = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &review);
+    let repair = runtime.jobs().unwrap().remove(0);
+    let pin_head = repair.feedback_workspace.as_ref().unwrap().head.clone();
+    let script = temp.path().join("agent.sh");
+    let original = fs::read_to_string(&script).unwrap();
+    fs::write(&script, original.replace("      echo fixed > owner.txt",
+        "      echo residue > residue.txt\n      git add -A\n      git -c user.name=residue -c user.email=residue@invalid commit -qm residue\n      exit 19")).unwrap();
+    let root = runtime.root.clone();
+    let result = perform(&repair, &root, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
+        execution_id: repair.execution.id.clone(), head,
+    }));
+    assert!(result.is_err());
+    runtime.finish(&repair.execution, result).unwrap();
+    // No history() here: the failed attempt has no persisted Pi session.
+    let worktree = Path::new(&repair.execution.worktree);
+    let residue_head = workspace::git(worktree, &["rev-parse", "HEAD"]).unwrap();
+    fs::write(&script, original).unwrap();
+    runtime.intervene("owner", "Continue the failed repair").unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    // The resume fallback points at the original completed target session...
+    assert!(retry.session_fork.as_ref().is_some_and(|previous| previous.status == "completed"));
+    // ...and the residue is still adopted as the retry base.
+    execute(&mut runtime, &retry);
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
+    let retry_execution = runtime.state.executions.iter().rev()
+        .find(|execution| execution.id == retry.execution.id).unwrap();
+    assert_eq!(retry_execution.before, residue_head);
+    assert_ne!(residue_head, pin_head);
+    assert_eq!(fs::read_to_string(worktree.join("residue.txt")).unwrap().trim(), "residue");
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn failed_feedback_repair_keeps_its_dirty_files_for_the_retry() {
+    let (temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+    let owner = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &owner);
+    let review = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &review);
+    let repair = runtime.jobs().unwrap().remove(0);
+    let pin_head = repair.feedback_workspace.as_ref().unwrap().head.clone();
+    let script = temp.path().join("agent.sh");
+    let original = fs::read_to_string(&script).unwrap();
+    // First repair attempt leaves uncommitted writes behind and fails.
+    fs::write(&script, original.replace("      echo fixed > owner.txt",
+        "      echo partial > partial.txt\n      exit 19")).unwrap();
+    let root = runtime.root.clone();
+    let result = perform(&repair, &root, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
+        execution_id: repair.execution.id.clone(), head,
+    }));
+    assert!(result.is_err());
+    runtime.finish(&repair.execution, result).unwrap();
+    assert_eq!(runtime.state.nodes["owner"].status, "failed");
+    let worktree = Path::new(&repair.execution.worktree);
+    assert_eq!(workspace::git(worktree, &["rev-parse", "HEAD"]).unwrap(), pin_head);
+    fs::write(&script, original).unwrap();
+    history(&runtime, &repair, "OWNER REPAIR HISTORY");
+    runtime.intervene("owner", "Continue the failed repair").unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &retry);
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
+    let retry_execution = runtime.state.executions.iter().rev()
+        .find(|execution| execution.id == retry.execution.id).unwrap();
+    assert_eq!(retry_execution.before, pin_head);
+    assert_eq!(fs::read_to_string(worktree.join("partial.txt")).unwrap().trim(), "partial");
+    assert_eq!(fs::read_to_string(worktree.join("owner.txt")).unwrap().trim(), "fixed");
+}
+
+fn verdict_runtime(names: &[&str], script_body: &str) -> (TempDir, Runtime) {
+    let (temp, _source, mut runtime) = setup(true, graph(names));
+    let script = temp.path().join("agent.sh");
+    fs::write(&script, script_body).unwrap();
+    let config = runtime.state.config.as_mut().unwrap();
+    config.engine = "pi".into();
+    config.pi_command = "/bin/sh".into();
+    config.pi_args = vec![script.to_string_lossy().into()];
+    runtime.edit_draft_graph(graph(names), runtime.state.config.clone().unwrap()).unwrap();
+    runtime.approve().unwrap();
+    (temp, runtime)
+}
+
+#[test]
+fn malformed_feedback_verdict_pushes_a_synchronous_repair_turn_instead_of_failing() {
+    let (_temp, mut runtime) = verdict_runtime(&["owner", "review"], r##"task=$(cat)
+if [ "$GRAPHER_NODE_NAME" = owner ]; then
+  echo initial > owner.txt
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Completed"}]}}'
+  exit 0
+fi
+echo turn >> .launches
+if printf '%s' "$task" | grep -q 'Feedback Protocol Error'; then
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Restated verdict\n<FEEDBACK>"}]}}'
+else
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Review notes\n<FEEDBACK> trailing"}]}}'
+fi
+"##);
+    let owner = runtime.jobs().unwrap().remove(0);
+    assert_eq!(owner.execution.node, "owner");
+    assert!(!owner.feedback_source);
+    execute(&mut runtime, &owner);
+    let review = runtime.jobs().unwrap().remove(0);
+    assert!(review.feedback_source);
+    let mut streamed = String::new();
+    let root_dir = runtime.root.clone();
+    let result = perform(&review, &root_dir, &[], |text| streamed.push_str(&text), |head| {
+        runtime.emit(EventKind::Prepared { execution_id: review.execution.id.clone(), head })
+    });
+    // The node completed; the protocol repair turn restated the verdict.
+    let (head, output) = result.unwrap();
+    assert_eq!(output, "Restated verdict\n<FEEDBACK>");
+    assert_eq!(runtime.state.nodes["review"].status, "running");
+    runtime.finish(&review.execution, Ok((head, output))).unwrap();
+    assert_eq!(runtime.state.nodes["review"].status, "completed");
+    // Exactly one repair turn was pushed into the node's own session.
+    let launches = fs::read_to_string(Path::new(&review.execution.worktree).join(".launches")).unwrap();
+    assert_eq!(launches.lines().count(), 2, "original turn plus one synchronous repair: {launches}");
+    // The repair turn streamed into the same execution transcript.
+    assert!(streamed.contains("Review notes"));
+    assert!(streamed.contains("Restated verdict"));
+    // The repaired verdict entered the feedback pipeline instead of a failure.
+    assert_eq!(runtime.state.pending_feedback.len(), 1);
+    let repair = runtime.jobs().unwrap().remove(0);
+    assert_eq!(repair.execution.node, "owner");
+    assert_eq!(repair.task, "Feedback from review:\nRestated verdict");
+}
+
+#[test]
+fn exhausted_feedback_repairs_still_fail_the_node_closed() {
+    let (_temp, mut runtime) = verdict_runtime(&["owner", "review"], r##"task=$(cat)
+if [ "$GRAPHER_NODE_NAME" = owner ]; then
+  echo initial > owner.txt
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Completed"}]}}'
+  exit 0
+fi
+echo turn >> .launches
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Review notes\n<FEEDBACK> trailing"}]}}'
+"##);
+    let owner = runtime.jobs().unwrap().remove(0);
+    assert_eq!(owner.execution.node, "owner");
+    execute(&mut runtime, &owner);
+    let review = runtime.jobs().unwrap().remove(0);
+    let root_dir = runtime.root.clone();
+    let result = perform(&review, &root_dir, &[], |_| {}, |head| {
+        runtime.emit(EventKind::Prepared { execution_id: review.execution.id.clone(), head })
+    });
+    let error = result.unwrap_err();
+    assert_eq!(error, "Feedback protocol error: final line must be exactly <ACCEPT> or <FEEDBACK>");
+    runtime.finish(&review.execution, Err(error)).unwrap();
+    assert_eq!(runtime.state.nodes["review"].status, "failed");
+    // Original turn plus the bounded repair budget; no unbounded loop.
+    let launches = fs::read_to_string(Path::new(&review.execution.worktree).join(".launches")).unwrap();
+    assert_eq!(launches.lines().count(), 3, "original plus two repair attempts: {launches}");
+    assert!(runtime.state.pending_feedback.is_empty());
+}
+
+#[test]
+fn pending_feedback_stops_running_scope_work_instead_of_waiting_for_it() {
+    let (_temp, mut runtime) = verdict_runtime(&["owner", "review", "related"], r##"task=$(cat)
+if [ "$GRAPHER_NODE_NAME" = owner ]; then
+  echo initial > owner.txt
+fi
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Review notes\n<FEEDBACK>"}]}}'
+"##);
+    let owner = runtime.jobs().unwrap().remove(0);
+    assert_eq!(owner.execution.node, "owner");
+    execute(&mut runtime, &owner);
+    // Dispatch the reviewer and the in-scope sibling; leave the sibling running.
+    let jobs = runtime.jobs().unwrap();
+    let review = jobs.iter().find(|job| job.execution.node == "review").unwrap().clone();
+    let related = jobs.iter().find(|job| job.execution.node == "related").unwrap().clone();
+    assert!(related.feedback_source == false);
+    execute(&mut runtime, &review);
+    assert_eq!(runtime.state.pending_feedback.len(), 1);
+    let root_dir = runtime.root.clone();
+    let result = perform(&related, &root_dir, &[], |_| {}, |head| {
+        runtime.emit(EventKind::Prepared { execution_id: related.execution.id.clone(), head })
+    });
+    assert!(result.is_ok(), "the sibling runs until the verdict resolves");
+    let related_execution = runtime.state.executions.iter().rev()
+        .find(|execution| execution.node == "related").unwrap().clone();
+    assert_eq!(related_execution.status, "running");
+
+    // The queued verdict stops the in-scope sibling instead of waiting for it.
+    let held = runtime.jobs().unwrap();
+    assert!(held.is_empty(), "the unresolved verdict dispatches nothing into its scope");
+    assert_eq!(runtime.state.pending_feedback.len(), 1, "the verdict stays queued while the stopped work settles");
+    assert_eq!(runtime.state.feedback_counts.get("review->owner"), None);
+    let stopped = runtime.state.executions.iter().rev()
+        .find(|execution| execution.node == "related").unwrap();
+    assert_eq!(stopped.status, "running", "the stop signal lands; the worker settles on the driver");
+
+    // The stopped worker reports its kill, then the verdict resolves immediately.
+    runtime.finish(&related_execution, Err("Execution paused by user".into())).unwrap();
+    assert_eq!(runtime.state.nodes["related"].status, "failed");
+    let repair = runtime.jobs().unwrap().remove(0);
+    assert_eq!(repair.execution.node, "owner");
+    assert_eq!(repair.task, "Feedback from review:\nReview notes");
+    assert_eq!(runtime.state.feedback_counts.get("review->owner"), Some(&1));
+    assert_eq!(runtime.state.nodes["related"].status, "dirty", "the stopped sibling is invalidated for recomputation, not resumed");
+    assert!(runtime.state.pending_feedback.is_empty());
+    assert_eq!(runtime.state.executions.iter().filter(|execution| execution.node == "related").count(), 1);
 }

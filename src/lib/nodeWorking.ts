@@ -5,8 +5,12 @@ export function isNodeWorking(
   execution: Pick<Execution, "status" | "completedAt"> | undefined,
   pendingRequest: boolean,
   latestUnassignedMessage?: Pick<ChatMessage, "delivery">,
+  paused?: boolean,
 ): boolean {
-  return status === "dirty" ||
+  // A dirty node is queued for re-computation and its conversation continues,
+  // but a paused Run dispatches nothing: showing a working composer whose
+  // Steer would be rejected misreports an idle conversation.
+  return (!paused && status === "dirty") ||
     (pendingRequest && !!latestUnassignedMessage && !latestUnassignedMessage.delivery) ||
     (execution ? execution.status === "running" && execution.completedAt == null : status === "running");
 }

@@ -66,7 +66,6 @@ export function EditableUserBubble({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const compositionEndedAtRef = useRef(0);
-  const [initialSize, setInitialSize] = useState<{ width: number; height: number } | null>(null);
   const [copied, setCopied] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
@@ -109,7 +108,6 @@ export function EditableUserBubble({
 
   useLayoutEffect(() => {
     if (!editing) {
-      setInitialSize(null);
       return;
     }
     const textarea = textareaRef.current;
@@ -119,25 +117,11 @@ export function EditableUserBubble({
       if (scrollH > 0) {
         textarea.style.height = `${scrollH}px`;
       }
+      textarea.focus();
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
     }
   }, [editing, draft]);
-
-  useLayoutEffect(() => {
-    if (editing) {
-      const textarea = textareaRef.current;
-      if (textarea) {
-        textarea.focus();
-        const end = textarea.value.length;
-        textarea.setSelectionRange(end, end);
-      }
-      if (!initialSize && bubbleRef.current) {
-        const { width, height } = bubbleRef.current.getBoundingClientRect();
-        if (width > 0 && height > 0) {
-          setInitialSize({ width, height });
-        }
-      }
-    }
-  }, [editing, initialSize]);
 
   const submit = async () => {
     const value = draft.trim();
@@ -156,10 +140,6 @@ export function EditableUserBubble({
   };
 
   const beginEdit = () => {
-    if (bubbleRef.current) {
-      const { width, height } = bubbleRef.current.getBoundingClientRect();
-      setInitialSize({ width, height });
-    }
     if (cleanText) {
       onDraftChange(cleanText);
     }
@@ -168,7 +148,6 @@ export function EditableUserBubble({
 
   const targetText = cleanText || text;
   const isChanged = draft.trim() !== targetText.trim();
-  const isShorter = draft.trim().length < targetText.trim().length;
 
   return (
     <div className={`chat-user-message-card-wrapper${editing ? " inline-editing" : ""}`}>
@@ -185,18 +164,19 @@ export function EditableUserBubble({
             >
               <X size={14} />
             </button>
-            {isChanged && (
-              <button
-                type="button"
-                className="chat-bubble-action-btn send"
-                onClick={submit}
-                disabled={disabled || submitting || !draft.trim()}
-                title={t("回退并重试 (Enter)")}
-                aria-label={t("回退并重试")}
-              >
-                <ArrowUp size={14} />
-              </button>
-            )}
+            {/* Always visible while editing: a button that appears only after
+              the first keystroke reads as missing, and a hidden confirm next
+              to the occlusion-prone bubble edge left users stuck. */}
+            <button
+              type="button"
+              className="chat-bubble-action-btn send"
+              onClick={submit}
+              disabled={disabled || submitting || !isChanged || !draft.trim()}
+              title={t("回退并重试 (Enter)")}
+              aria-label={t("回退并重试")}
+            >
+              <ArrowUp size={14} />
+            </button>
           </div>
         ) : (
           <div className="chat-bubble-left-tools">
@@ -253,10 +233,6 @@ export function EditableUserBubble({
             <div
               ref={bubbleRef}
               className={`chat-bubble-user${editing ? " editing" : ""}`}
-              style={editing && initialSize && !isShorter ? {
-                minWidth: `${initialSize.width}px`,
-                minHeight: `${initialSize.height}px`,
-              } : undefined}
             >
               {editing ? (
                 <div className="chat-bubble-edit-grid">

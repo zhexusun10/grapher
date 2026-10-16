@@ -2,16 +2,13 @@ import type { TranscriptItem } from "../types";
 import { utf8Bytes } from "../lib/BoundedLruCache";
 import { stripPlannerContext } from "./plannerText";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./thinkingTranscript";
+import { toolOutputPreview } from "./toolOutput";
 
 function textContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.filter((part: any) => part?.type === "text")
     .map((part: any) => typeof part.text === "string" ? part.text : "").join("\n");
-}
-
-function outputText(result: any): string {
-  return textContent(result?.content);
 }
 
 /** Parse state shared by the incremental parser and its callers. */
@@ -126,7 +123,8 @@ export function parseTranscriptChunkLines(
       matched = addToolCall(toolCallId, toolName, {});
     }
 
-    const resultText = outputText(result);
+    const preview = toolOutputPreview(result?.content);
+    const resultText = preview.text;
     const rawExitCode = result?.details?.exitCode;
     const exitCode = typeof rawExitCode === "number" ? rawExitCode : null;
     const failed = isError || result?.isError || (exitCode !== null && exitCode !== 0);
@@ -134,7 +132,7 @@ export function parseTranscriptChunkLines(
       ...matched,
       result: resultText,
       exitCode,
-      truncated: !!(result?.details?.truncation?.truncated || result?.details?.truncated ||
+      truncated: !!(preview.truncated || result?.details?.truncation?.truncated || result?.details?.truncated ||
         resultText.includes("[Showing lines") || resultText.includes("Full output:")),
       isError: !!failed,
       status: failed ? "error" as const : "success" as const,

@@ -3096,7 +3096,7 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
 case "$GRAPHER_NODE_NAME" in
   slow) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo completed > slow.txt ;;
   related) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo completed > related.txt ;;
-  review) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
+  review) while [ ! -f '{related_started}' ]; do sleep 0.02; done; printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
   consumer) printf '%s\n' "$task" > consumer-input.txt; echo completed > consumer.txt ;;
   *) echo completed > owner.txt ;;
 esac
@@ -3161,7 +3161,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     drive(service.clone());
     let before_release = wait_for_state(
         &service,
-        "completed review with both workers at their gates",
+        "completed review with both workers started",
         |state| {
             state.executions.iter().any(|e| e.node == "review" && e.status == "completed")
                 && slow_started.is_file()
@@ -3171,36 +3171,35 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     assert!(!release.is_file());
     assert!(!release_related.is_file());
     assert_eq!(before_release.nodes["slow"].status, "running");
-    assert_eq!(before_release.nodes["related"].status, "running");
-    assert_eq!(
-        before_release.feedback_counts.get("review->owner"),
-        None,
-        "feedback must wait for affected running nodes"
-    );
-    assert!(
-        !before_release.executions.iter().any(|e| e.node == "consumer"),
-        "stale review consumers must remain blocked"
-    );
-    fs::write(&release_related, "release").unwrap();
+    // The queued <FEEDBACK> verdict stops the affected running worker instead
+    // of waiting for its gate; the unrelated sibling keeps running.
     let observed = wait_for_state(
         &service,
-        "feedback after the affected worker drains, while slow remains gated",
+        "verdict applied after the in-scope worker was stopped",
         |state| state.feedback_counts.get("review->owner").copied().unwrap_or(0) >= 1,
     );
-    assert!(
-        !release.is_file(),
-        "feedback must not require releasing the unrelated sibling"
-    );
+    assert!(!release_related.is_file(), "the stopped worker must not need its gate released");
+    assert!(!release.is_file(), "feedback must not require releasing the unrelated sibling");
     assert_eq!(observed.nodes["slow"].status, "running");
     assert_eq!(observed.feedback_counts.get("review->owner"), Some(&1));
-    assert!(
-        observed.executions.iter().any(|e| e.node == "related" && e.status == "completed"),
-        "feedback must follow the affected worker's completion"
-    );
+    let stopped_related = observed.executions.iter().find(|e| e.node == "related")
+        .expect("the affected worker was stopped before the verdict applied");
+    assert_eq!(stopped_related.status, "failed", "the in-scope worker is stopped, not drained");
     assert!(
         !observed.executions.iter().any(|e| e.node == "consumer"),
         "feedback must not expose stale consumers"
     );
+    // The stopped sibling recomputes after the repair; release its gate for
+    // the re-run only.
+    wait_for_state(
+        &service,
+        "related re-dispatched after the repair",
+        |state| {
+            state.executions.iter().filter(|e| e.node == "related").count() >= 2
+                && state.nodes["related"].status == "running"
+        },
+    );
+    fs::write(&release_related, "release").unwrap();
     fs::write(&release, "release").unwrap();
     wait_for_state(
         &service,
@@ -3226,6 +3225,11 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             .count(),
         2
     );
+    let relateds: Vec<_> = runtime.state.executions.iter().filter(|execution| execution.node == "related").collect();
+    assert_eq!(relateds.len(), 2, "the stopped worker is recomputed once after the repair");
+    assert_eq!(relateds[0].status, "failed", "the first attempt was stopped by the verdict");
+    assert_eq!(relateds[1].status, "completed");
+    assert_eq!(runtime.state.nodes["related"].status, "completed");
     let consumers: Vec<_> = runtime.state.executions.iter().filter(|execution| execution.node == "consumer").collect();
     assert_eq!(consumers.len(), 1, "the consumer runs once after feedback is skipped, not on the stale verdict");
     assert_eq!(consumers[0].status, "completed");

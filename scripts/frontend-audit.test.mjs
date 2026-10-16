@@ -156,15 +156,19 @@ test("inline message edits deduplicate click/Enter and preserve a rejected draft
   } finally { await context.close(); }
 });
 
-test("unchanged inline edit has cancel only; confirmation appears after an actual change", { timeout: 30_000 }, async () => {
+test("unchanged inline edit keeps the confirm visible but disabled until an actual change", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("unchangedBubble");
   try {
+    // The confirm stays rendered (disabled) so the control never reads as missing.
     assert.equal(await page.getByRole("button", { name: "Cancel edit" }).count(), 1);
-    assert.equal(await page.getByRole("button", { name: "Rewind and retry" }).count(), 0);
+    const confirm = page.getByRole("button", { name: "Rewind and retry" });
+    assert.equal(await confirm.count(), 1);
+    assert.equal(await confirm.isDisabled(), true);
     await page.locator("textarea").press("Enter");
     assert.equal(await page.evaluate(() => window.audit.unchangedSends), 0);
     await page.locator("textarea").fill("Changed message");
-    await page.getByRole("button", { name: "Rewind and retry" }).waitFor();
+    await confirm.waitFor();
+    assert.equal(await confirm.isDisabled(), false);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

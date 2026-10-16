@@ -631,7 +631,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // the node status that covers the whole preparation/execution cycle.
   const isSelectedNodeWorking = selectedMerger
     ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
-    : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage);
+    : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage, state.paused);
   const isSelectedNodeCompacting = isSelectedNodeWorking &&
     !!execution?.id && !!compactingAttempts[execution.id];
   const latestNodeTurn = nodeTurns.at(-1);
@@ -1454,7 +1454,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const serialWorkingAfterMessage = serialTurns.length > 0 && serialTurns[serialTurns.length - 1].executions.length === 0 &&
     !serialTurns[serialTurns.length - 1].userMessage.executionId;
   const isSerialWorking = isNodeWorking(serialNodeState?.status, serialExecution, pendingRequest,
-    serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined);
+    serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined, state.paused);
   // Serial auto-approval runs after planning releases its busy state, and
   // approval returns before the background driver starts the waiting node.
   // Both phases belong to first-execution startup, not an idle conversation.
@@ -2486,7 +2486,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           key="execution-control-btn"
                           type="button"
                           className="primary"
-                          disabled={locked || publishing || publicationFailed || state.phase === "completed" || graphPhase === "pausing"}
+                          // A settled run with nothing running or paused has no
+                          // pause/resume semantics: pausing is a no-op and the
+                          // following 继续 would just un-pause it without
+                          // continuing any node. Failed nodes are continued
+                          // from their conversation (介入指令), not here.
+                          disabled={locked || publishing || publicationFailed || state.phase === "completed" || graphPhase === "pausing"
+                            || (graphPhase === "needs_attention" && !canContinue)}
+                          title={graphPhase === "needs_attention" && !canContinue ? t("执行已停止；请在失败节点的对话中发送介入指令以继续") : undefined}
                           onClick={() => onControl(canContinue ? "resume" : "pause")}
                         >
                           {canContinue ? <Play size={13} /> : <Pause size={13} />}

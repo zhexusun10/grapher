@@ -160,17 +160,17 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
                 <X size={13} />
                 <span>{t("取消")}</span>
               </button>
-              {isChanged && <button
+              <button
                 type="button"
                 className="node-task-tool-btn save"
                 onClick={handleSave}
-                disabled={disabled || !draft.trim()}
+                disabled={disabled || !isChanged || !draft.trim()}
                 title={t("保存修改 (Ctrl + Enter)")}
                 aria-label={t("保存修改")}
               >
                 <Check size={13} />
                 <span>{t("保存")}</span>
-              </button>}
+              </button>
             </>
           ) : (
             <>

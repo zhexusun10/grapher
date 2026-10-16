@@ -25,6 +25,11 @@ pub struct Job {
     pub resume_execution_id: Option<String>,
     pub session_fork: Option<Execution>,
     pub feedback_workspace: Option<FeedbackWorkspace>,
+    /// A previous attempt of this node already failed inside the pinned
+    /// feedback source directory. Its residue (unrecorded snapshot commit or
+    /// interrupted writes) belongs to this node's repair, not to a foreign
+    /// mutation, so the cleanliness check may adopt it as the retry base.
+    pub feedback_repair_retry: bool,
     /// The selected worktree already contains the inherited commit; do not rebuild it from refs.
     pub inherit_workspace: bool,
     /// A failed attempt with durable Prepared evidence. Its own working tree,
@@ -1980,7 +1985,7 @@ impl Runtime {
             let initial_recovery = continuation && resume.is_some_and(|previous| {
                 if !self.state.execution_stop_requests.contains(&previous.id)
                     || self.state.nodes[&node.name].human_instruction
-                    || self.state.nodes[&node.name].feedback_workspace.is_some()
+                    || self.state.nodes[&node.name].feedback_workspace.as_ref().is_some_and(|input| !input.additional_sources.is_empty())
                     || self.state.executions.iter().any(|execution| execution.node == node.name
                         && (execution.pid.is_some() || execution.status == "completed")) {
                     return false;
@@ -2001,7 +2006,8 @@ impl Runtime {
                         && !self.is_serial()
                         && !source_direct_run
                         && self.state.nodes[&node.name].edit_execution_id.is_none()
-                        && self.state.nodes[&node.name].feedback_workspace.is_none()
+                        && self.state.nodes[&node.name].feedback_workspace.as_ref()
+                            .is_none_or(|input| !input.additional_sources.is_empty())
                 })
                 .and_then(|previous| {
                     // A preparation-only retry may have failed before emitting
@@ -2039,15 +2045,22 @@ impl Runtime {
             let mut inherit_workspace = false;
             let mut workspace_lineage = BTreeSet::new();
             let worktree = if let Some(input) = &self.state.nodes[&node.name].feedback_workspace {
-                if let Some(source) = self
-                    .state
-                    .executions
-                    .iter()
-                    .find(|execution| execution.id == input.source_execution_id)
-                {
-                    workspace_lineage.extend(source.workspace_lineage.iter().cloned());
+                for source in input.sources() {
+                    if let Some(execution) = self.state.executions.iter()
+                        .find(|execution| execution.id == source.source_execution_id) {
+                        workspace_lineage.extend(execution.workspace_lineage.iter().cloned());
+                    }
                 }
-                input.worktree.clone()
+                if input.additional_sources.is_empty() {
+                    input.worktree.clone()
+                } else {
+                    // Compose into a target-owned slot: sending evidence stays
+                    // immutable even if a Merger or repair fails halfway through.
+                    // A failed prepared attempt continues in its own partial tree.
+                    let prepared_failure = preserved_workspace.as_ref().filter(|previous|
+                        previous.status == "failed" && Path::new(&previous.worktree).is_dir());
+                    prepared_failure.map(|previous| previous.worktree.clone()).unwrap_or_else(fresh_path)
+                }
             } else if self.is_serial() || source_direct_run {
                 resolve_repository(&self.root, &config)?
                     .to_string_lossy()
@@ -2197,8 +2210,13 @@ impl Runtime {
                 continue;
             }
             let workspace_lineage: Vec<_> = workspace_lineage.into_iter().collect();
+            // A prepared failed attempt continues in its retained tree without
+            // forking: the Pi session already lives at that cwd.
             let session_fork = resume
-                .filter(|previous| previous.worktree != worktree || feedback_workspace.is_some())
+                .filter(|previous| Some(previous.worktree.as_str()) != Some(worktree.as_str())
+                    || feedback_workspace.as_ref().is_some_and(|input| {
+                        input.additional_sources.is_empty() || preserved_workspace.is_none()
+                    }))
                 .map(|previous| {
                     let mut source = previous.clone();
                     source.id = self
@@ -2378,7 +2396,8 @@ impl Runtime {
                     let mut selected = selected;
                     store.validate_result_metadata(&selected)?;
                     if config.environment.as_ref().is_some_and(|policy| policy.best_effort)
-                        && !preserve_failed_environment && !history_edit && feedback_workspace.is_none()
+                        && !preserve_failed_environment && !history_edit
+                        && feedback_workspace.as_ref().is_none_or(|input| !input.additional_sources.is_empty())
                         && store.requires_fixed_layout(&selected.launch_ref)?
                         && selected.layout.as_ref().is_some_and(|path| *path != execution.worktree)
                     {
@@ -2454,6 +2473,14 @@ impl Runtime {
                 images,
                 resume_execution_id,
                 session_fork,
+                feedback_repair_retry: feedback_workspace.as_ref().is_some_and(|input| {
+                    input.additional_sources.is_empty()
+                        && self.state.executions.iter().any(|previous| {
+                            previous.node == node.name
+                                && previous.status == "failed"
+                                && previous.worktree == input.worktree
+                        })
+                }),
                 feedback_workspace,
                 inherit_workspace,
                 preserved_workspace,
@@ -2721,6 +2748,18 @@ impl Runtime {
         if self.path_is_running(path) {
             return true;
         }
+        // Feedback evidence is reserved even without a managed environment.
+        // Unrelated jobs must not recycle an input before batch composition.
+        if self.state.pending_feedback.iter().any(|pending| {
+            self.state.executions.iter().any(|execution| {
+                execution.id == pending.execution_id && Path::new(&execution.worktree) == path
+            })
+        }) || self.state.nodes.iter().any(|(name, node)| {
+            Some(name.as_str()) != owner && node.feedback_workspace.as_ref()
+                .is_some_and(|input| input.sources().any(|source| Path::new(&source.worktree) == path))
+        }) {
+            return true;
+        }
         if self
             .state
             .config
@@ -2743,18 +2782,7 @@ impl Runtime {
                 .is_some_and(|result| result.layout.as_deref() == path.to_str())) {
             return true;
         }
-        self.state.pending_feedback.iter().any(|pending| {
-            self.state
-                .executions
-                .iter()
-                .any(|e| e.id == pending.execution_id && Path::new(&e.worktree) == path)
-        }) || self.state.nodes.iter().any(|(name, node)| {
-            Some(name.as_str()) != owner
-                && node
-                    .feedback_workspace
-                    .as_ref()
-                    .is_some_and(|w| Path::new(&w.worktree) == path)
-        }) || self.state.executions.iter().any(|e| {
+        self.state.executions.iter().any(|e| {
             e.status == "failed"
                 && Some(e.node.as_str()) != owner
                 && Path::new(&e.worktree) == path
@@ -2821,8 +2849,10 @@ impl Runtime {
         }
         for node in self.state.nodes.values() {
             if let Some(input) = &node.feedback_workspace {
-                if let Ok(path) = Path::new(&input.worktree).canonicalize() {
-                    keep.insert(path);
+                for source in input.sources() {
+                    if let Ok(path) = Path::new(&source.worktree).canonicalize() {
+                        keep.insert(path);
+                    }
                 }
             }
         }
@@ -3001,6 +3031,8 @@ impl Runtime {
                                 target.head.clone()
                             },
                             target_revision: target.revision,
+                            target_execution_id: self.reviewed_execution(&execution.id, &edge.to)
+                                .map(|target| target.id.clone()),
                             accepted: !engine::feedback(&output)?,
                             output_offset,
                             output_bytes: output.len(),
@@ -3115,6 +3147,8 @@ impl Runtime {
                     .ok_or("Feedback source has no result")?,
                 target_head: target.head.clone(),
                 target_revision: target.revision,
+                target_execution_id: self.reviewed_execution(&source.id, &edge.to)
+                    .map(|target| target.id.clone()),
                 accepted,
                 output_offset: 0,
                 output_bytes: output.len(),
@@ -3130,130 +3164,174 @@ impl Runtime {
         Ok(())
     }
 
+    /// Executions are appended in dispatch order. Pin the target that existed
+    /// when this sender started, not its movable head after directory handoff.
+    fn reviewed_execution(&self, source: &str, target: &str) -> Option<&Execution> {
+        let index = self.state.executions.iter().position(|execution| execution.id == source)?;
+        self.state.executions[..index].iter().rev().find(|execution| {
+            execution.node == target && execution.completed_at.is_some()
+        })
+    }
+
+    fn feedback_request_is_current(&self, pending: &PendingFeedback) -> bool {
+        self.state.graph.edges.iter().any(|edge| {
+            edge.feedback && edge.from == pending.from && edge.to == pending.to
+        }) && self.state.nodes.get(&pending.from).is_some_and(|node| {
+            node.status == "completed" && node.head.as_deref() == Some(&pending.source_head)
+        }) && self.state.nodes.get(&pending.to).is_some_and(|node| {
+            node.revision == pending.target_revision && match &pending.target_execution_id {
+                Some(id) => node.status == "completed"
+                    && self.latest_node_execution(&pending.to).is_some_and(|execution| {
+                        execution.id == *id && execution.status == "completed"
+                    }),
+                None => node.head == pending.target_head,
+            }
+        }) && !self.state.superseded_execution_ids.contains(&pending.execution_id)
+    }
+
     fn resolve_feedback(
         &mut self,
         pending: &PendingFeedback,
         output: Option<&str>,
     ) -> Result<(), String> {
-        let edge = self
-            .state
-            .graph
-            .edges
-            .iter()
-            .find(|edge| edge.feedback && edge.from == pending.from && edge.to == pending.to)
-            .cloned();
-        let valid = edge.is_some()
-            && self.state.nodes.get(&pending.from).is_some_and(|node| {
-                node.status == "completed" && node.head.as_deref() == Some(&pending.source_head)
-            })
-            && self.state.nodes.get(&pending.to).is_some_and(|node| {
-                node.head == pending.target_head && node.revision == pending.target_revision
-            })
-            && !self
-                .state
-                .superseded_execution_ids
-                .contains(&pending.execution_id);
-        if !valid {
+        // drain_feedback iterates a snapshot; a previous batch may already have
+        // resolved this entry. Never invalidate or consume its budget twice.
+        if self.state.events.iter().any(|event| matches!(&event.kind,
+            EventKind::FeedbackResolved { execution_id, .. } if execution_id == &pending.execution_id)) {
+            return Ok(());
+        }
+        if !self.feedback_request_is_current(pending) {
             return self.emit(EventKind::FeedbackResolved {
                 execution_id: pending.execution_id.clone(),
                 disposition: "superseded".into(),
             });
         }
-        let edge = edge.ok_or("No feedback edge")?;
-        if self.feedback_source_busy(&pending.from) {
+        let mut batch = self.state.pending_feedback.iter().filter(|candidate| {
+            candidate.execution_id == pending.execution_id
+                || pending.target_execution_id.is_some()
+                    && candidate.to == pending.to
+                    && candidate.target_execution_id == pending.target_execution_id
+                    && candidate.target_revision == pending.target_revision
+                    && self.feedback_request_is_current(candidate)
+        }).cloned().collect::<Vec<_>>();
+        if !batch.iter().any(|candidate| candidate.execution_id == pending.execution_id) {
+            batch.push(pending.clone());
+        }
+        // A verdict that will apply makes every running execution in its scope
+        // doomed: the repair recomputes them from the target's corrected
+        // result. Stop them now instead of letting them finish into a
+        // discarded result. Their failures settle on the driver before the
+        // next pass re-runs this resolution, so the settle barrier below then
+        // holds nothing and the repair dispatches immediately.
+        let mut doomed = BTreeSet::new();
+        for member in &batch {
+            // Only a <FEEDBACK> verdict invalidates its scope; an <ACCEPT>
+            // leaves every running result valid and must not stop anything.
+            if !member.accepted {
+                doomed.extend(self.feedback_scope(&member.from));
+            }
+        }
+        let stopped: Vec<(String, String)> = if doomed.is_empty() {
+            Vec::new()
+        } else {
+            self.state
+                .executions
+                .iter()
+                .filter(|execution| {
+                    execution.status == "running" && doomed.contains(&execution.node)
+                })
+                .map(|execution| (execution.node.clone(), execution.id.clone()))
+                .collect()
+        };
+        if !stopped.is_empty() {
+            for (node, execution_id) in &stopped {
+                eprintln!(
+                    "[Grapher] [Feedback] Stopping node '{node}': a queued <FEEDBACK> verdict invalidates its in-flight result",
+                );
+                crate::process_control::stop_owner(&crate::process_control::execution_owner(
+                    &self.state.run_id,
+                    node,
+                    execution_id,
+                ))?;
+            }
+            return Ok(());
+        }
+        // Only already-dispatched work can hold this barrier; waiting future
+        // senders are not batch members and must not deadlock the repair.
+        if batch.iter().any(|candidate| self.feedback_source_busy(&candidate.from)) {
             return Ok(());
         }
         let mut events = Vec::new();
-        let disposition;
-        if !pending.accepted && !self.feedback_budget_available(&edge) {
-            disposition = "exhausted";
-            events.push(EventKind::FeedbackExhausted {
-                from: pending.from.clone(),
-                to: pending.to.clone(),
-                execution_id: pending.execution_id.clone(),
-                count: self
-                    .state
-                    .feedback_counts
-                    .get(&format!("{}->{}", pending.from, pending.to))
-                    .copied()
-                    .unwrap_or(0),
-                limit: self
-                    .state
-                    .config
-                    .as_ref()
-                    .ok_or("Missing config")?
-                    .max_feedback
-                    .min(3),
-            });
-        } else {
-            disposition = if pending.accepted {
-                "accepted"
-            } else {
-                "applied"
-            };
-            events.push(EventKind::Feedback {
-                from: pending.from.clone(),
-                to: pending.to.clone(),
-                accepted: pending.accepted,
-            });
-            if !pending.accepted {
-                let stored;
-                let output = if let Some(output) = output {
-                    output
-                } else {
-                    stored = self
-                        .store
-                        .execution_log_page(
-                            &self.state.run_id,
-                            &pending.execution_id,
-                            pending.output_offset,
-                            pending.output_bytes,
-                        )?
-                        .content;
-                    if stored.len() != pending.output_bytes {
-                        return Err("Feedback output range is incomplete".into());
-                    }
-                    &stored
-                };
-                let body = engine::feedback_body(output)?;
-                let source = self
-                    .state
-                    .executions
-                    .iter()
-                    .find(|execution| execution.id == pending.execution_id)
-                    .ok_or("Missing feedback execution")?;
-                let target = self
-                    .state
-                    .executions
-                    .iter()
-                    .rev()
-                    .find(|execution| {
-                        execution.node == pending.to && execution.completed_at.is_some()
-                    })
-                    .ok_or("Missing feedback target session")?;
-                events.push(EventKind::Invalidated {
-                    nodes: downstream(&self.state.graph, &pending.to)
-                        .into_iter()
-                        .collect(),
-                    target: pending.to.clone(),
-                    instruction: format!("Feedback from {}:\n{body}", pending.from),
-                    human: false,
-                    images: None,
-                    workspace: Some(FeedbackWorkspace {
-                        source_execution_id: source.id.clone(),
-                        target_execution_id: target.id.clone(),
-                        worktree: source.worktree.clone(),
-                        head: pending.source_head.clone(),
-                    }),
-                    shared_workspace: false,
-                    source_direct: false,
+        let mut instructions = Vec::new();
+        let mut sources = Vec::new();
+        for member in &batch {
+            let edge = self.state.graph.edges.iter().find(|edge| {
+                edge.feedback && edge.from == member.from && edge.to == member.to
+            }).ok_or("No feedback edge")?;
+            let disposition;
+            if !member.accepted && !self.feedback_budget_available(edge) {
+                disposition = "exhausted";
+                events.push(EventKind::FeedbackExhausted {
+                    from: member.from.clone(), to: member.to.clone(),
+                    execution_id: member.execution_id.clone(),
+                    count: self.state.feedback_counts.get(&format!("{}->{}", member.from, member.to))
+                        .copied().unwrap_or(0),
+                    limit: self.state.config.as_ref().ok_or("Missing config")?.max_feedback.min(3),
                 });
+            } else {
+                disposition = if member.accepted { "accepted" } else { "applied" };
+                events.push(EventKind::Feedback {
+                    from: member.from.clone(), to: member.to.clone(), accepted: member.accepted,
+                });
+                if !member.accepted {
+                    let stored;
+                    let text = if member.execution_id == pending.execution_id && output.is_some() {
+                        output.unwrap()
+                    } else {
+                        stored = self.store.execution_log_page(
+                            &self.state.run_id, &member.execution_id,
+                            member.output_offset, member.output_bytes,
+                        )?.content;
+                        if stored.len() != member.output_bytes {
+                            return Err("Feedback output range is incomplete".into());
+                        }
+                        &stored
+                    };
+                    let body = engine::feedback_body(text)?;
+                    let source = self.state.executions.iter().find(|execution| {
+                        execution.id == member.execution_id
+                    }).ok_or("Missing feedback execution")?;
+                    instructions.push(format!("Feedback from {}:\n{body}", member.from));
+                    sources.push(FeedbackSource {
+                        source_execution_id: source.id.clone(),
+                        worktree: source.worktree.clone(), head: member.source_head.clone(),
+                    });
+                }
             }
+            events.push(EventKind::FeedbackResolved {
+                execution_id: member.execution_id.clone(), disposition: disposition.into(),
+            });
         }
-        events.push(EventKind::FeedbackResolved {
-            execution_id: pending.execution_id.clone(),
-            disposition: disposition.into(),
-        });
+        if !sources.is_empty() {
+            let source = sources.remove(0);
+            let target = self.state.executions.iter().rev().find(|execution| {
+                execution.node == pending.to && execution.completed_at.is_some()
+                    && pending.target_execution_id.as_ref().is_none_or(|id| execution.id == *id)
+            }).ok_or("Missing feedback target session")?;
+            events.push(EventKind::Invalidated {
+                nodes: downstream(&self.state.graph, &pending.to).into_iter().collect(),
+                target: pending.to.clone(), instruction: instructions.join("\n\n"),
+                human: false, images: None,
+                workspace: Some(FeedbackWorkspace {
+                    source_execution_id: source.source_execution_id,
+                    target_execution_id: target.id.clone(), worktree: source.worktree, head: source.head,
+                    additional_sources: sources,
+                }),
+                shared_workspace: false, source_direct: false,
+            });
+        }
+        // Pin all inputs, consume per-edge budgets, remove all requests and
+        // invalidate once in one transaction. Restart cannot split the batch.
         self.emit_outputs(events)
     }
 
@@ -3756,12 +3834,14 @@ fn perform_with_merger_inner(
         if !reused || previous.worktree != job.execution.worktree
             || previous.node != job.execution.node
             || previous.session_id != job.execution.session_id
-            || job.history_edit || job.feedback_workspace.is_some()
+            || job.history_edit || job.feedback_workspace.as_ref()
+                .is_some_and(|input| input.additional_sources.is_empty())
         {
             return Err("Recovery workspace is missing or reassigned; refusing to replace preserved partial work".into());
         }
         workspace::verify_prepared_ancestor(path, &previous.before)?;
-        for input in job.parent_heads.iter().chain(std::iter::once(&job.expected_source_head)) {
+        for input in job.parent_heads.iter().chain(std::iter::once(&job.expected_source_head))
+            .chain(job.feedback_workspace.iter().flat_map(|input| input.additional_sources.iter().map(|source| &source.head))) {
             if !input.is_empty() && workspace::git(
                 path, &["merge-base", "--is-ancestor", input, &previous.before],
             ).is_err() {
@@ -3835,33 +3915,56 @@ fn perform_with_merger_inner(
             source.environment_ref == input.environment_ref && source.launch_ref == input.launch_ref) {
             store.validate_result(input)?;
         }
-        if job.feedback_workspace.is_some() {
+        if job.feedback_workspace.as_ref().is_some_and(|input| input.additional_sources.is_empty()) {
             store
                 .scoped_files(&input.launch_ref)?
                 .verify(path, &input.environment_ref, "")?;
         }
     }
+    let mut adopted_feedback_head: Option<String> = None;
     if let Some(input) = &job.feedback_workspace {
-        let owner = path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str());
-        let bucket = path
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str());
-        if owner != Some(&job.run_id) || bucket != Some(".grapher-worktrees") || !reused {
-            return Err("Feedback requires an existing worktree owned by this Run".into());
-        }
-        let feedback_head = workspace::git(path, &["rev-parse", "HEAD"])?;
-        let feedback_status = workspace::repository_status(path, &exclusions)?;
-        if feedback_head != input.head || !feedback_status.is_empty() {
-            return Err("Feedback workspace changed after completion".into());
-        }
-        if let Some(target) = &job.session_fork {
-            if let Some(head) = &target.after {
-                workspace::verify_prepared_ancestor(path, head)?;
+        for source in input.sources() {
+            let source_path = Path::new(&source.worktree);
+            let owner = source_path.parent().and_then(Path::file_name).and_then(|name| name.to_str());
+            let bucket = source_path.parent().and_then(Path::parent)
+                .and_then(Path::file_name).and_then(|name| name.to_str());
+            if owner != Some(&job.run_id) || bucket != Some(".grapher-worktrees") || !source_path.is_dir() {
+                return Err("Feedback requires an existing worktree owned by this Run".into());
+            }
+            let mut source_exclusions = exclusions.clone();
+            if let Some(store) = &environments {
+                let result = store.load_record_metadata(&source.source_execution_id, "after")?;
+                store.validate_result(&result)?;
+                source_exclusions.extend(store.exclusions(&result.launch_ref)?);
+            }
+            let feedback_head = workspace::git(source_path, &["rev-parse", "HEAD"])?;
+            let feedback_status = workspace::repository_status(source_path, &source_exclusions)?;
+            if feedback_head != source.head || !feedback_status.is_empty() {
+                // A single-source handoff executes the target in the sender's
+                // directory, so a failed attempt of this very node can leave
+                // residue there: its unrecorded after-snapshot commit or
+                // interrupted writes. That residue belongs to the failed
+                // attempt, and the directory stays reserved for it until the
+                // repair releases the handoff. Refusing it would wedge every
+                // retry on a pin nothing will ever satisfy again, so the retry
+                // adopts the live head as its base — the mutation becomes
+                // represented by the retry's own Prepared input — while any
+                // residue that discarded the pinned history stays refused.
+                // `feedback_repair_retry` is computed at launch from the run's
+                // execution history, so attribution never depends on whether
+                // the failed attempt's own session happened to be persisted.
+                let own_residue = job.feedback_repair_retry
+                    && source.worktree == job.execution.worktree
+                    && workspace::verify_prepared_ancestor(source_path, &source.head).is_ok();
+                if !own_residue {
+                    return Err("Feedback workspace changed after completion".into());
+                }
+                adopted_feedback_head = Some(feedback_head.clone());
+            }
+            if let Some(target) = &job.session_fork {
+                if let Some(head) = &target.after {
+                    workspace::verify_prepared_ancestor(source_path, head)?;
+                }
             }
         }
     }
@@ -3888,15 +3991,28 @@ fn perform_with_merger_inner(
     let expected_source_head = materialized_base
         .as_deref()
         .unwrap_or(&job.expected_source_head);
-    let execution_before = materialized_base
-        .as_deref()
-        .unwrap_or(&job.execution.before);
+    let execution_before = if let Some(adopted) = &adopted_feedback_head {
+        adopted.as_str()
+    } else {
+        materialized_base
+            .as_deref()
+            .unwrap_or(&job.execution.before)
+    };
     let parent_refs = if job.parent_heads.is_empty() {
         parents
     } else {
         &job.parent_heads
     };
     let mut input_heads = parent_refs.to_vec();
+    if let Some(input) = &job.feedback_workspace {
+        // Unlike stale published parents, a pinned feedback input must never be
+        // silently filtered out of composition when its commit is unavailable.
+        for source in input.sources() {
+            workspace::repository_git(&repository, &["cat-file", "-e", &format!("{}^{{commit}}", source.head)])
+                .map_err(|error| format!("Feedback input commit is unavailable: {error}"))?;
+        }
+        input_heads.extend(input.additional_sources.iter().map(|source| source.head.clone()));
+    }
     if job.history_edit && environments.is_some() {
         input_heads.clear();
     }
@@ -3961,6 +4077,10 @@ fn perform_with_merger_inner(
         && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err();
     let before = if let Some(head) = preserved_head {
         head
+    } else if let Some(adopted) = &adopted_feedback_head {
+        // Continue from the failed attempt's residue instead of recomposing
+        // the pinned base, which would discard that attempt's recorded work.
+        adopted.clone()
     } else if can_inherit {
         inherited_head.unwrap_or_else(|| execution_before.to_string())
     } else if job.source_direct || source_tree {
@@ -4037,6 +4157,7 @@ fn perform_with_merger_inner(
     }
     let mut execution_view = job.execution.clone();
     execution_view.input = environment_input.clone();
+    let mut on_output = on_output;
     let output = engine::execute(
         &job.config,
         &execution_view,
@@ -4047,8 +4168,24 @@ fn perform_with_merger_inner(
         job.initial_recovery,
         job.images.as_deref(),
         root,
-        on_output,
+        &mut on_output,
     )?;
+    // A malformed verdict is a protocol error, not a node failure: push a
+    // bounded repair turn into this node's own session and let it restate the
+    // verdict before completion is committed. Exhausted repairs still fail
+    // closed with the protocol error inside finish.
+    let output = if job.feedback_source {
+        engine::repair_feedback_verdict(
+            &job.config,
+            &execution_view,
+            output,
+            job.resume_execution_id.as_deref(),
+            root,
+            &mut on_output,
+        )?
+    } else {
+        output
+    };
     if path != repository {
         workspace::verify_prepared_ancestor(path, &before)?;
     }

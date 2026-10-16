@@ -10,6 +10,7 @@ import { runtimeService } from "../../src/services/runtime";
 import { ThinkingCard } from "../../src/components/ThinkingCard";
 import { ToolCallCard } from "../../src/components/ToolCallCard";
 import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
+import { TranscriptHistoryStatus } from "../../src/components/TranscriptHistoryStatus";
 import { ExecutionTranscript, executionTranscriptCache } from "../../src/components/ExecutionTranscript";
 import { PlanningActivity, planningTranscriptCache } from "../../src/components/PlanningActivity";
 import { useConversationTranscriptCache } from "../../src/hooks/useConversationTranscriptCache";
@@ -112,6 +113,17 @@ function TranscriptFixture() {
 function PlannerTranscriptFixture() {
   return <div className="initial-query-scroll" data-transcript-scroll style={{ height: 300, overflowY: "auto" }}>
     <PlanningActivity planningIds={["planner-tool-plan"]} showUserTurns running />
+  </div>;
+}
+
+function HistoryStatusFixture() {
+  const [loading, setLoading] = useState(false);
+  const [mounted, setMounted] = useState(true);
+  audit.setHistoryLoading = setLoading;
+  audit.unmountHistoryStatus = () => setMounted(false);
+  return <div data-history-loading={loading}>
+    {mounted && <TranscriptHistoryStatus loading={loading} />}
+    <div data-history-anchor>History below the reserved status line</div>
   </div>;
 }
 
@@ -282,7 +294,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  polling: PollingFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
+  polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture,
 };
 const Component = cases[new URLSearchParams(location.search).get("case") || "settings"];

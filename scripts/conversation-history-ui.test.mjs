@@ -97,6 +97,102 @@ test("transcript and parser hot updates preserve the mounted conversation", { ti
   } finally { await context.close(); await hmrServer.close(); }
 });
 
+test("history status bridges page gaps without flashing for fast reads or moving history", { timeout: 20_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__history?case=historyStatus`, { waitUntil: "networkidle" });
+    await page.clock.install();
+    const status = page.locator(".transcript-history-status");
+    const anchorTop = await page.locator("[data-history-anchor]").evaluate(element => element.getBoundingClientRect().top);
+    await page.evaluate(() => {
+      window.historyStatusTexts = [];
+      new MutationObserver(() => window.historyStatusTexts.push(document.querySelector(".transcript-history-status")?.textContent))
+        .observe(document.querySelector(".transcript-history-status"), { childList: true, subtree: true, characterData: true });
+    });
+    const loading = async value => {
+      await page.evaluate(value => window.audit.setHistoryLoading(value), value);
+      await page.waitForFunction(value => document.querySelector("[data-history-loading]").dataset.historyLoading === String(value), value);
+    };
+    // A fast, isolated read should never paint a loading-text flash.
+    await loading(true); await page.clock.runFor(30);
+    await loading(false); await page.clock.runFor(1000);
+    assert.equal(await status.innerText(), "");
+    assert.ok((await page.evaluate(() => window.historyStatusTexts)).every(text => !text));
+    // Once loading is visible, short per-page idle gaps must not hide it.
+    await loading(true); await page.clock.runFor(1000);
+    assert.match(await status.innerText(), /Loading earlier records/);
+    await page.evaluate(() => { window.historyStatusTexts = []; });
+    for (let i = 0; i < 5; i++) {
+      await loading(false); await page.clock.runFor(60);
+      assert.match(await status.innerText(), /Loading earlier records/);
+      await loading(true); await page.clock.runFor(120);
+    }
+    assert.ok((await page.evaluate(() => window.historyStatusTexts)).every(text => text?.includes("Loading earlier records")),
+      "the label cannot disappear in intermediate painted frames");
+    assert.equal(await page.locator("[data-history-anchor]").evaluate(element => element.getBoundingClientRect().top), anchorTop);
+    await loading(false); await page.clock.runFor(1000);
+    assert.equal(await status.innerText(), "", "the label clears after the final page, not forever");
+    // Pending timers belong to this mount, not the next conversation.
+    await loading(true); await page.clock.runFor(20);
+    await page.evaluate(() => window.audit.unmountHistoryStatus());
+    await page.clock.runFor(1000);
+    assert.equal(await status.count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const role of ["node", "planner"]) {
+  test(`${role}: continuous upward paging advances cursors and keeps one stable loading label`, { timeout: 30_000 }, async () => {
+    const parts = Array.from({ length: 5 }, (_, part) => Array.from({ length: 60 }, (_, row) => assistant(`PAGING_${part}_${row}`)).join(""));
+    const data = Buffer.from(parts.join("")), boundaries = [0];
+    for (const part of parts) boundaries.push(boundaries.at(-1) + Buffer.byteLength(part));
+    const cursors = [], pending = [];
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON(), command = new URL(route.request().url()).pathname.slice(5);
+      if (!["get_execution_output", "get_planning_output"].includes(command)) return route.fulfill({ json: { result: {} } });
+      const relevant = role === "node" ? command === "get_execution_output" : command === "get_planning_output";
+      const bytes = relevant ? data : Buffer.alloc(0);
+      const end = body.before ?? bytes.length;
+      const start = !relevant ? 0 : body.tail ? boundaries[Math.max(0, boundaries.indexOf(end) - 1)] : body.offset;
+      if (relevant && body.before !== undefined) {
+        cursors.push(body.before);
+        await new Promise(resolve => pending.push(resolve));
+      }
+      try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", running: true,
+        content: bytes.subarray(start, end).toString(), startOffset: start, nextOffset: end, totalBytes: bytes.length,
+        complete: end === bytes.length, status: "running" } } }); } catch {}
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.selectHistory);
+      if (role === "planner") await page.evaluate(() => { window.audit.setPlanningIds(["planner-latest"]); window.audit.selectHistory("planner"); });
+      const cachedStart = () => page.evaluate(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset, role);
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset > 0, role);
+      const scroller = page.locator("[data-shared-scroll]"), status = page.locator(".transcript-history-status");
+      for (let i = 0; i < 4; i++) {
+        const before = await cachedStart();
+        await scroller.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })); });
+        for (let wait = 0; wait < 100 && !pending.length; wait++) await page.waitForTimeout(10);
+        assert.ok(pending.length, "upward input starts the next page");
+        await status.filter({ hasText: "Loading earlier records" }).waitFor();
+        pending.shift()();
+        await page.waitForFunction(({ role, before }) => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset < before, { role, before });
+        // Simulate the pause between adjacent requests during continuous input.
+        if (i < 3) { await page.waitForTimeout(60); assert.match(await status.innerText(), /Loading earlier records/); }
+      }
+      assert.equal(await cachedStart(), 0, "the full history beginning is eventually reached");
+      assert.equal(cursors.length, 4);
+      assert.ok(cursors.every((cursor, i) => i === 0 || cursor < cursors[i - 1]), "never reread the same older byte page");
+      await page.waitForFunction(() => !document.querySelector(".transcript-history-status").textContent);
+      await scroller.evaluate(element => element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })));
+      await page.waitForTimeout(300);
+      assert.equal(cursors.length, 4, "at byte zero upward input must not re-arm loading");
+      assert.deepEqual(errors, []);
+    } finally { pending.splice(0).forEach(release => release()); await context.close(); }
+  });
+}
+
 for (const view of ["node", "serial"]) {
   test(`${view}: continuous live pages cannot starve initial history readiness`, { timeout: 30_000 }, async () => {
     const history = Array.from({ length: 80 }, (_, i) => assistant(`STREAM_HISTORY_${i}`)).join("");
@@ -117,6 +213,8 @@ for (const view of ["node", "serial"]) {
       await page.goto(`${origin}/__history?case=latestScroll&layout=live-paged&view=${view}`, { waitUntil: "domcontentloaded" });
       await page.waitForFunction(() => document.querySelector('[data-execution-id]')?.getAttribute("aria-busy") === "false", null, { timeout: 4000 });
       await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
+      // The first forward poll can race the reveal; wait bounded time for the backlog.
+      for (let i = 0; i < 100 && forwardReads < 2; i++) await page.waitForTimeout(20);
       assert.ok(forwardReads > 1, "exercise an ongoing forward-page backlog");
       assert.equal(streaming, true, "history must reveal without pausing the agent or clicking the pane");
       assert.deepEqual(errors, []);
@@ -176,6 +274,39 @@ for (const role of ["node", "planner"]) {
       });
       for (let i = 0; i < 50 && olderReads === stoppedAt; i++) await page.waitForTimeout(20);
       assert.ok(olderReads > stoppedAt, "another upward gesture can continue past the automatic byte budget");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+for (const role of ["node", "planner"]) {
+  test(`${role}: giant output stays inside one normal tool card with a small truncated body`, { timeout: 30_000 }, async () => {
+    const output = startTool("bounded-output-tool", "long-running-command") + endTool("bounded-output-tool", "PREVIEW_HEAD\n" + "x".repeat(400_000) + "HUGE_OUTPUT_TAIL");
+    const total = Buffer.byteLength(output);
+    const { context, page, errors } = await newPage(async route => {
+      const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      if (!["get_execution_output", "get_planning_output"].includes(command)) return route.fulfill({ json: { result: {} } });
+      const start = body.tail ? 0 : body.offset;
+      return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", running: false, content: output.slice(start), startOffset: start,
+        nextOffset: total, totalBytes: total, complete: true, status: "completed" } } });
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.selectHistory);
+      if (role === "planner") await page.evaluate(() => { window.audit.setPlanningIds(["planner-latest"]); window.audit.selectHistory("planner"); });
+      const card = page.locator('[data-transcript-id="bounded-output-tool"] .tool-call-card');
+      await card.waitFor();
+      await card.locator(".tool-truncated-pill").waitFor();
+      assert.equal(await card.count(), 1, "keep the tool card, not just an ellipsis in place of it");
+      await card.locator(".tool-call-header").click();
+      await card.locator(".tool-result-code").waitFor();
+      const rendered = await card.locator(".tool-result-code").innerText();
+      assert.ok(Buffer.byteLength(rendered) <= 100 * 1024);
+      assert.ok(rendered.startsWith("PREVIEW_HEAD"));
+      assert.ok(rendered.endsWith("..."));
+      assert.ok(!rendered.includes("HUGE_OUTPUT_TAIL"));
+      assert.match(await card.locator(".tool-summary").innerText(), /long-running-command/);
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });

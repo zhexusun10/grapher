@@ -3,6 +3,9 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ThinkingCard } from "../src/components/ThinkingCard.tsx";
+import { ToolCallCard } from "../src/components/ToolCallCard.tsx";
+import { parseTranscriptChunkLines } from "../src/services/transcriptParser.ts";
+import { TOOL_OUTPUT_PREVIEW_BYTES } from "../src/services/toolOutput.ts";
 import { injectStreamingCursor } from "../src/components/MarkdownRenderer.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
 import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
@@ -100,6 +103,37 @@ test("a settled progress-only tail shows the recovered tool as interrupted", () 
   assert.equal(toolCount(html), 1);
   assert.match(html, /data.csv/);
   assert.match(html, /tool-status interrupted/);
+});
+
+test("a giant tool result keeps its card and failure metadata, but only renders a bounded preview", () => {
+  const text = "PREVIEW_HEAD " + "中🚀".repeat(TOOL_OUTPUT_PREVIEW_BYTES) + "HUGE_OUTPUT_TAIL";
+  const result = parseTranscriptChunkLines([line({ type: "tool_execution_end", toolCallId: "giant-tool", toolName: "bash",
+    durationMs: 1234, isError: true, result: { content: [{ type: "text", text }], details: { exitCode: 2 } },
+  }).trimEnd()], [], new Map(), {
+    source: "output", byteOffset: 0, leadingFragment: false, inTagThinking: false, inFinalResponse: false,
+    finalResponseSuppressed: false, seenFirstUser: false, pendingUserStart: false, assistantStartIndex: 0,
+    userMessageStarts: new Set(), compacting: false,
+  }, { showUserTurns: false, skipFirstUser: false });
+  const item = result.currentItems[0];
+  assert.equal(result.currentItems.length, 1);
+  assert.equal(item.toolCallId, "giant-tool");
+  assert.equal(item.exitCode, 2);
+  assert.equal(item.durationMs, 1234);
+  assert.equal(item.status, "error");
+  assert.equal(item.truncated, true);
+  assert.ok(new TextEncoder().encode(item.result).byteLength <= TOOL_OUTPUT_PREVIEW_BYTES);
+  const html = renderToStaticMarkup(createElement(ToolCallCard, { item, defaultExpanded: true }));
+  assert.equal(toolCount(html), 1);
+  assert.match(html, /tool-truncated-pill|PREVIEW_HEAD/);
+  assert.match(html, /tool-result-code error/);
+  assert.match(html, /\.\.\./);
+  assert.doesNotMatch(html, /HUGE_OUTPUT_TAIL/);
+  // Direct/live card callers have the same cap, even without parsing first.
+  const direct = renderToStaticMarkup(createElement(ToolCallCard, { item: { ...item, result: text, truncated: false }, defaultExpanded: true }));
+  assert.match(direct, /tool-truncated-pill/);
+  assert.match(direct, /PREVIEW_HEAD/);
+  assert.doesNotMatch(direct, /HUGE_OUTPUT_TAIL/);
+  assert.ok(direct.length < TOOL_OUTPUT_PREVIEW_BYTES + 20_000);
 });
 
 test("a leading split JSONL record is buffered, not rendered as assistant plaintext", () => {

@@ -310,6 +310,27 @@ pub struct FeedbackWorkspace {
     pub target_execution_id: String,
     pub worktree: String,
     pub head: String,
+    /// Only additional senders of applicable <FEEDBACK>, never <ACCEPT>.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_sources: Vec<FeedbackSource>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackSource {
+    pub source_execution_id: String,
+    pub worktree: String,
+    pub head: String,
+}
+
+impl FeedbackWorkspace {
+    pub fn sources(&self) -> impl Iterator<Item = FeedbackSource> + '_ {
+        std::iter::once(FeedbackSource {
+            source_execution_id: self.source_execution_id.clone(),
+            worktree: self.worktree.clone(),
+            head: self.head.clone(),
+        }).chain(self.additional_sources.iter().cloned())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -321,6 +342,10 @@ pub struct PendingFeedback {
     pub source_head: String,
     pub target_head: Option<String>,
     pub target_revision: usize,
+    /// Stable reviewed execution; node heads may advance during directory handoff.
+    /// Legacy requests without this field retain their exact-head validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_execution_id: Option<String>,
     pub accepted: bool,
     pub output_offset: usize,
     pub output_bytes: usize,
@@ -1359,6 +1384,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 let continuation = node.pending_messages.is_empty() && continuation_nodes.contains(name)
                     && (node.model_config.is_some()
                         || node.error.as_deref().is_some_and(is_interrupted_error));
+                // A failed multi-source repair has a queued user continuation
+                // that duplicates the node instruction. Claim it so the retry
+                // keeps the feedback batch input and cannot re-batch the text.
+                if node.pending_messages.len() == 1 && node.human_instruction
+                    && node.pending_messages[0].instruction == node.instruction
+                    && node.feedback_workspace.as_ref()
+                        .is_some_and(|input| !input.additional_sources.is_empty()) {
+                    node.pending_messages.clear();
+                    node.continuation = true;
+                }
                 let has_previous_result = node.head.is_some()
                     || state.executions.iter().any(|execution| {
                         execution.node == *name
@@ -1737,7 +1772,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }
                 if *name == target {
                     if let Some(input) = &mut node.feedback_workspace {
-                        input.head = head.clone();
+                        // A batch is composed in a separate target slot. Its
+                        // sender commits remain immutable recovery evidence.
+                        if input.additional_sources.is_empty() {
+                            input.head = head.clone();
+                        }
                     } else if !node.human_instruction {
                         node.instruction.clear();
                         node.instruction_images = None;
@@ -1845,7 +1884,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 target_node.shared_workspace = *shared_workspace;
             } else if !instruction.is_empty() {
                 // Feedback retains the target's conversation, but a pinned
-                // workspace input can transfer the reviewer's completed tree.
+                // workspace input can transfer the sender's completed tree.
                 target_node.baseline_head = None;
                 target_node.instruction = instruction.clone();
                 target_node.instruction_images = None;

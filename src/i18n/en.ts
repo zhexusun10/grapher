@@ -492,6 +492,7 @@ export const en: Record<string, string> = {
   "源目录直改中": "Direct source edit in progress",
   "源目录直改中（无快照）": "Editing the source directory directly (no snapshot)",
   "执行已停止，请检查失败或阻塞节点": "Execution stopped. Check failed or blocked nodes",
+  "执行已停止；请在失败节点的对话中发送介入指令以继续": "Execution has stopped; send an intervention message in the failed node's conversation to continue",
   "已暂停后续派发": "Further dispatch paused",
   "正在暂停": "Pausing",
   "正在停止运行中的节点…": "Stopping running nodes…",

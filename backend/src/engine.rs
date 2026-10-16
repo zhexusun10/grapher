@@ -23,6 +23,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+mod tool_output;
+
 #[cfg(not(feature = "fixture"))]
 pub(crate) mod prewarm;
 #[cfg(not(feature = "fixture"))]
@@ -1169,6 +1171,7 @@ fn run_pi_with_timeout(
     let mut timed_out = false;
     let mut agent_ended = None::<Instant>;
     let mut first_output_ms = None;
+    let mut tool_output = tool_output::ToolOutputProjection::default();
     loop {
         // Planners/nodes need a steer handoff window. The Partitioner has no
         // follow-up commands, so close RPC stdin as soon as its turn settles.
@@ -1313,6 +1316,12 @@ fn run_pi_with_timeout(
                         _ => {}
                     }
                 }
+                // Runtime decisions above see the original Pi event. Only the
+                // outbound display log is projected; Pi's session/tool context
+                // is untouched and old persisted byte ranges are not rewritten.
+                if let Some(event) = event.as_mut() {
+                    if !tool_output.project(event) { continue; }
+                }
                 if let Some(object) = event.as_mut().and_then(Value::as_object_mut) {
                     object.insert("grapherReceivedAt".into(), crate::model::now().into());
                 }
@@ -1427,6 +1436,13 @@ fn run_pi_with_timeout(
 
 pub(crate) const FEEDBACK_INSTRUCTIONS: &str = "\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.";
 
+/// A malformed verdict is a protocol error, not a node failure: the runtime
+/// synchronously pushes this repair turn into the node's own session before
+/// giving up. Two repairs keep the protocol nudge bounded like the runtime's
+/// feedback budget cap.
+pub(crate) const FEEDBACK_REPAIR_PROMPT: &str = "Feedback Protocol Error: final line must be exactly <ACCEPT> or <FEEDBACK>.";
+pub(crate) const FEEDBACK_REPAIR_ATTEMPTS: usize = 2;
+
 pub fn execute(
     config: &Config,
     execution: &Execution,
@@ -1505,6 +1521,44 @@ pub fn feedback(output: &str) -> Result<bool, String> {
         Some("<FEEDBACK>") => Ok(true),
         _ => Err("Feedback protocol error: final line must be exactly <ACCEPT> or <FEEDBACK>".into()),
     }
+}
+
+/// Push bounded protocol-repair turns into the node's own session until its
+/// verdict is readable. The pushed turn resumes the same Pi session, so the
+/// node only restates its verdict; it never repeats the task. Exhausted
+/// repairs propagate the original protocol error so completion still fails
+/// closed.
+pub fn repair_feedback_verdict(
+    config: &Config,
+    execution: &Execution,
+    output: String,
+    resume_execution_id: Option<&str>,
+    root: &Path,
+    on_output: &mut impl FnMut(String),
+) -> Result<String, String> {
+    let mut output = output;
+    for attempt in 1..=FEEDBACK_REPAIR_ATTEMPTS {
+        if feedback(&output).is_ok() {
+            return Ok(output);
+        }
+        eprintln!(
+            "[Grapher] [Execution] Node '{}' did not end with a standalone <ACCEPT>/<FEEDBACK> line; pushing protocol repair to its session ({attempt}/{FEEDBACK_REPAIR_ATTEMPTS})",
+            execution.node
+        );
+        output = execute(
+            config,
+            execution,
+            FEEDBACK_REPAIR_PROMPT,
+            true,
+            resume_execution_id,
+            false,
+            false,
+            None,
+            root,
+            &mut *on_output,
+        )?;
+    }
+    feedback(&output).map(|_| output)
 }
 
 #[cfg(test)]
@@ -1676,6 +1730,58 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         .unwrap();
         assert!(claim_warm_node(&config, &repository, &session_dir, &session_id).is_none());
         invalidate_warm_node();
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn tool_output_projection_in_real_rpc_reader_bounds_only_the_display_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("large_tool_rpc.py");
+        fs::write(&script, r#"import json, sys
+request = json.loads(sys.stdin.readline())
+print(json.dumps({'type':'response','id':request['id'],'success':True}), flush=True)
+text = 'head ' + 'x' * 1200000 + ' original tail'
+with open('original-tool-result.txt', 'w', encoding='utf-8') as f: f.write(text)
+print(json.dumps({'type':'tool_execution_start','toolCallId':'one','toolName':'bash','args':{'command':'long job'}}), flush=True)
+for i in range(200):
+    print(json.dumps({'type':'tool_execution_update','toolCallId':'one','toolName':'bash','partialResult':{'content':[{'type':'text','text':text[:32000]}]}}), flush=True)
+result = {'content':[{'type':'text','text':text}],'details':{'exitCode':0}}
+print(json.dumps({'type':'tool_execution_end','toolCallId':'one','toolName':'bash','durationMs':42,'result':result}), flush=True)
+message = {'role':'toolResult','toolCallId':'one','content':result['content']}
+print(json.dumps({'type':'message_end','message':message}), flush=True)
+print(json.dumps({'type':'agent_end','messages':[message]}), flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'FINAL_UNCHANGED'}]}}), flush=True)
+print(json.dumps({'type':'agent_settled'}), flush=True)
+sys.stdin.read()
+"#).unwrap();
+        let config = Config {
+            environment: None, engine: "pi".into(), pi_command: test_python(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
+            role_models: Default::default(), post_task_review: false,
+        };
+        let mut output = String::new();
+        let result = run_pi(PiRequest {
+            role: PiRole::Partitioner, config: &config, cwd: temp.path(), task: "test",
+            session_dir: &temp.path().join("session"), extension: None, tools: Some(""), session_id: None,
+            extra_args: vec![], environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None, images: None,
+        }, |line| output.push_str(&line)).unwrap();
+        assert_eq!(result, "FINAL_UNCHANGED");
+        assert!(fs::read_to_string(temp.path().join("original-tool-result.txt")).unwrap().ends_with("original tail"));
+        assert!(fs::metadata(temp.path().join("original-tool-result.txt")).unwrap().len() > 1_000_000);
+        let events: Vec<Value> = output.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+        let updates: Vec<_> = events.iter().filter(|event| event["type"] == "tool_execution_update").collect();
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].get("partialResult").is_none());
+        let tool = events.iter().find(|event| event["type"] == "tool_execution_end").unwrap();
+        let preview = tool["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(preview.len() <= 100 * 1024);
+        assert!(preview.ends_with("\n..."));
+        assert_eq!(tool["result"]["details"]["truncated"], true);
+        assert_eq!(tool["result"]["details"]["exitCode"], 0);
+        assert_eq!(tool["durationMs"], 42);
+        assert!(output.len() < 400 * 1024, "repeated progress and aggregate copies must not restore giant output");
     }
 
     #[cfg(feature = "fixture")]

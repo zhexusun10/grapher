@@ -119,7 +119,8 @@ identity or a security sandbox.
 | --- | --- | --- |
 | Root/new slot | Checkout the recorded source commit | Prepare a private working tree; any source files outside the recorded commit are copied once from the selected source baseline |
 | Linear A → B | B starts from A's committed result | Reuse/hand off A's directory when possible |
-| Feedback B → A | A receives B's committed result and normal Git ancestry | Reuse B's directory after ownership, generation, budget and drain checks |
+| Single-source feedback B → A | A receives B's committed result and normal Git ancestry | Reuse B's directory after ownership, generation, budget and drain checks |
+| Concurrent feedback to A | Git merges only applicable feedback senders' pinned commits | Compose in a separate target-owned slot; retain the senders' directories as immutable evidence |
 | Fan-out | Each branch has a distinct Git working tree and result history | One branch may take the parent slot; other branches get independent slots |
 | Fan-in | Git merges all parent commits; conflicts include formerly ignored paths and `.gitignore` | The selected parent directory is used for the merge. Runtime reuses a verified environment at that current workspace when possible; otherwise the downstream execution is unbound. Parent environments need not agree and are never directory-merged |
 
@@ -149,15 +150,38 @@ A completed workspace that is modified after completion fails the feedback
 handoff cleanliness check. The result must first be represented by a new
 execution/snapshot; Runtime does not silently absorb an unrecorded mutation.
 
+The one exception is residue left by the target's own failed repair attempt. A
+single-source handoff executes the target in the sender's directory, so a
+failed attempt can leave an unrecorded after-snapshot commit or interrupted
+writes there. The retry adopts that live head as its base — recording it
+through the retry's Prepared input — provided the pinned input is still a Git
+ancestor of the live tree and the previous attempt failed in that same
+directory. External mutations, sender drift, discarded pinned history and
+multi-source senders remain refused.
+
 ## Feedback and history edits
 
-For B → A feedback:
+For feedback to A:
 
-1. Runtime applies budget, generation and drain rules.
-2. B's completed Git working tree and commit become A's repair input.
-3. A's own Pi history is forked; B's conversation is never imported.
-4. A's next execution produces another Git snapshot containing all project
-   files, including files that match `.gitignore`.
+1. Runtime applies the [budget, generation and batching rules](runtime.md#bounded-feedback).
+2. A single applicable sender B hands off its completed Git working tree and
+   commit. For multiple senders, Runtime pins every contributing execution,
+   directory and commit, then composes their Git results in a separate
+   target-owned slot before A's agent starts. Only applicable `<FEEDBACK>`
+   senders contribute; parallel `<ACCEPT>` workspaces are not merged into repair.
+3. Every contributing directory must still be Run-owned, clean and at its
+   recorded commit. Sources stay reserved against reuse/reclamation until the
+   repair releases them. A real Git conflict invokes the existing Merger;
+   failed composition preserves the partial slot and original source evidence
+   without starting A's agent. Retry can recompose from those immutable inputs.
+   Managed environment directories are never merged; normal environment reuse
+   or best-effort unbound selection applies at the new slot.
+4. A's own Pi history is forked; sender conversations are never imported.
+   A failed multi-source repair with Prepared evidence retains its partial target workspace
+   for continuation rather than replacing it with the senders' old files.
+5. A's next execution produces another Git snapshot containing all project
+   files, including files that match `.gitignore`. Cross-layer regressions are
+   in [feedback batch tests](../../backend/src/feedback_batch_tests.rs).
 
 History edits retain the existing Git rollback/branch behavior. There is no
 separate project-file `before-*` snapshot to restore and no second file
