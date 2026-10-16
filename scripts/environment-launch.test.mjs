@@ -29,9 +29,9 @@ test('declared hook runs before factories and cannot change Pi/Runtime identity 
 });
 
 test('Pi PATH preprocessing and shell startup variables cannot change managed Bash binding', () => {
-  const result = run(base(), "console.log(JSON.stringify(managedBashOptions({env:{PATH:'old',Path:'old-too',bAsH_EnV:'poison',ENV:'poison',KEEP:'yes'}}).env))");
+  const result = run(base(), "console.log(JSON.stringify(managedBashOptions({env:{PATH:'old',Path:'old-too',bAsH_EnV:'poison',ENV:'poison',PYTHONDONTWRITEBYTECODE:'0',KEEP:'yes'}}).env))");
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { KEEP: 'yes', PATH: dirname(process.execPath) });
+  assert.deepEqual(JSON.parse(result.stdout), { KEEP: 'yes', PYTHONDONTWRITEBYTECODE: '1', PATH: dirname(process.execPath) });
 });
 
 test('actual native Bash PATH has no implicit MSYS host bins and temporary exports do not rebind the next call', () => {
