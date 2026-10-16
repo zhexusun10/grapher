@@ -75,6 +75,33 @@ test("a tail result without its start still has a tool card, never raw JSON", ()
   assert.doesNotMatch(html, /&quot;tool_execution_end&quot;/);
 });
 
+test("a progress-only tail renders one running tool without replaying cumulative stdout", () => {
+  const progress = { type: "tool_execution_update", toolCallId: "progress-tail", toolName: "bash",
+    args: { command: "python long_job.py" }, partialResult: { content: [{ type: "text", text: "CUMULATIVE_STDOUT" }] } };
+  const output = Array.from({ length: 20 }, () => line(progress)).join("");
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, compact: true, startOffset: 400 }));
+  assert.equal(toolCount(html), 1);
+  assert.match(html, /python long_job.py/);
+  assert.match(html, /tool-status running/);
+  assert.doesNotMatch(html, /CUMULATIVE_STDOUT|&quot;tool_execution_update&quot;/);
+  const completed = renderToStaticMarkup(createElement(VirtualizedTranscript, { output: output + line({
+    type: "tool_execution_end", toolCallId: "progress-tail", toolName: "bash", isError: false,
+    result: { content: [{ type: "text", text: "FINAL_RESULT" }], details: { exitCode: 0 } },
+  }), compact: true, startOffset: 400, settled: true }));
+  assert.equal(toolCount(completed), 1);
+  assert.match(completed, /tool-call-card terminal success/);
+  assert.doesNotMatch(completed, /tool-status running|tool-status interrupted/);
+});
+
+test("a settled progress-only tail shows the recovered tool as interrupted", () => {
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output: line({
+    type: "tool_execution_update", toolCallId: "interrupted-tail", toolName: "read", args: { path: "data.csv" },
+  }), compact: true, startOffset: 400, settled: true }));
+  assert.equal(toolCount(html), 1);
+  assert.match(html, /data.csv/);
+  assert.match(html, /tool-status interrupted/);
+});
+
 test("a leading split JSONL record is buffered, not rendered as assistant plaintext", () => {
   const full = line({ type: "tool_execution_end", toolCallId: "huge-result", toolName: "read",
     result: { content: [{ type: "text", text: "FRAGMENT_PAYLOAD中文🚀".repeat(100) }] } });

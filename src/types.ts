@@ -238,6 +238,9 @@ export interface TranscriptItem {
   thinkingContentIndex?: number;
   // Raw stdout is displayed as text but is not assistant RPC stream content.
   rawOutput?: boolean;
+  // Runtime's plain-text final-response fallback, not a second model message.
+  // Absolute provenance lets older-page parsing retire only its matching copy.
+  finalResponseCopy?: { source: string; offset: number };
   toolName?: string;
   toolCallId?: string;
   args?: Record<string, any>;

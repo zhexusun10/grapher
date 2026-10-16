@@ -440,7 +440,7 @@ const POST_TASK_REVIEW_PROMPT: &str = "All tasks you assigned are completed. Con
 /// Rework semantics shared by the injected Planner status block and the
 /// post-task review turn so revisions price downstream re-runs correctly.
 /// Runtime enforces the same rule in `revision_affected` regardless.
-const PLANNER_REWORK_NOTE: &str = "Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the new dependency filesystem state); unrelated branches keep their results and history.";
+const PLANNER_REWORK_NOTE: &str = "Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the updated dependencies' project-file results); unrelated branches keep their results and history.";
 
 fn post_task_review_task() -> String {
     format!("{POST_TASK_REVIEW_PROMPT}\n\n{PLANNER_REWORK_NOTE}")

@@ -2,11 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import {
-  parseTranscriptChunkLines,
-  VirtualizedTranscript,
-  type ParseTranscriptChunkState,
-} from "../src/components/VirtualizedTranscript.tsx";
+import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
+import { parseTranscriptChunkLines, type ParseTranscriptChunkState } from "../src/services/transcriptParser.ts";
 
 const line = (event: unknown) => JSON.stringify(event) + "\n";
 

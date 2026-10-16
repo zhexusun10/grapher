@@ -295,10 +295,10 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
     assert_eq!(plan.warnings.len(), 2);
     assert!(plan.warnings.iter().all(|warning| warning.starts_with("W303:")));
     assert!(plan.warnings.iter().any(|warning| warning ==
-        "W303: If <FEEDBACK> from review to frontend is applied, the target and dependency descendants will be invalidated: delivery, frontend, inspect, review. Completed results must be recomputed; frontend continues its conversation. Nodes outside this set are unaffected."
+        "W303: If <FEEDBACK> from review to frontend is applied, the target and dependency descendants will be invalidated: delivery, frontend, inspect, review. Completed results must be recomputed; frontend continues from its own conversation history. Nodes outside this set are unaffected."
     ));
     assert!(plan.warnings.iter().any(|warning| warning ==
-        "W303: If <FEEDBACK> from inspect to spec is applied, the target and dependency descendants will be invalidated: backend, delivery, frontend, inspect, review, spec. Completed results must be recomputed; spec continues its conversation. Nodes outside this set are unaffected."
+        "W303: If <FEEDBACK> from inspect to spec is applied, the target and dependency descendants will be invalidated: backend, delivery, frontend, inspect, review, spec. Completed results must be recomputed; spec continues from its own conversation history. Nodes outside this set are unaffected."
     ));
     // Compare the reported set to the actual event, not a size heuristic or
     // merely the dependency path from the target to the feedback source.

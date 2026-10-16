@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { FOLLOW_LATEST_EVENT, transcriptScrollParent } from "../services/transcriptScroll";
-import { TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
+import { MAX_AUTO_TRANSCRIPT_BYTES, TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 import { useStableCallback } from "./useStableCallback";
 
 function needsInitialTranscriptFill(element: HTMLElement | null, hasOlder: boolean, error: string): boolean {
@@ -13,16 +13,17 @@ function needsInitialTranscriptFill(element: HTMLElement | null, hasOlder: boole
 }
 
 /** Fill actual history to two viewports, ignoring task/graph/composer chrome.
- * The first byte page is not display readiness: folded cards and split records
- * may leave very little visible history. Wait for the fill and row measurements. */
+ * Sparse progress-only logs may never fill that height. Bound each automatic
+ * burst by bytes, then reveal measured rows and wait for another upward gesture. */
 export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, hasOlder: boolean,
   busy: boolean, error: string, progress: unknown, loadOlder: (preserveReading: boolean) => void,
-  ready: boolean): boolean {
+  ready: boolean, loadedBytes: number): boolean {
   const load = useStableCallback(loadOlder);
   const [initialReady, setInitialReady] = useState(false);
   const initialReadyRef = useRef(false);
   const measuredViewportRef = useRef("");
   const busyRetryRef = useRef<number | null>(null);
+  const autoFillStartRef = useRef(0);
   useLayoutEffect(() => {
     if (!ready) { measuredViewportRef.current = ""; return; }
     const element = ref.current;
@@ -59,7 +60,8 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
         const relativeTop = parent.getBoundingClientRect().top - element.getBoundingClientRect().top;
         const threshold = Math.max(480, parent.clientHeight * TRANSCRIPT_VIEWPORT_BUFFER);
         const readingNearTop = hasOlder && parent.dataset.transcriptHistoryReading === "true" && relativeTop >= -threshold && relativeTop <= threshold;
-        if (needsInitialTranscriptFill(element, hasOlder, error) || readingNearTop) {
+        const withinBudget = loadedBytes - autoFillStartRef.current < MAX_AUTO_TRANSCRIPT_BYTES;
+        if (withinBudget && (needsInitialTranscriptFill(element, hasOlder, error) || readingNearTop)) {
           measuredViewportRef.current = "";
           load(readingNearTop);
           return;
@@ -78,17 +80,30 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
         }
       });
     };
+    const resumeFill = (event: Event) => {
+      if ((event.target as HTMLElement).closest?.("input, textarea, [contenteditable=true]")) return;
+      if (event instanceof WheelEvent && event.deltaY >= -0.5) return;
+      if (event instanceof KeyboardEvent && !["ArrowUp", "PageUp", "Home"].includes(event.key) && !(event.key === " " && event.shiftKey)) return;
+      autoFillStartRef.current = loadedBytes;
+      check();
+    };
     const observer = new ResizeObserver(check);
     observer.observe(element); observer.observe(parent);
+    parent.addEventListener("wheel", resumeFill, { passive: true });
+    parent.addEventListener("touchmove", resumeFill, { passive: true });
+    parent.addEventListener("keydown", resumeFill);
     parent.addEventListener(FOLLOW_LATEST_EVENT, check);
     document.addEventListener("visibilitychange", check);
     check();
     return () => {
       observer.disconnect(); parent.removeEventListener(FOLLOW_LATEST_EVENT, check);
+      parent.removeEventListener("wheel", resumeFill);
+      parent.removeEventListener("touchmove", resumeFill);
+      parent.removeEventListener("keydown", resumeFill);
       document.removeEventListener("visibilitychange", check);
       if (frame !== null) cancelAnimationFrame(frame);
       if (busyRetryRef.current !== null) { clearTimeout(busyRetryRef.current); busyRetryRef.current = null; }
     };
-  }, [ref, ready, hasOlder, busy, error, progress, load]);
+  }, [ref, ready, hasOlder, busy, error, progress, loadedBytes, load]);
   return initialReady;
 }

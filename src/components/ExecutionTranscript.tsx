@@ -125,7 +125,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
   });
 
   const initialReady = useAutoTranscriptHistory(wrapperRef, hasOlder, loadingOlder, error, window,
-    preserveReading => { void loadOlder(preserveReading); }, ready);
+    preserveReading => { void loadOlder(preserveReading); }, ready, window ? window.end - window.start : 0);
 
   useLayoutEffect(() => {
     notifyLoading(!initialReady);

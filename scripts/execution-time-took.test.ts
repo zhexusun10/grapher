@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateExecutionDurationMs } from "../src/components/ExecutionTimeTook.tsx";
+import { calculateExecutionDurationMs, calculatePlannerDurationMs } from "../src/components/ExecutionTimeTook.tsx";
 import { formatToolDuration } from "../src/utils/toolTiming.ts";
 import type { Execution } from "../src/types.ts";
 
@@ -68,3 +68,69 @@ test("uses now - startedAt when execution is running without completedAt", () =>
   assert.equal(ms, 2500);
   assert.equal(formatToolDuration(ms!), "2.5s");
 });
+
+test("calculatePlannerDurationMs returns null when planner is idle and has no duration", () => {
+  assert.equal(calculatePlannerDurationMs({ isPlanning: false, durationSeconds: null }), null);
+  assert.equal(calculatePlannerDurationMs({ isPlanning: false, durationSeconds: undefined }), null);
+  assert.equal(calculatePlannerDurationMs({ isPlanning: false, durationSeconds: Number.NaN }), null);
+});
+
+test("calculatePlannerDurationMs formats settled duration in English aligned with formatToolDuration", () => {
+  // sub-10-second duration keeps one decimal
+  const msSub10 = calculatePlannerDurationMs({ isPlanning: false, durationSeconds: 3.5 });
+  assert.equal(msSub10, 3500);
+  assert.equal(formatToolDuration(msSub10!), "3.5s");
+
+  // 10s to 60s
+  const ms15 = calculatePlannerDurationMs({ isPlanning: false, durationSeconds: 15 });
+  assert.equal(ms15, 15000);
+  assert.equal(formatToolDuration(ms15!), "15s");
+
+  // >= 60s formats in English ("1m 15s", not Chinese "1分15秒")
+  const ms75 = calculatePlannerDurationMs({ isPlanning: false, durationSeconds: 75 });
+  assert.equal(ms75, 75000);
+  assert.equal(formatToolDuration(ms75!), "1m 15s");
+
+  // >= 1h formats in English ("1h 1m 5s")
+  const msHour = calculatePlannerDurationMs({ isPlanning: false, durationSeconds: 3665 });
+  assert.equal(msHour, 3665000);
+  assert.equal(formatToolDuration(msHour!), "1h 1m 5s");
+});
+
+test("calculatePlannerDurationMs calculates live duration when isPlanning is true, ignoring old durationSeconds from previous planning turns", () => {
+  // Scenario: turn 1 took 18.5s. Now user appends planning info, isPlanning becomes true.
+  // The live duration must compute from now - startedAt and NOT stay frozen at 18.5s.
+  const oldDurationSeconds = 18.5;
+  const startedAt = 10000;
+  const now = 13500; // 3.5s into the new turn
+  const liveMs = calculatePlannerDurationMs({
+    isPlanning: true,
+    startedAt,
+    durationSeconds: oldDurationSeconds,
+    now,
+  });
+  assert.equal(liveMs, 3500);
+  assert.equal(formatToolDuration(liveMs!), "3.5s");
+
+  // At 25s into the new turn
+  const now25 = 35000;
+  const liveMs25 = calculatePlannerDurationMs({
+    isPlanning: true,
+    startedAt,
+    durationSeconds: oldDurationSeconds,
+    now: now25,
+  });
+  assert.equal(liveMs25, 25000);
+  assert.equal(formatToolDuration(liveMs25!), "25s");
+});
+
+test("calculatePlannerDurationMs returns 0 when isPlanning is true without startedAt", () => {
+  const ms = calculatePlannerDurationMs({
+    isPlanning: true,
+    startedAt: null,
+    durationSeconds: 12.3,
+  });
+  assert.equal(ms, 0);
+  assert.equal(formatToolDuration(ms!), "0.0s");
+});
+

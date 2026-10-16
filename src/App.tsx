@@ -485,6 +485,7 @@ export default function App() {
     plannerMessageStart: 0,
     representedPlanningIds: [] as string[],
     isContinuation: false,
+    startedAt: undefined as number | undefined,
     partitionerThinking: "",
     partitionerThinkingActive: false,
     partitionerText: "",
@@ -667,7 +668,9 @@ export default function App() {
       }
       const message = recordMessage(displayMsg);
       setPlannerStream(prev => ({
-        ...prev, items: [...closeRunningThinkingItem(prev.items), {
+        ...prev,
+        startedAt: prev.startedAt || Date.now(),
+        items: [...closeRunningThinkingItem(prev.items), {
           id: message.id, type: "text", role: "user", content: displayMsg, timestamp: message.timestamp,
         }],
       }));
@@ -1430,6 +1433,7 @@ export default function App() {
         plannerMessageStart: 0,
         representedPlanningIds: [],
         isContinuation: false,
+        startedAt: Date.now(),
         partitionerThinking: "",
         partitionerThinkingActive: false,
         partitionerText: "",
@@ -1484,6 +1488,7 @@ export default function App() {
         stage: "planning",
         isContinuation: true,
         plannerMessageStart: 1,
+        startedAt: Date.now(),
         items: [
           {
             id: newMsg.id,
@@ -2119,6 +2124,7 @@ export default function App() {
         representedPlanningIds: snapshot.planningId && !prev.representedPlanningIds.includes(snapshot.planningId)
           ? [...prev.representedPlanningIds, snapshot.planningId] : prev.representedPlanningIds,
         stage: "completed",
+        startedAt: undefined,
       }));
     } catch (err: any) {
       if (!planningRecovery.current(scope)) return;
@@ -2164,6 +2170,7 @@ export default function App() {
         );
         return {
           ...prev,
+          startedAt: undefined,
           items: alreadyHas
             ? closed
             : [

@@ -53,6 +53,134 @@ async function newPage(handler) {
   return { context, page, errors };
 }
 
+test("transcript and parser hot updates preserve the mounted conversation", { timeout: 30_000 }, async () => {
+  // The other history fixtures disable HMR. Exercise real Vite/React refresh
+  // boundaries here without editing source files or touching a running backend.
+  const hmrServer = await createServer({ cacheDir: "node_modules/.vite-transcript-hmr",
+    server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, watch: null },
+    plugins: [{ name: "transcript-hmr-fixture", configureServer(vite) {
+      vite.middlewares.use(async (req, res, next) => {
+        if (!req.url.startsWith("/__hmr")) return next();
+        res.setHeader("Content-Type", "text/html");
+        res.end(await vite.transformIndexHtml(req.url, '<html><body><div id="root"></div><script type="module" src="/scripts/fixtures/frontend-audit.tsx"></script></body></html>'));
+      });
+    } }],
+  });
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  const invalidations = [];
+  page.on("console", message => { if (message.text().includes("Could not Fast Refresh")) invalidations.push(message.text()); });
+  try {
+    await hmrServer.listen();
+    await page.goto(`http://127.0.0.1:${hmrServer.httpServer.address().port}/__hmr?case=cardPresentation&type=tool&source=node`, { waitUntil: "networkidle" });
+    await page.evaluate(() => window.audit.showCards(true));
+    await page.locator(".tool-call-header").click();
+    await page.locator(".tool-call-body").waitFor();
+    await page.evaluate(async () => {
+      window.hmrAudit = { updates: 0, reloads: 0 };
+      const { createHotContext } = await import("/@vite/client");
+      const hot = createHotContext("/__transcript_hmr_probe");
+      hot.on("vite:afterUpdate", () => window.hmrAudit.updates++);
+      hot.on("vite:beforeFullReload", () => window.hmrAudit.reloads++);
+    });
+    let expectedUpdates = 0;
+    for (const url of ["/src/components/VirtualizedTranscript.tsx", "/src/services/transcriptParser.ts"]) {
+      const module = await hmrServer.moduleGraph.getModuleByUrl(url);
+      assert.ok(module, `${url} must be loaded in the browser`);
+      await hmrServer.reloadModule(module);
+      await page.waitForFunction(expected => window.hmrAudit?.updates >= expected, ++expectedUpdates);
+      assert.equal(await page.evaluate(() => window.hmrAudit.reloads), 0, "refresh must not reload the page");
+      await page.locator(".tool-call-body").waitFor();
+      assert.equal(await page.locator('[data-transcript-id="presentation-tool"]').count(), 1);
+    }
+    assert.deepEqual(invalidations, []);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); await hmrServer.close(); }
+});
+
+for (const view of ["node", "serial"]) {
+  test(`${view}: continuous live pages cannot starve initial history readiness`, { timeout: 30_000 }, async () => {
+    const history = Array.from({ length: 80 }, (_, i) => assistant(`STREAM_HISTORY_${i}`)).join("");
+    let streaming = true, forwardReads = 0;
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      const command = new URL(route.request().url()).pathname.slice(5);
+      if (command !== "get_execution_output") return route.fulfill({ json: { result: {} } });
+      const content = body.tail ? history : streaming ? line({ type: "tool_execution_update", toolCallId: "busy-tool", partialResult: { content: [] } }) : "";
+      if (!body.tail) forwardReads++;
+      const start = body.tail ? 0 : body.offset;
+      const end = start + Buffer.byteLength(content);
+      return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        content, startOffset: start, nextOffset: end, totalBytes: streaming ? end + 1 : end,
+        complete: !streaming, status: "running" } } });
+    });
+    try {
+      await page.goto(`${origin}/__history?case=latestScroll&layout=live-paged&view=${view}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => document.querySelector('[data-execution-id]')?.getAttribute("aria-busy") === "false", null, { timeout: 4000 });
+      await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
+      assert.ok(forwardReads > 1, "exercise an ongoing forward-page backlog");
+      assert.equal(streaming, true, "history must reveal without pausing the agent or clicking the pane");
+      assert.deepEqual(errors, []);
+    } finally { streaming = false; await context.close(); }
+  });
+}
+
+for (const role of ["node", "planner"]) {
+  test(`${role}: sparse tool progress has bounded automatic history fill and remains readable`, { timeout: 30_000 }, async () => {
+    const update = line({ type: "tool_execution_update", toolCallId: "long-running-tool", toolName: "bash",
+      args: { command: "long-running-command" }, partialResult: { content: [{ type: "text", text: "x".repeat(64 * 1024) }] } });
+    const parts = Array.from({ length: 10 }, () => update.repeat(16));
+    parts[0] = assistant("OLD_CONTEXT") + startTool("long-running-tool", "long-running-command") + parts[0];
+    const data = Buffer.from(parts.join(""));
+    const boundaries = [0];
+    for (const part of parts) boundaries.push(boundaries.at(-1) + Buffer.byteLength(part));
+    let olderReads = 0;
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      const command = new URL(route.request().url()).pathname.slice(5);
+      if (!["get_execution_output", "get_planning_output"].includes(command)) return route.fulfill({ json: { result: {} } });
+      // The Planner fixture starts on Node; do not count an unrelated Node read
+      // while switching to the history under test.
+      if (role === "planner" && command === "get_execution_output") return route.fulfill({ json: { result: {
+        runId: body.runId, executionId: body.executionId, content: "", startOffset: 0,
+        nextOffset: 0, totalBytes: 0, complete: true, status: "running",
+      } } });
+      const end = body.before ?? data.length;
+      const start = body.tail ? boundaries[Math.max(0, boundaries.indexOf(end) - 1)] : body.offset;
+      if (body.before !== undefined) olderReads++;
+      return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", running: true,
+        content: data.subarray(start, end).toString(), startOffset: start, nextOffset: end, totalBytes: data.length,
+        complete: end === data.length, status: "running" } } });
+    });
+    try {
+      await page.goto(role === "node" ? `${origin}/__history?case=latestScroll&layout=live-paged&view=node`
+        : `${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+      if (role === "planner") {
+        await page.waitForFunction(() => !!window.audit?.selectHistory);
+        await page.evaluate(() => window.audit.selectHistory("planner"));
+      }
+      const history = page.locator(role === "node" ? "[data-execution-id]" : ".planning-activity");
+      await page.waitForFunction(selector => document.querySelector(selector)?.getAttribute("aria-busy") === "false",
+        role === "node" ? "[data-execution-id]" : ".planning-activity");
+      await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
+      await page.waitForTimeout(300);
+      assert.ok(olderReads <= 5, `opening a sparse tail drained ${olderReads} old pages`);
+      const stoppedAt = olderReads;
+      await page.waitForTimeout(400);
+      assert.equal(olderReads, stoppedAt, "automatic loading must stop even with fewer than two viewports of rows");
+      assert.equal(await history.locator('[data-transcript-id="long-running-tool"]').count(), 1, "a tail starting inside tool progress still renders the running tool");
+      const scroller = page.locator(role === "node" ? ".initial-query-scroll" : "[data-shared-scroll]");
+      await scroller.evaluate(element => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+      });
+      for (let i = 0; i < 50 && olderReads === stoppedAt; i++) await page.waitForTimeout(20);
+      assert.ok(olderReads > stoppedAt, "another upward gesture can continue past the automatic byte budget");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 for (const [mode, turn] of [
   ["serial", "provisional"], ["serial", "initial"], ["serial", "follow-up"], ["graph", "initial"], ["graph", "follow-up"],
 ]) {

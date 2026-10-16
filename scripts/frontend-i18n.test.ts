@@ -107,18 +107,18 @@ test("provider errors include actionable hints and role localization", () => {
 
 test("execution graph plan warnings are localized without diagnostic code prefixes", () => {
   const w303Raw =
-    "W303: If <FEEDBACK> from verify_final_branch_b to integrate_branch_b is applied, the target and dependency descendants will be invalidated: integrate_branch_b, verify_final_branch_b. Completed results must be recomputed; integrate_branch_b continues its conversation. Nodes outside this set are unaffected.";
+    "W303: If <FEEDBACK> from verify_final_branch_b to integrate_branch_b is applied, the target and dependency descendants will be invalidated: integrate_branch_b, verify_final_branch_b. Completed results must be recomputed; integrate_branch_b continues from its own conversation history. Nodes outside this set are unaffected.";
   const w303Zh = localizePlanWarning(w303Raw, "zh-CN");
   assert.equal(
     w303Zh,
-    "若应用从 verify_final_branch_b 到 integrate_branch_b 的 <FEEDBACK>，目标节点及其依赖后代将被置为失效：integrate_branch_b, verify_final_branch_b。已完成的结果必须重新计算；integrate_branch_b 将继续其会话。该集合之外的节点不受影响。"
+    "若应用从 verify_final_branch_b 到 integrate_branch_b 的 <FEEDBACK>，目标节点及其依赖后代将被置为失效：integrate_branch_b, verify_final_branch_b。已完成的结果必须重新计算；integrate_branch_b 将基于自己的会话历史继续执行。该集合之外的节点不受影响。"
   );
   assert.ok(!w303Zh.includes("W303"));
 
   const w303En = localizePlanWarning(w303Raw, "en");
   assert.equal(
     w303En,
-    "If <FEEDBACK> from verify_final_branch_b to integrate_branch_b is applied, the target and dependency descendants will be invalidated: integrate_branch_b, verify_final_branch_b. Completed results must be recomputed; integrate_branch_b continues its conversation. Nodes outside this set are unaffected."
+    "If <FEEDBACK> from verify_final_branch_b to integrate_branch_b is applied, the target and dependency descendants will be invalidated: integrate_branch_b, verify_final_branch_b. Completed results must be recomputed; integrate_branch_b continues from its own conversation history. Nodes outside this set are unaffected."
   );
   assert.ok(!w303En.includes("W303"));
 
@@ -134,9 +134,14 @@ test("execution graph plan warnings are localized without diagnostic code prefix
   assert.equal(localizePlanWarning("W399: Generic warning text", "en"), "Generic warning text");
   assert.equal(localizePlanWarning("W399: Generic warning text", "zh-CN"), "Generic warning text");
 
-  // localizeError also formats plan warnings properly
-  assert.equal(localizeError(w303Raw, "zh-CN"), w303Zh);
-  assert.equal(localizeError(w303Raw, "en"), w303En);
+  // Retained warnings from older backends remain readable in both locales.
+  const legacyW303 = w303Raw.replace("continues from its own conversation history", "continues its conversation");
+  for (const warning of [w303Raw, legacyW303]) {
+    assert.equal(localizePlanWarning(warning, "zh-CN"), w303Zh);
+    assert.equal(localizePlanWarning(warning, "en"), w303En);
+    assert.equal(localizeError(warning, "zh-CN"), w303Zh);
+    assert.equal(localizeError(warning, "en"), w303En);
+  }
 });
 
 for (const [systemLanguage, preference] of [["zh-CN", "en"], ["en-US", "zh-CN"], ["fr-FR", "auto"]]) {

@@ -6,6 +6,7 @@ import {
   captureViewScrollState,
   distanceFromBottom,
   resolveViewScroll,
+  calculateWorkspaceDetailsScrollDelta,
   type ScrollMetrics,
 } from "../src/services/conversationScroll.ts";
 
@@ -125,3 +126,100 @@ test("Latest cancellation stops frames and reduced-motion reaches the bottom wit
     assert.equal(complete, 1);
   } finally { frames.restore(); }
 });
+
+test("workspace details panel toggle does not scroll on collapse", () => {
+  // Collapsing must never scroll the viewport up or down
+  const delta = calculateWorkspaceDetailsScrollDelta(
+    false, // nextOpen = false
+    180,   // current animator height
+    0,     // target height
+    600,   // panel bottom
+    500,   // visible bottom
+  );
+  assert.equal(delta, 0);
+});
+
+test("workspace details panel toggle scrolls only overflow on expand", () => {
+  // When panel bottom + growth exceeds visible bottom, scroll by the difference
+  const delta = calculateWorkspaceDetailsScrollDelta(
+    true, // nextOpen = true
+    0,    // current animator height
+    180,  // target height
+    400,  // panel bottom (before expand)
+    500,  // visible bottom
+  );
+  // futurePanelBottom = 400 + 180 = 580. visibleBottom = 500. Overflow = 80.
+  assert.equal(delta, 80);
+
+  // If panel already fits completely inside visible viewport, delta is 0
+  const noOverflowDelta = calculateWorkspaceDetailsScrollDelta(
+    true,
+    0,
+    180,
+    250,
+    500,
+  );
+  assert.equal(noOverflowDelta, 0);
+});
+
+test("workspace details panel re-expand mid-animation does not double-count height", () => {
+  // Suppose animator is partially open at height 100 with target height 180.
+  // panelBottom already includes the current 100px (e.g. 500px).
+  // Remaining growth is only 80px, so futurePanelBottom should be 500 + 80 = 580px, NOT 500 + 180 = 680px.
+  const delta = calculateWorkspaceDetailsScrollDelta(
+    true, // nextOpen = true
+    100,  // current animator height
+    180,  // target height
+    500,  // panel bottom (which already includes the 100px)
+    500,  // visible bottom
+  );
+  assert.equal(delta, 80);
+});
+
+test("repeated rapid expand and collapse cycles remain scroll-stable without ratcheting", () => {
+  let scrollTop = 500;
+  const panelDocumentTop = 1100;
+  const triggerHeight = 24;
+  const fullContentHeight = 180;
+  const visibleBottom = 700;
+
+  // Cycle 1: Expand from fully closed near the bottom of viewport
+  let animatorHeight = 0;
+  let panelBottomViewport = (panelDocumentTop + triggerHeight + animatorHeight) - scrollTop; // 624
+  let scrollDelta = calculateWorkspaceDetailsScrollDelta(
+    true,
+    animatorHeight,
+    fullContentHeight,
+    panelBottomViewport,
+    visibleBottom,
+  );
+  // futurePanelBottom = 624 + 180 = 804. visibleBottom = 700. Overflow = 104.
+  assert.equal(scrollDelta, 104);
+  scrollTop += scrollDelta; // 604
+  animatorHeight = fullContentHeight;
+
+  // Cycle 2: Collapse
+  panelBottomViewport = (panelDocumentTop + triggerHeight + animatorHeight) - scrollTop;
+  scrollDelta = calculateWorkspaceDetailsScrollDelta(
+    false,
+    animatorHeight,
+    0,
+    panelBottomViewport,
+    visibleBottom,
+  );
+  assert.equal(scrollDelta, 0); // No scroll on collapse
+  animatorHeight = 0;
+
+  // Cycle 3: Expand again after collapse settles
+  panelBottomViewport = (panelDocumentTop + triggerHeight + animatorHeight) - scrollTop; // 1124 - 604 = 520
+  scrollDelta = calculateWorkspaceDetailsScrollDelta(
+    true,
+    animatorHeight,
+    fullContentHeight,
+    panelBottomViewport,
+    visibleBottom,
+  );
+  // futurePanelBottom = 520 + 180 = 700 <= visibleBottom (700). Overflow = 0.
+  assert.equal(scrollDelta, 0); // Doesn't over-scroll or ratchet!
+});
+

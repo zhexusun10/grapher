@@ -115,7 +115,7 @@ function annotateProviderError(message: string, language: Locale): string {
 }
 
 const W303_REGEX =
-  /^(?:W303:\s*)?If\s+<FEEDBACK>\s+from\s+(.+?)\s+to\s+(.+?)\s+is\s+applied,\s+the\s+target\s+and\s+dependency\s+descendants\s+will\s+be\s+invalidated:\s*(.+?)\.\s*Completed\s+results\s+must\s+be\s+recomputed;\s*(.+?)\s+continues\s+its\s+conversation\.\s*Nodes\s+outside\s+this\s+set\s+are\s+unaffected\.?$/i;
+  /^(?:W303:\s*)?If\s+<FEEDBACK>\s+from\s+(.+?)\s+to\s+(.+?)\s+is\s+applied,\s+the\s+target\s+and\s+dependency\s+descendants\s+will\s+be\s+invalidated:\s*(.+?)\.\s*Completed\s+results\s+must\s+be\s+recomputed;\s*(.+?)\s+continues\s+(?:from\s+its\s+own\s+conversation\s+history|its\s+conversation)\.\s*Nodes\s+outside\s+this\s+set\s+are\s+unaffected\.?$/i;
 
 const W301_REGEX =
   /^(?:W301:\s*)?Nodes\s+(.+?)\s+have\s+identical\s+task\s+text;\s*they\s+may\s+duplicate\s+work\.\s*Confirm\s+that\s+this\s+is\s+intentional\.?$/i;
@@ -132,7 +132,7 @@ export function localizePlanWarning(warning: string, language: Locale = locale):
   if (m303) {
     return translate(
       language,
-      "若应用从 {0} 到 {1} 的 <FEEDBACK>，目标节点及其依赖后代将被置为失效：{2}。已完成的结果必须重新计算；{1} 将继续其会话。该集合之外的节点不受影响。",
+      "若应用从 {0} 到 {1} 的 <FEEDBACK>，目标节点及其依赖后代将被置为失效：{2}。已完成的结果必须重新计算；{1} 将基于自己的会话历史继续执行。该集合之外的节点不受影响。",
       m303[1],
       m303[2],
       m303[3]

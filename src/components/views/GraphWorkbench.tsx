@@ -23,12 +23,12 @@ import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
 import { shouldShowRouteBadge } from "../../services/executionRoute";
 import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
-import { captureViewScrollState, resolveViewScroll, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
+import { captureViewScrollState, resolveViewScroll, calculateWorkspaceDetailsScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
-import { ExecutionTimeTookText } from "../ExecutionTimeTook";
+import { ExecutionTimeTookText, PlannerTimeTookText } from "../ExecutionTimeTook";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
 import { plannerTurnIds } from "../../lib/plannerOutput";
@@ -37,7 +37,6 @@ import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { plannerUserTurns } from "../../services/plannerUserTurns";
 import { PlanningActivity } from "../PlanningActivity";
-import { formatSeconds } from "../PlanningSummaryCard";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
@@ -185,14 +184,15 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
   const animatorRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const rafIdRef = useRef<number | null>(null);
-  const lastScrollDeltaRef = useRef<number>(0);
   const interruptedRef = useRef<boolean>(false);
+  const cleanupListenersRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     return () => {
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
       }
+      cleanupListenersRef.current?.();
     };
   }, []);
 
@@ -211,6 +211,8 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
+    cleanupListenersRef.current?.();
+    cleanupListenersRef.current = null;
 
     const container =
       scrollContainerRef?.current ||
@@ -219,40 +221,33 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
     onBeforeToggle?.();
 
     const startHeight = animator.offsetHeight;
-    const measuredHeight = Math.max(content.offsetHeight, content.scrollHeight, animator.scrollHeight);
+    const measuredHeight = Math.max(content.offsetHeight, content.scrollHeight);
     const targetHeight = nextOpen ? (measuredHeight > 0 ? measuredHeight : 120) : 0;
 
     const startScrollTop = container ? container.scrollTop : 0;
     let scrollDelta = 0;
     interruptedRef.current = false;
 
-    if (container) {
+    if (container && nextOpen) {
       const visibleBottom = getConversationViewport(container).bottom - 12;
-
-      if (nextOpen) {
-        const panelRect = panel.getBoundingClientRect();
-        const futurePanelBottom = panelRect.bottom + targetHeight;
-        if (futurePanelBottom > visibleBottom) {
-          scrollDelta = futurePanelBottom - visibleBottom;
-        }
-        lastScrollDeltaRef.current = scrollDelta;
-      } else {
-        if (lastScrollDeltaRef.current > 0) {
-          scrollDelta = -Math.min(lastScrollDeltaRef.current, container.scrollTop);
-        } else {
-          const panelRect = panel.getBoundingClientRect();
-          if (panelRect.bottom >= visibleBottom - 24) {
-            scrollDelta = -Math.min(startHeight, container.scrollTop);
-          }
-        }
-        lastScrollDeltaRef.current = 0;
-      }
+      const panelRect = panel.getBoundingClientRect();
+      scrollDelta = calculateWorkspaceDetailsScrollDelta(
+        nextOpen,
+        startHeight,
+        targetHeight,
+        panelRect.bottom,
+        visibleBottom,
+      );
 
       const onUserScroll = () => {
         interruptedRef.current = true;
       };
-      container.addEventListener("wheel", onUserScroll, { passive: true, once: true });
-      container.addEventListener("touchmove", onUserScroll, { passive: true, once: true });
+      container.addEventListener("wheel", onUserScroll, { passive: true });
+      container.addEventListener("touchmove", onUserScroll, { passive: true });
+      cleanupListenersRef.current = () => {
+        container.removeEventListener("wheel", onUserScroll);
+        container.removeEventListener("touchmove", onUserScroll);
+      };
     }
 
     setIsOpen(nextOpen);
@@ -272,7 +267,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
       animator.style.height = `${currentH}px`;
       animator.style.opacity = `${currentOp}`;
 
-      if (container && scrollDelta !== 0 && !interruptedRef.current && container.dataset.transcriptScrollMode !== "latest") {
+      if (container && scrollDelta > 0 && !interruptedRef.current && container.dataset.transcriptScrollMode !== "latest") {
         container.scrollTop = startScrollTop + scrollDelta * ease;
       }
 
@@ -280,6 +275,8 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
         rafIdRef.current = requestAnimationFrame(tick);
       } else {
         rafIdRef.current = null;
+        cleanupListenersRef.current?.();
+        cleanupListenersRef.current = null;
         if (nextOpen) {
           animator.style.height = "auto";
           animator.style.opacity = "1";
@@ -1222,6 +1219,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     suppressAutoScrollRef.current = true;
     if (chatScrollRef.current) {
       prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+      lastScrollTopRef.current = chatScrollRef.current.scrollTop;
     }
     if (workspaceDetailsTimerRef.current !== null) {
       clearTimeout(workspaceDetailsTimerRef.current);
@@ -1232,6 +1230,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       suppressAutoScrollRef.current = false;
       if (chatScrollRef.current) {
         prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+        lastScrollTopRef.current = chatScrollRef.current.scrollTop;
       }
       handleChatScroll();
     }, 450);
@@ -1245,6 +1244,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     suppressAutoScrollRef.current = false;
     if (chatScrollRef.current) {
       prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+      lastScrollTopRef.current = chatScrollRef.current.scrollTop;
     }
     handleChatScroll();
   }, [handleChatScroll]);
@@ -2226,7 +2226,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   >
                     <p>model: {plannerModelInfo.model}</p>
                     <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
-                    <p>time took: {plannerRole ? formatSeconds(plannerRole.durationSeconds) : "counted when planning settles…"}</p>
+                    <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerStream?.startedAt} durationSeconds={plannerRole?.durationSeconds} /></p>
                   </WorkspaceDetailsPanel>
                 )}
               </div>

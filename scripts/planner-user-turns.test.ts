@@ -7,11 +7,13 @@ test("Planner status context is not shown as conversation text", () => {
   assert.equal(stripPlannerContext("Current graph node status:\n- worker: completed\n继续优化"), "继续优化");
   assert.equal(stripPlannerContext("Current graph node status:\n- worker: completed\n\n继续优化"), "继续优化");
   assert.equal(stripPlannerContext("User query:\n\nOriginal"), "Original");
-  // Current prompts carry the rework note between the header and the node list.
-  assert.equal(
-    stripPlannerContext("Current graph node status:\nModifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the new dependency filesystem state); unrelated branches keep their results and history.\n- worker: completed\n\n继续优化"),
-    "继续优化",
-  );
+  // Current and historical rework notes are transport context, not user text.
+  for (const dependencyInput of ["the updated dependencies' project-file results", "the new dependency filesystem state"]) {
+    assert.equal(
+      stripPlannerContext(`Current graph node status:\nModifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with ${dependencyInput}); unrelated branches keep their results and history.\n- worker: completed\n\n继续优化`),
+      "继续优化",
+    );
+  }
   // Legacy blocks carried the published-nodes paragraph before the status list.
   assert.equal(
     stripPlannerContext("Current graph node status:\nAlready published in this run: a, b. These nodes cannot be deleted; change their task to rework them.\n- a: completed\n- b: completed\n\n继续优化"),

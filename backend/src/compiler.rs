@@ -275,7 +275,7 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
                 errors.push(Diagnostic {
                     code: "E209".into(),
                     message: format!(
-                        "Redundant dependency {} → {}. Remove this direct edge: {} already provides execution ordering and carries upstream filesystem state to {}.",
+                        "Redundant dependency {} → {}. Remove this direct edge: {} already provides execution ordering and carries upstream project-file results to {}.",
                         edge.from, edge.to, path.join(" → "), edge.to
                     ),
                 });
@@ -311,7 +311,7 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         // Match the runtime's invalidation set exactly: target plus dependency
         // descendants, without following other feedback edges or judging size.
         warnings.push(format!(
-            "W303: If <FEEDBACK> from {} to {} is applied, the target and dependency descendants will be invalidated: {}. Completed results must be recomputed; {} continues its conversation. Nodes outside this set are unaffected.",
+            "W303: If <FEEDBACK> from {} to {} is applied, the target and dependency descendants will be invalidated: {}. Completed results must be recomputed; {} continues from its own conversation history. Nodes outside this set are unaffected.",
             edge.from,
             edge.to,
             downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", "),

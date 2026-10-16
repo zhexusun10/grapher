@@ -12,7 +12,7 @@ interface PlanningSummaryCardProps {
   defaultExpanded?: boolean;
 }
 
-/** Exported for the Planner conversation details panel. */
+/** Formats seconds into human-readable duration for summary cards. */
 export function formatSeconds(seconds: number): string {
   if (seconds == null || isNaN(seconds) || seconds < 0) return "0s";
   if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;

@@ -150,7 +150,8 @@ function HistoryRegressionFixture() {
 
 function LatestScrollFixture() {
   const layout = new URLSearchParams(location.search).get("layout");
-  const live = layout === "live-tool";
+  const pagedLive = layout === "live-paged";
+  const live = layout === "live-tool" || pagedLive;
   const nodeView = live && new URLSearchParams(location.search).get("view") === "node";
   const assistant = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
   const [output, setOutput] = useState(() => {
@@ -173,6 +174,7 @@ function LatestScrollFixture() {
     graph: { originalGoal: "Latest-scroll regression", nodes: [{ name: "task", task: "Inspect the long conversation" }], edges: [] },
     nodes: { task: { status: live ? "running" : "completed", revision: 0, instruction: "", error: null } },
     executions: [{ id: "latest-execution", node: "task", status: live ? "running" : "completed", revision: 0, attempt: 1, output,
+      ...(pagedLive ? { outputBytes: 10_000_000 } : {}),
       startedAt: 1, completedAt: live ? null : 2, sessionId: "latest-session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
   const noop = () => {};
   return mounted ? <div style={{ height: 800, display: "flex" }}>

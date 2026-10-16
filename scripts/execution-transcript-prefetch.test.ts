@@ -5,10 +5,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { runtimeService } from "../src/services/runtime.ts";
 import { ExecutionTranscript, executionTranscriptCache, prefetchExecutionTranscript } from "../src/components/ExecutionTranscript.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
+import { parseTranscriptChunkLines, type ParseTranscriptChunkState } from "../src/services/transcriptParser.ts";
 import { planningTranscriptCache } from "../src/components/PlanningActivity.tsx";
 import { BoundedLruCache, utf8Bytes } from "../src/lib/BoundedLruCache.ts";
 import { cachedPlanningOutput, invalidateTranscriptCaches, planningTranscriptKey, registerTranscriptReader } from "../src/services/transcriptCache.ts";
-import type { Execution } from "../src/types.ts";
+import type { Execution, TranscriptItem } from "../src/types.ts";
 
 test("settled node requests share work and publish only complete history", async () => {
   const original = runtimeService.getExecutionOutput;
@@ -204,5 +205,69 @@ test("final response tail is shown without delimiter tag when no assistant messa
   const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }));
   assert.match(html, /Direct Final Answer/);
   assert.doesNotMatch(html, /Final response/);
+});
+
+const parseHistory = (output: string, startOffset = 0, tailItems?: TranscriptItem[], source = "output") => {
+  const state: ParseTranscriptChunkState = {
+    source, byteOffset: startOffset, leadingFragment: startOffset > 0,
+    inTagThinking: false, inFinalResponse: false, finalResponseSuppressed: false,
+    seenFirstUser: false, pendingUserStart: false, assistantStartIndex: 0,
+    userMessageStarts: new Set(), compacting: false,
+  };
+  return parseTranscriptChunkLines(output.slice(0, -1).split("\n"), [], new Map(), state,
+    { showUserTurns: false, skipFirstUser: false }, tailItems).currentItems;
+};
+const assistantEnd = (text: string) => JSON.stringify({
+  type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] },
+}) + "\n";
+
+test("prepending across a large agent_end removes only the final-response copy, not real repeated replies", () => {
+  const answer = "集成节点已完成 PASS 🚀\n\n## 验证\n\n| 文件 | 结果 |\n|---|---|\n| a.py | 通过 |\n";
+  // agent_end repeats the session and can exceed both the initial tail and an older page.
+  const output = assistantEnd(answer) + assistantEnd(answer)
+    + JSON.stringify({ type: "agent_end", messages: [{ padding: "x".repeat(2 * 1024 * 1024) }] }) + "\n"
+    + JSON.stringify({ type: "grapher_process_exited", success: true }) + "\n"
+    + "\n── Final response ──\n" + answer + "\n";
+  const bytes = Buffer.from(output);
+  let start = bytes.length - 512 * 1024;
+  let items = parseHistory(bytes.subarray(start).toString(), start);
+  const count = () => items.filter(item => item.type === "text" && item.content?.includes("集成节点已完成")).length;
+  assert.equal(count(), 1); // Fallback stays visible until its structured message is available.
+  let prepends = 0;
+  while (start > 0) {
+    const next = Math.max(0, start - 1024 * 1024);
+    // Match the component's prepend path: finish the split junction line,
+    // parse only older bytes and merge with the retained tail rows.
+    const firstNewline = bytes.indexOf(10, start);
+    const prefix = bytes.subarray(next, firstNewline + 1).toString();
+    const older = parseHistory(prefix, next, items);
+    items = [...older, ...items];
+    start = next;
+    prepends++;
+    if (start > 0) assert.equal(count(), 1);
+  }
+  assert.equal(prepends, 2);
+  assert.equal(count(), 2); // Two actual messages, not three copies including the runtime tail.
+  assert.deepEqual(items.map(item => item.content), parseHistory(output).map(item => item.content));
+});
+
+test("prepend reconciliation preserves unrelated final responses, sources and ordinary stdout", () => {
+  for (const source of ["output", "planner-revision"]) {
+    const answer = "PASS\n\nDetails 中文🚀";
+    const fallback = "split-json-fragment\n── Final response ──\n" + answer + "\n";
+    const start = utf8Bytes(assistantEnd(answer));
+    const items = parseHistory(fallback, start, undefined, source);
+    const saved = items[0];
+    parseHistory(assistantEnd("Different answer"), 0, items, source);
+    assert.equal(items[0], saved);
+    parseHistory(assistantEnd(answer), 0, items, "another-source");
+    assert.equal(items[0], saved);
+    parseHistory(assistantEnd(answer), start + utf8Bytes(fallback), items, source);
+    assert.equal(items[0], saved); // A later identical message is not the origin of this tail.
+    const raw = parseHistory(answer + "\n");
+    items.push(...raw);
+    parseHistory(assistantEnd(answer), 0, items, source);
+    assert.deepEqual(items, raw); // Only the provenance-marked runtime copy is removed.
+  }
 });
 

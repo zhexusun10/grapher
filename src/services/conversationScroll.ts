@@ -67,3 +67,25 @@ export function resolveViewScroll(
   }
   return { restoreSaved: false, scrollTop: currentScrollHeight, isUserScrolledUp: false };
 }
+
+/** Calculate the required scroll delta when toggling the workspace details panel.
+ *
+ * Expanding scrolls only the additional height required to reveal the panel if
+ * it extends below the visible viewport, correctly handling in-flight animations
+ * without double-counting current height.
+ * Collapsing never applies a programmatic scroll delta, allowing the panel to fold
+ * into the button in place without ratcheting or shifting the conversation upward.
+ */
+export function calculateWorkspaceDetailsScrollDelta(
+  nextOpen: boolean,
+  currentAnimatorHeight: number,
+  targetHeight: number,
+  panelBottom: number,
+  visibleBottom: number,
+): number {
+  if (!nextOpen) return 0;
+  const additionalHeight = Math.max(0, targetHeight - currentAnimatorHeight);
+  const futurePanelBottom = panelBottom + additionalHeight;
+  return futurePanelBottom > visibleBottom ? futurePanelBottom - visibleBottom : 0;
+}
+
