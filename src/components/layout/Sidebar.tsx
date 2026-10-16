@@ -99,6 +99,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           className="sidebar-toggle-btn"
           onClick={toggleCollapsed}
           aria-label={isCollapsed ? t("展开侧边栏") : t("收起侧边栏")}
+          title={isCollapsed ? t("展开侧边栏") : t("收起侧边栏")}
           aria-expanded={!isCollapsed}
         >
           {isCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
@@ -112,6 +113,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
             aria-label={t("添加或打开本地 Git 仓库")}
+            title={t("添加或打开本地 Git 仓库")}
             onClick={onOpenProject}
             disabled={isOpeningProject}
             aria-busy={isOpeningProject}
@@ -165,6 +167,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
             aria-label={t("新建对话")}
+            title={t("新建对话")}
             onClick={onNewConversation}
           >
             <Plus size={18} />
@@ -249,6 +252,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           className={`sidebar-bottom-btn ${isSettingsOpen ? "active" : ""}`}
           onClick={onOpenSettings}
           aria-label={t("设置")}
+          title={t("设置")}
         >
           <Settings2 size={18} />
           <span>Setting</span>

@@ -40,6 +40,11 @@ function applyEdge(graph: Graph, edit: EdgeEdit) {
 
 export default function grapherPlanner(pi: ExtensionAPI) {
   const graphPath = process.env.GRAPHER_GRAPH_PATH!;
+  // Runtime-owned constraint: node names this run may not remove because their
+  // results are already published. Graph structure cannot express it, so the
+  // server passes it beside the graph and the edit is rejected where the
+  // Planner can still react instead of failing the commit afterwards.
+  const unremovableNodes: string[] = JSON.parse(process.env.GRAPHER_UNREMOVABLE_NODES ?? '[]');
   const result = (text: string, diagnosticCodes?: string[]) => ({
     content: [{ type: "text" as const, text }],
     ...(diagnosticCodes ? { details: { diagnosticCodes } } : {}),
@@ -68,7 +73,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     }), diagnostics.map(diagnostic => diagnostic.code));
     const inputErrors = change(graph);
     if (inputErrors?.length) return rejected(inputErrors);
-    const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false }), encoding: "utf8", timeout: 10000 });
+    const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false, unremovableNodes }), encoding: "utf8", timeout: 10000 });
     if (checked.error || checked.status !== 0) return rejected([{ code: "compiler-unavailable", message: checked.error?.message || checked.stderr || `Compiler exited with status ${checked.status}` }]);
     let output;
     try { output = JSON.parse(checked.stdout); }
@@ -87,7 +92,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     // Pi normalizes nullable optional edit fields before local validation.
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete graph nodes. Provide a nonempty nodes array; use one element for a single edit. Each nodes[].name must be unique within the call. Replacing a node updates its task and preserves its edges. Deleting a node removes its connected edges. A node's first execution starts a fresh session with its task and completed dependencies' filesystem state. Edits are applied in order and validated together. If validation fails, the saved graph is unchanged.",
+      "Create, replace, or delete graph nodes. Provide a nonempty nodes array; use one element for a single edit. Each nodes[].name must be unique within the call. Replacing a node updates its task and preserves its edges. Deleting a node removes its connected edges. A node whose result is already published in this run cannot be deleted; keep it and change its task to rework it. A node's first execution starts a fresh session with its task and completed dependencies' filesystem state. Edits are applied in order and validated together. If validation fails, the saved graph is unchanged.",
     parameters: Type.Object({
       nodes: Type.Array(Type.Object({
         name: Type.String({ description: "Stable node name" }),

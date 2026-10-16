@@ -48,7 +48,7 @@ See [Execution model](execution-model.md) for workspace and user-visible semanti
 
 The graph contains named tasks, ordinary dependency edges, and explicit feedback edges. Removing feedback edges must leave a DAG. A feedback target must be an ordinary dependency ancestor of its source; each feedback source can have only one target.
 
-Planner tool mutations compile atomically: invalid changes leave the saved candidate graph unchanged. Graph execution requires final validation and approval. Independent roots do not need artificial connecting edges.
+Planner tool mutations compile atomically: invalid changes leave the saved candidate graph unchanged. Once a run has published, a node whose result was delivered cannot be removed; the tools receive the run's unremovable node names and reject that edit (diagnostic `E210`) so the Planner reworks the task or adds a follow-up node instead of losing the whole revision at commit time. Graph execution requires final validation and approval. Independent roots do not need artificial connecting edges.
 
 The production [Planner prompt](../../backend/resources/prompts/planner.md) and [Partitioner prompt](../../backend/resources/prompts/partitioner.md) stay beside the implementation.
 

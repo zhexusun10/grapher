@@ -94,6 +94,33 @@ it does not prove the exact cause of a past production stall without its trace.
 
 Local deterministic model responses exercise production integration without paid API calls. They are not a real-model benchmark. Similarly, fixture engines cannot establish real launcher permissions or shell compatibility.
 
+### Saved-model Planner review acceptance
+
+[`scripts/planner-review-acceptance.mjs`](../../scripts/planner-review-acceptance.mjs)
+is an opt-in paid-provider test with the real Rust backend, pinned Pi and a
+headless browser. It requires the saved `antigravity/gemini-3.8-flash` model and
+credentials; every role uses that model. It creates disposable Git projects and
+runtime data, tests the Settings toggle, live Planner output and node/edge
+rendering, manual and automatic continuation, published-file inheritance, final
+reply and hidden-notification behavior after reload. Model choices can still make
+an acceptance attempt fail; fixtures are the deterministic contract evidence.
+
+Build production into an isolated target first (do not rebuild a binary while
+that acceptance backend is running). Then, from the repo root:
+
+```sh
+CARGO_TARGET_DIR=.grapher/verification-target node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --no-default-features --bin grapher
+GRAPHER_PAID_ACCEPTANCE=1 node scripts/planner-review-acceptance.mjs
+```
+
+The script honors `CARGO_TARGET_DIR`, `GRAPHER_SAVED_CONFIG`, and
+`GRAPHER_BROWSER_CHANNEL`. It copies the saved provider configuration into a
+private disposable agent directory and removes that copy after shutdown. It uses
+low thinking and disables optional `pi-continuity` only in that disposable
+configuration so extra recovery turns do not obscure the phase boundary under
+test. It does not change user settings or production prompts. Project/data
+artifacts remain in the printed temporary directory for inspection, not Git.
+
 ## Platform checks
 
 - [Planner source CI](../../.github/workflows/planner-source.yml) runs weekly (and on manual dispatch) on macOS, Windows, and Linux. It covers the snapshot/replay fixtures, real Planner Bash contract, native launcher tests, Linux bubblewrap preflight and namespace boundaries, the full backend library suite and native Bash/Pi acceptance on Windows (it does not expect filesystem permission rejection from Windows Graph), managed-environment state/launch/native acceptance with Python 3.12, macOS Seatbelt child-process tests, and production Planner/Merger acceptance. Windows acceptance includes extended-drive-prefix paths; shared tests use Unicode and spaces. Pushes and pull requests do not trigger it; run the focused local suites above instead.

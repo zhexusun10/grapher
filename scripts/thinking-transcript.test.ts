@@ -21,6 +21,19 @@ const render = (events: unknown[]) => renderToStaticMarkup(createElement(Virtual
 const cardCount = (html: string) => (html.match(/class="thinking-card /g) || []).length;
 const toolCount = (html: string) => (html.match(/class="tool-call-card /g) || []).length;
 
+test("background Planner replies stay separate across turns with no visible user bubble", () => {
+  const events = [
+    { type: "grapher_planning_source", planningId: "first" }, start(),
+    update("text_delta", 0, { delta: "PHASE_TWO_PLANNED" }), end([{ type: "text", text: "PHASE_TWO_PLANNED" }]),
+    { type: "grapher_planning_source", planningId: "review" }, start(),
+    update("text_delta", 0, { delta: "REVIEW_COMPLETE" }), end([{ type: "text", text: "REVIEW_COMPLETE" }]),
+  ];
+  const html = render(events);
+  assert.equal((html.match(/PHASE_TWO_PLANNED/g) || []).length, 1);
+  assert.equal((html.match(/REVIEW_COMPLETE/g) || []).length, 1);
+  assert.doesNotMatch(html, /PHASE_TWO_PLANNEDREVIEW_COMPLETE/);
+});
+
 test("RPC and message_end tool-call records render one completed tool card", () => {
   const events = [
     line(start()),

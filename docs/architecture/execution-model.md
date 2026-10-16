@@ -40,6 +40,40 @@ Planner can inspect and write any files in the source. Git snapshots force-colle
 
 Source locks protect approval and snapshots taken after approved Planner revisions, not the Planner's Bash/model session. During a live revision, already-running nodes drain, while new nodes in that Run wait for its complete source snapshot. Failed/cancelled approved revisions keep the previous graph but record their surviving source writes for future jobs; a snapshot failure pauses the Run instead of scheduling stale inputs. Concurrent Planners still share the source and can overwrite one another's files; there is no private merge protecting those writes. Node model sessions and final Graph publication do not hold a project-wide execution lock.
 
+### Post-task Planner review
+
+**Post-task Planner review** is an independent Settings toggle directly below
+Auto Approve, disabled by default (including saved configurations that predate
+it). Like Auto Approve, it is captured in a new Run's configuration. It applies
+to Graph Runs, which already have a Planner conversation, not Serial Runs.
+
+After every successful publication, when all nodes are done, an enabled Run
+appends a brief neutral completion notification to its existing Planner session.
+The notification is not a user bubble and is omitted from the browser transcript,
+including after reload; the shared Planner system prompt is unchanged. The
+Planner can reply, inspect the published source, or use its usual graph tools.
+Its output streams through durable planning logs and SSE wake-ups. Successful
+node/edge edits immediately project a live candidate graph without dispatching
+work before the turn finishes.
+
+A completed turn validates and commits its graph and snapshots any Planner source
+writes. Existing unaffected results stay done. If more work is needed, Auto
+Approve dispatches it immediately; otherwise the new graph waits for **Approve**,
+without rerunning completed nodes. New workspaces use the newly published source
+plus any source writes made during review, never the previous approval baseline.
+Each later successful execution/publication can trigger another review; a final
+reply without further work does not trigger itself again. This can incur extra
+model calls, and Auto Approve permits additional work chosen by the Planner.
+
+Failed publication or failed/blocked execution does not trigger review. A failed
+or stopped review retains its logs and source writes but discards its uncommitted
+candidate. Restart never silently repeats an interrupted model turn; it records
+failure and preserves the committed graph, requiring approval if committed work
+remains. Publication completion remains distinct from review success.
+
+Focused evidence: [runtime review regressions](../../backend/src/planner_review_tests.rs)
+and the opt-in [real-browser saved-model acceptance](../../scripts/planner-review-acceptance.mjs).
+
 ## Node workspaces and inheritance
 
 ```text
@@ -91,6 +125,7 @@ If a Git Merger fails or leaves an unresolved conflict, the affected node is blo
 - Accepted node/Merger steering and continuation turns persist their attachment-bearing text and image payloads in Run events, not just optimistic UI state. Their attachment cards/thumbnails survive Run selection and reload. Legacy steering events without image payloads remain readable but cannot reconstruct an image from those events.
 - Outside shared-terminal follow-ups, changing a completed node's Git result—including a file that was previously ignored—invalidates affected ordinary dependency descendants. Applied feedback and explicit history edits still trigger their Git/session invalidation rules.
 - A Graph follow-up without a selected node asks the Planner to revise the graph, including after successful publication.
+- A revision that changes a node which already ran (its task or its inputs) discards that node's previous session entirely: its executions become superseded, its revision increments, and the rework starts a fresh Pi session instead of continuing the old conversation. Nodes whose task and inputs are unchanged, and whose upstream is unaffected, keep their results, revisions, sessions and workspaces.
 - Unsent composer text is retained in browser memory for each Run and conversation target (Planner/Serial, node, or Merger). Switching conversations or returning from home restores that target's draft, without sending it or sharing it with another target. An accepted send clears only its originating draft; a rejected send keeps it. Draft text is not Pi history or persisted browser storage: reload/closing the page clears it, and unsent file attachments are not retained.
 
 Editing a historical user turn creates a branch in the node's Pi JSONL session and retains the old branch. Serial branches rewind conversation context, **not project files**. Graph branches keep the existing Git rollback behavior; all project files are restored through Git history, and no `before-*` file snapshots are required. Changed Git results invalidate affected descendants. Planner history edits likewise branch the Planner session.

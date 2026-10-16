@@ -162,6 +162,8 @@ pub struct Config {
     pub max_feedback: usize,
     #[serde(default)]
     pub auto_approve: bool,
+    #[serde(default)]
+    pub post_task_review: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<crate::environment::EnvironmentConfig>,
 }
@@ -401,6 +403,16 @@ impl Default for NodeState {
     }
 }
 
+impl NodeState {
+    pub fn is_user_paused(&self) -> bool {
+        self.status == "failed" && self.error.as_deref().is_some_and(is_interrupted_error)
+    }
+
+    pub fn is_real_failure(&self) -> bool {
+        self.status == "failed" && !self.error.as_deref().is_some_and(is_interrupted_error)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
@@ -413,6 +425,18 @@ pub enum EventKind {
     },
     PlanningFailed {
         planning: PlanningSummary,
+    },
+    /// A source-published phase may append one background Planner turn.
+    PlannerReviewStarted {
+        planning: PlanningSummary,
+    },
+    /// Display-only candidate; execution keeps using the committed graph.
+    PlannerReviewProgress {
+        graph: Graph,
+    },
+    PlannerReviewFinished {
+        planning: PlanningSummary,
+        approval_required: bool,
     },
     Created {
         graph: Graph,
@@ -712,6 +736,8 @@ pub struct Publication {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_graph: Option<Graph>,
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
@@ -901,6 +927,30 @@ impl Snapshot {
             && (!self.interrupted_nodes().is_empty() || !self.model_retry_nodes().is_empty())
     }
 
+    pub fn is_node_user_paused(&self, node: &str) -> bool {
+        self.nodes.get(node).is_some_and(|n| n.is_user_paused())
+    }
+
+    pub fn is_node_failed(&self, node: &str) -> bool {
+        self.nodes.get(node).is_some_and(|n| n.is_real_failure())
+    }
+
+    pub fn user_paused_nodes(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .filter(|(_, node)| node.is_user_paused())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    pub fn failed_nodes(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .filter(|(_, node)| node.is_real_failure())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn compute_run_metrics(&self) -> RunMetrics {
         let mut planning_duration = 0.0;
         let mut planning_messages = 0;
@@ -976,7 +1026,7 @@ impl Snapshot {
     }
 }
 
-fn is_interrupted_error(error: &str) -> bool {
+pub fn is_interrupted_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("application stopped during this execution")
         || lower.contains("execution was interrupted")
@@ -985,6 +1035,18 @@ fn is_interrupted_error(error: &str) -> bool {
         || lower.contains("exit code: 143")
         || lower.contains("signal: sigint")
         || lower.contains("signal: sigterm")
+        || error.contains("用户已停止本次执行")
+        || error.contains("用户手动暂停")
+        || error.contains("用户已暂停")
+        || error.contains("用户停止")
+        || error.contains("手动暂停")
+        || error.contains("已暂停")
+        || lower.contains("paused by user")
+        || lower.contains("stopped by user")
+        || lower.contains("manually paused")
+        || lower.contains("manually stopped")
+        || lower.contains("user paused")
+        || lower.contains("user stopped")
 }
 
 pub fn now() -> u64 {
@@ -1023,6 +1085,32 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.planning = Some(planning.clone());
             state.plan_type = plan_type.clone();
             state.phase = "planning".into();
+        }
+        EventKind::PlannerReviewStarted { planning } => {
+            state.planning_id = Some(planning.planning_id.clone());
+            state.planning = Some(planning.clone());
+            state.review_graph = Some(state.graph.clone());
+            state.phase = "planning".into();
+        }
+        EventKind::PlannerReviewProgress { graph } => {
+            if state.review_graph.is_some() {
+                state.review_graph = Some(graph.clone());
+            }
+        }
+        EventKind::PlannerReviewFinished { planning, approval_required } => {
+            state.planning = Some(planning.clone());
+            state.review_graph = None;
+            if *approval_required {
+                state.approved = false;
+                state.paused = false;
+                state.phase = "awaiting_approval".into();
+            } else if state.stop_requested || state.paused {
+                state.phase = "paused".into();
+            } else if state.nodes.values().all(|node| node.status == "done") {
+                state.phase = "completed".into();
+            } else {
+                state.phase = "running".into();
+            }
         }
         EventKind::PlanningFailed { planning } => {
             state.planning = Some(planning.clone());
@@ -1074,6 +1162,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.nodes.entry(node.name.clone()).or_default();
             }
             for name in invalidated {
+                // A reworked node starts a fresh session: its prior executions stay
+                // in the record for audit, but they are no longer part of the
+                // active conversation, so clients drop them exactly like
+                // superseded edits. A node with no prior execution has nothing
+                // to supersede.
+                for execution in &state.executions {
+                    if execution.node == *name
+                        && !state.superseded_execution_ids.contains(&execution.id)
+                    {
+                        state.superseded_execution_ids.push(execution.id.clone());
+                    }
+                }
                 let node = state.nodes.get_mut(name).unwrap();
                 // A node with no prior execution has no result to invalidate.
                 node.status = if matches!(node.status.as_str(), "waiting" | "failed" | "blocked") {
@@ -1089,6 +1189,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.edit_execution_id = None;
                 node.human_instruction = false;
                 node.feedback_workspace = None;
+                node.baseline_head = None;
+                // A changed task must not resurrect the discarded session through
+                // pending recovery, nor attach to a superseded shared workspace.
+                node.continuation = false;
+                node.shared_workspace = false;
                 if node.status == "dirty" {
                     node.revision += 1;
                 }

@@ -27,8 +27,6 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
 
   return (
     <div className="role-model-settings">
-      <p className="role-model-note">{t("三个角色分别配置模型与思维等级，仅可选择已可用的模型。Provider 认证由上方统一管理。")}</p>
-      <p className="role-model-note">{t("思维等级由 Pi 按模型提供；不兼容的已保存等级会在保存时按 Pi 规则调整。")}</p>
       <label className="form-field">
         <span>{t("可用模型 Provider 筛选")}</span>
         <select value={activeFilter} disabled={busy || availableProviders.length === 0} onChange={event => setProviderFilter(event.target.value)} className="provider-filter-select">

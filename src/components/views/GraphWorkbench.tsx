@@ -78,7 +78,7 @@ interface GraphWorkbenchProps {
   editPrefillText?: string;
   onEditPrefillTextChange?: (text: string) => void;
   onCancelEditMessage?: () => void;
-  onInterrupt?: () => void;
+  onInterrupt?: (targetNode?: string) => void;
   isPlanning: boolean;
   plannerStream: any;
   recoveredPlanningId?: string;
@@ -639,7 +639,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   // Live SSE is ephemeral. After reload or run selection, replay the durable
   // planning JSONL associated with the selected run, never a previous run's stream.
-  const showLivePlanner = !recoveredPlanningId && (isPlanning ||
+  const backgroundReview = plannerStream.stage !== "planning" && state.events.some(event =>
+    event.type === "planner_review_started" && event.planning?.planningId === state.planningId);
+  const showLivePlanner = !backgroundReview && !recoveredPlanningId && (isPlanning ||
     ((plannerStream.runId === state.runId || (provisionalRunIdRef.current && (plannerStream.runId === provisionalRunIdRef.current || state.runId === provisionalRunIdRef.current))) && plannerStream.items?.length > 0));
   const savedPlannerId = recoveredPlanningId || (failedPlanning
     ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
@@ -651,10 +653,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // Recovery discovers the planning ID before the route is known. Mount the
     // durable activity poller now, rather than waiting for the finished graph.
     if ((!recoveredPlanningId && routeType !== "graph") ||
-        (isPlanning && !recoveredPlanningId && !plannerStream.isContinuation)) return [];
+        (isPlanning && !backgroundReview && !recoveredPlanningId && !plannerStream.isContinuation)) return [];
     const ids = state.events
-      .filter((event) => event.type === "created" || event.type === "graph_revised")
-      .map((event) => event.planning_id)
+      .filter((event) => event.type === "created" || event.type === "graph_revised" || event.type === "planner_review_started")
+      .map((event) => event.planning_id || event.planning?.planningId)
       .filter((id): id is string => Boolean(id));
     if (savedPlannerId) ids.push(savedPlannerId);
     const seen = new Set<string>();
@@ -663,12 +665,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       seen.add(id);
       // Only suppress a durable turn while it is actively streaming. Once
       // planning stops, the JSONL is authoritative even if SSE was partial.
-      if (isPlanning && showLivePlanner && (id === savedPlannerId || plannerStream.representedPlanningIds?.includes(id))) {
+      // Continuation turns stream a new revision; previous completed turns belong to history.
+      if (!plannerStream.isContinuation && isPlanning && showLivePlanner && (id === savedPlannerId || plannerStream.representedPlanningIds?.includes(id))) {
         return false;
       }
       return true;
     });
-  }, [routeType, isPlanning, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.isContinuation, plannerStream.representedPlanningIds]);
+  }, [routeType, isPlanning, backgroundReview, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.isContinuation, plannerStream.representedPlanningIds]);
   const plannerEdits = useMemo(() => state.events.flatMap((event, index) => {
     if (event.type !== "planner_conversation_edited") return [];
     const nextPlanningId = state.events.slice(index + 1).find(item =>
@@ -716,7 +719,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     state.planType,
   ]);
   const useSavedPlanner = savedPlannerIds.length > 0 &&
-    (!showLivePlanner || readySavedPlannerKey === savedPlannerKey);
+    (!showLivePlanner || readySavedPlannerKey === savedPlannerKey || Boolean(plannerStream.isContinuation));
   const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
   const { workbenchRef, isResizing, splitRatio, handleStartResize, handleResetResizer } = useWorkbenchResizer();
   const chatScrollRef = useRef<HTMLDivElement>(null);
@@ -1429,7 +1432,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const showGraphPane = routeType === "graph" && (hasGraphContent || (!isPlanning && state.graph.nodes.length > 0));
 
   const animatedNodes = useAnimatedNodes(nodes, state.runId);
-  const { ready: isGraphMountedForRun, initialize: centerGraph } = useGraphViewport(
+  const { ready: isGraphReadyForRun, initialize: centerGraph, synchronize: synchronizeGraph } = useGraphViewport(
     currentRunKey, showGraphPane, nodes, edges, isPlanning, graphCanvasRef,
   );
 
@@ -1597,11 +1600,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               <div className="heading-title-col">
                 <h2>{selectedNodeLabel}</h2>
               </div>
-              <span className={`status ${selectedMerger ? (selectedMerger.status === "completed" ? "done" : selectedMerger.status === "running" ? "running" : "failed") : (selectedState?.status ?? "waiting")}`}>
-                {selectedMerger
-                  ? statusText[selectedMerger.status === "completed" ? "done" : selectedMerger.status === "running" ? "running" : "failed"]
-                  : statusText[selectedState?.status ?? "waiting"]}
-              </span>
               {routeType === "graph" && (
                 <button
                   type="button"
@@ -1847,7 +1845,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 }
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
-                onInterrupt={onInterrupt}
+                onInterrupt={onInterrupt ? () => onInterrupt(selectedNode?.name) : undefined}
                 disabled={
                   locked ||
                   !!editingMessage ||
@@ -2034,7 +2032,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           key={savedPlannerKey}
                           runId={transcriptRunId}
                           planningIds={savedPlannerIds}
-                          showUserTurns={!isPlanning || !!recoveredPlanningId}
+                          showUserTurns={!isPlanning || backgroundReview || !!recoveredPlanningId || Boolean(plannerStream.isContinuation)}
                           skipFirstUser={plannerMessages.length > 0}
                           running={isPlanning || !!recoveredPlanningId}
                           onReady={() => {
@@ -2278,7 +2276,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 }
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
-                onInterrupt={onInterrupt}
+                onInterrupt={onInterrupt ? () => onInterrupt() : undefined}
                 disabled={
                   !!editingMessage ||
                   (locked && !isPlanning)
@@ -2297,10 +2295,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               key="workbench-resizer"
               className={`workbench-resizer ${isResizing ? "active" : ""}`}
               initial={{ opacity: 0 }}
-              animate={{ opacity: isGraphMountedForRun ? 1 : 0 }}
+              animate={{ opacity: 1 }}
               exit={{ opacity: 0, transition: { duration: 0.16 } }}
               transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-              style={{ pointerEvents: isGraphMountedForRun ? "auto" : "none" }}
               onMouseDown={handleStartResize}
               onDoubleClick={handleResetResizer}
               title={t("按住左右拖动调节宽度，双击恢复默认")}
@@ -2312,10 +2309,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               key={`graph-pane:${currentRunKey}`}
               className="graph-pane"
               initial={{ opacity: 0, x: 28 }}
-              animate={{ opacity: isGraphMountedForRun ? 1 : 0, x: isGraphMountedForRun ? 0 : 28 }}
+              animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 28, transition: { duration: 0.16, ease: [0.3, 0, 0.8, 0.15] } }}
               transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-              style={{ pointerEvents: isGraphMountedForRun ? "auto" : "none" }}
             >
               <div className="graph-toolbar">
                 <div className="toolbar-left">
@@ -2335,9 +2331,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               </div>
 
               <div className="graph-canvas" ref={graphCanvasRef}>
-                <GraphCanvas runKey={currentRunKey} ready={isGraphMountedForRun}
+                <GraphCanvas runKey={currentRunKey} ready={isGraphReadyForRun}
                   nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
-                  onInit={centerGraph} onSelect={selectGraphNode} />
+                  onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} />
 
                 {state.graph.nodes.length > 0 && (
                   <>

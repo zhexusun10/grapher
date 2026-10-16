@@ -420,7 +420,7 @@ export default function App() {
 
   const effectiveMessages = useMemo<ChatMessage[]>(() => {
     if (sessionEntries.length > 0) return sessionEntries;
-    const initialGoal = state.graph.originalGoal || goal || recoveredPlanning?.goal || (state.runId ? runLabels[state.runId] : "");
+    const initialGoal = state.graph.originalGoal || goal || state.planning?.goal || recoveredPlanning?.goal || (state.runId ? runLabels[state.runId] : "");
     if (initialGoal) {
       return [
         {
@@ -432,7 +432,7 @@ export default function App() {
       ];
     }
     return [];
-  }, [sessionEntries, state.graph.originalGoal, goal, recoveredPlanning?.goal, state.runId, runLabels]);
+  }, [sessionEntries, state.graph.originalGoal, goal, state.planning?.goal, recoveredPlanning?.goal, state.runId, runLabels]);
 
   const [routeType, setRouteType] = useState<PlanRouteType>(() => deduceRouteType(emptySnapshot));
 
@@ -470,8 +470,8 @@ export default function App() {
   const [plannerStream, setPlannerStream, queuePlannerStream] = useFrameBatchedState(initialPlannerStream);
   // Legacy/orphaned Planner histories may be visible before a Run is recovered.
   // They still need an owner so leaving the Conversation releases their RAM.
-  const visiblePlanningId = recoveredPlanning?.planningId || failedPlanning?.planningId || state.planningId;
-  const transcriptRunId = state.runId || plannerStream.runId || recoveredPlanning?.runId || failedPlanning?.runId ||
+  const visiblePlanningId = recoveredPlanning?.planningId || failedPlanning?.planningId || state.planningId || state.planning?.planningId;
+  const transcriptRunId = state.runId || plannerStream.runId || recoveredPlanning?.runId || failedPlanning?.runId || state.planning?.runId ||
     (visiblePlanningId ? `planning@${visiblePlanningId}` : "");
   useConversationTranscriptCache(transcriptRunId);
   const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions,
@@ -517,7 +517,10 @@ export default function App() {
       await requireRepository(state.config?.repository || config.repository);
     }
     if (generation !== foregroundGeneration.current) return;
-    const defaultNode = selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined);
+    const isGlobalGraphAction = ["pause", "resume", "approve", "reject", "retry_publication"].includes(action);
+    const defaultNode = !isGlobalGraphAction
+      ? (selected || (routeType === "serial" && state.graph.nodes.length > 0 ? (state.graph.nodes[0]?.name || "task") : undefined))
+      : undefined;
     const targetNode = extra.node !== undefined ? extra.node : defaultNode;
     const payload: Record<string, unknown> = { runId: state.runId, ...extra };
     if (targetNode !== undefined) {
@@ -623,7 +626,7 @@ export default function App() {
     }
     const execution = targetNodeName && [...state.executions].reverse()
       .find(item => item.node === targetNodeName && item.status === "running");
-    if ((isPlanning || recoveredPlanning?.status === "running" || active) && execution) {
+    if ((isPlanning || backendPlanning || recoveredPlanning?.status === "running" || active) && execution) {
       const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${text}`, "steered", execution.id);
       return submitNodeMessage("steer", message, execution.id);
     }
@@ -842,9 +845,6 @@ export default function App() {
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
       setSelected("");
-      if (isActivelyPlanning && data.snapshot.planning) {
-        setRecoveredPlanning(data.snapshot.planning);
-      }
     } else {
       // Opening the UI must not reset or delete another Run's checkout.
       setState(emptySnapshot);
@@ -1174,7 +1174,9 @@ export default function App() {
     setError("");
   };
 
-  const handleSaveConfig = (draftConfig: Config) => run(async () => {
+  const handleCloseSettings = useCallback(() => setModal(null), []);
+
+  const handleSaveConfig = useCallback((draftConfig: Config) => run(async () => {
     const generation = foregroundGeneration.current;
     // Settings change models/defaults, not the selected workspace. Rediscovery
     // or Git status here can stall saving behind an unrelated large tree scan.
@@ -1211,7 +1213,7 @@ export default function App() {
     }
     setModal(null);
     setError("");
-  });
+  }), [config.repository, repoInfo, state.runId, run]);
 
   const save = (graph: Graph) => run(async () => {
     const generation = foregroundGeneration.current;
@@ -1360,6 +1362,7 @@ export default function App() {
           originalGoal: targetGoal,
         },
         nodes: {},
+        plan: null,
       }));
     } else {
       setIsPlanning(true);
@@ -1389,9 +1392,8 @@ export default function App() {
         ...prev,
         stage: "planning",
         isContinuation: true,
-        plannerMessageStart: editedMessage ? 1 : prev.items.length + 1,
+        plannerMessageStart: 1,
         items: [
-          ...(editedMessage ? [] : prev.items),
           {
             id: newMsg.id,
             type: "text",
@@ -1837,6 +1839,9 @@ export default function App() {
                         nodes: nextNodes,
                         edges: nextEdges,
                       },
+                      // The committed plan predates this draft. Lay out the
+                      // preview from its current edges until Rust commits it.
+                      plan: null,
                     };
                   });
                   if (addedNodeNames.length > 0) {
@@ -1875,6 +1880,7 @@ export default function App() {
                           ...prev.graph,
                           edges: nextEdges,
                         },
+                        plan: null,
                       };
                     });
                     if (addedIds.length > 0) {
@@ -2148,7 +2154,7 @@ export default function App() {
       (sessionEntries.length > 0 && sessionEntries[0].id === targetMsg.id) ||
       effectiveMessages[0]?.id === targetMsg.id
     ));
-    if ((isPlanning || recoveredPlanning?.status === "running") && !targetMsg.node && routeType !== "serial") {
+    if ((isPlanning || backendPlanning || recoveredPlanning?.status === "running") && !targetMsg.node && routeType !== "serial") {
       setError(t("请先停止或等待正在运行的 Planner 完成，再修改历史消息。"));
       return false;
     }
@@ -2370,7 +2376,7 @@ export default function App() {
       setEditingMessage(null);
       setEditPrefillText("");
 
-      if (state.runId && (active || isPlanning)) {
+      if (state.runId && (active || isPlanning || backendPlanning)) {
         try {
           await runtimeService.control("stop", { runId: state.runId });
         } catch (error) { return reportEditError(error); }
@@ -2779,20 +2785,24 @@ export default function App() {
     }
   }, [routeType, state.planType, state.phase, busy, repositoryBlocked]);
 
-  const handleInterrupt = useCallback(async () => {
+  const handleInterrupt = useCallback(async (targetNode?: string) => {
     const generation = foregroundGeneration.current;
-    if (planningAbortControllerRef.current) {
+    if (!targetNode && planningAbortControllerRef.current) {
       planningAbortControllerRef.current.abort();
       planningAbortControllerRef.current = null;
     }
     try {
       const runId = state.runId || plannerStream.runId;
-      await runtimeService.control("stop", runId ? { runId } : {});
+      const payload: Record<string, unknown> = runId ? { runId } : {};
+      if (targetNode) {
+        payload.node = targetNode;
+      }
+      await runtimeService.control("stop", payload);
     } catch (e) {
       if (generation === foregroundGeneration.current) console.warn("Stop command failed:", e);
     }
     if (generation !== foregroundGeneration.current) return;
-    if (isPlanning) {
+    if (!targetNode && isPlanning) {
       setIsPlanning(false);
       setPlannerStream((prev) => ({
         ...prev,
@@ -2982,7 +2992,7 @@ export default function App() {
                   goal={landingGoal}
                   setGoal={handleLandingGoalChange}
                   onPlanGoal={actions.plan}
-                  isBusy={busy || isPlanning || repositoryBlocked}
+                  isBusy={busy || isPlanning || backendPlanning || repositoryBlocked}
                   planMode={planMode}
                   onPlanModeChange={handlePlanModeChange}
                   isWorking={isAgentWorking}
@@ -3021,7 +3031,7 @@ export default function App() {
                     setSelected={setSelected}
                     selectedMergerId={selectedMergerId}
                     setSelectedMergerId={setSelectedMergerId}
-                    failedPlanning={failedPlanning || (state.phase === "planning_failed" ? state.planning : null)}
+                    failedPlanning={failedPlanning || (state.planning?.status === "failed" ? state.planning : null)}
                     effectiveMessages={effectiveMessages}
                     onEditMessage={handleStartEditMessage}
                     editingMessage={editingMessage}
@@ -3033,7 +3043,7 @@ export default function App() {
                     onInterrupt={handleInterrupt}
                     isPlanning={isPlanning || backendPlanning || !!recoveredPlanning}
                     plannerStream={plannerStream}
-                    recoveredPlanningId={recoveredPlanning?.planningId || (!isPlanning && backendPlanning ? state.planningId : undefined)}
+                    recoveredPlanningId={recoveredPlanning?.planningId || (!isPlanning && backendPlanning ? (state.planningId || state.planning?.planningId) : undefined)}
                     onConversationReady={handleConversationReady}
                     onSendMessage={actions.send}
                     onRequestConfirmation={setConfirmModal}
@@ -3067,7 +3077,7 @@ export default function App() {
               <SettingsModal
                 key="settings-modal"
                 isOpen={true}
-                onClose={() => setModal(null)}
+                onClose={handleCloseSettings}
                 config={config}
                 dataPath={dataPath}
                 envOverrides={envOverrides}

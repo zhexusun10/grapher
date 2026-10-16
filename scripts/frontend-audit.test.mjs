@@ -1038,6 +1038,66 @@ test("recovered planning polls activity before route discovery and opens the com
   } finally { await context.close(); }
 });
 
+test("pure frontend refresh during active planning suppresses floating recovered banner and prevents secondary flicker", { timeout: 45_000 }, async () => {
+  const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const runningPlanning = { planningId: "active-plan", repository: "/a", status: "running", createdAt: Date.now(),
+    modelDuration: 0, totalPlanningDuration: 0, roles: { partition: {}, planner: {} } };
+  const planningSnapshot = {
+    runId: "active-plan-run", config, planType: "undecided", phase: "planning",
+    planningId: runningPlanning.planningId, planning: runningPlanning,
+    graph: { originalGoal: "Active refresh goal", nodes: [], edges: [] },
+    nodes: {}, plan: null, executions: [], events: [], approved: false, paused: false, base: "", feedbackCounts: {},
+  };
+  const info = { path: "/a", name: "Alpha", branch: "main", head: "", clean: true };
+  const bootstrap = { config, snapshot: planningSnapshot, runs: ["active-plan-run"], repositoryInfo: info, dataPath: "/mock" };
+  const line = event => JSON.stringify(event) + "\n";
+  const output = line({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "Active refresh goal" }] } }) +
+    line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Streaming active plan output" } });
+  const offsets = [], errors = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = bootstrap; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = [runningPlanning]; break;
+      case "get_planning": result = runningPlanning; break;
+      case "get_planning_output": {
+        assert.equal(body.planningId, runningPlanning.planningId);
+        assert.equal(body.role, "planner");
+        offsets.push(body.offset);
+        const bytes = Buffer.from(output);
+        result = { planningId: runningPlanning.planningId, role: "planner", content: bytes.subarray(body.offset).toString(),
+          nextOffset: bytes.length, totalBytes: bytes.length, complete: false, running: true };
+        break;
+      }
+      case "history": case "snapshot": result = planningSnapshot; break;
+      case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
+      case "provider_auth": result = catalog; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      default:
+        errors.push(`Unexpected API: ${command}`);
+        await route.fulfill({ status: 400, json: { error: `Unexpected API: ${command}` } }); return;
+    }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    // Planning activity should poll and render directly
+    const activity = page.getByRole("region", { name: "Planning activity" });
+    await activity.getByText("Streaming active plan output", { exact: true }).waitFor();
+    // Pure frontend refresh must NEVER show the recovered banner nor trigger secondary flicker
+    assert.equal(await page.locator(".floating-recovered-banner").count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("late node sends and edits cannot overwrite another workspace or its composer draft", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const base = { plan: null, events: [], approved: true, paused: false, phase: "completed", base: "", feedbackCounts: {} };

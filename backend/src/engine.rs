@@ -385,6 +385,10 @@ pub fn terminate_run(run_id: &str) {
     process_control::terminate_owner(run_id);
 }
 
+pub fn terminate_node(run_id: &str, node: &str) {
+    process_control::terminate_node(run_id, node);
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PiRole {
     Partitioner,
@@ -1557,6 +1561,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
+            post_task_review: false,
             max_parallel: 1,
             max_feedback: 3,
             auto_approve: false,
@@ -1608,6 +1613,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             environment: None,
             repository: repository.to_string_lossy().into(),
             model: "openai-codex/gpt-6-sol".into(),
+            post_task_review: false,
             thinking_level: "high".into(),
             max_parallel: 1,
             max_feedback: 0,
@@ -1694,6 +1700,7 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
+            post_task_review: false,
         };
         let mut events = String::new();
         let result = run_pi(
@@ -1749,6 +1756,7 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
+            post_task_review: false,
         };
         let session = temp.path().join("planning-1").join("planner-session");
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -1821,6 +1829,7 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
+            post_task_review: false,
         };
         // Both the first-attempt layout and manual Graph revisions must keep
         // independent RPC channels. Manual revisions share the parent directory
@@ -1902,6 +1911,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            post_task_review: false,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -1975,6 +1985,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            post_task_review: false,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -2054,6 +2065,7 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
+            post_task_review: false,
         };
         let result = run_pi_with_timeout(
             PiRequest {
@@ -2094,6 +2106,7 @@ sys.stdin.read()
                 model: "mock/model".into(),
                 role_models: Default::default(),
                 thinking_level: "medium".into(),
+                post_task_review: false,
                 max_parallel: 1,
                 max_feedback: 0,
                 auto_approve: false,
@@ -2147,7 +2160,7 @@ sys.stdin.read()
             model: "mock/model".into(),
             thinking_level: "medium".into(),
             max_parallel: 1,
-            max_feedback: 0, auto_approve: false,
+            max_feedback: 0, auto_approve: false, post_task_review: false,
             role_models: Default::default(),
         };
         let result = run_pi(
@@ -2180,6 +2193,7 @@ sys.stdin.read()
         let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            post_task_review: false,
             environment: None,
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
@@ -2226,6 +2240,7 @@ sys.stdin.read()
         let _guard = lock_env();
         let original = std::env::var_os("PLANNER_THINKING");
         let mut config = Config {
+            post_task_review: false,
             environment: None,
             repository: "/tmp/fake".into(),
             model: "mock/model".into(),
@@ -2293,6 +2308,7 @@ sys.stdin.read()
         std::env::remove_var("PARTITIONER_THINKING");
 
         let custom_config = Config {
+            post_task_review: false,
             environment: None,
             repository: "/tmp/fake".into(),
             model: "anthropic/claude-3-7-sonnet".into(),
@@ -2330,6 +2346,7 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
+            post_task_review: false,
             model: String::new(),
             role_models: Default::default(),
             thinking_level: "medium".into(),
@@ -2357,6 +2374,7 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
+            post_task_review: false,
             model: "some-model".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
@@ -2451,6 +2469,7 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
+            post_task_review: false,
             model: "claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,

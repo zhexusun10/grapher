@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { type Node } from "@xyflow/react";
+import { useReducedMotion } from "motion/react";
 
 const ANIMATION_DURATION_MS = 400;
 
@@ -8,6 +9,7 @@ function easeOutCubic(t: number): number {
 }
 
 export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[], graphId = ""): T[] {
+  const reduceMotion = useReducedMotion();
   const [rendered, setRendered] = useState<{ graphId: string; nodes: T[] }>({ graphId, nodes: targetNodes });
   const currentPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const animationFrameRef = useRef<number | null>(null);
@@ -62,7 +64,8 @@ export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[], gra
     }
 
     // 如果没有已有节点位移，直接同步最新的数据与属性
-    if (!hasMovedNodes) {
+    if (!hasMovedNodes || reduceMotion) {
+      currentPositionsRef.current = new Map(destPositions);
       if (animationFrameRef.current !== null) {
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
@@ -126,7 +129,7 @@ export function useAnimatedNodes<T extends Node<any, any>>(targetNodes: T[], gra
         animationFrameRef.current = null;
       }
     };
-  }, [targetNodes, graphId]);
+  }, [targetNodes, graphId, reduceMotion]);
 
   return rendered.graphId === graphId ? rendered.nodes : targetNodes;
 }

@@ -227,9 +227,9 @@ h3 {
 /* 侧边栏 (悬浮圆角卡片模式) */
 .sidebar {
   --sidebar-content-width: 230px;
-  --sidebar-anim-ease: cubic-bezier(0.16, 1, 0.3, 1);
-  --sidebar-width-duration: 0.28s;
-  --sidebar-content-duration: 0.18s;
+  --sidebar-anim-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --sidebar-width-duration: 0.32s;
+  --sidebar-content-duration: 0.2s;
   width: 260px;
   max-width: 260px;
   flex-shrink: 0;
@@ -244,49 +244,95 @@ h3 {
   flex-direction: column;
   z-index: 10;
   overflow: hidden;
+  will-change: width, max-width;
   transition:
     width var(--sidebar-width-duration) var(--sidebar-anim-ease),
     max-width var(--sidebar-width-duration) var(--sidebar-anim-ease);
-  /* Padding is deliberately not transitioned: it moves the content layer's
-     origin, which would drag the rail controls with the animating width. */
 }
 
 /* ---------- Content sizing ---------- */
-/* The rail rows keep one fixed width in both states. The sidebar clips this
-   layer, so only the panel edge animates while collapsing: a control that
-   changes position when the state changes is still a click target, whereas a
-   control that slides with the animating width moves out from under the
-   pointer and its click is dispatched to a shared ancestor instead. */
 .sidebar .sidebar-brand-row,
 .sidebar .nav-section,
-.sidebar .sidebar-bottom,
-.sidebar:not(.is-collapsed) .projects-list,
-.sidebar:not(.is-collapsed) .runs-list {
+.sidebar .sidebar-bottom {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.sidebar .projects-list,
+.sidebar .runs-list {
   width: var(--sidebar-content-width, 230px);
   min-width: var(--sidebar-content-width, 230px);
   flex-shrink: 0;
 }
 
 /* ---------- Content fade / slide shared transition ---------- */
-.sidebar .brand,
-.sidebar .nav-section > span,
-.sidebar .projects-list,
-.sidebar .runs-list,
-.sidebar .sidebar-bottom-btn > span {
+.sidebar .brand {
+  max-width: 160px;
+  overflow: hidden;
+  white-space: nowrap;
   opacity: 1;
   visibility: visible;
   transform: translateX(0);
   transition:
-    opacity var(--sidebar-content-duration) var(--sidebar-anim-ease),
-    visibility var(--sidebar-content-duration) var(--sidebar-anim-ease),
-    transform var(--sidebar-content-duration) var(--sidebar-anim-ease);
+    opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s;
 }
 
+.sidebar .nav-section > span {
+  display: inline-block;
+  max-width: 160px;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+  transition:
+    opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s;
+}
+
+.sidebar .projects-list {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+  transition:
+    opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    max-height var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    margin-bottom var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s;
+}
+
+.sidebar .runs-list {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+  transition:
+    opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    transform var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s;
+}
+
+.sidebar .sidebar-bottom-btn > span {
+  display: inline-block;
+  max-width: 140px;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+  transition:
+    opacity var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    visibility var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s,
+    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform var(--sidebar-content-duration) var(--sidebar-anim-ease) 0.04s;
+}
 
 /* 浏览器布局 */
-
-
-
 
 button,
 input,
@@ -304,6 +350,9 @@ a,
   justify-content: space-between;
   margin-bottom: 16px;
   padding: 0 4px;
+  width: 100%;
+  box-sizing: border-box;
+  transition: padding var(--sidebar-width-duration) var(--sidebar-anim-ease);
 }
 
 .sidebar-toggle-btn {
@@ -319,6 +368,7 @@ a,
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .sidebar-toggle-btn:hover {
@@ -334,89 +384,128 @@ a,
 .sidebar.is-collapsed {
   width: 60px;
   max-width: 60px;
-  padding-left: 8px;
-  padding-right: 8px;
 }
 
-/* Collapse: fade out + slide left, finish BEFORE width shrinks */
-.sidebar.is-collapsed .brand,
-.sidebar.is-collapsed .nav-section > span,
-.sidebar.is-collapsed .sidebar-bottom-btn > span {
+/* Collapse: smooth fade out + slide left with graceful max-width contraction */
+.sidebar.is-collapsed .brand {
+  max-width: 0;
   opacity: 0;
   visibility: hidden;
-  transform: translateX(-6px);
-  transition-delay: 0s;
-  transition-duration: calc(var(--sidebar-content-duration) * 0.6);
+  transform: translateX(-8px);
   pointer-events: none;
-  width: 0 !important;
-  min-width: 0 !important;
-  max-width: 0 !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  border: 0 !important;
-  overflow: hidden;
-  white-space: nowrap;
+  margin: 0;
+  padding: 0;
+  transition:
+    opacity 0.15s var(--sidebar-anim-ease),
+    visibility 0.15s var(--sidebar-anim-ease),
+    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform 0.15s var(--sidebar-anim-ease);
 }
 
-.sidebar.is-collapsed .projects-list,
+.sidebar.is-collapsed .nav-section > span {
+  max-width: 0;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-8px);
+  pointer-events: none;
+  margin: 0;
+  padding: 0;
+  transition:
+    opacity 0.15s var(--sidebar-anim-ease),
+    visibility 0.15s var(--sidebar-anim-ease),
+    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform 0.15s var(--sidebar-anim-ease);
+}
+
+.sidebar.is-collapsed .sidebar-bottom-btn > span {
+  max-width: 0;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-8px);
+  pointer-events: none;
+  margin: 0;
+  padding: 0;
+  transition:
+    opacity 0.15s var(--sidebar-anim-ease),
+    visibility 0.15s var(--sidebar-anim-ease),
+    max-width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform 0.15s var(--sidebar-anim-ease);
+}
+
+.sidebar.is-collapsed .projects-list {
+  opacity: 0;
+  visibility: hidden;
+  max-height: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  pointer-events: none;
+  overflow: hidden;
+  transform: translateX(-8px);
+  transition:
+    opacity 0.15s var(--sidebar-anim-ease),
+    visibility 0.15s var(--sidebar-anim-ease),
+    max-height var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    margin-bottom var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    transform 0.15s var(--sidebar-anim-ease);
+}
+
 .sidebar.is-collapsed .runs-list {
   opacity: 0;
   visibility: hidden;
-  transform: translateX(-6px);
-  transition-delay: 0s;
-  transition-duration: calc(var(--sidebar-content-duration) * 0.6);
-  pointer-events: none;
+  flex: 0;
   max-height: 0;
-  overflow: hidden;
+  min-height: 0;
   margin: 0;
   padding: 0;
-  flex: 0;
-  min-height: 0;
+  pointer-events: none;
+  overflow: hidden;
+  transform: translateX(-8px);
+  transition:
+    opacity 0.15s var(--sidebar-anim-ease),
+    visibility 0.15s var(--sidebar-anim-ease),
+    transform 0.15s var(--sidebar-anim-ease);
 }
 
-.sidebar.is-collapsed .sidebar-brand-row,
-.sidebar.is-collapsed .nav-section,
-.sidebar.is-collapsed .sidebar-bottom {
-  /* Keep the fixed layer and left-align the rail inside it, so the controls
-     sit at the collapsed resting position from the first animation frame. */
-  width: var(--sidebar-content-width, 230px) !important;
-  min-width: var(--sidebar-content-width, 230px) !important;
-  justify-content: flex-start !important;
-  padding-left: 5px !important;
-  padding-right: 4px !important;
-}
-
-.sidebar.is-collapsed .sidebar-bottom {
-  display: flex !important;
-  /* Column layout: cross-axis start keeps the rail button at the left edge. */
-  align-items: flex-start !important;
+.sidebar.is-collapsed .sidebar-brand-row {
+  padding: 0;
+  justify-content: center;
 }
 
 .sidebar.is-collapsed .nav-section {
+  padding: 0;
+  justify-content: center;
   height: 32px;
+}
+
+.sidebar.is-collapsed .sidebar-bottom {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .sidebar.is-collapsed .icon-tiny-btn,
 .sidebar.is-collapsed .sidebar-add-btn,
 .sidebar.is-collapsed .sidebar-toggle-btn {
-  width: 32px !important;
-  height: 32px !important;
-  min-width: 0 !important;
-  padding: 0 !important;
-  /* Auto margins would centre the control in the still-wide content layer. */
-  margin: 0 !important;
+  width: 32px;
+  height: 32px;
+  min-width: 0;
+  padding: 0;
+  margin: 0 auto;
   box-sizing: border-box;
 }
 
 .sidebar.is-collapsed .sidebar-bottom-btn {
-  width: 32px !important;
-  height: 32px !important;
-  min-width: 0 !important;
-  padding: 0 !important;
-  gap: 0 !important;
-  justify-content: center !important;
-  align-items: center !important;
-  margin: 0 !important;
+  width: 32px;
+  height: 32px;
+  min-width: 0;
+  padding: 0;
+  gap: 0;
+  justify-content: center;
+  align-items: center;
+  margin: 0 auto;
   border-radius: 7px;
   box-sizing: border-box;
 }
@@ -428,12 +517,15 @@ a,
 @media (prefers-reduced-motion: reduce) {
   .sidebar,
   .sidebar .brand,
+  .sidebar .nav-section,
   .sidebar .nav-section > span,
   .sidebar .projects-list,
   .sidebar .runs-list,
+  .sidebar .sidebar-bottom,
   .sidebar .sidebar-bottom-btn,
-  .sidebar .sidebar-bottom-btn > span {
-    transition: none;
+  .sidebar .sidebar-bottom-btn > span,
+  .sidebar-brand-row {
+    transition: none !important;
   }
 }
 
@@ -903,6 +995,7 @@ a,
   color: var(--text-secondary);
   padding: 0 4px;
   box-sizing: border-box;
+  transition: padding var(--sidebar-width-duration) var(--sidebar-anim-ease);
 }
 
 .nav-section > span {
@@ -916,6 +1009,9 @@ a,
   margin-top: 14px;
   margin-bottom: 8px;
   flex-shrink: 0;
+  transition:
+    margin-top var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    margin-bottom var(--sidebar-width-duration) var(--sidebar-anim-ease);
 }
 
 .runs-list {
@@ -931,7 +1027,7 @@ a,
 }
 
 .runs-list.is-loaded {
-  animation: sidebarListFadeIn 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: sidebarListFadeIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 @keyframes sidebarListFadeIn {
@@ -1116,7 +1212,7 @@ a,
   color: var(--status-danger-text, #991b1b);
   opacity: 1;
   user-select: auto;
-  animation: sidebarListFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: sidebarListFadeIn 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .sidebar-load-error-header {
@@ -1192,7 +1288,12 @@ a,
   font-size: 13.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    width var(--sidebar-width-duration) var(--sidebar-anim-ease),
+    padding var(--sidebar-width-duration) var(--sidebar-anim-ease);
   text-align: left;
 }
 

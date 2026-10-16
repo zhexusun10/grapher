@@ -33,6 +33,15 @@ Names are semantic identifiers, not literal directory names. Edges contain only 
 
 The compiler returns `executionBatches`, `roots`, `terminals`, and warnings. Batches describe topology; scheduling does not wait for every slow node in a batch before dispatching a ready descendant.
 
+During foreground planning, the graph pane opens on a `node`/`edge` tool call.
+Successful tool results update the unapproved draft preview before the Planner's
+text stream ends. Cards appear centered as soon as they are measured; edge edits
+animate the layout while the viewport follows its center. Draft edits invalidate
+old displayed execution batches, and durable polling must not restore them over
+the live preview. This visualization does not approve, dispatch, or complete any
+work; approved revisions still commit atomically in Rust. Browser regressions:
+[Planner streaming and auto-fit](../../scripts/graph-planning-fit.test.mjs).
+
 ## Node states
 
 ```text

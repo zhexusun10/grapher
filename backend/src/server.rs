@@ -436,6 +436,19 @@ pub struct Bootstrap {
 
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
 const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
+const POST_TASK_REVIEW_PROMPT: &str = "All tasks you assigned are completed. Consider your next move.";
+
+// Keep the synthetic turn in Pi's own session, not in the UI transcript.
+fn hidden_review_turn(line: &str, background_review: bool) -> bool {
+    if !background_review { return false; }
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else { return false; };
+    matches!(event["type"].as_str(), Some("message_start" | "message_end"))
+        && event["message"]["role"] == "user"
+        && event["message"]["content"].as_array().is_some_and(|parts| {
+            parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")
+                == POST_TASK_REVIEW_PROMPT
+        })
+}
 
 #[cfg(test)]
 #[path = "planning_lifecycle_tests.rs"]
@@ -446,6 +459,9 @@ mod planning_repository_tests;
 #[cfg(test)]
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
+#[cfg(all(test, feature = "fixture"))]
+#[path = "planner_review_tests.rs"]
+mod planner_review_tests;
 #[cfg(test)]
 #[path = "transcript_page_tests.rs"]
 mod transcript_page_tests;
@@ -570,6 +586,7 @@ fn bootstrap_projection(
             max_parallel: 0,
             max_feedback: 3,
             auto_approve: false,
+            post_task_review: false,
             environment: None,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
@@ -1035,9 +1052,45 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 
 fn planner_node_status(snapshot: &Snapshot) -> String {
     let mut text = String::from("Current graph node status:\n");
+    if snapshot.published_head.is_some() {
+        let published: Vec<&str> = snapshot
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| snapshot.nodes.get(&node.name).is_some_and(|state| state.status == "done"))
+            .map(|node| node.name.as_str())
+            .collect();
+        if !published.is_empty() {
+            text.push_str(&format!(
+                "Already published in this run: {}. These nodes cannot be deleted; change their task to rework them.\n",
+                published.join(", ")
+            ));
+        }
+    }
     for node in &snapshot.graph.nodes {
         if let Some(state) = snapshot.nodes.get(&node.name) {
-            text.push_str(&format!("- {}: {}\n", node.name, state.status));
+            let status_desc = if snapshot.is_node_user_paused(&node.name) {
+                "paused (manually paused by user)".to_string()
+            } else if state.status == "failed" {
+                if let Some(err) = &state.error {
+                    let first_line = err.lines().next().unwrap_or("").trim();
+                    if !first_line.is_empty() {
+                        let truncated = if first_line.chars().count() > 80 {
+                            format!("{}...", first_line.chars().take(80).collect::<String>())
+                        } else {
+                            first_line.to_string()
+                        };
+                        format!("failed (error: {})", truncated)
+                    } else {
+                        "failed".to_string()
+                    }
+                } else {
+                    "failed".to_string()
+                }
+            } else {
+                state.status.clone()
+            };
+            text.push_str(&format!("- {}: {}\n", node.name, status_desc));
         }
     }
     text
@@ -1260,7 +1313,7 @@ fn plan_goal_internal(
     on_planner_line: impl FnMut(&str),
 ) -> Result<Snapshot, (String, Option<PlanningSummary>)> {
     plan_goal_internal_with_started(goal, config, mode, images, revision_run_id, service,
-        |_| {}, on_partitioner_line, on_route, on_planner_line)
+        false, |_| {}, on_partitioner_line, on_route, on_planner_line)
 }
 
 fn plan_goal_internal_with_started(
@@ -1270,6 +1323,7 @@ fn plan_goal_internal_with_started(
     images: Option<Vec<crate::model::ImageAttachment>>,
     revision_run_id: Option<String>,
     service: &Arc<Service>,
+    background_review: bool,
     mut on_started: impl FnMut(&str),
     mut on_partitioner_line: impl FnMut(&str),
     mut on_route: impl FnMut(&Route),
@@ -1381,7 +1435,7 @@ fn plan_goal_internal_with_started(
                 directory.join("request.json"),
                 serde_json::to_vec(&serde_json::json!({
                     "goal": goal, "config": config, "mode": mode, "revisionRunId": revision_run_id,
-                    "runId": owner
+                    "runId": owner, "backgroundReview": background_review
                 }))
                 .map_err(|e| (e.to_string(), None))?,
             )
@@ -1393,7 +1447,7 @@ fn plan_goal_internal_with_started(
                 created_at: Some(now_ms),
                 repository: Some(repo_str.clone()),
                 plan_type: mode.filter(|mode| matches!(*mode, "graph" | "serial")).map(str::to_owned),
-                goal: Some(goal.clone()),
+                goal: Some(if background_review { original_graph.as_ref().map(|graph| graph.original_goal.clone()).unwrap_or_else(|| goal.clone()) } else { goal.clone() }),
                 run_id: Some(owner.clone()),
                 roles: ["partition", "planner"]
                     .into_iter()
@@ -1410,6 +1464,15 @@ fn plan_goal_internal_with_started(
                     plan_type: mode.filter(|mode| matches!(*mode, "graph" | "serial")).map(str::to_owned),
                 }).map_err(|error| (error, None))?;
                 runtime.store.select_run(Some(&owner)).map_err(|error| (error, None))?;
+            }
+            if background_review {
+                let mut runtime = service.runtime.lock().map_err(|e| (e.to_string(), None))?;
+                if runtime.state.phase != "completed" || runtime.state.stop_requested
+                    || !runtime.state.nodes.values().all(|node| node.status == "done") {
+                    return Err(("Run is no longer ready for post-task review".into(), None));
+                }
+                runtime.emit(EventKind::PlannerReviewStarted { planning: running.clone() })
+                    .map_err(|error| (error, None))?;
             }
             // Publish only an identity whose request and initial event are durable.
             on_started(&owner);
@@ -1561,7 +1624,9 @@ fn plan_goal_internal_with_started(
                             .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
                         // Append dynamic state only to the new user turn, never to
                         // the shared system prompt or previous Planner turns.
-                        let task = {
+                        let task = if background_review {
+                            POST_TASK_REVIEW_PROMPT.to_owned()
+                        } else {
                             let runtime =
                                 service.runtime.lock().map_err(|error| error.to_string())?;
                             planner_followup_prompt(
@@ -1604,6 +1669,27 @@ fn plan_goal_internal_with_started(
                         )
                         .map_err(|e| e.to_string())?;
                         let mut log = String::new();
+                        // Runtime rejects removing a node whose result this run
+                        // already published. Tell the Planner at the tool boundary
+                        // so it reworks the task instead of losing the turn.
+                        let unremovable_nodes = revision_run_id
+                            .as_ref()
+                            .and_then(|run_id| {
+                                let runtime = service.runtime.lock().ok()?;
+                                (runtime.state.run_id == *run_id
+                                    && runtime.state.approved
+                                    && runtime.state.published_head.is_some())
+                                .then(|| {
+                                    runtime
+                                        .state
+                                        .nodes
+                                        .iter()
+                                        .filter(|(_, node)| node.status == "done")
+                                        .map(|(name, _)| name.clone())
+                                        .collect::<Vec<_>>()
+                                })
+                            })
+                            .unwrap_or_default();
                         // Each attempt retains its own stream/metrics for recovery;
                         // only Pi's private conversation directory is shared.
                         let mut planner_log = fs::File::create(directory.join("planner.jsonl"))
@@ -1637,16 +1723,41 @@ fn plan_goal_internal_with_started(
                                             .to_string_lossy()
                                             .into(),
                                     ),
+                                    (
+                                        "GRAPHER_UNREMOVABLE_NODES",
+                                        serde_json::to_string(&unremovable_nodes)
+                                            .unwrap_or_else(|_| "[]".into()),
+                                    ),
                                 ],
                                 system_prompt: Some(&planner_system_prompt),
                                 images: None,
                             },
                             |text| {
+                                if hidden_review_turn(&text, background_review) { return; }
                                 if let Err(error) = planner_log.write_all(text.as_bytes()) {
                                     log_error = Some(error.to_string());
                                 }
                                 log.push_str(&text);
                                 on_planner_line(&text);
+                                if background_review {
+                                    notify_planning_output(&owner, &planning_id);
+                                    let event = serde_json::from_str::<serde_json::Value>(&text).ok();
+                                    if event.as_ref().is_some_and(|event| event["type"] == "tool_execution_end"
+                                        && matches!(event["toolName"].as_str(), Some("node" | "edge"))) {
+                                        let candidate = fs::read(&graph_path).map_err(|e| e.to_string())
+                                            .and_then(|bytes| serde_json::from_slice::<Graph>(&bytes).map_err(|e| e.to_string()));
+                                        match candidate.and_then(|graph| {
+                                            let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                                            if runtime.state.review_graph.as_ref() != Some(&graph) {
+                                                runtime.emit(EventKind::PlannerReviewProgress { graph })?;
+                                            }
+                                            Ok(())
+                                        }) {
+                                            Ok(()) => {},
+                                            Err(error) => log_error = Some(error),
+                                        }
+                                    }
+                                }
                             },
                         );
                         let planner_wall_sec = planner_start.elapsed().as_secs_f64();
@@ -1703,7 +1814,7 @@ fn plan_goal_internal_with_started(
                     created_at: Some(now_ms),
                     repository: Some(repo_str.clone()),
                     plan_type: Some(route.plan_type.clone()),
-                    goal: Some(goal.clone()),
+                    goal: running.goal.clone(),
                     run_id: Some(owner.clone()),
                 };
 
@@ -1768,9 +1879,17 @@ fn plan_goal_internal_with_started(
                 {
                     runtime.approve()?;
                 }
+                if background_review {
+                    let pending = runtime.state.nodes.values().any(|node| node.status != "done");
+                    runtime.emit(EventKind::PlannerReviewFinished {
+                        planning: summary.clone(),
+                        approval_required: pending && !config.auto_approve,
+                    })?;
+                }
                 let snapshot = runtime.state.clone();
                 drop(runtime);
                 write_planning_summary(&directory, &summary)?;
+                if background_review { notify_planning_output(&owner, &planning_id); }
                 if snapshot.approved && (route.plan_type == "serial" || config.auto_approve) {
                     drive(service.clone());
                 }
@@ -1827,7 +1946,7 @@ fn plan_goal_internal_with_started(
                             .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
                             .map(|route| route.plan_type)
                             .or_else(|| mode.filter(|m| matches!(*m, "graph" | "serial")).map(str::to_owned)),
-                        goal: Some(goal.clone()),
+                        goal: running.goal.clone(),
                         run_id: Some(owner.clone()),
                     };
                     if let Err(error) = write_planning_summary(&directory, &failure_summary) {
@@ -1858,6 +1977,14 @@ fn plan_goal_internal_with_started(
                         if let Err(error) = captured {
                             resume_after = false; // Do not undo the safety pause below.
                             eprintln!("Cannot snapshot Planner writes after failed revision: {error}");
+                        }
+                        if background_review {
+                            if let Ok(mut runtime) = service.runtime.lock() {
+                                let _ = runtime.emit(EventKind::PlannerReviewFinished {
+                                    planning: failure_summary.clone(), approval_required: false,
+                                });
+                            }
+                            notify_planning_output(&owner, &planning_id);
                         }
                     }
                     Err((err, Some(failure_summary)))
@@ -2188,6 +2315,25 @@ fn drive(service: Arc<Service>) {
                                         "Cannot reclaim published shadow repository: {error}"
                                     );
                                 }
+                                let review = {
+                                    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                                    runtime.state.config.as_ref().filter(|config| config.post_task_review)
+                                        .filter(|_| runtime.state.plan_type.as_deref() == Some("graph")
+                                            && runtime.state.phase == "completed" && !runtime.state.stop_requested
+                                            && runtime.state.nodes.values().all(|node| node.status == "done"))
+                                        .cloned()
+                                };
+                                if let Some(config) = review {
+                                    if let Err((error, _)) = plan_goal_internal_with_started(
+                                        POST_TASK_REVIEW_PROMPT.into(), config, Some("graph"), None,
+                                        Some(run_id.clone()), &service, true, |_| {}, |_| {}, |_| {}, |_| {},
+                                    ) {
+                                        eprintln!("Post-task Planner review failed: {error}");
+                                    }
+                                    // The same driver owns continuation execution. No new
+                                    // jobs can dispatch until the entire turn has settled.
+                                    continue;
+                                }
                             }
                             Err(error) => {
                                 eprintln!("[Grapher] [Publication] Failed: {error}");
@@ -2211,11 +2357,12 @@ fn drive(service: Arc<Service>) {
                     let run_id = run_id.clone();
                     let spawned = thread::Builder::new().name("grapher-node".into()).spawn(move || {
                         let mut job = job;
+                        let node_owner = format!("{}:node:{}", run_id, job.execution.node);
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             // Every model session is independent. Serial mode selects
                             // the source checkout, but it does not serialize sessions
                             // from different Runs or attempt to reconcile their writes.
-                            crate::process_control::with_owner(&run_id, || {
+                            crate::process_control::with_owner(&node_owner, || {
                                 if job.materialize_source {
                                     materialize_job_source(&service, &root, &mut job)?;
                                 }
@@ -2643,6 +2790,17 @@ fn control(
     if matches!(action.as_str(), "stop" | "cancel") {
         let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
         let active_id = runtime.state.run_id.clone();
+        let target_node = node.as_deref().filter(|n| !n.trim().is_empty());
+        if let Some(node_name) = target_node {
+            // 用户在单个 Node 的对话框中点击停止/打断：
+            // 只打断目标 Node 的独立执行进程，绝不暂停全图，绝不影响其他并发运行的 Node，绝不打断 Planner
+            crate::engine::terminate_node(&active_id, node_name);
+            let snapshot = runtime.state.clone();
+            drop(runtime);
+            return Ok(snapshot);
+        }
+
+        // 全局 stop/cancel（未指定 node 时，才打断 Planner 并暂停整个图）
         if service.planning.load(Ordering::SeqCst) && !active_id.is_empty() {
             CANCELLED_PLANNING
                 .get_or_init(Default::default)
@@ -2659,7 +2817,7 @@ fn control(
         crate::engine::terminate_run(&active_id);
         return Ok(snapshot);
     }
-    if service.planning.load(Ordering::SeqCst) {
+    if !matches!(action.as_str(), "pause" | "resume") && service.planning.load(Ordering::SeqCst) {
         return Err("Wait for planning to finish".into());
     }
     if matches!(action.as_str(), "resolve" | "retry_publication")
@@ -4267,6 +4425,7 @@ enum RuntimeSignal {
         run_id: String,
         version: String,
     },
+    PlanningOutputAvailable { run_id: String, planning_id: String },
     OutputAvailable {
         run_id: String,
         execution_id: String,
@@ -4302,6 +4461,7 @@ fn run_sse_coalescer(rx: std::sync::mpsc::Receiver<RuntimeSignal>) {
         let deadline = std::time::Instant::now() + debounce;
         let mut snapshots: BTreeMap<String, String> = BTreeMap::new();
         let mut outputs: BTreeMap<(String, String), (usize, bool)> = BTreeMap::new();
+        let mut planning_outputs = BTreeSet::new();
         let mut current = Some(first);
         loop {
             if let Some(signal) = current.take() {
@@ -4311,6 +4471,9 @@ fn run_sse_coalescer(rx: std::sync::mpsc::Receiver<RuntimeSignal>) {
                         if !version.is_empty() {
                             *entry = version;
                         }
+                    }
+                    RuntimeSignal::PlanningOutputAvailable { run_id, planning_id } => {
+                        planning_outputs.insert((run_id, planning_id));
                     }
                     RuntimeSignal::OutputAvailable {
                         run_id,
@@ -4354,10 +4517,21 @@ fn run_sse_coalescer(rx: std::sync::mpsc::Receiver<RuntimeSignal>) {
                 format!("event: output_available\ndata: {data}\n\n").as_bytes(),
             );
         }
+        for (run_id, planning_id) in planning_outputs {
+            let data = serde_json::json!({ "runId": run_id, "planningId": planning_id });
+            payload.extend_from_slice(format!("event: planning_output_available\ndata: {data}\n\n").as_bytes());
+        }
         if !payload.is_empty() {
             broadcast_sse_bytes(&payload);
         }
     }
+}
+
+fn notify_planning_output(run_id: &str, planning_id: &str) {
+    if ACTIVE_SSE_CLIENTS.load(Ordering::Relaxed) == 0 { return; }
+    let _ = sse_signal_sender().send(RuntimeSignal::PlanningOutputAvailable {
+        run_id: run_id.into(), planning_id: planning_id.into(),
+    });
 }
 
 fn broadcast_sse_bytes(bytes: &[u8]) {
@@ -5022,6 +5196,7 @@ fn handle_http_request(
                     images,
                     revision_run_id,
                     &service_clone,
+                    false,
                     |run_id| send_sse_event(&tx, "run_started", &serde_json::json!({"runId": run_id})),
                     |line| {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {

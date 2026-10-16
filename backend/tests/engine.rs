@@ -24,7 +24,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
         pi_args: vec![script_path.to_string_lossy().into()],
         model: String::new(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false,
+        max_feedback: 3, auto_approve: false, post_task_review: false,
         thinking_level: "medium".into(),
         role_models: Default::default(),
     };
@@ -295,6 +295,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
         role_models: Default::default(),
+        post_task_review: false,
     };
     for role in [PiRole::Merger, PiRole::NodeAgent, PiRole::Planner, PiRole::Partitioner] {
         let mut output = String::new();
@@ -338,6 +339,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script_path.to_string_lossy().into()],
         model: "test-model".into(),
+        post_task_review: false,
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
@@ -508,6 +510,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script.to_string_lossy().into()],
         model: "test-model".into(),
+        post_task_review: false,
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
@@ -584,7 +587,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         model: "test-model".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false,
+        max_feedback: 3, auto_approve: false, post_task_review: false,
         role_models: Default::default(),
     };
     let mut output = String::new();
@@ -651,7 +654,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         role_models: Default::default(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false,
+        max_feedback: 3, auto_approve: false, post_task_review: false,
     };
 
     // Verify PiModelConfig::resolve for NodeAgent ignores PI_MODEL and uses base_config.model

@@ -1125,7 +1125,7 @@
 .pi-auth-title-group {
   display: flex;
   gap: 12px;
-  align-items: flex-start;
+  align-items: center;
 }
 
 .pi-auth-icon-badge {
@@ -1226,7 +1226,6 @@
   overflow-x: hidden;
   padding: 6px;
   box-sizing: border-box;
-  scrollbar-width: thin;
   margin-top: 8px;
 }
 

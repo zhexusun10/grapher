@@ -481,6 +481,14 @@ impl Runtime {
     }
 
     fn recover_publication(&mut self) -> Result<(), String> {
+        if self.state.review_graph.is_some() {
+            if let Some(mut planning) = self.state.planning.clone() {
+                planning.status = Some("failed".into());
+                planning.error = Some("Backend stopped during post-task Planner review. Saved output is preserved; send a follow-up to continue.".into());
+                let approval_required = self.state.nodes.values().any(|node| node.status != "done");
+                self.emit(EventKind::PlannerReviewFinished { planning, approval_required })?;
+            }
+        }
         if let Some(execution) = self
             .state
             .result_execution
@@ -2918,7 +2926,7 @@ impl Runtime {
             Err(error) => {
                 // Stop kills Pi's process tree; its nonzero exit code is a
                 // consequence of the user's action, not a model failure.
-                let error = if self.state.stop_requested && error.starts_with("Pi exited with ") {
+                let error = if self.state.stop_requested {
                     "用户已停止本次执行；可以修改消息或重新运行。".to_string()
                 } else {
                     error

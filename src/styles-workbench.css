@@ -1424,15 +1424,17 @@ button.session-label-toggle:focus-visible {
 .heading-title-col {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
 }
 
 .back-to-query-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
   background: transparent;
   border: none;
   color: var(--text-secondary);
@@ -1440,10 +1442,12 @@ button.session-label-toggle:focus-visible {
   transition: color 0.15s ease, background 0.15s ease;
   margin-left: 6px;
   padding: 0;
+  flex-shrink: 0;
 }
 
 .back-to-query-btn:hover {
-  color: var(--brand-default);
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
 }
 
 
@@ -1526,11 +1530,14 @@ button.session-label-toggle:focus-visible {
 
 
 .conversation-heading {
+  height: 68px;
+  box-sizing: border-box;
   display: flex;
   gap: 10px;
   align-items: center;
-  padding: 20px 18px 18px;
+  padding: 0 18px;
   flex-shrink: 0;
+  background: var(--bg-surface);
 }
 
 .conversation-heading>div:nth-child(2) {
@@ -1542,6 +1549,7 @@ button.session-label-toggle:focus-visible {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-weight: 550;
   color: var(--text-primary);
+  line-height: 1;
 }
 
 .conversation-heading>div>span {
@@ -1649,7 +1657,8 @@ button.session-label-toggle:focus-visible {
 }
 
 .graph-toolbar {
-  height: 48px;
+  height: 68px;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1676,6 +1685,7 @@ button.session-label-toggle:focus-visible {
   font-size: 11px;
   font-weight: 500;
   color: var(--text-primary);
+  line-height: 1;
 }
 
 .phase {
@@ -2557,19 +2567,20 @@ button.session-label-toggle:focus-visible {
 .settings-header-title-wrap {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 8px;
+  color: var(--text-primary);
+}
+
+.settings-header-title-wrap svg {
+  color: var(--text-primary);
+  flex-shrink: 0;
 }
 
 .settings-header-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: 7px;
-  background: var(--brand-subtle);
-  border: 1px solid var(--brand-border);
-  color: var(--brand-default);
   display: flex;
   align-items: center;
   justify-content: center;
+  color: var(--text-primary);
   flex-shrink: 0;
 }
 
@@ -2754,6 +2765,7 @@ button.session-label-toggle:focus-visible {
   min-width: 0;
 }
 
+.settings-toggle-row + .settings-toggle-row { margin-top: 14px; }
 .settings-toggle-row strong { font-size: 13px; font-weight: 600; }
 .settings-toggle-row small { font-size: 12px; color: var(--text-secondary); }
 .settings-toggle-row input { width: 18px; height: 18px; flex: none; accent-color: var(--brand-default); cursor: pointer; }
@@ -2831,6 +2843,11 @@ button.session-label-toggle:focus-visible {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
+.save-config-btn:disabled {
+  box-shadow: none;
+  pointer-events: none;
+}
+
 /* 响应式适配 */
 @media (max-width: 1180px) {
   .sidebar:not(.is-collapsed) {
@@ -2866,11 +2883,6 @@ button.session-label-toggle:focus-visible {
 }
 
 @media (max-height: 820px) {
-
-  .conversation-heading {
-    padding-top: 14px;
-    padding-bottom: 14px;
-  }
 
   .intervention textarea {
     height: 52px;

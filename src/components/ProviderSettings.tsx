@@ -12,7 +12,6 @@ import {
   Check,
   Eye,
   EyeOff,
-  ShieldCheck,
   LogIn,
   Trash2,
   X,
@@ -308,14 +307,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       {/* Pi Auth Center Header */}
       <div className="pi-auth-header-card">
         <div className="pi-auth-title-group">
-          <div className="pi-auth-icon-badge">
-            <ShieldCheck size={18} />
-          </div>
-          <div>
-            <div className="pi-auth-main-title">
-              <h5>{t("Provider 认证")}</h5>
-            </div>
-
+          <div className="pi-auth-main-title">
+            <h5>{t("Provider 认证")}</h5>
           </div>
         </div>
 
@@ -378,7 +371,6 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             style={{ cursor: "pointer", userSelect: "none" }}
           >
             <div className="configured-title-group">
-              <Key size={15} className="configured-key-icon" />
               <strong>{t("已绑定的 Provider 凭据 (")}{configuredProviders.length})</strong>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>

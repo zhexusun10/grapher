@@ -1,5 +1,5 @@
 use grapher::{
-    compiler::{compile, compile_legacy, downstream, node_id},
+    compiler::{compile, compile_legacy, downstream, node_id, unremovable_node_diagnostics},
     engine::feedback,
     model::*,
     runtime::{perform, Runtime},
@@ -47,6 +47,7 @@ fn config() -> Config {
         max_parallel: 2,
         max_feedback: 3,
         auto_approve: false,
+        post_task_review: false,
         role_models: Default::default(),
     }
 }
@@ -330,6 +331,28 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
         }),
         unaffected
     );
+}
+
+#[test]
+fn unremovable_published_nodes_report_a_removal_diagnostic_at_the_tool_boundary() {
+    // A run whose results already published cannot lose a delivered node, but
+    // the graph structure stays valid: the Planner tool boundary needs the
+    // runtime-owned name set to reject the edit where the model still reacts.
+    let mut candidate = graph();
+    // An unremovable node that is still present is not a problem.
+    assert!(unremovable_node_diagnostics(&candidate, &["review".into()]).is_empty());
+    assert!(unremovable_node_diagnostics(&candidate, &[]).is_empty());
+    // Deleting it produces the boundary rejection; other nodes do not.
+    candidate.nodes.pop();
+    let removed = unremovable_node_diagnostics(&candidate, &["review".into(), "spec".into()]);
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].code, "E210");
+    assert!(removed[0].message.contains("review"));
+    assert!(removed[0].message.contains("already published"));
+    // Keeping the node but reworking its task is the sanctioned alternative.
+    candidate.nodes.push(Node { name: "review".into(), task: "Review again".into() });
+    assert!(unremovable_node_diagnostics(&candidate, &["review".into()]).is_empty());
+    assert!(compile(&candidate, true).is_ok());
 }
 
 #[test]

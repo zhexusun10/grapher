@@ -391,6 +391,8 @@ export const en: Record<string, string> = {
   "图纸审批": "Plan approval",
   "自动批准 Planner 生成的图纸并开始执行": "Automatically approve Planner-generated graphs and start execution",
   "Auto Approve Planner 图纸": "Auto approve Planner graphs",
+  "任务后 Planner 复盘": "Post-task Planner review",
+  "任务完成并写回后，让 Planner 决定下一步。新任务遵循自动审批设置。": "After tasks are published, let Planner decide what comes next. New tasks follow Auto Approve.",
   "存储与重置": "Storage and reset",
   "数据路径": "Data path",
   "本地系统应用目录": "Local system application directory",

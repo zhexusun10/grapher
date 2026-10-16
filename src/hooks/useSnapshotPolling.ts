@@ -108,7 +108,9 @@ export function useSnapshotPolling(
                   ...previous.graph,
                   originalGoal: previous.graph.originalGoal || snapshot.graph.originalGoal,
                 },
-                plan: previous.plan ?? snapshot.plan,
+                // null deliberately invalidates an older committed plan after
+                // a draft edit; do not restore its obsolete execution batches.
+                plan: previous.plan,
               }
               : previous);
             return;

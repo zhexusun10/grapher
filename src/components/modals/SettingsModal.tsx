@@ -32,6 +32,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   const reduceMotion = useReducedMotion();
   const [draftConfig, setDraftConfig] = useState(() => ({ ...config }));
   const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? false);
+  const [postTaskReview, setPostTaskReview] = useState(config.postTaskReview ?? false);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState("");
@@ -41,12 +42,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     setSaving(true);
     setSaveError("");
     try {
-      await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove });
+      const ok = await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove, postTaskReview });
+      if (ok === false) {
+        savingRef.current = false;
+        setSaving(false);
+      }
     } catch (error) {
-      setSaveError(String(error));
-    } finally {
       savingRef.current = false;
       setSaving(false);
+      setSaveError(String(error));
     }
   };
   const [catalog, setCatalog] = useState<ProviderCatalog>();
@@ -91,12 +95,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       >
         <header className="settings-modal-header">
           <div className="settings-header-title-wrap">
-            <div className="settings-header-icon">
-              <Settings2 size={18} />
-            </div>
-            <div>
-              <h2 id="modal-title">{t("设置")}</h2>
-            </div>
+            <Settings2 size={18} />
+            <h2 id="modal-title">{t("设置")}</h2>
           </div>
           <button className="icon-button" aria-label={t("关闭弹窗")} disabled={saving} onClick={onClose}>
             <X size={18} />
@@ -165,6 +165,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   disabled={saving}
                   onChange={(event) => setAutoApprove(event.target.checked)}
                   aria-label={t("Auto Approve Planner 图纸")}
+                />
+              </label>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("任务后 Planner 复盘")}</strong>
+                  <small>{t("任务完成并写回后，让 Planner 决定下一步。新任务遵循自动审批设置。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={postTaskReview}
+                  disabled={saving}
+                  onChange={(event) => setPostTaskReview(event.target.checked)}
+                  aria-label={t("任务后 Planner 复盘")}
                 />
               </label>
             </div>

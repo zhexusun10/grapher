@@ -199,6 +199,40 @@ try {
   assert.equal(deletedBuild.warnings.length, 1);
   assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target removes the scope warning and exposes the missing-route warning again");
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
+  // Runtime-state constraint is read when the extension loads: a node whose
+  // result this run already published cannot be deleted, but its task can be
+  // reworked. The rejection must reach the Planner as an actionable tool
+  // diagnostic instead of failing the whole commit inside Runtime.
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({
+    originalGoal: "Published fixture",
+    nodes: [{ name: "published", task: "Original" }, { name: "fresh", task: "New work" }],
+    edges: [],
+  }));
+  process.env.GRAPHER_UNREMOVABLE_NODES = JSON.stringify(["published"]);
+  const publishedLoaded = await loadExtensions([join(source, "backend/resources/planner.ts")], repository);
+  assert.deepEqual(publishedLoaded.errors, []);
+  const publishedExtension = publishedLoaded.extensions[0];
+  const publishedCall = async (name: string, parameters: Record<string, unknown>) => {
+    const tool = publishedExtension.tools.get(name)!.definition;
+    const args = validateToolArguments(tool, { type: "toolCall", id: "test-published", name, arguments: parameters });
+    return await tool.execute("test-published", args, undefined, undefined, context);
+  };
+  const publishedBefore = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
+  const publishedDelete = await publishedCall("node", { nodes: [{ name: "published", delete: true }] });
+  const publishedDeleteResult = JSON.parse(publishedDelete.content[0].text);
+  assert.equal(publishedDeleteResult.applied, false);
+  assert.deepEqual(Object.keys(publishedDeleteResult), ["applied", "topology", "diagnostics"]);
+  assert.match(publishedDeleteResult.diagnostics[0], /Cannot remove node 'published'/);
+  assert.match(publishedDeleteResult.diagnostics[0], /already published/);
+  assert.deepEqual(publishedDelete.details.diagnosticCodes, ["E210"]);
+  assert.deepEqual(await publishedExtension.handlers.get("tool_result")![0]({ toolName: "node", details: publishedDelete.details, isError: false }), { isError: true });
+  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), publishedBefore, "A rejected edit leaves the saved graph unchanged");
+  const rework = JSON.parse((await publishedCall("node", { nodes: [{ name: "published", task: "Reworked" }] })).content[0].text);
+  assert.equal(rework.applied, true, "Reworking a published node's task stays allowed");
+  assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).nodes.find((n: { name: string }) => n.name === "published").task, "Reworked");
+  const deleteFresh = JSON.parse((await publishedCall("node", { nodes: [{ name: "fresh", delete: true }] })).content[0].text);
+  assert.equal(deleteFresh.applied, true, "Nodes without published results stay deletable");
+  delete process.env.GRAPHER_UNREMOVABLE_NODES;
   // Each tool compiles its own batch once.
   const compilerPath = process.env.GRAPHER_COMPILER_PATH!;
   const countedCompiler = join(root, process.platform === "win32" ? "counted-compiler.exe" : "counted-compiler.mjs");

@@ -1,6 +1,7 @@
 import { t, localizeError } from "../i18n";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
 import { runtimeService } from "../services/runtime";
+import { subscribePlanningOutput } from "../services/runtimeEvents";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useTranscriptReader } from "../hooks/useTranscriptReader";
@@ -152,7 +153,10 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         return null;
       }
     });
-    return () => { abort.abort(); stop(); };
+    const unsubscribe = subscribePlanningOutput(event => {
+      if (event.runId === runId && planningIds.includes(event.planningId)) stop.wake();
+    });
+    return () => { unsubscribe(); abort.abort(); stop(); };
   }, [key, retry, running, publish, lifetime]);
 
   return <section ref={sectionRef} className="planning-activity" aria-label={t("规划活动记录")} aria-busy={!initialReady}>

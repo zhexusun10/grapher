@@ -199,6 +199,7 @@ mod tests {
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
+            post_task_review: false,
             environment: None,
             role_models: Default::default(),
         };

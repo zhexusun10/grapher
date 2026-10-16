@@ -38,7 +38,9 @@ pub(crate) fn planning_ids(root: &Path, state: &Snapshot) -> Result<BTreeSet<Str
                 ids.insert(planning.planning_id.clone());
             }
             EventKind::PlanningStarted { planning, .. }
-            | EventKind::PlanningFailed { planning } => {
+            | EventKind::PlanningFailed { planning }
+            | EventKind::PlannerReviewStarted { planning }
+            | EventKind::PlannerReviewFinished { planning, .. } => {
                 ids.insert(planning.planning_id.clone());
             }
             _ => {}

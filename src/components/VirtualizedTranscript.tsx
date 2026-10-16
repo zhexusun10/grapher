@@ -420,7 +420,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                   const textBefore = remaining.slice(0, startIdx);
                   if (textBefore) {
                     const lastItem = currentItems[currentItems.length - 1];
-                    if (lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
+                    if (currentItems.length > assistantStartIndexRef.current && lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
                       lastItem.content = (lastItem.content || "") + textBefore;
                     } else {
                       currentItems.push({
@@ -436,7 +436,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
                   remaining = remaining.slice(startIdx + startTag.length);
                 } else {
                   const lastItem = currentItems[currentItems.length - 1];
-                  if (lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
+                  if (currentItems.length > assistantStartIndexRef.current && lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
                     lastItem.content = (lastItem.content || "") + remaining;
                   } else {
                     currentItems.push({
@@ -460,7 +460,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             lastItem.status = "success";
           }
 
-          if (lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
+          if (currentItems.length > assistantStartIndexRef.current && lastItem && lastItem.type === "text" && lastItem.role === "assistant" && !lastItem.rawOutput) {
             lastItem.content = (lastItem.content || "") + delta;
           } else {
             currentItems.push({

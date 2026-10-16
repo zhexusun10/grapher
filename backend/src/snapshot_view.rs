@@ -66,7 +66,7 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "publication": state.publication, "events": [], "approved": state.approved,
         "paused": state.paused, "stopRequested": state.stop_requested, "canResume": state.can_resume(), "phase": state.phase, "base": state.base,
         "publishedHead": state.published_head, "feedbackCounts": state.feedback_counts,
-        "pendingFeedback": state.pending_feedback,
+        "pendingFeedback": state.pending_feedback, "reviewGraph": state.review_graph,
         "environmentPolicy": state.environment_policy,
         "environmentBaseline": state.environment_baseline, "publishedResult": state.published_result,
         "resultExecution": state.result_execution,
@@ -96,6 +96,10 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         "resultExecution": state.result_execution,
         "runMetrics": state.run_metrics
     });
+    if let Some(graph) = &state.review_graph {
+        metadata["graph"] = json!(graph);
+        metadata["plan"] = json!(crate::compiler::compile(graph, false).ok());
+    }
     if let Some(plan_type) = &state.plan_type {
         metadata["planType"] = json!(plan_type);
     }

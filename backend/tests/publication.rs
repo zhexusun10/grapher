@@ -187,7 +187,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             role_models: Default::default(),
             thinking_level: "medium".into(),
             max_parallel: 2,
-            max_feedback: 1, auto_approve: false,
+            max_feedback: 1, auto_approve: false, post_task_review: false,
         };
         let runtime_root = temp.path().join("runtime");
         let mut events = Vec::new();
@@ -281,6 +281,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         max_parallel: 1,
         max_feedback: 1,
         auto_approve: false,
+        post_task_review: false,
     };
     let root = temp.path().join("runtime");
     let session_dir = root.join("mergers").join("publication-merger");

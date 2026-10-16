@@ -15,7 +15,7 @@ export interface CompositeResult { domain: { platform: string; arch: string; bas
 export interface ResultEntry { name: string; result: CompositeResult; workspace: string }
 export interface ResultDescriptor { schema: number; runId: string; result: CompositeResult; config: EnvironmentConfig; workspace: string; entries?: ResultEntry[]; defaultEntry?: string }
 export interface EnvironmentCapabilities { platform: string; arch: string; nativeWorkspace: boolean; fixedPhysicalLayout: boolean; namespaceLayout: boolean; basicSnapshots: boolean; extendedMetadata: boolean; sharedWorkingLayers: boolean; fullSystemSnapshot: boolean; gpuVerified: boolean; resourceQuotas: boolean; cpuQuota: boolean; memoryQuota: boolean; deviceLeases: boolean; storage: string }
-export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; environment?: EnvironmentConfig | null }
+export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; postTaskReview?: boolean; environment?: EnvironmentConfig | null }
 interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; result?: CompositeResult | null; modelConfig?: RoleModelConfig }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
 interface ExecutionMetrics {
@@ -39,7 +39,7 @@ interface RunMetrics {
 }
 
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; input?: CompositeResult | null; result?: CompositeResult | null; workspaceLineage?: string[]; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null }
-export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Execution; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; from_execution_id?: string; from_event_sequence?: number; old_instruction?: string; first_turn?: boolean; selected_version?: number; human?: boolean; planning_id?: string; plan_type?: string; planType?: string }
+export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Execution; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; from_execution_id?: string; from_event_sequence?: number; old_instruction?: string; first_turn?: boolean; selected_version?: number; human?: boolean; planning_id?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
   input: number;
@@ -146,7 +146,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: 0, maxFeedback: 3, autoApprove: false };
+export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: 0, maxFeedback: 3, autoApprove: false, postTaskReview: false };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},

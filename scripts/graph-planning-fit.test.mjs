@@ -4,12 +4,20 @@ import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 
 let server, browser, origin;
+let planningResponse;
 before(async () => {
   server = await createServer({
     cacheDir: "node_modules/.vite-graph-planning-fit",
     server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false },
     plugins: [{ name: "graph-planning-fixture", configureServer(vite) {
       vite.middlewares.use(async (req, res, next) => {
+        if (req.url === "/api/plan_goal_stream") {
+          for await (const _chunk of req) { /* Drain the request before streaming. */ }
+          planningResponse = res;
+          res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+          res.write(": planning\n\n");
+          return;
+        }
         if (req.url !== "/__graph-planning") return next();
         res.setHeader("Content-Type", "text/html");
         res.end(await vite.transformIndexHtml(req.url,
@@ -21,7 +29,145 @@ before(async () => {
   origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
-after(async () => { await browser?.close(); await server?.close(); });
+after(async () => { planningResponse?.destroy(); await browser?.close(); await server?.close(); });
+
+test("actual App: node results render before Planner completion; edges rearrange a visible, centered graph", { timeout: 30_000 }, async () => {
+  const config = { repository: "/mock/live-graph", model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const goal = "Build a live topology";
+  const runId = "live-graph";
+  let snapshot = empty, textTimer;
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "no-preference" });
+  await context.addInitScript(config => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_plan_mode", "graph");
+    localStorage.setItem("grapher_projects", JSON.stringify([{ id: config.repository, path: config.repository, name: "Live graph", lastOpened: 1 }]));
+  }, config);
+  const errors = [];
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [], repositoryInfo: { path: config.repository, name: "Live graph", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = snapshot; break;
+      case "snapshot_if_changed": result = { version: snapshot.phase, snapshot: snapshot.runId ? snapshot : null }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [] }; break;
+      default: errors.push(`Unexpected API: ${command}`); result = null;
+    }
+    try { await route.fulfill({ json: { result } }); } catch { /* A superseded poll can be aborted. */ }
+  });
+  const page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  const send = (type, data) => planningResponse.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+  const planner = event => send("planner", { event, raw: JSON.stringify(event) + "\n" });
+  const startTool = (id, toolName, args) => planner({ type: "tool_execution_start", toolCallId: id, toolName, args });
+  // Pi's end event intentionally has no args. The pairing must survive text updates and polls.
+  const endTool = (id, toolName, topology, isError = false) => planner({ type: "tool_execution_end", toolCallId: id, toolName, isError,
+    result: { content: [{ type: "text", text: JSON.stringify({ applied: !isError, topology }) }] } });
+  const tool = (id, toolName, args, topology, isError = false) => {
+    startTool(id, toolName, args);
+    endTool(id, toolName, topology, isError);
+  };
+  const nodes = ["a", "b", "c"].map(name => ({ name, task: `Task ${name}` }));
+  const edges = [{ from: "a", to: "b", feedback: false }, { from: "b", to: "c", feedback: false }];
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    const input = page.locator(".landing-screen textarea");
+    await input.fill(goal); await input.press("Enter");
+    for (let i = 0; !planningResponse && i < 100; i++) await page.waitForTimeout(20);
+    assert.ok(planningResponse, "Planner stream started");
+    snapshot = { ...empty, runId, config, phase: "planning", planType: "graph",
+      graph: { ...empty.graph, originalGoal: goal }, events: [{ sequence: 1, timestamp: 1, type: "planning_started", plan_type: "graph" }] };
+    send("run_started", { runId });
+    send("route_decision", { planType: "graph" });
+    planner({ type: "message_start", message: { role: "assistant", content: [] } });
+    textTimer = setInterval(() => planner({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Still planning. " } }), 50);
+
+    startTool("node-a", "node", { nodes: nodes.slice(0, 1) });
+    await page.waitForFunction(() => {
+      const pane = document.querySelector(".graph-pane");
+      return pane && +getComputedStyle(pane).opacity > 0.99;
+    });
+    assert.equal(await page.locator(".react-flow__node").count(), 0, "show the pane on tool start, but only accepted results become cards");
+    endTool("node-a", "node", { nodes: ["a"], edges: [] });
+    await assertFitted(page, [["a"]]);
+    tool("node-bc", "node", { nodes: nodes.slice(1) }, { nodes: ["a", "b", "c"], edges: [] });
+    await assertFitted(page, [["a", "b", "c"]]);
+    assert.equal(planningResponse.writableEnded, false, "cards appear while the response is still open");
+    assert.equal(await page.getByRole("button", { name: "Approve", exact: true }).count(), 0, "preview is not approval");
+
+    await page.evaluate(() => {
+      window.graphFrames = [];
+      window.sampleGraph = true;
+      const sample = () => {
+        const flow = document.querySelector(".graph-canvas .react-flow");
+        const elements = [...(flow?.querySelectorAll(".react-flow__node") ?? [])];
+        if (flow && elements.length) {
+          const rects = elements.map(node => node.getBoundingClientRect()), canvas = flow.getBoundingClientRect();
+          const left = Math.min(...rects.map(r => r.left)), right = Math.max(...rects.map(r => r.right));
+          const top = Math.min(...rects.map(r => r.top)), bottom = Math.max(...rects.map(r => r.bottom));
+          window.graphFrames.push({ centerError: Math.max(Math.abs((left + right - canvas.left - canvas.right) / 2),
+            Math.abs((top + bottom - canvas.top - canvas.bottom) / 2)),
+            visible: elements.every(node => node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })),
+            opacity: [getComputedStyle(flow).opacity, getComputedStyle(flow.closest(".graph-pane")).opacity],
+            hidden: elements.filter(node => !node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }))
+              .map(node => ({ id: node.dataset.id, visibility: getComputedStyle(node).visibility })),
+            positions: rects.map(r => [r.left, r.top]) });
+        }
+        if (window.sampleGraph) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    tool("edges", "edge", { edges }, { nodes: ["a", "b", "c"], edges });
+    await assertFitted(page, [["a"], ["b"], ["c"]]);
+    assert.equal(await page.locator(".react-flow__edge-path").count(), 2, "accepted edges render during planning");
+    const frames = await page.evaluate(() => { window.sampleGraph = false; return window.graphFrames; });
+    assert.ok(frames.every(frame => frame.visible), `edge rearrangement never hides existing cards: ${JSON.stringify(frames.filter(frame => !frame.visible).slice(0, 3))}`);
+    assert.ok(frames.every(frame => frame.centerError < 8), `rearrangement stays centered: ${Math.max(...frames.map(f => f.centerError))}px`);
+    assert.ok(new Set(frames.map(frame => JSON.stringify(frame.positions))).size > 3, "cards move through intermediate layouts, not a final-layout jump");
+    assert.equal(planningResponse.writableEnded, false, "edge layout does not wait for Planner completion");
+
+    tool("rejected", "node", { nodes: [{ name: "phantom", task: "Invalid edit" }] }, { nodes: ["a", "b", "c"], edges }, true);
+    await page.waitForTimeout(850); // At least one durable empty-graph poll must not erase the preview.
+    await assertFitted(page, [["a"], ["b"], ["c"]]);
+    assert.equal(await page.locator('.react-flow__node[data-id="phantom"]').count(), 0);
+    clearInterval(textTimer);
+    snapshot = { ...snapshot, phase: "awaiting_approval", graph: { originalGoal: goal, nodes, edges },
+      nodes: Object.fromEntries(nodes.map(node => [node.name, { status: "waiting" }])),
+      plan: { executionBatches: [["a"], ["b"], ["c"]], roots: ["a"], terminals: ["c"], warnings: [] } };
+    planningResponse.end(`event: complete\ndata: ${JSON.stringify({ snapshot })}\n\n`);
+    await page.getByRole("button", { name: "Approve", exact: true }).waitFor();
+    await assertFitted(page, [["a"], ["b"], ["c"]]);
+
+    // Revise an unapproved draft whose saved plan still contains the old chain.
+    // Polling that plan must not pin a live edge edit to obsolete execution batches.
+    planningResponse = undefined;
+    const followUp = page.locator(".pane-bottom-chat textarea");
+    await followUp.fill("Remove the dependencies"); await followUp.press("Enter");
+    for (let i = 0; !planningResponse && i < 100; i++) await page.waitForTimeout(20);
+    assert.ok(planningResponse, "revision stream started");
+    send("run_started", { runId });
+    tool("remove-edges", "edge", { edges: edges.map(edge => ({ ...edge, delete: true })) }, { nodes: ["a", "b", "c"], edges: [] });
+    await assertFitted(page, [["a", "b", "c"]]);
+    await page.waitForTimeout(850);
+    await assertFitted(page, [["a", "b", "c"]]);
+    assert.equal(await page.locator(".react-flow__edge-path").count(), 0);
+    snapshot = { ...snapshot, graph: { ...snapshot.graph, edges: [] },
+      plan: { executionBatches: [["a", "b", "c"]], roots: ["a", "b", "c"], terminals: ["a", "b", "c"], warnings: [] } };
+    planningResponse.end(`event: complete\ndata: ${JSON.stringify({ snapshot })}\n\n`);
+    await assertFitted(page, [["a", "b", "c"]]);
+    assert.deepEqual(errors, []);
+  } finally {
+    clearInterval(textTimer); planningResponse?.destroy(); planningResponse = undefined;
+    await context.close();
+  }
+});
 
 const viewport = page => page.locator(".react-flow__viewport").evaluate(element => {
   const matrix = new DOMMatrixReadOnly(getComputedStyle(element).transform);

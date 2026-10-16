@@ -182,17 +182,25 @@ test('refreshed catalog exposes reviewed API changes and does not resurrect reti
     ['openrouter', 'qwen/qwen3.8-27b:free'],
     ['openrouter', 'stealth/space-bunny-alpha'],
     ['vercel-ai-gateway', 'inclusionai/ling-3.0-flash-sante-free'],
-    // Retired while moving to the Pi 1.2.0 snapshot: the paid Ling and OpenCode
-    // Step models remain, the Vertex `*-latest` aliases moved to concrete ids.
+    // Retired while moving to the Pi 1.2.0 snapshot; the Vertex `*-latest`
+    // aliases moved to concrete ids.
     ['openrouter', 'inclusionai/ling-3.0-flash-sante:free'],
     ['opencode', 'fledge-alpha-free'],
     ['google-vertex', 'gemini-flash-latest'],
     ['google-vertex', 'gemini-flash-lite-latest'],
+    // Retired while moving to the Pi 1.3.0 snapshot: OpenRouter dropped both the
+    // free and the paid `*-sante` Ling variants, and the OpenCode Zen catalog
+    // shrank; the plain Ling models and `opencode-go/step-5-preview` remain.
+    ['openrouter', 'inclusionai/ling-3.0-flash-sante'],
+    ['opencode', 'step-5-preview-free'],
   ]) {
     assert.equal(runtime.getModel(provider, id), undefined, `${provider}/${id}: saved selections need replacement`);
   }
-  assert.equal(runtime.getModel('openrouter', 'inclusionai/ling-3.0-flash-sante')?.api, 'openai-completions');
-  assert.equal(runtime.getModel('opencode', 'step-5-preview-free')?.api, 'openai-completions');
+  assert.equal(runtime.getModel('openrouter', 'inclusionai/ling-3.0-flash')?.api, 'openai-completions');
+  // OpenCode Go moved to the opencode.ai inference endpoints in 1.3.0 and gained
+  // Google Generative AI support, while its Qwen models stay on Anthropic Messages.
+  assert.equal(runtime.getModel('opencode-go', 'gemini-4-argon-contributor')?.api, 'google-generative-ai');
+  assert.match(runtime.getModel('opencode-go', 'gemini-4-argon-contributor')?.baseUrl ?? '', /^https:\/\/opencode\.ai\/inference\/go\/v1$/);
   // OpenRouter router models report a negative placeholder price; the snapshot must use 0, not -$1,000,000.
   assert.deepEqual(runtime.getModel('openrouter', 'openrouter/auto')?.cost,
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });

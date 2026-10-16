@@ -98,6 +98,25 @@ fn is_legacy_node_id(name: &str) -> bool {
         && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
+/// Runtime-state constraint surfaced at the Planner tool boundary: once a
+/// run has published, a node whose result was delivered may be reworked (a
+/// task change invalidates and re-runs it) but never removed. Graph structure
+/// alone cannot express this, so the caller supplies the run's unremovable
+/// node names and a missing one is reported as an actionable diagnostic
+/// instead of failing the whole commit inside Runtime.
+pub fn unremovable_node_diagnostics(graph: &Graph, unremovable: &[String]) -> Vec<Diagnostic> {
+    unremovable
+        .iter()
+        .filter(|name| !graph.nodes.iter().any(|node| &node.name == *name))
+        .map(|name| Diagnostic {
+            code: "E210".into(),
+            message: format!(
+                "Cannot remove node '{name}': its result is already published in this run. Keep the node and change its task to rework it, or add a new node for follow-up work.",
+            ),
+        })
+        .collect()
+}
+
 pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>> {
     compile_with_policy(graph, final_check, true)
 }

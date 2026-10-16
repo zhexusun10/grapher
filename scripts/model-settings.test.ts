@@ -225,8 +225,9 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
   } finally { await vite.close(); }
 });
 
-test('Auto Approve defaults to off, including legacy configs; only an explicit saved true enables it', async () => {
+test('approval and post-task review independently default off, including legacy configs', async () => {
   assert.equal(defaultConfig.autoApprove, false);
+  assert.equal(defaultConfig.postTaskReview, false);
   const { createServer } = await import('vite');
   const vite = await createServer({
     configFile: false, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] },
@@ -234,19 +235,21 @@ test('Auto Approve defaults to off, including legacy configs; only an explicit s
   });
   try {
     const { SettingsModal } = await vite.ssrLoadModule('/src/components/modals/SettingsModal.tsx');
-    const checkbox = (config: Config) => {
+    const checkbox = (config: Config, label: string) => {
       const markup = renderToStaticMarkup(React.createElement(SettingsModal, {
         isOpen: true, onClose() {}, config, dataPath: '', onSaveConfig() {},
       }));
-      const input = markup.match(/<input\b[^>]*>/g)?.find(input => input.includes(`aria-label="${t('Auto Approve Planner 图纸')}"`));
-      assert.ok(input, 'Auto Approve checkbox is present');
+      const input = markup.match(/<input\b[^>]*>/g)?.find(input => input.includes(`aria-label="${t(label)}"`));
+      assert.ok(input, `${label} checkbox is present`);
       return input;
     };
-    assert.doesNotMatch(checkbox(defaultConfig), /checked=""/);
-    const oldConfig: Partial<Config> = { ...defaultConfig };
-    delete oldConfig.autoApprove;
-    assert.doesNotMatch(checkbox(oldConfig as Config), /checked=""/);
-    assert.match(checkbox({ ...defaultConfig, autoApprove: true }), /checked=""/);
+    for (const [field, label] of [['autoApprove', 'Auto Approve Planner 图纸'], ['postTaskReview', '任务后 Planner 复盘']] as const) {
+      assert.doesNotMatch(checkbox(defaultConfig, label), /checked=""/);
+      const legacy: Partial<Config> = { ...defaultConfig }; delete legacy[field];
+      assert.doesNotMatch(checkbox(legacy as Config, label), /checked=""/);
+      assert.match(checkbox({ ...defaultConfig, [field]: true }, label), /checked=""/);
+    }
+    assert.doesNotMatch(checkbox({ ...defaultConfig, autoApprove: true }, '任务后 Planner 复盘'), /checked=""/);
   } finally { await vite.close(); }
 });
 

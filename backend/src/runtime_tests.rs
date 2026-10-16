@@ -1565,6 +1565,90 @@ fn planner_revision_keeps_approval_and_unaffected_node_results() {
 }
 
 #[test]
+fn reworked_node_discards_its_previous_session_while_unaffected_nodes_keep_theirs() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: ["keep", "change", "child"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "change".into(),
+            to: "child".into(),
+            feedback: false,
+        }],
+    };
+    let (_temp, source, mut runtime) = setup(true, graph.clone());
+    runtime.approve().unwrap();
+    let roots = runtime.jobs().unwrap();
+    for job in roots {
+        let name = job.execution.node.clone();
+        let path = Path::new(&job.execution.worktree);
+        workspace::prepare(&source, path, &job.execution.before, &runtime.parents(&name)).unwrap();
+        fs::write(path.join(format!("{name}.txt")), name.clone()).unwrap();
+        let head = workspace::snapshot_node(path, &source, &name).unwrap();
+        runtime
+            .finish(&job.execution, Ok((head, "done".into())))
+            .unwrap();
+    }
+    let changed = runtime
+        .state
+        .executions
+        .iter()
+        .find(|execution| execution.node == "change")
+        .unwrap()
+        .clone();
+    let kept = runtime
+        .state
+        .executions
+        .iter()
+        .find(|execution| execution.node == "keep")
+        .unwrap()
+        .clone();
+    assert!(runtime.state.superseded_execution_ids.is_empty());
+    let mut revised = graph;
+    revised
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "change")
+        .unwrap()
+        .task = "new task".into();
+    runtime
+        .revise_graph(revised, PlanningSummary {
+            planning_id: "revision".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    // The reworked node's whole previous session is discarded, exactly like a
+    // superseded edit; unaffected nodes keep their conversation.
+    assert_eq!(runtime.state.nodes["change"].status, "dirty");
+    assert_eq!(runtime.state.nodes["child"].status, "waiting");
+    assert_eq!(runtime.state.nodes["keep"].status, "done");
+    assert!(runtime
+        .state
+        .superseded_execution_ids
+        .contains(&changed.id));
+    assert!(!runtime
+        .state
+        .superseded_execution_ids
+        .contains(&kept.id));
+    let run_id = runtime.state.run_id.clone();
+    let replay = runtime.store.load(&run_id).unwrap();
+    assert!(replay.superseded_execution_ids.contains(&changed.id));
+    assert!(!replay.superseded_execution_ids.contains(&kept.id));
+    // The rework runs as a fresh session and attempt, not a continuation.
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].execution.node, "change");
+    assert_ne!(jobs[0].execution.session_id, changed.session_id);
+    assert_eq!(jobs[0].execution.attempt, 2);
+    assert!(!jobs[0].continuation);
+}
+
+#[test]
 fn planning_revision_defers_publication_but_not_ready_jobs() {
     let graph = Graph {
         original_goal: "test".into(),

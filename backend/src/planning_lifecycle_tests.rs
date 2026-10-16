@@ -227,7 +227,7 @@ fn run_started_is_published_after_persistence_and_commit_reuses_its_id() {
     cfg.pi_command = "/bin/sh".into();
     cfg.pi_args = vec![script.to_string_lossy().into()];
     let mut published = None;
-    let result = plan_goal_internal_with_started("Goal".into(), cfg, Some("graph"), None, None, &child,
+    let result = plan_goal_internal_with_started("Goal".into(), cfg, Some("graph"), None, None, &child, false,
         |run_id| {
             published = Some(run_id.to_owned());
             let saved = history(run_id.to_owned(), &primary).unwrap();

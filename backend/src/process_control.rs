@@ -366,9 +366,34 @@ pub fn terminate_all() {
 pub fn terminate_owner(run_id: &str) {
     let trees = if let Ok(mut processes) = registry().lock() {
         let mut trees = Vec::new();
+        let prefix = format!("{run_id}:");
         processes.retain(|(owner, weak)| {
             if let Some(tree) = weak.upgrade() {
-                if owner == run_id {
+                if owner == run_id || owner.starts_with(&prefix) {
+                    trees.push(ProcessTree(tree));
+                }
+                true
+            } else {
+                false
+            }
+        });
+        trees
+    } else {
+        Vec::new()
+    };
+    for tree in trees {
+        tree.terminate();
+    }
+}
+
+pub fn terminate_node(run_id: &str, node: &str) {
+    let target = format!("{run_id}:node:{node}");
+    let target_prefix = format!("{target}:");
+    let trees = if let Ok(mut processes) = registry().lock() {
+        let mut trees = Vec::new();
+        processes.retain(|(owner, weak)| {
+            if let Some(tree) = weak.upgrade() {
+                if owner == &target || owner.starts_with(&target_prefix) {
                     trees.push(ProcessTree(tree));
                 }
                 true

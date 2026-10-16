@@ -26,12 +26,25 @@ fn main() {
             .expect("Cannot read graph");
         let result = serde_json::from_str::<serde_json::Value>(&input).and_then(|value| {
             let graph = serde_json::from_value(value["graph"].clone())?;
+            // Runtime-state constraint passed by the Planner tool boundary:
+            // nodes whose results this run already published cannot be removed.
+            let unremovable: Vec<String> = value["unremovableNodes"]
+                .as_array()
+                .map(|names| names.iter().filter_map(|name| name.as_str().map(String::from)).collect())
+                .unwrap_or_default();
             Ok(
                 match grapher::compiler::compile(
                     &graph,
                     value["finalCheck"].as_bool().unwrap_or(true),
                 ) {
-                    Ok(plan) => serde_json::json!({ "plan": plan, "diagnostics": [] }),
+                    Ok(plan) => {
+                        let diagnostics = grapher::compiler::unremovable_node_diagnostics(&graph, &unremovable);
+                        if diagnostics.is_empty() {
+                            serde_json::json!({ "plan": plan, "diagnostics": [] })
+                        } else {
+                            serde_json::json!({ "diagnostics": diagnostics })
+                        }
+                    }
                     Err(diagnostics) => serde_json::json!({ "diagnostics": diagnostics }),
                 },
             )

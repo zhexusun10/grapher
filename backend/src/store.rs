@@ -27,6 +27,9 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
     match kind {
         EventKind::PlanningStarted { .. } => "planning_started",
         EventKind::PlanningFailed { .. } => "planning_failed",
+        EventKind::PlannerReviewStarted { .. } => "planner_review_started",
+        EventKind::PlannerReviewProgress { .. } => "planner_review_progress",
+        EventKind::PlannerReviewFinished { .. } => "planner_review_finished",
         EventKind::Created { .. } => "created",
         EventKind::Routed { .. } => "routed",
         EventKind::Approved { .. } => "approved",
@@ -114,6 +117,8 @@ fn created_planning_ids(kind: &EventKind) -> (Option<&str>, Option<&str>) {
         ),
         EventKind::PlanningStarted { planning, .. }
         | EventKind::PlanningFailed { planning }
+        | EventKind::PlannerReviewStarted { planning }
+        | EventKind::PlannerReviewFinished { planning, .. }
         | EventKind::GraphRevised { planning, .. } => (Some(&planning.planning_id), None),
         _ => (None, None),
     }

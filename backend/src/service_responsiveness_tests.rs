@@ -184,9 +184,26 @@ fn sse_event_stream_coalesces_outputs_and_suppresses_mid_stream_snapshot_storms(
         }])
         .unwrap();
 
-    let mut batch1 = vec![0u8; 1024];
-    let n1 = std::io::Read::read(&mut stream, &mut batch1).unwrap();
-    let frame1 = String::from_utf8_lossy(&batch1[..n1]);
+    // The bus is process-wide: parallel Run tests can legitimately publish
+    // other frames, and one transport read is not a complete coalesced batch.
+    fn own_frames(stream: &mut SseStreamReceiver, expected: &str) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut pending = String::new();
+        let mut own = String::new();
+        while !own.contains(expected) {
+            assert!(std::time::Instant::now() < deadline, "Missing {expected}: {own}");
+            let mut bytes = vec![0; 64 * 1024];
+            let count = std::io::Read::read(stream, &mut bytes).unwrap();
+            assert!(count > 0);
+            pending.push_str(&String::from_utf8_lossy(&bytes[..count]));
+            while let Some(end) = pending.find("\n\n") {
+                let frame: String = pending.drain(..end + 2).collect();
+                if frame.contains("\"runId\":\"sse-run\"") { own.push_str(&frame); }
+            }
+        }
+        own
+    }
+    let frame1 = own_frames(&mut stream, "\"totalBytes\":6");
     assert!(
         frame1.contains("event: snapshot_changed"),
         "Creation, start and first output byte must emit snapshot_changed: {frame1}"
@@ -211,9 +228,7 @@ fn sse_event_stream_coalesces_outputs_and_suppresses_mid_stream_snapshot_storms(
         ])
         .unwrap();
 
-    let mut batch2 = vec![0u8; 1024];
-    let n2 = std::io::Read::read(&mut stream, &mut batch2).unwrap();
-    let frame2 = String::from_utf8_lossy(&batch2[..n2]);
+    let frame2 = own_frames(&mut stream, "\"totalBytes\":19");
     assert!(
         !frame2.contains("event: snapshot_changed"),
         "Mid-stream output chunks must not trigger snapshot_changed storms: {frame2}"
@@ -235,9 +250,7 @@ fn sse_event_stream_coalesces_outputs_and_suppresses_mid_stream_snapshot_storms(
             metrics: None,
         })
         .unwrap();
-    let mut batch3 = vec![0u8; 1024];
-    let n3 = std::io::Read::read(&mut stream, &mut batch3).unwrap();
-    let frame3 = String::from_utf8_lossy(&batch3[..n3]);
+    let frame3 = own_frames(&mut stream, "\"settled\":true");
     assert!(frame3.contains("event: snapshot_changed"));
     assert!(frame3.contains("\"settled\":true"));
 

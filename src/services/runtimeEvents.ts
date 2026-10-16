@@ -15,12 +15,13 @@ let connected = false;
 let hadConnectionOrError = false;
 let source: EventSource | null = null;
 
+const planningListeners = new Set<(event: { runId: string; planningId: string }) => void>();
 const snapshotListeners = new Set<(event: SnapshotChangedEvent) => void>();
 const outputListeners = new Map<string, Set<(event: OutputAvailableEvent) => void>>();
 const connectListeners = new Set<(reconnected: boolean) => void>();
 
 function hasSubscribers(): boolean {
-  return snapshotListeners.size > 0 || outputListeners.size > 0;
+  return snapshotListeners.size > 0 || outputListeners.size > 0 || planningListeners.size > 0;
 }
 
 function closeConnection(): void {
@@ -63,6 +64,13 @@ function ensureConnection(): void {
         queueMicrotask(() => {
           for (const listener of snapshotListeners) listener(data);
         });
+      } catch {}
+    });
+    es.addEventListener("planning_output_available", (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(String(event.data));
+        if (!data?.runId || !data?.planningId) return;
+        queueMicrotask(() => { for (const listener of planningListeners) listener(data); });
       } catch {}
     });
     es.addEventListener("output_available", (event: MessageEvent) => {
@@ -109,6 +117,15 @@ export function subscribeSnapshotChanges(listener: (event: SnapshotChangedEvent)
   ensureConnection();
   return () => {
     snapshotListeners.delete(listener);
+    if (!hasSubscribers()) closeConnection();
+  };
+}
+
+export function subscribePlanningOutput(listener: (event: { runId: string; planningId: string }) => void): () => void {
+  planningListeners.add(listener);
+  ensureConnection();
+  return () => {
+    planningListeners.delete(listener);
     if (!hasSubscribers()) closeConnection();
   };
 }
