@@ -693,9 +693,9 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
         let parent = temp.path().to_path_buf();
-        let (done, result) = mpsc::channel();
+        let (completed, result) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            done.send(
+            completed.send(
                 get_or_prepare(
                     &parent,
                     &"a".repeat(64),

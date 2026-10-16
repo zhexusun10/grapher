@@ -122,14 +122,14 @@ def run_goal(client, instruction, config, timeout, poll_interval=1.0):
         if phase == "completed":
             if (not snap.get("approved") or snap.get("planType") not in ("serial", "graph")
                 or not snap.get("nodes") or any(
-                    node.get("status") != "done" for node in snap["nodes"].values()
+                    node.get("status") != "completed" for node in snap["nodes"].values()
                 ) or (snap.get("planType") == "graph" and
                       (snap.get("publication") or {}).get("status") != "completed")):
                 raise RuntimeError("Grapher reported completion without published successful work")
             return snap
         if phase in TERMINAL_FAILURES or phase == "awaiting_approval":
             failures = {name: node.get("error") for name, node in snap.get("nodes", {}).items()
-                        if node.get("status") != "done"}
+                        if node.get("status") != "completed"}
             raise RuntimeError(f"Grapher run {run_id} stopped in {phase}: "
                                f"{(snap.get('publication') or {}).get('error') or failures}")
         if time.monotonic() >= deadline:

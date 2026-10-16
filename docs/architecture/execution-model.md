@@ -47,7 +47,7 @@ Auto Approve, enabled by default (including saved configurations that predate
 it). Like Auto Approve, it is captured in a new Run's configuration. It applies
 to Graph Runs, which already have a Planner conversation, not Serial Runs.
 
-After every successful publication, when all nodes are done, an enabled Run
+After every successful publication, when all nodes are completed, an enabled Run
 appends a brief neutral completion notification to its existing Planner session.
 The notification is not a user bubble and is omitted from the browser transcript,
 including after reload; the shared Planner system prompt is unchanged. The
@@ -57,7 +57,7 @@ node/edge edits immediately project a live candidate graph without dispatching
 work before the turn finishes.
 
 A completed turn validates and commits its graph and snapshots any Planner source
-writes. Existing unaffected results stay done. If more work is needed, Auto
+writes. Existing unaffected results stay completed. If more work is needed, Auto
 Approve dispatches it immediately; otherwise the new graph waits for **Approve**,
 without rerunning completed nodes. New workspaces use the newly published source
 plus any source writes made during review, never the previous approval baseline.

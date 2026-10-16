@@ -31,7 +31,7 @@ if (process.env.GRAPHER_MODE === 'planner') {
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
   emit({type:'tool_execution_end',toolName:'node',isError:false});
   if (fs.existsSync('fail-review')) throw Error('review failed deliberately');
-  while (!fs.existsSync('release-review')) await new Promise(done=>setTimeout(done,20));
+  while (!fs.existsSync('release-review')) await new Promise(completed=>setTimeout(completed,20));
   graph.edges.push({from:'first',to:'second',feedback:false});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
   emit({type:'tool_execution_end',toolName:'edge',isError:false});
@@ -45,7 +45,7 @@ if (process.env.GRAPHER_MODE === 'planner') {
     if (fs.existsSync('fail-node')) throw Error('node failed deliberately');
     fs.writeFileSync('first.txt','published');
   }
-  say('Done');
+  say('Completed');
 }
 "#).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
@@ -85,7 +85,7 @@ fn continuation(auto: bool) {
     if !auto {
         let pending = wait(&service, |s| s.phase == "awaiting_approval");
         assert!(!pending.approved);
-        assert_eq!(pending.nodes["first"].status, "done");
+        assert_eq!(pending.nodes["first"].status, "completed");
         assert_eq!(pending.executions.len(), 1);
         let replay = service.runtime.lock().unwrap().store.load(&pending.run_id).unwrap();
         assert_eq!(replay.phase, "awaiting_approval");
@@ -93,13 +93,13 @@ fn continuation(auto: bool) {
         service.runtime.lock().unwrap().approve().unwrap();
         drive(service.clone());
     }
-    let done = wait(&service, |s| s.phase == "completed" && s.nodes.len() == 2 && s.planning.as_ref().is_some_and(|p| p.status.as_deref() == Some("success"))
+    let completed = wait(&service, |s| s.phase == "completed" && s.nodes.len() == 2 && s.planning.as_ref().is_some_and(|p| p.status.as_deref() == Some("success"))
         && s.events.iter().filter(|e| matches!(e.kind, EventKind::PlannerReviewFinished { .. })).count() == 2);
-    assert_eq!(done.executions.len(), 2);
+    assert_eq!(completed.executions.len(), 2);
     assert_eq!(fs::read_to_string(repo.join("second.txt")).unwrap(), "continued");
-    assert_eq!(done.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 2);
+    assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 2);
     let runtime = service.runtime.lock().unwrap();
-    for event in &done.events {
+    for event in &completed.events {
         if let EventKind::PlannerReviewStarted { planning } = &event.kind {
             let output = fs::read_to_string(runtime.root.join("planning").join(&planning.planning_id).join("planner.jsonl")).unwrap();
             assert!(!output.contains(POST_TASK_REVIEW_PROMPT));
@@ -111,23 +111,23 @@ fn continuation(auto: bool) {
 fn post_task_review_auto_continuation_uses_published_source() { continuation(true); }
 
 #[test]
-fn post_task_review_manual_approval_preserves_done_nodes() { continuation(false); }
+fn post_task_review_manual_approval_preserves_completed_nodes() { continuation(false); }
 
 #[test]
 fn post_task_review_disabled_does_not_call_planner() {
     let (_temp, _repo, service) = setup(false, false);
     drive(service.clone());
-    let done = wait(&service, |s| s.phase == "completed");
-    assert!(!done.events.iter().any(|e| matches!(e.kind, EventKind::PlannerReviewStarted { .. })));
+    let completed = wait(&service, |s| s.phase == "completed");
+    assert!(!completed.events.iter().any(|e| matches!(e.kind, EventKind::PlannerReviewStarted { .. })));
 }
 
 #[test]
 fn aborted_follow_up_revision_is_recorded_in_the_run_conversation() {
     let (temp, repo, service) = setup(false, false);
     drive(service.clone());
-    let done = wait(&service, |s| s.phase == "completed");
-    let run_id = done.run_id.clone();
-    let (phase, graph_nodes) = (done.phase.clone(), done.graph.nodes.len());
+    let completed = wait(&service, |s| s.phase == "completed");
+    let run_id = completed.run_id.clone();
+    let (phase, graph_nodes) = (completed.phase.clone(), completed.graph.nodes.len());
     fs::write(repo.join("fail-review"), "fail").unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repo, "engine": "pi", "piCommand": "node", "piArgs": [temp.path().join("agent.mjs")],
@@ -160,12 +160,12 @@ fn post_task_review_failure_preserves_published_graph_and_source_writes() {
     let (_temp, repo, service) = setup(true, true);
     fs::write(repo.join("fail-review"), "fail").unwrap();
     drive(service.clone());
-    let done = wait(&service, |s| s.phase == "completed" && s.planning.as_ref().is_some_and(|p| p.status.as_deref() == Some("failed")));
-    assert_eq!(done.graph.nodes.len(), 1);
-    assert_eq!(done.nodes["first"].status, "done");
-    assert!(done.review_graph.is_none());
+    let completed = wait(&service, |s| s.phase == "completed" && s.planning.as_ref().is_some_and(|p| p.status.as_deref() == Some("failed")));
+    assert_eq!(completed.graph.nodes.len(), 1);
+    assert_eq!(completed.nodes["first"].status, "completed");
+    assert!(completed.review_graph.is_none());
     assert_eq!(fs::read_to_string(repo.join("review.txt")).unwrap(), "fresh source");
-    assert!(done.events.iter().any(|e| matches!(e.kind, EventKind::SourceSnapshotted { .. })));
+    assert!(completed.events.iter().any(|e| matches!(e.kind, EventKind::SourceSnapshotted { .. })));
 }
 
 #[test]

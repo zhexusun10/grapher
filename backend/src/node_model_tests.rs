@@ -69,9 +69,9 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
 }
 
 #[test]
-fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_done_nodes() {
+fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_completed_nodes() {
     let graph = Graph {
-        nodes: ["failed", "done", "running", "after", "pending"].into_iter()
+        nodes: ["failed", "completed", "running", "after", "pending"].into_iter()
             .map(|name| Node { name: name.into(), task: name.into() }).collect(),
         edges: vec![
             Edge { from: "failed".into(), to: "after".into(), feedback: false },
@@ -86,10 +86,10 @@ fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_done_no
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
     let failed = jobs.iter().find(|job| job.execution.node == "failed").unwrap();
-    let done = jobs.iter().find(|job| job.execution.node == "done").unwrap();
+    let completed = jobs.iter().find(|job| job.execution.node == "completed").unwrap();
     let running = jobs.iter().find(|job| job.execution.node == "running").unwrap();
     runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
-    runtime.finish(&done.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    runtime.finish(&completed.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.nodes["after"].status, "blocked");
     assert_eq!(runtime.state.nodes["pending"].status, "waiting");
@@ -100,7 +100,7 @@ fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_done_no
     settings.max_feedback = 0;
     runtime.update_node_models(&settings).unwrap();
     let after = serde_json::to_value(&runtime.state).unwrap();
-    for name in ["done", "running"] {
+    for name in ["completed", "running"] {
         assert_eq!(after["nodes"][name], before["nodes"][name]);
     }
     for name in ["after", "pending"] {
@@ -127,7 +127,7 @@ fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_done_no
     assert_eq!(runtime.state.nodes["after"].status, "waiting");
     assert_eq!(runtime.state.nodes["running"].status, "failed");
     assert_eq!(runtime.state.nodes["pending"].status, "blocked");
-    assert_eq!(runtime.state.nodes["done"].status, "done");
+    assert_eq!(runtime.state.nodes["completed"].status, "completed");
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn previously_started_waiting_blocked_and_dirty_nodes_keep_their_models() {
         let (_temp, _source, mut runtime) = setup(true, single());
         runtime.approve().unwrap();
         let job = runtime.jobs().unwrap().remove(0);
-        runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+        runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
         // These states can also represent rescheduled work, not just a first attempt.
         runtime.state.nodes.get_mut("task").unwrap().status = status.into();
         runtime.state.superseded_execution_ids.push(job.execution.id.clone());

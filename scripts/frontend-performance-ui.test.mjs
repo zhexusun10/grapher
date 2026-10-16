@@ -126,7 +126,7 @@ test("frame batching preserves all 100 updates, drains before terminal/reset act
     assert.equal(await page.evaluate(() => window.performanceAudit.commits) - before, 1,
       "one presentation commit, not 100 commits");
     await page.evaluate(() => { window.performanceAudit.reset(); window.performanceAudit.queueBurst(); window.performanceAudit.finish(); });
-    await page.waitForFunction(text => window.performanceAudit.text === text, expected + "done");
+    await page.waitForFunction(text => window.performanceAudit.text === text, expected + "completed");
     await page.evaluate(() => { window.performanceAudit.queueBurst(); window.performanceAudit.reset(); });
     await page.waitForFunction(() => window.performanceAudit.text === "");
     await page.waitForTimeout(80);

@@ -69,7 +69,7 @@ for (const [mode, turn] of [
         const total = Buffer.byteLength(content);
         return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
           content: content.slice(body.offset ?? 0), startOffset: body.offset ?? 0, nextOffset: total, totalBytes: total,
-          complete: true, status: body.executionId === "current" && !settled ? "running" : "done" } } });
+          complete: true, status: body.executionId === "current" && !settled ? "running" : "completed" } } });
       }
       return route.fulfill({ json: { result: command === "list_files" ? { files: [] } : { skills: [] } } });
     });
@@ -663,7 +663,7 @@ test("actual App preserves scrollback and releases RAM on Node/Conversation navi
   const runs = Object.fromEntries(["run-a", "run-b"].map(id => [id, { ...empty, runId: id, config, planType: "graph", phase: "paused", paused: true, approved: true,
     planningId: `plan-${id}`, graph: { originalGoal: `Goal ${id}`, nodes: [{ name: "worker", task: "Worker task" }], edges: [] },
     plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
-    nodes: { worker: { status: "done", revision: 1, instruction: "", error: null } },
+    nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [{ id: `exec-${id}`, node: "worker", status: "completed", output: "", outputBytes: nodeBytes,
       revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: `session-${id}`, worktree: "/mock", before: "", after: "" }],
     events: [{ type: "created", sequence: 1, planning_id: `plan-${id}`, timestamp: 1 }] }]));
@@ -851,7 +851,7 @@ test("switching conversations on a large viewport never flashes the top user pro
       planningId: "plan-latest",
       graph: { originalGoal: "TOP_USER_GOAL_graph-paged", nodes: [{ name: "worker", task: "Worker task" }], edges: [] },
       plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
-      nodes: { worker: { status: "done", revision: 1, instruction: "", error: null } },
+      nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
       events: [
         { type: "created", sequence: 1, planning_id: "plan-older", timestamp: 1 },
         { type: "graph_revised", sequence: 2, planning_id: "plan-latest", timestamp: 2 },
@@ -860,14 +860,14 @@ test("switching conversations on a large viewport never flashes the top user pro
     "serial-paged": {
       ...empty, runId: "serial-paged", config, planType: "serial", phase: "completed", approved: true,
       graph: { originalGoal: "TOP_USER_GOAL_serial-paged", nodes: [{ name: "task", task: "TOP_USER_GOAL_serial-paged" }], edges: [] },
-      nodes: { task: { status: "done", revision: 1, instruction: "", error: null } },
+      nodes: { task: { status: "completed", revision: 1, instruction: "", error: null } },
       executions: [{ id: "exec-paged", node: "task", status: "completed", output: "", outputBytes: 100_000,
         revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s-1", worktree: "/mock", before: "", after: "" }],
     },
     "serial-multiturn": {
       ...empty, runId: "serial-multiturn", config, planType: "serial", phase: "completed", approved: true,
       graph: { originalGoal: "TOP_USER_GOAL_serial-multiturn", nodes: [{ name: "task", task: "TOP_USER_GOAL_serial-multiturn" }], edges: [] },
-      nodes: { task: { status: "done", revision: 2, instruction: "Follow-up instruction", error: null } },
+      nodes: { task: { status: "completed", revision: 2, instruction: "Follow-up instruction", error: null } },
       executions: [
         { id: "exec-turn-1", node: "task", status: "completed", output: "", outputBytes: 50_000,
           revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s-2", worktree: "/mock", before: "", after: "" },

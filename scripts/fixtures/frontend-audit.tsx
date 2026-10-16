@@ -159,7 +159,7 @@ function LatestScrollFixture() {
   audit.unmountConversation = () => setMounted(false);
   const state = { ...emptySnapshot, runId: "latest-run", config, phase: live ? "running" : "paused", paused: !live, approved: true, planType: nodeView ? "graph" : "serial",
     graph: { originalGoal: "Latest-scroll regression", nodes: [{ name: "task", task: "Inspect the long conversation" }], edges: [] },
-    nodes: { task: { status: live ? "running" : "done", revision: 0, instruction: "", error: null } },
+    nodes: { task: { status: live ? "running" : "completed", revision: 0, instruction: "", error: null } },
     executions: [{ id: "latest-execution", node: "task", status: live ? "running" : "completed", revision: 0, attempt: 1, output,
       startedAt: 1, completedAt: live ? null : 2, sessionId: "latest-session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
   const noop = () => {};
@@ -232,7 +232,7 @@ function CardPresentationFixture() {
       ? line({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: "echo presentation" } })
       : line({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Already generated reasoning" } });
     const completed = type === "tool"
-      ? line({ type: "tool_execution_end", toolCallId: id, toolName: "bash", result: { content: "done" } })
+      ? line({ type: "tool_execution_end", toolCallId: id, toolName: "bash", result: { content: "completed" } })
       : line({ type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } });
     setOutput(initial + (historical ? completed : ""));
     setVisible(true);
@@ -242,14 +242,14 @@ function CardPresentationFixture() {
       content: previous.content + " updated", args: { command: "echo updated" }, timestamp: Date.now() });
     setOutput(previous => previous + (type === "tool"
       ? line(settle
-        ? { type: "tool_execution_end", toolCallId: "presentation-tool", toolName: "bash", result: { content: "done" } }
+        ? { type: "tool_execution_end", toolCallId: "presentation-tool", toolName: "bash", result: { content: "completed" } }
         : { type: "tool_execution_start", toolCallId: "presentation-tool", toolName: "bash", args: { command: "echo updated" } })
       : line({ type: "message_update", assistantMessageEvent: { type: settle ? "thinking_end" : "thinking_delta", contentIndex: 0, delta: " updated" } })));
   };
   // A fast operation can start and finish inside the same polled JSONL chunk.
   audit.appendCompletedCard = () => setOutput(previous => previous + (type === "tool" ? [
     { type: "tool_execution_start", toolCallId: "next-tool", toolName: "bash", args: { command: "echo next" } },
-    { type: "tool_execution_end", toolCallId: "next-tool", toolName: "bash", result: { content: "done" } },
+    { type: "tool_execution_end", toolCallId: "next-tool", toolName: "bash", result: { content: "completed" } },
   ] : [
     { type: "message_start", message: { role: "assistant", content: [] } },
     { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "New reasoning" } },

@@ -85,7 +85,7 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     history(&runtime, review, "REVIEW PRIVATE HISTORY");
     assert_eq!(runtime.state.pending_feedback.len(), 1);
     assert!(runtime.jobs().unwrap().is_empty(), "running related branch must drain");
-    assert_eq!(runtime.state.nodes["owner"].status, "done");
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
     execute(&mut runtime, related);
     let repair = runtime.jobs().unwrap().remove(0);
     assert_eq!(repair.execution.node, "owner");
@@ -174,7 +174,7 @@ fn exhausted_feedback_does_not_transfer_a_workspace() {
     let review = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &review);
     runtime.drain_feedback().unwrap();
-    assert_eq!(runtime.state.nodes["owner"].status, "done");
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
     assert_eq!(runtime.state.nodes["owner"].head, runtime.state.nodes["review"].head);
     assert!(runtime.state.nodes["owner"].feedback_workspace.is_none());
     assert!(runtime.state.feedback_counts.is_empty());
@@ -182,7 +182,7 @@ fn exhausted_feedback_does_not_transfer_a_workspace() {
 }
 
 #[test]
-fn shared_terminal_workspace_project_file_followup_keeps_descendants_done() {
+fn shared_terminal_workspace_project_file_followup_keeps_descendants_completed() {
     let (temp, _source, mut runtime) = configured(&["owner", "related"], 0);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
@@ -195,7 +195,7 @@ fn shared_terminal_workspace_project_file_followup_keeps_descendants_done() {
     let update = runtime.jobs_with_publication(false).unwrap().remove(0);
     execute(&mut runtime, &update);
     assert_ne!(runtime.state.nodes["owner"].head, old_head, "ordinary output changes the Git result");
-    assert_eq!(runtime.state.nodes["related"].status, "done", "a shared terminal workspace is updated in place");
+    assert_eq!(runtime.state.nodes["related"].status, "completed", "a shared terminal workspace is updated in place");
     assert!(!runtime.state.events.iter().any(|event| matches!(&event.kind,
         EventKind::WorkspaceFilesChanged { execution_id } if execution_id == &update.execution.id)));
     assert_eq!(fs::read_to_string(Path::new(&update.execution.worktree).join(".cache/owner")).unwrap().trim(), "cache-only-change");
@@ -278,7 +278,7 @@ fn fan_in_tracked_file_conflict_invokes_git_merger() {
     let (temp, source, mut runtime) = setup(true, candidate.clone());
     fs::write(source.join(".gitignore"), ".cache/\n").unwrap();
     let script = temp.path().join("agent.sh");
-    fs::write(&script, "cat >/dev/null\nmkdir -p .cache\nif [ \"$GRAPHER_NODE_NAME\" != join ]; then echo \"$GRAPHER_NODE_NAME\" > .cache/shared; fi\necho done > \"$GRAPHER_NODE_NAME.txt\"\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
+    fs::write(&script, "cat >/dev/null\nmkdir -p .cache\nif [ \"$GRAPHER_NODE_NAME\" != join ]; then echo \"$GRAPHER_NODE_NAME\" > .cache/shared; fi\necho completed > \"$GRAPHER_NODE_NAME.txt\"\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
     let config = runtime.state.config.as_mut().unwrap();
     config.pi_command = "/bin/sh".into();
     config.pi_args = vec![script.to_string_lossy().into()];
@@ -355,7 +355,7 @@ fn historical_edit_does_not_restore_project_files_from_the_original_execution() 
     let edited = runtime.jobs().unwrap().remove(0);
     assert_eq!(edited.execution.before, owner.execution.before);
     execute(&mut runtime, &edited);
-    assert_eq!(runtime.state.nodes["owner"].status, "done");
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
     assert_eq!(runtime.state.nodes["review"].status, "dirty");
 }
 

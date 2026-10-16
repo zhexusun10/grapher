@@ -14,7 +14,7 @@ import type { AddressInfo } from 'node:net';
 const windows = process.platform === 'win32';
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-const delay = (ms: number) => new Promise(done => setTimeout(done, ms));
+const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms));
 const safeRm = async (target: string) => {
   // Forty linearly backed-off retries can spend 205 seconds on one busy path.
   await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
@@ -97,16 +97,16 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
   };
   try {
     await mkdir(agent);
-    await new Promise<void>(done => modelServer.listen(0, '127.0.0.1', done));
+    await new Promise<void>(completed => modelServer.listen(0, '127.0.0.1', completed));
     const modelPort = (modelServer.address() as AddressInfo).port;
     await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: { 'windows-test': {
       baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: 'openai-completions', apiKey: 'local-test-only',
       models: [{ id: 'native', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
     } } }));
     const listener = createServer();
-    await new Promise<void>(done => listener.listen(0, '127.0.0.1', done));
+    await new Promise<void>(completed => listener.listen(0, '127.0.0.1', completed));
     const port = (listener.address() as AddressInfo).port;
-    await new Promise<void>(done => listener.close(() => done()));
+    await new Promise<void>(completed => listener.close(() => completed()));
     const env = { ...process.env, GRAPHER_DATA_DIR: data, GRAPHER_PORT: String(port), PI_CODING_AGENT_DIR: agent,
       GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces'),
       PLANNER_MODEL: 'windows-test/native', NODE_AGENT_MODEL: 'windows-test/native', PARTITIONER_MODEL: 'windows-test/native', MERGER_MODEL: 'windows-test/native',
@@ -171,7 +171,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
     }, `Graph ${plan.label} did not complete`)));
     for (const [index, plan] of plans.entries()) {
       const snapshot = completed[index];
-      for (const name of ['alpha', 'beta', 'join']) assert.equal(snapshot.nodes[name].status, 'done');
+      for (const name of ['alpha', 'beta', 'join']) assert.equal(snapshot.nodes[name].status, 'completed');
       assert.equal(await readFile(join(plan.repository, 'a.txt'), 'utf8'), 'alpha');
       assert.equal(await readFile(join(plan.repository, 'b.txt'), 'utf8'), 'beta');
       assert.equal(await readFile(join(plan.repository, 'joined.txt'), 'utf8'), 'alpha-beta');
@@ -248,7 +248,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
     } finally {
       progress('Cleanup: closing local model server');
       modelServer.closeAllConnections();
-      await new Promise<void>(done => modelServer.close(() => done()));
+      await new Promise<void>(completed => modelServer.close(() => completed()));
       progress('Cleanup: removing workspaces and native runtime');
       await safeRm(directory);
       progress('Cleanup complete');

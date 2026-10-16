@@ -9,7 +9,7 @@ export const statusText: Record<Status, string> = {
   running: "RUNNING",
   paused: "PAUSED",
   blocked: "BLOCKED",
-  done: "DONE",
+  completed: "COMPLETED",
   failed: "FAILED",
   dirty: "DIRTY",
 };
@@ -53,7 +53,6 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
     <div
       data-node-name={data.name}
       className={`task-node ${data.selected ? "selected" : ""} ${data.status}`}
-      title={t("{0}{1}\n尝试: {2}\n工作区: {3}", data.task, data.hint ? t("\n\n依赖关系:\n{0}", data.hint) : "", data.attempts, data.worktree || t("未生成"))}
     >
       <Handle id="top" type="target" position={Position.Top}
         className={`react-flow__handle ${data.hasTop ? "connected" : ""}`} />
@@ -70,7 +69,7 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
             <LoaderCircle className="spin" size={10} />
           ) : data.status === "paused" ? (
             <Pause size={10} />
-          ) : data.status === "done" ? (
+          ) : data.status === "completed" ? (
             <Check size={11} />
           ) : (
             <Circle size={7} fill="currentColor" />
@@ -83,7 +82,6 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
       </div>
       {data.feedbackExhaustion && (
         <div className="node-feedback-exhausted" role="note"
-          title={t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", data.feedbackExhaustion.to)}
           aria-label={t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", data.feedbackExhaustion.to)}>
           <AlertTriangle size={12} />
           <span>{t("反馈预算耗尽 {0}/{1}", data.feedbackExhaustion.count, data.feedbackExhaustion.limit)}</span>

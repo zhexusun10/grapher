@@ -45,10 +45,10 @@ work; approved revisions still commit atomically in Rust. Browser regressions:
 ## Node states
 
 ```text
-waiting -> running -> done
-             |         |
-             v         v
-           failed    dirty -> running
+waiting -> running -> completed
+             |           |
+             v           v
+           failed      dirty -> running
 
 waiting / dirty -> blocked
 blocked -> waiting            (an upstream node runs again)
@@ -56,12 +56,19 @@ blocked -> waiting            (an upstream node runs again)
 
 - `waiting`: task has not run or is waiting for dependencies.
 - `running`: an execution is in progress.
-- `done`: current task result is valid.
+- `completed`: current task result is valid.
 - `dirty`: a change invalidated the current result.
 - `failed`: the execution or protocol failed.
 - `paused`: the backend's browser projection identifies an explicitly stopped or
   recoverably interrupted execution; it is not a provider/protocol failure.
 - `blocked`: dependencies failed or workspace composition could not proceed. Starting an upstream execution returns the node to `waiting` so the new result is composed again.
+
+Node and execution completion both use `completed` in API projections. Historical
+checkpoints with the legacy node status `done` are normalized to `completed` on
+read without rewriting stored events or transcripts. The browser also normalizes
+legacy node statuses at the HTTP/SSE snapshot boundary, so a newly loaded UI can
+still display completion correctly while an older backend is running. This is
+only a spelling conversion; it never changes Run phase or publication evidence.
 
 Nodes remain stable across recorded execution attempts. Historical output and backend-recorded Git snapshots remain inspectable even when a later revision supersedes their result; ordinary files remain tied to their physical directory.
 
@@ -114,7 +121,7 @@ A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `
 - `<ACCEPT>` leaves the result accepted without sending an additional instruction.
 - `<FEEDBACK>` queues a versioned request for the graph's one explicit target. After affected running work drains, applying it invalidates the target and its ordinary dependency descendants; other branches remain valid. The target receives the sender's completed physical workspace plus instruction, never the sender's conversation.
 - A malformed verdict fails the execution.
-- Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains done; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
+- Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains completed; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
 - The runtime caps the configured limit at 3. A limit of 0 skips the first feedback request. Execution errors and malformed verdicts still fail normally.
 
 While feedback budget remains, the runtime waits for running nodes that a pending verdict could invalidate; it does not forcibly suspend their processes. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable. Once a review's verdict is resolved, its feedback edge no longer blocks ready descendants just because an accepted sibling is still running. Scheduling that review again reactivates the barrier; queued unresolved verdicts retain their drain-before-handoff checks.

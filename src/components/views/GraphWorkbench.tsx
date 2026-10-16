@@ -37,6 +37,7 @@ import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { plannerUserTurns } from "../../services/plannerUserTurns";
 import { PlanningActivity } from "../PlanningActivity";
+import { formatSeconds } from "../PlanningSummaryCard";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
@@ -44,7 +45,7 @@ import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 import { PublicationCompletedCard } from "../PublicationCompletedCard";
 import { EnvironmentResult } from "../EnvironmentResult";
 import { PlannerTranscript } from "../PlannerTranscript";
-import { resolveExecutionModelAndThinking } from "../../modelConfig";
+import { resolveExecutionModelAndThinking, roleModelConfig } from "../../modelConfig";
 
 /** Transient I/O status takes precedence over the durable phase copy. */
 function activityStatusText(activity: RuntimeActivity[]): string | null {
@@ -160,6 +161,9 @@ function getConversationViewport(scroll: HTMLElement) {
 
 interface WorkspaceDetailsPanelProps {
   showWorking?: boolean;
+  compacting?: boolean;
+  /** Defaults to the node wording; the Planner variant owns no workspace rows. */
+  label?: string;
   children: React.ReactNode;
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   onBeforeToggle?: () => void;
@@ -168,6 +172,8 @@ interface WorkspaceDetailsPanelProps {
 
 const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
   showWorking,
+  compacting,
+  label,
   children,
   scrollContainerRef,
   onBeforeToggle,
@@ -292,7 +298,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
       {showWorking && (
         <div className="working-indicator" role="status" aria-live="polite">
           <span className="working-indicator-dot" />
-          Working…
+          {compacting ? "Compacting…" : "Working…"}
         </div>
       )}
       <div className="workspace-details-summary">
@@ -302,7 +308,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
           onClick={handleToggle}
           aria-expanded={isOpen}
         >
-          <span>{t("工作区与会话信息")}</span>
+          <span>{label ?? t("工作区与会话信息")}</span>
           <ChevronRight size={11} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} />
         </button>
       </div>
@@ -377,6 +383,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
   const [editingTaskNode, setEditingTaskNode] = useState("");
   const [taskDraft, setTaskDraft] = useState("");
+  // Auto-compaction visibility per parsed execution transcript; the working
+  // labels swap to "Compacting…" while the node's own session compresses.
+  const [compactingAttempts, setCompactingAttempts] = useState<Record<string, boolean>>({});
+  const [plannerHistoryCompacting, setPlannerHistoryCompacting] = useState(false);
+  const handleAttemptCompacting = useCallback((execId: string, compacting: boolean) => {
+    setCompactingAttempts((prev) => (!!prev[execId] === compacting ? prev : { ...prev, [execId]: compacting }));
+  }, []);
   useEffect(() => {
     setAttemptId("");
     setCollapsedAttemptIds(new Set());
@@ -615,6 +628,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const isSelectedNodeWorking = selectedMerger
     ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
     : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage);
+  const isSelectedNodeCompacting = isSelectedNodeWorking &&
+    !!execution?.id && !!compactingAttempts[execution.id];
   const latestNodeTurn = nodeTurns.at(-1);
   const waitingForNodeExecution = !!latestNodeTurn && latestNodeTurn.executions.length === 0 &&
     !latestNodeTurn.userMessage?.delivery && !latestNodeTurn.userMessage?.executionId && (isSelectedNodeWorking || pendingRequest);
@@ -651,6 +666,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const savedPlannerId = recoveredPlanningId || (failedPlanning
     ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
     : (routeType === "graph" ? state.planningId : undefined));
+  // Planner conversation facts. The Planner owns no worktree and no commits
+  // (execution-model.md), so this panel only lists what actually exists:
+  // resolved model, thinking level and role duration.
+  const plannerRole = state.planning?.roles?.planner ?? failedPlanning?.roles?.planner;
+  const plannerModelInfo = (() => {
+    const configured = roleModelConfig(config, "planner", envOverrides);
+    return {
+      model: plannerRole?.model?.trim() || configured.model || t("未设置模型"),
+      thinkingLevel: configured.thinkingLevel || "low",
+    };
+  })();
+  // The panel also carries the planner's working indicator, so it must exist
+  // for the whole live-planning window, before the summary reaches a snapshot.
+  const showPlannerDetails = routeType !== "serial" &&
+    !!(state.planning || failedPlanning || isPlanning);
   // A run owns one Planner conversation, although each planning attempt has
   // its own durable output log. Replay every recorded turn after a reload —
   // including aborted revision turns — excluding turns still live-streaming.
@@ -1405,7 +1435,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     (state.approved && state.phase === "running" && serialNodeState?.status === "waiting")
   );
   const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialAwaitingStart || isSerialWorking) : isPlanning;
-  const completed = Object.values(state.nodes).filter((n) => n.status === "done").length;
+  // Live SSE and the durable-JSONL poller can both observe the Planner's
+  // compaction; either source is enough to relabel the working indicator.
+  const isMainViewCompacting = isMainViewWorking &&
+    ((showLivePlanner && !!plannerStream?.compacting) || plannerHistoryCompacting);
+  const completed = Object.values(state.nodes).filter((n) => n.status === "completed").length;
   // A poll can return the old draft while the Planner is revising it. The
   // backend also exposes recoverable interruption state for Runs whose last
   // node failed due to interruption or has an explicitly updated model.
@@ -1759,6 +1793,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   execution={exec}
                                   onUserResize={handleExpandableContentChange}
                                   onInitialOutputReady={handleExecutionOutputReady}
+                                  onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
                                 />
                               </div>
                             )}
@@ -1782,6 +1817,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 <WorkspaceDetailsPanel
                   key={`${state.runId}:${selectedNode.name}`}
                   showWorking={isSelectedNodeWorking}
+                  compacting={isSelectedNodeCompacting}
                   scrollContainerRef={chatScrollRef}
                   onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                   onAfterToggle={handleWorkspaceDetailsAfterToggle}
@@ -1860,7 +1896,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           : t("merger 已结束，只能查看执行记录"))
                       : isSelectedNodeWorking
                         ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", selectedNode.name)
-                        : selectedState?.status === "done"
+                        : selectedState?.status === "completed"
                           ? t("向 @{0} 发送消息并继续执行…", selectedNode.name)
                           : t("向 @{0} 发送介入指令…", selectedNode.name)
                 }
@@ -1952,6 +1988,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     execution={exec}
                                     onUserResize={handleExpandableContentChange}
                                     onInitialOutputReady={handleExecutionOutputReady}
+                                    onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
                                   />
                                 </div>
                               </motion.div>
@@ -1971,6 +2008,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <WorkspaceDetailsPanel
                       key={`${state.runId}:serial`}
                       showWorking={isMainViewWorking}
+                      compacting={isMainViewWorking && !!serialExecution?.id && !!compactingAttempts[serialExecution.id]}
                       scrollContainerRef={chatScrollRef}
                       onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                       onAfterToggle={handleWorkspaceDetailsAfterToggle}
@@ -2057,6 +2095,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           showUserTurns={!isPlanning || backgroundReview || !!recoveredPlanningId || Boolean(plannerStream.isContinuation)}
                           skipFirstUser={plannerMessages.length > 0}
                           running={isPlanning || !!recoveredPlanningId}
+                          onCompactingChange={setPlannerHistoryCompacting}
                           onReady={() => {
                             setReadySavedPlannerKey(savedPlannerKey);
                             if (!isConversationReady) revealConversation();
@@ -2147,11 +2186,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
                   </>
                 )}
-                {isMainViewWorking && routeType !== "serial" && (
-                  <div className="working-indicator" role="status" aria-live="polite">
-                    <span className="working-indicator-dot" />
-                    Working…
-                  </div>
+                {showPlannerDetails && (
+                  <WorkspaceDetailsPanel
+                    key={`${state.runId}:planner`}
+                    label={t("规划会话信息")}
+                    showWorking={isMainViewWorking}
+                    compacting={isMainViewCompacting}
+                    scrollContainerRef={chatScrollRef}
+                    onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
+                    onAfterToggle={handleWorkspaceDetailsAfterToggle}
+                  >
+                    <p>model: {plannerModelInfo.model}</p>
+                    <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
+                    <p>time took: {plannerRole ? formatSeconds(plannerRole.durationSeconds) : "counted when planning settles…"}</p>
+                  </WorkspaceDetailsPanel>
                 )}
               </div>
 

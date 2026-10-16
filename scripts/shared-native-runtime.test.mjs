@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path';
 import { createServer } from 'node:http';
 import { root } from './pi-baseline.mjs';
 
-const delay = ms => new Promise(done => setTimeout(done, ms));
+const delay = ms => new Promise(completed => setTimeout(completed, ms));
 
 test('Windows projects/backends share a persistent engine and default workspaces to LocalAppData', {
   skip: process.platform !== 'win32', timeout: 360000,
@@ -44,7 +44,7 @@ test('Windows projects/backends share a persistent engine and default workspaces
     throw new Error(`${label} within ${timeoutMs}ms\n${backend.diagnostics}`);
   };
   try {
-    await new Promise(done => modelServer.listen(0, '127.0.0.1', done));
+    await new Promise(completed => modelServer.listen(0, '127.0.0.1', completed));
     const agent = join(directory, 'agent');
     await mkdir(agent);
     await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: { 'cache-test': {
@@ -60,9 +60,9 @@ test('Windows projects/backends share a persistent engine and default workspaces
       await mkdir(source, { recursive: true });
       await writeFile(join(source, 'base.txt'), 'keep');
       const listener = createServer();
-      await new Promise(done => listener.listen(0, '127.0.0.1', done));
+      await new Promise(completed => listener.listen(0, '127.0.0.1', completed));
       const port = listener.address().port;
-      await new Promise(done => listener.close(done));
+      await new Promise(completed => listener.close(completed));
       const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
       const env = { ...process.env, GRAPHER_DATA_DIR: join(directory, `data-${name}`), GRAPHER_PORT: String(port),
         // Isolate engine preparation explicitly to avoid inspecting the real
@@ -137,7 +137,7 @@ test('Windows projects/backends share a persistent engine and default workspaces
   } finally {
     await Promise.all(backends.map(stop));
     modelServer.closeAllConnections();
-    await new Promise(done => modelServer.close(done));
+    await new Promise(completed => modelServer.close(completed));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
 });

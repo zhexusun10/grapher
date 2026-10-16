@@ -61,7 +61,7 @@ function FrameFixture() {
   const [factor, setFactor] = useState(1);
   const callback = useStableCallback(() => factor);
   audit.queueBurst = () => { for (let i = 0; i < 100; i++) queue(previous => previous + `${i},`); };
-  audit.finish = () => setText(previous => previous + "done");
+  audit.finish = () => setText(previous => previous + "completed");
   audit.reset = () => setText("");
   audit.setFactor = setFactor;
   audit.callback = callback;

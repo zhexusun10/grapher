@@ -67,7 +67,7 @@ function skippedFeedbackState(): Snapshot {
   return {
     ...emptySnapshot,
     graph: { ...graph, edges: [...graph.edges, { from: "c", to: "a", feedback: true }] },
-    nodes: { c: { status: "done", revision: 1, head: "head", instruction: "", error: null } },
+    nodes: { c: { status: "completed", revision: 1, head: "head", instruction: "", error: null } },
     executions: [{ node: "c", id: "review-1", status: "completed" } as Execution],
     feedbackCounts: { "c->a": 3 },
     events: [{ sequence: 1, timestamp: 1, type: "feedback_exhausted", from: "c", to: "a", count: 3, limit: 3, execution_id: "review-1" }],
@@ -119,8 +119,8 @@ function publicationMergerState(): Snapshot {
     graph: { originalGoal: "publish", nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }],
       edges: [{ from: "a", to: "b", feedback: false }] },
     plan: { executionBatches: [["a"], ["b"]], roots: ["a"], terminals: ["b"], warnings: [] },
-    nodes: { a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
-      b: { status: "done", revision: 1, head: "hb", instruction: "", error: null } },
+    nodes: { a: { status: "completed", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "completed", revision: 1, head: "hb", instruction: "", error: null } },
     mergers: [{
       id: "publish-merger", node: "merger", revision: 1, attempt: 1, sessionId: "publish-merger",
       worktree: "/source", before: "hb", after: "hc", status: "completed",
@@ -135,7 +135,7 @@ test("a publication merger is a card below the terminal layer", () => {
   const card = idle.nodes.find(node => node.id === "merger:publication");
   assert.ok(card, "publication merger card must exist once invoked");
   assert.equal(card!.data.name, "publication merger");
-  assert.equal(card!.data.status, "done");
+  assert.equal(card!.data.status, "completed");
   assert.equal(card!.data.selected, false);
   // The publication card sits below the last execution layer and receives the
   // terminal edges only.
@@ -224,13 +224,13 @@ test("downstream edge is dashed only during workspace transfer and immediately t
   assert.equal(edgeAB_running.animated, false, "downstream edge must not be animated/dashed while upstream node is running");
   assert.equal(edgeBC_running.animated, false);
 
-  // 2. a is done, workspace starts passing to b (b is waiting/preparing, not yet prepared).
+  // 2. a is completed, workspace starts passing to b (b is waiting/preparing, not yet prepared).
   // Downstream edge a -> b should be animated (dashed).
   const stateTransferringB: Snapshot = {
     ...emptySnapshot,
     graph: testGraph,
     nodes: {
-      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
+      a: { status: "completed", revision: 1, head: "ha", instruction: "", error: null },
       b: { status: "running", revision: 1, head: null, instruction: "", error: null },
       c: { status: "waiting", revision: 1, head: null, instruction: "", error: null },
     },
@@ -247,7 +247,7 @@ test("downstream edge is dashed only during workspace transfer and immediately t
 
   // 3. Workspace transfer completes (prepared event emitted), but b is STILL RUNNING!
   // The edge a -> b must IMMEDIATELY turn into a solid line (animated: false),
-  // without waiting for b to finish (status === "done").
+  // without waiting for b to finish (status === "completed").
   const statePreparedB: Snapshot = {
     ...stateTransferringB,
     events: [
@@ -267,8 +267,8 @@ test("downstream edge is dashed only during workspace transfer and immediately t
     ...emptySnapshot,
     graph: testGraph,
     nodes: {
-      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
-      b: { status: "done", revision: 1, head: "hb", instruction: "", error: null },
+      a: { status: "completed", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "completed", revision: 1, head: "hb", instruction: "", error: null },
       c: { status: "running", revision: 1, head: null, instruction: "", error: null },
     },
     executions: [
@@ -298,21 +298,21 @@ test("downstream edge is dashed only during workspace transfer and immediately t
   const edgeBC_prepared = projPreparedC.edges.find(e => e.source === "b" && e.target === "c")!;
   assert.equal(edgeBC_prepared.animated, false, "edge b -> c must immediately turn solid once workspace transfer completes");
 
-  // 6. c completes: all nodes done, all edges solid.
-  const stateAllDone: Snapshot = {
+  // 6. c completes: all nodes completed, all edges solid.
+  const stateAllCompleted: Snapshot = {
     ...emptySnapshot,
     graph: testGraph,
     nodes: {
-      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
-      b: { status: "done", revision: 1, head: "hb", instruction: "", error: null },
-      c: { status: "done", revision: 1, head: "hc", instruction: "", error: null },
+      a: { status: "completed", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "completed", revision: 1, head: "hb", instruction: "", error: null },
+      c: { status: "completed", revision: 1, head: "hc", instruction: "", error: null },
     },
   };
-  const projAllDone = projectGraph(stateAllDone, "");
-  assert.ok(projAllDone.edges.every(e => !e.animated), "all edges must be solid once all nodes are done");
+  const projAllCompleted = projectGraph(stateAllCompleted, "");
+  assert.ok(projAllCompleted.edges.every(e => !e.animated), "all edges must be solid once all nodes are completed");
 });
 
-test("fan-in dependency edges only turn dashed once all upstream parents are done and turn solid once prepared", () => {
+test("fan-in dependency edges only turn dashed once all upstream parents are completed and turn solid once prepared", () => {
   const fanInGraph: Graph = {
     originalGoal: "test fan-in edge animation",
     nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }, { name: "c", task: "c" }],
@@ -322,12 +322,12 @@ test("fan-in dependency edges only turn dashed once all upstream parents are don
     ],
   };
 
-  // a is done, but b is still running. c cannot receive workspace yet.
+  // a is completed, but b is still running. c cannot receive workspace yet.
   const statePartial: Snapshot = {
     ...emptySnapshot,
     graph: fanInGraph,
     nodes: {
-      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
+      a: { status: "completed", revision: 1, head: "ha", instruction: "", error: null },
       b: { status: "running", revision: 1, head: null, instruction: "", error: null },
       c: { status: "waiting", revision: 1, head: null, instruction: "", error: null },
     },
@@ -338,13 +338,13 @@ test("fan-in dependency edges only turn dashed once all upstream parents are don
   assert.equal(edgeAC_partial.animated, false, "edge a -> c must not animate while b is still running");
   assert.equal(edgeBC_partial.animated, false, "edge b -> c must not animate while b is running");
 
-  // Both a and b are done, c starts workspace transfer. Both edges turn dashed.
-  const stateBothDoneTransferring: Snapshot = {
+  // Both a and b are completed, c starts workspace transfer. Both edges turn dashed.
+  const stateBothCompletedTransferring: Snapshot = {
     ...emptySnapshot,
     graph: fanInGraph,
     nodes: {
-      a: { status: "done", revision: 1, head: "ha", instruction: "", error: null },
-      b: { status: "done", revision: 1, head: "hb", instruction: "", error: null },
+      a: { status: "completed", revision: 1, head: "ha", instruction: "", error: null },
+      b: { status: "completed", revision: 1, head: "hb", instruction: "", error: null },
       c: { status: "running", revision: 1, head: null, instruction: "", error: null },
     },
     executions: [{
@@ -354,22 +354,22 @@ test("fan-in dependency edges only turn dashed once all upstream parents are don
     } as Execution],
     events: [{ sequence: 1, timestamp: 1, type: "started", node: "c", execution_id: "exec-c-1" }],
   };
-  const projBothDone = projectGraph(stateBothDoneTransferring, "", "", [{ kind: "workspace_prepare", nodes: ["c"] }]);
-  const edgeAC_transferring = projBothDone.edges.find(e => e.source === "a" && e.target === "c")!;
-  const edgeBC_transferring = projBothDone.edges.find(e => e.source === "b" && e.target === "c")!;
+  const projBothCompleted = projectGraph(stateBothCompletedTransferring, "", "", [{ kind: "workspace_prepare", nodes: ["c"] }]);
+  const edgeAC_transferring = projBothCompleted.edges.find(e => e.source === "a" && e.target === "c")!;
+  const edgeBC_transferring = projBothCompleted.edges.find(e => e.source === "b" && e.target === "c")!;
   assert.equal(edgeAC_transferring.animated, true, "edge a -> c must turn dashed during workspace transfer to c");
   assert.equal(edgeBC_transferring.animated, true, "edge b -> c must turn dashed during workspace transfer to c");
 
   // c completes workspace preparation (prepared event emitted), but c is STILL RUNNING.
   // Both edges IMMEDIATELY turn back to solid!
-  const stateBothDonePrepared: Snapshot = {
-    ...stateBothDoneTransferring,
+  const stateBothCompletedPrepared: Snapshot = {
+    ...stateBothCompletedTransferring,
     events: [
       { sequence: 1, timestamp: 1, type: "started", node: "c", execution_id: "exec-c-1" },
       { sequence: 2, timestamp: 2, type: "prepared", node: "c", execution_id: "exec-c-1" },
     ],
   };
-  const projPrepared = projectGraph(stateBothDonePrepared, "", "", []);
+  const projPrepared = projectGraph(stateBothCompletedPrepared, "", "", []);
   const edgeAC_prepared = projPrepared.edges.find(e => e.source === "a" && e.target === "c")!;
   const edgeBC_prepared = projPrepared.edges.find(e => e.source === "b" && e.target === "c")!;
   assert.equal(edgeAC_prepared.animated, false, "edge a -> c must immediately turn solid once workspace transfer completes");

@@ -163,7 +163,7 @@ test('SIGTERM waits for the owned command to exit before reclaiming its target',
     'require("node:fs").writeFileSync(process.argv[1],process.env.CARGO_TARGET_DIR); setInterval(()=>{},1000)', evidence,
   ], { env: { ...freshEnv(), TMPDIR: parent }, stdio: 'ignore' });
   try {
-    while (!await exists(evidence)) await new Promise(done => setTimeout(done, 20));
+    while (!await exists(evidence)) await new Promise(completed => setTimeout(completed, 20));
     const closed = once(child, 'close');
     child.kill('SIGTERM');
     const [code] = await closed;

@@ -14,7 +14,7 @@ function createMockExecution(overrides: Partial<Execution> = {}): Execution {
     worktree: "/tmp/worktree",
     before: "abc",
     after: "def",
-    status: "done",
+    status: "completed",
     output: "test output",
     startedAt: 1000,
     completedAt: 5000,

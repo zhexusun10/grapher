@@ -35,7 +35,7 @@ const evidence = { startedAt: new Date(started).toISOString(), platform: process
   revision: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), dirty: true,
   dataRoot, recoveryFrom: resume ? join(dataRoot, "report.json") : undefined,
   checks: {}, browserErrors: [], apiErrors: [], controls: [], activity: [], pollLatencyMs: [] };
-const sleep = ms => new Promise(done => setTimeout(done, ms));
+const sleep = ms => new Promise(completed => setTimeout(completed, ms));
 let backend, vite, browser, context, page, runId, state;
 let previousMergerCount = 0;
 let diagnostics = "";
@@ -44,7 +44,7 @@ const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=" + (process
   { cwd: repository, encoding: "utf8" }).trim();
 async function freePort() {
   const server = netServer(); server.listen(0, "127.0.0.1"); await once(server, "listening");
-  const port = server.address().port; await new Promise(done => server.close(done));
+  const port = server.address().port; await new Promise(completed => server.close(completed));
   return [2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080].includes(port) ? freePort() : port;
 }
 async function until(check, message, timeout = 90_000) {
@@ -192,7 +192,7 @@ try {
   assert.equal(git("status", "--porcelain"), "");
   assert.ok(git("ls-files").includes("artifacts/shared.txt")); evidence.checks.ignoredFilesAndDeletionsPublished = true;
   // Poll durable completion into the UI without injecting or mocking a snapshot.
-  await until(async () => (await card.innerText()).includes("DONE"), "settled Merger card");
+  await until(async () => (await card.innerText()).includes("COMPLETED"), "settled Merger card");
   await until(async () => /Append a message/.test(await composer.getAttribute("placeholder")), "settled Merger composer");
   assert.equal(await composer.isDisabled(), false);
   const followupMergerCount = state.mergers.filter(item => item.node === "merger").length;
@@ -207,7 +207,7 @@ try {
   assert.ok(evidence.controls.some(item => item.action === "continue_merger" && item.node === "merger"));
   assert.equal((await readFile(join(repository, "followup.txt"), "utf8")).trim(), "FOLLOWUP");
   assert.equal(git("status", "--porcelain"), ""); evidence.checks.mergerContinuation = true;
-  await until(async () => (await card.innerText()).includes("DONE") &&
+  await until(async () => (await card.innerText()).includes("COMPLETED") &&
     /Append a message/.test(await composer.getAttribute("placeholder")), "live continuation terminal status without reload");
   evidence.checks.liveContinuationSettled = true;
   await page.screenshot({ path: join(root, "merger-followup.png"), fullPage: true });

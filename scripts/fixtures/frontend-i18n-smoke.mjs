@@ -74,7 +74,7 @@ try {
     ["views/LandingView", "LandingView", { goal: "", setGoal: noop, onPlanGoal: noop }],
     ["PlanningSummaryCard", "PlanningSummaryCard", { planning, state, defaultExpanded: true }],
     ["ThinkingCard", "ThinkingCard", { content: "", isStreaming: true }],
-    ["graph/TaskNode", "TaskNode", { data: { name: "review", task: "Review result", status: "done", attempts: 4, hint: "", reviewer: true, selected: false, worktree: "", feedbackExhaustion: { from: "review", to: "owner", count: 3, limit: 3 } } }],
+    ["graph/TaskNode", "TaskNode", { data: { name: "review", task: "Review result", status: "completed", attempts: 4, hint: "", reviewer: true, selected: false, worktree: "", feedbackExhaustion: { from: "review", to: "owner", count: 3, limit: 3 } } }],
     ["ToolCallCard", "ToolCallCard", { item: { id: "tool", type: "tool_call", toolName: "bash", status: "running", args: {} } }],
     ["PublicationPanel", "PublicationPanel", { publication: { repository: "/project", heads: ["abc"], status: "failed", error: planning.error, head: null }, mergers: [], onRetry: noop }],
     ["PublicationCompletedCard", "PublicationCompletedCard", { state: { ...state, phase: "completed" }, routeType: "graph" }],
@@ -120,12 +120,15 @@ try {
       }
     }
     if (name === "TaskNode") {
-      assert.match(html, /class="task-node[^\"]*done"/);
-      assert.match(html, /class="status done"/);
+      assert.doesNotMatch(html, /\stitle=/, "nodes and feedback warnings must not show native hover tooltips");
+      assert.match(html, /class="task-node[^\"]*completed"/);
+      assert.match(html, /class="status completed"/);
+      assert.ok(html.includes("COMPLETED"));
       assert.ok(html.includes(t("反馈预算耗尽 {0}/{1}", 3, 3)));
       assert.ok(html.includes(t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", "owner")));
       const plain = renderToStaticMarkup(taskNodeCanvas(module[name], { ...props.data, feedbackExhaustion: undefined }));
       assert.ok(!plain.includes("node-feedback-exhausted"));
+      assert.doesNotMatch(plain, /\stitle=/, "plain nodes must not show native hover tooltips");
     }
   }
   assert.equal(locale, preference === "auto" ? (language.startsWith("zh") ? "zh-CN" : "en") : preference);

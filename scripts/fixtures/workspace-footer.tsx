@@ -24,10 +24,10 @@ function WorkspaceFooterFixture() {
   const [hasNode, setHasNode] = useState(!provisional);
   const [hasRunId, setHasRunId] = useState(!provisional);
   const [planning, setPlanning] = useState(provisional);
-  const [executions, setExecutions] = useState<Execution[]>(followUp ? [execution("previous", "done", 0)] : []);
+  const [executions, setExecutions] = useState<Execution[]>(followUp ? [execution("previous", "completed", 0)] : []);
   const [messages, setMessages] = useState<ChatMessage[]>([{ id: "initial", role: "user", text: "Initial task" }]);
   const [pending, setPending] = useState(!followUp);
-  const [status, setStatus] = useState<"done" | "dirty" | "running">(followUp ? "done" : "dirty");
+  const [status, setStatus] = useState<"completed" | "dirty" | "running">(followUp ? "completed" : "dirty");
   const state: Snapshot = { ...emptySnapshot, runId: hasRunId ? "footer-run" : "pending-footer-run", config,
     phase: hasNode ? "running" : "draft", approved: hasNode,
     planType: graph ? "graph" : "serial",
@@ -48,15 +48,15 @@ function WorkspaceFooterFixture() {
     setStatus("running");
   };
   audit.finish = () => {
-    setExecutions(previous => previous.map(item => ({ ...item, status: "done", completedAt: 2 })));
-    setStatus("done");
+    setExecutions(previous => previous.map(item => ({ ...item, status: "completed", completedAt: 2 })));
+    setStatus("completed");
   };
   return <div style={{ height: 800, display: "flex" }}>
     <GraphWorkbench state={state} routeType={graph ? "graph" : "serial"} initialPlanMode={graph ? "graph" : "serial"}
       selected={graph ? "task" : ""} setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
       effectiveMessages={messages} isPlanning={planning} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
       onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
-      active={status !== "done"} locked={false} pendingRequest={pending} publishing={false} publicationFailed={false}
+      active={status !== "completed"} locked={false} pendingRequest={pending} publishing={false} publicationFailed={false}
       nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
   </div>;
 }

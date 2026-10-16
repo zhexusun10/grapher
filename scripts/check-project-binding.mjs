@@ -26,7 +26,7 @@ try {
   listener.listen(0, '127.0.0.1');
   await once(listener, 'listening');
   const port = listener.address().port;
-  await new Promise(done => listener.close(done));
+  await new Promise(completed => listener.close(completed));
   const target = resolve(process.env.CARGO_TARGET_DIR || 'backend/target');
   child = spawn(join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`), [], {
     env: { ...process.env, GRAPHER_DATA_DIR: join(root, 'data'), GRAPHER_PORT: String(port) },
@@ -48,7 +48,7 @@ try {
     if (spawnError) throw spawnError;
     if (child.exitCode !== null || attempt > 100) throw new Error(diagnostics || 'Backend did not start');
     try { await api('repository_status', { repository: source }); break; } catch {}
-    await new Promise(done => setTimeout(done, 50));
+    await new Promise(completed => setTimeout(completed, 50));
   }
   assert.equal((await api('repository_status', { repository: source })).valid, true);
   assert.equal((await api('repository_status', { repository: 'relative' })).valid, false);

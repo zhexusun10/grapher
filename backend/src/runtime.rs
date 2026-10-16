@@ -38,7 +38,7 @@ pub struct Job {
     /// First job batch of a plain-directory graph run: materialize the external
     /// shadow repository before any prepare/hand-off work.
     pub materialize_source: bool,
-    /// Post-publication follow-up of a done node runs directly in the source
+    /// Post-publication follow-up of a completed node runs directly in the source
     /// directory (no worktree, no commit, no invalidation of descendants).
     pub source_direct: bool,
     pub expected_source_head: String,
@@ -488,7 +488,7 @@ impl Runtime {
             if let Some(mut planning) = self.state.planning.clone() {
                 planning.status = Some("failed".into());
                 planning.error = Some("Backend stopped during post-task Planner review. Saved output is preserved; send a follow-up to continue.".into());
-                let approval_required = self.state.nodes.values().any(|node| node.status != "done");
+                let approval_required = self.state.nodes.values().any(|node| node.status != "completed");
                 self.emit(EventKind::PlannerReviewFinished { planning, approval_required })?;
             }
         }
@@ -1230,7 +1230,7 @@ impl Runtime {
         let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
         if self.state.published_head.is_some()
             && previous.nodes.iter().any(|node| {
-                !names.contains(node.name.as_str()) && self.state.nodes[&node.name].status == "done"
+                !names.contains(node.name.as_str()) && self.state.nodes[&node.name].status == "completed"
             })
         {
             return Err("Cannot remove already published nodes from this run".into());
@@ -1382,14 +1382,14 @@ impl Runtime {
 
     /// Record a turn addressed to a completed node without changing its result
     /// or scheduling another execution. The finished Pi process cannot be steered.
-    pub fn message_done_node(
+    pub fn message_completed_node(
         &mut self,
         node: &str,
         instruction: &str,
         images: Option<Vec<ImageAttachment>>,
     ) -> Result<(), String> {
         if !self.state.approved
-            || self.state.nodes.get(node).map(|n| n.status.as_str()) != Some("done")
+            || self.state.nodes.get(node).map(|n| n.status.as_str()) != Some("completed")
         {
             return Err("Select a completed node to message".into());
         }
@@ -1431,7 +1431,7 @@ impl Runtime {
         }
         // Failed executions also retain a session, even without a result head.
         // Replies on a node's unique terminal workspace update that shared tree
-        // directly, so completed descendants remain valid and stay done.
+        // directly, so completed descendants remain valid and stay completed.
         let shared_workspace = !source_direct && self.terminal_workspace_for(node).is_some();
         self.emit(EventKind::Invalidated {
             nodes: vec![node.into()],
@@ -1579,7 +1579,7 @@ impl Runtime {
         Ok(())
     }
 
-    /// Post-publication conversations with a done node edit the user's source
+    /// Post-publication conversations with a completed node edit the user's source
     /// directory directly instead of rebuilding a Graph worktree. Managed
     /// environments keep their fixed-layout workspace contract, so they are
     /// excluded from source-direct follow-ups.
@@ -1600,7 +1600,7 @@ impl Runtime {
                 .state
                 .nodes
                 .get(node)
-                .is_some_and(|state| state.status == "done")
+                .is_some_and(|state| state.status == "completed")
     }
 
     /// Refuses an update while a downstream node is still running, because a
@@ -1878,7 +1878,7 @@ impl Runtime {
                         .edges
                         .iter()
                         .filter(|edge| !edge.feedback && edge.to == node.name)
-                        .all(|edge| self.state.nodes[&edge.from].status == "done")
+                        .all(|edge| self.state.nodes[&edge.from].status == "completed")
             })
             .take(available)
             .cloned()
@@ -2483,7 +2483,7 @@ impl Runtime {
             // the user's directory already holds the result.
             if self.state.phase != "followup"
                 && !self.is_serial()
-                && self.state.nodes.values().all(|node| node.status == "done")
+                && self.state.nodes.values().all(|node| node.status == "completed")
             {
                 let terminal_names: Vec<String> = if let Some(plan) = &self.state.plan {
                     if !plan.terminals.is_empty() {
@@ -2568,7 +2568,7 @@ impl Runtime {
                     .state
                     .nodes
                     .get("task")
-                    .is_none_or(|node| node.status != "done")
+                    .is_none_or(|node| node.status != "completed")
             {
                 return;
             }
@@ -2737,7 +2737,7 @@ impl Runtime {
             && self.terminal_workspace_for(owner).is_some_and(|terminal| Path::new(&terminal.worktree) == path));
         if best_effort && !shared_handoff && self.state.graph.nodes.iter().any(|node|
             Some(node.name.as_str()) != owner
-            && self.state.nodes[&node.name].status == "done"
+            && self.state.nodes[&node.name].status == "completed"
             && !self.state.graph.edges.iter().any(|edge| !edge.feedback && edge.from == node.name)
             && self.state.nodes[&node.name].result.as_ref()
                 .is_some_and(|result| result.layout.as_deref() == path.to_str())) {
@@ -2832,7 +2832,7 @@ impl Runtime {
             if self.state.graph.edges.iter().any(|edge| {
                 !edge.feedback
                     && edge.from == execution.node
-                    && self.state.nodes.get(&edge.to).is_some_and(|node| node.status != "done")
+                    && self.state.nodes.get(&edge.to).is_some_and(|node| node.status != "completed")
             }) {
                 if let Ok(path) = Path::new(&execution.worktree).canonicalize() {
                     keep.insert(path);
@@ -3144,7 +3144,7 @@ impl Runtime {
             .cloned();
         let valid = edge.is_some()
             && self.state.nodes.get(&pending.from).is_some_and(|node| {
-                node.status == "done" && node.head.as_deref() == Some(&pending.source_head)
+                node.status == "completed" && node.head.as_deref() == Some(&pending.source_head)
             })
             && self.state.nodes.get(&pending.to).is_some_and(|node| {
                 node.head == pending.target_head && node.revision == pending.target_revision

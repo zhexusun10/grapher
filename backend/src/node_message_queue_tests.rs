@@ -79,7 +79,7 @@ fn node_message_queue_survives_checkpoint_restart_and_claims_exactly_once() {
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
     assert!(replayed.nodes["task"].pending_messages.is_empty());
     assert_eq!(claimed(&replayed, &job.execution.id), sequences);
-    runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.executions.len(), 2, "a completed claim is never replayed as another user turn");
 }
@@ -111,14 +111,14 @@ fn node_message_queue_waits_for_capacity_without_cross_node_claims() {
     let jobs = runtime.jobs().unwrap();
     let task = jobs.iter().find(|job| job.execution.node == "task").unwrap();
     let other = jobs.iter().find(|job| job.execution.node == "other").unwrap();
-    runtime.finish(&task.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    runtime.finish(&task.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
     runtime.state.config.as_mut().unwrap().max_parallel = 1;
     runtime.intervene("task", "first waiting turn").unwrap();
     runtime.intervene("task", "second waiting turn").unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.nodes["task"].pending_messages.len(), 2);
     assert!(runtime.state.nodes["other"].pending_messages.is_empty());
-    runtime.finish(&other.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    runtime.finish(&other.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
     let next = runtime.jobs().unwrap().remove(0);
     assert_eq!(next.execution.node, "task");
     assert!(next.task.contains("first waiting turn") && next.task.contains("second waiting turn"));

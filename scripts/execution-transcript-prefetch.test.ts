@@ -13,7 +13,7 @@ import type { Execution } from "../src/types.ts";
 test("settled node requests share work and publish only complete history", async () => {
   const original = runtimeService.getExecutionOutput;
   const runId = "prefetch-test-run";
-  const execution = { id: "prefetch-test-exec", node: "node", status: "done", outputBytes: 13 } as Execution;
+  const execution = { id: "prefetch-test-exec", node: "node", status: "completed", outputBytes: 13 } as Execution;
   const offsets: number[] = [];
   let releaseSecond!: () => void;
   const secondPage = new Promise<void>(resolve => { releaseSecond = resolve; });
@@ -23,7 +23,7 @@ test("settled node requests share work and publish only complete history", async
     if (offset) await secondPage;
     return {
       runId, executionId: execution.id, content: offset ? "second\n" : "first\n",
-      nextOffset: offset ? 13 : 6, totalBytes: 13, complete: Boolean(offset), status: "done",
+      nextOffset: offset ? 13 : 6, totalBytes: 13, complete: Boolean(offset), status: "completed",
     };
   };
   try {
@@ -44,12 +44,12 @@ test("settled node requests share work and publish only complete history", async
 test("aborted history never publishes stale text", async () => {
   const original = runtimeService.getExecutionOutput;
   const controller = new AbortController();
-  const execution = { id: "abort", status: "done", outputBytes: 6 } as Execution;
+  const execution = { id: "abort", status: "completed", outputBytes: 6 } as Execution;
   let release!: () => void;
   const response = new Promise<void>(resolve => { release = resolve; });
   runtimeService.getExecutionOutput = async () => {
     await response;
-    return { runId: "old", executionId: "abort", content: "stale\n", nextOffset: 6, totalBytes: 6, complete: true, status: "done" };
+    return { runId: "old", executionId: "abort", content: "stale\n", nextOffset: 6, totalBytes: 6, complete: true, status: "completed" };
   };
   try {
     const pending = prefetchExecutionTranscript("old", execution, controller.signal);
@@ -75,7 +75,7 @@ test("LRU uses UTF-8 bytes, touches reads, replaces sizes and refuses oversized 
 
 test("uncached settled nodes render a loading spinner on the first frame", () => {
   executionTranscriptCache.clear();
-  const execution = { id: "selected", status: "done", outputBytes: 100 } as Execution;
+  const execution = { id: "selected", status: "completed", outputBytes: 100 } as Execution;
   const html = renderToStaticMarkup(createElement(ExecutionTranscript, { runId: "run", execution }));
   assert.match(html, /transcript-loading\"/);
   assert.match(html, /role="status"/);

@@ -41,7 +41,7 @@ export function indexFeedbackExhaustion(state: Pick<Snapshot, "graph" | "nodes" 
   for (const event of state.events) {
     if (event.type !== "feedback_exhausted" || !event.from || !event.to || event.count === undefined || event.limit === undefined) continue;
     const execution = latest.get(event.from);
-    if (state.nodes[event.from]?.status === "done" && execution?.status === "completed" && execution.id === event.execution_id &&
+    if (state.nodes[event.from]?.status === "completed" && execution?.status === "completed" && execution.id === event.execution_id &&
         routes.has(graphEdgeId({ from: event.from, to: event.to, feedback: true }))) {
       exhausted.set(event.from, { from: event.from, to: event.to, count: event.count, limit: event.limit });
     }
@@ -271,7 +271,7 @@ export function useGraphElements(
         position: { x: mergerX, y: node.position.y },
         data: {
           name: `merger · ${target}`, task: t("合并上游分支冲突"),
-          status: merger.status === "completed" ? "done" : merger.status === "running" ? "running" : "failed",
+          status: merger.status === "completed" ? "completed" : merger.status === "running" ? "running" : "failed",
           attempts, hint: t("合并至 {0}", target), reviewer: false,
           selected: selected === `merger:${target}` || (selected === target && merger.id === selectedMergerId),
           worktree: merger.worktree, hasTop: true, hasBottom: false,
@@ -286,7 +286,7 @@ export function useGraphElements(
       position: { x: publicationPosition.x, y: publicationPosition.y },
       data: {
         name: t("publication merger"), task: t("合并最终回写结果冲突"),
-        status: publicationMerger.status === "completed" ? "done" : publicationMerger.status === "running" ? "running" : "failed",
+        status: publicationMerger.status === "completed" ? "completed" : publicationMerger.status === "running" ? "running" : "failed",
         attempts: publicationAttempts, hint: t("合并至源目录"), reviewer: false,
         selected: publicationMerger.id === selectedMergerId,
         worktree: publicationMerger.worktree, hasTop: true, hasBottom: false,
@@ -304,8 +304,8 @@ export function useGraphElements(
 
       let animated = false;
       if (!isFeedback) {
-        const fromDone = state.nodes[edge.from]?.status === "done";
-        if (fromDone) {
+        const fromCompleted = state.nodes[edge.from]?.status === "completed";
+        if (fromCompleted) {
           if (mergeTargets.has(edge.to)) {
             const merger = mergeTargets.get(edge.to);
             animated = merger?.status === "running";
@@ -315,12 +315,12 @@ export function useGraphElements(
             const toAttempts = indexes.attempts.get(edge.to) ?? [];
             const latestExec = toAttempts.at(-1);
 
-            const isTerminal = !toNode || toStatus === "done" || toStatus === "failed" || toStatus === "paused" || toStatus === "blocked";
+            const isTerminal = !toNode || toStatus === "completed" || toStatus === "failed" || toStatus === "paused" || toStatus === "blocked";
             if (!isTerminal) {
               const incomingDeps = (indexes.incoming.get(edge.to) ?? []).filter((e) => !e.feedback);
-              const allParentsDone = incomingDeps.length > 0 && incomingDeps.every((e) => state.nodes[e.from]?.status === "done");
+              const allParentsCompleted = incomingDeps.length > 0 && incomingDeps.every((e) => state.nodes[e.from]?.status === "completed");
 
-              if (allParentsDone) {
+              if (allParentsCompleted) {
                 const isCurrentExecRunning = latestExec != null && (latestExec.status === "running" || toStatus === "running");
                 const isPrepared = isCurrentExecRunning && (
                   state.events.some((e) => e.type === "prepared" && e.execution_id === latestExec.id) ||
@@ -331,7 +331,7 @@ export function useGraphElements(
                   (a) => a.kind === "workspace_prepare" && a.nodes.includes(edge.to)
                 );
 
-                // Workspace is actively transferring when all upstream parents are done,
+                // Workspace is actively transferring when all upstream parents are completed,
                 // and the workspace preparation has not yet completed.
                 // As soon as preparation completes (prepared event or output produced),
                 // it immediately turns back into a solid line without waiting for node completion!
@@ -363,13 +363,13 @@ export function useGraphElements(
     const publicationEdges: Edge[] = publicationMerger
       ? Array.from(publicationTargets, (name): Edge => {
           const routing = edgeRouting.get(`publication:${name}`);
-          const isTerminalDone = state.nodes[name]?.status === "done";
+          const isTerminalCompleted = state.nodes[name]?.status === "completed";
           const isMergerRunning = publicationMerger.status === "running";
           return {
             id: `publication:${name}->merger`, source: name, target: publicationMergerCardId,
             sourceHandle: routing?.sourceHandle ?? "bottom", targetHandle: "top", type: "workflow",
             markerEnd: "url(#workflow-arrow-default)",
-            animated: isTerminalDone && isMergerRunning,
+            animated: isTerminalCompleted && isMergerRunning,
             data: { routeX: routing?.routeX, routeSide: routing?.routeSide },
             style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
           };
@@ -395,7 +395,7 @@ export function useGraphElements(
       const isTargetPreparingActivity = activity.some(
         (a) => a.kind === "workspace_prepare" && a.nodes.includes(target)
       );
-      const isTargetTerminal = !toNode || toStatus === "done" || toStatus === "failed" || toStatus === "paused" || toStatus === "blocked";
+      const isTargetTerminal = !toNode || toStatus === "completed" || toStatus === "failed" || toStatus === "paused" || toStatus === "blocked";
       const animated = isMergerCompleted && !isTargetTerminal && (isTargetPreparingActivity || !isTargetPrepared);
 
       return {

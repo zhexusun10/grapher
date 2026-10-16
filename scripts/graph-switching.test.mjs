@@ -83,7 +83,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       planningId: `plan-${runId}`,
       graph: { originalGoal: `Goal ${runId}`, nodes: names.map(name => ({ name, task: `Task ${name}` })),
         edges: names.slice(1).map((name, index) => ({ from: names[index], to: name, feedback: false })) },
-      nodes: Object.fromEntries(names.map(name => [name, { status: "done" }])),
+      nodes: Object.fromEntries(names.map(name => [name, { status: "completed" }])),
       plan: null, executions: [], events: [], base: "", feedbackCounts: {},
     });
     const snapshots = {
@@ -186,7 +186,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           window.summaryFrames = [];
           window.composerFrames = [];
           window.workbenchChanges = 0;
-          window.switchSamplingDone = false;
+          window.switchSamplingCompleted = false;
           let previousWorkbench = document.querySelector(".workbench");
           const sourceWorkbench = previousWorkbench;
           const started = performance.now();
@@ -238,12 +238,12 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
               window.switchFrames.push(frame);
             }
             if (performance.now() - started < 900) requestAnimationFrame(sample);
-            else window.switchSamplingDone = true;
+            else window.switchSamplingCompleted = true;
           };
           requestAnimationFrame(sample);
           document.querySelector(`[data-run-id="${id}"]`).click();
         }, { id, expectedNames: Object.keys(snapshots[id].nodes).sort() });
-        await page.waitForFunction(() => window.switchSamplingDone);
+        await page.waitForFunction(() => window.switchSamplingCompleted);
         const { frames, summaries, changes, composers } = await page.evaluate(() => ({
           frames: window.switchFrames, summaries: window.summaryFrames, changes: window.workbenchChanges,
           composers: window.composerFrames,

@@ -16,10 +16,10 @@ assert.equal(model, 'antigravity/gemini-3.8-flash', 'This acceptance must use th
 const root = await mkdtemp(join(tmpdir(), 'grapher-planner-review-'));
 console.log(`Disposable acceptance root: ${root}`);
 const binary = join(resolve(process.env.CARGO_TARGET_DIR || '.grapher/verification-target'), 'debug', `grapher${process.platform === 'win32' ? '.exe' : ''}`);
-const delay = ms => new Promise(done => setTimeout(done, ms));
+const delay = ms => new Promise(completed => setTimeout(completed, ms));
 async function port() {
-  const server = netServer(); await new Promise(done => server.listen(0, '127.0.0.1', done));
-  const value = server.address().port; await new Promise(done => server.close(done)); return value;
+  const server = netServer(); await new Promise(completed => server.listen(0, '127.0.0.1', completed));
+  const value = server.address().port; await new Promise(completed => server.close(completed)); return value;
 }
 const browser = await chromium.launch({ headless: true, channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === 'win32' ? 'msedge' : 'chromium') });
 try {
@@ -151,7 +151,7 @@ try {
       throw Error(`${label}: ${error}\n${diagnostics}`);
     } finally {
       await context?.close(); await vite?.close();
-      backend.kill(); await new Promise(done => backend.exitCode !== null ? done() : backend.once('exit', done));
+      backend.kill(); await new Promise(completed => backend.exitCode !== null ? completed() : backend.once('exit', completed));
       await rm(agent, { recursive: true, force: true });
     }
   }

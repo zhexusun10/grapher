@@ -45,7 +45,7 @@ test("completed tool calls keep their result state in a settled transcript", () 
   const html = render([
     ...interruptedTool,
     { type: "tool_execution_end", toolCallId: "bash-1", toolName: "bash", isError: false,
-      result: { content: [{ type: "text", text: "done" }], details: { exitCode: 0 } } },
+      result: { content: [{ type: "text", text: "completed" }], details: { exitCode: 0 } } },
   ], true);
   assert.match(html, /tool-call-card terminal success/);
   assert.doesNotMatch(html, /tool-status interrupted/);
@@ -67,7 +67,7 @@ test("a settled transcript stops streaming a trailing interrupted thinking block
 
 test("settleInterruptedItems rewrites only running items and keeps array identity otherwise", () => {
   const same: TranscriptItem[] = [
-    { id: "a", type: "text", role: "assistant", content: "done" },
+    { id: "a", type: "text", role: "assistant", content: "completed" },
     { id: "b", type: "tool_call", toolName: "bash", status: "success", result: "ok" },
     { id: "c", type: "thinking", content: "final", status: "success" },
   ];

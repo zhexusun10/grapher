@@ -252,7 +252,7 @@ mod tests {
             json!({"type":"message", "id":"root", "parentId":null,
                 "message":{"role":"user", "content":"original", "timestamp":1}}),
             json!({"type":"message", "id":"next", "parentId":"root",
-                "message":{"role":"user", "content":"Current graph node status:\n- task: done\n\nlater", "timestamp":2}}),
+                "message":{"role":"user", "content":"Current graph node status:\n- task: completed\n\nlater", "timestamp":2}}),
         ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
         let branch = branch_before_planner_user(dir.path(), &id, dir.path(), "later").unwrap();
         let value: Value = serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap()).unwrap();

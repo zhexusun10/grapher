@@ -95,7 +95,7 @@ Grapher is a local coding-agent workbench that compiles complex work into inspec
 - **Windows sandboxing** — Graph nodes use process isolation only, not filesystem sandbox
 - **Routing heuristics** — Graph planning quality varies with task structure
 - **Provider coverage** — Some providers may have compatibility issues
-- **Performance** — No optimization work done yet; expect some overhead
+- **Performance** — No optimization work completed yet; expect some overhead
 
 ### Installation requirements
 

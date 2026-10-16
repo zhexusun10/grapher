@@ -291,7 +291,7 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
         if !failures.is_empty() {
             return Err(format!("Cleanup remains queued:\n{}", failures.join("\n")));
         }
-        println!("[cleanup] Done. Conversations, source files and retained Run directories were not deleted.");
+        println!("[cleanup] Completed. Conversations, source files and retained Run directories were not deleted.");
     } else {
         println!("[cleanup] Review the paths, then repeat with --apply to delete them.");
     }

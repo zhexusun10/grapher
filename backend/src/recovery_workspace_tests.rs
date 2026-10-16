@@ -18,7 +18,7 @@ fn prepared_worker(standard_git: bool) -> (TempDir, PathBuf, Runtime, Job) {
     fs::write(path.join("branch_b/__pycache__/model.pyc"), b"original cache").unwrap();
     fs::write(path.join("parent.txt"), "parent output").unwrap();
     let head = workspace::snapshot_node_for_run(path, &source, "parent", Some(&runtime.state.run_id)).unwrap();
-    runtime.finish(&parent.execution, Ok((head, "done".into()))).unwrap();
+    runtime.finish(&parent.execution, Ok((head, "completed".into()))).unwrap();
     let worker = runtime.jobs().unwrap().remove(0);
     let prepared = workspace::prepare_with_merger_expected_for_run(
         &source, Path::new(&worker.execution.worktree), &worker.execution.before,
@@ -83,7 +83,7 @@ fn pause_after_preparation_before_pi_launch_restarts_the_task_without_resetting_
     runtime.finish(&retry.execution, result.clone()).unwrap();
     result.expect("an unlaunched session must not block workspace recovery");
     assert_partial_work(&path);
-    assert_eq!(runtime.state.nodes["worker"].status, "done");
+    assert_eq!(runtime.state.nodes["worker"].status, "completed");
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn interrupted_resume_preserves_dirty_files_index_and_agent_commits_after_restar
             result.expect("dirty interrupted work must survive continuation");
             assert_partial_work(&path);
             workspace::verify_prepared_ancestor(&path, &head).unwrap();
-            assert_eq!(runtime.state.nodes["worker"].status, "done");
+            assert_eq!(runtime.state.nodes["worker"].status, "completed");
             assert_eq!(runtime.state.executions.iter().find(|e| e.id == worker.execution.id).unwrap().status, "failed");
             assert!(runtime.state.executions.iter().find(|e| e.id == worker.execution.id).unwrap().after.is_none());
         }

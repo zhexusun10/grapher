@@ -33,7 +33,7 @@ const evidence = { startedAt: new Date(started).toISOString(), platform: process
   revision: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), dirty: true,
   dataRoot, recoveryFrom: resume ? join(dataRoot, "report.json") : undefined,
   checks: { ...previousReport?.checks }, browserErrors: [], apiErrors: [], controls: [] };
-const sleep = ms => new Promise(done => setTimeout(done, ms));
+const sleep = ms => new Promise(completed => setTimeout(completed, ms));
 let backend, vite, browser, context, page, runId, state, diagnostics = "";
 const gitAt = (cwd, ...args) => execFileSync("git", ["-c", "core.hooksPath=" + (process.platform === "win32" ? "NUL" : "/dev/null"),
   "-c", "commit.gpgsign=false", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@localhost", ...args],
@@ -42,7 +42,7 @@ const git = (...args) => gitAt(repository, ...args);
 const text = async file => (await readFile(join(repository, file), "utf8")).replaceAll("\r\n", "\n").trim();
 async function freePort() {
   const server = netServer(); server.listen(0, "127.0.0.1"); await once(server, "listening");
-  const port = server.address().port; await new Promise(done => server.close(done));
+  const port = server.address().port; await new Promise(completed => server.close(completed));
   return [2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080].includes(port) ? freePort() : port;
 }
 async function until(check, message, timeout = 90_000) {
@@ -262,9 +262,9 @@ try {
   const followColor = ["red", "blue", "green"][Math.floor(Math.random() * 3)];
   const followToken = "FOLLOWUP_" + randomUUID();
   await submit("joined", "intervene", await imageAttachment("follow-image.png", followColor), "Inspect the attached image and write its actual solid background color as one lowercase English word to follow-image.txt using bash. Preserve existing files; finish with a nonempty sentence.");
-  await until(async () => { await refresh(); return state.phase === "completed" && state.nodes.joined.status === "done"; }, "image continuation published", 50_000);
+  await until(async () => { await refresh(); return state.phase === "completed" && state.nodes.joined.status === "completed"; }, "image continuation published", 50_000);
   await submit("joined", "intervene", { name: "follow-notes.txt", mimeType: "text/plain", buffer: Buffer.from(followToken) }, "Read the attached file and write its exact token plus newline to follow-file.txt using bash. Preserve existing files; finish with a nonempty sentence.");
-  await until(async () => { await refresh(); return state.phase === "completed" && state.nodes.joined.status === "done"; }, "file continuation published", 50_000);
+  await until(async () => { await refresh(); return state.phase === "completed" && state.nodes.joined.status === "completed"; }, "file continuation published", 50_000);
   assert.equal(await text("follow-image.txt"), followColor); assert.equal(await text("follow-file.txt"), followToken);
   assert.equal(await text("artifacts/shared.txt"), "USER\nLEFT\nRIGHT");
   assert.equal(await text("downstream.txt"), "LEFT\nRIGHT");

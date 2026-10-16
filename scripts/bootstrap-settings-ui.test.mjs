@@ -58,7 +58,7 @@ async function openSettings(page) {
 }
 async function until(check) {
   const end = Date.now() + 8_000;
-  while (!await check()) { assert.ok(Date.now() < end, "expected request/state did not arrive"); await new Promise(done => setTimeout(done, 20)); }
+  while (!await check()) { assert.ok(Date.now() < end, "expected request/state did not arrive"); await new Promise(completed => setTimeout(completed, 20)); }
 }
 
 test("one stalled history cannot keep validated sidebar cards and saved models loading", { timeout: 30_000 }, async () => {

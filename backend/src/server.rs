@@ -1492,7 +1492,7 @@ fn plan_goal_internal_with_started(
             if background_review {
                 let mut runtime = service.runtime.lock().map_err(|e| (e.to_string(), None))?;
                 if runtime.state.phase != "completed" || runtime.state.stop_requested
-                    || !runtime.state.nodes.values().all(|node| node.status == "done") {
+                    || !runtime.state.nodes.values().all(|node| node.status == "completed") {
                     return Err(("Run is no longer ready for post-task review".into(), None));
                 }
                 runtime.emit(EventKind::PlannerReviewStarted { planning: running.clone() })
@@ -1708,7 +1708,7 @@ fn plan_goal_internal_with_started(
                                         .state
                                         .nodes
                                         .iter()
-                                        .filter(|(_, node)| node.status == "done")
+                                        .filter(|(_, node)| node.status == "completed")
                                         .map(|(name, _)| name.clone())
                                         .collect::<Vec<_>>()
                                 })
@@ -1904,7 +1904,7 @@ fn plan_goal_internal_with_started(
                     runtime.approve()?;
                 }
                 if background_review {
-                    let pending = runtime.state.nodes.values().any(|node| node.status != "done");
+                    let pending = runtime.state.nodes.values().any(|node| node.status != "completed");
                     runtime.emit(EventKind::PlannerReviewFinished {
                         planning: summary.clone(),
                         approval_required: pending && !config.auto_approve,
@@ -2368,7 +2368,7 @@ fn drive(service: Arc<Service>) {
                                     runtime.state.config.as_ref().filter(|config| config.post_task_review)
                                         .filter(|_| runtime.state.plan_type.as_deref() == Some("graph")
                                             && runtime.state.phase == "completed" && !runtime.state.stop_requested
-                                            && runtime.state.nodes.values().all(|node| node.status == "done"))
+                                            && runtime.state.nodes.values().all(|node| node.status == "completed"))
                                         .cloned()
                                 };
                                 if let Some(config) = review {
@@ -2626,7 +2626,7 @@ fn control(
         if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
             return Err("Run changed while messaging node".into());
         }
-        runtime.message_done_node(
+        runtime.message_completed_node(
             node.as_deref().unwrap_or_default(),
             instruction.as_deref().unwrap_or_default(),
             images,
@@ -3429,6 +3429,10 @@ fn get_planning_output(
         };
         let content = std::str::from_utf8(&bytes[..length]).map_err(|e| e.to_string())?;
         let next_offset = start + length as u64;
+        // The planner writer appends to this file concurrently. A size sampled
+        // before the reads may already be stale; re-sample so totalBytes covers
+        // what this page actually observed.
+        let total_bytes = total_bytes.max(file.metadata().map(|meta| meta.len()).unwrap_or(0));
         return Ok(serde_json::json!({ "planningId": planning_id, "role": role,
             "content": content, "startOffset": start, "nextOffset": next_offset,
             "totalBytes": total_bytes, "complete": next_offset >= total_bytes, "running": running }));
@@ -3436,7 +3440,7 @@ fn get_planning_output(
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
-    file.take(limit)
+    (&mut file).take(limit)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     let length = match std::str::from_utf8(&bytes) {
@@ -3446,6 +3450,14 @@ fn get_planning_output(
     };
     let content = std::str::from_utf8(&bytes[..length]).map_err(|e| e.to_string())?;
     let next_offset = offset + length as u64;
+    // Same concurrent-append hazard as the tail path: the size was sampled
+    // before the read, so a page that observed bytes appended in between would
+    // report nextOffset beyond totalBytes and the frontend would reject it as
+    // an invalid transcript byte range. Re-sample, and keep the reported total
+    // at or above the observed cursor by construction.
+    let total_bytes = total_bytes
+        .max(file.metadata().map(|meta| meta.len()).unwrap_or(0))
+        .max(next_offset);
     Ok(serde_json::json!({ "planningId": planning_id, "role": role,
         "content": content, "startOffset": offset, "nextOffset": next_offset, "totalBytes": total_bytes,
         "complete": next_offset >= total_bytes, "running": running }))

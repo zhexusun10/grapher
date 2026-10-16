@@ -222,8 +222,8 @@ fn partitioner_prompt_requests_the_labels_the_parser_recognizes() {
 
 #[test]
 fn parses_final_assistant_text_and_preserves_tool_stream() {
-    let (result, stream) = execute_script("cat >/dev/null\nprintf '%s\\n' '{\"type\":\"tool_execution_start\",\"toolName\":\"read\",\"args\":{\"path\":\"README.md\"}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"Done\\n<ACCEPT>\"}]}}'\n");
-    assert_eq!(result.unwrap(), "Done\n<ACCEPT>");
+    let (result, stream) = execute_script("cat >/dev/null\nprintf '%s\\n' '{\"type\":\"tool_execution_start\",\"toolName\":\"read\",\"args\":{\"path\":\"README.md\"}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\\n<ACCEPT>\"}]}}'\n");
+    assert_eq!(result.unwrap(), "Completed\n<ACCEPT>");
     assert!(stream.contains("tool_execution_start"));
 }
 

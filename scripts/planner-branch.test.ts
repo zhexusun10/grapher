@@ -15,7 +15,7 @@ test('Planner branch hides only abandoned turns while retaining earlier context 
 });
 
 test('Planner branch matches Pi follow-ups with a dynamic status prefix', () => {
-  const log = [source('a'), user('first'), user('Current graph node status:\n- task: done\n\nlater'), 'old reply'].join('\n') + '\n';
+  const log = [source('a'), user('first'), user('Current graph node status:\n- task: completed\n\nlater'), 'old reply'].join('\n') + '\n';
   assert.doesNotMatch(activePlannerOutput(log, [{ old_instruction: 'later' }]), /old reply/);
 });
 

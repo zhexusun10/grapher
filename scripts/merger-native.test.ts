@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const normalize = (value: string) => value.replace(/^\\\\\?\\/, '').replaceAll('\\', '/');
-const delay = (ms: number) => new Promise(done => setTimeout(done, ms));
+const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms));
 
 test('production Planner writes source directly; Merger repairs node and publication conflicts', { timeout: 300000 }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-merger-')));
@@ -125,7 +125,7 @@ test('production Planner writes source directly; Merger repairs node and publica
           : 'test "$(cat shared.txt)" = resolved && printf verified > verified.txt';
         tool = { name: 'bash', arguments: { command } };
       }
-      requests.push(`${label}:${role}:${tool?.name ?? 'done'}`);
+      requests.push(`${label}:${role}:${tool?.name ?? 'completed'}`);
       const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${requests.length}`, type: 'function',
         function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] }
         : { role: 'assistant', content: 'Completed' };
@@ -141,7 +141,7 @@ test('production Planner writes source directly; Merger repairs node and publica
   });
   try {
     await mkdir(agent);
-    await new Promise<void>(done => modelServer.listen(0, '127.0.0.1', done));
+    await new Promise<void>(completed => modelServer.listen(0, '127.0.0.1', completed));
     const modelPort = (modelServer.address() as AddressInfo).port;
     await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: { 'merger-test': {
       baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: 'openai-completions', apiKey: 'local-test-only',
@@ -149,9 +149,9 @@ test('production Planner writes source directly; Merger repairs node and publica
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
     } } }));
     const listener = createServer();
-    await new Promise<void>(done => listener.listen(0, '127.0.0.1', done));
+    await new Promise<void>(completed => listener.listen(0, '127.0.0.1', completed));
     const port = (listener.address() as AddressInfo).port;
-    await new Promise<void>(done => listener.close(() => done()));
+    await new Promise<void>(completed => listener.close(() => completed()));
     const env = { ...process.env, GRAPHER_DATA_DIR: data, GRAPHER_PORT: String(port), PI_CODING_AGENT_DIR: agent,
       GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces'),
       PLANNER_MODEL: 'merger-test/native', NODE_AGENT_MODEL: 'merger-test/native',
@@ -263,7 +263,7 @@ test('production Planner writes source directly; Merger repairs node and publica
         return current.phase === 'completed' && current;
       });
       if (kind === 'planner') assert.ok(!requests.some(request => request.startsWith(`${label}:merger:`)));
-      else assert.ok(requests.includes(`${label}:merger:done`));
+      else assert.ok(requests.includes(`${label}:merger:completed`));
       const merger = kind === 'planner' ? undefined : state.mergers[0];
       if (kind !== 'planner') {
         assert.equal(state.mergers.length, 1);
@@ -320,7 +320,7 @@ test('production Planner writes source directly; Merger repairs node and publica
         assert.equal(failedState.base, state.base);
         assert.deepEqual(failedState.executions, state.executions);
         assert.equal(failedState.phase, 'completed', 'a refused revision does not re-enter execution');
-        assert.equal(failedState.nodes.verify.status, 'done', 'a published node survives the refused edit');
+        assert.equal(failedState.nodes.verify.status, 'completed', 'a published node survives the refused edit');
         // The Planner writes the user's source directly, so its own writes must
         // survive a revision that changed nothing; the next dispatch collects
         // them as that job's source.
@@ -331,7 +331,7 @@ test('production Planner writes source directly; Merger repairs node and publica
         const revised = await until(async () => {
           const current = await api('snapshot', { runId: state.runId });
           assert.ok(!['needs_attention', 'publication_failed', 'failed'].includes(current.phase), JSON.stringify(current));
-          return current.phase === 'completed' && current.nodes.late?.status === 'done' && current;
+          return current.phase === 'completed' && current.nodes.late?.status === 'completed' && current;
         });
         assert.equal(revised.base, state.base, 'approval is immutable');
         // A plain folder whose successful publication reclaimed its snapshot
@@ -360,7 +360,7 @@ test('production Planner writes source directly; Merger repairs node and publica
       await exited;
     }
     modelServer.closeAllConnections();
-    await new Promise<void>(done => modelServer.close(() => done()));
+    await new Promise<void>(completed => modelServer.close(() => completed()));
     await rm(directory, { recursive: true, force: true, maxRetries: 40, retryDelay: 250 });
   }
 });

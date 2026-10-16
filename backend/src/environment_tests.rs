@@ -235,7 +235,7 @@ fn empty_business_binding_keeps_ordinary_parallel_fanout_and_fanin_without_layou
         .state
         .nodes
         .values()
-        .all(|node| node.status == "done"));
+        .all(|node| node.status == "completed"));
     let config = runtime
         .state
         .config
@@ -463,7 +463,7 @@ fs.writeFileSync('.cache/runtime','cache should not fork E');
         "C artifact"
     );
     for name in ["A", "B", "C"] {
-        assert_eq!(runtime.state.nodes[name].status, "done");
+        assert_eq!(runtime.state.nodes[name].status, "completed");
         assert_eq!(
             runtime.state.nodes[name].result,
             runtime.state.executions.last().unwrap().result
@@ -708,7 +708,7 @@ fn failed_native_initialization_retains_selection_and_partial_work_for_retry() {
     assert!(retry.preserve_failed_environment);
     run(&mut runtime, &retry);
     assert_eq!(retry.execution.worktree, first.execution.worktree);
-    assert_eq!(runtime.state.nodes["A"].status, "done");
+    assert_eq!(runtime.state.nodes["A"].status, "completed");
 }
 
 #[cfg(feature = "fixture")]

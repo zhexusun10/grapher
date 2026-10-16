@@ -10,7 +10,7 @@ fn created(repository: &str, direct: Option<&str>, nested: Option<&str>) -> Even
         "planningId": id, "roles": {}, "totalPlanningDuration": 0, "modelDuration": 0
     })).unwrap());
     EventKind::Created {
-        graph: Graph { nodes: ["done", "failed", "live"].iter().map(|name| Node { name: (*name).into(), task: "test".into() }).collect(), ..Default::default() },
+        graph: Graph { nodes: ["completed", "failed", "live"].iter().map(|name| Node { name: (*name).into(), task: "test".into() }).collect(), ..Default::default() },
         config, planning_id: direct.map(str::to_string), planning,
     }
 }
@@ -40,9 +40,9 @@ fn seed_legacy(path: &std::path::Path, indexed: bool) -> String {
     let text = format!("{}\n── Final response ──\n完成🚀\n", "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":7,\"output\":3,\"totalTokens\":10}}}\n".repeat(500));
     for kind in [
         created("repo", Some("id"), None),
-        EventKind::Started { execution: execution("done"), message_sequences: None },
-        EventKind::Output { execution_id: "done".into(), text: "redundant".into() },
-        EventKind::Finished { execution_id: "done".into(), head: "h".into(), output: text.clone(), output_bytes: 0, metrics: None },
+        EventKind::Started { execution: execution("completed"), message_sequences: None },
+        EventKind::Output { execution_id: "completed".into(), text: "redundant".into() },
+        EventKind::Finished { execution_id: "completed".into(), head: "h".into(), output: text.clone(), output_bytes: 0, metrics: None },
         EventKind::Started { execution: execution("failed"), message_sequences: None },
         EventKind::Output { execution_id: "failed".into(), text: "失败前\n".into() },
         EventKind::Output { execution_id: "failed".into(), text: "🚀🎉\u{1b}[31m错误\u{1b}[0m".into() },
@@ -85,13 +85,13 @@ fn migration_preserves_finished_failed_interrupted_and_merger_logs_and_is_idempo
     let full = seed_legacy(&path, false);
     let store = Store::open(&path).unwrap();
     // JIT may have run before the offline command; deterministic chunks match.
-    store.ensure_legacy_logs("run", "done").unwrap();
+    store.ensure_legacy_logs("run", "completed").unwrap();
     let report = store.migrate_legacy_logs().unwrap();
     assert_eq!(report.backfilled_rows, 13);
     assert_eq!(report.migrated_executions, 4);
     assert_eq!(report.deleted_chunks, 5);
     for (id, expected) in [
-        ("done", full.as_str()),
+        ("completed", full.as_str()),
         ("failed", "失败前\n🚀🎉\u{1b}[31m错误\u{1b}[0m"),
         ("live", "interrupted\n"),
         ("merge", "conflict\n\nMerger failed: unresolved\n"),
@@ -127,9 +127,9 @@ fn jit_is_concurrent_idempotent_and_never_mutates_events() {
                 let path = &path;
                 scope.spawn(move || {
                     let store = Store::open(path).unwrap();
-                    store.ensure_legacy_logs("run", "done").unwrap();
+                    store.ensure_legacy_logs("run", "completed").unwrap();
                     store.ensure_legacy_logs("run", "merge").unwrap();
-                    store.execution_log_page("run", "done", 0, usize::MAX).unwrap().content
+                    store.execution_log_page("run", "completed", 0, usize::MAX).unwrap().content
                 })
             }).collect();
             readers.into_iter().map(|reader| reader.join().unwrap()).collect::<Vec<_>>()
@@ -148,45 +148,45 @@ fn utf8_paging_and_interleaved_cursors_survive_reopen_and_cascade_deletion() {
     let mut store = Store::open(&path).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    for id in ["done", "live"] { store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None }).unwrap(); }
+    for id in ["completed", "live"] { store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None }).unwrap(); }
     let chunk = format!("{}🚀🎉中文\u{1b}[31m\n", "a".repeat(32 * 1024 - 1));
     let mut expected = String::new();
     for _ in 0..3 {
         store.append_batch(&mut state, vec![
-            EventKind::Output { execution_id: "done".into(), text: chunk.clone() },
+            EventKind::Output { execution_id: "completed".into(), text: chunk.clone() },
             EventKind::Output { execution_id: "live".into(), text: "其他日志\n".into() },
         ]).unwrap();
         expected.push_str(&chunk);
         store = Store::open(&path).unwrap(); // No cached offset: recover from DB.
     }
-    assert_eq!(store.log_bytes("run", "done").unwrap(), expected.len());
+    assert_eq!(store.log_bytes("run", "completed").unwrap(), expected.len());
     assert_eq!(state.executions[0].output, expected);
     assert!(state.events.iter().all(|e| !matches!(e.kind, EventKind::Output { .. })));
     let mut restored = String::new();
     let mut offset = 0;
     loop {
-        let page = store.execution_log_page("run", "done", offset, 32 * 1024).unwrap();
+        let page = store.execution_log_page("run", "completed", offset, 32 * 1024).unwrap();
         assert!(page.content.len() <= 32 * 1024);
         restored.push_str(&page.content);
         offset = page.next_offset;
         if page.complete { break; }
     }
     assert_eq!(restored.as_bytes(), expected.as_bytes());
-    let tail = store.execution_log_tail_page("run", "done", expected.len(), 32 * 1024).unwrap();
+    let tail = store.execution_log_tail_page("run", "completed", expected.len(), 32 * 1024).unwrap();
     assert!(expected.ends_with(&tail.content));
     let mut older = String::new();
     let mut before = tail.start_offset;
     while before > 0 {
-        let page = store.execution_log_tail_page("run", "done", before, 32 * 1024).unwrap();
+        let page = store.execution_log_tail_page("run", "completed", before, 32 * 1024).unwrap();
         older.insert_str(0, &page.content);
         before = page.start_offset;
     }
     assert_eq!(format!("{older}{}", tail.content).as_bytes(), expected.as_bytes());
-    assert!(store.execution_log_page("run", "done", 32 * 1024, 1024).is_err());
-    assert!(store.execution_log_page("wrong-run", "done", 1, 1024).is_err());
+    assert!(store.execution_log_page("run", "completed", 32 * 1024, 1024).is_err());
+    assert!(store.execution_log_page("wrong-run", "completed", 1, 1024).is_err());
     let db = Connection::open(&path).unwrap();
     let mut previous = 0;
-    let mut stmt = db.prepare("SELECT offset,bytes,text FROM execution_logs WHERE execution_id='done' ORDER BY offset").unwrap();
+    let mut stmt = db.prepare("SELECT offset,bytes,text FROM execution_logs WHERE execution_id='completed' ORDER BY offset").unwrap();
     for row in stmt.query_map([], |r| Ok((r.get::<_, usize>(0)?, r.get::<_, usize>(1)?, r.get::<_, String>(2)?))).unwrap() {
         let (offset, bytes, text) = row.unwrap();
         assert_eq!(offset, previous); assert_eq!(bytes, text.len()); assert!(bytes <= 32 * 1024);
@@ -205,14 +205,14 @@ fn tail_pages_never_discard_a_tool_result_larger_than_the_page() {
     let store = Store::open(&temp.path().join("events.db")).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("done"), message_sequences: None }).unwrap();
+    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None }).unwrap();
     let text = format!("{}\n", serde_json::json!({ "type": "tool_execution_end", "toolCallId": "tool",
         "toolName": "read", "result": { "content": [{ "type": "text", "text": "中文🚀".repeat(100_000) }] } }));
-    store.append(&mut state, EventKind::Output { execution_id: "done".into(), text: text.clone() }).unwrap();
+    store.append(&mut state, EventKind::Output { execution_id: "completed".into(), text: text.clone() }).unwrap();
     let mut before = text.len();
     let mut restored = String::new();
     loop {
-        let page = store.execution_log_tail_page("run", "done", before, 32 * 1024).unwrap();
+        let page = store.execution_log_tail_page("run", "completed", before, 32 * 1024).unwrap();
         assert!(page.start_offset < before);
         assert_eq!(page.next_offset, before);
         assert_eq!(page.content, text[page.start_offset..before]);
@@ -229,14 +229,14 @@ fn committed_finished_has_no_text_and_carries_metrics_and_pid() {
     let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
     runtime.state.run_id = "run".into();
     runtime.emit(created("repo", None, None)).unwrap();
-    let exec = execution("done");
+    let exec = execution("completed");
     runtime.emit(EventKind::Started { execution: exec.clone(), message_sequences: None }).unwrap();
     let first = "{\"type\":\"grapher_process_started\",\"pid\":123}";
-    runtime.emit_outputs(vec![EventKind::Output { execution_id: "done".into(), text: first.into() }]).unwrap();
-    runtime.emit_outputs(vec![EventKind::Output { execution_id: "done".into(), text: "\n{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"totalTokens\":42}}}\n".into() }]).unwrap();
+    runtime.emit_outputs(vec![EventKind::Output { execution_id: "completed".into(), text: first.into() }]).unwrap();
+    runtime.emit_outputs(vec![EventKind::Output { execution_id: "completed".into(), text: "\n{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"totalTokens\":42}}}\n".into() }]).unwrap();
     assert_eq!(runtime.state.executions[0].pid, Some(123));
     runtime.finish(&exec, Ok(("head".into(), "完成🚀".into()))).unwrap();
-    let page = runtime.store.execution_log_page("run", "done", 0, usize::MAX).unwrap();
+    let page = runtime.store.execution_log_page("run", "completed", 0, usize::MAX).unwrap();
     assert!(page.content.ends_with("\n── Final response ──\n完成🚀\n"));
     let loaded = runtime.store.load("run").unwrap();
     assert_eq!(loaded.executions[0].output_bytes, page.total_bytes);
@@ -295,22 +295,22 @@ fn failed_log_commit_never_advances_projection_or_offset_cursor() {
     let mut store = Store::open(&path).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("done"), message_sequences: None }).unwrap();
-    store.append(&mut state, EventKind::Output { execution_id: "done".into(), text: "before\n".into() }).unwrap();
+    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None }).unwrap();
+    store.append(&mut state, EventKind::Output { execution_id: "completed".into(), text: "before\n".into() }).unwrap();
     let db = Connection::open(&path).unwrap();
     db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON execution_logs WHEN NEW.text='reject' BEGIN SELECT RAISE(ABORT,'injected failure'); END;
         CREATE TRIGGER fail_log_update BEFORE UPDATE ON execution_logs WHEN NEW.text LIKE '%reject%' BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
     assert!(store.append_batch(&mut state, vec![
-        EventKind::Output { execution_id: "done".into(), text: "reject".into() },
+        EventKind::Output { execution_id: "completed".into(), text: "reject".into() },
         EventKind::Output { execution_id: "other".into(), text: "also rollback".into() },
     ]).is_err());
     assert_eq!(state.executions[0].output, "before\n");
-    assert_eq!(store.log_bytes("run", "done").unwrap(), 7);
+    assert_eq!(store.log_bytes("run", "completed").unwrap(), 7);
     assert_eq!(store.log_bytes("run", "other").unwrap(), 0);
     db.execute_batch("DROP TRIGGER fail_log; DROP TRIGGER fail_log_update;").unwrap();
-    store.append(&mut state, EventKind::Output { execution_id: "done".into(), text: "after🚀\n".into() }).unwrap();
-    assert_eq!(store.execution_log_page("run", "done", 0, usize::MAX).unwrap().content, "before\nafter🚀\n");
-    assert_eq!(store.log_bytes("run", "done").unwrap(), state.executions[0].output.len());
+    store.append(&mut state, EventKind::Output { execution_id: "completed".into(), text: "after🚀\n".into() }).unwrap();
+    assert_eq!(store.execution_log_page("run", "completed", 0, usize::MAX).unwrap().content, "before\nafter🚀\n");
+    assert_eq!(store.log_bytes("run", "completed").unwrap(), state.executions[0].output.len());
 }
 
 #[test]
@@ -320,7 +320,7 @@ fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte
     let mut store = Store::open(&path).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    for id in ["done", "live"] {
+    for id in ["completed", "live"] {
         store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None }).unwrap();
     }
     let mut expected = String::new();
@@ -328,7 +328,7 @@ fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte
     for i in 0..512 {
         let text = format!("{i}:中文🚀\n").repeat(12);
         store.append_batch(&mut state, vec![
-            EventKind::Output { execution_id: "done".into(), text: text.clone() },
+            EventKind::Output { execution_id: "completed".into(), text: text.clone() },
             EventKind::Output { execution_id: "live".into(), text: "other\n".into() },
         ]).unwrap();
         expected.push_str(&text);
@@ -336,10 +336,10 @@ fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte
         if i % 64 == 0 { store = Store::open(&path).unwrap(); }
     }
     let db = Connection::open(&path).unwrap();
-    let rows: usize = db.query_row("SELECT COUNT(*) FROM execution_logs WHERE execution_id='done'", [], |r| r.get(0)).unwrap();
+    let rows: usize = db.query_row("SELECT COUNT(*) FROM execution_logs WHERE execution_id='completed'", [], |r| r.get(0)).unwrap();
     assert!(rows <= expected.len() / (32 * 1024 - 3) + 1, "small writes left {rows} permanent rows");
     let mut previous = 0;
-    let mut statement = db.prepare("SELECT offset,bytes,text FROM execution_logs WHERE execution_id='done' ORDER BY offset").unwrap();
+    let mut statement = db.prepare("SELECT offset,bytes,text FROM execution_logs WHERE execution_id='completed' ORDER BY offset").unwrap();
     for row in statement.query_map([], |r| Ok((r.get::<_, usize>(0)?, r.get::<_, usize>(1)?, r.get::<_, String>(2)?))).unwrap() {
         let (offset, bytes, text) = row.unwrap();
         assert_eq!(offset, previous);
@@ -348,10 +348,10 @@ fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte
         previous += bytes;
     }
     assert_eq!(previous, expected.len());
-    assert_eq!(store.execution_log_page("run", "done", 0, usize::MAX).unwrap().content, expected);
-    assert_eq!(store.execution_log_page("run", "done", saved_cursor, usize::MAX).unwrap().content, expected[saved_cursor..]);
+    assert_eq!(store.execution_log_page("run", "completed", 0, usize::MAX).unwrap().content, expected);
+    assert_eq!(store.execution_log_page("run", "completed", saved_cursor, usize::MAX).unwrap().content, expected[saved_cursor..]);
     assert_eq!(store.execution_log_page("run", "live", 0, usize::MAX).unwrap().content, "other\n".repeat(512));
-    let tail = store.execution_log_tail_page("run", "done", saved_cursor, 32 * 1024).unwrap();
+    let tail = store.execution_log_tail_page("run", "completed", saved_cursor, 32 * 1024).unwrap();
     assert_eq!(tail.content, expected[..saved_cursor]);
 }
 
@@ -362,10 +362,10 @@ fn delete_run_releases_incremental_pages_and_cascades_logs() {
     let mut store = Store::open(&path).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("done"), message_sequences: None }).unwrap();
+    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None }).unwrap();
     for batch in 0..8 {
         store.append_batch(&mut state, (0..32).map(|i| EventKind::Output {
-            execution_id: "done".into(), text: format!("{batch}-{i}-{}", "y".repeat(64 * 1024)),
+            execution_id: "completed".into(), text: format!("{batch}-{i}-{}", "y".repeat(64 * 1024)),
         }).collect()).unwrap();
     }
     let db = Connection::open(&path).unwrap();

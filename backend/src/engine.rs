@@ -2165,7 +2165,7 @@ sys.stdin.read()
             environment: None,
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
-            pi_args: vec!["-c".into(), "cat >/dev/null; sleep 1.2; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
+            pi_args: vec!["-c".into(), "cat >/dev/null; sleep 1.2; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"completed\"}],\"stopReason\":\"stop\"}}'".into()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
@@ -2194,7 +2194,7 @@ sys.stdin.read()
             Some(value) => std::env::set_var(&variable, value),
             None => std::env::remove_var(&variable),
         }
-        assert_eq!(result.unwrap(), "done");
+        assert_eq!(result.unwrap(), "completed");
     }
 
     #[cfg(feature = "fixture")]
@@ -2207,7 +2207,7 @@ sys.stdin.read()
             environment: None,
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
-            pi_args: vec!["-c".into(), "cat >/dev/null; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'".into()],
+            pi_args: vec!["-c".into(), "cat >/dev/null; echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"completed\"}],\"stopReason\":\"stop\"}}'".into()],
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
@@ -2241,7 +2241,7 @@ sys.stdin.read()
                 Some(value) => std::env::set_var(&variable, value),
                 None => std::env::remove_var(&variable),
             }
-            assert_eq!(result.unwrap(), "done", "{role:?}");
+            assert_eq!(result.unwrap(), "completed", "{role:?}");
         }
     }
 

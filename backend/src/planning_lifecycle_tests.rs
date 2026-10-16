@@ -233,7 +233,7 @@ fn run_started_is_published_after_persistence_and_commit_reuses_its_id() {
     let script = temp.path().join("planner.sh");
     fs::write(&script, concat!(
         "printf '%s' '{\"originalGoal\":\"Goal\",\"nodes\":[{\"name\":\"work\",\"task\":\"Do work\"}],\"edges\":[]}' > \"$GRAPHER_GRAPH_PATH\"\n",
-        "echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stopReason\":\"stop\"}}'\n",
+        "echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"completed\"}],\"stopReason\":\"stop\"}}'\n",
     )).unwrap();
     let mut cfg = config(&repository);
     cfg.pi_command = "/bin/sh".into();

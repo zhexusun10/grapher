@@ -56,7 +56,7 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
     runtime.approve().unwrap();
     for job in runtime.jobs().unwrap() {
         runtime
-            .finish(&job.execution, Ok((head.clone(), "done".into())))
+            .finish(&job.execution, Ok((head.clone(), "completed".into())))
             .unwrap();
     }
     assert!(runtime.jobs().unwrap().is_empty());
@@ -92,7 +92,7 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
         })
         .unwrap();
     assert_eq!(runtime.state.phase, "merging");
-    assert_eq!(runtime.state.nodes["merger"].status, "done");
+    assert_eq!(runtime.state.nodes["merger"].status, "completed");
     assert_eq!(runtime.state.executions.len(), 2);
     assert_eq!(runtime.state.mergers[0].output, "live output");
     drop(runtime);
@@ -154,7 +154,7 @@ fn load_run_recovers_publication_and_serial_has_no_publication_step() {
     let job = runtime.jobs().unwrap().remove(0);
     assert_eq!(job.execution.worktree, source.to_string_lossy());
     runtime
-        .finish(&job.execution, Ok((head.clone(), "done".into())))
+        .finish(&job.execution, Ok((head.clone(), "completed".into())))
         .unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.phase, "completed");

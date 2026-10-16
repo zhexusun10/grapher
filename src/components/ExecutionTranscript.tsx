@@ -63,6 +63,7 @@ type Props = {
   onLoadingChange?: (loading: boolean) => void;
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
   onInitialOutputReady?: (executionId: string) => void;
+  onCompactingChange?: (compacting: boolean) => void;
 };
 
 export function ExecutionTranscript(props: Props) {
@@ -78,7 +79,7 @@ export function ExecutionTranscriptPlaceholder() {
   </div>;
 }
 
-function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onInitialOutputReady }: Props) {
+function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onInitialOutputReady, onCompactingChange }: Props) {
   const cacheKey = `${runId}:${execution.id}`;
   const paged = execution.outputBytes !== undefined;
   const settled = execution.status !== "running";
@@ -192,6 +193,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
     </div> : <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}
       onReachTop={window?.start && !error ? () => { void loadOlder(); } : undefined}
       onUserResize={onUserResize}
+      onCompactingChange={onCompactingChange}
       emptyText={execution.status === "running" ? "" : t("该节点没有产生日志输出")} />}
   </div>;
 }

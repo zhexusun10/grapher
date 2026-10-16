@@ -14,7 +14,7 @@ import { chromium } from '@playwright/test';
 import { workerBody } from './fixtures/conversation-acceptance-worker.mjs';
 import { createTemporaryTarget } from './temporary-target.mjs';
 
-const sleep = ms => new Promise(done => setTimeout(done, ms));
+const sleep = ms => new Promise(completed => setTimeout(completed, ms));
 const md5 = text => createHash('md5').update(text, 'utf8').digest('hex');
 const root = resolve(process.env.GRAPHER_ACCEPTANCE_DIR || `.grapher/acceptance/${new Date().toISOString().replace(/[:.]/g, '-')}`);
 const source = resolve(process.env.GRAPHER_ACCEPTANCE_SOURCE || '.grapher/events.sqlite');
@@ -36,7 +36,7 @@ function record(id, data) {
 }
 async function port() {
   const server = net.createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const value = server.address().port; await new Promise(done => server.close(done));
+  const value = server.address().port; await new Promise(completed => server.close(completed));
   // Windows may allocate low dynamic ports. Fetch/Chromium reject SIP, X11,
   // IRC and Amanda ports even though a local HTTP server can bind them.
   const blocked = [2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080];
@@ -50,11 +50,11 @@ async function until(check, message, timeout = 120_000) {
 async function stop(child) {
   if (!child) return;
   if (child.exitCode !== null || child.signalCode !== null) { children.delete(child); return; }
-  const done = once(child, 'exit');
+  const completed = once(child, 'exit');
   if (process.platform === 'win32') {
     try { command('taskkill', ['/PID', String(child.pid), '/T', '/F']); } catch {}
   } else process.kill(-child.pid, 'SIGKILL');
-  await Promise.race([done, sleep(10_000)]);
+  await Promise.race([completed, sleep(10_000)]);
   assert.ok(child.exitCode !== null || child.signalCode !== null, 'backend failed to stop'); children.delete(child);
 }
 async function backend(data, origin) {
@@ -108,7 +108,7 @@ async function frontend(server, delay = {}) {
   });
   proxies.add(proxy);
   proxy.listen(frontPort, '127.0.0.1'); await once(proxy, 'listening');
-  return { url: `http://127.0.0.1:${frontPort}`, entries, delay, close: () => new Promise(done => { proxies.delete(proxy); proxy.closeAllConnections(); proxy.close(done); }) };
+  return { url: `http://127.0.0.1:${frontPort}`, entries, delay, close: () => new Promise(completed => { proxies.delete(proxy); proxy.closeAllConnections(); proxy.close(completed); }) };
 }
 async function pageFor(front, manifest, runs, label) {
   const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, locale: 'en-US' });
@@ -255,7 +255,7 @@ try {
   await view.page.locator('[data-execution-id="alpha-exec"] .transcript-loading').waitFor({ timeout: 30_000 });
   const clicked = await view.page.evaluate(async ids => {
     const times = [];
-    for (let i = 0; i < 30; i++) { document.querySelector(`button[data-run-id="${ids[i % 3]}"]`).click(); times.push(performance.now()); await new Promise(done => setTimeout(done, 50)); }
+    for (let i = 0; i < 30; i++) { document.querySelector(`button[data-run-id="${ids[i % 3]}"]`).click(); times.push(performance.now()); await new Promise(completed => setTimeout(completed, 50)); }
     return times;
   }, ids);
   const finalId = ids[29 % 3]; const finalRun = manifest.small.runs.find(run => run.id === finalId);
@@ -301,7 +301,7 @@ try {
   const failedFront = await frontend(server, { get_execution_output: 300 });
   const failedView = await pageFor(failedFront, manifest, ['acceptance-failed'], 'TC12-failed-after-restart');
   await failedView.page.locator('button[data-run-id="acceptance-failed"]').click();
-  await assertPageGraph(failedView.page, ['done', 'failed', 'merger · failed']); await chooseNode(failedView.page, 'failed');
+  await assertPageGraph(failedView.page, ['completed', 'failed', 'merger · failed']); await chooseNode(failedView.page, 'failed');
   const failedCard = failedView.page.locator('[data-execution-id="failed-exec"]');
   await until(async () => await failedCard.getAttribute('aria-busy') === 'false', 'Failed transcript did not settle');
   // The failed merger is the latest attempt, so initial auto-follow correctly
@@ -418,7 +418,7 @@ try {
     try { await context.tracing.stop({ path: join(root, `${label}-failure.trace.zip`) }); } catch {}
   }
   await browser?.close();
-  for (const proxy of proxies) { proxy.closeAllConnections(); await new Promise(done => proxy.close(done)); }
+  for (const proxy of proxies) { proxy.closeAllConnections(); await new Promise(completed => proxy.close(completed)); }
   for (const child of children) await stop(child);
   // Only reclaim this invocation's compiler target after its backends stop.
   // Reports, copied databases, sessions and failure traces remain untouched.

@@ -27,6 +27,35 @@ const boundedCommands = new Set([
 ]);
 const metadataTimeoutMs = 15_000;
 
+// A hot-reloaded UI can still be talking to an older backend. Translate only
+// its legacy node-completion spelling; never infer completion from Run phase,
+// execution output, or publication state.
+function normalizeSnapshot(snapshot: Snapshot): Snapshot {
+  if (!snapshot.nodes) return snapshot;
+  let nodes = snapshot.nodes;
+  for (const [name, node] of Object.entries(snapshot.nodes)) {
+    const status: string = node.status;
+    if (status !== "done") continue;
+    if (nodes === snapshot.nodes) nodes = { ...nodes };
+    nodes[name] = { ...node, status: "completed" };
+  }
+  return nodes === snapshot.nodes ? snapshot : { ...snapshot, nodes };
+}
+
+function normalizeSnapshotResult<T>(result: T): T {
+  if (!result || typeof result !== "object") return result;
+  if ("snapshot" in result) {
+    const envelope = result as T & { snapshot: Snapshot | null };
+    if (!envelope.snapshot) return result;
+    const snapshot = normalizeSnapshot(envelope.snapshot);
+    return snapshot === envelope.snapshot ? result : { ...result, snapshot };
+  }
+  if ("runId" in result && "graph" in result && "nodes" in result) {
+    return normalizeSnapshot(result as T & Snapshot) as T;
+  }
+  return result;
+}
+
 function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   if (!boundedCommands.has(command)) return requestBody<T>(command, body, signal);
   const message = command === "save_config"
@@ -60,7 +89,7 @@ async function requestBody<T>(command: string, body: Record<string, unknown>, si
   });
   if (snapshotMutations.has(command)) historyRequests.clear();
   if (!response.ok || data.error) throw new Error(data.error || t("后端请求失败 ({0})", response.status));
-  return data.result as T;
+  return normalizeSnapshotResult(data.result as T);
 }
 
 export const runtimeService = {
@@ -152,8 +181,8 @@ export const runtimeService = {
     let buffer = "";
     try {
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        const { done: completed, value } = await reader.read();
+        if (completed) break;
         buffer += decoder.decode(value, { stream: true });
 
         const parts = buffer.split("\n\n");
@@ -181,7 +210,7 @@ export const runtimeService = {
           }
           if (eventType === "complete") {
             historyRequests.clear();
-            const snapshot: Snapshot = dataObj.snapshot || dataObj;
+            const snapshot = normalizeSnapshot(dataObj.snapshot || dataObj);
             onEvent({ type: "complete", snapshot });
             // `complete` is the business boundary. A proxy/keep-alive stream
             // may remain open indefinitely after this terminal event.

@@ -87,7 +87,7 @@ export async function runDev({
   let stopping = false;
   let stopPromise;
   let finish;
-  const done = new Promise(resolve => { finish = resolve; });
+  const completed = new Promise(resolve => { finish = resolve; });
   const onInterrupt = () => { void stop(130); };
   const onTerminate = () => { void stop(143); };
   async function stop(code = 0) {
@@ -106,7 +106,7 @@ export async function runDev({
   }
   signals.on('SIGINT', onInterrupt);
   signals.on('SIGTERM', onTerminate);
-  const handle = { stop, done };
+  const handle = { stop, completed };
   try {
     const env = loadDevEnvironment(installationRoot, baseEnv);
     const frontendPort = devPort(env.GRAPHER_FRONTEND_PORT, 1420, 'GRAPHER_FRONTEND_PORT');
@@ -167,5 +167,5 @@ export async function runDev({
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const dev = await runDev();
-  process.exitCode = await dev.done;
+  process.exitCode = await dev.completed;
 }

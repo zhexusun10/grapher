@@ -94,9 +94,9 @@ export async function runWithTemporaryTarget(args, options = {}) {
     }]));
     for (const [signal, handler] of handlers) process.on(signal, handler);
     try {
-      const result = await new Promise((done, reject) => {
+      const result = await new Promise((completed, reject) => {
         child.once('error', reject);
-        child.once('close', (code, signal) => done({ code, signal }));
+        child.once('close', (code, signal) => completed({ code, signal }));
       });
       const signal = interrupted ?? result.signal;
       return { code: signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : result.code ?? 1, signal };

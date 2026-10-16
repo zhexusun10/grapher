@@ -441,6 +441,7 @@ export const en: Record<string, string> = {
   "图片 {0}": "Image {0}",
   "修改消息内容": "Edit message content",
   "工作区与会话信息": "Workspace and session details",
+  "规划会话信息": "Planning session details",
   "修改未执行的 Task？": "Edit an unexecuted Task?",
   "此节点尚无 Pi 对话可分支，将创建新的待审批运行。": "This node has no Pi conversation to branch. A new run awaiting approval will be created.",
   "确认修改": "Confirm edit",

@@ -12,7 +12,8 @@ interface PlanningSummaryCardProps {
   defaultExpanded?: boolean;
 }
 
-function formatSeconds(seconds: number): string {
+/** Exported for the Planner conversation details panel. */
+export function formatSeconds(seconds: number): string {
   if (seconds == null || isNaN(seconds) || seconds < 0) return "0s";
   if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
   const totalSecs = Math.floor(seconds);

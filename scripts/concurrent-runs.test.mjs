@@ -46,7 +46,7 @@ try {
     for (let i = 0; i < 200; i++) {
       if (backend.exitCode !== null) throw new Error(diagnostics);
       if (await condition()) return;
-      await new Promise(done => setTimeout(done, 25));
+      await new Promise(completed => setTimeout(completed, 25));
     }
     throw new Error(`${message}\n${diagnostics}`);
   };
@@ -75,15 +75,15 @@ try {
   assert.equal((await api('snapshot', { runId: first.id })).nodes.worker.status, 'running');
   await writeFile(first.release, 'go');
   await until(async () => (await api('snapshot', { runId: first.id })).phase === 'completed', 'First Run did not finish');
-  assert.equal((await api('history', { runId: second.id })).nodes.worker.status, 'done');
+  assert.equal((await api('history', { runId: second.id })).nodes.worker.status, 'completed');
   console.log('Concurrent HTTP Runs completed independently without replacing the old session.');
 } finally {
   if (backend && backend.exitCode === null) {
-    const done = once(backend, 'exit');
+    const completed = once(backend, 'exit');
     backend.kill('SIGTERM');
     let timer;
     try {
-      await Promise.race([done, new Promise(resolve => { timer = setTimeout(() => { backend.kill('SIGKILL'); resolve(); }, 5000); })]);
+      await Promise.race([completed, new Promise(resolve => { timer = setTimeout(() => { backend.kill('SIGKILL'); resolve(); }, 5000); })]);
     } finally { clearTimeout(timer); }
   }
   await rm(root, { recursive: true, force: true });

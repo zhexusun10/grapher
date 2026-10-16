@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { root } from './pi-baseline.mjs';
 
-const delay = ms => new Promise(done => setTimeout(done, ms));
+const delay = ms => new Promise(completed => setTimeout(completed, ms));
 function host(role, cwd, env) {
   const child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--grapher-prewarm', role], {
     cwd, env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -85,7 +85,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const marker = join(directory, 'loaded.jsonl');
     for (const path of [source, other, agent, join(global, 'extensions')]) await mkdir(path, { recursive: true });
     await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED, unremovableNodes: process.env.GRAPHER_UNREMOVABLE_NODES }) + '\\n'); }`);
-    await new Promise(done => server.listen(0, '127.0.0.1', done));
+    await new Promise(completed => server.listen(0, '127.0.0.1', completed));
     const model = id => ({ id, reasoning: false, input: ['text', 'image'], contextWindow: 128000, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
     await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: { 'prepared-test': {
@@ -209,7 +209,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
   } finally {
     await Promise.all(children.map(value => value.stop()));
     server.closeAllConnections();
-    await new Promise(done => server.close(done));
+    await new Promise(completed => server.close(completed));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
 });

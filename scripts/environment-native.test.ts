@@ -15,7 +15,7 @@ import { venvCreationCommand } from './fixtures/environment-native.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-const delay = (ms: number) => new Promise(done => setTimeout(done, ms));
+const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms));
 const code = (value: string) => `import json,sys,os\nVALUE=${JSON.stringify(value)}\ndef main():\n print(json.dumps({'value':VALUE,'cwd':os.getcwd(),'prefix':sys.prefix,'python':sys.executable}))\n`;
 async function fileHash(path: string): Promise<string> {
   const digest = createHash('sha256'); for await (const chunk of createReadStream(path)) digest.update(chunk); return digest.digest('hex');
@@ -191,13 +191,13 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     await writeFile(join(source, '.pi/extensions/launch-probe.ts'), `import {execFileSync} from 'node:child_process'; import {writeFileSync} from 'node:fs'; export default function(){ const proof=execFileSync('python',['-c','import sys,json,os; print(json.dumps({"prefix":sys.prefix,"cwd":os.getcwd()}))'],{encoding:'utf8'}); writeFileSync('.runtime-cache/extension.json',proof); }`);
     const git = (...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: source, encoding: 'utf8' }).trim();
     git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'baseline');
-    await new Promise<void>(done => modelServer.listen(0, '127.0.0.1', done));
+    await new Promise<void>(completed => modelServer.listen(0, '127.0.0.1', completed));
     await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: { 'environment-test': {
       baseUrl: `http://127.0.0.1:${(modelServer.address() as AddressInfo).port}/v1`, api: 'openai-completions', apiKey: 'local-only',
       models: [{ id: 'native', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
     } } }));
-    const listener = createServer(); await new Promise<void>(done => listener.listen(0, '127.0.0.1', done));
-    const port = (listener.address() as AddressInfo).port; await new Promise<void>(done => listener.close(() => done()));
+    const listener = createServer(); await new Promise<void>(completed => listener.listen(0, '127.0.0.1', completed));
+    const port = (listener.address() as AddressInfo).port; await new Promise<void>(completed => listener.close(() => completed()));
     const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
     const env = { ...process.env, GRAPHER_DATA_DIR: data, GRAPHER_PORT: String(port), PI_CODING_AGENT_DIR: agent,
       GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'engine-cache'), GRAPHER_WORKSPACE_PARENT: workspaceParent,
@@ -315,13 +315,13 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     assert.equal(last.worktree, workspace); assert.equal(last.sessionId, initial.executions[0].sessionId);
     assert.equal(last.input.environmentRef, old[2].environmentRef);
     assert.equal(last.before, last.after, 'environment-only follow-up leaves Git head unchanged');
-    for (const name of ['A', 'B', 'C']) { assert.equal(followup.nodes[name].status, 'done'); assert.deepEqual(followup.nodes[name].result, last.result); }
+    for (const name of ['A', 'B', 'C']) { assert.equal(followup.nodes[name].status, 'completed'); assert.deepEqual(followup.nodes[name].result, last.result); }
     for (let i = 0; i < 3; i++) assert.deepEqual(followup.executions[i].result, old[i]);
     const callsBeforeResult = modelCalls;
     const resultArgs = ml ? ['-c', "import json,torch; assert torch.cuda.is_available() and torch.version.cuda and torch.version.hip is None; x=torch.arange(4096,device='cuda',dtype=torch.float32); w=torch.tensor(0.25,device='cuda',requires_grad=True); loss=(x*w).sin().mean(); loss.backward(); torch.cuda.synchronize(); assert w.grad is not None; print(json.dumps({'device':torch.cuda.get_device_name(0),'cuda':torch.version.cuda,'loss':loss.item(),'gradient':w.grad.item()}))"]
       : ['-c', "import native_dependency,ml_probe; assert native_dependency.VERSION==3; ml_probe.main()"];
     stage('result-launch-start');
-    const launched = await api('launch_result', { runId, args: resultArgs }, ml ? 1_200_000 : 120_000); stage('result-launch-done');
+    const launched = await api('launch_result', { runId, args: resultArgs }, ml ? 1_200_000 : 120_000); stage('result-launch-completed');
     if (ml) assert.match(launched.output, new RegExp(`\\\"device\\\": \\\"${cudaDeviceName}\\\"`));
     else assert.match(launched.output, /\"value\": \"C\"/);
     assert.equal(modelCalls, callsBeforeResult); await settled();
@@ -439,16 +439,16 @@ test('native managed environment: install once, real Pi tools, editable/launcher
       execFileSync('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-qm', 'plain baseline'], { cwd: plain });
       const empty = await api('save_graph', { graph: { originalGoal: 'No environment needed', nodes: [{ name: 'plain', task: 'NO_ENVIRONMENT' }], edges: [] }, config: { ...config, repository: plain } });
       await api('control', { runId: empty.runId, action: 'approve' });
-      const done = await until(async () => {
+      const completed = await until(async () => {
         const state = await api('snapshot', { runId: empty.runId });
         if (['needs_attention', 'publication_failed'].includes(state.phase)) throw new Error(JSON.stringify(state.nodes));
         return state.phase === 'completed' && state;
       }, 'plain project without an environment');
-      const input = done.executions[0].input; const result = done.executions[0].result;
+      const input = completed.executions[0].input; const result = completed.executions[0].result;
       assert.equal(result.launchRef, input.launchRef, 'Declarations and .env do not change L');
       const launch = JSON.parse(await readFile(join(data, 'environments', empty.runId, 'launches', `${result.launchRef}.json`), 'utf8'));
       assert.equal(launch.environment, undefined);
-      await assert.rejects(stat(join(done.executions[0].worktree, '.venv')), /ENOENT/);
+      await assert.rejects(stat(join(completed.executions[0].worktree, '.venv')), /ENOENT/);
       const calls = modelCalls;
       const executed = await api('launch_result', { runId: empty.runId, args: ['-c', 'node -p ' + quote('"EMPTY_NATIVE_RESULT"')] });
       assert.match(executed.output, /EMPTY_NATIVE_RESULT/); assert.equal(modelCalls, calls);
@@ -459,7 +459,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
   } catch (error) { throw new Error(`${error}\nNative acceptance elapsed=${Date.now() - started}ms; modelCalls=${modelCalls}; completed tool requests=${commands.length}\n${diagnostics}`); }
   finally {
     heldBackground?.destroy();
-    await stop(); await new Promise<void>(done => modelServer.close(() => done()));
+    await stop(); await new Promise<void>(completed => modelServer.close(() => completed()));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     if (ml) await rm(workspaceParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

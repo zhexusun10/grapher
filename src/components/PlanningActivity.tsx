@@ -28,6 +28,7 @@ type Props = {
   onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
   edits?: Array<{ old_instruction?: string; nextPlanningId?: string }>;
   running?: boolean;
+  onCompactingChange?: (compacting: boolean) => void;
 };
 
 /** Read backward through the contiguous loaded suffix, one revision/page at a time. */
@@ -44,7 +45,7 @@ export const PlanningActivity = memo(function PlanningActivity(props: Props) {
 });
 
 function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onLoadingChange, showUserTurns = false,
-  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false }: Props) {
+  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false, onCompactingChange }: Props) {
   const key = planningIds.join(":");
   const [initialSegments] = useState(() => {
     const loaded = new Map<string, TranscriptWindow>();
@@ -168,6 +169,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         onReachTop={hasOlder && !error ? () => { void loadOlder(); } : undefined}
         showUserTurns={showUserTurns} skipFirstUser={skipInitialUser} onUserResize={onUserResize}
         settled={!running}
+        onCompactingChange={onCompactingChange}
         onEditUser={onEditUser ? editUser : undefined} />
     </div>}
   </section>;

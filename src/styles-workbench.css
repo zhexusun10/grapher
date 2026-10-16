@@ -1100,7 +1100,7 @@ button.session-label-toggle:focus-visible {
   background: var(--brand-default);
 }
 
-.chip-dot.done {
+.chip-dot.completed {
   background: var(--status-success);
 }
 
@@ -1581,7 +1581,7 @@ button.session-label-toggle:focus-visible {
   color: var(--brand-default);
 }
 
-.status.done {
+.status.completed {
   color: var(--status-success);
 }
 

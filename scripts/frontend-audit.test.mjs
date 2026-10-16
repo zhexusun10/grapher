@@ -6,7 +6,7 @@ import { createServer } from "vite";
 let server, browser, origin;
 const deferred = () => {
   let resolve;
-  const promise = new Promise(done => { resolve = done; });
+  const promise = new Promise(completed => { resolve = completed; });
   return { promise, resolve };
 };
 async function waitFor(check) {
@@ -350,7 +350,7 @@ for (const view of ["serial", "node"]) {
                 if (settledAt === null && shouldSettle) {
                   settledAt = performance.now();
                   window.audit.appendToolEvents([{ type: "tool_execution_end", toolCallId: id, toolName: "bash",
-                    result: { content: "done", details: { exitCode: 0, truncated: true } } }]);
+                    result: { content: "completed", details: { exitCode: 0, truncated: true } } }]);
                 }
               }
               if ((settledAt !== null && performance.now() - settledAt > 350) || performance.now() - start > 3000) resolve();
@@ -971,6 +971,58 @@ for (const approved of [false, true]) {
   });
 }
 
+for (const wireStatus of ["completed", "done"]) {
+  test(`topology cards display COMPLETED for ${wireStatus} backend status`, { timeout: 30_000 }, async () => {
+    const config = { repository: "/mock/status-label", model: "test/old", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+    const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+      plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+    const snapshot = { ...empty, runId: `status-${wireStatus}`, config, planType: "graph", approved: true, phase: "needs_attention",
+      graph: { originalGoal: "Show authoritative node statuses", nodes: ["task", "waiting", "failed"].map(name => ({ name, task: `Task ${name}` })), edges: [] },
+      nodes: Object.fromEntries(["task", "waiting", "failed"].map(name => [name, {
+        status: name === "task" ? wireStatus : name, revision: 1, head: null, instruction: "", error: name === "failed" ? "Mock failure" : null,
+      }])) };
+    const info = { path: config.repository, name: "Status labels", branch: "main", head: "", clean: true };
+    const errors = [];
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      const body = route.request().postDataJSON();
+      let result;
+      switch (command) {
+        case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], repositoryInfo: info, dataPath: "/mock" }; break;
+        case "history": case "snapshot": result = snapshot; break;
+        case "snapshot_if_changed": result = { version: "1", snapshot }; break;
+        case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+        case "list_plannings": result = []; break;
+        case "list_files": result = { files: [] }; break;
+        case "list_skills": result = { skills: [] }; break;
+        case "provider_auth": result = catalog; break;
+        default: errors.push(`Unexpected API: ${command}`); result = null;
+      }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage();
+    page.setDefaultTimeout(10_000);
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      await page.goto(origin, { waitUntil: "networkidle" });
+      await page.locator(`[data-run-id="${snapshot.runId}"]`).click();
+      const card = page.locator('.graph-canvas .task-node[data-node-name="task"]');
+      await card.waitFor();
+      const label = card.locator(".node-footer .status");
+      assert.equal(await label.innerText(), "COMPLETED", "backend completion must never leave the card label empty");
+      assert.equal(await label.evaluate(element => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })), true);
+      const bounds = await label.boundingBox(), cardBounds = await card.boundingBox();
+      assert.ok(bounds && cardBounds && bounds.width > 0 && bounds.height > 0 && bounds.x >= cardBounds.x &&
+        bounds.x + bounds.width <= cardBounds.x + cardBounds.width, "the full status label fits inside the visible card");
+      assert.equal(await page.locator('.task-node[data-node-name="waiting"] .status').innerText(), "WAITING");
+      assert.equal(await page.locator('.task-node[data-node-name="failed"] .status').innerText(), "FAILED");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 test("topology Pause/Continue controls running nodes and distinguishes paused attempts from failures", { timeout: 30_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const execution = (id, node, status) => ({ id, node, status, revision: 1, attempt: 1, sessionId: id,
@@ -1181,7 +1233,7 @@ test("node follow-ups keep records expanded and completed nodes continue instead
     output: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `Agent response ${attempt}` }] } }) + "\n" });
   let current = { runId: "record-run", config, planType: "graph", approved: true, paused: false, phase: "completed",
     graph: { originalGoal: "Continue the node", nodes: [{ name: "task", task: "Original task" }], edges: [] },
-    nodes: { task: { status: "done", revision: 1, instruction: "", error: null } },
+    nodes: { task: { status: "completed", revision: 1, instruction: "", error: null } },
     executions: [execution(1)], plan: null, events: [], base: "", feedbackCounts: {} };
   const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
   const gates = [deferred(), deferred()], controls = [], errors = [];
@@ -1281,7 +1333,7 @@ for (const planType of ["graph", "serial"]) {
     const first = { id: "queue-first", node: "task", status: "completed", revision: 1, attempt: 1, sessionId: "same-session", worktree: "/a", before: "", after: "", startedAt: 1, completedAt: 2, output: output("Initial queue result") };
     let current = { runId: "queue-run", config, planType, approved: true, paused: false, phase: "completed",
       graph: { originalGoal: "Queue goal", nodes: [{ name: "task", task: "Queue task" }], edges: [] },
-      nodes: { task: { status: "done", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
+      nodes: { task: { status: "completed", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
       executions: [first], plan: null, events: [], base: "", feedbackCounts: {} };
     const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
     const actions = [], errors = [];
@@ -1373,7 +1425,7 @@ test("late node sends and edits cannot overwrite another workspace or its compos
   const base = { plan: null, events: [], approved: true, paused: false, phase: "completed", base: "", feedbackCounts: {} };
   const snapshots = {
     a: { ...base, runId: "a", config, planType: "serial", graph: { originalGoal: "Alpha original", nodes: [{ name: "task", task: "Alpha original" }], edges: [] },
-      nodes: { task: { status: "done", revision: 0, head: null, instruction: "", error: null } },
+      nodes: { task: { status: "completed", revision: 0, head: null, instruction: "", error: null } },
       executions: [{ id: "exec-a", node: "task", status: "completed", revision: 0, attempt: 1, sessionId: "s", worktree: "/a", before: "", after: "", output: "", startedAt: 1, completedAt: 2 }] },
     b: { ...base, runId: "b", config: { ...config, repository: "/b" }, planType: "graph", graph: { originalGoal: "Beta original", nodes: [], edges: [] }, nodes: {}, executions: [] },
   };

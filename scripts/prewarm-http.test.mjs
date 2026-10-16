@@ -9,16 +9,16 @@ import { join, resolve } from 'node:path';
 import { createServer } from 'node:http';
 import { root } from './pi-baseline.mjs';
 
-const delay = ms => new Promise(done => setTimeout(done, ms));
+const delay = ms => new Promise(completed => setTimeout(completed, ms));
 
 test('Auto refills during routing and older completions cannot revert a newly configured ready worker', { timeout: 180000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-prewarm-http-'));
   let backend;
   let diagnostics = '';
   let releaseRoute;
-  const routeRelease = new Promise(done => { releaseRoute = done; });
+  const routeRelease = new Promise(completed => { releaseRoute = completed; });
   let enteredRoute;
-  const routeEntered = new Promise(done => { enteredRoute = done; });
+  const routeEntered = new Promise(completed => { enteredRoute = completed; });
   const errors = [];
   const requests = [];
   const modelServer = createServer(async (request, response) => {
@@ -52,7 +52,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
     await mkdir(source);
     await mkdir(agent);
     await writeFile(join(source, 'base.txt'), 'keep');
-    await new Promise(done => modelServer.listen(0, '127.0.0.1', done));
+    await new Promise(completed => modelServer.listen(0, '127.0.0.1', completed));
     const modelPort = modelServer.address().port;
     const model = id => ({ id, reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
@@ -61,9 +61,9 @@ test('Auto refills during routing and older completions cannot revert a newly co
       models: [model('router'), model('router-next'), model('node'), model('planner')],
     } } }));
     const listener = createServer();
-    await new Promise(done => listener.listen(0, '127.0.0.1', done));
+    await new Promise(completed => listener.listen(0, '127.0.0.1', completed));
     const port = listener.address().port;
-    await new Promise(done => listener.close(done));
+    await new Promise(completed => listener.close(completed));
     const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
     const env = { ...process.env, GRAPHER_DATA_DIR: data, GRAPHER_PORT: String(port), PI_CODING_AGENT_DIR: agent,
       GRAPHER_GLOBAL_PI_AGENT_DIR: join(directory, 'global-agent'), GRAPHER_ISOLATED_PI_MODELS: '1',
@@ -171,7 +171,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
       await exited;
     }
     modelServer.closeAllConnections();
-    await new Promise(done => modelServer.close(done));
+    await new Promise(completed => modelServer.close(completed));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
 });

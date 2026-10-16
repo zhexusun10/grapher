@@ -480,7 +480,7 @@ export default function App() {
   const initialPlannerStream = {
     runId: "",
     initialPlanMode: undefined as PlanMode | undefined,
-    stage: "idle" as "idle" | "partitioning" | "planning" | "done" | "error",
+    stage: "idle" as "idle" | "partitioning" | "planning" | "completed" | "error",
     items: [] as TranscriptItem[],
     plannerMessageStart: 0,
     representedPlanningIds: [] as string[],
@@ -492,6 +492,8 @@ export default function App() {
     plannerThinkingActive: false,
     plannerText: "",
     tools: [] as TranscriptItem[],
+    // Live Planner auto-compaction: no transcript rows, only the working label.
+    compacting: false,
   };
 
   const [plannerStream, setPlannerStream, queuePlannerStream] = useFrameBatchedState(initialPlannerStream);
@@ -648,7 +650,7 @@ export default function App() {
           if (next && next.id !== selectedMerger.id) setSelectedMergerId(next.id);
         });
     }
-    if (targetNodeName && state.nodes[targetNodeName]?.status === "done") {
+    if (targetNodeName && state.nodes[targetNodeName]?.status === "completed") {
       return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${text}` : text));
     }
     const execution = targetNodeName && [...state.executions].reverse()
@@ -1435,6 +1437,7 @@ export default function App() {
         plannerThinkingActive: false,
         plannerText: "",
         tools: [],
+        compacting: false,
       });
       setState((prev) => ({
         ...prev,
@@ -2043,6 +2046,9 @@ export default function App() {
                   ),
                 };
               });
+            } else if (pEvent?.type === "compaction_start" || pEvent?.type === "compaction_end") {
+              const compacting = pEvent.type === "compaction_start";
+              queuePlannerStream((prev) => (!!prev.compacting === compacting ? prev : { ...prev, compacting }));
             }
           } else if (event.type === "error") {
             const errorMsg = event.error;
@@ -2112,7 +2118,7 @@ export default function App() {
         items: closeRunningThinkingItem(prev.items),
         representedPlanningIds: snapshot.planningId && !prev.representedPlanningIds.includes(snapshot.planningId)
           ? [...prev.representedPlanningIds, snapshot.planningId] : prev.representedPlanningIds,
-        stage: "done",
+        stage: "completed",
       }));
     } catch (err: any) {
       if (!planningRecovery.current(scope)) return;
@@ -2660,7 +2666,7 @@ export default function App() {
 
       updatedMsg = {
         ...current,
-        delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? undefined : current.delivery,
+        delivery: state.nodes[targetMsg.node || selected]?.status === "completed" ? undefined : current.delivery,
         text: cleanText,
         files: parsedExisting.attachments,
         timestamp: Date.now(),
@@ -2676,7 +2682,7 @@ export default function App() {
       ];
       updatedMsg = {
         ...targetMsg,
-        delivery: state.nodes[targetMsg.node || selected]?.status === "done" ? undefined : targetMsg.delivery,
+        delivery: state.nodes[targetMsg.node || selected]?.status === "completed" ? undefined : targetMsg.delivery,
         text: cleanText,
         files: parsedExisting.attachments,
         timestamp: Date.now(),

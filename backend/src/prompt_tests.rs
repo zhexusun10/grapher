@@ -89,7 +89,7 @@ fn reopening_a_paused_run_does_not_append_pause_events() {
 }
 
 #[test]
-fn done_node_message_control_does_not_wait_for_planner_or_start_driver() {
+fn completed_node_message_control_does_not_wait_for_planner_or_start_driver() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     runtime.state.run_id = Uuid::new_v4().to_string();
@@ -103,7 +103,7 @@ fn done_node_message_control_does_not_wait_for_planner_or_start_driver() {
         planning_id: None, planning: None,
     }).unwrap();
     runtime.emit(EventKind::Approved { base: String::new() }).unwrap();
-    runtime.state.nodes.get_mut("task").unwrap().status = "done".into();
+    runtime.state.nodes.get_mut("task").unwrap().status = "completed".into();
     let run_id = runtime.state.run_id.clone();
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
@@ -114,7 +114,7 @@ fn done_node_message_control_does_not_wait_for_planner_or_start_driver() {
     });
     let snap = control("message_node".into(), Some("task".into()), Some("hi".into()),
         Some(run_id.clone()), None, None, &service).unwrap();
-    assert_eq!(snap.nodes["task"].status, "done");
+    assert_eq!(snap.nodes["task"].status, "completed");
     assert!(snap.executions.is_empty());
     assert!(matches!(snap.events.last().unwrap().kind, EventKind::NodeMessaged { .. }));
     assert!(control("message_node".into(), Some("task".into()), Some("wrong run".into()),
@@ -309,12 +309,12 @@ fn topology_pause_and_node_stop_recover_unlaunched_workers_without_a_phantom_ses
                     runtime.finish(&job.execution, Err("Pi exited with exit code: 1".into())).unwrap();
                 } else {
                     let head = runtime.state.base.clone();
-                    runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
+                    runtime.finish(&job.execution, Ok((head, "completed".into()))).unwrap();
                 }
             }
             let view = snapshot_metadata(&runtime.state).unwrap();
             assert_eq!(view["nodes"]["left"]["status"], "paused");
-            assert_eq!(view["nodes"]["right"]["status"], if global { "paused" } else { "done" });
+            assert_eq!(view["nodes"]["right"]["status"], if global { "paused" } else { "completed" });
         }
         let resumed = control("resume".into(), None, None, Some(run_id), None, None, &service).unwrap();
         assert!(!resumed.paused);
@@ -388,7 +388,7 @@ fn failed_node_instruction_control_starts_a_new_running_execution() {
         }
         let runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.state.phase, "completed");
-        assert_eq!(runtime.state.nodes["task"].status, "done");
+        assert_eq!(runtime.state.nodes["task"].status, "completed");
     }
 }
 
@@ -459,7 +459,7 @@ fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     runtime.emit(EventKind::Finished {
-        execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "done".into(), output_bytes: 0, metrics: None,
+        execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
     }).unwrap();
     runtime.jobs().unwrap();
     let run_id = runtime.state.run_id.clone();
@@ -634,7 +634,7 @@ fn buffered_output_flushes_before_finish_and_replays() {
         .runtime
         .lock()
         .unwrap()
-        .finish(&execution, Ok(("done".into(), "result".into())))
+        .finish(&execution, Ok(("completed".into(), "result".into())))
         .unwrap();
     drop(tx);
     writer.join().unwrap();
@@ -911,7 +911,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let final_snapshot = service.runtime.lock().unwrap().state.clone();
     assert_eq!(final_snapshot.phase, "completed");
     for node in ["first", "after", "extra"] {
-        assert_eq!(final_snapshot.nodes[node].status, "done");
+        assert_eq!(final_snapshot.nodes[node].status, "completed");
     }
     assert_eq!(
         final_snapshot
@@ -937,6 +937,99 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert_eq!(lines.len(), 2, "{trace}");
     assert_eq!(lines[0], lines[1]);
     assert!(lines[0].ends_with(&format!("|{first_planning_id}")));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn planner_revision_uses_the_planner_model_saved_for_its_own_turn() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = crate::fixture::repository(temp.path()).unwrap();
+    let script = temp.path().join("model-trace.sh");
+    fs::write(
+        &script,
+        r#"cat >/dev/null
+session=''
+identity=''
+model=''
+prev=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-dir) session="$2"; shift 2 ;;
+    --session-id) identity="$2"; shift 2 ;;
+    --model) model="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "$model" >> "$(dirname "$0")/model-trace.txt"
+case "$GRAPHER_MODE" in
+  planner)
+    if [ -f "$session/turns.jsonl" ]; then
+      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first v2"},{"name":"extra","task":"extra"}],"edges":[{"from":"first","to":"extra","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
+    else
+      printf '%s' '{"originalGoal":"test","nodes":[{"name":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
+      mkdir -p "$session"
+      cwd="$PWD"
+      if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
+      printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$cwd" > "$session/turns.jsonl"
+    fi
+    ;;
+esac
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}],"stopReason":"stop"}}'
+"#,
+    )
+    .unwrap();
+    let config = |model: &str| -> Config {
+        serde_json::from_value(serde_json::json!({
+            "repository": repo, "engine": "pi", "piCommand": "/bin/sh",
+            "piArgs": [script], "model": "mock/model", "thinkingLevel": "medium",
+            "maxParallel": 1, "maxFeedback": 0, "autoApprove": false,
+            "postTaskReview": false,
+            "roleModels": { "planner": { "model": model, "thinkingLevel": "low" } }
+        }))
+        .unwrap()
+    };
+    let root = temp.path().join("runtime");
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&root).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let first = plan_goal_internal(
+        "test".into(),
+        config("prov/first"),
+        Some("graph"),
+        None,
+        None,
+        &service,
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
+    // The user saved a different Planner model in settings after the first
+    // plan; the follow-up revision turn must honor the newly saved model.
+    let revised = plan_goal_internal(
+        "add another workstream".into(),
+        config("prov/second"),
+        Some("graph"),
+        None,
+        Some(first.run_id.clone()),
+        &service,
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(revised.run_id, first.run_id);
+    assert_eq!(
+        revised.planning.as_ref().unwrap().roles["planner"].model,
+        "prov/second"
+    );
+    let trace = fs::read_to_string(temp.path().join("model-trace.txt")).unwrap();
+    let models: Vec<_> = trace.lines().collect();
+    assert_eq!(models, vec!["prov/first", "prov/second"], "{trace}");
 }
 
 #[cfg(feature = "fixture")]
@@ -1006,7 +1099,7 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
     snapshot.graph = Graph {
         original_goal: "test goal".into(),
         nodes: vec![
-            Node { name: "done_task".into(), task: "finished task".into() },
+            Node { name: "completed_task".into(), task: "finished task".into() },
             Node { name: "paused_task".into(), task: "manually stopped task".into() },
             Node { name: "app_interrupted_task".into(), task: "interrupted task".into() },
             Node { name: "failed_task".into(), task: "broken task".into() },
@@ -1015,8 +1108,8 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
         edges: vec![],
     };
 
-    let mut done_node = NodeState::default();
-    done_node.status = "done".into();
+    let mut completed_node = NodeState::default();
+    completed_node.status = "completed".into();
 
     let mut paused_node = NodeState::default();
     paused_node.status = "failed".into();
@@ -1033,7 +1126,7 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
     let mut waiting_node = NodeState::default();
     waiting_node.status = "waiting".into();
 
-    snapshot.nodes.insert("done_task".into(), done_node);
+    snapshot.nodes.insert("completed_task".into(), completed_node);
     snapshot.nodes.insert("paused_task".into(), paused_node);
     snapshot.nodes.insert("app_interrupted_task".into(), interrupted_node);
     snapshot.nodes.insert("failed_task".into(), failed_node);
@@ -1049,8 +1142,8 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
     assert!(!snapshot.is_node_user_paused("failed_task"));
     assert!(snapshot.is_node_failed("failed_task"));
 
-    assert!(!snapshot.is_node_user_paused("done_task"));
-    assert!(!snapshot.is_node_failed("done_task"));
+    assert!(!snapshot.is_node_user_paused("completed_task"));
+    assert!(!snapshot.is_node_failed("completed_task"));
 
     let user_paused = snapshot.user_paused_nodes();
     assert!(user_paused.contains(&"paused_task".to_string()));
@@ -1063,7 +1156,7 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
 
     // Verify planner_node_status prompt content
     let status_text = planner_node_status(&snapshot);
-    assert!(status_text.contains("- done_task: done\n"));
+    assert!(status_text.contains("- completed_task: completed\n"));
     assert!(status_text.contains("- paused_task: paused (manually paused by user)\n"));
     assert!(status_text.contains("- app_interrupted_task: paused (manually paused by user)\n"));
     assert!(status_text.contains("- failed_task: failed (error: TypeError: unsupported operand type(s))\n"));
@@ -1072,8 +1165,26 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
     // Verify planner_followup_prompt carries the distinguished status
     let followup = planner_followup_prompt("Please replan", Some("test-run"), &snapshot);
     assert!(followup.starts_with("Current graph node status:\n"));
+    assert!(followup.contains("- completed_task: completed\n"));
     assert!(followup.contains("- paused_task: paused (manually paused by user)\n"));
     assert!(followup.contains("- failed_task: failed (error: TypeError: unsupported operand type(s))\n"));
+    assert!(followup.ends_with("\nPlease replan"));
+}
+
+#[test]
+fn planner_node_status_uses_completed_after_loading_a_legacy_snapshot() {
+    let mut snapshot = Snapshot::default();
+    snapshot.run_id = "legacy-planner-status".into();
+    snapshot.approved = true;
+    snapshot.plan_type = Some("graph".into());
+    snapshot.graph.nodes.push(Node { name: "task".into(), task: "Retain the result".into() });
+    snapshot.nodes.insert("task".into(), NodeState::default());
+    let mut saved = serde_json::to_value(snapshot).unwrap();
+    saved["nodes"]["task"]["status"] = "done".into();
+    let restored: Snapshot = serde_json::from_value(saved).unwrap();
+    let followup = planner_followup_prompt("Please replan", Some("legacy-planner-status"), &restored);
+    assert!(followup.contains("- task: completed\n"));
+    assert!(!followup.contains("- task: done\n"));
     assert!(followup.ends_with("\nPlease replan"));
 }
 
@@ -2578,7 +2689,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     }
     assert_eq!(
         third.runtime.lock().unwrap().state.nodes["task"].status,
-        "done"
+        "completed"
     );
 
     // Serial is only an execution route, not a session concurrency limit.
@@ -2612,7 +2723,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             .unwrap()
             .nodes["task"]
             .status,
-        "done"
+        "completed"
     );
     assert_eq!(
         runtime
@@ -2621,7 +2732,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             .unwrap()
             .nodes["task"]
             .status,
-        "done"
+        "completed"
     );
 }
 
@@ -2635,9 +2746,9 @@ fn fast_sibling_releases_slot_for_downstream_before_slow_sibling() {
     let script = root.join("worker.sh");
     fs::write(&script, format!(r#"cat >/dev/null
 case "$PWD" in
-  *a_slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo done > slow.txt ;;
-  *z_fast-*) echo done > fast.txt ;;
-  *) echo done > downstream.txt ;;
+  *a_slow-*) while [ ! -f '{}' ]; do sleep 0.02; done; echo completed > slow.txt ;;
+  *z_fast-*) echo completed > fast.txt ;;
+  *) echo completed > downstream.txt ;;
 esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
 "#, release.display())).unwrap();
@@ -2687,14 +2798,14 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let observed = loop {
         let state = service.runtime.lock().unwrap().state.clone();
-        if state.nodes["after_fast"].status == "done" || std::time::Instant::now() > deadline {
+        if state.nodes["after_fast"].status == "completed" || std::time::Instant::now() > deadline {
             break state;
         }
         thread::sleep(std::time::Duration::from_millis(20));
     };
     // The driver is waiting on the slow worker. A new API event must still
     // dispatch the follow-up without waiting for that worker to finish.
-    if observed.nodes["after_fast"].status == "done" {
+    if observed.nodes["after_fast"].status == "completed" {
         control("intervene".into(), Some("z_fast".into()), Some("again".into()), None, None, None, &service).unwrap();
     }
     let rerun_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -2713,9 +2824,9 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     }
     assert_eq!(rerun_observed.executions.iter().filter(|e| e.node == "z_fast" && e.status == "completed").count(), 2);
     assert_eq!(rerun_observed.nodes["a_slow"].status, "running");
-    assert_eq!(observed.nodes["z_fast"].status, "done");
+    assert_eq!(observed.nodes["z_fast"].status, "completed");
     assert_eq!(observed.nodes["a_slow"].status, "running");
-    assert_eq!(observed.nodes["after_fast"].status, "done");
+    assert_eq!(observed.nodes["after_fast"].status, "completed");
     let fast = observed
         .executions
         .iter()
@@ -2845,7 +2956,7 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         &service,
     ).unwrap();
     assert!(running_page["content"].as_str().unwrap().len() <= 256 * 1024);
-    service.runtime.lock().unwrap().state.executions[0].status = "done".into();
+    service.runtime.lock().unwrap().state.executions[0].status = "completed".into();
     let full = get_execution_output(
         &serde_json::json!({"runId":"large-run", "executionId":"large", "full":true}),
         &service,
@@ -2983,11 +3094,11 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
     let script = root.join("worker.sh");
     fs::write(&script, format!(r#"task=$(cat)
 case "$GRAPHER_NODE_NAME" in
-  slow) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo done > slow.txt ;;
-  related) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo done > related.txt ;;
+  slow) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo completed > slow.txt ;;
+  related) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo completed > related.txt ;;
   review) printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
-  consumer) printf '%s\n' "$task" > consumer-input.txt; echo done > consumer.txt ;;
-  *) echo done > owner.txt ;;
+  consumer) printf '%s\n' "$task" > consumer-input.txt; echo completed > consumer.txt ;;
+  *) echo completed > owner.txt ;;
 esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
 "#, release = release.display(), release_related = release_related.display(),
@@ -3118,7 +3229,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     let consumers: Vec<_> = runtime.state.executions.iter().filter(|execution| execution.node == "consumer").collect();
     assert_eq!(consumers.len(), 1, "the consumer runs once after feedback is skipped, not on the stale verdict");
     assert_eq!(consumers[0].status, "completed");
-    assert_eq!(runtime.state.nodes["review"].status, "done");
+    assert_eq!(runtime.state.nodes["review"].status, "completed");
     assert_eq!(runtime.state.feedback_counts.get("review->owner"), Some(&1));
     let skipped = runtime.state.events.iter().find(|event| matches!(&event.kind,
         EventKind::FeedbackExhausted { from, to, count: 1, limit: 1, .. } if from == "review" && to == "owner"
@@ -4110,7 +4221,7 @@ case "$GRAPHER_MODE" in
         ;;
     node)
         test "$model:$thinking" = 'example/coder:low' || exit 23
-        text=done
+        text=completed
         ;;
     *) exit 24 ;;
 esac

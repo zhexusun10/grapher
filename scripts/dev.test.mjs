@@ -66,7 +66,7 @@ test('cold compilation is outside the server readiness timeout; frontend starts 
   assert.deepEqual(f.phases, ['build', 'run', 'frontend']);
   assert.ok(f.logs.some(text => text.includes('Backend ready')));
   await dev.stop();
-  assert.equal(await dev.done, 0);
+  assert.equal(await dev.completed, 0);
   assert.equal(f.signals.listenerCount('SIGINT'), 0);
   assert.equal(f.signals.listenerCount('SIGTERM'), 0);
 });
@@ -74,11 +74,11 @@ test('cold compilation is outside the server readiness timeout; frontend starts 
 test('setup and build errors fail closed without starting backend/frontend', async t => {
   const missing = await fixture(t);
   const first = await missing.start({ ensureReady: async () => { throw new Error('missing host prerequisite'); } });
-  assert.equal(await first.done, 1);
+  assert.equal(await first.completed, 1);
   assert.deepEqual(missing.phases, []);
   const failed = await fixture(t, { buildExit: 7 });
   const second = await failed.start();
-  assert.equal(await second.done, 1);
+  assert.equal(await second.completed, 1);
   assert.deepEqual(failed.phases, ['build']);
   assert.ok(failed.logs.some(text => text.includes('failed (7)')));
 });
@@ -86,14 +86,14 @@ test('setup and build errors fail closed without starting backend/frontend', asy
 test('a backend exit aborts readiness immediately instead of waiting for the timeout', { timeout: 5000 }, async t => {
   const f = await fixture(t, { runExit: 2 });
   const dev = await f.start({ startupTimeoutMs: 60000 });
-  assert.equal(await dev.done, 2);
+  assert.equal(await dev.completed, 2);
   assert.deepEqual(f.phases, ['build', 'run']);
 });
 
 test('an unresponsive backend times out only after compilation and is cleaned up', async t => {
   const f = await fixture(t, { noListen: true });
   const dev = await f.start({ startupTimeoutMs: 200 });
-  assert.equal(await dev.done, 1);
+  assert.equal(await dev.completed, 1);
   assert.deepEqual(f.phases, ['build', 'run']);
   assert.ok(f.logs.some(text => text.includes('after compilation finished')));
   assert.ok(f.children.every(child => child.exitCode !== null || child.signalCode !== null));
@@ -102,7 +102,7 @@ test('an unresponsive backend times out only after compilation and is cleaned up
 test('unexpected frontend exit stops the owned backend', async t => {
   const f = await fixture(t, { frontendExit: 3 });
   const dev = await f.start();
-  assert.equal(await dev.done, 3);
+  assert.equal(await dev.completed, 3);
   assert.ok(f.children.every(child => child.exitCode !== null || child.signalCode !== null));
 });
 
@@ -115,7 +115,7 @@ for (const phase of ['setup', 'build']) {
       return child;
     };
     const dev = await f.start({ spawnProcess, ensureReady: phase === 'setup' ? async ({ run }) => run(process.execPath, ['setup']) : async () => {} });
-    assert.equal(await dev.done, 130);
+    assert.equal(await dev.completed, 130);
     assert.deepEqual(f.phases, [phase]);
     assert.ok(f.children.every(child => child.exitCode !== null || child.signalCode !== null));
   });
@@ -128,7 +128,7 @@ test('an occupied port is rejected before setup and its listener is not terminat
   t.after(() => new Promise(resolve => server.close(resolve)));
   let installed = false;
   const dev = await f.start({ ensureReady: async () => { installed = true; } });
-  assert.equal(await dev.done, 1);
+  assert.equal(await dev.completed, 1);
   assert.equal(installed, false);
   assert.deepEqual(f.phases, []);
   assert.equal(await (await fetch(`http://127.0.0.1:${f.env.GRAPHER_PORT}`)).text(), 'unrelated');
@@ -173,6 +173,6 @@ test('invalid and conflicting ports fail before installation', async t => {
   assert.equal(devPort(undefined, 1421, 'GRAPHER_PORT'), 1421);
   const f = await fixture(t);
   const dev = await f.start({ env: { ...f.env, GRAPHER_PORT: f.env.GRAPHER_FRONTEND_PORT } });
-  assert.equal(await dev.done, 1);
+  assert.equal(await dev.completed, 1);
   assert.deepEqual(f.phases, []);
 });

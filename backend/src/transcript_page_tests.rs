@@ -45,3 +45,55 @@ fn planner_tail_pages_preserve_long_jsonl_records_and_unicode_across_boundaries(
     let larger = get_planning_output(id, "planner".into(), 0, true, None, Some(1024 * 1024), &service).unwrap();
     assert!(larger["content"].as_str().unwrap().len() > initial["content"].as_str().unwrap().len());
 }
+
+/// The planner writer appends to planner.jsonl while live pages are read. A
+/// size sampled before a forward read must never make the page report
+/// nextOffset beyond totalBytes, which the frontend rejects as an invalid
+/// transcript byte range.
+#[test]
+fn live_forward_pages_never_exceed_the_reported_total_while_the_writer_appends() {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let id = Uuid::new_v4().to_string();
+    let directory = temp.path().join("planning").join(&id);
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("planner.jsonl");
+    fs::write(&path, b"{}\n").unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(temp.path()).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused"),
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stop = stop.clone();
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut index = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                file.write_all(format!("{{\"append\":{index}}}\n").as_bytes()).unwrap();
+                index += 1;
+            }
+        })
+    };
+    for _ in 0..2000 {
+        // Read the last byte so the uncapped read reaches EOF as of the sampled
+        // size, exactly like a live poll that caught up with the writer.
+        let size = fs::metadata(&path).unwrap().len();
+        let offset = size.saturating_sub(1);
+        let page = get_planning_output(id.clone(), "planner".into(), offset, false, None, None, &service).unwrap();
+        let start = page["startOffset"].as_u64().unwrap();
+        let next = page["nextOffset"].as_u64().unwrap();
+        let total = page["totalBytes"].as_u64().unwrap();
+        let content = page["content"].as_str().unwrap();
+        assert!(next <= total, "forward page reported nextOffset {next} beyond totalBytes {total}");
+        assert_eq!(content.len() as u64, next - start, "page content must span exactly [startOffset, nextOffset)");
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+}

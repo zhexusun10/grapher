@@ -22,7 +22,7 @@ const fullMarkdown = (text: string, streaming: boolean) => sanitizeHtml(marked.p
   { gfm: true, breaks: true }) as string);
 
 test("stream deltas preserve completed objects and never mutate frozen history", () => {
-  const history: TranscriptItem[] = Array.from({ length: 2000 }, (_, i) => Object.freeze({ id: String(i), type: "text", content: `done ${i}`, status: "success" }));
+  const history: TranscriptItem[] = Array.from({ length: 2000 }, (_, i) => Object.freeze({ id: String(i), type: "text", content: `completed ${i}`, status: "success" }));
   const tail = Object.freeze({ id: "tail", type: "text" as const, role: "assistant" as const, content: "A", status: "running" as const });
   const previous = Object.freeze([...history, tail]) as unknown as TranscriptItem[];
   const next = appendItemDelta(previous, "text", "中文🚀");

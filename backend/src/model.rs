@@ -350,6 +350,7 @@ pub struct PendingNodeMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeState {
+    #[serde(deserialize_with = "deserialize_node_status")]
     pub status: String,
     pub revision: usize,
     pub head: Option<String>,
@@ -395,6 +396,18 @@ pub struct NodeState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<crate::environment::CompositeResult>,
     pub error: Option<String>,
+}
+
+// Normalize historical checkpoints in memory without rewriting stored events.
+fn deserialize_node_status<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let status = String::deserialize(deserializer)?;
+    Ok(if status == "done" {
+        "completed".into()
+    } else {
+        status
+    })
 }
 
 impl Default for NodeState {
@@ -1172,7 +1185,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.phase = "awaiting_approval".into();
             } else if state.stop_requested || state.paused {
                 state.phase = "paused".into();
-            } else if state.nodes.values().all(|node| node.status == "done") {
+            } else if state.nodes.values().all(|node| node.status == "completed") {
                 state.phase = "completed".into();
             } else {
                 state.phase = "running".into();
@@ -1501,7 +1514,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     execution.result = Some(descriptor.result.clone());
                 }
                 for node in state.nodes.values_mut().filter(|node| {
-                    node.status == "done"
+                    node.status == "completed"
                         && node
                             .result
                             .as_ref()
@@ -1583,7 +1596,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                             Vec::new()
                         };
                     if let Some(node) = state.nodes.get_mut(&node_name) {
-                        node.status = "done".into();
+                        node.status = "completed".into();
                         node.head = Some(head.clone());
                         node.result = result.clone();
                         node.instruction_images = None;
@@ -1597,7 +1610,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     // remain intact, and no dependent node needs to run again.
                     for inherited in lineage.into_iter().filter(|name| name != &node_name) {
                         if let Some(node) = state.nodes.get_mut(&inherited) {
-                            if node.status == "done" {
+                            if node.status == "completed" {
                                 node.head = Some(head.clone());
                                 node.result = result.clone();
                             }
@@ -2069,7 +2082,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
         }
         EventKind::Settled => {
-            state.phase = if state.nodes.values().all(|node| node.status == "done") {
+            state.phase = if state.nodes.values().all(|node| node.status == "completed") {
                 "completed"
             } else {
                 "needs_attention"

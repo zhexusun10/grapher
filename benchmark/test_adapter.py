@@ -31,7 +31,7 @@ class FakeClient:
 
 def state(phase, route="graph", approved=True):
     return {"runId": "one", "phase": phase, "planType": route, "approved": approved,
-            "nodes": {"work": {"status": "done" if phase == "completed" else "running"}},
+            "nodes": {"work": {"status": "completed" if phase == "completed" else "running"}},
             "publication": {"status": "completed" if phase == "completed" else "publishing"}}
 
 
@@ -174,7 +174,7 @@ class Handler(BaseHTTPRequestHandler):
    else:
     (repo/'published.txt').write_text('merged result')
     result = {'runId':'graph-run','phase':'completed','approved':True,'planType':'graph',
-      'nodes':{'first':{'status':'done'},'second':{'status':'done'}},
+      'nodes':{'first':{'status':'completed'},'second':{'status':'completed'}},
       'publication':{'status':os.environ.get('FAKE_PUBLICATION','completed')}}
   else: raise AssertionError(self.path)
   data = json.dumps({'result':result}).encode()
@@ -321,7 +321,7 @@ class Handler(BaseHTTPRequestHandler):
    assert all(os.environ[k] == body['config']['model'] for k in ('PLANNER_MODEL','PARTITIONER_MODEL','NODE_AGENT_MODEL','MERGER_MODEL'))
    result = {'runId':'trial', 'approved':True, 'phase':'running', 'planType':'serial'}
   elif self.path.endswith('snapshot'):
-   result = {'runId':'trial', 'approved':True, 'phase':'completed', 'planType':'serial', 'nodes':{'task':{'status':'done'}}}
+   result = {'runId':'trial', 'approved':True, 'phase':'completed', 'planType':'serial', 'nodes':{'task':{'status':'completed'}}}
   else: raise AssertionError(self.path)
   data = json.dumps({'result':result}).encode()
   self.send_response(200); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)

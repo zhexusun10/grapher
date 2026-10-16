@@ -31,6 +31,10 @@ interface VirtualizedTranscriptProps {
   onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
   /** Called when the user reaches the top of a shared history scroller. */
   onReachTop?: () => void;
+  /** Reports whether the parsed stream sits inside a compaction (a
+   * compaction_start seen without its matching compaction_end), so
+   * conversation chrome can swap its working label for a compacting one. */
+  onCompactingChange?: (compacting: boolean) => void;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -67,7 +71,8 @@ function outputText(result: any): string {
   return textContent(result?.content);
 }
 
-interface ParseTranscriptChunkState {
+/** Parse state shared by the incremental parser and its callers. */
+export interface ParseTranscriptChunkState {
   source: string;
   byteOffset: number;
   leadingFragment: boolean;
@@ -78,6 +83,7 @@ interface ParseTranscriptChunkState {
   pendingUserStart: boolean;
   assistantStartIndex: number;
   userMessageStarts: Set<string>;
+  compacting: boolean;
 }
 
 const PLANNING_MARKER_PREFIX = '{"type":"grapher_planning_source"';
@@ -107,6 +113,7 @@ function freshSegmentState(segment: PlanningSegment): SegmentParseState {
     pendingUserStart: false,
     assistantStartIndex: 0,
     userMessageStarts: new Set(),
+    compacting: false,
     startOffset: segment.startOffset,
     text: segment.text,
     parsedChars: 0,
@@ -191,7 +198,8 @@ function cloneSegmentTail(items: TranscriptItem[]): TranscriptItem[] {
     (item.type === "tool_call" && item.status === "running") ? { ...item } : item);
 }
 
-function parseTranscriptChunkLines(
+/** Exported for compaction-indicator tests: the parser is otherwise private. */
+export function parseTranscriptChunkLines(
   lines: string[],
   currentItems: TranscriptItem[],
   pendingTools: Map<string, TranscriptItem>,
@@ -561,6 +569,16 @@ function parseTranscriptChunkLines(
         continue;
       }
 
+      // Auto-compaction is surfaced through the working indicator, not as chat rows.
+      if (event.type === "compaction_start") {
+        state.compacting = true;
+        continue;
+      }
+      if (event.type === "compaction_end") {
+        state.compacting = false;
+        continue;
+      }
+
       // Session start or system info - kept in workspace details, not in chat transcript
       if (event.type === "session") {
         continue;
@@ -569,6 +587,8 @@ function parseTranscriptChunkLines(
       // Grapher process lifecycle - kept in workspace details, not in chat transcript
       if (event.type === "grapher_process_started" || event.type === "grapher_process_exited") {
         if (event.type === "grapher_process_exited") {
+          // A dead process cannot still be compacting.
+          state.compacting = false;
           currentItems = closeThinkingItems(currentItems);
           for (const toolCallId of pendingTools.keys()) {
             const index = currentItems.findIndex(item => item.type === "tool_call" && item.toolCallId === toolCallId);
@@ -661,6 +681,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   settled = false,
   onEditUser,
   onReachTop,
+  onCompactingChange,
 }) => {
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [userDraft, setUserDraft] = useState("");
@@ -696,6 +717,13 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   // only the revision whose window changed instead of the whole composition.
   const segmentStatesRef = useRef(new Map<string, SegmentParseState>());
   const segmentedRef = useRef(false);
+  // Auto-compaction visibility: parse state survives incremental chunks and
+  // re-parses; reporting is deferred to an effect so a parent never setState
+  // during this component's render.
+  const compactingRef = useRef(false);
+  const lastSegmentSourceRef = useRef("");
+  const reportedCompactingRef = useRef<boolean | null>(null);
+  const onCompactingChangeRef = useRef(onCompactingChange);
 
   // Height cache for virtualization
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
@@ -741,6 +769,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         lastRawOutputRef.current = "";
         segmentStatesRef.current.clear();
         segmentedRef.current = false;
+        compactingRef.current = false;
+        lastSegmentSourceRef.current = "";
         return true;
       }
       return false;
@@ -824,6 +854,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             pendingUserStart: false,
             assistantStartIndex: 0,
             userMessageStarts: new Set(),
+            compacting: false,
           };
           const lines = chunkToProcess.slice(0, lastNewline).split("\n");
           const parsed = parseTranscriptChunkLines(lines, prependedItems, state.pendingTools, prependState, segmentOptions, tailItems);
@@ -865,12 +896,17 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       lastRawOutputRef.current = rawOutput;
       parseOptionsRef.current = parseOptions;
       inputStartRef.current = startOffset;
+      // Compaction is per-session and each planning revision owns a session, so
+      // only the newest revision can be compacting right now.
+      lastSegmentSourceRef.current = segments.at(-1)?.source ?? "";
       return changed || shared !== itemsRef.current;
     }
     if (segmentedRef.current) {
       // A non-composed output cannot reuse per-revision state.
       segmentStatesRef.current.clear();
       segmentedRef.current = false;
+      compactingRef.current = false;
+      lastSegmentSourceRef.current = "";
     }
 
     const isPrepend = parseOptions === parseOptionsRef.current &&
@@ -910,6 +946,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         pendingUserStart: false,
         assistantStartIndex: 0,
         userMessageStarts: new Set<string>(),
+        compacting: false,
       };
 
       const result = parseTranscriptChunkLines(
@@ -964,6 +1001,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       inFinalResponseRef.current = false;
       finalResponseSuppressedRef.current = false;
       lastRawOutputRef.current = "";
+      compactingRef.current = false;
     }
 
     if (lastProcessedPosRef.current === 0) {
@@ -1005,6 +1043,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       pendingUserStart: pendingUserStartRef.current,
       assistantStartIndex: assistantStartIndexRef.current,
       userMessageStarts: userMessageStartsRef.current,
+      compacting: compactingRef.current,
     };
 
     const result = parseTranscriptChunkLines(
@@ -1024,6 +1063,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     seenFirstUserRef.current = forwardState.seenFirstUser;
     pendingUserStartRef.current = forwardState.pendingUserStart;
     assistantStartIndexRef.current = forwardState.assistantStartIndex;
+    compactingRef.current = forwardState.compacting;
 
     currentItems = result.currentItems;
     const previousIds = new Set(previousItems.map(item => item.id));
@@ -1054,6 +1094,37 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
   }, [showUserTurns, skipFirstUser, startOffset, settled, inline]);
+
+  const computeCompacting = (): boolean => {
+    if (segmentedRef.current) {
+      const state = lastSegmentSourceRef.current
+        ? segmentStatesRef.current.get(lastSegmentSourceRef.current)
+        : undefined;
+      return !!state?.compacting;
+    }
+    return compactingRef.current;
+  };
+
+  useEffect(() => {
+    onCompactingChangeRef.current = onCompactingChange;
+  });
+
+  // Report after the parse commit, never during render: parents own state that
+  // this callback feeds.
+  useEffect(() => {
+    const value = computeCompacting();
+    if (reportedCompactingRef.current === value) return;
+    reportedCompactingRef.current = value;
+    onCompactingChangeRef.current?.(value);
+  });
+
+  // A stream this parser last reported as compacting must not outlive it.
+  useEffect(() => () => {
+    if (reportedCompactingRef.current === true) {
+      reportedCompactingRef.current = false;
+      onCompactingChangeRef.current?.(false);
+    }
+  }, []);
 
   // Parse before deriving rows. A prepend used to measure the old DOM first,
   // then replace it in a nested layout update, breaking the scroll anchor.

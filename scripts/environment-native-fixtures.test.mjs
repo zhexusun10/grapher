@@ -44,7 +44,7 @@ test('background fixture confirms its partial write and remains in the owner lif
     process.kill(pid, 0);
     const heartbeat = join(directory, '.venv/background-partial-heartbeat');
     const initial = await readFile(heartbeat, 'utf8');
-    await new Promise(done => setTimeout(done, 500));
+    await new Promise(completed => setTimeout(completed, 500));
     assert.notEqual(await readFile(heartbeat, 'utf8'), initial, 'the fixture must be an active writer');
     if (process.platform !== 'win32') {
       const group = pid => execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).trim();

@@ -9,14 +9,14 @@ import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { request } from 'node:http';
 
-const delay = ms => new Promise(done => setTimeout(done, ms));
+const delay = ms => new Promise(completed => setTimeout(completed, ms));
 
 test('production HTTP confines static paths and refuses linked workspace cleanup', { timeout: 60_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-hardening-'));
   const listener = createServer();
-  await new Promise(done => listener.listen(0, '127.0.0.1', done));
+  await new Promise(completed => listener.listen(0, '127.0.0.1', completed));
   const { port } = listener.address();
-  await new Promise(done => listener.close(done));
+  await new Promise(completed => listener.close(completed));
   const target = resolve(process.env.CARGO_TARGET_DIR || 'backend/target');
   const agent = join(directory, 'agent');
   const source = join(directory, 'source');
@@ -45,10 +45,10 @@ test('production HTTP confines static paths and refuses linked workspace cleanup
     return payload.result;
   };
   // Unlike fetch, node:http preserves backslashes and drive prefixes in the URI.
-  const rawGet = path => new Promise((done, fail) => {
+  const rawGet = path => new Promise((completed, fail) => {
     const req = request({ hostname: '127.0.0.1', port, method: 'GET', path }, response => {
       response.resume();
-      response.on('end', () => done(response.statusCode));
+      response.on('end', () => completed(response.statusCode));
     });
     req.setTimeout(5000, () => req.destroy(new Error('HTTP probe timed out')));
     req.on('error', fail);

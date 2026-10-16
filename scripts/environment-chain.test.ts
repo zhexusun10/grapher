@@ -17,7 +17,7 @@ import { venvCreationCommand } from './fixtures/environment-native.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-const delay = (ms: number) => new Promise(done => setTimeout(done, ms));
+const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms));
 
 function nativePython() {
   for (const executable of process.platform === 'win32' ? ['python', 'py'] : ['python3', 'python']) {
@@ -128,13 +128,13 @@ test('default environment discovery binds one private venv across a parallel Gra
     git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'baseline');
     // Host Python must not see the probe before the Run creates it.
     assert.throws(() => execFileSync(python, ['-I', '-c', 'import grapher_probe'], { cwd: source, stdio: 'pipe' }), 'host Python must not import the private probe before the Run');
-    await new Promise<void>(done => modelServer.listen(0, '127.0.0.1', done));
+    await new Promise<void>(completed => modelServer.listen(0, '127.0.0.1', completed));
     await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: { 'environment-chain': {
       baseUrl: `http://127.0.0.1:${(modelServer.address() as AddressInfo).port}/v1`, api: 'openai-completions', apiKey: 'local-only',
       models: [{ id: 'chain', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
     } } }));
-    const listener = createServer(); await new Promise<void>(done => listener.listen(0, '127.0.0.1', done));
-    const port = (listener.address() as AddressInfo).port; await new Promise<void>(done => listener.close(() => done()));
+    const listener = createServer(); await new Promise<void>(completed => listener.listen(0, '127.0.0.1', completed));
+    const port = (listener.address() as AddressInfo).port; await new Promise<void>(completed => listener.close(() => completed()));
     const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
     const built = join(target, 'debug', process.platform === 'win32' ? 'grapher.exe' : 'grapher');
     const executable = join(directory, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
@@ -315,7 +315,7 @@ test('default environment discovery binds one private venv across a parallel Gra
       elapsedMs: Date.now() - started }));
   } catch (error) { throw new Error(`${error}\nEnvironment chain elapsed=${Date.now() - started}ms; modelCalls=${modelCalls}; toolRequests=${commands.length}\n${diagnostics}`); }
   finally {
-    await stop(); await new Promise<void>(done => modelServer.close(() => done()));
+    await stop(); await new Promise<void>(completed => modelServer.close(() => completed()));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });

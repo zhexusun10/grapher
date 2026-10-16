@@ -45,9 +45,9 @@ async function download(url, path) {
   await pipeline(response.body, createWriteStream(pending, { flags: 'w' })); await rename(pending, path);
 }
 async function run(program, argv) {
-  await new Promise((done, fail) => {
+  await new Promise((completed, fail) => {
     const child = spawn(program, argv, { env, cwd: directory, stdio: 'inherit' });
-    child.once('error', fail); child.once('exit', code => code === 0 ? done() : fail(new Error(`Native provisioning exited ${code}; no fallback`)));
+    child.once('error', fail); child.once('exit', code => code === 0 ? completed() : fail(new Error(`Native provisioning exited ${code}; no fallback`)));
   });
 }
 const installer = join(directory, filename);

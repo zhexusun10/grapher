@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runtimeService } from "../src/services/runtime.ts";
 import { hasCurrentPlanningRun } from "../src/services/planningRecovery.ts";
-import type { Snapshot } from "../src/types.ts";
+import { emptySnapshot, defaultConfig, type Snapshot } from "../src/types.ts";
 
 const response = (result: unknown) => new Response(JSON.stringify({ result }), {
   headers: { "Content-Type": "application/json" },
@@ -52,6 +52,91 @@ test("aborted requests retain their cancellation error instead of reporting a ba
   try {
     globalThis.fetch = async () => { throw cancellation; };
     await assert.rejects(runtimeService.snapshot(controller.signal), error => error === cancellation);
+  } finally { globalThis.fetch = original; }
+});
+
+test("legacy completion is normalized across snapshot APIs without changing other statuses or content", async () => {
+  const original = globalThis.fetch;
+  const statuses = ["done", "completed", "waiting", "running", "paused", "blocked", "failed", "dirty"];
+  const wire = { ...emptySnapshot, runId: "legacy-label", phase: "publication_failed",
+    graph: { originalGoal: "Keep done in user content", nodes: statuses.map(name => ({ name, task: name })), edges: [] },
+    nodes: Object.fromEntries(statuses.map(status => [status, { status, revision: 1, head: "retained", instruction: "done is literal user text", error: null }])),
+    extra: { evidence: "untouched" } };
+  const expected = structuredClone(wire);
+  expected.nodes.done.status = "completed";
+  try {
+    globalThis.fetch = async url => {
+      const command = String(url).split("/").at(-1);
+      return response(command === "bootstrap" || command === "save_config"
+        ? { config: defaultConfig, snapshot: wire, runs: [wire.runId], dataPath: "/mock" }
+        : command === "snapshot_if_changed" ? { version: "legacy-v1", snapshot: wire } : wire);
+    };
+    const reads = [
+      () => runtimeService.snapshot(),
+      () => runtimeService.snapshotForRun(wire.runId),
+      () => runtimeService.history(wire.runId),
+      () => runtimeService.loadRun(wire.runId),
+      () => runtimeService.getPlanningSnapshot("planning", "/mock"),
+      () => runtimeService.control("pause"),
+      () => runtimeService.saveGraph(wire.graph, defaultConfig),
+      () => runtimeService.planGoal("goal", defaultConfig),
+      () => runtimeService.editPlanner({ runId: wire.runId, oldText: "old", instruction: "new" }),
+      () => runtimeService.editNode({ runId: wire.runId, node: "done", executionId: "exec", oldText: "old", instruction: "new" }),
+    ];
+    for (const read of reads) assert.deepEqual(await read(), expected);
+    assert.deepEqual((await runtimeService.bootstrap()).snapshot, expected);
+    assert.deepEqual((await runtimeService.saveConfig(defaultConfig)).snapshot, expected);
+    const poll = await runtimeService.snapshotIfChanged(null, undefined, wire.runId);
+    assert.equal(poll.version, "legacy-v1");
+    assert.deepEqual(poll.snapshot, expected);
+    globalThis.fetch = async () => response({ version: "legacy-v1", snapshot: null });
+    assert.equal((await runtimeService.snapshotIfChanged("legacy-v1")).snapshot, null);
+    assert.equal(wire.nodes.done.status, "done", "the wire fixture is not rewritten");
+  } finally { globalThis.fetch = original; }
+});
+
+test("current snapshots retain their identities and normalization never mutates legacy snapshots", async () => {
+  const original = globalThis.fetch;
+  const node = Object.freeze({ status: "completed" as const, revision: 1, head: "head", instruction: "", error: null });
+  const current = Object.freeze({ ...emptySnapshot, runId: "current-label", nodes: Object.freeze({ task: node }) });
+  const legacyNode = Object.freeze({ ...node, status: "done" });
+  const legacy = Object.freeze({ ...current, nodes: Object.freeze({ task: legacyNode, unchanged: node }) });
+  let wire: unknown = current;
+  try {
+    globalThis.fetch = async () => {
+      const result = response(null);
+      result.json = async () => ({ result: wire });
+      return result;
+    };
+    assert.equal(await runtimeService.snapshot(), current);
+    wire = legacy;
+    const normalized = await runtimeService.snapshot();
+    assert.equal(normalized.nodes.task.status, "completed");
+    assert.equal(legacy.nodes.task.status, "done");
+    assert.equal(normalized.nodes.unchanged, node);
+    assert.equal(normalized.graph, legacy.graph);
+    assert.equal(normalized.events, legacy.events);
+  } finally { globalThis.fetch = original; }
+});
+
+test("Planner completion streams normalize legacy node status before notifying the UI", async () => {
+  const original = globalThis.fetch;
+  const wire = { ...emptySnapshot, runId: "stream-label", phase: "needs_attention",
+    nodes: { task: { status: "done", revision: 1, head: "head", instruction: "", error: null } } };
+  try {
+    for (const wrapped of [false, true]) {
+      let notified: Snapshot | undefined;
+      globalThis.fetch = async () => new Response(
+        `event: complete\ndata: ${JSON.stringify(wrapped ? { snapshot: wire } : wire)}\n\n`,
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+      const result = await runtimeService.planGoalStream("goal", defaultConfig, event => {
+        if (event.type === "complete") notified = event.snapshot;
+      });
+      assert.equal(result.nodes.task.status, "completed");
+      assert.equal(result.phase, "needs_attention", "renaming a node status cannot mark the Run completed");
+      assert.equal(notified, result);
+    }
   } finally { globalThis.fetch = original; }
 });
 

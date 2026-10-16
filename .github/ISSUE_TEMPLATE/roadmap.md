@@ -28,7 +28,7 @@ Link to related issues, discussions, or PRs.
 
 ## Dependencies
 
-What needs to be done before this can be completed?
+What requirements must be completed before this roadmap item can be closed?
 
 ## Notes
 

@@ -45,7 +45,7 @@ fn run_created(runtime: &mut Runtime, job: &Job, prefix: &str) {
     });
     assert!(result.is_ok(), "{:?}", result);
     runtime.finish(&job.execution, result).unwrap();
-    assert_eq!(runtime.state.nodes[&job.execution.node].status, "done",
+    assert_eq!(runtime.state.nodes[&job.execution.node].status, "completed",
         "{:?}", runtime.state.nodes[&job.execution.node].error);
 }
 

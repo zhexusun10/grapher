@@ -206,12 +206,12 @@ def initialize(root, source):
         insert(db, run_id, {'type': 'settled'}, 4001)
         runs.append({'id': run_id, 'executionId': name + '-exec', 'marker': marker})
     run_id = 'acceptance-failed'
-    graph = {'originalGoal': 'Acceptance failed DAG', 'nodes': [{'name': name, 'task': name} for name in ['done', 'failed']], 'edges': [{'from': 'done', 'to': 'failed', 'feedback': False}]}
+    graph = {'originalGoal': 'Acceptance failed DAG', 'nodes': [{'name': name, 'task': name} for name in ['completed', 'failed']], 'edges': [{'from': 'completed', 'to': 'failed', 'feedback': False}]}
     insert(db, run_id, {'type': 'created', 'graph': graph, 'config': config})
     insert(db, run_id, {'type': 'routed', 'plan_type': 'graph'})
     insert(db, run_id, {'type': 'approved', 'base': head})
-    insert(db, run_id, {'type': 'started', 'execution': execution('done-exec', 'done', repository)})
-    insert(db, run_id, {'type': 'finished', 'execution_id': 'done-exec', 'head': head, 'output': assistant('DONE_ONLY')}, 4000)
+    insert(db, run_id, {'type': 'started', 'execution': execution('completed-exec', 'completed', repository)})
+    insert(db, run_id, {'type': 'finished', 'execution_id': 'completed-exec', 'head': head, 'output': assistant('COMPLETED_ONLY')}, 4000)
     insert(db, run_id, {'type': 'started', 'execution': execution('failed-exec', 'failed', repository)})
     text = ('长中文边界验证🚀🎉\x1b[31m失败前\x1b[0m\n' * 3000) + assistant('FAILED_ONLY: failure history preserved')
     for start in range(0, len(text), 197):

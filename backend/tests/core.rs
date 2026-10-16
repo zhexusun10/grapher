@@ -66,7 +66,7 @@ fn finish_wave(runtime: &mut Runtime, feedback_output: &str) {
         let output = if job.feedback_source {
             feedback_output
         } else {
-            "done"
+            "completed"
         };
         if let Some(feedback) = runtime
             .finish(&job.execution, Ok(("fake-head".into(), output.into())))
@@ -532,7 +532,7 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
     finish_wave(&mut runtime, "Add empty state\n<FEEDBACK>");
     assert_eq!(runtime.state.nodes["frontend"].status, "dirty");
     assert_eq!(runtime.state.nodes["review"].status, "dirty");
-    assert_eq!(runtime.state.nodes["backend"].status, "done");
+    assert_eq!(runtime.state.nodes["backend"].status, "completed");
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "<ACCEPT>");
     assert!(runtime.jobs().unwrap().is_empty());
@@ -593,11 +593,11 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         let event_count = runtime.state.events.len();
         let frontend_head = runtime.state.nodes["frontend"].head.clone();
         runtime.apply_feedback(&from, &final_output).unwrap();
-        assert_eq!(runtime.state.nodes["review"].status, "done");
+        assert_eq!(runtime.state.nodes["review"].status, "completed");
         assert!(runtime.state.nodes["review"].error.is_none());
         assert_eq!(runtime.state.nodes["frontend"].head, frontend_head);
-        assert_eq!(runtime.state.nodes["frontend"].status, "done");
-        assert_eq!(runtime.state.nodes["backend"].status, "done");
+        assert_eq!(runtime.state.nodes["frontend"].status, "completed");
+        assert_eq!(runtime.state.nodes["backend"].status, "completed");
         assert_eq!(runtime.state.feedback_counts, counts);
         assert_eq!(runtime.state.feedback_counts.get("review->frontend").copied().unwrap_or(0), limit);
         let warning: Vec<_> = runtime.state.events[event_count..].iter().filter(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })).collect();
@@ -619,7 +619,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         for job in jobs {
             assert_eq!(job.task, format!("Implement {}", job.execution.node), "dependency consumers receive no upstream text");
             assert_eq!(job.parent_heads, vec!["review-head".to_string()]);
-            runtime.finish(&job.execution, Ok(("delivery-head".into(), "done".into()))).unwrap();
+            runtime.finish(&job.execution, Ok(("delivery-head".into(), "completed".into()))).unwrap();
         }
         assert_eq!(runtime.state.feedback_counts, counts);
         assert_eq!(runtime.state.executions.iter().filter(|execution| execution.node == "frontend").count(), limit + 1);
@@ -653,7 +653,7 @@ fn exhausted_feedback_does_not_wait_for_running_siblings() {
     let consumer = runtime.jobs().unwrap().remove(0);
     assert_eq!(consumer.execution.node, "consumer");
     assert_eq!(consumer.task, "consumer");
-    assert_eq!(runtime.state.nodes["owner"].status, "done");
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
     assert_eq!(runtime.state.nodes["related"].status, "running");
     assert!(runtime.state.feedback_counts.is_empty());
 }
@@ -694,7 +694,7 @@ fn acceptance_at_exhausted_budget_is_not_a_skipped_feedback_warning() {
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "Summary\n<ACCEPT>");
-    assert_eq!(runtime.state.nodes["review"].status, "done");
+    assert_eq!(runtime.state.nodes["review"].status, "completed");
     assert!(runtime.state.feedback_counts.is_empty());
     assert!(!runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })));
     assert!(runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::Feedback { accepted: true, .. })));
@@ -715,14 +715,14 @@ fn failure_propagates_but_independent_work_remains_ready() {
         let result = if job.execution.node == "frontend" {
             Err("Pi failed".into())
         } else {
-            Ok(("backend-head".into(), "done".into()))
+            Ok(("backend-head".into(), "completed".into()))
         };
         runtime.finish(&job.execution, result).unwrap();
     }
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.nodes["frontend"].status, "failed");
     assert_eq!(runtime.state.nodes["review"].status, "blocked");
-    assert_eq!(runtime.state.nodes["backend"].status, "done");
+    assert_eq!(runtime.state.nodes["backend"].status, "completed");
 }
 
 #[test]
@@ -737,7 +737,7 @@ fn pause_drains_and_intervention_preserves_history() {
     let job = runtime.jobs().unwrap().remove(0);
     runtime.pause(true).unwrap();
     runtime
-        .finish(&job.execution, Ok(("spec-head".into(), "done".into())))
+        .finish(&job.execution, Ok(("spec-head".into(), "completed".into())))
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     assert!(runtime.intervene("frontend", "Use Svelte").is_err()); // No session yet.
@@ -789,7 +789,7 @@ fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up
         .iter()
         .all(|node| runtime.state.nodes[&node.name].status != "dirty"));
     runtime
-        .finish(&spec.execution, Ok(("spec-head".into(), "done".into())))
+        .finish(&spec.execution, Ok(("spec-head".into(), "completed".into())))
         .unwrap();
     let jobs = runtime.jobs().unwrap();
     let frontend = jobs
@@ -799,7 +799,7 @@ fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up
     runtime
         .finish(
             &frontend.execution,
-            Ok(("frontend-head".into(), "done".into())),
+            Ok(("frontend-head".into(), "completed".into())),
         )
         .unwrap();
     assert_eq!(runtime.state.nodes["backend"].status, "running");

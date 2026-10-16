@@ -37,7 +37,7 @@ export async function startBackgroundWriter(cwd, signal) {
         throw error;
       });
       if (partial === 'partial' && child.pid) return child.pid;
-      await new Promise(done => setTimeout(done, 25));
+      await new Promise(completed => setTimeout(completed, 25));
     }
     throw new Error('Background fixture did not confirm its partial write');
   } catch (error) {

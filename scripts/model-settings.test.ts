@@ -293,7 +293,7 @@ test("resolveExecutionModelAndThinking extracts model and thinking from executio
     worktree: "/path/to/worktree",
     before: "abc1234",
     after: "def5678",
-    status: "done",
+    status: "completed",
     output: [
       JSON.stringify({ type: "session", id: "sess-1" }),
       JSON.stringify({ type: "model_change", provider: "openai-codex", modelId: "gpt-6-sol" }),
@@ -333,7 +333,7 @@ test("resolveExecutionModelAndThinking falls back to config and role models when
     worktree: "/path/to/worktree-2",
     before: "1111111",
     after: "2222222",
-    status: "done",
+    status: "completed",
     output: "some regular non-json text\n",
     startedAt: 1000,
     completedAt: 2000,

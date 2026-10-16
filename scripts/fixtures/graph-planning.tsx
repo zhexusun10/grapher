@@ -34,7 +34,7 @@ function Fixture() {
     <GraphWorkbench state={snapshot} routeType="graph" selected={selected} setSelected={setSelected}
       selectedMergerId={selectedMergerId} setSelectedMergerId={setSelectedMergerId}
       effectiveMessages={[]} isPlanning={planning}
-      plannerStream={{ runId: snapshot.runId, stage: planning ? "planning" : "done", plannerText: "",
+      plannerStream={{ runId: snapshot.runId, stage: planning ? "planning" : "completed", plannerText: "",
         items: [{ id: "node-tool", type: "tool_call", toolName: "node", args: {}, status: "success" }] }}
       onSendMessage={noop} onRequestConfirmation={noop} onControl={noop} onSave={noop}
       onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}

@@ -1,5 +1,5 @@
 import { t } from "./i18n/index.ts";
-export type Status = "waiting" | "running" | "paused" | "blocked" | "done" | "failed" | "dirty";
+export type Status = "waiting" | "running" | "paused" | "blocked" | "completed" | "failed" | "dirty";
 interface GraphNode { name: string; task: string }
 interface GraphEdge { from: string; to: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }

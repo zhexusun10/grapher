@@ -39,7 +39,7 @@ const evidence = {
   revision: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), dirty: true,
   checks: {}, browserErrors: [], apiErrors: [], controls: [],
 };
-const sleep = ms => new Promise(done => setTimeout(done, ms));
+const sleep = ms => new Promise(completed => setTimeout(completed, ms));
 let backend, vite, browser, context, page, runId, state, agent, diagnostics = "";
 const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=" + (process.platform === "win32" ? "NUL" : "/dev/null"),
   "-c", "commit.gpgsign=false", "-c", "user.name=Acceptance", "-c", "user.email=acceptance@localhost", ...args],
@@ -55,7 +55,7 @@ function nativePython() {
 
 async function freePort() {
   const server = netServer(); server.listen(0, "127.0.0.1"); await once(server, "listening");
-  const port = server.address().port; await new Promise(done => server.close(done));
+  const port = server.address().port; await new Promise(completed => server.close(completed));
   return [2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080].includes(port) ? freePort() : port;
 }
 async function until(check, message, timeout = 90_000) {
