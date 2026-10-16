@@ -248,7 +248,10 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     // Normal acceptance exercises backend admission with no policy supplied by
     // the client. The ML profile additionally covers the saved-policy boundary;
     // automatic Conda/device policy discovery remains separately unaccepted.
-    const config = { repository: source, model: 'environment-test/native', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 1, ...(ml ? { environment } : {}) };
+    // The post-task Planner review is a Planning turn, accepted by its own
+    // harness; here it would reach the environment actuator model, which only
+    // understands environment tasks, so this Run opts out of it explicitly.
+    const config = { repository: source, model: 'environment-test/native', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 1, postTaskReview: false, ...(ml ? { environment } : {}) };
     const saved = await api('save_graph', { graph, config });
     if (!ml) assert.equal(saved.environmentPolicy, 'automatic-pending');
     const runId = saved.runId;
