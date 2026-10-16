@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-16
+
 ### Added
 
 - Dispatch a node-composition Merger when fan-in parent environments are incompatible: it selects one verified input environment or builds a new private environment offline, then Runtime discovers and captures the result. A simultaneous Git and environment conflict uses one Merger with both prompt segments concatenated; environment directory trees are never merged and there is no network or host-Python fallback.

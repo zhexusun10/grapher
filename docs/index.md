@@ -73,6 +73,7 @@ requires design history. Promotion requires implementation and verification.
 | --- | --- | --- |
 | `archived` | [2026-10-06 run/system audit (中文)](reviews/latest-run-system-design-audit-2026-10-06.md) | Review-time evidence and superseded suggestions, not today's protocol; see its warning and the current [execution model](architecture/execution-model.md) |
 | `archived` | [v0.1.0-alpha.2 notes](releases/v0.1.0-alpha.2.md) / [initial preview notes](../.github/releases/v0.1.0.md) | Release-specific statements; current setup: [Installation](guides/installation.md) |
+| `archived` | [v1.0.0 notes](releases/v1.0.0.md) | Release-specific statements; current setup: [Installation](guides/installation.md) |
 | Release history | [CHANGELOG.md](../CHANGELOG.md) | Versioned change record, not a full current architecture specification |
 
 ## Upstream and executable text

@@ -189,6 +189,9 @@ export function packageRelease(platform, arch, artifact) {
     }
     for (const script of executableScripts) chmodSync(join(destination, script), 0o755);
     mkdirSync(dirname(archive), { recursive: true });
+    // Repackaging over a previous artifact must not fail (CreateFromDirectory
+    // refuses to overwrite; tar's czf already replaces).
+    rmSync(archive, { force: true });
     if (platform === 'windows') {
       // Compress-Archive silently skips hidden .git metadata. ZipFile includes it;
       // preparation dereferences Windows junctions before they reach the archive.
