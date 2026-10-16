@@ -266,7 +266,7 @@ fn publication_merger_continuation_control_validates_phase_and_workspace() {
         .runtime
         .lock()
         .unwrap()
-        .emit(EventKind::Started { execution: busy, message_sequences: None })
+        .emit(EventKind::Started { execution: busy, message_sequences: None, fresh_restart: false })
         .unwrap();
     assert!(attempt("merger", &merger.id).is_err());
 }
@@ -596,8 +596,7 @@ fn buffered_output_flushes_before_finish_and_replays() {
         runtime
             .emit(EventKind::Started {
                 execution: execution.clone(),
-                message_sequences: None,
-            })
+                message_sequences: None, fresh_restart: false })
             .unwrap();
     }
     let (tx, rx) = std::sync::mpsc::sync_channel(256);
@@ -3394,7 +3393,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         completed_at: None,
         metrics: None,
     };
-    runtime.emit(EventKind::Started { execution, message_sequences: None }).unwrap();
+    runtime.emit(EventKind::Started { execution, message_sequences: None, fresh_restart: false }).unwrap();
     runtime
         .emit(EventKind::Finished {
             execution_id: "exec-1".into(),

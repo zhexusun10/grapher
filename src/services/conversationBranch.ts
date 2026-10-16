@@ -4,6 +4,15 @@ import type { ChatMessageVersion, GraphEvent, Snapshot } from "../types";
  * original durable events and executions remain available for history. */
 export function activeNodeConversationEvents(state: Snapshot, node: string): GraphEvent[] {
   const edits = state.events.filter((event) => event.type === "conversation_edited" && event.nodes?.includes(node));
+  // A from-zero re-execution (fresh session, no continuation) restarts the
+  // node's conversation: the backend supersedes the prior attempts, and human
+  // turns recorded before the oldest surviving attempt are dead history.
+  const superseded = new Set(state.supersededExecutionIds ?? []);
+  const freshBoundary = state.events
+    .filter((event) => event.type === "started" && event.execution?.node === node
+      && !superseded.has(event.execution.id))
+    .map((event) => event.sequence)
+    .reduce((oldest, sequence) => Math.min(oldest, sequence), Number.POSITIVE_INFINITY);
   const belongs = (event: GraphEvent) => event.node === node || event.target === node;
   return state.events.filter((event) => !edits.some((edit) => {
     if (event.sequence >= edit.sequence) return false;
@@ -14,7 +23,13 @@ export function activeNodeConversationEvents(state: Snapshot, node: string): Gra
     return event.timestamp >= (state.events.find((e) => e.type === "started" &&
       e.execution?.id === edit.from_execution_id)?.timestamp ?? edit.timestamp) &&
       belongs(event);
-  }));
+  })).filter((event) => {
+    if (Number.isFinite(freshBoundary) && event.sequence < freshBoundary
+      && (event.type === "invalidated" || event.type === "node_messaged" || event.type === "steered")) {
+      return false;
+    }
+    return true;
+  });
 }
 
 export function executionIdForMessage(state: Snapshot, event: GraphEvent): string | undefined {

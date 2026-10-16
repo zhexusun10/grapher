@@ -118,3 +118,22 @@ test('message rollback matches stripped node prefixes and rolls back subsequent 
   assert.equal(subsequentEntries[0].id, 'msg-2');
 });
 
+
+test('a fresh restart supersedes prior attempts and their human turns', () => {
+  const state: Snapshot = {
+    ...emptySnapshot,
+    supersededExecutionIds: ['attempt-1'],
+    executions: [
+      { id: 'attempt-1', node: 'task', revision: 1, attempt: 1, sessionId: 'old', worktree: '', before: '', after: '', status: 'failed', output: '', startedAt: 1, completedAt: 2 },
+      { id: 'attempt-2', node: 'task', revision: 2, attempt: 2, sessionId: 'new', worktree: '', before: '', after: '', status: 'running', output: '', startedAt: 9, completedAt: null },
+    ],
+    events: [
+      { sequence: 1, timestamp: 1, type: 'started', execution: { id: 'attempt-1', node: 'task' } as never },
+      { sequence: 2, timestamp: 2, type: 'invalidated', target: 'task', instruction: 'old repair instruction', human: true },
+      { sequence: 9, timestamp: 9, type: 'started', execution: { id: 'attempt-2', node: 'task' } as never },
+    ],
+  };
+  assert.deepEqual(activeNodeExecutions(state, 'task').map(e => e.id), ['attempt-2']);
+  // The dead conversation's human turn no longer renders above the fresh start.
+  assert.deepEqual(activeNodeConversationEvents(state, 'task').filter(e => !!e.instruction), []);
+});

@@ -16,7 +16,7 @@ fn image(data: &str) -> ImageAttachment {
 
 fn claimed(state: &Snapshot, execution_id: &str) -> Vec<i64> {
     state.events.iter().find_map(|event| match &event.kind {
-        EventKind::Started { execution, message_sequences } if execution.id == execution_id => message_sequences.clone(),
+        EventKind::Started { execution, message_sequences, .. } if execution.id == execution_id => message_sequences.clone(),
         _ => None,
     }).unwrap()
 }

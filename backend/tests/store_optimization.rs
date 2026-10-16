@@ -40,14 +40,14 @@ fn seed_legacy(path: &std::path::Path, indexed: bool) -> String {
     let text = format!("{}\n── Final response ──\n完成🚀\n", "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":7,\"output\":3,\"totalTokens\":10}}}\n".repeat(500));
     for kind in [
         created("repo", Some("id"), None),
-        EventKind::Started { execution: execution("completed"), message_sequences: None },
+        EventKind::Started { execution: execution("completed"), message_sequences: None, fresh_restart: false },
         EventKind::Output { execution_id: "completed".into(), text: "redundant".into() },
         EventKind::Finished { execution_id: "completed".into(), head: "h".into(), output: text.clone(), output_bytes: 0, metrics: None },
-        EventKind::Started { execution: execution("failed"), message_sequences: None },
+        EventKind::Started { execution: execution("failed"), message_sequences: None, fresh_restart: false },
         EventKind::Output { execution_id: "failed".into(), text: "失败前\n".into() },
         EventKind::Output { execution_id: "failed".into(), text: "🚀🎉\u{1b}[31m错误\u{1b}[0m".into() },
         EventKind::Failed { node: "failed".into(), execution_id: Some("failed".into()), error: "failed".into(), output_bytes: 0, metrics: None },
-        EventKind::Started { execution: execution("live"), message_sequences: None },
+        EventKind::Started { execution: execution("live"), message_sequences: None, fresh_restart: false },
         EventKind::Output { execution_id: "live".into(), text: "interrupted\n".into() },
         EventKind::MergerStarted { execution: execution("merge") },
         EventKind::Output { execution_id: "merge".into(), text: "conflict\n".into() },
@@ -148,7 +148,7 @@ fn utf8_paging_and_interleaved_cursors_survive_reopen_and_cascade_deletion() {
     let mut store = Store::open(&path).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    for id in ["completed", "live"] { store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None }).unwrap(); }
+    for id in ["completed", "live"] { store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None, fresh_restart: false }).unwrap(); }
     let chunk = format!("{}🚀🎉中文\u{1b}[31m\n", "a".repeat(32 * 1024 - 1));
     let mut expected = String::new();
     for _ in 0..3 {
@@ -205,7 +205,7 @@ fn tail_pages_never_discard_a_tool_result_larger_than_the_page() {
     let store = Store::open(&temp.path().join("events.db")).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None }).unwrap();
+    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None, fresh_restart: false }).unwrap();
     let text = format!("{}\n", serde_json::json!({ "type": "tool_execution_end", "toolCallId": "tool",
         "toolName": "read", "result": { "content": [{ "type": "text", "text": "中文🚀".repeat(100_000) }] } }));
     store.append(&mut state, EventKind::Output { execution_id: "completed".into(), text: text.clone() }).unwrap();
@@ -230,7 +230,7 @@ fn committed_finished_has_no_text_and_carries_metrics_and_pid() {
     runtime.state.run_id = "run".into();
     runtime.emit(created("repo", None, None)).unwrap();
     let exec = execution("completed");
-    runtime.emit(EventKind::Started { execution: exec.clone(), message_sequences: None }).unwrap();
+    runtime.emit(EventKind::Started { execution: exec.clone(), message_sequences: None, fresh_restart: false }).unwrap();
     let first = "{\"type\":\"grapher_process_started\",\"pid\":123}";
     runtime.emit_outputs(vec![EventKind::Output { execution_id: "completed".into(), text: first.into() }]).unwrap();
     runtime.emit_outputs(vec![EventKind::Output { execution_id: "completed".into(), text: "\n{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"totalTokens\":42}}}\n".into() }]).unwrap();
@@ -253,7 +253,7 @@ fn runtime_merger_failure_and_failed_bytes_survive_reload() {
     let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
     runtime.state.run_id = "run".into();
     runtime.emit(created("repo", None, None)).unwrap();
-    runtime.emit(EventKind::Started { execution: execution("failed"), message_sequences: None }).unwrap();
+    runtime.emit(EventKind::Started { execution: execution("failed"), message_sequences: None, fresh_restart: false }).unwrap();
     runtime.emit(EventKind::Output { execution_id: "failed".into(), text: "失败日志🎉".into() }).unwrap();
     runtime.emit(EventKind::Failed { node: "failed".into(), execution_id: Some("failed".into()), error: "oops".into(), output_bytes: 0, metrics: None }).unwrap();
     runtime.emit(EventKind::MergerStarted { execution: execution("merge") }).unwrap();
@@ -273,7 +273,7 @@ fn interrupted_runtime_preserves_committed_logs_bytes_and_metrics() {
         let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
         runtime.state.run_id = "run".into();
         runtime.emit(created("repo", None, None)).unwrap();
-        runtime.emit(EventKind::Started { execution: execution("failed"), message_sequences: None }).unwrap();
+        runtime.emit(EventKind::Started { execution: execution("failed"), message_sequences: None, fresh_restart: false }).unwrap();
         runtime.emit(EventKind::Output { execution_id: "failed".into(), text: text.into() }).unwrap();
         // No terminal event: equivalent durable state to an interrupted process.
     }
@@ -295,7 +295,7 @@ fn failed_log_commit_never_advances_projection_or_offset_cursor() {
     let mut store = Store::open(&path).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None }).unwrap();
+    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None, fresh_restart: false }).unwrap();
     store.append(&mut state, EventKind::Output { execution_id: "completed".into(), text: "before\n".into() }).unwrap();
     let db = Connection::open(&path).unwrap();
     db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON execution_logs WHEN NEW.text='reject' BEGIN SELECT RAISE(ABORT,'injected failure'); END;
@@ -321,7 +321,7 @@ fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
     for id in ["completed", "live"] {
-        store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None }).unwrap();
+        store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None, fresh_restart: false }).unwrap();
     }
     let mut expected = String::new();
     let mut saved_cursor = 0;
@@ -362,7 +362,7 @@ fn delete_run_releases_incremental_pages_and_cascades_logs() {
     let mut store = Store::open(&path).unwrap();
     let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
     store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None }).unwrap();
+    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None, fresh_restart: false }).unwrap();
     for batch in 0..8 {
         store.append_batch(&mut state, (0..32).map(|i| EventKind::Output {
             execution_id: "completed".into(), text: format!("{batch}-{i}-{}", "y".repeat(64 * 1024)),

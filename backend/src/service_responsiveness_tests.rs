@@ -155,6 +155,7 @@ fn sse_event_stream_coalesces_outputs_and_suppresses_mid_stream_snapshot_storms(
     runtime
         .emit(EventKind::Started {
             message_sequences: None,
+            fresh_restart: false,
             execution: Execution {
                 id: "exec-1".into(),
                 node: "node-1".into(),

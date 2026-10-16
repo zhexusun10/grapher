@@ -2456,7 +2456,7 @@ fn failed_node_merger_marks_posterior_node_blocked_and_descendants_recover_on_no
     // Emitting Started for "join" resets its blocked descendants to waiting.
     let mut join_exec = merger.clone();
     join_exec.node = "join".into();
-    runtime.emit(EventKind::Started { execution: join_exec, message_sequences: None }).unwrap();
+    runtime.emit(EventKind::Started { execution: join_exec, message_sequences: None, fresh_restart: false }).unwrap();
     assert_eq!(runtime.state.nodes["after"].status, "waiting");
 }
 
@@ -3360,7 +3360,7 @@ fn failed_node_intervention_resumes_running_phase_and_clears_needs_attention() {
 
     // If phase somehow stayed needs_attention before Started or Steered, verify they clear it
     runtime.state.phase = "needs_attention".into();
-    runtime.emit(EventKind::Started { execution: retry_job.execution.clone(), message_sequences: None }).unwrap();
+    runtime.emit(EventKind::Started { execution: retry_job.execution.clone(), message_sequences: None, fresh_restart: false }).unwrap();
     assert_eq!(runtime.state.phase, "running");
 
     runtime.state.phase = "needs_attention".into();

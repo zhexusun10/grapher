@@ -2443,6 +2443,9 @@ impl Runtime {
             self.emit(EventKind::Started {
                 execution: execution.clone(),
                 message_sequences: Some(message_sequences),
+                // A from-zero execution starts a new Pi session: prior attempts
+                // of this node belong to a dead conversation lineage.
+                fresh_restart: session_fork.is_none() && resume_execution_id.is_none(),
             })?;
             if config.environment.as_ref().is_some_and(|policy| policy.best_effort) {
                 environment_sources.extend(environment_previous.iter().cloned());

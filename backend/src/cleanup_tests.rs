@@ -58,8 +58,7 @@ fn failed_execution(runtime: &mut Runtime, id: &str) {
     runtime
         .emit(EventKind::Started {
             execution: execution(runtime, id),
-            message_sequences: None,
-        })
+            message_sequences: None, fresh_restart: false })
         .unwrap();
     runtime
         .emit(EventKind::Failed {

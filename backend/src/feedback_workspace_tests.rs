@@ -510,6 +510,33 @@ fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
 
 #[cfg(feature = "fixture")]
 #[test]
+fn recomputed_descendant_supersedes_its_previous_attempts() {
+    // Downstream recomputation starts the node's conversation from zero in the
+    // new workspace: the fresh execution supersedes the node's prior attempts
+    // so the conversation view renders only the live lineage.
+    let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+    let owner = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &owner);
+    let review = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &review);
+    assert_eq!(runtime.state.pending_feedback.len(), 1);
+    let repair = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &repair);
+    let recomputed = runtime.jobs().unwrap().remove(0);
+    assert_eq!(recomputed.execution.node, "review");
+    assert_eq!(recomputed.execution.attempt, 2);
+    assert!(recomputed.session_fork.is_none());
+    assert!(runtime.state.superseded_execution_ids.contains(&review.execution.id));
+    assert!(runtime.state.events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Started { execution, fresh_restart: true, .. } if execution.id == recomputed.execution.id
+    )));
+    execute(&mut runtime, &recomputed);
+    assert_eq!(runtime.state.nodes["review"].status, "completed");
+}
+
+#[cfg(feature = "fixture")]
+#[test]
 fn failed_feedback_repair_keeps_its_dirty_files_for_the_retry() {
     let (temp, _source, mut runtime) = configured(&["owner", "review"], 1);
     let owner = runtime.jobs().unwrap().remove(0);

@@ -641,6 +641,10 @@ pub enum EventKind {
         /// Legacy starts omitted the field and consumed their pending instruction.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_sequences: Option<Vec<i64>>,
+        /// This execution starts the node's conversation from zero (no session
+        /// fork or resume), so prior attempts are superseded dead history.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fresh_restart: bool,
     },
     Prepared {
         execution_id: String,
@@ -1410,7 +1414,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = "rejected".into();
             state.approved = false;
         }
-        EventKind::Started { execution, message_sequences } => {
+        EventKind::Started { execution, message_sequences, fresh_restart } => {
             let node = state.nodes.get_mut(&execution.node).unwrap();
             let source_direct = node.pending_messages.iter().any(|message| message.source_direct
                 && message_sequences.as_ref().is_none_or(|sequences| sequences.contains(&message.sequence)));
@@ -1421,6 +1425,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.continuation = false;
             node.status = "running".into();
             node.error = None;
+            if *fresh_restart {
+                // A from-zero execution starts a new Pi session in this
+                // workspace: the node's prior attempts belong to a dead
+                // conversation lineage and no longer render as live history.
+                let superseded: Vec<String> = state.executions.iter()
+                    .filter(|prior| prior.node == execution.node
+                        && prior.id != execution.id
+                        && !state.superseded_execution_ids.contains(&prior.id))
+                    .map(|prior| prior.id.clone())
+                    .collect();
+                state.superseded_execution_ids.extend(superseded);
+            }
             state.executions.push(execution.clone());
             if state.phase == "needs_attention" {
                 state.phase = if state.paused { "paused" } else { "running" }.into();
