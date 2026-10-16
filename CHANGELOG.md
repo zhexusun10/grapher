@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-17
+
+### Changed
+
+- Rename the node execution status `done` to `completed` across the runtime, snapshot events, planner prompts and UI. Historical checkpoints are normalized in memory on load while stored events stay unchanged, so existing Runs keep rendering and completing correctly.
+- Clarify the Planner prompt and `node`/`edge` tool contracts: an Executor's context is isolated — other nodes' names, tasks and file responsibilities are not automatically included, so necessary context must be supplied in the task or inherited project files — and dependency handoff is described as project-file results instead of filesystem state; the feedback-edge description states that the feedback target receives the source's completed project-file state.
+- Rework the conversation transcript pipeline: a dedicated incremental transcript parser service replaces the ad-hoc rendering logic in the virtualized transcript, conversation-history auto-fill is bounded per burst by bytes and resumes on upward wheel, touch or keyboard gestures instead of loading unbounded history, the planner shows a live elapsed duration while planning, and expanding or collapsing the workspace details panel scrolls only the additional required height without shifting the conversation.
+
+### Fixed
+
+- Sort the workbench overview node chips by execution order instead of alphabetically and remove their redundant hover title.
+- Prevent the workbench prompt placeholder from clipping when the node name is long.
+- Keep prompt-box controls in normal flow instead of nested layout projections, fixing mode-selector motion and broken button hover transitions during resize.
+
 ## [1.0.0] - 2026-10-16
 
 ### Added
