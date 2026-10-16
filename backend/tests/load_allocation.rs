@@ -68,7 +68,7 @@ fn load_of_a_large_legacy_run_never_parses_transcript_text() {
                 input: None, result: None,
                 started_at: 1, completed_at: None, metrics: None,
             };
-            legacy(&db, EventKind::Started { execution });
+            legacy(&db, EventKind::Started { execution, message_sequences: None });
             for _ in 0..3 {
                 legacy(&db, EventKind::Output { execution_id: id.into(), text: filler.clone() });
             }

@@ -1434,6 +1434,7 @@ pub fn execute(
     feedback_source: bool,
     resume_execution_id: Option<&str>,
     continuation: bool,
+    initial_recovery: bool,
     images: Option<&[crate::model::ImageAttachment]>,
     root: &Path,
     on_output: impl FnMut(String),
@@ -1452,7 +1453,10 @@ pub fn execute(
     let session_dir = root
         .join("sessions")
         .join(resume_execution_id.unwrap_or(&execution.id));
-    if resume_execution_id.is_some() && !cfg!(feature = "fixture") {
+    // Runtime permits a new session in this retained slot only when an explicit
+    // pause preceded the first launch and no saved conversation exists. Missing
+    // sessions from actual interrupted turns must still fail validation.
+    if resume_execution_id.is_some() && !initial_recovery && !cfg!(feature = "fixture") {
         crate::session_branch::validate_session(&session_dir, &execution.session_id, Path::new(&execution.worktree))
             .map_err(|error| format!("Cannot resume node session: {error}"))?;
     }
@@ -1577,7 +1581,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         };
         let task = "Inspect the result";
         for feedback_source in [false, true] {
-            let captured = execute(&config, &execution, task, feedback_source, None, false, None, temp.path(), |_| {}).unwrap();
+            let captured = execute(&config, &execution, task, feedback_source, None, false, false, None, temp.path(), |_| {}).unwrap();
             if feedback_source {
                 assert_eq!(captured, format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker."));
             } else {
@@ -1894,7 +1898,7 @@ sys.stdin.read()
 
     #[cfg(feature = "fixture")]
     #[test]
-    fn node_rpc_steer_uses_current_execution_without_restart() {
+    fn node_rpc_consecutive_steers_preserve_order_images_and_current_execution() {
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("rpc.py");
         fs::write(&script, r#"import json, sys
@@ -1902,10 +1906,12 @@ first = json.loads(sys.stdin.readline())
 assert first['type'] == 'prompt' and first['message'] == 'original'
 print(json.dumps({'type':'response','command':'prompt','success':True}), flush=True)
 print(json.dumps({'type':'tool_execution_start'}), flush=True)
-second = json.loads(sys.stdin.readline())
-assert second['type'] == 'prompt' and second['streamingBehavior'] == 'steer'
-assert second['message'] == 'new instruction'
-print(json.dumps({'type':'response','id':second['id'],'command':'prompt','success':True}), flush=True)
+for index, expected in enumerate(['new instruction', 'same instruction', 'same instruction']):
+    second = json.loads(sys.stdin.readline())
+    assert second['type'] == 'prompt' and second['streamingBehavior'] == 'steer'
+    assert second['message'] == expected
+    assert second['images'][0]['data'] == str(index)
+    print(json.dumps({'type':'response','id':second['id'],'command':'prompt','success':True}), flush=True)
 print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'steered result'}]}}), flush=True)
 print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
@@ -1957,7 +1963,11 @@ sys.stdin.read()
             }
         });
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        steer(&id, "new instruction", None).unwrap();
+        for (index, text) in ["new instruction", "same instruction", "same instruction"].into_iter().enumerate() {
+            steer(&id, text, Some(vec![crate::model::ImageAttachment {
+                r#type: "image".into(), mime_type: "image/png".into(), data: index.to_string(), name: None,
+            }])).unwrap();
+        }
         let (result, output) = worker.join().unwrap();
         assert_eq!(result.unwrap(), "steered result");
         assert!(output.contains("steered result"));

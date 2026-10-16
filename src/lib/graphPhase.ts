@@ -35,7 +35,8 @@ export function resolveGraphPhase(options: ResolveGraphPhaseOptions): string {
 
   const canContinue = !publishing && !publicationFailed && (paused || canResume === true);
   if (canContinue) {
-    return "paused";
+    // Do not offer another writer until the interrupted attempts have drained.
+    return paused && executions.some(e => e.status === "running") ? "pausing" : "paused";
   }
 
   const isAnyNodeOrMergerWorking =

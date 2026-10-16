@@ -747,12 +747,14 @@ fn pause_drains_and_intervention_preserves_history() {
     assert_eq!(runtime.state.nodes["backend"].revision, 1);
     assert_eq!(runtime.state.nodes["backend"].status, "waiting");
     assert_eq!(runtime.state.executions.len(), 1);
-    assert_eq!(runtime.state.nodes["spec"].instruction, "Switch to React");
+    assert_eq!(runtime.state.nodes["spec"].instruction, "Use Svelte");
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
-    assert_eq!(replay.nodes["spec"].instruction, "Switch to React");
+    assert_eq!(replay.nodes["spec"].pending_messages.iter().map(|message| message.instruction.as_str()).collect::<Vec<_>>(),
+        ["Use Svelte", "Switch to React"]);
     runtime.pause(false).unwrap();
     let follow_up = runtime.jobs().unwrap().remove(0);
-    assert_eq!(follow_up.task, "Switch to React");
+    assert!(follow_up.task.find("Use Svelte").unwrap() < follow_up.task.find("Switch to React").unwrap());
+    assert!(runtime.state.nodes["spec"].pending_messages.is_empty());
     assert_eq!(follow_up.execution.session_id, job.execution.session_id);
     assert_eq!(follow_up.execution.worktree, job.execution.worktree);
     assert_eq!(

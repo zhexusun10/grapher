@@ -89,7 +89,7 @@ Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo com
 
 1. In **Settings**, select a local project, authenticate a provider, and choose a `provider/model`. You can also sign in through `npm run pi`; see [Providers](docs/guides/providers.md).
 2. Enter a coding goal. Choose **Serial** for a single Pi agent, **Graph** for a task graph, or **Auto** to let the Partitioner select the route.
-3. For Graph, inspect and **approve** the plan. Follow node logs, pause new dispatches, or send instructions.
+3. For Graph, inspect and **approve** the plan. Follow node logs, pause running nodes and later continue their sessions, or send instructions.
 4. Graph work is complete only after valid results are published to your project. Publication failures preserve state for inspection or retry.
 
 **Use trusted projects; start with a disposable one.** Planner Bash writes directly to the source before approval, even if planning fails or is cancelled; snapshots force-collect project files into Git except Runtime/managed-environment internals. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read the [execution model](docs/architecture/execution-model.md) and [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.

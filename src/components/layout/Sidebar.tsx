@@ -175,7 +175,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </div>
       </div>
 
-      <div className={`runs-list ${isReady ? "is-loaded" : ""}`}>
+      <div className="runs-list">
         {loadError && (
           <div className="sidebar-load-error" role="alert" title={loadError}>
             <div className="sidebar-load-error-header">

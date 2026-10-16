@@ -223,7 +223,7 @@ impl Store {
             let (sequence, timestamp, payload) = row.map_err(|e| e.to_string())?;
             let kind: EventKind = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
             match &kind {
-                EventKind::Started { execution } | EventKind::MergerStarted { execution } => {
+                EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } => {
                     if !authoritative { text = execution.output.clone(); }
                 }
                 EventKind::Output { text: chunk, .. } if !authoritative => text.push_str(chunk),
@@ -274,7 +274,7 @@ impl Store {
             let saved = self.execution_log_page(&run, &id, 0, usize::MAX)?;
             if saved.content != text { return Err(format!("Legacy log mismatch for {id}; source events preserved")); }
             let started = events.iter().find_map(|(_, _, kind)| match kind {
-                EventKind::Started { execution } | EventKind::MergerStarted { execution } => Some(execution.started_at),
+                EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } => Some(execution.started_at),
                 _ => None,
             }).unwrap_or(0);
             for (sequence, timestamp, mut kind) in events {
@@ -290,7 +290,7 @@ impl Store {
                         *output_bytes = text.len();
                         *metrics = metrics.take().or_else(|| Some(parse_execution_metrics(&text, started, timestamp))); true
                     }
-                    EventKind::Started { execution } | EventKind::MergerStarted { execution } if !execution.output.is_empty() => {
+                    EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } if !execution.output.is_empty() => {
                         execution.output.clear(); true
                     }
                     _ => false,

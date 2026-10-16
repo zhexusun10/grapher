@@ -1984,7 +1984,10 @@ export default function App() {
             void planningRecovery.finish(scope, event.summary, event.planningId);
           } else if (event.type === "complete") {
             if (event.snapshot) {
-              setState(event.snapshot);
+              // Terminal events supersede in-flight draft polls immediately;
+              // planning must not wait for the SSE transport to close.
+              applyForegroundSnapshot(event.snapshot, foregroundGeneration.current);
+              setIsPlanning(false);
               setRouteType(deduceRouteType(event.snapshot));
               recordRunToWorkspace(event.snapshot.runId, event.snapshot.config?.repository || targetRepo);
               const id = event.snapshot.planningId;
@@ -2003,7 +2006,7 @@ export default function App() {
         effectiveRevisionRunId
       );
       if (!planningRecovery.current(scope)) return;
-      setState(snapshot);
+      applyForegroundSnapshot(snapshot, foregroundGeneration.current);
       setRouteType(deduceRouteType(snapshot));
       recordRunToWorkspace(snapshot.runId, snapshot.config?.repository || targetRepo);
       setRunModes((prev) => {
@@ -2261,7 +2264,7 @@ export default function App() {
           return true;
         }
         if (!selectedExecution || selectedExecution.node !== selectedNodeName ||
-            !["completed", "failed", "running"].includes(selectedExecution.status)) {
+            !["completed", "failed", "paused", "running"].includes(selectedExecution.status)) {
           throw new Error(t("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。"));
         }
         const snap = await runtimeService.editNode({
@@ -2351,7 +2354,7 @@ export default function App() {
         const node = state.graph.nodes[0].name;
         const first = state.executions.find((execution) => execution.node === node &&
           !state.supersededExecutionIds?.includes(execution.id));
-        if (!first || !["completed", "failed"].includes(first.status)) {
+        if (!first || !["completed", "failed", "paused"].includes(first.status)) {
           setError(t("请等待当前执行结束后再修改初始消息。"));
           return;
         }
@@ -2625,7 +2628,7 @@ export default function App() {
         : targetMsg.executionId ?? executionIdForVersion(state, targetNodeName, cleanExisting);
       const execution = state.executions.find((item) => item.id === resolvedExecutionId);
       if (!execution || execution.node !== targetNodeName ||
-          !["completed", "failed", "running"].includes(execution.status) ||
+          !["completed", "failed", "paused", "running"].includes(execution.status) ||
           state.supersededExecutionIds?.includes(execution.id)) {
         setError(t("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。"));
         return;

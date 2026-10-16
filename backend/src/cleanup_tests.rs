@@ -58,6 +58,7 @@ fn failed_execution(runtime: &mut Runtime, id: &str) {
     runtime
         .emit(EventKind::Started {
             execution: execution(runtime, id),
+            message_sequences: None,
         })
         .unwrap();
     runtime
@@ -153,6 +154,59 @@ fn shared_node_sessions_survive_until_their_last_run_is_deleted() {
     assert!(session.is_dir());
     runtime.delete_run(&second).unwrap();
     assert!(!session.exists());
+}
+
+#[test]
+fn plain_folder_shadow_snapshot_is_reclaimed_when_the_project_has_no_other_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("plain source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("user.txt"), "keep user files").unwrap();
+    let config: Config = serde_json::from_value(
+        serde_json::json!({"repository": source, "model":"test", "maxParallel":1}),
+    )
+    .unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("data")).unwrap();
+    runtime.create(graph(), config).unwrap();
+    let id = runtime.state.run_id.clone();
+    let node = Uuid::new_v4().to_string();
+    failed_execution(&mut runtime, &node);
+    // A failed plain-folder Run keeps its lazily materialized snapshot, so a
+    // deleted failed Run must not leak it into the data directory.
+    let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
+    assert!(!crate::workspace::materialize_shadow_repo(&source, &[]).unwrap().is_empty());
+    assert!(shadow.join("objects").is_dir());
+    runtime.delete_run(&id).unwrap();
+    assert!(!shadow.exists(), "a deleted failed Run must reclaim its shadow snapshot");
+    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "keep user files");
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+}
+
+#[test]
+fn shared_plain_folder_shadow_snapshot_survives_until_the_last_run_is_deleted() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("plain source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("user.txt"), "keep user files").unwrap();
+    let config: Config = serde_json::from_value(
+        serde_json::json!({"repository": source, "model":"test", "maxParallel":1}),
+    )
+    .unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("data")).unwrap();
+    runtime.create(graph(), config.clone()).unwrap();
+    let first = runtime.state.run_id.clone();
+    let node = Uuid::new_v4().to_string();
+    failed_execution(&mut runtime, &node);
+    let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
+    assert!(!crate::workspace::materialize_shadow_repo(&source, &[]).unwrap().is_empty());
+    runtime.create(graph(), config).unwrap();
+    let second = runtime.state.run_id.clone();
+    runtime.delete_run(&first).unwrap();
+    assert!(shadow.exists(), "another Conversation still shares this snapshot");
+    runtime.delete_run(&second).unwrap();
+    assert!(!shadow.exists(), "the last Conversation reclaims the shared snapshot");
+    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "keep user files");
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
 fn legacy_runtime(source: &std::path::Path, root: &std::path::Path) -> Runtime {

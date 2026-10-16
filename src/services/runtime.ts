@@ -150,68 +150,65 @@ export const runtimeService = {
 
     const decoder = new TextDecoder();
     let buffer = "";
-    let finalSnapshot: Snapshot | null = null;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
 
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop() || "";
+        for (const part of parts) {
+          if (!part.trim()) continue;
+          let eventType = "message";
+          let dataStr = "";
 
-      for (const part of parts) {
-        if (!part.trim()) continue;
-        let eventType = "message";
-        let dataStr = "";
-
-        for (const line of part.split("\n")) {
-          if (line.startsWith("event: ")) {
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith("data: ")) {
-            dataStr = line.slice(6).trim();
-          }
-        }
-
-        if (dataStr) {
-          try {
-            const dataObj = JSON.parse(dataStr);
-            if (eventType === "complete") {
-              historyRequests.clear();
-              finalSnapshot = dataObj.snapshot || dataObj;
-              onEvent({ type: "complete", snapshot: finalSnapshot! });
-            } else if (eventType === "run_started") {
-              onEvent({ type: "run_started", runId: dataObj.runId });
-            } else if (eventType === "route_decision") {
-              onEvent({ type: "route_decision", planType: dataObj.planType });
-            } else if (eventType === "partitioner") {
-              onEvent({ type: "partitioner", raw: dataObj.raw, event: dataObj.event });
-            } else if (eventType === "planner") {
-              onEvent({ type: "planner", raw: dataObj.raw, event: dataObj.event });
-            } else if (eventType === "error") {
-              historyRequests.clear();
-              onEvent({
-                type: "error",
-                error: dataObj.error,
-                planningId: dataObj.planningId,
-                summary: dataObj.summary,
-              });
-              const err = new Error(dataObj.error || t("规划失败"));
-              (err as any).planningId = dataObj.planningId;
-              (err as any).summary = dataObj.summary;
-              throw err;
+          for (const line of part.split("\n")) {
+            if (line.startsWith("event: ")) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith("data: ")) {
+              dataStr = line.slice(6).trim();
             }
-          } catch (e) {
-            if (eventType === "error") throw e;
+          }
+
+          if (!dataStr) continue;
+          let dataObj;
+          try { dataObj = JSON.parse(dataStr); }
+          catch (error) {
+            if (eventType === "error") throw error;
+            continue;
+          }
+          if (eventType === "complete") {
+            historyRequests.clear();
+            const snapshot: Snapshot = dataObj.snapshot || dataObj;
+            onEvent({ type: "complete", snapshot });
+            // `complete` is the business boundary. A proxy/keep-alive stream
+            // may remain open indefinitely after this terminal event.
+            return snapshot;
+          } else if (eventType === "run_started") {
+            onEvent({ type: "run_started", runId: dataObj.runId });
+          } else if (eventType === "route_decision") {
+            onEvent({ type: "route_decision", planType: dataObj.planType });
+          } else if (eventType === "partitioner") {
+            onEvent({ type: "partitioner", raw: dataObj.raw, event: dataObj.event });
+          } else if (eventType === "planner") {
+            onEvent({ type: "planner", raw: dataObj.raw, event: dataObj.event });
+          } else if (eventType === "error") {
+            historyRequests.clear();
+            onEvent({ type: "error", error: dataObj.error, planningId: dataObj.planningId, summary: dataObj.summary });
+            const err = new Error(dataObj.error || t("规划失败"));
+            (err as any).planningId = dataObj.planningId;
+            (err as any).summary = dataObj.summary;
+            throw err;
           }
         }
       }
-    }
-
-    if (!finalSnapshot) {
       throw new Error(t("规划连接已结束，但未收到完成结果。请刷新检查规划记录后重试。"));
+    } finally {
+      void reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
-    return finalSnapshot;
   },
   getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number) =>
     request<{ runId: string; executionId: string; content: string; startOffset?: number; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(

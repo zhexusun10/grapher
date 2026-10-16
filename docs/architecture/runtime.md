@@ -59,6 +59,8 @@ blocked -> waiting            (an upstream node runs again)
 - `done`: current task result is valid.
 - `dirty`: a change invalidated the current result.
 - `failed`: the execution or protocol failed.
+- `paused`: the backend's browser projection identifies an explicitly stopped or
+  recoverably interrupted execution; it is not a provider/protocol failure.
 - `blocked`: dependencies failed or workspace composition could not proceed. Starting an upstream execution returns the node to `waiting` so the new result is composed again.
 
 Nodes remain stable across recorded execution attempts. Historical output and backend-recorded Git snapshots remain inspectable even when a later revision supersedes their result; ordinary files remain tied to their physical directory.
@@ -69,7 +71,27 @@ Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=
 
 There is no global pool limiting nodes across Runs, and no shared cap for Planner/Serial sessions. Choose concurrency with provider quotas and machine resources in mind. Creating or switching conversations does not stop background Runs.
 
-Failure blocks dependent branches; unrelated work continues. Pause stops new dispatches without forcibly terminating active model calls. Stop/cancel is a separate process-lifecycle action.
+Failure blocks dependent branches; unrelated work continues. The topology's
+Pause control stops new dispatches **and interrupts active node process trees**
+for that Run, without stopping its Planner or another Run. The browser shows
+`pausing` until those writers drain and disables Continue during that interval.
+Continue requeues the interrupted nodes using their own Pi sessions and retained
+workspaces. If an initial preparation was paused before Pi launched and no
+conversation exists, Continue dispatches the initial task instead of attempting
+to resume a nonexistent session; the unstarted attempt remains in history.
+A node conversation's Stop interrupts only that node; global
+Stop/cancel also cancels planning. Internal scheduling-only pauses used to drain
+an affected branch for a Planner revision still let active calls finish.
+
+`ExecutionStopRequested` records the affected execution IDs before termination,
+including workers still preparing or not yet registered as native processes.
+That intent wins a concurrent successful worker return and prevents publication
+or feedback from the stopped attempt. Windows termination's exit code 1 alone
+is **not** evidence of a user pause. The persisted failure/recovery schema stays
+compatible: stopped attempts retain terminal `Failed` evidence, while API node
+and execution projections expose `paused` for known interruptions. Checkpoints
+retain the attempt-scoped stop requests; Continue does not silently retry an
+unrelated ordinary failure.
 
 Saving changed Node Agent model/thinking settings from a conversation records
 per-node overrides for every node that has never had an execution, including
@@ -103,11 +125,50 @@ Completion-state verification, forwarded-message shape and session forks are spe
 
 Live steering does not itself mark a running node dirty. Completed-node follow-ups are new messages, not original-task rewrites; shared-terminal continuations, other changed results and history edits follow the distinct [session/invalidation rules](execution-model.md#sessions-follow-ups-and-history-edits).
 
+### Durable node follow-up delivery
+
+Accepted human follow-ups are a per-node FIFO in the event-sourced projection,
+identified by event sequence rather than text. Equal messages are separate turns.
+The legacy `instruction` field is not the queue and later sends cannot overwrite
+an accepted pending turn. Existing approval, publication, dependency and writer
+ownership checks still apply; queueing does not bypass them.
+
+When a node can dispatch, Runtime batches its currently pending turns into one
+Execution, preserving message boundaries, file-attachment text and image order.
+A single turn retains its original prompt; a multi-turn prompt labels each turn
+and its attached image range. The same durable `Started` event records the exact
+`message_sequences` claim and removes those turns from the FIFO. A failed claim
+write removes nothing. Later messages cannot be consumed by an earlier claim.
+The browser uses this binding after reload and displays the shared response after
+all user turns in that batch, not between them.
+
+Pending turns survive checkpoints and restart; legacy checkpoints without queue
+metadata rebuild from business events without rewriting stored data. Startup
+still pauses unfinished Runs for explicit recovery rather than silently making
+model calls. Dispatched messages remain bound to their execution, including its
+failure/interruption evidence; a claim is not evidence of model completion.
+
+Running nodes continue to accept acknowledged Pi RPC Steers in order, without a
+new Execution or queue-capacity rejection. If a stale browser sends `intervene`
+after dispatch has already started, the API routes it to that live writer as a
+Steer. RPC transport/acknowledgement failures still surface as failures, not false
+success or automatic resends.
+
+Focused evidence: [queue/replay regressions](../../backend/src/node_message_queue_tests.rs),
+[live delivery regressions](../../backend/src/node_message_delivery_tests.rs) and
+[Graph/Serial browser interactions](../../scripts/frontend-audit.test.mjs).
+
 ## Event and output storage
 
 Business events include graph creation/revision, approval, execution transitions, feedback, human intervention, pause, and publication. Execution output is stored separately in UTF-8 byte-indexed `execution_logs` chunks; terminal events carry structured metadata rather than full transcripts. New output fills the final partial chunk across writer batches, up to 32 KiB per UTF-8-aligned chunk, instead of retaining one row/index entry per small stdout packet. Extending a chunk never changes its committed text prefix or existing byte cursors; log writes and cursor/projection updates remain commit-ordered. This bounds future row overhead without rewriting retained transcripts during normal startup or history reads.
 
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand using `(runId, executionId, byteOffset)`; planning revisions each have their own cursor. Execution-log forward pages default to 256 KiB, with a configurable limit capped at 1 MiB. Planning forward pages are capped at 256 KiB; Planning tail requests accept a `limit` capped at 1 MiB. Both live and settled conversations open from a bounded 512 KiB tail, with 1 MiB targets for older reads (plus the bounded look-behind below). Upward scrolling prefetches within roughly two viewports of the loaded transcript's beginning, rather than waiting for the pane's exact top. Initial filling measures the rendered transcript, not the surrounding task, graph summary or composer, and reads older pages until there are about two viewports of actual history or the beginning is reached. On conversation entry, history is revealed only after that fill, virtualized row measurements and the initial scroll have settled; a first byte page or elapsed timer is not sufficient. All displayed execution turns participate in readiness, while empty logs and read errors still reveal a usable view with retry where appropriate. A gray loading label occupies a permanently reserved, separate line; it never overlays messages or changes the reading anchor. There is no load-earlier button. Prepending preserves a retained visible row's pixel position through virtualized height measurements, independently of concurrent live appends, and never enables follow-to-bottom while the user is reading older output. `tail=true` with an optional exclusive `before` cursor returns `startOffset` and `nextOffset`; older reads move only the start cursor, while live reads advance only the end cursor. Tail reads may include boundary look-behind (up to two stored execution chunks, or 256 KiB for Planner). A leading split JSONL record is retained for later reconstruction but is never displayed as raw assistant text. `full=true` remains available for explicit settled-output exports and compatibility callers.
+
+Node and Merger execution records default to expanded, including older attempts.
+Appending a message or waiting for its new execution does not collapse earlier
+records. Explicitly collapsing a record affects only that execution and remains
+in effect for later turns while viewing the same node conversation. This is
+separate from the thinking/tool-card folding described below.
 
 The two browser transcript caches each have a 20-entry / 30 MiB limit, charged against retained text rather than absolute byte cursors. Execution windows are owned by their mounted view and are released when leaving that Node/Serial/Merger view. Planner windows are cached independently by `(runId, planningId)` and, within the cache budget, survive Node-to-Planner navigation and new revisions within the same Conversation. Cold Planner history starts at the newest revision; older revisions load to fill the initial buffer or on upward scroll. The Latest action smoothly traverses the full distance without a pre-jump, tracks the bottom through live output and virtualized height changes, and temporarily disables reading-anchor restoration and automatic bottom snaps. User input or Conversation exit cancels the animation; reduced-motion preferences are respected. Cold, settled thinking history and tool cards start collapsed; their bodies are mounted only on explicit expansion. Active-conversation thinking (SSE or incremental JSONL) may auto-expand, while explicit user collapse remains respected. Folding reduces body-rendering work, not log-page transfer: the current JSONL byte pages still carry thinking and tool details, and expansion reads the already loaded page rather than issuing a per-card network request. Leaving the entire Conversation (another Run, workspace, new-conversation view, or unmount) releases both caches for that Run and cancels its in-flight readers so late responses cannot repopulate them. Deletion invalidates only the affected Run. A live Planner window must revalidate its end cursor through a terminal output page, even if that page has no new text; reaching the previous live byte total is not terminal completeness. These cache limits are not a cap on a selected transcript's size. Focused regressions cover cross-page tools, concurrent live/older reads, repeated switching and stop-with-draft behavior in [conversation history browser tests](../../scripts/conversation-history-ui.test.mjs) and [byte-window tests](../../scripts/transcript-window.test.ts).
 
@@ -132,7 +193,12 @@ mistaking unloaded settings for a missing model. See
 [request deadlines](../../src/services/requestTimeout.ts) and
 [browser regressions](../../scripts/bootstrap-settings-ui.test.mjs).
 
-Planning attempts retain requests, graph candidates, summaries, and Pi JSONL streams. UI switching must not confuse one Run's transcripts with another's. Tests and legacy-log migration are described in [Conversation logs](../testing/conversation-logs.md).
+Planning attempts retain requests, graph candidates, summaries, and Pi JSONL streams.
+The planning SSE `complete` event is terminal even if the HTTP transport remains
+open: the client releases the reader, clears foreground planning, and supersedes
+in-flight draft polls with the committed snapshot. This applies to appended
+Planner revisions as well as first plans. UI switching must not confuse one Run's
+transcripts with another's. Tests and legacy-log migration are described in [Conversation logs](../testing/conversation-logs.md).
 
 ## Recovery and ownership
 
@@ -141,8 +207,9 @@ One backend process exclusively owns a runtime data directory through `runtime.l
 After interruption:
 
 - Old model sessions are not automatically resumed.
-- Interrupted executions become failed; the Run retains a paused or recoverable
-  state.
+- Interrupted executions retain terminal failure evidence internally and project
+  as `paused` when the interruption is recognized; the Run remains paused or
+  recoverable rather than claiming completion.
 - If the failed execution is identified as an application/process interruption,
   the saved projection exposes a recoverable Continue action. Continue queues
   those interrupted nodes and their blocked dependency descendants, then starts

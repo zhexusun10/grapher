@@ -266,9 +266,71 @@ fn publication_merger_continuation_control_validates_phase_and_workspace() {
         .runtime
         .lock()
         .unwrap()
-        .emit(EventKind::Started { execution: busy })
+        .emit(EventKind::Started { execution: busy, message_sequences: None })
         .unwrap();
     assert!(attempt("merger", &merger.id).is_err());
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn topology_pause_and_node_stop_recover_unlaunched_workers_without_a_phantom_session() {
+    for global in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = crate::fixture::repository(temp.path()).unwrap();
+        let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+        runtime.create(Graph {
+            original_goal: "pause".into(),
+            nodes: ["left", "right"].into_iter().map(|name| Node {
+                name: name.into(), task: name.into(),
+            }).collect(), edges: vec![],
+        }, serde_json::from_value(serde_json::json!({
+            "repository": repository, "model": "mock/model", "maxParallel": 2,
+        })).unwrap()).unwrap();
+        runtime.approve().unwrap();
+        let jobs = runtime.jobs().unwrap();
+        let run_id = runtime.state.run_id.clone();
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime), driving: AtomicBool::new(true),
+            drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+            planning: AtomicBool::new(true), extension: temp.path().join("unused.ts"),
+        });
+        let paused = control(if global { "pause" } else { "stop" }.into(),
+            if global { None } else { Some("left".into()) }, None,
+            Some(run_id.clone()), None, None, &service).unwrap();
+        assert_eq!(paused.paused, global);
+        assert!(!paused.stop_requested, "node/topology pause must not cancel the Planner");
+        assert!(service.planning.load(Ordering::SeqCst));
+        assert_eq!(paused.execution_stop_requests.len(), if global { 2 } else { 1 });
+        assert!(control("resume".into(), None, None, Some(run_id.clone()), None, None, &service).is_err());
+        {
+            let mut runtime = service.runtime.lock().unwrap();
+            for job in &jobs {
+                if global || job.execution.node == "left" {
+                    runtime.finish(&job.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+                } else {
+                    let head = runtime.state.base.clone();
+                    runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
+                }
+            }
+            let view = snapshot_metadata(&runtime.state).unwrap();
+            assert_eq!(view["nodes"]["left"]["status"], "paused");
+            assert_eq!(view["nodes"]["right"]["status"], if global { "paused" } else { "done" });
+        }
+        let resumed = control("resume".into(), None, None, Some(run_id), None, None, &service).unwrap();
+        assert!(!resumed.paused);
+        assert_eq!(resumed.nodes["left"].status, "waiting");
+        let mut runtime = service.runtime.lock().unwrap();
+        let retry = runtime.jobs().unwrap();
+        assert_eq!(retry.len(), if global { 2 } else { 1 });
+        for job in retry {
+            let prior = jobs.iter().find(|prior| prior.execution.node == job.execution.node).unwrap();
+            assert!(!job.continuation, "these workers were paused before Pi launched");
+            assert!(job.initial_recovery);
+            assert_eq!(job.task, job.execution.node);
+            assert_eq!(job.execution.session_id, prior.execution.session_id);
+            assert_eq!(job.execution.worktree, prior.execution.worktree);
+        }
+    }
 }
 
 #[cfg(feature = "fixture")]
@@ -532,6 +594,7 @@ fn buffered_output_flushes_before_finish_and_replays() {
         runtime
             .emit(EventKind::Started {
                 execution: execution.clone(),
+                message_sequences: None,
             })
             .unwrap();
     }
@@ -3059,7 +3122,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         EventKind::FeedbackExhausted { from, to, count: 1, limit: 1, .. } if from == "review" && to == "owner"
     )).expect("exhaustion must be recorded, not accepted or failed");
     let consumer_started = runtime.state.events.iter().find(|event| matches!(&event.kind,
-        EventKind::Started { execution } if execution.node == "consumer"
+        EventKind::Started { execution, .. } if execution.node == "consumer"
     )).unwrap();
     assert!(skipped.sequence < consumer_started.sequence);
     assert_eq!(runtime.state.phase, "completed");
@@ -3214,7 +3277,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         completed_at: None,
         metrics: None,
     };
-    runtime.emit(EventKind::Started { execution }).unwrap();
+    runtime.emit(EventKind::Started { execution, message_sequences: None }).unwrap();
     runtime
         .emit(EventKind::Finished {
             execution_id: "exec-1".into(),

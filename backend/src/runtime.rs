@@ -50,6 +50,9 @@ pub struct Job {
     /// Resume the existing Pi session through its public continuation boundary
     /// rather than sending the original task again.
     pub continuation: bool,
+    /// An explicitly paused preparation never launched its first Pi session.
+    /// Send the initial task, but retain the selected workspace and session slot.
+    pub initial_recovery: bool,
 }
 
 pub(crate) struct ResultJob {
@@ -1326,6 +1329,21 @@ impl Runtime {
         })
     }
 
+    /// Record intent before terminating processes, including workers not yet spawned.
+    /// Scheduling-only pauses (e.g. Planner revision drain) do not call this.
+    pub fn request_execution_stop(&mut self, node: Option<&str>) -> Result<Vec<(String, String)>, String> {
+        let executions: Vec<_> = self.state.executions.iter()
+            .filter(|execution| execution.status == "running"
+                && node.is_none_or(|node| execution.node == node))
+            .map(|execution| (execution.node.clone(), execution.id.clone())).collect();
+        if !executions.is_empty() {
+            self.emit(EventKind::ExecutionStopRequested {
+                execution_ids: executions.iter().map(|(_, id)| id.clone()).collect(),
+            })?;
+        }
+        Ok(executions)
+    }
+
     pub fn pause(&mut self, paused: bool) -> Result<(), String> {
         if matches!(
             self.state.phase.as_str(),
@@ -1337,6 +1355,10 @@ impl Runtime {
             return Err("Approve the graph first".into());
         }
         if !paused {
+            if self.state.executions.iter().any(|execution| execution.status == "running"
+                && self.state.execution_stop_requests.contains(&execution.id)) {
+                return Err("Wait for paused executions to stop before continuing".into());
+            }
             resolve_repository(
                 &self.root,
                 self.state.config.as_ref().ok_or("Missing config")?,
@@ -1478,7 +1500,7 @@ impl Runtime {
             .iter()
             .position(|event| {
                 matches!(
-                &event.kind, EventKind::Started { execution } if execution.id == execution_id
+                &event.kind, EventKind::Started { execution, .. } if execution.id == execution_id
                     )
             })
             .ok_or("Missing execution start")?;
@@ -1539,6 +1561,10 @@ impl Runtime {
     /// environments keep their fixed-layout workspace contract, so they are
     /// excluded from source-direct follow-ups.
     fn source_direct_context(&self, node: &str) -> bool {
+        if self.state.nodes.get(node).and_then(|state| state.pending_messages.first())
+            .is_some_and(|message| message.source_direct) {
+            return true;
+        }
         !self.is_serial()
             && self
                 .state
@@ -1546,7 +1572,7 @@ impl Runtime {
                 .as_ref()
                 .and_then(|config| config.environment.as_ref())
                 .is_none()
-            && self.state.phase == "completed"
+            && matches!(self.state.phase.as_str(), "completed" | "followup")
             && self
                 .state
                 .nodes
@@ -1832,7 +1858,8 @@ impl Runtime {
         // A source-direct follow-up runs in the user's directory and must not
         // rebuild/invalidate anything else. `followup` is entered only by a
         // source_direct Invalidated event, so every job scheduled here is one.
-        let source_direct_run = self.state.phase == "followup";
+        let source_direct_run = self.state.phase == "followup" || self.state.nodes.values()
+            .any(|node| node.pending_messages.first().is_some_and(|message| message.source_direct));
         let resolved_repository = resolve_repository(&self.root, &config)?;
         let materialize_source = !source_direct_run
             && !self.is_serial()
@@ -1860,7 +1887,10 @@ impl Runtime {
                     .clone()
                     .unwrap_or_else(|| source_head.clone())
             };
-            let continuation = self.state.nodes[&node.name].continuation;
+            let queued_prompt = self.state.nodes[&node.name].pending_prompt();
+            let message_sequences = self.state.nodes[&node.name].pending_messages.iter()
+                .map(|message| message.sequence).collect::<Vec<_>>();
+            let continuation = self.state.nodes[&node.name].continuation && queued_prompt.is_none();
             let resume = if continuation {
                 self.state
                     .executions
@@ -1916,6 +1946,26 @@ impl Runtime {
             } else {
                 None
             };
+            // Session continuation and physical workspace recovery are distinct:
+            // a first preparation may have stopped before Pi accepted any task.
+            let initial_recovery = continuation && resume.is_some_and(|previous| {
+                if !self.state.execution_stop_requests.contains(&previous.id)
+                    || self.state.nodes[&node.name].human_instruction
+                    || self.state.nodes[&node.name].feedback_workspace.is_some()
+                    || self.state.executions.iter().any(|execution| execution.node == node.name
+                        && (execution.pid.is_some() || execution.status == "completed")) {
+                    return false;
+                }
+                let origin = self.state.executions.iter().find(|execution|
+                    execution.node == node.name && execution.session_id == previous.session_id).unwrap();
+                let suffix = format!("_{}.jsonl", previous.session_id);
+                match fs::read_dir(self.root.join("sessions").join(&origin.id)) {
+                    Ok(mut entries) => !entries.any(|entry| entry.map_or(true, |entry|
+                        entry.file_name().to_string_lossy().ends_with(&suffix))),
+                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                }
+            });
+            let continuation = continuation && !initial_recovery;
             let preserved_workspace = resume
                 .filter(|previous| {
                     previous.status == "failed"
@@ -2174,7 +2224,20 @@ impl Runtime {
                 metrics: None,
             };
             let state = &self.state.nodes[&node.name];
-            let task = if continuation {
+            let task = if let Some((prompt, _)) = &queued_prompt {
+                if resume.is_none() {
+                    // A Planner revision may have replaced the original task
+                    // and session while these accepted turns were waiting.
+                    format!("{}\n\n{prompt}", node.task)
+                } else if !state.instruction.is_empty() && !state.pending_messages.iter()
+                    .any(|message| message.instruction == state.instruction) {
+                    // Pending feedback/history work is not replaced by the
+                    // human-message batch either.
+                    format!("{}\n\n{prompt}", state.instruction)
+                } else {
+                    prompt.clone()
+                }
+            } else if continuation {
                 // The Pi continuation boundary restores the unfinished turn
                 // from the existing session; do not resend the original task.
                 String::new()
@@ -2187,7 +2250,7 @@ impl Runtime {
             } else {
                 format!("{}\n{}", node.task, state.instruction)
             };
-            let images = state.instruction_images.clone();
+            let images = queued_prompt.map(|(_, images)| images).unwrap_or_else(|| state.instruction_images.clone());
             let feedback_source = self
                 .state
                 .graph
@@ -2331,6 +2394,7 @@ impl Runtime {
             }
             self.emit(EventKind::Started {
                 execution: execution.clone(),
+                message_sequences: Some(message_sequences),
             })?;
             if config.environment.as_ref().is_some_and(|policy| policy.best_effort) {
                 environment_sources.extend(environment_previous.iter().cloned());
@@ -2376,6 +2440,7 @@ impl Runtime {
                 previous_environment_launch,
                 preserve_failed_environment,
                 continuation,
+                initial_recovery,
             });
         }
         if allow_publication
@@ -2762,6 +2827,16 @@ impl Runtime {
         execution: &Execution,
         result: Result<(String, String), String>,
     ) -> Result<Option<(String, String)>, String> {
+        crate::process_control::clear_owner_stop(&crate::process_control::execution_owner(
+            &self.state.run_id, &execution.node, &execution.id,
+        ));
+        // A worker may return success concurrently with the user's pause. The
+        // persisted request wins; never publish or send feedback from that turn.
+        let result = if self.state.execution_stop_requests.contains(&execution.id) {
+            Err("用户已暂停本次执行；点击继续可恢复未完成的会话。".to_string())
+        } else {
+            result
+        };
         match result {
             Ok((head, output)) => {
                 let mut composite = None;
@@ -2926,7 +3001,8 @@ impl Runtime {
             Err(error) => {
                 // Stop kills Pi's process tree; its nonzero exit code is a
                 // consequence of the user's action, not a model failure.
-                let error = if self.state.stop_requested {
+                let error = if self.state.stop_requested
+                    && !self.state.execution_stop_requests.contains(&execution.id) {
                     "用户已停止本次执行；可以修改消息或重新运行。".to_string()
                 } else {
                     error
@@ -3927,6 +4003,7 @@ fn perform_with_merger_inner(
         job.feedback_source,
         job.resume_execution_id.as_deref(),
         job.continuation,
+        job.initial_recovery,
         job.images.as_deref(),
         root,
         on_output,

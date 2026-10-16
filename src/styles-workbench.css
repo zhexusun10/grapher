@@ -1591,7 +1591,9 @@ button.session-label-toggle:focus-visible {
   color: var(--status-blocked, #64748B);
 }
 
-.status.dirty {
+.status.dirty,
+.status.paused,
+.status-badge.paused {
   color: var(--status-warning);
 }
 
@@ -1776,6 +1778,10 @@ button.session-label-toggle:focus-visible {
 
 .task-node.blocked {
   border-color: var(--status-blocked-border, #94A3B8);
+}
+
+.task-node.paused {
+  border-color: var(--status-warning);
 }
 
 .node-heading {
@@ -2409,6 +2415,12 @@ button.session-label-toggle:focus-visible {
   margin: 8px 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.node-error.paused {
+  color: var(--text-secondary);
+  background: var(--bg-canvas);
+  border-color: var(--border-default);
 }
 
 .node-error button {

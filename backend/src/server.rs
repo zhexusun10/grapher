@@ -460,6 +460,9 @@ mod planning_repository_tests;
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
 #[cfg(all(test, feature = "fixture"))]
+#[path = "node_message_delivery_tests.rs"]
+mod node_message_delivery_tests;
+#[cfg(all(test, feature = "fixture"))]
 #[path = "planner_review_tests.rs"]
 mod planner_review_tests;
 #[cfg(test)]
@@ -2357,12 +2360,15 @@ fn drive(service: Arc<Service>) {
                     let run_id = run_id.clone();
                     let spawned = thread::Builder::new().name("grapher-node".into()).spawn(move || {
                         let mut job = job;
-                        let node_owner = format!("{}:node:{}", run_id, job.execution.node);
+                        let node_owner = crate::process_control::execution_owner(
+                            &run_id, &job.execution.node, &job.execution.id,
+                        );
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             // Every model session is independent. Serial mode selects
                             // the source checkout, but it does not serialize sessions
                             // from different Runs or attempt to reconcile their writes.
                             crate::process_control::with_owner(&node_owner, || {
+                                crate::process_control::check_current_owner_stop()?;
                                 if job.materialize_source {
                                     materialize_job_source(&service, &root, &mut job)?;
                                 }
@@ -2387,6 +2393,7 @@ fn drive(service: Arc<Service>) {
                                         });
                                     },
                                     |head| {
+                                        crate::process_control::check_current_owner_stop()?;
                                         clear_activity(&job.run_id, &activity_key);
                                         service
                                             .runtime
@@ -2581,6 +2588,24 @@ fn control(
         )?;
         return Ok(runtime.state.clone());
     }
+    // Decide queue-vs-live delivery under the same Run mutex as dispatch.
+    // A stale browser may still send `intervene` after its queued turn started;
+    // transparently steer that writer instead of rejecting or overwriting it.
+    let (action, execution_id) = if action == "intervene" {
+        let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        if let Some(running) = runtime.state.executions.iter().rev().find(|execution|
+            execution.node == node.as_deref().unwrap_or_default() && execution.status == "running") {
+            ("steer".to_string(), Some(running.id.clone()))
+        } else {
+            if service.planning.load(Ordering::SeqCst) { return Err("Wait for planning to finish".into()); }
+            runtime.intervene_with_images(node.as_deref().unwrap_or_default(),
+                instruction.as_deref().unwrap_or_default(), images)?;
+            let snapshot = runtime.state.clone();
+            drop(runtime);
+            drive(service.clone());
+            return Ok(snapshot);
+        }
+    } else { (action, execution_id) };
     if action == "steer" {
         let node = node.ok_or("Select a node to steer")?;
         let instruction = instruction.ok_or("Enter a steering message")?;
@@ -2794,6 +2819,7 @@ fn control(
         if let Some(node_name) = target_node {
             // 用户在单个 Node 的对话框中点击停止/打断：
             // 只打断目标 Node 的独立执行进程，绝不暂停全图，绝不影响其他并发运行的 Node，绝不打断 Planner
+            stop_node_executions(&mut runtime, Some(node_name))?;
             crate::engine::terminate_node(&active_id, node_name);
             let snapshot = runtime.state.clone();
             drop(runtime);
@@ -2812,6 +2838,7 @@ fn control(
             let _ = runtime.pause(true);
         }
         runtime.emit(EventKind::StopRequested)?;
+        stop_node_executions(&mut runtime, None)?;
         let snapshot = runtime.state.clone();
         drop(runtime);
         crate::engine::terminate_run(&active_id);
@@ -2857,7 +2884,11 @@ fn control(
                 ActivityGuard::begin(&runtime.state.run_id, "approve", "source_capture", "");
             runtime.approve()?;
         }
-        "pause" => runtime.pause(true)?,
+        "pause" => {
+            runtime.pause(true)?;
+            // UI Pause interrupts current nodes, not the Planner or other Runs.
+            stop_node_executions(&mut runtime, None)?;
+        },
         "resume" => runtime.pause(false)?,
         "reject" => {
             if runtime.state.phase != "awaiting_approval" {
@@ -2865,11 +2896,6 @@ fn control(
             }
             runtime.emit(EventKind::Rejected)?;
         }
-        "intervene" => runtime.intervene_with_images(
-            node.as_deref().unwrap_or_default(),
-            instruction.as_deref().unwrap_or_default(),
-            images,
-        )?,
         "resolve" => runtime.resolved(node.as_deref().unwrap_or_default())?,
         _ => return Err("Unknown action".into()),
     }
@@ -2877,11 +2903,20 @@ fn control(
     drop(runtime);
     if matches!(
         action.as_str(),
-        "approve" | "resume" | "intervene" | "resolve" | "retry_publication"
+        "approve" | "resume" | "resolve" | "retry_publication"
     ) {
         drive(service.clone());
     }
     Ok(snapshot)
+}
+
+fn stop_node_executions(runtime: &mut Runtime, node: Option<&str>) -> Result<(), String> {
+    for (node, execution_id) in runtime.request_execution_stop(node)? {
+        crate::process_control::stop_owner(&crate::process_control::execution_owner(
+            &runtime.state.run_id, &node, &execution_id,
+        ))?;
+    }
+    Ok(())
 }
 
 fn edit_planner(

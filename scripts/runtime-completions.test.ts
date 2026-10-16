@@ -64,6 +64,30 @@ test("a durable planning or failed planning Run stays attached to its workspace"
   }
 });
 
+test("a terminal Planner revision completes without waiting for SSE EOF", { timeout: 2000 }, async () => {
+  const original = globalThis.fetch;
+  const snapshot = { runId: "revision-run", phase: "awaiting_approval", approved: false } as Snapshot;
+  let cancelled = false;
+  const events: string[] = [];
+  try {
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      start(controller) {
+        const wire = `event: complete\ndata: ${JSON.stringify({ snapshot })}\n\n`;
+        // The terminal frame can span transport packets, without closing HTTP.
+        const bytes = new TextEncoder().encode(wire);
+        controller.enqueue(bytes.slice(0, 20));
+        controller.enqueue(bytes.slice(20));
+      },
+      cancel() { cancelled = true; },
+    }), { headers: { "Content-Type": "text/event-stream" } });
+    const result = await runtimeService.planGoalStream("Append a planning instruction", {} as import("../src/types.ts").Config,
+      event => events.push(event.type), "graph", undefined, undefined, snapshot.runId);
+    assert.deepEqual(result, snapshot);
+    assert.deepEqual(events, ["complete"]);
+    assert.equal(cancelled, true, "release a terminal stream rather than leaking an open reader");
+  } finally { globalThis.fetch = original; }
+});
+
 test("planning stream preserves the persisted Run identity through completion", async () => {
   const original = globalThis.fetch;
   const snapshot = { runId: "saved-run", phase: "awaiting_approval" } as Snapshot;

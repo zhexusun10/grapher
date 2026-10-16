@@ -155,9 +155,12 @@ creation call using a call-local PATH, rather than relying on the unbound Bash
 entry's directory order. Its [drain fixture](../../scripts/fixtures/environment-native.mjs)
 starts a writer owned by the Unix process group or Windows Job from a real project
 extension. Windows bypasses libuv's additional kill-on-parent-exit child Job,
-not Rust's outer Job. Linux namespace cleanup may stop the writer before sealing;
-the harness then requires stopped-heartbeat evidence and separately checks an
-explicitly interrupted writer's partial-environment retry. The
+not Rust's outer Job. Whether the host seals a result while such a writer lives,
+or refuses to, is a platform property rather than a Grapher contract: the harness
+accepts either outcome and asserts only the invariant both hosts share, namely
+that native cleanup stops the 90-second writer instead of waiting it out, and
+that an explicitly interrupted attempt keeps its created partial environment as
+append-only evidence which the next turn reuses instead of rebuilding. The
 [lifecycle limits](../architecture/filesystem-isolation.md#process-lifecycle)
 still apply. Fixture regressions run with `npm run test:environment`.
 

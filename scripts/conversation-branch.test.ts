@@ -26,12 +26,28 @@ test('editing a completed turn hides the abandoned node branch but preserves ear
   assert.equal(state.events.length, 5, 'old durable history remains intact');
 });
 
+test('queued turns use exact durable execution claims, not the next start or matching text', () => {
+  const messages: GraphEvent[] = [1, 2, 3].map(sequence => ({ sequence, timestamp: sequence, type: 'invalidated', target: 'task', instruction: 'same', human: true }));
+  const state: Snapshot = { ...emptySnapshot,
+    nodes: { task: { status: 'dirty', revision: 2, head: '', instruction: 'same', error: null, pendingMessages: [{ sequence: 3, instruction: 'same' }] } },
+    events: [...messages,
+      { sequence: 4, timestamp: 4, type: 'started', execution: { id: 'other', node: 'other' } as never, message_sequences: [3] },
+      { sequence: 5, timestamp: 5, type: 'started', execution: { id: 'batch', node: 'task' } as never, message_sequences: [1, 2] },
+      { sequence: 6, timestamp: 6, type: 'started', execution: { id: 'unrelated-task-start', node: 'task' } as never, message_sequences: [] }],
+  };
+  assert.equal(executionIdForMessage(state, messages[0]), 'batch');
+  assert.equal(executionIdForMessage(state, messages[1]), 'batch');
+  assert.equal(executionIdForMessage(state, messages[2]), undefined);
+  const reloaded = JSON.parse(JSON.stringify(state));
+  assert.equal(executionIdForMessage(reloaded, messages[1]), 'batch');
+});
+
 test('edited messages point at the new active execution, not the superseded anchor', () => {
   const state: Snapshot = {
     ...emptySnapshot,
     events: [
       { sequence: 1, timestamp: 10, type: 'conversation_edited', target: 'task', nodes: ['task'], instruction: 'replacement', from_execution_id: 'old' },
-      { sequence: 2, timestamp: 20, type: 'started', execution: { id: 'new', node: 'task' } as never },
+      { sequence: 2, timestamp: 20, type: 'started', execution: { id: 'new', node: 'task' } as never, message_sequences: [] },
     ],
   };
   assert.equal(executionIdForEdit(state, state.events[0]), 'new');

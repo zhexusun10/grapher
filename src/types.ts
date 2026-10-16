@@ -1,5 +1,5 @@
 import { t } from "./i18n/index.ts";
-export type Status = "waiting" | "running" | "blocked" | "done" | "failed" | "dirty";
+export type Status = "waiting" | "running" | "paused" | "blocked" | "done" | "failed" | "dirty";
 interface GraphNode { name: string; task: string }
 interface GraphEdge { from: string; to: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
@@ -16,7 +16,7 @@ export interface ResultEntry { name: string; result: CompositeResult; workspace:
 export interface ResultDescriptor { schema: number; runId: string; result: CompositeResult; config: EnvironmentConfig; workspace: string; entries?: ResultEntry[]; defaultEntry?: string }
 export interface EnvironmentCapabilities { platform: string; arch: string; nativeWorkspace: boolean; fixedPhysicalLayout: boolean; namespaceLayout: boolean; basicSnapshots: boolean; extendedMetadata: boolean; sharedWorkingLayers: boolean; fullSystemSnapshot: boolean; gpuVerified: boolean; resourceQuotas: boolean; cpuQuota: boolean; memoryQuota: boolean; deviceLeases: boolean; storage: string }
 export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; postTaskReview?: boolean; environment?: EnvironmentConfig | null }
-interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; result?: CompositeResult | null; modelConfig?: RoleModelConfig }
+interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; result?: CompositeResult | null; modelConfig?: RoleModelConfig; pendingMessages?: Array<{ sequence: number; instruction: string; images?: ImageAttachment[] | null }> }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
 interface ExecutionMetrics {
   durationSeconds: number;
@@ -39,7 +39,7 @@ interface RunMetrics {
 }
 
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; input?: CompositeResult | null; result?: CompositeResult | null; workspaceLineage?: string[]; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null }
-export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Execution; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; from_execution_id?: string; from_event_sequence?: number; old_instruction?: string; first_turn?: boolean; selected_version?: number; human?: boolean; planning_id?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
+export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Execution; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; old_instruction?: string; first_turn?: boolean; selected_version?: number; human?: boolean; planning_id?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
   input: number;
@@ -210,6 +210,8 @@ export interface ChatMessage {
   runId?: string;
   node?: string;
   executionId?: string;
+  /** A durable turn that has not yet been claimed by an execution. */
+  pendingExecution?: boolean;
   delivery?: "node_messaged" | "steered";
   versions?: ChatMessageVersion[];
   currentVersionIndex?: number;

@@ -1,12 +1,13 @@
 import { t } from "../../i18n";
 import React from "react";
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
-import { ShieldCheck, Code2, LoaderCircle, Check, Circle, AlertTriangle } from "lucide-react";
+import { ShieldCheck, Code2, LoaderCircle, Check, Circle, AlertTriangle, Pause } from "lucide-react";
 import { type FeedbackExhaustion, type Status } from "../../types";
 
 export const statusText: Record<Status, string> = {
   waiting: "WAITING",
   running: "RUNNING",
+  paused: "PAUSED",
   blocked: "BLOCKED",
   done: "DONE",
   failed: "FAILED",
@@ -19,6 +20,7 @@ export const phaseText: Record<string, string> = {
   awaiting_approval: t("等待审批"),
   running: t("执行中"),
   paused: t("已暂停"),
+  pausing: t("正在暂停"),
   completed: t("已完成"),
   followup: t("源目录直改中"),
   publishing: t("正在写回工作文件夹"),
@@ -66,6 +68,8 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
         <span className={`status ${data.status}`}>
           {data.status === "running" ? (
             <LoaderCircle className="spin" size={10} />
+          ) : data.status === "paused" ? (
+            <Pause size={10} />
           ) : data.status === "done" ? (
             <Check size={11} />
           ) : (

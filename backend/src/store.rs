@@ -53,6 +53,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::NodeModelsUpdated { .. } => "node_models_updated",
         EventKind::RecoveryQueued { .. } => "recovery_queued",
         EventKind::StopRequested => "stop_requested",
+        EventKind::ExecutionStopRequested { .. } => "execution_stop_requested",
         EventKind::Rejected => "rejected",
         EventKind::Started { .. } => "started",
         EventKind::Prepared { .. } => "prepared",
@@ -82,7 +83,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
 
 fn event_execution_id(kind: &EventKind) -> Option<&str> {
     match kind {
-        EventKind::Started { execution } | EventKind::MergerStarted { execution } => {
+        EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } => {
             Some(&execution.id)
         }
         EventKind::Prepared { execution_id, .. }
@@ -269,7 +270,7 @@ impl Store {
                 *output = String::new();
             }
         }
-        let initial = if let EventKind::Started { execution }
+        let initial = if let EventKind::Started { execution, .. }
         | EventKind::MergerStarted { execution } = &mut kind
         {
             if execution.output.is_empty() {
@@ -580,8 +581,12 @@ impl Store {
             )
             .ok()
             .and_then(|(sequence, payload)| {
-                serde_json::from_str::<Snapshot>(&payload)
-                    .ok()
+                // Older checkpoints predate the durable node-message queue.
+                // Replay their business events to reconstruct pending turns;
+                // no user database migration or log rewrite is needed.
+                serde_json::from_str::<serde_json::Value>(&payload).ok()
+                    .filter(|value| value["nodeMessageQueueVersion"] == 1)
+                    .and_then(|value| serde_json::from_value::<Snapshot>(value).ok())
                     .filter(|state| {
                         state.run_id == run_id
                             && (state.events.is_empty()

@@ -333,6 +333,20 @@ pub struct SourceFiles {
     pub version: String,
 }
 
+/// A durable user turn waiting for a node execution. Its event sequence is
+/// the stable identity; equal text or attachments never deduplicate turns.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingNodeMessage {
+    pub sequence: i64,
+    pub instruction: String,
+    pub images: Option<Vec<ImageAttachment>>,
+    #[serde(default)]
+    pub source_direct: bool,
+    #[serde(default)]
+    pub shared_workspace: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeState {
@@ -340,6 +354,8 @@ pub struct NodeState {
     pub revision: usize,
     pub head: Option<String>,
     pub instruction: String,
+    #[serde(default)]
+    pub pending_messages: Vec<PendingNodeMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_images: Option<Vec<ImageAttachment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -388,6 +404,7 @@ impl Default for NodeState {
             revision: 1,
             head: None,
             instruction: String::new(),
+            pending_messages: Vec::new(),
             instruction_images: None,
             edit_execution_id: None,
             human_instruction: false,
@@ -408,6 +425,30 @@ impl Default for NodeState {
 }
 
 impl NodeState {
+    /// Batch only undispatched turns, preserving message boundaries and the
+    /// correspondence between each turn and its ordered image attachments.
+    pub fn pending_prompt(&self) -> Option<(String, Option<Vec<ImageAttachment>>)> {
+        if self.pending_messages.is_empty() { return None; }
+        let mut images = Vec::new();
+        let mut parts = Vec::new();
+        for (index, message) in self.pending_messages.iter().enumerate() {
+            let first_image = images.len() + 1;
+            images.extend(message.images.clone().unwrap_or_default());
+            let label = if images.len() >= first_image {
+                format!("[User message {}; attached images {}-{}]", index + 1, first_image, images.len())
+            } else {
+                format!("[User message {}]", index + 1)
+            };
+            parts.push(format!("{label}\n{}", message.instruction));
+        }
+        let prompt = if self.pending_messages.len() == 1 {
+            self.pending_messages[0].instruction.clone()
+        } else {
+            format!("Process these user messages in order. Image numbers refer to the attached images in order.\n\n{}", parts.join("\n\n"))
+        };
+        Some((prompt, (!images.is_empty()).then_some(images)))
+    }
+
     pub fn is_user_paused(&self) -> bool {
         self.status == "failed" && self.error.as_deref().is_some_and(is_interrupted_error)
     }
@@ -545,9 +586,17 @@ pub enum EventKind {
         continuation_nodes: Vec<String>,
     },
     StopRequested,
+    /// Explicit user interruption, pinned to attempts rather than a whole Run.
+    ExecutionStopRequested {
+        execution_ids: Vec<String>,
+    },
     Rejected,
     Started {
         execution: Execution,
+        /// Atomically claim exactly these queued turns for this execution.
+        /// Legacy starts omitted the field and consumed their pending instruction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_sequences: Option<Vec<i64>>,
     },
     Prepared {
         execution_id: String,
@@ -765,6 +814,8 @@ pub struct Snapshot {
     pub paused: bool,
     #[serde(default)]
     pub stop_requested: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_stop_requests: Vec<String>,
     pub phase: String,
     pub base: String,
     /// Last successfully published source HEAD, distinct from the graph's approval base.
@@ -1233,6 +1284,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::StopRequested => {
             state.stop_requested = true;
         }
+        EventKind::ExecutionStopRequested { execution_ids } => {
+            for id in execution_ids {
+                if !state.execution_stop_requests.contains(id) {
+                    state.execution_stop_requests.push(id.clone());
+                }
+            }
+        }
         EventKind::Paused { paused } => {
             state.paused = *paused;
             if !paused {
@@ -1271,7 +1329,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if !matches!(node.status.as_str(), "failed" | "blocked") {
                     continue;
                 }
-                let continuation = continuation_nodes.contains(name)
+                let continuation = node.pending_messages.is_empty() && continuation_nodes.contains(name)
                     && (node.model_config.is_some()
                         || node.error.as_deref().is_some_and(is_interrupted_error));
                 let has_previous_result = node.head.is_some()
@@ -1290,8 +1348,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = "rejected".into();
             state.approved = false;
         }
-        EventKind::Started { execution } => {
+        EventKind::Started { execution, message_sequences } => {
             let node = state.nodes.get_mut(&execution.node).unwrap();
+            let source_direct = node.pending_messages.iter().any(|message| message.source_direct
+                && message_sequences.as_ref().is_none_or(|sequences| sequences.contains(&message.sequence)));
+            node.pending_messages.retain(|message| message_sequences.as_ref()
+                .is_some_and(|sequences| !sequences.contains(&message.sequence)));
+            if source_direct { state.phase = "followup".into(); }
             node.edit_execution_id = None;
             node.continuation = false;
             node.status = "running".into();
@@ -1553,6 +1616,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     if changed {
                         state.publication = None;
                     }
+                    // A request accepted while this writer was still active is
+                    // for the next execution, never part of the finished one.
+                    let node = state.nodes.get_mut(&node_name).unwrap();
+                    if let Some(message) = node.pending_messages.first() {
+                        node.status = "dirty".into();
+                        node.baseline_head = (!message.source_direct).then(|| head.clone());
+                        node.human_instruction = true;
+                        node.instruction = message.instruction.clone();
+                        node.instruction_images = message.images.clone();
+                        node.shared_workspace = message.shared_workspace;
+                        if message.source_direct { state.phase = "followup".into(); }
+                    }
                 }
             }
         }
@@ -1656,6 +1731,22 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             source_direct,
         } => {
             state.stop_requested = false;
+            if *human && !instruction.is_empty() {
+                let node = state.nodes.get_mut(target).unwrap();
+                node.pending_messages.push(PendingNodeMessage {
+                    sequence: event.sequence, instruction: instruction.clone(), images: images.clone(),
+                    source_direct: *source_direct, shared_workspace: *shared_workspace,
+                });
+                // A new turn cannot overwrite a queued turn or reconfigure a
+                // live writer. The scheduler claims the immutable FIFO batch.
+                if node.status == "running" || (node.pending_messages.len() > 1
+                    && matches!(node.status.as_str(), "dirty" | "waiting" | "blocked")) {
+                    if node.status != "running" { node.revision += 1; }
+                    state.events.push(event.clone());
+                    state.run_metrics = Some(state.compute_run_metrics());
+                    return;
+                }
+            }
             if *source_direct {
                 // Source-direct follow-up: only the target re-runs in the user's
                 // directory. Publication, downstream heads and pending feedback

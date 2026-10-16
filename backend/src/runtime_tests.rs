@@ -4,6 +4,9 @@ use tempfile::TempDir;
 #[path = "node_model_tests.rs"]
 mod node_models;
 
+#[path = "node_message_queue_tests.rs"]
+mod node_message_queue;
+
 #[cfg(feature = "fixture")]
 #[path = "feedback_workspace_tests.rs"]
 mod feedback_workspace;
@@ -1000,6 +1003,88 @@ fn starting_an_upstream_node_returns_its_blocked_descendants_to_waiting() {
     }
     assert_eq!(runtime.state.nodes["other"].status, "blocked");
     assert!(runtime.state.nodes["other"].error.is_some());
+}
+
+#[test]
+fn manual_node_pause_is_replayable_and_does_not_disguise_an_unrelated_failure() {
+    let graph = Graph {
+        original_goal: "pause one branch".into(),
+        nodes: ["left", "right"].into_iter().map(|name| Node {
+            name: name.into(), task: name.into(),
+        }).collect(),
+        edges: vec![],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    let left = &jobs.iter().find(|job| job.execution.node == "left").unwrap().execution;
+    let right = &jobs.iter().find(|job| job.execution.node == "right").unwrap().execution;
+    runtime.emit_outputs(vec![EventKind::Output {
+        execution_id: left.id.clone(),
+        text: "{\"type\":\"grapher_process_started\",\"pid\":1234}\n".into(),
+    }]).unwrap();
+    let stopped = runtime.request_execution_stop(Some("left")).unwrap();
+    assert_eq!(stopped.len(), 1);
+    assert!(!runtime.state.paused, "node stop must not pause unrelated branches");
+    assert!(runtime.pause(false).is_err(), "do not resume before the writer drains");
+    runtime.finish(left, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime.finish(right, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime.jobs().unwrap();
+    assert!(runtime.state.can_resume());
+    let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+    for state in [&runtime.state, &replay] {
+        let view = crate::snapshot_view::snapshot_metadata(state).unwrap();
+        assert_eq!(view["nodes"]["left"]["status"], "paused");
+        assert_eq!(view["nodes"]["right"]["status"], "failed");
+        assert_eq!(view["executions"][0]["status"], "paused");
+        assert_eq!(view["executions"][1]["status"], "failed");
+        assert!(!view["nodes"]["left"]["error"].as_str().unwrap().contains("exit code"));
+        assert_eq!(view["canResume"], true);
+    }
+    let checkpoint: Snapshot = serde_json::from_value(
+        crate::snapshot_view::checkpoint_projection(&runtime.state),
+    ).unwrap();
+    assert_eq!(checkpoint.execution_stop_requests, vec![left.id.clone()]);
+    assert_eq!(crate::snapshot_view::snapshot_metadata(&checkpoint).unwrap()["executions"][0]["status"], "paused");
+    runtime.pause(false).unwrap();
+    let resumed = runtime.jobs().unwrap();
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].execution.node, "left");
+    assert!(resumed[0].continuation);
+    assert_eq!(resumed[0].execution.session_id, left.session_id);
+    assert_eq!(resumed[0].execution.worktree, left.worktree);
+    assert_eq!(resumed[0].resume_execution_id.as_deref(), Some(left.id.as_str()));
+    assert_eq!(runtime.state.nodes["right"].status, "failed");
+}
+
+#[test]
+fn explicit_pause_wins_a_completion_race_without_publishing_a_result() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.pause(true).unwrap();
+    runtime.request_execution_stop(None).unwrap();
+    runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "racing success".into()))).unwrap();
+    assert_eq!(runtime.state.phase, "paused");
+    assert!(runtime.state.nodes["task"].head.is_none());
+    assert!(runtime.state.executions[0].after.is_none());
+    assert!(runtime.state.publication.is_none());
+    assert_eq!(crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["nodes"]["task"]["status"], "paused");
+    runtime.pause(false).unwrap();
+    assert_eq!(runtime.jobs().unwrap().len(), 1);
+}
+
+#[test]
+fn scheduling_only_pause_does_not_reclassify_provider_failure() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.pause(true).unwrap(); // Planner's temporary drain is not a user stop.
+    runtime.finish(&job.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    let view = crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap();
+    assert_eq!(view["nodes"]["task"]["status"], "failed");
+    assert_eq!(view["executions"][0]["status"], "failed");
+    assert!(!runtime.state.can_resume());
 }
 
 #[test]
@@ -2327,7 +2412,7 @@ fn failed_node_merger_marks_posterior_node_blocked_and_descendants_recover_on_no
     // Emitting Started for "join" resets its blocked descendants to waiting.
     let mut join_exec = merger.clone();
     join_exec.node = "join".into();
-    runtime.emit(EventKind::Started { execution: join_exec }).unwrap();
+    runtime.emit(EventKind::Started { execution: join_exec, message_sequences: None }).unwrap();
     assert_eq!(runtime.state.nodes["after"].status, "waiting");
 }
 
@@ -3130,7 +3215,7 @@ fn failed_node_intervention_resumes_running_phase_and_clears_needs_attention() {
 
     // If phase somehow stayed needs_attention before Started or Steered, verify they clear it
     runtime.state.phase = "needs_attention".into();
-    runtime.emit(EventKind::Started { execution: retry_job.execution.clone() }).unwrap();
+    runtime.emit(EventKind::Started { execution: retry_job.execution.clone(), message_sequences: None }).unwrap();
     assert_eq!(runtime.state.phase, "running");
 
     runtime.state.phase = "needs_attention".into();

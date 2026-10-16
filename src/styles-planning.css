@@ -1039,6 +1039,28 @@
   pointer-events: none;
 }
 
+/* While expanding, anchor the Latest button to the settled composer height so it
+   fades out in place instead of rising with the growing input box. On collapse
+   there is no .expanded, so this rule drops and the button keeps following the
+   live height, landing at rest on reveal. */
+.initial-query-view:has(.prompt-box-container.expanded[data-resizing]) .scroll-to-bottom-btn {
+  bottom: calc(var(--composer-height-resting, var(--composer-height, 110px)) + 12px);
+}
+
+/* Keep the Latest shortcut hidden while the composer is enlarged, and hold it
+   hidden through the whole expand/shrink animation ([data-resizing], cleared
+   only by the resize onfinish) so it never reappears mid-motion and drifts
+   with the box. Hiding with opacity/visibility instead of display lets the
+   reveal ride the button's existing transition, so once the composer has
+   settled it fades in — with a subtle rise — rather than popping abruptly. */
+.initial-query-view:has(.prompt-box-container.expanded) .scroll-to-bottom-btn,
+.initial-query-view:has(.prompt-box-container[data-resizing]) .scroll-to-bottom-btn {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(4px);
+}
+
 .conversation-pane.full-width .scroll-to-bottom-btn {
   left: min(calc(100% - 70px), calc(50% + 430px + 14px));
   right: auto;

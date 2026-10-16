@@ -27,7 +27,7 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
         graph: Graph { nodes: vec![Node { name: "task".into(), task: "test".into() }], ..Default::default() },
         config, planning_id: None, planning: None,
     }).unwrap();
-    runtime.emit(EventKind::Started { execution: execution("node", "task") }).unwrap();
+    runtime.emit(EventKind::Started { execution: execution("node", "task"), message_sequences: None }).unwrap();
     runtime.emit(EventKind::MergerStarted { execution: execution("merge", "merge:task") }).unwrap();
     let db = Connection::open(&path).unwrap();
     let mut sizes = Vec::new();

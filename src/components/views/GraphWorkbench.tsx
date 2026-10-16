@@ -370,13 +370,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   onConversationReady,
 }) => {
   const [attemptId, setAttemptId] = useState("");
-  const [expandedAttemptIds, setExpandedAttemptIds] = useState<Set<string>>(new Set());
   const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
   const [editingTaskNode, setEditingTaskNode] = useState("");
   const [taskDraft, setTaskDraft] = useState("");
   useEffect(() => {
     setAttemptId("");
-    setExpandedAttemptIds(new Set());
     setCollapsedAttemptIds(new Set());
     setEditingTaskNode("");
     setTaskDraft("");
@@ -527,6 +525,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         id: `event-${event.sequence}`, parentId: null, role: "user",
         text: event.instruction || "", images: event.images, node: conversationNode, runId: state.runId,
         executionId: executionIdForMessage(state, event),
+        pendingExecution: state.nodes[conversationNode]?.pendingMessages?.some(message => message.sequence === event.sequence),
         versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : matchingLocal?.versions,
         currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : matchingLocal?.currentVersionIndex,
         delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
@@ -577,15 +576,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const assigned = new Set(turns[0].executions.map(item => item.id));
     let nextAttempt = 1;
 
+    const lastMessageByExecution = new Map(nodeMessages.filter(message => !message.delivery && message.executionId)
+      .map(message => [message.executionId, message.id]));
     for (const message of nodeMessages) {
-      const exact = message.executionId
+      const exact = message.executionId && lastMessageByExecution.get(message.executionId) === message.id
         ? attempts.find(item => item.id === message.executionId && !assigned.has(item.id))
         : undefined;
       let executions: Execution[] = exact ? [exact] : [];
       if (exact) {
         assigned.add(exact.id);
         nextAttempt = Math.max(nextAttempt, attempts.findIndex(item => item.id === exact.id) + 1);
-      } else if (!message.delivery) {
+      } else if (!message.delivery && !message.executionId && !message.pendingExecution) {
         // Older snapshots did not persist execution_id on every edit. Keep the
         // historical attempt ordering as a compatibility fallback.
         while (nextAttempt < attempts.length && assigned.has(attempts[nextAttempt].id)) nextAttempt += 1;
@@ -612,7 +613,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage);
   const latestNodeTurn = nodeTurns.at(-1);
   const waitingForNodeExecution = !!latestNodeTurn && latestNodeTurn.executions.length === 0 &&
-    !latestNodeTurn.userMessage?.delivery && (isSelectedNodeWorking || pendingRequest);
+    !latestNodeTurn.userMessage?.delivery && !latestNodeTurn.userMessage?.executionId && (isSelectedNodeWorking || pendingRequest);
   // Apply the continuation layout with the optimistic message, rather than
   // waiting for the backend to insert a new execution and its record header.
   const showExecutionRecords = attempts.length > 1 || (waitingForNodeExecution && attempts.length > 0);
@@ -1079,17 +1080,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }, 600);
   }, [handleChatScroll, setUserScrolledUp]);
 
+  // New turns must not hide earlier output. Only an explicit user toggle
+  // collapses a record, and that choice stays with its execution id.
   const isAttemptExpanded = useCallback((execId: string) => {
-    if (!showExecutionRecords) return true;
-    return execId === latestAttemptId && !waitingForNodeExecution
-      ? !collapsedAttemptIds.has(execId)
-      : expandedAttemptIds.has(execId);
-  }, [showExecutionRecords, waitingForNodeExecution, latestAttemptId, collapsedAttemptIds, expandedAttemptIds]);
+    return !showExecutionRecords || !collapsedAttemptIds.has(execId);
+  }, [showExecutionRecords, collapsedAttemptIds]);
 
   const handleToggleAttempt = useCallback((execId: string, panelEl?: HTMLElement | null) => {
     const currentlyExpanded = isAttemptExpanded(execId);
     const willExpand = !currentlyExpanded;
-    const isLatest = execId === latestAttemptId && !waitingForNodeExecution;
 
     const attemptIndex = attempts.findIndex(a => a.id === execId);
     const hasExpandedBelow = attemptIndex >= 0 && attempts.slice(attemptIndex + 1).some(a => isAttemptExpanded(a.id));
@@ -1108,21 +1107,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       setUserScrolledUp(true);
     }
 
-    if (isLatest) {
-      setCollapsedAttemptIds((prev) => {
-        const next = new Set(prev);
-        if (currentlyExpanded) next.add(execId);
-        else next.delete(execId);
-        return next;
-      });
-    } else {
-      setExpandedAttemptIds((prev) => {
-        const next = new Set(prev);
-        if (currentlyExpanded) next.delete(execId);
-        else next.add(execId);
-        return next;
-      });
-    }
+    setCollapsedAttemptIds((prev) => {
+      const next = new Set(prev);
+      if (currentlyExpanded) next.add(execId);
+      else next.delete(execId);
+      return next;
+    });
 
     if (panelEl) {
       if (willExpand) {
@@ -1142,14 +1132,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         }, 260);
       }
     }
-  }, [isAttemptExpanded, latestAttemptId, waitingForNodeExecution, attempts, followExecutionExpansion, handleChatScroll]);
+  }, [isAttemptExpanded, attempts, followExecutionExpansion, handleChatScroll]);
 
   useLayoutEffect(() => {
     const view = chatScrollRef.current?.parentElement;
     const composer = view?.querySelector<HTMLElement>(".pane-bottom-chat");
     if (!view || !composer) return;
     const update = () => {
-      view.style.setProperty("--composer-height", `${composer.getBoundingClientRect().height}px`);
+      const composerHeight = composer.getBoundingClientRect().height;
+      view.style.setProperty("--composer-height", `${composerHeight}px`);
+      // Also track the settled (collapsed and idle) composer height. The Latest
+      // button anchors to it while the input box is expanding so it fades out in
+      // place instead of riding the growing height; it never binds this while
+      // collapsing (.expanded is gone), so it still lands at rest on reveal.
+      const isSettled = !composer.querySelector(".prompt-box-container.expanded")
+        && !composer.querySelector(".prompt-box-container[data-resizing]");
+      if (isSettled) {
+        view.style.setProperty("--composer-height-resting", `${composerHeight}px`);
+      }
       // The composer is overlaid; changing its height changes the scroll area's
       // bottom padding without resizing the observed transcript content.
       const scroll = chatScrollRef.current;
@@ -1326,22 +1326,24 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
     }
     const localRemaining = messages.filter((msg) => msg.node === serialNode.name);
+    const replacedIds = new Set<string>();
     const recorded = activeNodeConversationEvents(state, serialNode.name).filter((event) =>
-      (event.type === "node_messaged" && event.node === serialNode.name) ||
+      ((event.type === "node_messaged" || event.type === "steered") && event.node === serialNode.name) ||
       ((event.type === "invalidated" && event.human || (event.type === "conversation_edited" && !event.first_turn)) && event.target === serialNode.name && !!event.instruction)
     ).reverse().filter((event) => {
-      const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "") === event.instruction);
-      if (idx < 0) return true;
-      localRemaining.splice(idx, 1);
-      return false;
+      const idx = localRemaining.findIndex((msg) => msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === event.instruction?.trim());
+      if (idx >= 0) replacedIds.add(localRemaining.splice(idx, 1)[0].id);
+      return true;
     }).reverse().map((event): ChatMessage => ({
       id: `event-${event.sequence}`, parentId: null, role: "user",
       text: event.instruction || "", images: event.images, node: serialNode.name, runId: state.runId,
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
       executionId: executionIdForMessage(state, event),
-      delivery: event.type === "node_messaged" ? "node_messaged" : undefined,
+      pendingExecution: state.nodes[serialNode.name]?.pendingMessages?.some(message => message.sequence === event.sequence),
+      delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
     }));
+    messages = messages.filter(message => !replacedIds.has(message.id));
     // A fresh browser session may have only a recorded follow-up, not the
     // original prompt in local state. Keep the initial task paired with its execution.
     if (messages[0]?.node === serialNode.name && state.graph.originalGoal) {
@@ -1363,17 +1365,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       executions: serialExecutions.length > 0 ? [serialExecutions[0]] : [],
     });
 
-    let execIndex = 1;
-    messages.slice(1).forEach((msg) => {
-      const execs = msg.delivery ? [] : execIndex < serialExecutions.length ? [serialExecutions[execIndex]] : [];
-      if (!msg.delivery) execIndex++;
-      turns.push({
-        id: msg.id,
-        userMessage: { ...msg, executionId: execs[0]?.id ?? msg.executionId },
-        isInitial: false,
-        executions: execs,
-      });
-    });
+    const assigned = new Set(turns[0].executions.map(execution => execution.id));
+    const followUps = messages.slice(1);
+    const lastMessageByExecution = new Map(followUps.filter(message => !message.delivery && message.executionId)
+      .map(message => [message.executionId, message.id]));
+    for (const msg of followUps) {
+      const exact = msg.executionId && lastMessageByExecution.get(msg.executionId) === msg.id
+        ? serialExecutions.find(execution => execution.id === msg.executionId && !assigned.has(execution.id)) : undefined;
+      const next = exact ?? (!msg.delivery && !msg.executionId && !msg.pendingExecution
+        ? serialExecutions.find(execution => !assigned.has(execution.id)) : undefined);
+      const execs = next ? [next] : [];
+      if (next) assigned.add(next.id);
+      turns.push({ id: msg.id, userMessage: { ...msg, executionId: next?.id ?? msg.executionId }, isInitial: false, executions: execs });
+    }
 
     if (serialExecutions.length > 1) {
       const assigned = new Set(turns.flatMap((t) => t.executions.map((e) => e.id)));
@@ -1388,7 +1392,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [routeType, serialNode?.name, effectiveMessages, serialExecutions, state.graph.originalGoal, state.runId, state.events]);
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
-  const serialWorkingAfterMessage = serialTurns.length > 0 && serialTurns[serialTurns.length - 1].executions.length === 0;
+  const serialWorkingAfterMessage = serialTurns.length > 0 && serialTurns[serialTurns.length - 1].executions.length === 0 &&
+    !serialTurns[serialTurns.length - 1].userMessage.executionId;
   const isSerialWorking = isNodeWorking(serialNodeState?.status, serialExecution, pendingRequest,
     serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined);
   // Serial auto-approval runs after planning releases its busy state, and
@@ -1645,7 +1650,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   editing={editingTaskNode === selectedNode.name}
                   draft={taskDraft}
                   onDraftChange={setTaskDraft}
-                  onEdit={!isNodeMergerSelected && selected !== publicationMergerCardId && (!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "running") ? () => {
+                  onEdit={!isNodeMergerSelected && selected !== publicationMergerCardId && (!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "paused" || selectedState?.status === "running") ? () => {
                     onCancelEditMessage?.();
                     setEditingTaskNode(selectedNode.name);
                     setTaskDraft(selectedNode.task);
@@ -1779,7 +1784,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </WorkspaceDetailsPanel>
 
                 {selectedState?.error && (
-                  <div className="node-error" style={{ marginTop: 12 }}>
+                  <div className={`node-error${selectedState.status === "paused" ? " paused" : ""}`} style={{ marginTop: 12 }}>
                     {localizeError(selectedState.error)}
                   </div>
                 )}
@@ -1840,7 +1845,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     : isSelectedNodeWorking
                     ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", selectedNode.name)
                     : selectedState?.status === "done"
-                    ? t("向 @{0} 留言（仅记录，不重新执行）…", selectedNode.name)
+                    ? t("向 @{0} 发送消息并继续执行…", selectedNode.name)
                     : t("向 @{0} 发送介入指令…", selectedNode.name)
                 }
                 isExecuting={isSelectedNodeWorking}
@@ -1872,7 +1877,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <div className="serial-turns-container" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     {serialTurns.map((turn, index) => {
                       const isWaitingExecution =
-                        turn.executions.length === 0 &&
+                        turn.executions.length === 0 && !turn.userMessage.executionId && !turn.userMessage.delivery &&
                         index === serialTurns.length - 1 &&
                         (isSerialWorking || isMainViewWorking || pendingRequest);
 
@@ -1964,7 +1969,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       )}
                     </WorkspaceDetailsPanel>
                     {serialNodeState?.error && (
-                      <div className="node-error" style={{ marginTop: 12 }}>
+                      <div className={`node-error${serialNodeState.status === "paused" ? " paused" : ""}`} style={{ marginTop: 12 }}>
                         {localizeError(serialNodeState.error)}
                       </div>
                     )}
@@ -2367,7 +2372,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         : graphPhase === "running" ? t("确定性运行时正在推进")
                         : graphPhase === "followup" ? t("源目录直改中（无快照）")
                         : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
-                        : graphPhase === "paused" ? t("已暂停后续派发")
+                        : graphPhase === "pausing" ? t("正在停止运行中的节点…")
+                        : graphPhase === "paused" ? t("执行已暂停，点击继续可恢复")
                         : graphPhase === "completed" ? t("运行已完成")
                         : state.approved ? phaseText[graphPhase] ?? graphPhase : ""}
                     </span>
@@ -2386,11 +2392,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           <button
                             type="button"
                             className="primary"
-                            disabled={locked || publishing || publicationFailed || state.phase === "completed"}
+                            disabled={locked || publishing || publicationFailed || state.phase === "completed" || graphPhase === "pausing"}
                             onClick={() => onControl(canContinue ? "resume" : "pause")}
                           >
                             {canContinue ? <Play size={13} /> : <Pause size={13} />}
-                            {canContinue ? t("继续") : t("暂停")}
+                            {graphPhase === "pausing" ? t("正在暂停") : canContinue ? t("继续") : t("暂停")}
                           </button>
                         </>
                       ) : null}

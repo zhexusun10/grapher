@@ -57,6 +57,7 @@ enum EventMetadata<'a> {
 /// Durable projection only: history stays in events, transcripts in execution_logs.
 pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
     json!({
+        "nodeMessageQueueVersion": 1,
         "runId": state.run_id, "planType": state.plan_type,
         "planningId": state.planning_id, "planning": state.planning,
         "graph": state.graph, "config": state.config, "plan": state.plan, "nodes": state.nodes,
@@ -64,7 +65,9 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "mergers": state.mergers.iter().map(execution_metadata).collect::<Vec<_>>(),
         "supersededExecutionIds": state.superseded_execution_ids,
         "publication": state.publication, "events": [], "approved": state.approved,
-        "paused": state.paused, "stopRequested": state.stop_requested, "canResume": state.can_resume(), "phase": state.phase, "base": state.base,
+        "paused": state.paused, "stopRequested": state.stop_requested,
+        "executionStopRequests": state.execution_stop_requests,
+        "canResume": state.can_resume(), "phase": state.phase, "base": state.base,
         "publishedHead": state.published_head, "feedbackCounts": state.feedback_counts,
         "pendingFeedback": state.pending_feedback, "reviewGraph": state.review_graph,
         "environmentPolicy": state.environment_policy,
@@ -96,6 +99,26 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         "resultExecution": state.result_execution,
         "runMetrics": state.run_metrics
     });
+    // Keep legacy persisted failure events/checkpoints compatible while exposing
+    // interruption as a distinct UI state. Ordinary provider errors stay failed.
+    for (name, node) in &state.nodes {
+        if node.is_user_paused() {
+            metadata["nodes"][name]["status"] = json!("paused");
+        }
+    }
+    let interrupted: std::collections::BTreeSet<_> = state.events.iter().filter_map(|event| {
+        match &event.kind {
+            EventKind::Failed { execution_id: Some(id), error, .. }
+                if crate::model::is_interrupted_error(error) => Some(id.as_str()),
+            _ => None,
+        }
+    }).chain(state.execution_stop_requests.iter().map(String::as_str)).collect();
+    for execution in metadata["executions"].as_array_mut().unwrap() {
+        if execution["status"] == "failed"
+            && execution["id"].as_str().is_some_and(|id| interrupted.contains(id)) {
+            execution["status"] = json!("paused");
+        }
+    }
     if let Some(graph) = &state.review_graph {
         metadata["graph"] = json!(graph);
         metadata["plan"] = json!(crate::compiler::compile(graph, false).ok());

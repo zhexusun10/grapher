@@ -220,7 +220,7 @@ pub(crate) fn remember_event(
         EventKind::EnvironmentPolicyResolved { environment: Some(_), .. } => {
             targets.insert(Target::data("environments", &state.run_id));
         }
-        EventKind::Started { execution } => {
+        EventKind::Started { execution, .. } => {
             targets.insert(Target::data("sessions", &execution.id));
         }
         EventKind::MergerStarted { execution } => {
@@ -338,7 +338,7 @@ pub(crate) fn manifest(
         }
     }
     for event in &state.events {
-        if let EventKind::Started { execution } | EventKind::MergerStarted { execution } =
+        if let EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } =
             &event.kind
         {
             if let Some(target) = legacy_workspace(Path::new(&execution.worktree), &state.run_id) {
@@ -393,7 +393,7 @@ pub(crate) fn manifest(
         }
         for event in &state.events {
             match &event.kind {
-                EventKind::Started { execution } => {
+                EventKind::Started { execution, .. } => {
                     targets.insert(Target::data("sessions", &execution.id));
                 }
                 EventKind::MergerStarted { execution } => {

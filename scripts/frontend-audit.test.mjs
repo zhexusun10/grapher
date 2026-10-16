@@ -900,7 +900,18 @@ for (const approved of [false, true]) {
     let requested = false, polls = 0;
     const errors = [];
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
-    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    await context.addInitScript(() => {
+      localStorage.setItem("grapher_language_v1", "en");
+      const fetch = window.fetch.bind(window);
+      window.fetch = async (...args) => {
+        const response = await fetch(...args);
+        if (!String(args[0]).includes("/api/plan_goal_stream") || !response.ok) return response;
+        // Model a proxy that delivers `complete` but keeps the transport open.
+        return new Response(new ReadableStream({ async start(controller) {
+          controller.enqueue(new TextEncoder().encode(await response.text()));
+        } }), { headers: response.headers });
+      };
+    });
     await context.route("**/api/*", async route => {
       const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
       let result;
@@ -959,6 +970,71 @@ for (const approved of [false, true]) {
     } finally { gate.resolve(); await context.close(); }
   });
 }
+
+test("topology Pause/Continue controls running nodes and distinguishes paused attempts from failures", { timeout: 30_000 }, async () => {
+  const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const execution = (id, node, status) => ({ id, node, status, revision: 1, attempt: 1, sessionId: id,
+    worktree: "/work", before: "", after: null, output: "", startedAt: 1000, completedAt: status === "running" ? null : 2000 });
+  let current = { runId: "pause-run", config, planType: "graph", approved: true, paused: false, phase: "running",
+    graph: { originalGoal: "Pause graph", nodes: [{ name: "task", task: "Work" }, { name: "broken", task: "Failed independently" }], edges: [] },
+    nodes: { task: { status: "running", revision: 1, instruction: "", error: null }, broken: { status: "failed", revision: 1, instruction: "", error: "Provider failed" } },
+    executions: [execution("first", "task", "running"), execution("broken-first", "broken", "failed")],
+    plan: null, events: [], base: "", feedbackCounts: {} };
+  const empty = { ...current, runId: "", approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
+  const actions = [], errors = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "history": case "snapshot": result = current; break;
+      case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = catalog; break;
+      case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+      case "get_execution_output": result = { runId: current.runId, executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true,
+        status: current.executions.find(item => item.id === body.executionId)?.status }; break;
+      case "control":
+        actions.push(body);
+        assert.equal(body.runId, current.runId);
+        assert.equal(body.node, undefined, "topology controls stay global even with a node selected");
+        current = body.action === "pause" ? { ...current, paused: true, phase: "paused" }
+          : { ...current, paused: false, canResume: false, phase: "running",
+            nodes: { ...current.nodes, task: { ...current.nodes.task, status: "running", error: null } },
+            executions: [...current.executions, { ...execution("second", "task", "running"), attempt: 2 }] };
+        result = current; break;
+      default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
+    }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator(`[data-run-id="${current.runId}"]`).click();
+    const bottom = page.locator(".graph-bottom");
+    await page.locator('[data-node-name="task"]').click();
+    await bottom.getByRole("button", { name: "Pause", exact: true }).click();
+    await bottom.getByRole("button", { name: "Pausing", exact: true }).waitFor();
+    assert.equal(await bottom.getByRole("button", { name: "Pausing", exact: true }).isDisabled(), true);
+    current = { ...current, canResume: true,
+      nodes: { ...current.nodes, task: { ...current.nodes.task, status: "paused", error: "Execution paused by the user" } },
+      executions: current.executions.map(item => item.id === "first" ? { ...item, status: "paused", completedAt: 2000 } : item) };
+    await bottom.getByRole("button", { name: "Resume", exact: true }).waitFor();
+    await page.locator('[data-node-name="task"] .status', { hasText: "PAUSED" }).waitFor();
+    await page.locator('[data-node-name="broken"] .status', { hasText: "FAILED" }).waitFor();
+    await bottom.getByRole("button", { name: "Resume", exact: true }).click();
+    await page.locator('[data-node-name="task"] .status', { hasText: "RUNNING" }).waitFor();
+    assert.deepEqual(actions.map(action => action.action), ["pause", "resume"]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("recovered planning polls activity before route discovery and opens the completed graph", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
@@ -1097,6 +1173,200 @@ test("pure frontend refresh during active planning suppresses floating recovered
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("node follow-ups keep records expanded and completed nodes continue instead of leaving notes", { timeout: 45_000 }, async () => {
+  const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const execution = attempt => ({ id: `record-${attempt}`, node: "task", status: "completed", revision: attempt, attempt,
+    sessionId: "same-session", worktree: "/a", before: "", after: "", startedAt: attempt * 1000, completedAt: attempt * 1000 + 1,
+    output: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `Agent response ${attempt}` }] } }) + "\n" });
+  let current = { runId: "record-run", config, planType: "graph", approved: true, paused: false, phase: "completed",
+    graph: { originalGoal: "Continue the node", nodes: [{ name: "task", task: "Original task" }], edges: [] },
+    nodes: { task: { status: "done", revision: 1, instruction: "", error: null } },
+    executions: [execution(1)], plan: null, events: [], base: "", feedbackCounts: {} };
+  const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
+  const gates = [deferred(), deferred()], controls = [], errors = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "history": case "snapshot": result = current; break;
+      case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = catalog; break;
+      case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+      case "control": {
+        const index = controls.length;
+        controls.push(body);
+        assert.equal(body.action, "intervene", "a completed node resumes execution, not message_node record-only delivery");
+        assert.equal(body.node, "task");
+        assert.equal(body.runId, current.runId);
+        await gates[index].promise;
+        const next = execution(index + 2), sequence = current.events.length + 1;
+        current = { ...current, nodes: { task: { ...current.nodes.task, revision: next.revision, instruction: body.instruction } },
+          executions: [...current.executions, next], events: [...current.events,
+            { type: "invalidated", sequence, timestamp: next.startedAt, target: "task", nodes: ["task"], human: true, instruction: body.instruction },
+            { type: "started", sequence: sequence + 1, timestamp: next.startedAt, execution: next }] };
+        result = current; break;
+      }
+      default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
+    }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  const headers = page.locator(".session-label-toggle[aria-expanded]");
+  const expansion = () => headers.evaluateAll(items => items.map(item => item.getAttribute("aria-expanded")));
+  const openNode = async () => {
+    await page.locator('[data-run-id="record-run"]').click();
+    await page.locator('[data-node-name="task"]').click();
+    await page.getByText("Agent response 1", { exact: true }).waitFor();
+  };
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await openNode();
+    assert.equal(await headers.count(), 0, "a single execution stays open without a toggle header");
+    const composer = page.locator(".pane-bottom-chat textarea");
+    assert.equal(await composer.getAttribute("placeholder"), "Send a message to @task and continue execution…");
+    await composer.fill("First follow-up");
+    await composer.press("Enter");
+    await waitFor(() => controls.length === 1);
+    await headers.first().waitFor();
+    assert.deepEqual(await expansion(), ["true"], "even the optimistic waiting turn keeps the old output expanded");
+    await page.getByText("Agent response 1", { exact: true }).waitFor();
+    gates[0].resolve();
+    await page.getByText("Agent response 2", { exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.value === "");
+    assert.deepEqual(await expansion(), ["true", "true"], "both old and new executions default to expanded");
+
+    await headers.nth(1).click();
+    assert.deepEqual(await expansion(), ["true", "false"]);
+    assert.equal(await page.locator('[data-execution-id="record-2"]').count(), 0);
+    await composer.fill("Second follow-up");
+    await composer.press("Enter");
+    await waitFor(() => controls.length === 2);
+    assert.deepEqual(await expansion(), ["true", "false"], "manual collapse survives the optimistic turn");
+    gates[1].resolve();
+    await page.getByText("Agent response 3", { exact: true }).waitFor();
+    assert.deepEqual(await expansion(), ["true", "false", "true"], "the user's choice stays with the execution when it becomes an older attempt");
+    await page.getByText("First follow-up", { exact: true }).waitFor();
+    await page.getByText("Second follow-up", { exact: true }).waitFor();
+
+    await headers.nth(2).click();
+    await headers.nth(1).click();
+    await page.getByText("Agent response 2", { exact: true }).waitFor();
+    assert.deepEqual(await expansion(), ["true", "true", "false"], "opening one record never changes another record");
+    await headers.nth(0).click();
+    assert.deepEqual(await expansion(), ["false", "true", "false"], "multiple records can still be collapsed explicitly");
+
+    await page.reload({ waitUntil: "networkidle" });
+    await openNode();
+    await page.getByText("Agent response 3", { exact: true }).waitFor();
+    assert.deepEqual(await expansion(), ["true", "true", "true"], "cold history also defaults all execution records to expanded");
+    assert.deepEqual(controls.map(body => body.instruction), ["First follow-up", "Second follow-up"]);
+    assert.deepEqual(errors, []);
+  } finally { gates.forEach(gate => gate.resolve()); await context.close(); }
+});
+
+for (const planType of ["graph", "serial"]) {
+  test(`${planType}: queued messages batch in order and consecutive Steers stay on the live execution`, { timeout: 45_000 }, async () => {
+    const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
+    const output = text => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
+    const first = { id: "queue-first", node: "task", status: "completed", revision: 1, attempt: 1, sessionId: "same-session", worktree: "/a", before: "", after: "", startedAt: 1, completedAt: 2, output: output("Initial queue result") };
+    let current = { runId: "queue-run", config, planType, approved: true, paused: false, phase: "completed",
+      graph: { originalGoal: "Queue goal", nodes: [{ name: "task", task: "Queue task" }], edges: [] },
+      nodes: { task: { status: "done", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
+      executions: [first], plan: null, events: [], base: "", feedbackCounts: {} };
+    const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
+    const actions = [], errors = [];
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      let result;
+      switch (command) {
+        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+        case "history": case "snapshot": result = current; break;
+        case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
+        case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+        case "list_plannings": result = []; break;
+        case "list_files": result = { files: [] }; break;
+        case "list_skills": result = { skills: [] }; break;
+        case "provider_auth": result = catalog; break;
+        case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "control": {
+          actions.push(body.action);
+          const sequence = current.events.length + 1;
+          if (body.action === "intervene") {
+            const event = { type: "invalidated", sequence, timestamp: sequence + 2, target: "task", nodes: ["task"], human: true, instruction: body.instruction };
+            current = { ...current, phase: "running", events: [...current.events, event],
+              nodes: { task: { ...current.nodes.task, status: "dirty", pendingMessages: [...current.nodes.task.pendingMessages, { sequence, instruction: body.instruction }] } } };
+          } else {
+            assert.equal(body.action, "steer");
+            assert.equal(body.executionId, "queue-batch");
+            current = { ...current, events: [...current.events, { type: "steered", sequence, timestamp: sequence + 2,
+              node: "task", execution_id: body.executionId, instruction: body.instruction }] };
+          }
+          result = current; break;
+        }
+        default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
+      }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage(); page.setDefaultTimeout(10_000);
+    page.on("pageerror", error => errors.push(String(error)));
+    const openNode = async () => {
+      await page.locator('[data-run-id="queue-run"]').click();
+      if (planType === "graph") await page.locator('[data-node-name="task"]').click();
+      await page.getByText("Initial queue result", { exact: true }).waitFor();
+    };
+    try {
+      await page.goto(origin, { waitUntil: "networkidle" });
+      await openNode();
+      const composer = page.locator(".pane-bottom-chat textarea");
+      const send = async text => {
+        await composer.fill(text); await composer.press("Enter");
+        await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.value === "");
+      };
+      await send("Repeated queued instruction");
+      await send("Repeated queued instruction");
+      assert.deepEqual(actions, ["intervene", "intervene"]);
+      assert.equal(current.nodes.task.pendingMessages.length, 2);
+      assert.equal(await page.getByText("Repeated queued instruction", { exact: true }).count(), 2);
+      const batch = { ...first, id: "queue-batch", attempt: 2, revision: 2, status: "running", startedAt: 10, completedAt: null, output: output("Combined batch response") };
+      current = { ...current, executions: [...current.executions, batch],
+        nodes: { task: { ...current.nodes.task, status: "running", pendingMessages: [] } },
+        events: [...current.events, { type: "started", sequence: 3, timestamp: 10, execution: batch, message_sequences: [1, 2] }] };
+      await page.getByText("Combined batch response", { exact: true }).waitFor();
+      assert.equal(await page.locator('[data-execution-id="queue-batch"]').count(), 1);
+      assert.equal(await page.evaluate(() => {
+        const messages = [...document.querySelectorAll(".chat-message-row.user")].filter(item => item.textContent.includes("Repeated queued instruction"));
+        return messages.length === 2 && !!(messages[1].compareDocumentPosition(document.querySelector('[data-execution-id="queue-batch"]')) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }), true, "the shared response follows all user turns in its batch");
+      await send("First live Steer");
+      await send("Second live Steer");
+      assert.deepEqual(actions, ["intervene", "intervene", "steer", "steer"]);
+      assert.equal(current.executions.length, 2, "Steers do not create another execution");
+      assert.equal(current.nodes.task.pendingMessages.length, 0);
+      await page.getByText("First live Steer", { exact: true }).waitFor();
+      await page.getByText("Second live Steer", { exact: true }).waitFor();
+      await page.reload({ waitUntil: "networkidle" });
+      await openNode();
+      await page.getByText("Combined batch response", { exact: true }).waitFor();
+      assert.equal(await page.getByText("Repeated queued instruction", { exact: true }).count(), 2);
+      await page.getByText("First live Steer", { exact: true }).waitFor();
+      await page.getByText("Second live Steer", { exact: true }).waitFor();
+      assert.equal(await page.locator('[data-execution-id="queue-batch"]').count(), 1);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
 
 test("late node sends and edits cannot overwrite another workspace or its composer draft", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };

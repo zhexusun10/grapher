@@ -21,8 +21,15 @@ export function executionIdForMessage(state: Snapshot, event: GraphEvent): strin
   if (event.execution_id) return event.execution_id;
   const node = event.target ?? event.node;
   if (!node) return undefined;
-  return state.events.find(item => item.type === "started" && item.sequence > event.sequence &&
-    item.execution?.node === node)?.execution?.id;
+  const bound = state.events.find(item => item.type === "started" && item.execution?.node === node &&
+    item.message_sequences?.includes(event.sequence));
+  if (bound) return bound.execution?.id;
+  if (state.nodes[node]?.pendingMessages?.some(message => message.sequence === event.sequence)) return undefined;
+  // New starts have exact claims. Only historical starts may infer ownership
+  // from event order; otherwise an unclaimed message could appear delivered.
+  return state.events.find(item => item.type === "started" &&
+    (event.type === "conversation_edited" || item.message_sequences === undefined) &&
+    item.sequence > event.sequence && item.execution?.node === node)?.execution?.id;
 }
 
 export function executionIdForVersion(state: Snapshot, node: string, text: string): string | undefined {

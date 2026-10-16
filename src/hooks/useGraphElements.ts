@@ -315,7 +315,7 @@ export function useGraphElements(
             const toAttempts = indexes.attempts.get(edge.to) ?? [];
             const latestExec = toAttempts.at(-1);
 
-            const isTerminal = !toNode || toStatus === "done" || toStatus === "failed" || toStatus === "blocked";
+            const isTerminal = !toNode || toStatus === "done" || toStatus === "failed" || toStatus === "paused" || toStatus === "blocked";
             if (!isTerminal) {
               const incomingDeps = (indexes.incoming.get(edge.to) ?? []).filter((e) => !e.feedback);
               const allParentsDone = incomingDeps.length > 0 && incomingDeps.every((e) => state.nodes[e.from]?.status === "done");
@@ -395,7 +395,7 @@ export function useGraphElements(
       const isTargetPreparingActivity = activity.some(
         (a) => a.kind === "workspace_prepare" && a.nodes.includes(target)
       );
-      const isTargetTerminal = !toNode || toStatus === "done" || toStatus === "failed" || toStatus === "blocked";
+      const isTargetTerminal = !toNode || toStatus === "done" || toStatus === "failed" || toStatus === "paused" || toStatus === "blocked";
       const animated = isMergerCompleted && !isTargetTerminal && (isTargetPreparingActivity || !isTargetPrepared);
 
       return {

@@ -4,7 +4,7 @@
 //! Node, Pi, shells, and their descendants share one lifecycle boundary.
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     process::{Child, Command},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -95,6 +95,34 @@ pub fn with_owner<T>(run_id: &str, work: impl FnOnce() -> T) -> T {
 
 fn registry() -> &'static Mutex<Vec<(String, Weak<ProcessTreeInner>)>> {
     PROCESSES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// Attempt-scoped cancellation closes the preparation/spawn/registration gap.
+// Cleared only after the driver observes that attempt's worker has drained.
+static STOPPED_OWNERS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+fn stopped_owners() -> &'static Mutex<BTreeSet<String>> {
+    STOPPED_OWNERS.get_or_init(Default::default)
+}
+pub(crate) fn execution_owner(run: &str, node: &str, execution: &str) -> String {
+    format!("{run}:node:{node}:execution:{execution}")
+}
+pub(crate) fn stop_owner(owner: &str) -> Result<(), String> {
+    stopped_owners().lock().map_err(|e| e.to_string())?.insert(owner.into());
+    terminate_owner(owner);
+    Ok(())
+}
+pub(crate) fn clear_owner_stop(owner: &str) {
+    if let Ok(mut stopped) = stopped_owners().lock() { stopped.remove(owner); }
+}
+fn check_owner_stop(owner: &str) -> Result<(), String> {
+    if stopped_owners().lock().map_err(|e| e.to_string())?.contains(owner) {
+        Err("Execution paused by user".into())
+    } else {
+        Ok(())
+    }
+}
+pub(crate) fn check_current_owner_stop() -> Result<(), String> {
+    OWNER.with(|owner| check_owner_stop(&owner.borrow()))
 }
 
 static RESULTS: OnceLock<Mutex<BTreeMap<String, Arc<AtomicBool>>>> = OnceLock::new();
@@ -195,6 +223,10 @@ pub fn track(child: &Child) -> Result<ProcessTree, String> {
         .lock()
         .map_err(|error| error.to_string())?
         .push((owner.clone(), Arc::downgrade(&tree.0)));
+    if let Err(error) = check_owner_stop(&owner) {
+        tree.terminate();
+        return Err(error);
+    }
     if results()
         .lock()
         .map_err(|e| e.to_string())?
@@ -216,7 +248,12 @@ pub fn assign_to_current_owner(tree: &ProcessTree) -> Result<(), String> {
         .iter_mut()
         .find(|(_, weak)| weak.ptr_eq(&Arc::downgrade(&tree.0)))
         .ok_or("Prestarted process is no longer tracked")?;
-    entry.0 = owner;
+    entry.0 = owner.clone();
+    drop(processes);
+    if let Err(error) = check_owner_stop(&owner) {
+        tree.terminate();
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -650,6 +687,34 @@ mod tests {
             cancel_result(run).is_err(),
             "completed scopes cannot acknowledge a fictitious cancellation"
         );
+    }
+
+    #[test]
+    fn execution_pause_covers_late_registration_without_poisoning_the_next_attempt() {
+        let owner = execution_owner("late-pause-test", "worker", "first");
+        stop_owner(&owner).unwrap();
+        with_owner(&owner, || {
+            assert!(check_current_owner_stop().is_err());
+            let mut command = if cfg!(windows) {
+                let mut command = Command::new("cmd");
+                command.args(["/C", "ping 127.0.0.1 -n 10 > NUL"]);
+                command
+            } else {
+                let mut command = Command::new("sh");
+                command.args(["-c", "sleep 10"]);
+                command
+            };
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+            configure_command(&mut command);
+            let mut child = command.spawn().unwrap();
+            assert!(track(&child).is_err(), "late process must acknowledge cancellation");
+            assert!(!child.wait().unwrap().success());
+        });
+        with_owner(&execution_owner("late-pause-test", "worker", "next"), || {
+            check_current_owner_stop().unwrap();
+        });
+        clear_owner_stop(&owner);
+        assert!(check_owner_stop(&owner).is_ok());
     }
 
     #[test]

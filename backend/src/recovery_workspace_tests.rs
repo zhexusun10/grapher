@@ -59,6 +59,34 @@ fn local_agent(job: &mut Job, temp: &TempDir) {
 }
 
 #[test]
+fn pause_after_preparation_before_pi_launch_restarts_the_task_without_resetting_the_workspace() {
+    let (temp, _source, mut runtime, worker) = prepared_worker(true);
+    let path = PathBuf::from(&worker.execution.worktree);
+    dirty_workspace(&path);
+    runtime.pause(true).unwrap();
+    runtime.request_execution_stop(Some("worker")).unwrap();
+    runtime.finish(&worker.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime.pause(false).unwrap();
+    let mut retry = runtime.jobs().unwrap().remove(0);
+    assert!(retry.initial_recovery);
+    assert!(!retry.continuation);
+    assert_eq!(retry.task, "worker");
+    assert_eq!(retry.execution.session_id, worker.execution.session_id);
+    assert_eq!(retry.execution.worktree, worker.execution.worktree);
+    assert!(retry.preserved_workspace.is_some());
+    local_agent(&mut retry, &temp);
+    let root = runtime.root.clone();
+    let result = perform(&retry, &root, &[], |_| {}, |head| {
+        assert_partial_work(&path);
+        runtime.emit(EventKind::Prepared { execution_id: retry.execution.id.clone(), head })
+    });
+    runtime.finish(&retry.execution, result.clone()).unwrap();
+    result.expect("an unlaunched session must not block workspace recovery");
+    assert_partial_work(&path);
+    assert_eq!(runtime.state.nodes["worker"].status, "done");
+}
+
+#[test]
 fn interrupted_resume_preserves_dirty_files_index_and_agent_commits_after_restart() {
     for standard_git in [true, false] {
         for agent_commit in [false, true] {
