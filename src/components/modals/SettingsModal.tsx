@@ -32,7 +32,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   const reduceMotion = useReducedMotion();
   const [draftConfig, setDraftConfig] = useState(() => ({ ...config }));
   const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? false);
-  const [postTaskReview, setPostTaskReview] = useState(config.postTaskReview ?? false);
+  const [postTaskReview, setPostTaskReview] = useState(config.postTaskReview ?? true);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState("");

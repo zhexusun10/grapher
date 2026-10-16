@@ -146,7 +146,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: 0, maxFeedback: 3, autoApprove: false, postTaskReview: false };
+export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: 0, maxFeedback: 3, autoApprove: false, postTaskReview: true };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},

@@ -586,7 +586,7 @@ fn bootstrap_projection(
             max_parallel: 0,
             max_feedback: 3,
             auto_approve: false,
-            post_task_review: false,
+            post_task_review: true,
             environment: None,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),

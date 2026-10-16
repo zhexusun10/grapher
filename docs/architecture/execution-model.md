@@ -43,7 +43,7 @@ Source locks protect approval and snapshots taken after approved Planner revisio
 ### Post-task Planner review
 
 **Post-task Planner review** is an independent Settings toggle directly below
-Auto Approve, disabled by default (including saved configurations that predate
+Auto Approve, enabled by default (including saved configurations that predate
 it). Like Auto Approve, it is captured in a new Run's configuration. It applies
 to Graph Runs, which already have a Planner conversation, not Serial Runs.
 

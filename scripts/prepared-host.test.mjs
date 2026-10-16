@@ -65,14 +65,16 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       for await (const chunk of request) raw += chunk;
       const value = JSON.parse(raw);
       requests.push(value);
-      const createGraph = value.model === 'planner' && !value.messages.some(message => message.role === 'tool');
-      const delta = createGraph ? { role: 'assistant', tool_calls: [{ index: 0, id: 'create-node', type: 'function',
-        function: { name: 'node', arguments: JSON.stringify({ nodes: [{ name: 'A', task: 'Return completed' }] }) } }] }
+      const toolResults = value.messages.filter(message => message.role === 'tool');
+      const editGraph = value.model === 'planner' && toolResults.length < 2;
+      const nodes = toolResults.length === 0 ? [{ name: 'published', delete: true }] : [{ name: 'A', task: 'Return completed' }];
+      const delta = editGraph ? { role: 'assistant', tool_calls: [{ index: 0, id: `edit-node-${toolResults.length}`, type: 'function',
+        function: { name: 'node', arguments: JSON.stringify({ nodes }) } }] }
         : { role: 'assistant', content: `completed-${value.model}` };
       const chunk = (delta, finish_reason) => ({ id: 'prepared-test', object: 'chat.completion.chunk', created: 1,
         model: value.model, choices: [{ index: 0, delta, finish_reason }] });
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, createGraph ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
+      response.end(`data: ${JSON.stringify(chunk(delta, null))}\n\ndata: ${JSON.stringify(chunk({}, editGraph ? 'tool_calls' : 'stop'))}\n\ndata: [DONE]\n\n`);
     } catch (error) { errors.push(error); response.writeHead(500); response.end(String(error)); }
   });
   try {
@@ -82,7 +84,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const global = join(directory, 'global');
     const marker = join(directory, 'loaded.jsonl');
     for (const path of [source, other, agent, join(global, 'extensions')]) await mkdir(path, { recursive: true });
-    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED }) + '\\n'); }`);
+    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED, unremovableNodes: process.env.GRAPHER_UNREMOVABLE_NODES }) + '\\n'); }`);
     await new Promise(done => server.listen(0, '127.0.0.1', done));
     const model = id => ({ id, reasoning: false, input: ['text', 'image'], contextWindow: 128000, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
@@ -93,7 +95,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const env = { ...process.env, PI_CODING_AGENT_DIR: agent, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
       GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1', GRAPHER_ACTIVE_RUN_ID: 'outer-must-not-leak',
       GRAPHER_GRAPH_PATH: join(other, 'outer-graph.json'), GRAPHER_NODE_NAME: 'outer-node-must-not-leak',
-      GRAPHER_CONTINUE_INTERRUPTED: 'outer-continuation-must-not-leak' };
+      GRAPHER_CONTINUE_INTERRUPTED: 'outer-continuation-must-not-leak',
+      GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['outer-node-must-not-leak']) };
     const roles = ['partition', 'planner', 'node'];
     const started = performance.now();
     const prepared = roles.map(role => { const value = host(role, source, env); children.push(value); return value; });
@@ -114,7 +117,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       const sessionId = randomUUID();
       sessionIds.push(sessionId);
       await mkdir(session);
-      await writeFile(graph, JSON.stringify({ originalGoal: `goal-${role}`, nodes: [], edges: [] }));
+      await writeFile(graph, JSON.stringify({ originalGoal: `goal-${role}`,
+        nodes: role === 'planner' ? [{ name: 'published', task: 'Already published' }] : [], edges: [] }));
       const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
       const args = ['--mode', 'rpc', '--no-prompt-templates', '--no-themes', '--model', `prepared-test/${role}`,
         '--thinking', 'off', '--session-id', sessionId, '--session-dir', session];
@@ -126,6 +130,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: source,
         GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, GRAPHER_GRAPH_PATH: graph,
         GRAPHER_ACTIVE_RUN_ID: `run-${role}`, GRAPHER_NODE_EXECUTION_ID: `execution-${role}`,
+        ...(role === 'planner' ? { GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['published']) } : {}),
         ...(role === 'node' ? { GRAPHER_NODE_NAME: 'task', GRAPHER_CONTINUE_INTERRUPTED: 'false' } : {}),
         GRAPHER_COMPILER_PATH: join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`),
         GRAPHER_TRUSTED_GIT: process.env.GRAPHER_TRUSTED_GIT ?? 'git',
@@ -137,7 +142,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       const stateId = randomUUID();
       // Exercise control/RPC handoff with both lines in the same pipe write.
       value.child.stdin.write(`${JSON.stringify({ ...binding, id: bindId })}\n${JSON.stringify({ type: 'get_state', id: stateId })}\n`);
-      assert.equal((await value.wait(() => value.events.find(event => event.id === bindId))).success, true);
+      const bound = await value.wait(() => value.events.find(event => event.id === bindId));
+      assert.equal(bound.success, true, bound.error);
       const state = await value.wait(() => value.events.find(event => event.id === stateId));
       t.diagnostic(`${role} binding + session RPC readiness: ${(performance.now() - bindStarted).toFixed(0)}ms`);
       assert.equal(state.success, true);
@@ -151,7 +157,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       value.child.stdin.write(`${JSON.stringify({ id: 'commands', type: 'get_commands' })}\n${JSON.stringify(prompt)}\n`);
       await value.wait(() => value.events.find(event => event.type === 'agent_settled'));
       assert.deepEqual(errors, []);
-      assert.equal(requests.length, before + (role === 'planner' ? 2 : 1));
+      assert.equal(requests.length, before + (role === 'planner' ? 3 : 1));
       const body = requests[before];
       const text = content => typeof content === 'string' ? content : (content ?? []).map(part => part.text ?? '').join('\n');
       assert.ok(body.messages.some(message => message.role === 'user' && text(message.content) === `SENTINEL-${role}`));
@@ -164,7 +170,13 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         assert.ok(['edit', 'write', 'ls', 'find', 'grep'].every(tool => !tools.includes(tool)));
         const edgeDescription = body.tools.find(tool => tool.function.name === 'edge').function.description;
         assert.doesNotMatch(edgeDescription, /ignored|non-Git|drain|fork|workspace/i);
-        assert.equal(JSON.parse(await readFile(graph, 'utf8')).nodes[0].name, 'A');
+        const rejected = JSON.parse(requests[before + 1].messages.find(message => message.role === 'tool').content);
+        assert.equal(rejected.applied, false, 'the bound published-node constraint must reach the Planner compiler');
+        assert.deepEqual(rejected.topology.nodes, ['published']);
+        assert.match(rejected.diagnostics[0], /Cannot remove node 'published'.*already published/);
+        const results = requests[before + 2].messages.filter(message => message.role === 'tool');
+        assert.equal(JSON.parse(results[1].content).applied, true, 'a rejected deletion must not prevent further valid edits');
+        assert.deepEqual(JSON.parse(await readFile(graph, 'utf8')).nodes.map(node => node.name), ['published', 'A']);
       } else assert.ok(['read', 'write', 'edit', 'bash'].every(tool => tools.includes(tool)));
       // Match Rust's Planner/Node steer handoff window before closing RPC.
       if (role !== 'partition') await delay(500);
@@ -179,6 +191,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     assert.equal(loaded.find(value => value.role === 'node').continuation, 'false');
     assert.equal(loaded.find(value => value.role === 'planner').nodeName, undefined, 'prepared roles must not inherit an outer node identity');
     assert.equal(loaded.find(value => value.role === 'planner').continuation, undefined, 'prepared roles must not inherit an outer continuation flag');
+    assert.equal(loaded.find(value => value.role === 'planner').unremovableNodes, JSON.stringify(['published']));
+    assert.equal(loaded.find(value => value.role === 'node').unremovableNodes, undefined, 'prepared roles must not inherit another Run\'s published-node constraints');
     assert.ok(loaded.every(value => value.run === `run-${value.role}` && value.execution === `execution-${value.role}` && value.graph === join(directory, `graph-${value.role}.json`)));
     assert.deepEqual(await readdir(other), [], 'outer Run graph path must never be touched');
 

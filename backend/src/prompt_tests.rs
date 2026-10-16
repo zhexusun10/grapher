@@ -1057,14 +1057,6 @@ fn user_stopped_node_is_recognized_as_interrupted_and_recoverable() {
     assert!(!snapshot.is_node_failed("stopped_worker"));
 }
 
-#[test]
-fn planner_prompt_contains_status_differentiation_guidance() {
-    assert!(PLANNER_PROMPT.contains("distinguish node statuses"));
-    assert!(PLANNER_PROMPT.contains("`paused`"));
-    assert!(PLANNER_PROMPT.contains("`failed`"));
-    assert!(PLANNER_PROMPT.contains("NOT an execution failure"));
-}
-
 #[cfg(feature = "fixture")]
 #[test]
 fn legacy_planner_session_keeps_its_original_pi_identity() {

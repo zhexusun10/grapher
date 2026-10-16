@@ -225,9 +225,9 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
   } finally { await vite.close(); }
 });
 
-test('approval and post-task review independently default off, including legacy configs', async () => {
+test('auto approval defaults off and post-task review defaults on, including legacy configs', async () => {
   assert.equal(defaultConfig.autoApprove, false);
-  assert.equal(defaultConfig.postTaskReview, false);
+  assert.equal(defaultConfig.postTaskReview, true);
   const { createServer } = await import('vite');
   const vite = await createServer({
     configFile: false, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] },
@@ -243,13 +243,19 @@ test('approval and post-task review independently default off, including legacy 
       assert.ok(input, `${label} checkbox is present`);
       return input;
     };
-    for (const [field, label] of [['autoApprove', 'Auto Approve Planner 图纸'], ['postTaskReview', '任务后 Planner 复盘']] as const) {
-      assert.doesNotMatch(checkbox(defaultConfig, label), /checked=""/);
-      const legacy: Partial<Config> = { ...defaultConfig }; delete legacy[field];
-      assert.doesNotMatch(checkbox(legacy as Config, label), /checked=""/);
-      assert.match(checkbox({ ...defaultConfig, [field]: true }, label), /checked=""/);
-    }
-    assert.doesNotMatch(checkbox({ ...defaultConfig, autoApprove: true }, '任务后 Planner 复盘'), /checked=""/);
+    // Auto Approve stays off by default, including legacy configs.
+    assert.doesNotMatch(checkbox(defaultConfig, 'Auto Approve Planner 图纸'), /checked=""/);
+    const legacyApproval: Partial<Config> = { ...defaultConfig }; delete legacyApproval.autoApprove;
+    assert.doesNotMatch(checkbox(legacyApproval as Config, 'Auto Approve Planner 图纸'), /checked=""/);
+    assert.match(checkbox({ ...defaultConfig, autoApprove: true }, 'Auto Approve Planner 图纸'), /checked=""/);
+    // Post-task review turns on by default, including legacy configs.
+    assert.match(checkbox(defaultConfig, '任务后 Planner 复盘'), /checked=""/);
+    const legacyReview: Partial<Config> = { ...defaultConfig }; delete legacyReview.postTaskReview;
+    assert.match(checkbox(legacyReview as Config, '任务后 Planner 复盘'), /checked=""/);
+    assert.doesNotMatch(checkbox({ ...defaultConfig, postTaskReview: false }, '任务后 Planner 复盘'), /checked=""/);
+    // The two toggles remain independent.
+    assert.doesNotMatch(checkbox({ ...defaultConfig, autoApprove: true, postTaskReview: false }, '任务后 Planner 复盘'), /checked=""/);
+    assert.match(checkbox({ ...defaultConfig, autoApprove: false, postTaskReview: true }, '任务后 Planner 复盘'), /checked=""/);
   } finally { await vite.close(); }
 });
 

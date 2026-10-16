@@ -6,7 +6,7 @@ import { preparePiCli } from './pi-compat.ts';
 const roles = new Set(['partition', 'planner', 'node']);
 const bindingEnvironment = new Set([
   'GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_SOURCE_ALIAS',
-  'GRAPHER_WORKSPACE_ROOT', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_GRAPH_PATH',
+  'GRAPHER_WORKSPACE_ROOT', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_GRAPH_PATH', 'GRAPHER_UNREMOVABLE_NODES',
   'GRAPHER_PLANNER_RUN_ID', 'GRAPHER_ACTIVE_RUN_ID', 'GRAPHER_NODE_EXECUTION_ID', 'GRAPHER_NODE_NAME',
   'GRAPHER_COMPILER_PATH', 'PI_CODING_AGENT_DIR', 'GRAPHER_TRUSTED_GIT', 'GRAPHER_LAUNCH_BINDING',
   'GRAPHER_ENVIRONMENT_DATA', 'GRAPHER_CONTINUE_INTERRUPTED', 'PYTHONDONTWRITEBYTECODE',
@@ -105,7 +105,7 @@ export async function bindPreparedHost(role: string): Promise<string[] | null> {
   if (!roles.has(role)) throw new Error('Unsupported prepared role');
   const cwd = process.cwd();
   // Do not inherit an outer Run's identity. Factories are only loaded after bind.
-  for (const key of ['GRAPHER_GRAPH_PATH', 'GRAPHER_PLANNER_RUN_ID', 'GRAPHER_ACTIVE_RUN_ID', 'GRAPHER_NODE_EXECUTION_ID', 'GRAPHER_NODE_NAME', 'GRAPHER_COMPILER_PATH', 'GRAPHER_ENVIRONMENT_DATA', 'GRAPHER_CONTINUE_INTERRUPTED']) delete process.env[key];
+  for (const key of ['GRAPHER_GRAPH_PATH', 'GRAPHER_UNREMOVABLE_NODES', 'GRAPHER_PLANNER_RUN_ID', 'GRAPHER_ACTIVE_RUN_ID', 'GRAPHER_NODE_EXECUTION_ID', 'GRAPHER_NODE_NAME', 'GRAPHER_COMPILER_PATH', 'GRAPHER_ENVIRONMENT_DATA', 'GRAPHER_CONTINUE_INTERRUPTED']) delete process.env[key];
   await preparePiCli();
   const first = await controlLine();
   if (first === null) return null;

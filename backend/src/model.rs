@@ -162,7 +162,7 @@ pub struct Config {
     pub max_feedback: usize,
     #[serde(default)]
     pub auto_approve: bool,
-    #[serde(default)]
+    #[serde(default = "default_post_task_review")]
     pub post_task_review: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<crate::environment::EnvironmentConfig>,
@@ -215,6 +215,10 @@ fn default_max_feedback() -> usize {
 
 fn default_thinking_level() -> String {
     "low".into()
+}
+
+fn default_post_task_review() -> bool {
+    true
 }
 
 #[cfg(feature = "fixture")]
