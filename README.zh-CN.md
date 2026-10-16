@@ -54,13 +54,15 @@
 
 **依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、网络和服务商认证。Windows 需要 Git for Windows Bash；Linux Graph 需要 bubblewrap，并允许非特权 user/mount/PID namespace。各平台安装前提和排错见[安装指南](docs/guides/installation.md)。
 
+**不想安装编译工具？** 直接下载可运行的发布包：解压后运行 `start.bat`（Windows）或 `./start.sh`（macOS/Linux），详见[安装指南](docs/guides/installation.md)。发布包在运行时仍需要 Node.js 22.19+ 与 Git；无需 Rust 和 npm。
+
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
 cd grapher
-npm ci --ignore-scripts
-npm run pi:setup
 npm run dev
 ```
+
+`npm run dev` 会自动检查环境工具、初始化子模块、安装锁定依赖并编译后端。也可手动执行 `npm ci --ignore-scripts` 与 `npm run pi:setup` 分步准备。
 
 打开 **<http://127.0.0.1:1420>**。首次启动可能需要等待 Cargo 编译。
 
@@ -149,9 +151,9 @@ Rust 后端与 SQLite 事件日志拥有运行状态，React 界面只显示投�
 - 有界反馈边
 - 结果发布机制
 - Linux 沙箱（bubblewrap）
+- Windows/macOS/Linux 发布包与一键开发启动
 
 **仍在完善：**
-- 打包与一键安装
 - 跨平台隔离（Windows 沙箱）
 - 路由质量与图编译启发式
 - 服务商兼容性覆盖

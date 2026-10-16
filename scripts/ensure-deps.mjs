@@ -1,166 +1,109 @@
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { missingBundledExtensions } from "./bundled-extensions.mjs";
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { delimiter, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { missingBundledExtensions } from './bundled-extensions.mjs';
+import { toolchainEnv, pathValue, prependPath } from './cargo.mjs';
+import { verifyPiDependencies } from './pi-dependencies.mjs';
+import { piBuildReady } from './pi-build-state.mjs';
 
-export const root = fileURLToPath(new URL("../", import.meta.url));
-export const piSource = join(root, "pi");
-export const viteBin = join(root, "node_modules", "vite", "bin", "vite.js");
-export const tsxCli = join(root, "node_modules", "tsx", "dist", "cli.mjs");
-export const piPackageJson = join(piSource, "package.json");
-export const piDependencyMarker = join(piSource, "node_modules", ".grapher-pi-dependencies.json");
-export const piDist = join(piSource, "packages", "ai", "dist");
+export const root = fileURLToPath(new URL('../', import.meta.url));
+const json = path => JSON.parse(readFileSync(path, 'utf8'));
 
-/**
- * Fast synchronous check for Cargo installation (< 0.1ms).
- */
-export function findCargoExecutable() {
-  if (process.env.CARGO && existsSync(process.env.CARGO)) {
-    return process.env.CARGO;
-  }
-  const cargoName = process.platform === "win32" ? "cargo.exe" : "cargo";
-  const rustupCargo = join(homedir(), ".cargo", "bin", cargoName);
-  if (existsSync(rustupCargo)) {
-    return rustupCargo;
-  }
-  const paths = (process.env.PATH ?? "").split(delimiter);
-  for (const dir of paths) {
-    if (!dir) continue;
-    const candidate = join(dir, cargoName);
-    if (existsSync(candidate)) {
-      return candidate;
-    }
+export function findCargoExecutable(env = process.env) {
+  if (env.CARGO) return env.CARGO;
+  const cargoName = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
+  for (const directory of [join(homedir(), '.cargo/bin'), ...pathValue(env).split(delimiter)]) {
+    if (directory && existsSync(join(directory, cargoName))) return join(directory, cargoName);
   }
   return null;
 }
 
+export function assertSupportedNode(version = process.versions.node) {
+  const [major, minor] = version.split('.').map(Number);
+  if (!(major > 22 || (major === 22 && minor >= 19))) {
+    throw new Error(`Node.js 22.19+ is required (found ${version}). Install a supported Node.js release, reopen your terminal, and run npm run dev again.`);
+  }
+}
+
 export function rootDependenciesReady(installationRoot = root) {
-  return existsSync(join(installationRoot, "node_modules/vite/bin/vite.js")) &&
-    existsSync(join(installationRoot, "node_modules/tsx/dist/cli.mjs")) &&
-    missingBundledExtensions(installationRoot).length === 0;
+  try {
+    const project = json(join(installationRoot, 'package.json'));
+    const lock = json(join(installationRoot, 'package-lock.json'));
+    for (const group of ['dependencies', 'devDependencies']) {
+      if (JSON.stringify(project[group] ?? {}) !== JSON.stringify(lock.packages?.['']?.[group] ?? {})) return false;
+    }
+    // Include dev dependencies even under NODE_ENV=production, and detect partial
+    // installs/lock changes without importing third-party or extension code.
+    for (const [path, entry] of Object.entries(lock.packages)) {
+      if (!path) continue;
+      const metadata = join(installationRoot, path, 'package.json');
+      if (!existsSync(metadata) && entry.optional) continue;
+      if (!existsSync(metadata) || json(metadata).version !== entry.version) return false;
+    }
+    return ['vite/bin/vite.js', 'tsx/dist/cli.mjs', 'typescript/bin/tsc'].every(path =>
+      existsSync(join(installationRoot, 'node_modules', path))) && missingBundledExtensions(installationRoot).length === 0;
+  } catch {
+    return false;
+  }
 }
 
-/**
- * Synchronous filesystem check with zero subprocess overhead.
- */
-export function checkDependenciesFast() {
-  const missingSubmodule = !existsSync(piPackageJson);
-  const missingRootModules = !rootDependenciesReady();
-  const missingPiDist = !existsSync(piDist);
-  const missingPiDependencies = !existsSync(piDependencyMarker);
+export function checkDependenciesFast(installationRoot = root) {
+  const missingSubmodule = !existsSync(join(installationRoot, 'pi/package.json'));
+  const missingRootModules = !rootDependenciesReady(installationRoot);
+  let missingPiDependencies = true;
+  if (!missingSubmodule) {
+    try { verifyPiDependencies(installationRoot); missingPiDependencies = false; } catch {}
+  }
+  const missingPiDist = !piBuildReady(installationRoot);
   const cargoPath = findCargoExecutable();
-  const missingCargo = !cargoPath;
+  return { missingSubmodule, missingRootModules, missingPiDependencies, missingPiDist, cargoPath,
+    missingCargo: !cargoPath,
+    allReady: !missingSubmodule && !missingRootModules && !missingPiDependencies && !missingPiDist && !!cargoPath };
+}
 
-  return {
-    missingSubmodule,
-    missingRootModules,
-    missingPiDist,
-    missingPiDependencies,
-    missingCargo,
-    cargoPath,
-    allReady: !missingSubmodule && !missingRootModules && !missingPiDist && !missingPiDependencies && !missingCargo,
+export async function ensureDependencies({
+  installationRoot = root, env = process.env, run = execFileSync,
+  cargoPath = findCargoExecutable(env), log = console.log,
+} = {}) {
+  assertSupportedNode();
+  // Fail before network/download work if the host cannot build the backend.
+  if (!cargoPath) throw new Error('Rust/Cargo is required. Install stable Rust from https://rustup.rs/ and your native compiler/linker, reopen your terminal, then run npm run dev again.');
+  const childEnv = toolchainEnv(prependPath({ ...env }, dirname(cargoPath)));
+  const options = { cwd: installationRoot, env: childEnv, stdio: 'inherit' };
+  for (const [command, name] of [['git', 'Git'], [cargoPath, 'Rust/Cargo']]) {
+    try { await run(command, ['--version'], { ...options, stdio: 'pipe' }); }
+    catch { throw new Error(`${name} is not usable. Install ${name === 'Git' ? 'Git (Git for Windows includes Bash)' : 'a stable Rust toolchain from https://rustup.rs/ and native compiler/linker tools'}, reopen your terminal, and run npm run dev again.`); }
+  }
+  const npmCli = env.npm_execpath;
+  const runNpm = async args => {
+    if (npmCli && existsSync(npmCli)) return run(process.execPath, [npmCli, ...args], options);
+    if (process.platform === 'win32') throw new Error('Start setup with npm run dev so npm_execpath is available.');
+    return run('npm', args, options);
   };
-}
 
-/**
- * Cross-platform npm execution.
- */
-function runNpm(args, options = {}) {
-  const npmCli = process.env.npm_execpath;
-  if (npmCli && existsSync(npmCli)) {
-    execFileSync(process.execPath, [npmCli, ...args], { stdio: "inherit", ...options });
-  } else if (process.platform === "win32") {
-    execFileSync("npm.cmd", args, { stdio: "inherit", ...options });
-  } else {
-    execFileSync("npm", args, { stdio: "inherit", ...options });
+  if (!existsSync(join(installationRoot, 'pi/package.json'))) {
+    log('[dev] Initializing the pinned Pi submodule...');
+    await run('git', ['submodule', 'update', '--init', '--recursive'], options);
   }
-}
-
-/**
- * Ensure all dependencies are ready.
- * If dependencies are already satisfied, returns in < 2ms.
- * If any are missing, automatically fetches and installs them in order.
- */
-export async function ensureDependencies() {
-  const status = checkDependenciesFast();
-
-  // Fast path when all dependencies are ready: zero subprocesses, < 2ms
-  if (status.allReady) {
-    return;
+  if (!rootDependenciesReady(installationRoot)) {
+    log('[dev] Installing locked Grapher dependencies (including development tools)...');
+    try { await runNpm(['ci', '--ignore-scripts', '--include=dev']); }
+    catch { throw new Error('Locked npm installation failed. Check the error above, network/proxy access and package-lock.json, then retry npm run dev. Startup does not fall back to npm install or rewrite the lockfile.'); }
+    if (!rootDependenciesReady(installationRoot)) throw new Error('npm ci completed but required Grapher dependencies are still missing; check npm omit/optional settings and retry npm run dev.');
   }
-
-  console.log("\n[dev] Checking and installing missing dependencies...");
-
-  // 1. Check and initialize Git submodule (pi)
-  if (status.missingSubmodule) {
-    console.log("[dev] [1/3] Pi engine submodule not found. Running git submodule update --init --recursive...");
-    try {
-      execFileSync("git", ["submodule", "update", "--init", "--recursive"], {
-        stdio: "inherit",
-        cwd: root,
-      });
-      console.log("[dev] [1/3] Pi engine submodule initialized.");
-    } catch (error) {
-      console.error("[dev] ❌ Failed to update git submodule:", error.message);
-      throw error;
-    }
+  let action = 'build';
+  try { verifyPiDependencies(installationRoot); } catch { action = 'setup'; }
+  if (action === 'setup' || !piBuildReady(installationRoot)) {
+    log(`[dev] Preparing Pi (${action === 'setup' ? 'install, audit and build' : 'rebuild from local reviewed dependencies'})...`);
+    await run(process.execPath, [join(installationRoot, 'scripts/pi-baseline.mjs'), action], options);
+    verifyPiDependencies(installationRoot);
+    if (!piBuildReady(installationRoot)) throw new Error('Pi build is incomplete or stale. Inspect the error above and run npm run pi:setup.');
   }
-
-  // 2. Check root dependencies, including the bundled runtime extensions.
-  if (status.missingRootModules) {
-    console.log("[dev] [2/3] Root dependencies are missing or outdated. Running npm ci --ignore-scripts...");
-    try {
-      runNpm(["ci", "--ignore-scripts"], { cwd: root });
-    } catch (err) {
-      console.warn("[dev] npm ci failed, falling back to npm install --ignore-scripts...");
-      runNpm(["install", "--ignore-scripts"], { cwd: root });
-    }
-    console.log("[dev] [2/3] Root dependencies installed.");
-  }
-
-  // 3. Check and initialize Pi engine dependencies and offline build
-  if (status.missingPiDist || status.missingPiDependencies) {
-    console.log("[dev] [3/3] Pi engine build artifacts not found. Running npm run pi:setup...");
-    try {
-      const piBaselineScript = join(root, "scripts", "pi-baseline.mjs");
-      execFileSync(process.execPath, [piBaselineScript, "setup"], {
-        stdio: "inherit",
-        cwd: root,
-        env: { ...process.env, npm_execpath: process.env.npm_execpath },
-      });
-      console.log("[dev] [3/3] Pi engine dependencies and build complete.");
-    } catch (error) {
-      console.error("[dev] ❌ Failed to initialize Pi engine:", error.message);
-      throw error;
-    }
-  }
-
-  // 4. Rust / Cargo environment check and guidance
-  if (status.missingCargo) {
-    console.error("\n" + "=".repeat(70));
-    console.error("[dev] ❌ Rust/Cargo toolchain not found!");
-    console.error("[dev] The backend service is written in Rust; Cargo is required to build and run Grapher.");
-    console.error("[dev] Please install Rust:");
-    if (process.platform === "win32") {
-      console.error("[dev]   👉 Windows: visit https://rustup.rs/ to download and install rustup-init.exe");
-    } else {
-      console.error("[dev]   👉 Run in terminal: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh");
-    }
-    console.error("[dev] After installation, restart your terminal and run npm run dev again.");
-    console.error("=".repeat(70) + "\n");
-    process.exit(1);
-  }
-
-  console.log("[dev] ✅ Dependencies verified, continuing startup...\n");
+  log('[dev] Dependencies ready.');
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  try {
-    await ensureDependencies();
-  } catch (error) {
-    console.error(error);
-    process.exitCode = 1;
-  }
+  ensureDependencies().catch(error => { console.error(`[dev] ${error.message}`); process.exitCode = 1; });
 }

@@ -25,6 +25,9 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
 
   const execution = mergers.find(e => e.id === attemptId) ?? mergers.at(-1);
   const resultId = publication ? `${runId}:${publication.head}:${publication.completedAt}` : "";
+  // A failed attempt is identified by its start, so dismissing one failure does
+  // not hide a later retry's failure.
+  const failedAttemptId = publication ? `${runId}:${publication.startedAt}:failed` : "";
 
   // Hooks must run even before publication exists and after its banner is dismissed.
   // Auto-dismiss completed banner after 6 seconds when completing live in the foreground.
@@ -44,10 +47,16 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
       (wasCompletedOnMount.current || dismissedResult === resultId || dismissedPublicationResults.has(resultId))) {
     return null;
   }
+  // A dismissed failed attempt stays hidden until a new attempt fails again.
+  if (publication.status === "failed" &&
+      (dismissedResult === failedAttemptId || dismissedPublicationResults.has(failedAttemptId))) {
+    return null;
+  }
 
   const handleDismiss = () => {
-    dismissedPublicationResults.add(resultId);
-    setDismissedResult(resultId);
+    const key = publication.status === "completed" ? resultId : failedAttemptId;
+    dismissedPublicationResults.add(key);
+    setDismissedResult(key);
   };
 
   return <section className={`publication-panel ${publication.status}`} aria-label={t("Graph 结果回写")}>
@@ -60,7 +69,7 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
       </strong>
       <span title={t("每个终点节点的提交已包含其上游依赖的结果")}>{publication.heads.length}{t(" 个终点结果（含上游变更）")}</span>
       {publication.status === "failed" && <button type="button" className="secondary" disabled={busy} onClick={onRetry}>{t("重试回写")}</button>}
-      {publication.status === "completed" && (
+      {(publication.status === "completed" || publication.status === "failed") && (
         <button
           type="button"
           className="publication-close"

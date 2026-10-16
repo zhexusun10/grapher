@@ -2,6 +2,10 @@
 
 Windows Graph execution is implemented using **native host processes and independent Git repositories**. This is the current execution model, not a sandbox proposal or migration plan.
 
+## Use a release archive (no build tools)
+
+Download `grapher-windows-x64.zip` from [GitHub Releases](https://github.com/zhexusun10/grapher/releases), verify its `.sha256` checksum, and extract it into a writable folder. Double-click `start.bat`: it checks that Node.js 22.19+ and Git are on `PATH` (printing install guidance when they are not), starts the backend, and prints the local URL. The first launch may show a SmartScreen prompt for the unsigned binary — choose **More info** → **Run anyway**. Agent tasks use the Git Bash installed with Git for Windows; runtime data stays in `.grapher/` inside that folder. The launcher never installs software and never requests administrator rights. See [Installation](installation.md) for updates, data backup and the in-package `START-HERE.md`.
+
 ## Prerequisites and startup
 
 Install Node.js 22.19+, Git for Windows (including Bash), and stable Rust with its required native linker/build tools. The standard Windows MSVC Rust toolchain needs the appropriate Visual Studio C++ Build Tools/Windows SDK.

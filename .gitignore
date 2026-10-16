@@ -3,6 +3,10 @@ node_modules/
 dist/
 build/
 
+# Local-only model catalog tweaks applied on top of the pinned baseline by
+# pi:setup; never committed (see Pi integration docs).
+engine/model-data-local/
+
 # OS metadata
 .DS_Store
 Thumbs.db

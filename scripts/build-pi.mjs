@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { corePackages, verifyPiDependencies } from './pi-dependencies.mjs';
 import { root, source, verifyBaseline } from './pi-baseline.mjs';
 import { toolchainEnv } from './cargo.mjs';
+import { recordPiBuild } from './pi-build-state.mjs';
 
 export function verifyBuildScripts(directory) {
   const expected = {
@@ -66,6 +67,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     verifyBuildScripts(source);
     const run = (cwd, ...args) => execFileSync(process.execPath, args, { cwd, stdio: 'inherit', env: toolchainEnv() });
     run(join(source, 'packages/ai'), join(source, 'packages/ai/scripts/check-model-data.ts'));
+    // A failed or interrupted rebuild must not retain a previous success stamp.
+    rmSync(join(source, 'node_modules/.grapher-pi-build.json'), { force: true });
     // Don't let deleted outputs from the previous Pi revision survive rebuilding.
     for (const name of corePackages) rmSync(join(source, 'packages', name, 'dist'), { recursive: true, force: true });
     for (const name of corePackages) {
@@ -75,6 +78,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     copyPiAssets(source);
     run(source, join(source, 'scripts/build-coding-agent-bundle.mjs'));
+    recordPiBuild(root);
     console.log('Pi offline artifacts built without shx or example dependencies.');
   } catch (error) {
     console.error(error.message);

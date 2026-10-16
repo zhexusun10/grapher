@@ -69,7 +69,11 @@ Failed publication or failed/blocked execution does not trigger review. A failed
 or stopped review retains its logs and source writes but discards its uncommitted
 candidate. Restart never silently repeats an interrupted model turn; it records
 failure and preserves the committed graph, requiring approval if committed work
-remains. Publication completion remains distinct from review success.
+remains. Every Planner turn on an existing Run that ends without committing a
+graph — a failed or stopped review, an interrupted follow-up revision included —
+is recorded once as a `planner_turn_aborted` history event, so the conversation
+replay keeps its durable output without touching the graph, phase or approval
+state. Publication completion remains distinct from review success.
 
 Focused evidence: [runtime review regressions](../../backend/src/planner_review_tests.rs)
 and the opt-in [real-browser saved-model acceptance](../../scripts/planner-review-acceptance.mjs).

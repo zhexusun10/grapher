@@ -1,5 +1,6 @@
 import { t } from "../../i18n";
 import React, { useState } from "react";
+import { createPortal } from "react-dom";
 import { Folder, Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
 import { ProjectItem } from "../../types";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
@@ -287,15 +288,16 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </button>
       </div>
 
-      {projectContextMenu && (
-        <div
-          className="context-menu"
-          style={{
-            left: Math.min(projectContextMenu.x, window.innerWidth - 180),
-            top: Math.min(projectContextMenu.y, window.innerHeight - 120),
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
+      {projectContextMenu &&
+        createPortal(
+          <div
+            className="context-menu"
+            style={{
+              left: Math.min(projectContextMenu.x, window.innerWidth - 180),
+              top: Math.min(projectContextMenu.y, window.innerHeight - 120),
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
           <button
             className="context-menu-item"
             onClick={() => {
@@ -318,18 +320,20 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             <Trash2 size={14} />
             <span>{t("从工作区移除")}</span>
           </button>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
 
-      {runContextMenu && (
-        <div
-          className="context-menu"
-          style={{
-            left: Math.min(runContextMenu.x, window.innerWidth - 180),
-            top: Math.min(runContextMenu.y, window.innerHeight - 120),
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
+      {runContextMenu &&
+        createPortal(
+          <div
+            className="context-menu"
+            style={{
+              left: Math.min(runContextMenu.x, window.innerWidth - 180),
+              top: Math.min(runContextMenu.y, window.innerHeight - 120),
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
           <button
             className="context-menu-item"
             onClick={() => {
@@ -353,8 +357,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             <Trash2 size={14} />
             <span>{t("删除此条历史")}</span>
           </button>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </aside>
   );
 });

@@ -916,6 +916,50 @@ fn editing_an_earlier_serial_turn_branches_pi_and_supersedes_later_executions() 
 }
 
 #[test]
+fn editing_a_running_node_stops_its_execution_and_branches_from_the_start() {
+    let (_temp, source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    runtime.emit(EventKind::Finished {
+        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(), output_bytes: 0, metrics: None,
+    }).unwrap();
+    runtime.intervene("task", "second").unwrap();
+    let second = runtime.jobs().unwrap().remove(0);
+    // The follow-up execution is still running when the opening prompt is edited.
+    let session_dir = runtime.root.join("sessions").join(&first.execution.id);
+    fs::create_dir_all(&session_dir).unwrap();
+    let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
+    let entries = [
+        serde_json::json!({"type":"session", "id":first.execution.session_id, "cwd":source}),
+        serde_json::json!({"type":"message", "id":"root", "parentId":null, "message":{"role":"system", "content":"system"}}),
+        serde_json::json!({"type":"message", "id":"one", "parentId":"root", "message":{"role":"user", "content":"self-contained task", "timestamp":first.execution.started_at}}),
+        serde_json::json!({"type":"message", "id":"answer1", "parentId":"one", "message":{"role":"assistant", "content":[]}}),
+        serde_json::json!({"type":"message", "id":"two", "parentId":"answer1", "message":{"role":"user", "content":"second", "timestamp":second.execution.started_at}}),
+    ];
+    fs::write(&file, entries.iter().map(|e| format!("{e}\n")).collect::<String>()).unwrap();
+    runtime.edit_node_message("task", &first.execution.id, "self-contained task", "new goal", None).unwrap();
+    // The live execution is stopped (recorded request) and superseded, and the
+    // node waits to rerun from the branched opening turn.
+    assert!(runtime.state.execution_stop_requests.contains(&second.execution.id));
+    assert!(runtime.state.superseded_execution_ids.contains(&second.execution.id));
+    assert_eq!(runtime.state.nodes["task"].status, "dirty");
+    assert_eq!(runtime.state.graph.nodes[0].task, "new goal");
+    let marker: serde_json::Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
+    assert_eq!(marker["parentId"], "root");
+    // The stopped writer's observed failure must not flip the node back to failed.
+    runtime.emit(EventKind::Failed {
+        node: "task".into(), execution_id: Some(second.execution.id.clone()), error: "killed".into(), output_bytes: 0, metrics: None,
+    }).unwrap();
+    assert_eq!(runtime.state.nodes["task"].status, "dirty");
+    let edited = runtime.jobs().unwrap().remove(0);
+    assert_eq!(edited.task, "new goal");
+    assert_eq!(edited.execution.session_id, first.execution.session_id);
+    assert_eq!(edited.resume_execution_id.as_deref(), Some(first.execution.id.as_str()));
+    assert!(!runtime.state.superseded_execution_ids.contains(&edited.execution.id));
+}
+
+#[test]
 fn interrupted_nodes_and_blocked_descendants_resume_from_the_topology_control() {
     let graph = Graph {
         original_goal: "interrupted graph".into(),
@@ -2504,6 +2548,107 @@ fn moved_binding_blocks_scheduling_and_publication() {
             .contains("项目绑定已失效")
     );
     assert!(!source.exists());
+}
+
+/// Complete the single node and run a successful publication for it, leaving
+/// the Run in the completed phase with reclaimed publication inputs.
+fn publish_single_node() -> (TempDir, PathBuf, Runtime, String) {
+    let (temp, source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    let path = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
+    fs::write(path.join("task.txt"), "v1").unwrap();
+    let head = workspace::snapshot_node(path, &source, "task").unwrap();
+    runtime
+        .finish(&job.execution, Ok((head, "done".into())))
+        .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    assert_eq!(runtime.state.phase, "completed");
+    (temp, source, runtime, publication.heads[0].clone())
+}
+
+#[test]
+fn resume_after_stopped_post_task_review_settles_instead_of_republishing() {
+    let (_temp, source, mut runtime, task_head) = publish_single_node();
+    // The successful publication reclaimed the snapshot and worktrees, so the
+    // terminal commit only exists in the recorded state.
+    runtime.cleanup_worktrees().unwrap();
+    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+
+    // A post-task review stopped by the user walks completed -> planning ->
+    // paused; resuming returns the Run to running with unchanged results.
+    runtime
+        .emit(EventKind::PlannerReviewStarted {
+            planning: Default::default(),
+        })
+        .unwrap();
+    runtime.emit(EventKind::StopRequested).unwrap();
+    runtime
+        .emit(EventKind::PlannerReviewFinished {
+            planning: Default::default(),
+            approval_required: false,
+        })
+        .unwrap();
+    runtime.pause(false).unwrap();
+    assert_eq!(runtime.state.phase, "running");
+
+    // The next scheduling turn must settle, not start a doomed second
+    // publication over commits whose Git objects no longer exist.
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
+    assert_eq!(runtime.state.published_heads, vec![task_head]);
+    assert_eq!(
+        runtime
+            .state
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::PublicationStarted { .. }))
+            .count(),
+        1
+    );
+    let publication = runtime.state.publication.clone().unwrap();
+    assert_eq!(publication.status, "completed");
+    assert!(publication.completed_at.is_some());
+}
+
+#[test]
+fn retry_publication_settles_a_redundant_attempt_over_published_heads() {
+    let (_temp, source, mut runtime, task_head) = publish_single_node();
+    // Legacy poisoned state: a redundant second attempt over the same heads
+    // replaced the completed publication record and then failed.
+    runtime
+        .emit(EventKind::PublicationStarted {
+            repository: source.to_string_lossy().into(),
+            heads: vec![task_head.clone()],
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::PublicationFailed {
+            error: "merge: gone - not something we can merge".into(),
+        })
+        .unwrap();
+    assert_eq!(runtime.state.phase, "publication_failed");
+    assert!(runtime.state.paused);
+
+    runtime.retry_publication().unwrap();
+    assert_eq!(runtime.state.phase, "completed");
+    assert!(!runtime.state.paused);
+    // The redundant attempt resolves at the already-published head, so the
+    // publication record no longer advertises a recoverable failure.
+    let publication = runtime.state.publication.clone().unwrap();
+    assert_eq!(publication.status, "completed");
+    assert_eq!(publication.head.as_deref(), runtime.state.published_head.as_deref());
+    assert!(publication.error.is_none());
 }
 
 #[test]

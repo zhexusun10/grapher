@@ -22,6 +22,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
   const [initialReady, setInitialReady] = useState(false);
   const initialReadyRef = useRef(false);
   const measuredViewportRef = useRef("");
+  const busyRetryRef = useRef<number | null>(null);
   useLayoutEffect(() => {
     if (!ready) { measuredViewportRef.current = ""; return; }
     const element = ref.current;
@@ -41,7 +42,20 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
           complete();
           return;
         }
-        if (busy) { measuredViewportRef.current = ""; return; }
+        if (busy) {
+          // A busy window can outlive the triggers that would re-run this check
+          // (the loader releases its guard slightly after the state flip). Drop
+          // the frame, but reschedule once so the fill loop cannot stall with
+          // no further resize, scroll or visibility events.
+          if (busyRetryRef.current === null) {
+            busyRetryRef.current = window.setTimeout(() => {
+              busyRetryRef.current = null;
+              check();
+            }, 180);
+          }
+          measuredViewportRef.current = "";
+          return;
+        }
         const relativeTop = parent.getBoundingClientRect().top - element.getBoundingClientRect().top;
         const threshold = Math.max(480, parent.clientHeight * TRANSCRIPT_VIEWPORT_BUFFER);
         const readingNearTop = hasOlder && parent.dataset.transcriptHistoryReading === "true" && relativeTop >= -threshold && relativeTop <= threshold;
@@ -73,6 +87,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       observer.disconnect(); parent.removeEventListener(FOLLOW_LATEST_EVENT, check);
       document.removeEventListener("visibilitychange", check);
       if (frame !== null) cancelAnimationFrame(frame);
+      if (busyRetryRef.current !== null) { clearTimeout(busyRetryRef.current); busyRetryRef.current = null; }
     };
   }, [ref, ready, hasOlder, busy, error, progress, load]);
   return initialReady;

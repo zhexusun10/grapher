@@ -58,6 +58,15 @@ npm run pi:build
 
 `npm run pi` starts the pinned CLI and shares the dedicated agent directory with Grapher. User-facing authentication and role selection are covered in [Providers](../guides/providers.md).
 
+### Local model-data overlay
+
+The committed baseline (`engine/model-data/`, `engine/pi-lock.json` and the upstream `.manifest.json`) must stay exactly what the pinned Pi release ships; personal provider/catalog edits never enter Git. Instead, put full-file provider overrides into the git-ignored `engine/model-data-local/` directory:
+
+- `pi:setup` and `pi:build` restore the pristine baseline, copy each overlay file over it, and regenerate the merged catalog's manifest with Pi's own tooling, so upstream `check-model-data` validation still passes.
+- Overlay files may only override providers that exist in the baseline; adding a provider requires real submodule changes and an adoption, not an overlay. The overlay must not contain `.manifest.json`.
+- `pi:adopt` always records the pristine upstream hydration, never the overlay, so upgrades replace the baseline wholesale and the overlay keeps applying on top. Regenerate/re-check overlay files after an upgrade if upstream changed those catalogs.
+- Local release packages built on a machine with an overlay include those tweaks; CI release archives are built without an overlay and stay pristine.
+
 ## Role loading policy
 
 | Role | Policy |

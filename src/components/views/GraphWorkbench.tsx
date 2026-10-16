@@ -31,6 +31,7 @@ import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTimeTookText } from "../ExecutionTimeTook";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
+import { plannerTurnIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
 import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
@@ -123,8 +124,10 @@ function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = fa
     aria-hidden={placeholder || undefined}
     disabled={placeholder}
     onClick={onToggle}
-    style={{ cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", justifyContent: "space-between",
-      visibility: placeholder ? "hidden" : undefined }}
+    style={{
+      cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", justifyContent: "space-between",
+      visibility: placeholder ? "hidden" : undefined
+    }}
     title={expanded ? t("点击收起执行记录") : t("点击展开执行记录")}
   >
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -432,7 +435,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           setMergerPrompts((prev) => ({ ...prev, [mergerId]: prompt }));
         }
       })
-      .catch(() => {});
+      .catch(() => { });
 
     return () => {
       cancelled = true;
@@ -451,8 +454,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const activeMergerPrompt = (selectedMerger?.id ? mergerPrompts[selectedMerger.id] : undefined) || nodeMergerPrompt;
 
   const selectedNode = (isNodeMergerSelected
-      ? { name: selected, task: activeMergerPrompt }
-      : state.graph.nodes.find((item) => item.name === selected))
+    ? { name: selected, task: activeMergerPrompt }
+    : state.graph.nodes.find((item) => item.name === selected))
     ?? (selectedPublicationMerger ? { name: publicationMergerCardId, task: activeMergerPrompt } : undefined);
   const selectedState = selectedNode && !publicationMergerSelected && !isNodeMergerSelected
     ? state.nodes[selectedNode.name]
@@ -486,10 +489,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       event.type === "conversation_edited" && event.target === conversationNode && event.nodes?.includes(conversationNode));
     const local = latestEdit?.old_instruction
       ? (() => {
-          const index = localMessages.findIndex((msg) =>
-            msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === latestEdit.old_instruction);
-          return index >= 0 ? localMessages.slice(0, index) : localMessages;
-        })()
+        const index = localMessages.findIndex((msg) =>
+          msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === latestEdit.old_instruction);
+        return index >= 0 ? localMessages.slice(0, index) : localMessages;
+      })()
       : localMessages;
     const localRemaining = [...local];
     const rolledBackTurns = new Set<string>();
@@ -649,17 +652,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
     : (routeType === "graph" ? state.planningId : undefined));
   // A run owns one Planner conversation, although each planning attempt has
-  // its own durable output log. Replay every committed turn after a reload;
-  // exclude turns already present in the live SSE transcript.
+  // its own durable output log. Replay every recorded turn after a reload —
+  // including aborted revision turns — excluding turns still live-streaming.
   const savedPlannerIds = useMemo(() => {
     // Recovery discovers the planning ID before the route is known. Mount the
     // durable activity poller now, rather than waiting for the finished graph.
     if ((!recoveredPlanningId && routeType !== "graph") ||
-        (isPlanning && !backgroundReview && !recoveredPlanningId && !plannerStream.isContinuation)) return [];
-    const ids = state.events
-      .filter((event) => event.type === "created" || event.type === "graph_revised" || event.type === "planner_review_started")
-      .map((event) => event.planning_id || event.planning?.planningId)
-      .filter((id): id is string => Boolean(id));
+      (isPlanning && !backgroundReview && !recoveredPlanningId && !plannerStream.isContinuation)) return [];
+    const ids = plannerTurnIds(state.events);
     if (savedPlannerId) ids.push(savedPlannerId);
     const seen = new Set<string>();
     return ids.filter((id) => {
@@ -1651,13 +1651,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   editing={editingTaskNode === selectedNode.name}
                   draft={taskDraft}
                   onDraftChange={setTaskDraft}
-                  onEdit={!isNodeMergerSelected && selected !== publicationMergerCardId && (!state.approved || selectedState?.status === "done" || selectedState?.status === "failed" || selectedState?.status === "paused" || selectedState?.status === "running") ? () => {
+                  onEdit={!isNodeMergerSelected && selected !== publicationMergerCardId ? () => {
                     onCancelEditMessage?.();
                     setEditingTaskNode(selectedNode.name);
                     setTaskDraft(selectedNode.task);
                   } : undefined}
                   onCancel={() => setEditingTaskNode("")}
-                  disabled={locked || (state.approved && selectedState?.status === "dirty") || taskDraft.trim() === selectedNode.task}
+                  disabled={locked}
                   onSave={(value) => {
                     const saveTask = () => {
                       onSave({
@@ -1671,16 +1671,30 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     if (state.approved) {
                       const first = attempts[0];
                       if (first && onEditMessageSubmit) {
-                        void Promise.resolve(onEditMessageSubmit({
-                          id: `task-${selectedNode.name}`,
-                          role: "user",
-                          text: selectedNode.task,
-                          node: selectedNode.name,
-                          executionId: first.id,
-                          runId: state.runId,
-                        }, value)).then((accepted) => {
-                          if (accepted !== false) setEditingTaskNode("");
-                        });
+                        const submitEdit = () => {
+                          void Promise.resolve(onEditMessageSubmit({
+                            id: `task-${selectedNode.name}`,
+                            role: "user",
+                            text: selectedNode.task,
+                            node: selectedNode.name,
+                            executionId: first.id,
+                            runId: state.runId,
+                          }, value)).then((accepted) => {
+                            if (accepted !== false) setEditingTaskNode("");
+                          });
+                        };
+                        if (selectedState?.status === "running") {
+                          onRequestConfirmation({
+                            title: t("节点正在执行"),
+                            message: t("保存会停止该节点正在执行的进程，并从会话开头以新的任务目标重新运行。"),
+                            confirmText: t("停止并修改"),
+                            danger: true,
+                            onConfirm: submitEdit,
+                          });
+                          return;
+                        }
+                        submitEdit();
+                        return;
                       } else {
                         onRequestConfirmation({
                           title: t("修改未执行的 Task？"),
@@ -1700,70 +1714,70 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   const isWaitingExecution = waitingForNodeExecution && index === nodeTurns.length - 1;
 
                   return (
-                  <React.Fragment key={turn.id}>
-                    {turn.userMessage && (
-                      <div className="chat-message-row user">
-                        <EditableUserBubble
-                          text={turn.userMessage.text.replace(/^\[@[^\]]+\]\s*/, "").trim()}
-                          images={turn.userMessage.images}
-                          files={turn.userMessage.files}
-                          editing={editingMessage?.id === turn.userMessage.id}
-                          draft={editPrefillText ?? ""}
-                          onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                          onEdit={onEditMessage && (selectedMerger || turn.userMessage.delivery !== "node_messaged")
-                            ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!) }
-                            : undefined}
-                          onCancel={() => onCancelEditMessage?.()}
-                          onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
-                          disabled={locked}
-                          versions={turn.userMessage.versions}
-                          currentVersionIndex={turn.userMessage.currentVersionIndex}
-                          onSwitchVersion={(idx) => onSwitchMessageVersion?.(turn.userMessage!, idx)}
-                        />
-                      </div>
-                    )}
-                    {turn.executions.map((exec) => {
-                      const isExpanded = isAttemptExpanded(exec.id);
-                      return (
-                        <motion.div
-                          key={exec.id}
-                          className="serial-execution-panel"
-                          initial={false}
-                          animate={{ opacity: 1, y: 0 }}
-                          transition={{ duration: 0.3 }}
-                        >
-                          {showExecutionRecords && (
-                            <ExecutionRecordHeader execution={exec} expanded={isExpanded} onToggle={(e) => {
-                              const panel = e.currentTarget.closest<HTMLElement>(".serial-execution-panel");
-                              handleToggleAttempt(exec.id, panel);
-                            }} />
-                          )}
-                          {isExpanded && (
-                            <div style={{ display: "flex", flexDirection: "column", marginTop: showExecutionRecords ? 4 : 0 }}>
-                              <ExecutionTranscript
-                                runId={state.runId}
-                                execution={exec}
-                                onUserResize={handleExpandableContentChange}
-                                onInitialOutputReady={handleExecutionOutputReady}
-                              />
-                            </div>
-                          )}
-                        </motion.div>
-                      );
-                    })}
-                    {isWaitingExecution && (
-                      <div className="serial-execution-panel" aria-hidden="true">
-                        {showExecutionRecords && attempts.at(-1) && (
-                          <ExecutionRecordHeader execution={attempts.at(-1)!} expanded placeholder />
-                        )}
-                        <div style={{ display: "flex", flexDirection: "column", marginTop: showExecutionRecords ? 4 : 0 }}>
-                          <ExecutionTranscriptPlaceholder />
+                    <React.Fragment key={turn.id}>
+                      {turn.userMessage && (
+                        <div className="chat-message-row user">
+                          <EditableUserBubble
+                            text={turn.userMessage.text.replace(/^\[@[^\]]+\]\s*/, "").trim()}
+                            images={turn.userMessage.images}
+                            files={turn.userMessage.files}
+                            editing={editingMessage?.id === turn.userMessage.id}
+                            draft={editPrefillText ?? ""}
+                            onDraftChange={onEditPrefillTextChange ?? (() => { })}
+                            onEdit={onEditMessage && (selectedMerger || turn.userMessage.delivery !== "node_messaged")
+                              ? () => { setEditingTaskNode(""); onEditMessage(turn.userMessage!) }
+                              : undefined}
+                            onCancel={() => onCancelEditMessage?.()}
+                            onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
+                            disabled={locked}
+                            versions={turn.userMessage.versions}
+                            currentVersionIndex={turn.userMessage.currentVersionIndex}
+                            onSwitchVersion={(idx) => onSwitchMessageVersion?.(turn.userMessage!, idx)}
+                          />
                         </div>
-                      </div>
-                    )}
-                  </React.Fragment>
-                );
-              })}
+                      )}
+                      {turn.executions.map((exec) => {
+                        const isExpanded = isAttemptExpanded(exec.id);
+                        return (
+                          <motion.div
+                            key={exec.id}
+                            className="serial-execution-panel"
+                            initial={false}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.3 }}
+                          >
+                            {showExecutionRecords && (
+                              <ExecutionRecordHeader execution={exec} expanded={isExpanded} onToggle={(e) => {
+                                const panel = e.currentTarget.closest<HTMLElement>(".serial-execution-panel");
+                                handleToggleAttempt(exec.id, panel);
+                              }} />
+                            )}
+                            {isExpanded && (
+                              <div style={{ display: "flex", flexDirection: "column", marginTop: showExecutionRecords ? 4 : 0 }}>
+                                <ExecutionTranscript
+                                  runId={state.runId}
+                                  execution={exec}
+                                  onUserResize={handleExpandableContentChange}
+                                  onInitialOutputReady={handleExecutionOutputReady}
+                                />
+                              </div>
+                            )}
+                          </motion.div>
+                        );
+                      })}
+                      {isWaitingExecution && (
+                        <div className="serial-execution-panel" aria-hidden="true">
+                          {showExecutionRecords && attempts.at(-1) && (
+                            <ExecutionRecordHeader execution={attempts.at(-1)!} expanded placeholder />
+                          )}
+                          <div style={{ display: "flex", flexDirection: "column", marginTop: showExecutionRecords ? 4 : 0 }}>
+                            <ExecutionTranscriptPlaceholder />
+                          </div>
+                        </div>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
 
                 <WorkspaceDetailsPanel
                   key={`${state.runId}:${selectedNode.name}`}
@@ -1837,18 +1851,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   !state.approved
                     ? t("图规划审批启动后，可在此向选定节点发送介入指令…")
                     : selectedMerger
-                    ? (selectedMergerRunning
-                      ? t("向 merger 实时发送 Steer（当前工具调用后生效）…")
-                      : selectedMergerContinuable
-                      ? (selectedMerger.status === "failed"
-                        ? t("向 merger 发送消息并重跑…")
-                        : t("向 publication merger 追加消息…"))
-                      : t("merger 已结束，只能查看执行记录"))
-                    : isSelectedNodeWorking
-                    ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", selectedNode.name)
-                    : selectedState?.status === "done"
-                    ? t("向 @{0} 发送消息并继续执行…", selectedNode.name)
-                    : t("向 @{0} 发送介入指令…", selectedNode.name)
+                      ? (selectedMergerRunning
+                        ? t("向 merger 实时发送 Steer（当前工具调用后生效）…")
+                        : selectedMergerContinuable
+                          ? (selectedMerger.status === "failed"
+                            ? t("向 merger 发送消息并重跑…")
+                            : t("向 publication merger 追加消息…"))
+                          : t("merger 已结束，只能查看执行记录"))
+                      : isSelectedNodeWorking
+                        ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", selectedNode.name)
+                        : selectedState?.status === "done"
+                          ? t("向 @{0} 发送消息并继续执行…", selectedNode.name)
+                          : t("向 @{0} 发送介入指令…", selectedNode.name)
                 }
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
@@ -1884,75 +1898,75 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         (isSerialWorking || isMainViewWorking || pendingRequest);
 
                       return (
-                      <React.Fragment key={turn.id}>
-                        {turn.userMessage && (
-                          <motion.div
-                            className="chat-message-row user"
-                            initial={isPlanning && turn.isInitial ? { opacity: 0 } : false}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-                          >
-                            <EditableUserBubble
-                              text={turn.userMessage.text.trim()}
-                              images={turn.userMessage.images}
-                              files={turn.userMessage.files}
-                              editing={editingMessage?.id === turn.userMessage.id}
-                              draft={editPrefillText ?? ""}
-                              onDraftChange={onEditPrefillTextChange ?? (() => {})}
-                              onEdit={onEditMessage && turn.userMessage.delivery !== "node_messaged" ? () => onEditMessage(turn.userMessage!) : undefined}
-                              onCancel={() => onCancelEditMessage?.()}
-                              onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
-                              disabled={locked && !isPlanning}
-                              versions={turn.userMessage.versions}
-                              currentVersionIndex={turn.userMessage.currentVersionIndex}
-                              onSwitchVersion={(idx) => onSwitchMessageVersion?.(turn.userMessage!, idx)}
-                            />
-                          </motion.div>
-                        )}
-
-                        {turn.isInitial && showRouteBadge && (
-                          <motion.div
-                            className="route-decision-pill serial"
-                            initial={isPlanning ? { opacity: 0, scale: 0.96 } : false}
-                            animate={{ opacity: 1, scale: 1 }}
-                            transition={{ duration: isPlanning ? 0.25 : 0, ease: "easeOut" }}
-                          >
-                            <Compass size={13} />
-                            <span>{t("任务路线决策：单节点执行")}</span>
-                          </motion.div>
-                        )}
-
-                        {turn.executions.map((exec) => {
-                          return (
+                        <React.Fragment key={turn.id}>
+                          {turn.userMessage && (
                             <motion.div
-                              key={exec.id}
-                              className="serial-execution-panel"
-                              initial={false}
-                              animate={{ opacity: 1 }}
-                              transition={{ duration: 0.15 }}
+                              className="chat-message-row user"
+                              initial={isPlanning && turn.isInitial ? { opacity: 0 } : false}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
                             >
-                              <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                                <ExecutionTranscript
-                                  key={exec.id}
-                                  runId={state.runId}
-                                  execution={exec}
-                                  onUserResize={handleExpandableContentChange}
-                                  onInitialOutputReady={handleExecutionOutputReady}
-                                />
-                              </div>
+                              <EditableUserBubble
+                                text={turn.userMessage.text.trim()}
+                                images={turn.userMessage.images}
+                                files={turn.userMessage.files}
+                                editing={editingMessage?.id === turn.userMessage.id}
+                                draft={editPrefillText ?? ""}
+                                onDraftChange={onEditPrefillTextChange ?? (() => { })}
+                                onEdit={onEditMessage && turn.userMessage.delivery !== "node_messaged" ? () => onEditMessage(turn.userMessage!) : undefined}
+                                onCancel={() => onCancelEditMessage?.()}
+                                onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(turn.userMessage!, value) : onSendMessage(value)}
+                                disabled={locked && !isPlanning}
+                                versions={turn.userMessage.versions}
+                                currentVersionIndex={turn.userMessage.currentVersionIndex}
+                                onSwitchVersion={(idx) => onSwitchMessageVersion?.(turn.userMessage!, idx)}
+                              />
                             </motion.div>
-                          );
-                        })}
-                        {isWaitingExecution && (
-                          <div className="serial-execution-panel" aria-hidden="true">
-                            <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                              <ExecutionTranscriptPlaceholder />
+                          )}
+
+                          {turn.isInitial && showRouteBadge && (
+                            <motion.div
+                              className="route-decision-pill serial"
+                              initial={isPlanning ? { opacity: 0, scale: 0.96 } : false}
+                              animate={{ opacity: 1, scale: 1 }}
+                              transition={{ duration: isPlanning ? 0.25 : 0, ease: "easeOut" }}
+                            >
+                              <Compass size={13} />
+                              <span>{t("任务路线决策：单节点执行")}</span>
+                            </motion.div>
+                          )}
+
+                          {turn.executions.map((exec) => {
+                            return (
+                              <motion.div
+                                key={exec.id}
+                                className="serial-execution-panel"
+                                initial={false}
+                                animate={{ opacity: 1 }}
+                                transition={{ duration: 0.15 }}
+                              >
+                                <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                                  <ExecutionTranscript
+                                    key={exec.id}
+                                    runId={state.runId}
+                                    execution={exec}
+                                    onUserResize={handleExpandableContentChange}
+                                    onInitialOutputReady={handleExecutionOutputReady}
+                                  />
+                                </div>
+                              </motion.div>
+                            );
+                          })}
+                          {isWaitingExecution && (
+                            <div className="serial-execution-panel" aria-hidden="true">
+                              <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
+                                <ExecutionTranscriptPlaceholder />
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </React.Fragment>
-                    );
-                  })}
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
 
                     <WorkspaceDetailsPanel
                       key={`${state.runId}:serial`}
@@ -1994,7 +2008,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             files={plannerMessages[0].files}
                             editing={editingMessage?.id === plannerMessages[0].id}
                             draft={editPrefillText ?? ""}
-                            onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                            onDraftChange={onEditPrefillTextChange ?? (() => { })}
                             onEdit={onEditMessage ? () => onEditMessage(plannerMessages[0]) : undefined}
                             onCancel={() => onCancelEditMessage?.()}
                             onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(plannerMessages[0], value) : onSendMessage(value)}
@@ -2052,8 +2066,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           onUserResize={handleExpandableContentChange}
                           edits={plannerEdits}
                           onEditUser={onEditMessageSubmit ? (text, replacement) =>
-                            onEditMessageSubmit({ id: `planner-history-${text}`, role: "user", parentId: null,
-                              text, runId: state.runId }, replacement) : undefined}
+                            onEditMessageSubmit({
+                              id: `planner-history-${text}`, role: "user", parentId: null,
+                              text, runId: state.runId
+                            }, replacement) : undefined}
                         />
                       </div>
                     )}
@@ -2082,7 +2098,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           files={msg.files}
                           editing={editingMessage?.id === msg.id}
                           draft={editPrefillText ?? ""}
-                          onDraftChange={onEditPrefillTextChange ?? (() => {})}
+                          onDraftChange={onEditPrefillTextChange ?? (() => { })}
                           onEdit={onEditMessage ? () => onEditMessage(msg) : undefined}
                           onCancel={() => onCancelEditMessage?.()}
                           onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(msg, value) : onSendMessage(value)}
@@ -2098,7 +2114,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     {renderLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
                       <PlannerTranscript items={plannerStream.items} isPlanning={isPlanning} locked={locked}
                         editingMessage={editingMessage} draft={editPrefillText ?? ""}
-                        onDraftChange={onEditPrefillTextChange ?? (() => {})} onEditMessage={onEditMessage}
+                        onDraftChange={onEditPrefillTextChange ?? (() => { })} onEditMessage={onEditMessage}
                         onCancelEdit={onCancelEditMessage} onEditSubmit={onEditMessageSubmit}
                         onSendMessage={onSendMessage} onUserResize={handleExpandableContentChange} />
                     ) : (
@@ -2108,7 +2124,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             <ThinkingCard
                               content={plannerStream.plannerThinking}
                               isStreaming={isPlanning && plannerStream.plannerThinkingActive}
-                              title={t("思考过程")}
+                              title="Chain of Thought"
                               defaultExpanded={true}
                               autoExpandWhileStreaming={true}
                               animateAppear={false}
@@ -2277,10 +2293,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   isPlanning
                     ? t("输入补充规划或纠偏要求，发送将实时转向 (Steer)…")
                     : isSerialExecution
-                    ? t("向当前任务发送介入指令，直接在对话框中继续对话…")
-                    : state.approved
-                    ? t("向规划器修改当前图，保留未受影响的节点结果…")
-                    : t("向规划器追加指令，直接在对话框中继续对话并调整图规划…")
+                      ? t("向当前任务发送介入指令，直接在对话框中继续对话…")
+                      : state.approved
+                        ? t("向规划器修改当前图，保留未受影响的节点结果…")
+                        : t("向规划器追加指令，直接在对话框中继续对话并调整图规划…")
                 }
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
@@ -2373,12 +2389,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <><span className="progress-dot" />{activityStatus}</>
                       ) : graphPhase === "planning" ? t("规划中")
                         : graphPhase === "running" ? t("确定性运行时正在推进")
-                        : graphPhase === "followup" ? t("源目录直改中（无快照）")
-                        : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
-                        : graphPhase === "pausing" ? t("正在停止运行中的节点…")
-                        : graphPhase === "paused" ? t("执行已暂停，点击继续可恢复")
-                        : graphPhase === "completed" ? t("运行已完成")
-                        : state.approved ? phaseText[graphPhase] ?? graphPhase : ""}
+                          : graphPhase === "followup" ? t("源目录直改中（无快照）")
+                            : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
+                              : graphPhase === "pausing" ? t("正在停止运行中的节点…")
+                                : graphPhase === "paused" ? t("执行已暂停，点击继续可恢复")
+                                  : graphPhase === "completed" ? t("运行已完成")
+                                    : state.approved ? phaseText[graphPhase] ?? graphPhase : ""}
                     </span>
                     <div>
                       {graphPhase === "awaiting_approval" ? (

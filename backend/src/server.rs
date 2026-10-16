@@ -437,6 +437,14 @@ pub struct Bootstrap {
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
 const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
 const POST_TASK_REVIEW_PROMPT: &str = "All tasks you assigned are completed. Consider your next move.";
+/// Rework semantics shared by the injected Planner status block and the
+/// post-task review turn so revisions price downstream re-runs correctly.
+/// Runtime enforces the same rule in `revision_affected` regardless.
+const PLANNER_REWORK_NOTE: &str = "Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the new dependency filesystem state); unrelated branches keep their results and history.";
+
+fn post_task_review_task() -> String {
+    format!("{POST_TASK_REVIEW_PROMPT}\n\n{PLANNER_REWORK_NOTE}")
+}
 
 // Keep the synthetic turn in Pi's own session, not in the UI transcript.
 fn hidden_review_turn(line: &str, background_review: bool) -> bool {
@@ -446,8 +454,34 @@ fn hidden_review_turn(line: &str, background_review: bool) -> bool {
         && event["message"]["role"] == "user"
         && event["message"]["content"].as_array().is_some_and(|parts| {
             parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")
-                == POST_TASK_REVIEW_PROMPT
+                == post_task_review_task()
         })
+}
+
+/// Transcript projection of one Planner engine output line. Background-review
+/// user records of the synthetic turn are dropped; lifecycle records that
+/// embed the conversation (`agent_end`) lose the synthetic user message while
+/// keeping their own metrics and retry accounting.
+fn review_transcript_line(line: &str, background_review: bool) -> Option<std::borrow::Cow<'_, str>> {
+    if !background_review { return Some(std::borrow::Cow::Borrowed(line)); }
+    if hidden_review_turn(line, true) { return None; }
+    let Ok(mut event) = serde_json::from_str::<serde_json::Value>(line) else { return Some(std::borrow::Cow::Borrowed(line)); };
+    let synthetic = |message: &serde_json::Value| -> bool {
+        message.get("role").and_then(|role| role.as_str()) == Some("user")
+            && message.get("content").and_then(|content| content.as_array()).is_some_and(|parts| {
+                parts.iter().filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+                    .collect::<Vec<_>>().join("\n") == post_task_review_task()
+            })
+    };
+    let Some(messages) = event.get_mut("messages").and_then(|messages| messages.as_array_mut()) else {
+        return Some(std::borrow::Cow::Borrowed(line));
+    };
+    let before = messages.len();
+    messages.retain(|message| !synthetic(message));
+    if messages.len() == before { return Some(std::borrow::Cow::Borrowed(line)); }
+    let mut redacted = serde_json::to_string(&event).ok()?;
+    if line.ends_with('\n') { redacted.push('\n'); }
+    Some(std::borrow::Cow::Owned(redacted))
 }
 
 #[cfg(test)]
@@ -1055,21 +1089,8 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 
 fn planner_node_status(snapshot: &Snapshot) -> String {
     let mut text = String::from("Current graph node status:\n");
-    if snapshot.published_head.is_some() {
-        let published: Vec<&str> = snapshot
-            .graph
-            .nodes
-            .iter()
-            .filter(|node| snapshot.nodes.get(&node.name).is_some_and(|state| state.status == "done"))
-            .map(|node| node.name.as_str())
-            .collect();
-        if !published.is_empty() {
-            text.push_str(&format!(
-                "Already published in this run: {}. These nodes cannot be deleted; change their task to rework them.\n",
-                published.join(", ")
-            ));
-        }
-    }
+    text.push_str(PLANNER_REWORK_NOTE);
+    text.push('\n');
     for node in &snapshot.graph.nodes {
         if let Some(state) = snapshot.nodes.get(&node.name) {
             let status_desc = if snapshot.is_node_user_paused(&node.name) {
@@ -1628,7 +1649,7 @@ fn plan_goal_internal_with_started(
                         // Append dynamic state only to the new user turn, never to
                         // the shared system prompt or previous Planner turns.
                         let task = if background_review {
-                            POST_TASK_REVIEW_PROMPT.to_owned()
+                            post_task_review_task()
                         } else {
                             let runtime =
                                 service.runtime.lock().map_err(|error| error.to_string())?;
@@ -1736,7 +1757,7 @@ fn plan_goal_internal_with_started(
                                 images: None,
                             },
                             |text| {
-                                if hidden_review_turn(&text, background_review) { return; }
+                                let Some(text) = review_transcript_line(&text, background_review) else { return; };
                                 if let Err(error) = planner_log.write_all(text.as_bytes()) {
                                     log_error = Some(error.to_string());
                                 }
@@ -1988,6 +2009,16 @@ fn plan_goal_internal_with_started(
                                 });
                             }
                             notify_planning_output(&owner, &planning_id);
+                        } else if let Ok(mut runtime) = service.runtime.lock() {
+                            // The aborted turn's durable planner.jsonl stays part of
+                            // this Run's conversation; record it without touching the
+                            // compiled graph or the Run phase. Only the owning Run may
+                            // receive it: a switched-away Run is recovered at startup.
+                            if runtime.state.run_id == owner {
+                                let _ = runtime.emit(EventKind::PlannerTurnAborted {
+                                    planning: failure_summary.clone(),
+                                });
+                            }
                         }
                     }
                     Err((err, Some(failure_summary)))
@@ -2094,9 +2125,8 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
         enrich_planning_summary(&mut summary, &directory);
         write_planning_summary(&directory, &summary)?;
         let Some(request) = request else { continue; };
-        // A failed revision must not replace its existing compiled graph.
-        if !request["revisionRunId"].is_null() { continue; }
-        let run_id = recorded.or_else(|| request["runId"].as_str().map(str::to_owned))
+        let unrecorded = recorded.is_none();
+        let run_id = recorded.clone().or_else(|| request["runId"].as_str().map(str::to_owned))
             .or_else(|| {
                 // Legacy requests omitted the provisional Run ID. The private
                 // workspace preserves it as .grapher-workspaces/<runId>/<attempt>.
@@ -2104,6 +2134,21 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
                 let id = path.parent()?.file_name()?.to_str()?;
                 Uuid::parse_str(id).ok().map(|_| id.to_owned())
             }).unwrap_or_else(|| summary.planning_id.clone());
+        // A failed revision must not replace its existing compiled graph, but
+        // its durable Planner output stays part of the conversation: record the
+        // aborted turn once so a reload can replay it. Successful attempts are
+        // already identified by their GraphRevised/review events (`recorded`).
+        if !request["revisionRunId"].is_null() {
+            if unrecorded
+                && is_valid_planning_id(&run_id)
+                && !primary.store.run_was_deleted(&run_id)?
+                && primary.store.contains_run(&run_id)?
+            {
+                let mut recovered = primary.open_run(&run_id)?;
+                recovered.emit(EventKind::PlannerTurnAborted { planning: summary })?;
+            }
+            continue;
+        }
         if !is_valid_planning_id(&run_id) || primary.store.run_was_deleted(&run_id)? { continue; }
         let exists = primary.store.contains_run(&run_id)?;
         let mut recovered = primary.open_run(if exists { &run_id } else { "" })?;
@@ -2328,7 +2373,7 @@ fn drive(service: Arc<Service>) {
                                 };
                                 if let Some(config) = review {
                                     if let Err((error, _)) = plan_goal_internal_with_started(
-                                        POST_TASK_REVIEW_PROMPT.into(), config, Some("graph"), None,
+                                        post_task_review_task().into(), config, Some("graph"), None,
                                         Some(run_id.clone()), &service, true, |_| {}, |_| {}, |_| {}, |_| {},
                                     ) {
                                         eprintln!("Post-task Planner review failed: {error}");

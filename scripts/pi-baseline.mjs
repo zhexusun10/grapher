@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { toolchainEnv } from "./cargo.mjs";
 import { installPiDependencies, verifyPiDependencies } from "./pi-dependencies.mjs";
+import { regenerateModelDataManifest } from "./model-data-manifest.mjs";
 
 export const root = fileURLToPath(new URL("../", import.meta.url));
 export const source = join(root, "pi");
@@ -24,14 +25,31 @@ export function verifyBaseline() {
   // Version lock removed to allow local Pi modifications and unrecorded revisions.
 }
 
-export function restoreModelData() {
-  const destination = join(source, "packages/ai/src/providers/data");
+export const localModelData = join(root, "engine/model-data-local");
+
+// Restores the reviewed upstream model catalog, then applies the git-ignored
+// local overlay (engine/model-data-local, full-file provider overrides for
+// personal API tweaks). Overlay changes are not part of the reviewed baseline,
+// so their merged catalog gets a freshly computed manifest and upstream
+// validation still passes. The committed baseline itself stays pristine.
+export function restoreModelData(destination = join(source, "packages/ai/src/providers/data")) {
+  const overlay = existsSync(localModelData)
+    ? readdirSync(localModelData).filter(name => name.endsWith('.json'))
+    : [];
+  if (overlay.includes('.manifest.json')) throw new Error('The local model-data overlay must not contain .manifest.json; it is regenerated from the merged catalog');
+  const unknown = overlay.filter(name => !(name in lock.modelData));
+  if (unknown.length) {
+    throw new Error(`Local model-data overlay contains unknown providers (${unknown.join(', ')}); adding a provider requires submodule changes, not an overlay`);
+  }
+  const allowed = new Set([...Object.keys(lock.modelData), ...overlay]);
   mkdirSync(destination, { recursive: true });
   // Removed providers from an older local hydration must not survive an upgrade.
   for (const name of readdirSync(destination)) {
-    if (name.endsWith('.json') && !(name in lock.modelData)) rmSync(join(destination, name));
+    if (name.endsWith('.json') && !allowed.has(name)) rmSync(join(destination, name));
   }
   for (const name of Object.keys(lock.modelData)) copyFileSync(join(root, "engine/model-data", name), join(destination, name));
+  for (const name of overlay) copyFileSync(join(localModelData, name), join(destination, name));
+  if (overlay.length) regenerateModelDataManifest(join(destination, '..', '..', '..'));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

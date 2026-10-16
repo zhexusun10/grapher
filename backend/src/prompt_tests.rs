@@ -720,7 +720,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     );
     assert_eq!(
         planner_followup_prompt("Follow up", Some(&run_id), &runtime.state),
-        "Current graph node status:\n- keep: waiting\n\nFollow up"
+        format!("Current graph node status:\n{PLANNER_REWORK_NOTE}\n- keep: waiting\n\nFollow up")
     );
     let base = runtime.state.base.clone();
     let service = Arc::new(Service {
@@ -991,7 +991,7 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
     );
     assert_eq!(
         planner_node_status(&runtime.state),
-        "Current graph node status:\n- first: waiting\n"
+        format!("Current graph node status:\n{PLANNER_REWORK_NOTE}\n- first: waiting\n")
     );
 }
 

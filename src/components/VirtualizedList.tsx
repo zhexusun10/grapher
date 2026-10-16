@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { retainedRowAnchor, rowAt, rowOffsets, visibleRows } from "../services/transcriptLayout";
+import { estimateTranscriptRowHeight, retainedRowAnchor, rowAt, rowOffsets, visibleRows } from "../services/transcriptLayout";
 import { shareJson } from "../services/structuralSharing";
 import { FOLLOW_LATEST_EVENT } from "../services/transcriptScroll";
 
@@ -63,7 +63,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   previousIds.current = ids;
   const offsets = useMemo(() => rowOffsets(ids,
     { get: (id: string) => { const height = heights.current.get(id); return height === undefined ? undefined : height + gap; } },
-    72 + gap), [ids, gap, heightVersion]);
+    (id: string) => estimateTranscriptRowHeight(id) + gap), [ids, gap, heightVersion]);
   const previousOffsets = useRef(offsets);
   const previousOffsetIds = useRef(ids);
   // Keep the anchor through the subsequent first measurements too. Otherwise
@@ -71,19 +71,22 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   // microtask when those estimates are replaced by actual heights.
   const readingAnchor = useRef<{ id: string; visualTop: number } | null>(null);
   const restoredScrollTop = useRef<number | null>(null);
+  const stabilizingAnchorRef = useRef(false);
   const beforeIds = previousOffsetIds.current;
   const prefixChanged = beforeIds.length > 0 && ids[0] !== beforeIds[0];
+  if (prefixChanged) {
+    stabilizingAnchorRef.current = true;
+  }
   const parent = parentRef.current;
   const followingLatest = parent?.dataset.transcriptScrollMode === "latest";
   const readingHistory = !followingLatest && parent?.dataset.transcriptHistoryReading === "true";
-  let anchor = !readingHistory || (parent && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1)
+  let anchor = !readingHistory || (parent && !stabilizingAnchorRef.current && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1)
     ? null : readingAnchor.current;
   if (readingHistory && prefixChanged && parent && ref.current) {
     const top = parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top;
     if (top + parent.clientHeight > 0) {
       const retained = retainedRowAnchor(beforeIds, ids, previousOffsets.current, offsets, top);
-      const row = retained && Array.from(ref.current.querySelectorAll<HTMLElement>("[data-transcript-id]"))
-        .find(element => element.dataset.transcriptId === retained.id);
+      const row = retained && ref.current.querySelector<HTMLElement>(`[data-transcript-id="${retained.id.replace(/["\\]/g, "\\$&")}"]`);
       if (row && retained) anchor = { id: retained.id, visualTop: row.getBoundingClientRect().top };
     }
   }
@@ -114,9 +117,26 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     parentRef.current = scrollParent(ref.current);
     const parent = parentRef.current;
     updateViewport();
-    const releaseAnchor = () => { readingAnchor.current = null; restoredScrollTop.current = null; };
+    const releaseAnchor = () => {
+      if (stabilizingAnchorRef.current) return;
+      readingAnchor.current = null;
+      restoredScrollTop.current = null;
+    };
+    const onUserScrollGesture = (e: Event) => {
+      if (stabilizingAnchorRef.current && parent && restoredScrollTop.current !== null) {
+        // If the user scrolled during stabilization, adjust the anchor's expected visualTop
+        // by the user's scroll movement so stabilization preserves the user's manual progress.
+        const scrollDelta = parent.scrollTop - restoredScrollTop.current;
+        if (readingAnchor.current && scrollDelta !== 0) {
+          readingAnchor.current.visualTop -= scrollDelta;
+          restoredScrollTop.current = parent.scrollTop;
+        }
+        return;
+      }
+      releaseAnchor();
+    };
     const schedule = () => {
-      if (parent && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1) releaseAnchor();
+      if (!stabilizingAnchorRef.current && parent && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1) releaseAnchor();
       if (frame.current === null) {
         frame.current = requestAnimationFrame(() => {
           frame.current = null;
@@ -128,8 +148,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     if (parent) {
       parent.addEventListener(FOLLOW_LATEST_EVENT, releaseAnchor);
       parent.addEventListener("scroll", schedule, { passive: true });
-      parent.addEventListener("wheel", releaseAnchor, { passive: true });
-      parent.addEventListener("touchstart", releaseAnchor, { passive: true });
+      parent.addEventListener("wheel", onUserScrollGesture, { passive: true });
+      parent.addEventListener("touchstart", onUserScrollGesture, { passive: true });
       parent.addEventListener("pointerdown", releaseAnchor, { passive: true });
       parent.addEventListener("keydown", releaseAnchor);
       observer.observe(parent);
@@ -138,8 +158,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       mounted.current = false;
       parent?.removeEventListener(FOLLOW_LATEST_EVENT, releaseAnchor);
       parent?.removeEventListener("scroll", schedule);
-      parent?.removeEventListener("wheel", releaseAnchor);
-      parent?.removeEventListener("touchstart", releaseAnchor);
+      parent?.removeEventListener("wheel", onUserScrollGesture);
+      parent?.removeEventListener("touchstart", onUserScrollGesture);
       parent?.removeEventListener("pointerdown", releaseAnchor);
       parent?.removeEventListener("keydown", releaseAnchor);
       observer.disconnect();
@@ -160,10 +180,17 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     readingAnchor.current = anchor;
     if (anchor && parent) {
       const retained = anchor;
-      const row = Array.from(ref.current?.querySelectorAll<HTMLElement>("[data-transcript-id]") ?? [])
-        .find(element => element.dataset.transcriptId === retained.id);
-      if (row) parent.scrollTop += row.getBoundingClientRect().top - retained.visualTop;
+      const row = ref.current?.querySelector<HTMLElement>(`[data-transcript-id="${retained.id.replace(/["\\]/g, "\\$&")}"]`);
+      if (row) {
+        const visualDelta = row.getBoundingClientRect().top - retained.visualTop;
+        if (Math.abs(visualDelta) >= 1) {
+          parent.scrollTop += visualDelta;
+        }
+      }
       restoredScrollTop.current = parent.scrollTop;
+      if (!flushScheduled.current) {
+        stabilizingAnchorRef.current = false;
+      }
       updateViewport();
     } else if (preparingBottom && parent) {
       if (before !== offsets) parent.scrollTop = parent.scrollHeight;

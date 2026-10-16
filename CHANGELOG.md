@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Stop injecting the "Already published in this run" paragraph into Planner revision prompts and instead carry a rework note — modifying a completed node's task re-runs it in a fresh session and invalidates its downstream dependents, while unrelated branches keep their results — in both the revision status block and the post-task review turn; the `node` tool description and the `E210` unremovable-node rejection still enforce the never-delete rule.
 - Materialize the temporary shadow Git snapshot for an ordinary folder lazily on the first node dispatch instead of during detection, planning or approval; reclaim it after a successful publication (Run deletion and offline GC also reclaim it), and keep it for failed/interrupted Runs that need `retry_publication`. The first dispatch reports a non-blocking `source_materialize` activity.
 - Run completed-node conversations directly in the source directory (no worktree, commit, downstream invalidation or republication) for both ordinary folders and standard Git repositories; a settled publication-merger follow-up follows the same rule once a successful publication has reclaimed the ordinary folder's snapshot; only a Planner revision that dispatches new nodes rebuilds the snapshot.
 - Accept user edits in the source directory during Graph execution: downstream handoff and explicit node updates no longer block on a dirty source, and publication commits pending user changes as its base before merging node results.
@@ -27,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep aborted Planner turns in the conversation after a reload or restart. A revision turn that ends without committing a graph — a failed or stopped follow-up, or one interrupted by exiting the backend — is now recorded once as a `planner_turn_aborted` history event (startup recovery records interrupted attempts too), so its durable planning output replays with the rest of the Run conversation while the compiled graph, phase and approval state stay untouched.
+- Scrub the synthetic post-task review prompt from embedded lifecycle records (`agent_end`) when persisting the Planner transcript, so the hidden turn stays out of the browser-facing planning data, not only out of the rendered user turns.
+- Strip injected transport lines (the rework note and the legacy "Already published in this run" paragraph) from Planner status blocks so saved transcripts render the user's turn instead of leaking runtime status context.
 - Reject the user's desktop folder as a project workspace. Forced Git collection ignores `.gitignore`, so a desktop binding would snapshot unrelated personal data and stall planning before any node is dispatched.
 - Retry transient Chocolatey community-feed failures in Windows CI and verify both `rg` and `fd` before running tests, instead of failing later on a missing binary.
 - Resolve host Git for the Grapher-owned engine bootstrap independently of the business launch PATH, so pinned-baseline verification keeps working when a managed environment omits Git.

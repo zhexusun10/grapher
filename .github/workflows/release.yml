@@ -53,6 +53,8 @@ jobs:
         uses: ./.github/actions/install-windows-search-tools
       - name: Install Node dependencies
         run: npm ci --ignore-scripts
+      - name: Verify release launcher scripts
+        run: npm run test:release
       - name: Install and build Pi
         run: npm run pi:setup
       - name: Build frontend

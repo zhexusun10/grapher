@@ -122,6 +122,40 @@ fn post_task_review_disabled_does_not_call_planner() {
 }
 
 #[test]
+fn aborted_follow_up_revision_is_recorded_in_the_run_conversation() {
+    let (temp, repo, service) = setup(false, false);
+    drive(service.clone());
+    let done = wait(&service, |s| s.phase == "completed");
+    let run_id = done.run_id.clone();
+    let (phase, graph_nodes) = (done.phase.clone(), done.graph.nodes.len());
+    fs::write(repo.join("fail-review"), "fail").unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repo, "engine": "pi", "piCommand": "node", "piArgs": [temp.path().join("agent.mjs")],
+        "model": "mock/review", "thinkingLevel": "off", "maxParallel": 2,
+        "postTaskReview": false, "autoApprove": true
+    })).unwrap();
+    let outcome = plan_goal_internal_with_started(
+        "continue".into(), config, Some("graph"), None, Some(run_id.clone()), &service, false,
+        |_| {}, |_| {}, |_| {}, |_| {},
+    );
+    assert!(outcome.is_err(), "the follow-up revision must fail");
+    let state = service.runtime.lock().unwrap().state.clone();
+    assert_eq!(state.phase, phase, "an aborted revision keeps the Run phase");
+    assert_eq!(state.graph.nodes.len(), graph_nodes, "an aborted revision keeps the compiled graph");
+    let aborted = state.events.iter()
+        .find(|event| matches!(event.kind, EventKind::PlannerTurnAborted { .. }))
+        .unwrap_or_else(|| panic!("aborted turn must be recorded"));
+    let EventKind::PlannerTurnAborted { planning } = &aborted.kind else { unreachable!() };
+    assert_eq!(planning.status.as_deref(), Some("failed"));
+    // The durable output stays replayable and the replay keeps the turn.
+    let page = get_planning_output(planning.planning_id.clone(), "planner".into(), 0, true, None, None, &service).unwrap();
+    assert!(page["content"].as_str().unwrap().contains("continue"));
+    let replay = history(run_id, &service).unwrap();
+    assert_eq!(replay.events.iter()
+        .filter(|event| matches!(event.kind, EventKind::PlannerTurnAborted { .. })).count(), 1);
+}
+
+#[test]
 fn post_task_review_failure_preserves_published_graph_and_source_writes() {
     let (_temp, repo, service) = setup(true, true);
     fs::write(repo.join("fail-review"), "fail").unwrap();
@@ -175,4 +209,40 @@ fn post_task_review_interruption_discards_candidate_and_never_retries_model() {
     assert!(reopened.state.review_graph.is_none());
     assert_eq!(reopened.state.graph.nodes.len(), 1);
     assert_eq!(reopened.state.planning.unwrap().status.as_deref(), Some("failed"));
+}
+
+#[test]
+fn transcript_projection_hides_the_synthetic_review_turn_everywhere() {
+    let task = post_task_review_task();
+    let user_message = serde_json::json!({
+        "type": "message_end",
+        "message": { "role": "user", "content": [{ "type": "text", "text": task }] },
+    });
+    let line = format!("{}\n", user_message);
+    // Ordinary turns pass through untouched; the synthetic review turn is dropped.
+    assert_eq!(review_transcript_line(&line, false).as_deref(), Some(line.as_str()));
+    assert_eq!(review_transcript_line(&line, true), None);
+    // Lifecycle records embed the conversation: the synthetic user message is
+    // scrubbed while the assistant entry, metrics and the trailing newline stay.
+    let agent_end = serde_json::json!({
+        "grapherReceivedAt": 1000u64, "type": "agent_end", "willRetry": true,
+        "messages": [
+            { "role": "user", "content": [{ "type": "text", "text": task }] },
+            { "role": "assistant", "content": [], "stopReason": "error", "errorMessage": "Request timed out.",
+              "usage": { "input": 0, "output": 0, "totalTokens": 0 } },
+        ],
+    });
+    let embedded = format!("{}\n", agent_end);
+    let projected = review_transcript_line(&embedded, true).expect("embedded record is kept, not dropped");
+    assert!(projected.ends_with('\n'));
+    let projected: serde_json::Value = serde_json::from_str(projected.trim()).unwrap();
+    assert_eq!(projected["type"], "agent_end");
+    assert_eq!(projected["willRetry"], true);
+    let messages = projected["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["errorMessage"], "Request timed out.");
+    // A lifecycle record without the synthetic turn stays byte-identical.
+    let plain = format!("{}\n", serde_json::json!({ "type": "agent_end", "messages": [] }));
+    assert_eq!(review_transcript_line(&plain, true).as_deref(), Some(plain.as_str()));
 }

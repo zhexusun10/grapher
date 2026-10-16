@@ -199,12 +199,24 @@ fn interrupted_revision_does_not_replace_a_compiled_graph() {
         original_goal: "Existing graph".into(),
         nodes: vec![Node { name: "work".into(), task: "Do work".into() }], edges: vec![],
     }, config(temp.path())).unwrap();
-    let (_, running) = attempt(temp.path(), &id, false, true);
+    let (directory, running) = attempt(temp.path(), &id, false, true);
     recover_plannings(&primary).unwrap();
     let state = snapshot(&child).unwrap();
     assert_eq!(state.phase, "awaiting_approval");
     assert_eq!(state.graph.original_goal, "Existing graph");
-    assert_eq!(get_planning(running.planning_id, &primary).unwrap().status.as_deref(), Some("failed"));
+    assert_eq!(get_planning(running.planning_id.clone(), &primary).unwrap().status.as_deref(), Some("failed"));
+    // The aborted turn stays part of the Run conversation: one history marker,
+    // its durable planner.jsonl remains replayable, and recovery is idempotent.
+    let recorded_history = history(id.clone(), &primary).unwrap();
+    let aborted = recorded_history.events.iter().filter(|event|
+        matches!(event.kind, EventKind::PlannerTurnAborted { ref planning }
+            if planning.planning_id == running.planning_id)).count();
+    assert_eq!(aborted, 1);
+    let page = get_planning_output(running.planning_id.clone(), "planner".into(), 0, false, None, None, &primary).unwrap();
+    assert!(page["totalBytes"].as_u64().unwrap() > 0);
+    recover_plannings(&primary).unwrap();
+    assert_eq!(history(id.clone(), &primary).unwrap().events.len(), recorded_history.events.len());
+    drop(directory);
     invalidate_service_cache(temp.path(), None);
 }
 

@@ -16,11 +16,34 @@ Only use projects, extensions, and tools you trust. Before important work, read 
 
 ## Install a release archive
 
-Download the archive for your operating system and CPU from [GitHub Releases](https://github.com/zhexusun10/grapher/releases) and verify its accompanying SHA256 checksum. macOS has separate `arm64` (Apple Silicon) and `x64` (Intel) packages; the macOS packages are built and smoke-tested on macOS 15.
+Release archives are prebuilt: the backend binary, frontend, pinned Pi runtime and bundled extensions are inside. No Rust toolchain, npm installation or compilation is needed. At runtime you still need:
 
-Extract the entire archive into a writable directory, preserving its directory structure and hidden Pi Git metadata. On Linux/macOS run `./start.sh` inside the extracted directory; on Windows run `start.bat`. Open **<http://127.0.0.1:1421>**.
+- **Node.js 22.19+** and **Git** on `PATH` — agent processes and provider login run through them. The packaged start script checks both and prints exact install guidance when something is missing.
+- **Windows:** Git for Windows (it includes the Bash that tasks run in).
+- **Linux Graph:** `bubblewrap` plus permitted unprivileged user/mount/PID namespaces.
 
-Archives include the backend, frontend, pinned Pi runtime, and bundled extensions. You still need Node.js and Git on `PATH`, platform sandbox prerequisites, provider authentication, and any tools required by your tasks (including Git Bash on Windows). No Rust build or npm installation is needed to start an archive. Runtime data defaults to `.grapher/` inside the extracted installation; back it up before replacing an installation.
+Download the archive for your platform from [GitHub Releases](https://github.com/zhexusun10/grapher/releases) — macOS has separate `arm64` (Apple Silicon) and `x64` (Intel) packages; `uname -m` shows which one matches — and verify the accompanying `.sha256` checksum:
+
+```sh
+# macOS / Linux
+shasum -a 256 -c grapher-macos-arm64.tar.gz.sha256
+tar -xzf grapher-macos-arm64.tar.gz
+```
+
+```powershell
+# Windows PowerShell
+(Get-FileHash .\grapher-windows-x64.zip -Algorithm SHA256).Hash.ToLower() -eq (Get-Content .\grapher-windows-x64.zip.sha256).Split(' ')[0]
+```
+
+Extract the entire archive into a writable directory, preserving its directory structure and hidden Pi Git metadata (`.git` inside `pi/`), then start it:
+
+- **Windows:** double-click `start.bat`, or run it in a terminal. The first launch may show a SmartScreen prompt ("Windows protected your PC") because releases are unsigned; choose **More info** → **Run anyway**. The launcher verifies Node.js and Git (including the 22.19+ version) and keeps the console open with the exit code if Grapher stops.
+- **macOS:** `cd grapher-macos-arm64 && ./start.sh`. The launcher removes Apple's download quarantine mark from this extracted folder automatically; if the binary is still blocked, right-click `grapher` → **Open**, or run `xattr -dr com.apple.quarantine .` inside the folder.
+- **Linux:** `cd grapher-linux-x64 && ./start.sh`.
+
+Open **<http://127.0.0.1:1421>** (`GRAPHER_PORT` changes the port). The package contains a short `START-HERE.md` covering first steps, data location and troubleshooting.
+
+Runtime data defaults to `.grapher/` inside the extracted installation; back it up before replacing an installation. The start scripts never download anything and never request administrator rights: missing prerequisites are reported, not auto-installed.
 
 ## Install from source
 
@@ -29,10 +52,10 @@ Run from a terminal; on Windows these shell commands can be used in Git Bash.
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
 cd grapher
-npm ci --ignore-scripts
-npm run pi:setup
 npm run dev
 ```
+
+`npm run dev` automatically checks host tools, initializes the pinned Pi submodule, installs locked dependencies, and compiles the backend. For step-by-step setup or troubleshooting, you can also run `npm ci --ignore-scripts` followed by `npm run pi:setup`.
 
 Open **<http://127.0.0.1:1420>**. Cargo compilation can make the first startup slower. The repository uses a pinned Pi submodule, not your globally installed Pi.
 
@@ -100,6 +123,7 @@ To inspect old project-adjacent leftovers, stop the relevant backends and run `n
 
 | Symptom | Check |
 | --- | --- |
+| Windows SmartScreen or macOS Gatekeeper blocks the release binary | Approve the unsigned binary once (Windows: More info → Run anyway; macOS: right-click → Open); the packaged start script also clears the macOS quarantine mark automatically |
 | Missing Pi entrypoint or baseline mismatch | Initialize submodules, then run `npm run pi:setup` and `npm run pi:verify`; do not substitute global Pi |
 | Graph runtime prewarm reports missing/outdated `pi-trim` or `pi-continuity` | For a source checkout, run `npm ci --ignore-scripts` from the Grapher root and restart the backend; `pi:setup` installs Pi dependencies, not these bundled extensions. For a release, re-extract the complete archive |
 | First build exceeds dev startup timeout | Build the backend first with `node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher`, then rerun `npm run dev` |

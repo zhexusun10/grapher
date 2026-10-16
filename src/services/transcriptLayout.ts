@@ -1,7 +1,21 @@
+export function estimateTranscriptRowHeight(id: string): number {
+  if (id.startsWith("think_")) return 44;
+  if (id.startsWith("tool") || id.startsWith("call_")) return 48;
+  if (id.startsWith("err_") || id.startsWith("system_")) return 32;
+  if (id.startsWith("user_") || id.startsWith("session_user_")) return 56;
+  if (id.startsWith("text_")) return 88;
+  return 56;
+}
+
 // Offsets include the trailing edge so binary search handles tall rows and EOF.
-export function rowOffsets(ids: string[], heights: Pick<ReadonlyMap<string, number>, "get">, estimate = 72): number[] {
+export function rowOffsets(
+  ids: string[],
+  heights: Pick<ReadonlyMap<string, number>, "get">,
+  estimate: number | ((id: string) => number) = 72,
+): number[] {
   const offsets = [0];
-  for (const id of ids) offsets.push(offsets[offsets.length - 1] + (heights.get(id) ?? estimate));
+  const getEstimate = typeof estimate === "function" ? estimate : () => estimate;
+  for (const id of ids) offsets.push(offsets[offsets.length - 1] + (heights.get(id) ?? getEstimate(id)));
   return offsets;
 }
 

@@ -1,7 +1,6 @@
 import React, { memo, useCallback, useRef, useState } from "react";
 import { stripPlannerContext } from "../services/plannerText";
 import { motion } from "motion/react";
-import { t } from "../i18n";
 import type { ChatMessage, TranscriptItem } from "../types";
 import { VirtualizedList } from "./VirtualizedList";
 import { ToolCallCard } from "./ToolCallCard";
@@ -34,7 +33,7 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
   </motion.div>;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}><span className="system-pill">{item.content}</span></div>;
-  if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={streaming} title={t("思考过程")}
+  if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={streaming} title="Chain of Thought"
     defaultExpanded={item.defaultExpanded ?? true} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand}
     animateAppear={item.animateAppear ?? false} />;
   if (item.type === "text") {

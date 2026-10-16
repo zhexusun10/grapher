@@ -88,6 +88,32 @@ test("a leading split JSONL record is buffered, not rendered as assistant plaint
   assert.equal(toolCount(restored), 2);
 });
 
+test("incremental prepend parsing preserves tail items and backfills tool calls without re-parsing tail", () => {
+  const tailStartOffset = 200;
+  const tailOutput = line({
+    type: "message", id: "msg-tail", message: {
+      role: "assistant", content: [{ type: "text", text: "TAIL_ASSISTANT_TEXT" }],
+    },
+  });
+  const tailMarkup = renderToStaticMarkup(createElement(VirtualizedTranscript, {
+    output: tailOutput, compact: true, startOffset: tailStartOffset,
+  }));
+  assert.match(tailMarkup, /TAIL_ASSISTANT_TEXT/);
+
+  // Prepend older history: an older text turn
+  const olderOutput = line({
+    type: "message", id: "msg-old", message: {
+      role: "assistant", content: [{ type: "text", text: "OLDER_ASSISTANT_TEXT" }],
+    },
+  });
+  const prependedOutput = olderOutput + tailOutput;
+  const prependedMarkup = renderToStaticMarkup(createElement(VirtualizedTranscript, {
+    output: prependedOutput, compact: true, startOffset: 0,
+  }));
+  assert.match(prependedMarkup, /OLDER_ASSISTANT_TEXT/);
+  assert.match(prependedMarkup, /TAIL_ASSISTANT_TEXT/);
+});
+
 test("active agent conversation auto-opens running COT while settled history stays folded", () => {
   const running = render([start(), update("thinking_delta", 0, { delta: "ACTIVE_STREAMING_TEXT" })]);
   assert.match(running, /thinking-card streaming expanded/);

@@ -11,6 +11,9 @@ the repository root. [README.md](README.md) links the canonical integration docs
   [pi-dependencies/](pi-dependencies/) form one reviewed baseline. Upgrade only via
   [the documented procedure](../docs/development/pi-integration.md#upgrade-procedure),
   not hand edits, a global Pi installation or uncommitted submodule patches.
+  Personal model/catalog edits belong in the git-ignored
+  [model-data-local overlay](../docs/development/pi-integration.md#local-model-data-overlay),
+  never in the committed baseline.
 - Preserve role-specific resource/tool loading, project trust and credential
   provenance. Use isolated auth/model directories for tests, never user secrets.
 - File-tool path adaptation is not transparent rewriting of shell commands or

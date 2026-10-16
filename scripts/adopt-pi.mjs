@@ -13,16 +13,13 @@ const git = (...args) => execFileSync('git', ['-C', source, ...args], {
   env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
 }).trim();
 
-export function candidateLock(sha) {
+export function candidateLock(sha, dataDir = join(source, 'packages/ai/src/providers/data')) {
   if (!/^[a-f0-9]{40}$/.test(sha) || git('rev-parse', 'HEAD') !== sha) {
     throw new Error('Specify the full SHA of the checked-out Pi commit');
   }
   if (git('status', '--porcelain', '--untracked-files=normal')) {
     throw new Error('Pi has local changes; adopt only a clean upstream commit');
   }
-  const dataDir = join(source, 'packages/ai/src/providers/data');
-  // Include the upstream manifest: fresh clones have no ignored model data and
-  // the offline build needs this file to validate the restored catalog.
   const names = readdirSync(dataDir).sort();
   if (!names.length || names.some(name => name !== '.manifest.json' && !/^[a-z0-9-]+\.json$/.test(name))) {
     throw new Error('Pi model data is missing or has unexpected files; hydrate it first');

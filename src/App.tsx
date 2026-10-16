@@ -2917,7 +2917,7 @@ export default function App() {
   // when navigation begins. Otherwise the old Conversation remounts and flashes
   // while its replacement's metadata is still in flight.
   if (workbenchIdentityRef.current.runId !== state.runId) {
-    workbenchIdentityRef.current = { runId: state.runId, key: state.runId || "initial" };
+    workbenchIdentityRef.current = { runId: state.runId, key: state.runId ? `workbench:${state.runId}` : "initial" };
   }
 
   const draftConversationKey = state.runId || JSON.stringify([workspaceKey(config.repository), "unbound"]);

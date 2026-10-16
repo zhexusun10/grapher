@@ -541,6 +541,18 @@ impl Runtime {
             .publication
             .clone()
             .ok_or("No publication to retry")?;
+        // A failed attempt over terminal heads that a completed publication
+        // already merged cannot add anything, and the published snapshot's Git
+        // objects may be reclaimed, so retrying would fail forever. Resolve the
+        // attempt as completed at the already-published head: this restores the
+        // completed phase and marks the publication record successful without
+        // touching reclaimed Git state.
+        if let Some(published_head) = self.state.published_head.clone() {
+            if Self::same_published_heads(&self.state.published_heads, &publication.heads) {
+                return self
+                    .emit_outputs(vec![EventKind::PublicationCompleted { head: published_head }]);
+            }
+        }
         workspace::validate_binding(Path::new(&publication.repository))?;
         self.emit(EventKind::PublicationStarted {
             repository: publication.repository,
@@ -1494,6 +1506,17 @@ impl Runtime {
                 .ok_or("Historical environment input is unavailable")?;
             store.validate_result_metadata(input)?;
         }
+        // Editing branches the Pi session file, and Pi resumes from the last
+        // entry. A live writer would keep appending past the branch marker, so
+        // its process tree is stopped first — the same lifecycle as switching
+        // a /tree branch before rewriting the opening prompt.
+        for (_, stopped_execution) in self.request_execution_stop(Some(node))? {
+            crate::process_control::stop_owner(&crate::process_control::execution_owner(
+                &self.state.run_id,
+                node,
+                &stopped_execution,
+            ))?;
+        }
         let start = self
             .state
             .events
@@ -1730,6 +1753,12 @@ impl Runtime {
 
     pub fn jobs(&mut self) -> Result<Vec<Job>, String> {
         self.jobs_with_publication(true)
+    }
+
+    /// Terminal result sets match when they contain exactly the same commits;
+    /// order follows plan terminals and is not stable across revisions.
+    fn same_published_heads(published: &[String], heads: &[String]) -> bool {
+        published.len() == heads.len() && heads.iter().all(|head| published.contains(head))
     }
 
     /// During a live Planner revision, schedule ready nodes but defer publishing
@@ -2503,12 +2532,24 @@ impl Runtime {
                             .ok_or("Completed node has no snapshot")
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let repository = resolve_repository(&self.root, &config)?
-                    .canonicalize()
-                    .map_err(|e| e.to_string())?
-                    .to_string_lossy()
-                    .into();
-                self.emit(EventKind::PublicationStarted { repository, heads })?;
+                // Terminal results that a completed publication already merged
+                // do not need another publication pass: a resumed Run or a
+                // stopped post-task review replays this settle decision with
+                // unchanged heads, while the published snapshot's Git objects
+                // may already be reclaimed. Settling restores the completed
+                // phase instead of failing a redundant merge forever.
+                if self.state.published_head.is_some()
+                    && Self::same_published_heads(&self.state.published_heads, &heads)
+                {
+                    self.emit(EventKind::Settled)?;
+                } else {
+                    let repository = resolve_repository(&self.root, &config)?
+                        .canonicalize()
+                        .map_err(|e| e.to_string())?
+                        .to_string_lossy()
+                        .into();
+                    self.emit(EventKind::PublicationStarted { repository, heads })?;
+                }
             } else {
                 self.emit(EventKind::Settled)?;
             }

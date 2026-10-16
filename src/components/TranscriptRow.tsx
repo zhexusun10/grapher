@@ -1,5 +1,4 @@
 import React, { memo, useCallback } from "react";
-import { t } from "../i18n";
 import type { TranscriptItem } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
@@ -17,7 +16,7 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   if (item.type === "tool_call") return <div className="transcript-row tool-row"><ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} /></div>;
   if (item.type === "thinking") return <div className="transcript-row thinking-row"><ThinkingCard item={item} isStreaming={item.status === "running"}
-    title={t("思维链推理 (Chain of Thought)")}
+    title="Chain of Thought"
     defaultExpanded={item.defaultExpanded ?? (item.status === "running")} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand} /></div>;
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}><span className="system-pill">{item.content}</span></div>;
   if (item.role === "user") return <div className="transcript-row text-row user planner-user-turn"><EditableUserBubble text={item.content || ""}

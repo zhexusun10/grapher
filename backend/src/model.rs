@@ -483,6 +483,12 @@ pub enum EventKind {
         planning: PlanningSummary,
         approval_required: bool,
     },
+    /// A revision Planner turn (follow-up or stopped/interrupted attempt) ended
+    /// without committing a graph. History only: the durable planner.jsonl stays
+    /// part of the Run conversation, but the compiled graph and phase are kept.
+    PlannerTurnAborted {
+        planning: PlanningSummary,
+    },
     Created {
         graph: Graph,
         config: Config,
@@ -821,6 +827,11 @@ pub struct Snapshot {
     /// Last successfully published source HEAD, distinct from the graph's approval base.
     #[serde(default)]
     pub published_head: Option<String>,
+    /// Terminal heads already merged into the published source. Settling and
+    /// publication retry compare against this to skip republication of
+    /// unchanged results whose snapshot Git objects may already be reclaimed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub published_heads: Vec<String>,
     pub feedback_counts: BTreeMap<String, usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_feedback: Vec<PendingFeedback>,
@@ -1167,6 +1178,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.phase = "running".into();
             }
         }
+        // History marker only: an aborted revision keeps the compiled graph,
+        // the phase and the current planning identity untouched.
+        EventKind::PlannerTurnAborted { .. } => {}
         EventKind::PlanningFailed { planning } => {
             state.planning = Some(planning.clone());
             state.phase = "planning_failed".into();
@@ -1942,6 +1956,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::PublicationCompleted { head } => {
             state.published_head = Some(head.clone());
             if let Some(publication) = &mut state.publication {
+                state.published_heads = publication.heads.clone();
                 publication.status = "completed".into();
                 publication.head = Some(head.clone());
                 publication.completed_at = Some(event.timestamp);

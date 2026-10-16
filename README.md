@@ -77,13 +77,15 @@ See the [execution model](docs/architecture/execution-model.md) for planning sid
 
 **Requirements:** Node.js 22.19+, stable Rust, Git, npm, network access, and provider authentication. Windows needs Git for Windows Bash; Linux Graph needs bubblewrap and permitted unprivileged user/mount/PID namespaces. See [Installation](docs/guides/installation.md) for host prerequisites and troubleshooting.
 
+**No build tools?** Download a ready-to-run release archive instead: extract it and run `start.bat` (Windows) or `./start.sh` (macOS/Linux) — see [Installation](docs/guides/installation.md) for checksums, SmartScreen/Gatekeeper notes and prerequisites. Archives still require Node.js 22.19+ and Git at runtime; Rust and npm are not needed.
+
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
 cd grapher
-npm ci --ignore-scripts
-npm run pi:setup
 npm run dev
 ```
+
+`npm run dev` automatically checks prerequisites, initializes submodules, installs locked dependencies, and builds the backend. For manual or step-by-step setup, you can also run `npm ci --ignore-scripts` followed by `npm run pi:setup`.
 
 Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo compiles.
 
@@ -117,9 +119,9 @@ Open <http://127.0.0.1:1421>. Configuration, credentials, data paths, and startu
 - Bounded feedback edges
 - Result publication
 - Linux sandbox (bubblewrap)
+- Release archives (Windows/macOS/Linux) and one-command dev setup
 
 **Still evolving:**
-- Packaging and one-command installation
 - Cross-platform isolation (Windows sandboxing)
 - Routing quality and graph compilation heuristics
 - Provider compatibility coverage

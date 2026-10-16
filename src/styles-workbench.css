@@ -282,25 +282,19 @@
 .node-task-card {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg-canvas, #FFFFFF);
-  border: 1px solid var(--border-default, #E2E8F0);
-  border-radius: 12px;
-  padding: 14px 16px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: none;
+  transition: border-color 0.25s ease, background-color 0.25s ease, box-shadow 0.25s ease;
 }
 
 .node-task-card:hover {
-  border-color: var(--border-hover, #CBD5E1);
-}
-
-.node-task-card.editing {
-  background: var(--bg-canvas, #FFFFFF);
-  border-color: var(--brand-default, #2563EB);
-  box-shadow: 0 0 0 1px var(--brand-default, #2563EB), 0 4px 14px rgba(37, 99, 235, 0.08);
+  border-color: var(--border-subtle);
 }
 
 .node-task-card-header {
@@ -309,7 +303,7 @@
   justify-content: space-between;
   gap: 8px;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.06));
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .node-task-header-left {
@@ -343,8 +337,8 @@
   font-weight: 500;
   color: var(--text-secondary, #64748B);
   font-family: var(--font-mono, monospace);
-  background: var(--bg-canvas, #FFFFFF);
-  border: 1px solid var(--border-default, #E2E8F0);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
   padding: 1px 6px;
   border-radius: 4px;
   white-space: nowrap;
@@ -357,8 +351,8 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  background: var(--bg-canvas, #FFFFFF);
-  border: 1px solid var(--border-default, #E2E8F0);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
   padding: 1px 4px;
 }
@@ -408,8 +402,8 @@
   padding: 3px 8px;
   height: 26px;
   border-radius: 6px;
-  border: 1px solid var(--border-default, #E2E8F0);
-  background: var(--bg-canvas, #FFFFFF);
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--text-secondary, #64748B);
   font-size: 12px;
   font-weight: 500;
@@ -420,7 +414,11 @@
 .node-task-tool-btn:hover:not(:disabled) {
   background: var(--bg-surface-hover, #F1F5F9);
   color: var(--text-primary, #0F172A);
-  border-color: var(--border-hover, #CBD5E1);
+  border-color: var(--border-subtle);
+}
+
+.node-task-tool-btn.cancel {
+  border-color: var(--border-subtle);
 }
 
 .node-task-tool-btn.copied {
@@ -496,13 +494,6 @@
   border-radius: 8px;
   resize: vertical;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.node-task-edit-textarea:focus {
-  border-color: var(--brand-default, #2563EB);
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
-  background: var(--bg-canvas, #FFFFFF);
 }
 
 .node-task-edit-footer {
@@ -539,8 +530,19 @@
 }
 
 @keyframes workingPulse {
-  0%, 100% { opacity: .4; transform: scale(.85); box-shadow: 0 0 3px rgba(6, 182, 212, 0.3); }
-  50% { opacity: 1; transform: scale(1.15); box-shadow: 0 0 10px rgba(6, 182, 212, 0.7); }
+
+  0%,
+  100% {
+    opacity: .4;
+    transform: scale(.85);
+    box-shadow: 0 0 3px rgba(6, 182, 212, 0.3);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+    box-shadow: 0 0 10px rgba(6, 182, 212, 0.7);
+  }
 }
 
 /* 虚拟列表负责屏幕外卸载；不要再叠加 content-visibility，避免快速滚动时出现延迟绘制闪烁。 */
@@ -1417,7 +1419,7 @@ button.session-label-toggle:focus-visible {
   pointer-events: none;
 }
 
-.pane-bottom-chat > * {
+.pane-bottom-chat>* {
   pointer-events: auto;
 }
 
@@ -1728,11 +1730,13 @@ button.session-label-toggle:focus-visible {
     transform: scale(0.82) translateY(14px);
     box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
   }
+
   60% {
     opacity: 1;
     transform: scale(1.02) translateY(-2px);
     box-shadow: 0 0 0 4px var(--brand-subtle, rgba(37, 99, 235, 0.12));
   }
+
   100% {
     opacity: 1;
     transform: scale(1) translateY(0);
@@ -1898,9 +1902,11 @@ button.session-label-toggle:focus-visible {
     stroke-dashoffset: 800;
     opacity: 0;
   }
+
   20% {
     opacity: 1;
   }
+
   100% {
     stroke-dashoffset: 0;
     opacity: 1;
@@ -2312,7 +2318,7 @@ button.session-label-toggle:focus-visible {
   display: none;
 }
 
-.workspace-details > .working-indicator {
+.workspace-details>.working-indicator {
   margin: 0 0 6px;
   padding: 3px 0;
   font-size: 11px;
@@ -2382,7 +2388,7 @@ button.session-label-toggle:focus-visible {
   line-height: 1.5;
 }
 
-.workspace-details-body > :first-child,
+.workspace-details-body> :first-child,
 .workspace-details p:first-child {
   padding-top: 0;
 }
@@ -2634,7 +2640,7 @@ button.session-label-toggle:focus-visible {
   margin-top: 0;
 }
 
-.settings-modal-footer > button {
+.settings-modal-footer>button {
   height: 38px;
   line-height: 1.2;
 }
@@ -2735,13 +2741,47 @@ button.session-label-toggle:focus-visible {
   color: var(--text-primary);
 }
 
-.role-model-settings { display: flex; flex-direction: column; gap: 12px; }
-.role-model-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
-.role-model-card { border: 1px solid var(--border-default); border-radius: 8px; padding: 12px; min-width: 0; }
-.role-model-card h5 { margin: 0 0 6px; font-size: 13px; color: var(--text-primary); }
-.role-model-card p { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
-.role-model-card .form-grid { grid-template-columns: minmax(0, 2fr) minmax(130px, 1fr); }
-.role-model-card .form-field { min-width: 0; }
+.role-model-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.role-model-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.role-model-card {
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 0;
+}
+
+.role-model-card h5 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.role-model-card p {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.role-model-card .form-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(130px, 1fr);
+}
+
+.role-model-card .form-field {
+  min-width: 0;
+}
+
 .settings-modal select:focus,
 .settings-modal select:focus-visible,
 .settings-modal select:active,
@@ -2755,11 +2795,32 @@ button.session-label-toggle:focus-visible {
   box-shadow: none !important;
   border-color: var(--border-default) !important;
 }
-.role-model-card .provider-filter-select { max-width: 100%; }
-.role-model-effective, .role-model-warning { display: block; margin-top: 8px; font-size: 11px; overflow-wrap: anywhere; }
-.role-model-effective { color: var(--text-secondary); }
-.role-model-warning { color: #eab308; }
-@media (max-width: 600px) { .role-model-card .form-grid { grid-template-columns: 1fr; } }
+
+.role-model-card .provider-filter-select {
+  max-width: 100%;
+}
+
+.role-model-effective,
+.role-model-warning {
+  display: block;
+  margin-top: 8px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.role-model-effective {
+  color: var(--text-secondary);
+}
+
+.role-model-warning {
+  color: #eab308;
+}
+
+@media (max-width: 600px) {
+  .role-model-card .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
 
 .settings-toggle-row {
   display: flex;
@@ -2777,9 +2838,20 @@ button.session-label-toggle:focus-visible {
   min-width: 0;
 }
 
-.settings-toggle-row + .settings-toggle-row { margin-top: 14px; }
-.settings-toggle-row strong { font-size: 13px; font-weight: 600; }
-.settings-toggle-row small { font-size: 12px; color: var(--text-secondary); }
+.settings-toggle-row+.settings-toggle-row {
+  margin-top: 14px;
+}
+
+.settings-toggle-row strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-toggle-row small {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 .settings-toggle-row input {
   width: 18px;
   height: 18px;
@@ -2788,6 +2860,7 @@ button.session-label-toggle:focus-visible {
   accent-color: var(--brand-default);
   cursor: pointer;
 }
+
 .settings-toggle-row input:focus,
 .settings-toggle-row input:focus-visible {
   outline: none !important;
@@ -2907,4 +2980,3 @@ button.session-label-toggle:focus-visible {
     height: 52px;
   }
 }
-

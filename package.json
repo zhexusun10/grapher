@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "pi:verify": "node scripts/pi-baseline.mjs verify",
-    "test:pi": "node scripts/pi-baseline.mjs verify && node --test scripts/adopt-pi.test.mjs scripts/agent-dir.test.mjs scripts/ensure-deps.test.mjs scripts/planning-trajectory.test.mjs scripts/pi-process-contract.test.mjs && node scripts/node-ts.mjs --test scripts/execution-retry.test.ts scripts/pi-compat.test.ts scripts/global-extensions.test.ts",
+    "test:pi": "node scripts/pi-baseline.mjs verify && node --test scripts/adopt-pi.test.mjs scripts/agent-dir.test.mjs scripts/ensure-deps.test.mjs scripts/dev.test.mjs scripts/planning-trajectory.test.mjs scripts/pi-process-contract.test.mjs && node scripts/node-ts.mjs --test scripts/execution-retry.test.ts scripts/pi-compat.test.ts scripts/global-extensions.test.ts",
     "pi:upgrade-check": "npm run pi:verify && npm run pi:build && npm run test:pi && npm run check && npm run test && npm run test:extensions && npm run test:native && npm run test:bindings",
     "pi:setup": "node scripts/pi-baseline.mjs setup",
     "pi:build": "node scripts/pi-baseline.mjs build",
@@ -37,6 +37,7 @@
     "test:conversation-acceptance": "node --expose-gc scripts/conversation-acceptance.mjs",
     "test:concurrent": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --no-default-features --features fixture --bin grapher && node scripts/concurrent-runs.test.mjs",
     "test:build-cache": "node --test scripts/temporary-target.test.mjs",
+    "test:release": "node --test scripts/release-launchers.test.mjs",
     "test:isolated": "node scripts/temporary-target.mjs --npm-script test",
     "test:temporary": "node scripts/temporary-target.mjs --npm-script",
     "test": "node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture",

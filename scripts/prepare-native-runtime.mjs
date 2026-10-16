@@ -36,7 +36,7 @@ if (process.argv[2] === '--cache-key') {
     }
   };
   for (const name of ['engine', 'package.json', 'pi/package.json', 'pi/package-lock.json', 'pi/packages']) add(join(input, name), name);
-  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'prepare-native-runtime.mjs']) add(join(input, 'scripts', script), `scripts/${script}`);
+  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) add(join(input, 'scripts', script), `scripts/${script}`);
   for (const name of bundledExtensionNames) add(join(input, 'node_modules', name), `node_modules/${name}`);
   process.stdout.write(hash.digest('hex'));
   process.exit(0);
@@ -95,7 +95,7 @@ try {
   // Preserve the installation's ESM boundary in the copy.
   cpSync(join(root, 'package.json'), join(destination, 'package.json'));
   mkdirSync(join(destination, 'scripts'));
-  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'prepare-native-runtime.mjs']) {
+  for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) {
     cpSync(join(root, 'scripts', script), join(destination, 'scripts', script));
   }
   execFileSync('git', ['-C', gitPath(join(destination, 'pi')), 'reset', '--mixed', 'HEAD'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
