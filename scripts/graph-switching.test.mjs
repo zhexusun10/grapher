@@ -206,8 +206,17 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
               const send = composer.querySelector(".prompt-box-send-btn");
               const sendRect = send.getBoundingClientRect();
               const attach = composer.querySelector(".prompt-box-left-actions .prompt-box-icon-btn");
+              const attachRect = attach.getBoundingClientRect();
+              const attachIcon = attach.querySelector("svg").getBoundingClientRect();
+              const sendIcon = send.querySelector("svg").getBoundingClientRect();
               const painted = document.elementFromPoint(sendRect.x + sendRect.width / 2, sendRect.y + sendRect.height / 2);
               window.composerFrames.push({ x: rect.x, y: rect.y,
+                controlInsets: [attachRect.left - rect.left, rect.bottom - attachRect.bottom,
+                  rect.right - sendRect.right, rect.bottom - sendRect.bottom],
+                controlSizes: [attachRect.width, attachRect.height, sendRect.width, sendRect.height],
+                iconInsets: [attachIcon.left - attachRect.left, attachIcon.top - attachRect.top,
+                  sendIcon.left - sendRect.left, sendIcon.top - sendRect.top],
+                iconSizes: [attachIcon.width, attachIcon.height, sendIcon.width, sendIcon.height],
                 sendPainted: !!painted && send.contains(painted), paintedTag: painted?.getAttribute("class"),
                 arrowPresent: !!arrow, attachOpacity: Number(getComputedStyle(attach).opacity),
                 opacity: Number(getComputedStyle(composer).opacity), arrowError: Math.abs(angle - expectedAngle),
@@ -270,6 +279,12 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
             assert.ok(frame.arrowPresent && frame.arrowError < 0.1, `${id}: navigation must not replay or replace the idle send arrow`);
             assert.ok(frame.attachOpacity > 0.99, `${id}: navigation must not briefly dim the restored input controls`);
             assert.ok(frame.sendPainted, `${id}: the moving input must not be clipped or covered: ${JSON.stringify(frame)}`);
+            const destination = composers.at(-1);
+            assert.ok(frame.controlInsets.every((value, index) => Math.abs(value - destination.controlInsets[index]) < 0.5) &&
+              frame.controlSizes.every((value, index) => Math.abs(value - destination.controlSizes[index]) < 0.5) &&
+              frame.iconInsets.every((value, index) => Math.abs(value - destination.iconInsets[index]) < 0.5) &&
+              frame.iconSizes.every((value, index) => Math.abs(value - destination.iconSizes[index]) < 0.5),
+              `${id}: attachment/send buttons must stay attached to the moving composer, without their own twitch: ${JSON.stringify(frame)}`);
           }
         }
         assert.equal(changes, 1, `${id}: switching must not remount the previous conversation while metadata loads`);

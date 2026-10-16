@@ -1052,26 +1052,15 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           )}
         </div>
 
-        {/* Controls / Actions Row */}
-        <motion.div
-          className="prompt-box-actions-row"
-          layout="position"
-          layoutDependency={isPresent ? textareaId : undefined}
-          transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
-        >
+        {/* The shared bottom anchor owns navigation motion. Controls stay in
+            normal flow: nested projections would add independent transforms
+            that also compete with the buttons' CSS hover transitions. */}
+        <div className="prompt-box-actions-row">
           {/* Left Action Buttons */}
-          <motion.div
-            className="prompt-box-left-actions"
-            layout="position"
-            layoutDependency={isPresent ? textareaId : undefined}
-            transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
-          >
+          <div className="prompt-box-left-actions">
             {/* Attach Image/File Button */}
-            <motion.button
+            <button
               type="button"
-              layout="position"
-              layoutDependency={isPresent ? textareaId : undefined}
-              transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
               onClick={(e) => {
                 e.stopPropagation();
                 fileInputRef.current?.click();
@@ -1081,24 +1070,16 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               disabled={disabled || isBusy || isPreparing || isSubmitting}
             >
               <Paperclip size={compact ? 15 : 18} />
-            </motion.button>
-          </motion.div>
+            </button>
+          </div>
 
           {/* Right Action Button: Mode Selector + Send/Interrupt Button */}
-          <motion.div
-            className="prompt-box-right-actions"
-            layout="position"
-            layoutDependency={isPresent ? textareaId : undefined}
-            transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
-          >
+          <div className="prompt-box-right-actions">
             {planMode !== undefined && onPlanModeChange && (
-              <motion.div
+              <div
                 className="prompt-box-mode-selector"
                 role="group"
                 aria-label={t("执行规划模式")}
-                layout="position"
-                layoutDependency={isPresent ? textareaId : undefined}
-                transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
               >
                 {MODE_OPTIONS.map((item) => {
                   const isSelected = planMode === item.id;
@@ -1107,6 +1088,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                       key={item.id}
                       type="button"
                       className={`prompt-box-mode-btn ${isSelected ? "active" : ""}`}
+                      aria-pressed={isSelected}
+                      data-label={item.label}
                       onClick={(e) => {
                         e.stopPropagation();
                         onPlanModeChange(item.id);
@@ -1115,27 +1098,27 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                       {isSelected && (
                         <motion.div
                           layoutId={`mode-pill-indicator-${pillLayoutId}`}
+                          layoutCrossfade={false}
+                          initial={false}
+                          aria-hidden="true"
                           className="prompt-box-mode-pill-indicator"
-                          transition={{
+                          transition={{ layout: reduceMotion ? { duration: 0 } : {
                             type: "spring",
                             stiffness: 520,
                             damping: 36,
-                          }}
+                          } }}
                         />
                       )}
                       <span className="prompt-box-mode-text">{item.label}</span>
                     </button>
                   );
                 })}
-              </motion.div>
+              </div>
             )}
 
             {isWorking && (hasText || selectedFile) && onInterrupt && (
-              <motion.button
+              <button
                 type="button"
-                layout="position"
-                layoutDependency={isPresent ? textareaId : undefined}
-                transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
                 className="prompt-box-icon-btn prompt-box-interrupt-btn"
                 onClick={(event) => {
                   event.stopPropagation();
@@ -1145,14 +1128,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 aria-label={t("点击打断执行")}
               >
                 <Square size={compact ? 9 : 11} className="prompt-box-stop-icon" />
-              </motion.button>
+              </button>
             )}
 
-            <motion.button
+            <button
               type="submit"
-              layout="position"
-              layoutDependency={isPresent ? textareaId : undefined}
-              transition={{ layout: { type: "tween", duration: reduceMotion || isExpanded ? 0 : PROMPT_BOX_RESIZE_DURATION, ease: COMPOSER_EASE } }}
               onClick={(e) => {
                 e.stopPropagation();
                 if (isWorking && !hasText && !selectedFile) {
@@ -1193,9 +1173,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   <ArrowUp size={compact ? 15 : 18} />
                 </span>
               )}
-            </motion.button>
-          </motion.div>
-        </motion.div>
+            </button>
+          </div>
+        </div>
       </motion.div>
     );
 

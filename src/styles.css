@@ -2235,12 +2235,22 @@ a,
   cursor: pointer;
   line-height: 1;
   height: 25px;
-  display: inline-flex;
+  display: inline-grid;
   align-items: center;
   justify-content: center;
   user-select: none;
   transition: color 0.16s ease, background 0.16s ease;
   z-index: 1;
+}
+
+/* Reserve the bold label's width without making inactive labels bold. Both
+   layers share one grid cell, so selection never changes the button geometry. */
+.prompt-box-mode-btn::before {
+  content: attr(data-label);
+  grid-area: 1 / 1;
+  font-weight: 600;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .prompt-box-container.compact .prompt-box-mode-btn {
@@ -2267,6 +2277,7 @@ a,
 }
 
 .prompt-box-mode-text {
+  grid-area: 1 / 1;
   position: relative;
   z-index: 1;
   color: inherit;

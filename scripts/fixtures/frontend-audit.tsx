@@ -4,6 +4,7 @@ import { SettingsModal } from "../../src/components/modals/SettingsModal";
 import { EditorModal } from "../../src/components/modals/EditorModal";
 import { EditableUserBubble } from "../../src/components/views/ChatBubbles";
 import { PromptBox } from "../../src/components/ui/chatgpt-prompt-input";
+import { LandingView } from "../../src/components/views/LandingView";
 import { useSnapshotPolling } from "../../src/hooks/useSnapshotPolling";
 import { runtimeService } from "../../src/services/runtime";
 import { ThinkingCard } from "../../src/components/ThinkingCard";
@@ -75,6 +76,17 @@ function PromptFixture({ compact = false, uncontrolled = false }: { compact?: bo
       if (audit.deferSubmit) return new Promise<boolean>(resolve => { audit.resolve = resolve; });
       return true;
     }} />;
+}
+
+function ModePromptFixture({ compact = false }: { compact?: boolean }) {
+  const [goal, setGoal] = useState("");
+  const [planMode, setPlanMode] = useState<"auto" | "serial" | "graph">("auto");
+  if (compact) return <PromptBox compact value={goal} onChange={event => setGoal(event.target.value)}
+    planMode={planMode} onPlanModeChange={setPlanMode} />;
+  return <div style={{ position: "fixed", inset: 0 }}>
+    <LandingView goal={goal} setGoal={setGoal} onPlanGoal={() => true} isBusy={false} repository="/a"
+      planMode={planMode} onPlanModeChange={setPlanMode} />
+  </div>;
 }
 
 function UnchangedBubbleFixture() {
@@ -266,6 +278,7 @@ function CardPresentationFixture() {
 const cases: Record<string, React.ComponentType> = {
   settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, unchangedBubble: UnchangedBubbleFixture,
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
+  landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
   polling: PollingFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture,

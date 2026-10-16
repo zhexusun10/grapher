@@ -526,6 +526,89 @@ test("Planner and Node Agent tool history both render cards in headless browser"
 });
 
 
+for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
+  for (const reducedMotion of ["no-preference", "reduce"]) {
+    test(`${fixtureName} mode switching keeps the selector fixed with inertia and active emphasis (${reducedMotion})`, { timeout: 30_000 }, async () => {
+      const { context, page, errors } = await fixture(fixtureName, undefined, reducedMotion);
+      try {
+        const selector = page.locator(".prompt-box-mode-selector");
+        await selector.waitFor();
+        for (const mode of ["Graph", "Serial", "Auto"]) {
+          const frames = await selector.evaluate((selector, mode) => new Promise(resolve => {
+            const rect = element => {
+              const { x, y, width, height } = element.getBoundingClientRect();
+              return [x, y, width, height];
+            };
+            const frames = [];
+            const started = performance.now();
+            const sample = () => {
+              frames.push({ track: rect(selector), buttons: [...selector.querySelectorAll("button")].map(rect),
+                pill: rect(selector.querySelector(".prompt-box-mode-pill-indicator")),
+                target: rect(selector.querySelector(".prompt-box-mode-btn.active")),
+                activeWeight: Number(getComputedStyle(selector.querySelector(".active .prompt-box-mode-text")).fontWeight),
+                inactiveWeights: [...selector.querySelectorAll(".prompt-box-mode-btn:not(.active) .prompt-box-mode-text")]
+                  .map(label => Number(getComputedStyle(label).fontWeight)) });
+              if (performance.now() - started >= 450) return resolve(frames);
+              requestAnimationFrame(sample);
+            };
+            sample();
+            [...selector.querySelectorAll("button")].find(button => button.textContent === mode).click();
+          }), mode);
+          const first = frames[0], last = frames.at(-1);
+          for (const frame of frames) {
+            const geometry = [...frame.track, ...frame.buttons.flat()];
+            const initialGeometry = [...first.track, ...first.buttons.flat()];
+            assert.ok(geometry.every((value, index) => Math.abs(value - initialGeometry[index]) < 0.1),
+              `changing the selected mode cannot shift or resize the selector or labels: ${JSON.stringify(frame)}`);
+            assert.ok(Math.abs(frame.pill[1] - first.pill[1]) < 0.25 && Math.abs(frame.pill[3] - first.pill[3]) < 0.25,
+              "the pill slides horizontally without vertical jitter");
+            assert.ok(frame.inactiveWeights.every(weight => frame.activeWeight > weight),
+              "the selected label remains heavier without changing button widths");
+          }
+          if (reducedMotion === "no-preference") assert.ok(frames.some(frame =>
+            Math.abs(frame.pill[0] - first.pill[0]) > 1 && Math.abs(frame.pill[0] - last.target[0]) > 1),
+          "selection keeps its animated slide rather than jumping directly to the target");
+          assert.ok(last.pill.every((value, index) => Math.abs(value - last.target[index]) < 0.5),
+            "the pill settles on the selected mode");
+          assert.equal(await selector.getByRole("button", { name: mode, exact: true }).getAttribute("aria-pressed"), "true");
+        }
+        // Repeated reversals arrive before the spring settles, not only after
+        // completed animations. The track and labels must not accumulate drift.
+        const rapidFrames = await selector.evaluate(selector => new Promise(resolve => {
+          const modes = ["Graph", "Auto", "Serial", "Graph", "Auto", "Graph", "Serial", "Auto"];
+          const frames = [];
+          const started = performance.now();
+          let next = 0;
+          const sample = () => {
+            const elapsed = performance.now() - started;
+            if (next < modes.length && elapsed >= next * 40) {
+              const mode = modes[next++];
+              [...selector.querySelectorAll("button")].find(button => button.textContent === mode).click();
+            }
+            frames.push([selector, ...selector.querySelectorAll("button")].flatMap(element => {
+              const { x, y, width, height } = element.getBoundingClientRect();
+              return [x, y, width, height];
+            }));
+            if (elapsed >= modes.length * 40 + 600) return resolve(frames);
+            requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        }));
+        assert.ok(rapidFrames.every(frame => frame.every((value, index) => Math.abs(value - rapidFrames[0][index]) < 0.1)),
+          "rapid inertial reversals do not move or resize the control or its labels");
+        assert.equal(await selector.locator(".prompt-box-mode-btn.active").innerText(), "Auto");
+        const alignment = await selector.evaluate(element => {
+          const pill = element.querySelector(".prompt-box-mode-pill-indicator").getBoundingClientRect();
+          const active = element.querySelector(".prompt-box-mode-btn.active").getBoundingClientRect();
+          return [pill.x - active.x, pill.y - active.y, pill.width - active.width, pill.height - active.height];
+        });
+        assert.ok(alignment.every(value => Math.abs(value) < 0.5), "rapid switching keeps the pill on the final selection");
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+  }
+}
+
 for (const fixtureName of ["prompt", "compactPrompt"]) {
   test(`${fixtureName} expands only when full and preserves edits, selection and focus when toggled`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture(fixtureName);
