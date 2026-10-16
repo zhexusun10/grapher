@@ -543,6 +543,7 @@ a,
   .sidebar-skeleton-item::after,
   .sidebar-skeleton-wrap,
   .project-workspace-item,
+  .empty-projects-hint,
   .nav-section,
   .sidebar-bottom,
   .run-item,
@@ -614,26 +615,7 @@ a,
 }
 
 .project-workspace-item.is-switching {
-  opacity: 0.75;
-}
-
-.project-workspace-item.is-switching .proj-icon {
-  color: var(--brand-default);
-}
-
-.proj-branch-badge {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--bg-surface-hover, rgba(0, 0, 0, 0.04));
-  border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.08));
-  color: var(--text-secondary);
-  font-weight: 500;
-  max-width: 80px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 0;
+  opacity: 0.65;
 }
 
 .project-workspace-item:hover {
@@ -931,6 +913,7 @@ a,
   cursor: pointer;
   text-align: center;
   transition: all 0.15s ease;
+  animation: sidebarListFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .empty-projects-hint:hover {
@@ -1208,6 +1191,10 @@ a,
   border-color: var(--brand-border);
   color: var(--text-primary);
   box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
+}
+
+.run-item.is-loading {
+  opacity: 0.85;
 }
 
 .run-item.chosen .run-title-text {

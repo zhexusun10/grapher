@@ -29,6 +29,7 @@ interface SidebarProps {
   onRetryLoad?: () => void;
   isOpeningProject?: boolean;
   switchingProjectPath?: string | null;
+  loadingRunId?: string | null;
 }
 
 export const Sidebar: React.FC<SidebarProps> = React.memo(({
@@ -54,6 +55,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onRetryLoad,
   isOpeningProject = false,
   switchingProjectPath = null,
+  loadingRunId = null,
 }) => {
   const [isCollapsed, setIsCollapsed] = useState(() => {
     try {
@@ -143,21 +145,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
                 }}
               >
-                <div className="proj-icon">
-                  {isSwitching ? (
-                    <Loader2 size={15} className="sidebar-btn-spin" />
-                  ) : (
-                    <Folder size={15} />
-                  )}
-                </div>
                 <div className="proj-details">
                   <div className="proj-name-row">
                     <strong>{proj.name}</strong>
-                    {proj.branch && (
-                      <span className="proj-branch-badge" title={proj.branch}>
-                        {proj.branch}
-                      </span>
-                    )}
                   </div>
                   <small className="proj-path-text">{normalizeWorkspacePath(proj.path)}</small>
                 </div>
@@ -240,6 +230,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             const isThisRunActive = ["running", "awaiting_approval", "publishing", "merging"].includes(indicator?.phase ?? (activeBackendRunId === id ? activeBackendPhase ?? "" : ""));
             const isUnread = Boolean(indicator?.unread && currentRunId !== id);
             const needsUnreadApproval = isUnread && indicator.phase === "awaiting_approval";
+            const isChosen = (loadingRunId ?? currentRunId) === id;
+            const isLoadingThisRun = loadingRunId === id && currentRunId !== id;
             let displayLabel = `Graph ${id.slice(0, 8)}`;
             const labelText = runLabels[id];
             const isResolvingLabel = !labelText;
@@ -249,7 +241,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             return (
               <button
                 data-run-id={id}
-                className={`run-item ${currentRunId === id ? "chosen" : ""}`}
+                className={`run-item ${isChosen ? "chosen" : ""} ${isLoadingThisRun ? "is-loading" : ""}`}
                 style={{ "--item-index": Math.min(index, 12) } as React.CSSProperties}
                 key={id}
                 onClick={() => onLoadRun(id)}

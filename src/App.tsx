@@ -126,6 +126,7 @@ export default function App() {
   useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
   const [switchingProjectPath, setSwitchingProjectPath] = useState<string | null>(null);
+  const [loadingRunId, setLoadingRunId] = useState<string | null>(null);
   // Warm initial cache with stored workspace runs to prevent initial skeleton flash.
   // Bootstrap subsequently repairs ownership and updates persisted lists.
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
@@ -2950,35 +2951,42 @@ export default function App() {
     const controller = new AbortController();
     historyPrefetchRef.current = controller;
     const generation = foregroundGeneration.current;
+    setLoadingRunId(id);
     void (async () => {
-      clearRunUnread(id);
-      // Logs must never block opening a card; validate ownership before displaying it.
-      let snapshot: Snapshot;
-      try { snapshot = await runtimeService.snapshotForRun(id, controller.signal); }
-      catch (error) {
-        if (controller.signal.aborted) return;
-        if (generation === foregroundGeneration.current) {
-          setError(error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error));
+      try {
+        clearRunUnread(id);
+        // Logs must never block opening a card; validate ownership before displaying it.
+        let snapshot: Snapshot;
+        try { snapshot = await runtimeService.snapshotForRun(id, controller.signal); }
+        catch (error) {
+          if (controller.signal.aborted) return;
+          if (generation === foregroundGeneration.current) {
+            setError(error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error));
+          }
+          return;
         }
-        return;
+        if (controller.signal.aborted || generation !== foregroundGeneration.current) return;
+        if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
+        if (!snapshotBelongsToWorkspace(snapshot, config.repository)) {
+          setError(t("此对话不属于当前工作区，请在对应工作区中打开。"));
+          return;
+        }
+        setState(snapshot);
+        markSnapshotRead(snapshot);
+        setRouteType(deduceRouteType(snapshot));
+        setGoal(snapshot.graph.originalGoal || (id ? runLabels[id] : "") || "");
+        if (id !== state.runId) {
+          setPlannerStream(initialPlannerStream);
+          setSessionEntries(messagesByRunRef.current.get(id) ?? []);
+          setEditingMessage(null);
+          setEditPrefillText("");
+        }
+        setSelected("");
+      } finally {
+        if (generation === foregroundGeneration.current) {
+          setLoadingRunId(null);
+        }
       }
-      if (controller.signal.aborted || generation !== foregroundGeneration.current) return;
-      if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
-      if (!snapshotBelongsToWorkspace(snapshot, config.repository)) {
-        setError(t("此对话不属于当前工作区，请在对应工作区中打开。"));
-        return;
-      }
-      setState(snapshot);
-      markSnapshotRead(snapshot);
-      setRouteType(deduceRouteType(snapshot));
-      setGoal(snapshot.graph.originalGoal || (id ? runLabels[id] : "") || "");
-      if (id !== state.runId) {
-        setPlannerStream(initialPlannerStream);
-        setSessionEntries(messagesByRunRef.current.get(id) ?? []);
-        setEditingMessage(null);
-        setEditPrefillText("");
-      }
-      setSelected("");
     })();
   });
 
@@ -3005,6 +3013,7 @@ export default function App() {
             retrying={bootstrapLoading}
             onRetryLoad={() => void initialize()}
             currentRunId={state.runId}
+            loadingRunId={loadingRunId}
             runIndicators={runIndicators}
             onLoadRun={handleLoadRun}
             onDeleteRun={actions.deleteRun}

@@ -6,7 +6,7 @@
   "packageVersion": "1.3.0",
   "packageLockSha256": "b686f30bc97e99aee6bb63c78714535ada1d307639db7f4e8972144059fc501d",
   "modelData": {
-    ".manifest.json": "f167c1677ff6fc5b5cf79d461853e22145b39369b08bd89010d6d5a482727f05",
+    ".manifest.json": "84a7bf06744c2adaafc91131a737ea3d56852e456536fa853df1046d2df5db8e",
     "amazon-bedrock.json": "df227d426b678e44cd82deae1cf433855d6b27f36fedcff3ef4fb812fe882868",
     "ant-ling.json": "628feab3ef6c7d80ce96f75999804e1d9f05fec3851e5302e30fff3b69db90f6",
     "anthropic.json": "91f5da01452c7746645d3405bc91e09f849e4e4687c7c7ff22d8976eafe64b87",
@@ -32,7 +32,7 @@
     "nvidia.json": "98b47c4da26c8e649f48a874602fd7e9dc8a54ee0bdb40e3d07fe49189a842d2",
     "openai-codex.json": "75dfc2f9e4b1e039978e069d94c983595ef8ff02eb64481901bedae5883b1d3f",
     "openai.json": "3598d87bd39e40fe6ae44b07ecf3f9d27cb2e745e114c8b0c0fb0a3a84dd8d3e",
-    "opencode-go.json": "b90f86d462357019b95f8dacc2f73ca4461a415476074a9b0fc9a89fa20406f9",
+    "opencode-go.json": "86c0af611118b1557e4431c10df548aabb49a4f506bfb6da9d22ab85ad20af91",
     "opencode.json": "a54bd5c39a5a1a1228e46d134556ab11ab15524d831cf651e9cfa82180495e1f",
     "openrouter.json": "e6b06cb548d38a068ef252d5201c72dfd9c5d802f17dc06f9184b5752b1b79f7",
     "qwen-token-plan-cn.json": "2469a4091c474ec3db0a49a9962d8d2726c074ad9065b96bc4e0c87861c4c6c5",
