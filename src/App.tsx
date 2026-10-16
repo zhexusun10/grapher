@@ -35,7 +35,7 @@ import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
 import { Sidebar } from "./components/layout/Sidebar";
-import { bindRunToWorkspace, normalizeWorkspacePath, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey } from "./services/workspaceConversations";
+import { bindRunToWorkspace, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey } from "./services/workspaceConversations";
 import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
@@ -125,10 +125,36 @@ export default function App() {
   const historyPrefetchRef = useRef<AbortController | null>(null);
   useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
-  // Do not flash unvalidated, potentially cross-workspace browser indexes.
-  // Bootstrap repairs ownership before publishing the saved cards.
-  const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>({});
-  const [isSidebarReady, setIsSidebarReady] = useState(false);
+  const [switchingProjectPath, setSwitchingProjectPath] = useState<string | null>(null);
+  // Warm initial cache with stored workspace runs to prevent initial skeleton flash.
+  // Bootstrap subsequently repairs ownership and updates persisted lists.
+  const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
+    try {
+      const saved = localStorage.getItem("grapher_workspace_runs");
+      if (!saved) return {};
+      return normalizeWorkspaceRuns(JSON.parse(saved));
+    } catch {
+      return {};
+    }
+  });
+  const [isSidebarReady, setIsSidebarReady] = useState(() => {
+    try {
+      const savedProjects = localStorage.getItem("grapher_projects");
+      if (!savedProjects) return false;
+      const parsedProjects = JSON.parse(savedProjects);
+      if (!Array.isArray(parsedProjects) || parsedProjects.length === 0) return true;
+      const savedRuns = localStorage.getItem("grapher_workspace_runs");
+      if (savedRuns) {
+        const parsedRuns = JSON.parse(savedRuns);
+        const sorted = [...parsedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+        const active = sorted[0];
+        if (active && parsedRuns[workspaceKey(active.path)] !== undefined) return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  });
   const [isBootstrapReady, setIsBootstrapReady] = useState(false);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
@@ -788,10 +814,26 @@ export default function App() {
     }
 
     // Local browser indexes can lag another tab or a restarted backend.
-    // Reconcile persisted Runs by their actual repository, not the currently
-    // selected project (which may differ for concurrent conversations).
-    const indexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
+    // Prioritize runs for the active workspace so the user sees their current
+    // conversation list immediately, without waiting for unrelated repositories.
+    const rawIndexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
       .filter(id => !id.startsWith("pending-"));
+    const activeRepoKey = workspaceKey(activeRepo);
+    const candidateActiveIds = new Set([
+      ...(data.snapshot.runId && snapshotBelongsToWorkspace(data.snapshot, activeRepo) ? [data.snapshot.runId] : []),
+      ...(storedWorkspaceRuns?.[activeRepoKey] || []),
+    ]);
+    const indexedIds = [
+      ...rawIndexedIds.filter(id => candidateActiveIds.has(id)),
+      ...rawIndexedIds.filter(id => !candidateActiveIds.has(id)),
+    ];
+
+    // If the active repository has no candidate runs, sidebar is ready immediately
+    // without stalling on foreign workspace histories.
+    if (candidateActiveIds.size === 0) {
+      setIsSidebarReady(true);
+    }
+
     // Publish validated cards preserving canonical order, without letting one stalled
     // history keep all cards loading or causing items to jump and re-order.
     let historyFailed = false;
@@ -823,7 +865,7 @@ export default function App() {
         const nextRuns = buildValidatedRuns();
         const activeRuns = nextRuns[workspaceKey(activeRepo)] || [];
         setWorkspaceRuns(nextRuns);
-        if (activeRuns.length > 0) {
+        if (activeRuns.length > 0 || candidateActiveIds.size === 0) {
           setIsSidebarReady(true);
         }
       });
@@ -964,6 +1006,7 @@ export default function App() {
 
   const handleSelectProject = (proj: ProjectItem) => {
     if (workspaceKey(config.repository) === workspaceKey(proj.path)) return;
+    setSwitchingProjectPath(proj.path);
     const scope = detachForeground(proj.path);
     // Clear the old view synchronously, before repository detection can yield.
     setConfig(prev => ({ ...prev, repository: normalizeWorkspacePath(proj.path) }));
@@ -975,45 +1018,54 @@ export default function App() {
     setSelected("");
     resetSessionMessages();
     return run(async () => {
-      const info = await runtimeService.detectRepository(proj.path);
-      if (!planningRecovery.current(scope)) return;
-      if (info) {
-        setRepoInfo({ ...info, path: normalizeWorkspacePath(info.path) });
-        setConfig((prev) => ({ ...prev, repository: normalizeWorkspacePath(info.path) }));
-        setProjects((prev) => {
-          const next = prev.map((p) =>
-            workspaceKey(p.path) === workspaceKey(info.path)
-              ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
-              : p
-          );
-          try {
-            localStorage.setItem("grapher_projects", JSON.stringify(next));
-          } catch { }
-          return next;
-        });
-      } else {
-        setRepoInfo(null);
-        setConfig((prev) => ({ ...prev, repository: proj.path }));
-      }
-      const projRuns = workspaceRuns[workspaceKey(proj.path)] || [];
       let loadedSnapshot: Snapshot = emptySnapshot;
-      if (projRuns.length > 0) {
-        try {
-          const snapshot = await runtimeService.snapshotForRun(projRuns[0]);
-          if (!planningRecovery.current(scope)) return;
-          if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
-          if (!snapshotBelongsToWorkspace(snapshot, proj.path)) throw new Error("Workspace ownership mismatch");
-          const deduced = deduceRouteType(snapshot);
-          setState(snapshot);
-          setRouteType(deduced);
-          setGoal(snapshot.graph.originalGoal || "");
-          setSessionEntries(messagesByRunRef.current.get(snapshot.runId) ?? []);
-          setEditingMessage(null);
-          setEditPrefillText("");
-          setSelected("");
-          loadedSnapshot = snapshot;
-        } catch {
-          if (!planningRecovery.current(scope)) return;
+      try {
+        const info = await runtimeService.detectRepository(proj.path);
+        if (!planningRecovery.current(scope)) return;
+        if (info) {
+          setRepoInfo({ ...info, path: normalizeWorkspacePath(info.path) });
+          setConfig((prev) => ({ ...prev, repository: normalizeWorkspacePath(info.path) }));
+          setProjects((prev) => {
+            const next = prev.map((p) =>
+              workspaceKey(p.path) === workspaceKey(info.path)
+                ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
+                : p
+            );
+            try {
+              localStorage.setItem("grapher_projects", JSON.stringify(next));
+            } catch { }
+            return next;
+          });
+        } else {
+          setRepoInfo(null);
+          setConfig((prev) => ({ ...prev, repository: proj.path }));
+        }
+        const projRuns = workspaceRuns[workspaceKey(proj.path)] || [];
+        if (projRuns.length > 0) {
+          try {
+            const snapshot = await runtimeService.snapshotForRun(projRuns[0]);
+            if (!planningRecovery.current(scope)) return;
+            if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
+            if (!snapshotBelongsToWorkspace(snapshot, proj.path)) throw new Error("Workspace ownership mismatch");
+            const deduced = deduceRouteType(snapshot);
+            setState(snapshot);
+            setRouteType(deduced);
+            setGoal(snapshot.graph.originalGoal || "");
+            setSessionEntries(messagesByRunRef.current.get(snapshot.runId) ?? []);
+            setEditingMessage(null);
+            setEditPrefillText("");
+            setSelected("");
+            loadedSnapshot = snapshot;
+          } catch {
+            if (!planningRecovery.current(scope)) return;
+            setState(emptySnapshot);
+            loadedSnapshot = emptySnapshot;
+            setRouteType("undecided");
+            setPlannerStream(initialPlannerStream);
+            setGoal("");
+            resetSessionMessages();
+          }
+        } else {
           setState(emptySnapshot);
           loadedSnapshot = emptySnapshot;
           setRouteType("undecided");
@@ -1021,16 +1073,13 @@ export default function App() {
           setGoal("");
           resetSessionMessages();
         }
-      } else {
-        setState(emptySnapshot);
-        loadedSnapshot = emptySnapshot;
-        setRouteType("undecided");
-        setPlannerStream(initialPlannerStream);
-        setGoal("");
-        resetSessionMessages();
+        setError("");
+        void planningRecovery.restore(scope, loadedSnapshot);
+      } finally {
+        if (planningRecovery.current(scope)) {
+          setSwitchingProjectPath(null);
+        }
       }
-      setError("");
-      void planningRecovery.restore(scope, loadedSnapshot);
     });
   };
 
@@ -2945,6 +2994,7 @@ export default function App() {
             projects={projects}
             activeRepo={config.repository}
             onSelectProject={actions.selectProject}
+            switchingProjectPath={switchingProjectPath}
             onOpenProject={actions.openProject}
             isOpeningProject={isOpeningProject}
             onRemoveProject={actions.removeProject}

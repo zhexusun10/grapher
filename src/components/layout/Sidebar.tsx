@@ -28,6 +28,7 @@ interface SidebarProps {
   retrying?: boolean;
   onRetryLoad?: () => void;
   isOpeningProject?: boolean;
+  switchingProjectPath?: string | null;
 }
 
 export const Sidebar: React.FC<SidebarProps> = React.memo(({
@@ -52,6 +53,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   retrying = false,
   onRetryLoad,
   isOpeningProject = false,
+  switchingProjectPath = null,
 }) => {
   const [isCollapsed, setIsCollapsed] = useState(() => {
     try {
@@ -125,12 +127,14 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
 
       <div className="projects-list">
         {projects.length > 0 ? (
-          projects.map((proj) => {
+          projects.map((proj, index) => {
             const isActive = workspaceKey(activeRepo) === workspaceKey(proj.path);
+            const isSwitching = switchingProjectPath ? workspaceKey(switchingProjectPath) === workspaceKey(proj.path) : false;
             return (
               <div
                 key={proj.path}
-                className={`project-workspace-item ${isActive ? "active" : ""}`}
+                className={`project-workspace-item ${isActive ? "active" : ""} ${isSwitching ? "is-switching" : ""}`}
+                style={{ "--proj-index": Math.min(index, 8) } as React.CSSProperties}
                 onClick={() => onSelectProject(proj)}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -139,9 +143,21 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
                 }}
               >
+                <div className="proj-icon">
+                  {isSwitching ? (
+                    <Loader2 size={15} className="sidebar-btn-spin" />
+                  ) : (
+                    <Folder size={15} />
+                  )}
+                </div>
                 <div className="proj-details">
                   <div className="proj-name-row">
                     <strong>{proj.name}</strong>
+                    {proj.branch && (
+                      <span className="proj-branch-badge" title={proj.branch}>
+                        {proj.branch}
+                      </span>
+                    )}
                   </div>
                   <small className="proj-path-text">{normalizeWorkspacePath(proj.path)}</small>
                 </div>
@@ -196,18 +212,37 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         )}
         {!isReady ? (
           <div className="sidebar-skeleton-wrap" aria-hidden="true">
-            <div className="sidebar-skeleton-item" />
-            <div className="sidebar-skeleton-item" />
-            <div className="sidebar-skeleton-item" />
+            <div className="sidebar-skeleton-item">
+              <div className="sidebar-skeleton-dot" />
+              <div className="sidebar-skeleton-lines">
+                <div className="sidebar-skeleton-line title" style={{ width: "75%" }} />
+                <div className="sidebar-skeleton-line sub" style={{ width: "45%" }} />
+              </div>
+            </div>
+            <div className="sidebar-skeleton-item">
+              <div className="sidebar-skeleton-dot" />
+              <div className="sidebar-skeleton-lines">
+                <div className="sidebar-skeleton-line title" style={{ width: "60%" }} />
+                <div className="sidebar-skeleton-line sub" style={{ width: "35%" }} />
+              </div>
+            </div>
+            <div className="sidebar-skeleton-item">
+              <div className="sidebar-skeleton-dot" />
+              <div className="sidebar-skeleton-lines">
+                <div className="sidebar-skeleton-line title" style={{ width: "80%" }} />
+                <div className="sidebar-skeleton-line sub" style={{ width: "50%" }} />
+              </div>
+            </div>
           </div>
         ) : runs.length > 0 ? (
-          runs.map((id) => {
+          runs.map((id, index) => {
             const indicator = runIndicators[id];
             const isThisRunActive = ["running", "awaiting_approval", "publishing", "merging"].includes(indicator?.phase ?? (activeBackendRunId === id ? activeBackendPhase ?? "" : ""));
             const isUnread = Boolean(indicator?.unread && currentRunId !== id);
             const needsUnreadApproval = isUnread && indicator.phase === "awaiting_approval";
             let displayLabel = `Graph ${id.slice(0, 8)}`;
             const labelText = runLabels[id];
+            const isResolvingLabel = !labelText;
             if (labelText) {
               displayLabel = labelText;
             }
@@ -215,6 +250,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               <button
                 data-run-id={id}
                 className={`run-item ${currentRunId === id ? "chosen" : ""}`}
+                style={{ "--item-index": Math.min(index, 12) } as React.CSSProperties}
                 key={id}
                 onClick={() => onLoadRun(id)}
                 onContextMenu={(e) => {
@@ -233,7 +269,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                     className={`run-dot ${needsUnreadApproval ? "approval-pulse" : ""}`}
                   />
                 ) : null}
-                <span className="run-title-text">
+                <span className={`run-title-text ${isResolvingLabel ? "is-resolving" : ""}`}>
                   {displayLabel}
                 </span>
               </button>

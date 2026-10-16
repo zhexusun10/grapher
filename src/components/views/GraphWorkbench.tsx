@@ -28,6 +28,7 @@ import { isNodeWorking } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
+import { ExecutionTimeTookText } from "../ExecutionTimeTook";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
@@ -1781,6 +1782,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <p>thinking level: {snapshotModelInfo.thinkingLevel}</p>
                     </>
                   )}
+                  <p>time took: <ExecutionTimeTookText execution={execution} /></p>
                 </WorkspaceDetailsPanel>
 
                 {selectedState?.error && (
@@ -1967,6 +1969,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           <p>thinking level: {serialModelInfo.thinkingLevel}</p>
                         </>
                       )}
+                      <p>time took: <ExecutionTimeTookText execution={serialExecution} /></p>
                     </WorkspaceDetailsPanel>
                     {serialNodeState?.error && (
                       <div className={`node-error${serialNodeState.status === "paused" ? " paused" : ""}`} style={{ marginTop: 12 }}>

@@ -66,7 +66,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const [confirmDeleteProvider, setConfirmDeleteProvider] = useState<ProviderInfo | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [showProviders, setShowProviders] = useState(false);
-  const [showConfigured, setShowConfigured] = useState(true);
+  const [showConfigured, setShowConfigured] = useState(false);
 
   const mounted = useRef(false);
   const activeId = useRef<string | undefined>(undefined);

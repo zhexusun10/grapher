@@ -282,7 +282,7 @@
 .node-task-card {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg-surface, #F8FAFC);
+  background: var(--bg-canvas, #FFFFFF);
   border: 1px solid var(--border-default, #E2E8F0);
   border-radius: 12px;
   padding: 14px 16px;
@@ -2763,7 +2763,7 @@ button.session-label-toggle:focus-visible {
 
 .settings-toggle-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   cursor: pointer;
@@ -2780,7 +2780,14 @@ button.session-label-toggle:focus-visible {
 .settings-toggle-row + .settings-toggle-row { margin-top: 14px; }
 .settings-toggle-row strong { font-size: 13px; font-weight: 600; }
 .settings-toggle-row small { font-size: 12px; color: var(--text-secondary); }
-.settings-toggle-row input { width: 18px; height: 18px; flex: none; accent-color: var(--brand-default); cursor: pointer; }
+.settings-toggle-row input {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin: 2px 0 0 0;
+  accent-color: var(--brand-default);
+  cursor: pointer;
+}
 .settings-toggle-row input:focus,
 .settings-toggle-row input:focus-visible {
   outline: none !important;
