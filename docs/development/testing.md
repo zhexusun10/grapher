@@ -60,13 +60,13 @@ npm run test:build-cache                   # Verify target cleanup/lock/signal b
 | `npm run test:bindings` | Local HTTP project binding lifecycle and execution routing. |
 | `npm run test:concurrent` | Fixture HTTP multi-Run concurrency regression (requires `/bin/sh`; skips on Windows). |
 | `npm run test:conversation-acceptance` | Legacy database migration and large transcript stress harness (see [Conversation logs](../testing/conversation-logs.md)). |
-| `python3 -m unittest discover -s benchmark -p 'test_*.py'` | Harbor benchmark adapter unit tests (see [Harbor](../benchmarks/harbor.md)). |
+| `python3 -m unittest discover -s benchmark -p 'test_*.py'` | Harbor benchmark adapter unit tests; Linux/POSIX host required, Windows unsupported (see [Harbor](../benchmarks/harbor.md)). |
 
 **Focused API responsiveness checks:** [service_responsiveness_tests.rs](../../backend/src/service_responsiveness_tests.rs), [request-timeout.test.ts](../../scripts/request-timeout.test.ts), and [bootstrap-settings-ui.test.mjs](../../scripts/bootstrap-settings-ui.test.mjs).
 
 ## 4. Platform & CI Workflows
 
-- **Weekly CI:** [planner-source.yml](../../.github/workflows/planner-source.yml) (cross-platform native/sandbox/Merger suites) and [security-audit.yml](../../.github/workflows/security-audit.yml) (npm + RustSec audits).
+- **Weekly CI:** [planner-source.yml](../../.github/workflows/planner-source.yml) (cross-platform frontend contracts plus native/sandbox/Merger suites) and [security-audit.yml](../../.github/workflows/security-audit.yml) (npm + RustSec audits).
 - **Platform requirements:** Linux native suites require unprivileged user/mount/PID namespaces (never bypass failed preflights). macOS requires Seatbelt (`sandbox-exec`). On Windows, if pip/Conda hits `MAX_PATH`, set `GRAPHER_ENV_TEST_PARENT=C:/tmp`.
 
 ## 5. Opt-In Heavy, Offline ML & Paid Acceptance

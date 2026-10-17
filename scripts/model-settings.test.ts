@@ -100,7 +100,7 @@ test("credential catalog updates remove and restore choices without changing sav
 
 function renderRoles(config: Config, models: ProviderCatalog | undefined, envOverrides = {}, busy = false) {
   const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config, setConfig: () => {}, catalog: models, envOverrides, busy }));
-  return [...markup.matchAll(/<section class="role-model-card"[\s\S]*?<\/section>/g)].map(([card]) => {
+  return [...markup.matchAll(/<section\b[^>]*>[\s\S]*?<\/section>/g)].map(([card]) => {
     const select = [...card.matchAll(/<select\b[\s\S]*?<\/select>/g)][1][0];
     return { card, select, values: [...select.matchAll(/<option[^>]*value="([^"]*)"/g)].map(match => match[1]) };
   });

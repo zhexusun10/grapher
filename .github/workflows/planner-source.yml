@@ -48,6 +48,8 @@ jobs:
       - name: Install Grapher and pinned Pi
         run: npm ci --ignore-scripts
       - run: npm run pi:setup
+      - name: Verify frontend state, i18n and transcript contracts
+        run: npm run test:frontend
       - name: Verify snapshot inheritance, failed revisions and event replay
         run: npm test
       - name: Verify production HTTP paths and safe workspace cleanup

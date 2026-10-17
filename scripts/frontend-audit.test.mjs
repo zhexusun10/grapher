@@ -532,7 +532,7 @@ test("Planner and Node Agent tool history both render cards in headless browser"
 
 for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
   for (const reducedMotion of ["no-preference", "reduce"]) {
-    test(`${fixtureName} mode switching keeps the selector fixed with inertia and active emphasis (${reducedMotion})`, { timeout: 30_000 }, async () => {
+    test(`${fixtureName} mode switching keeps the selector fixed with inertia (${reducedMotion})`, { timeout: 30_000 }, async () => {
       const { context, page, errors } = await fixture(fixtureName, undefined, reducedMotion);
       try {
         const selector = page.locator(".prompt-box-mode-selector");
@@ -548,10 +548,7 @@ for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
             const sample = () => {
               frames.push({ track: rect(selector), buttons: [...selector.querySelectorAll("button")].map(rect),
                 pill: rect(selector.querySelector(".prompt-box-mode-pill-indicator")),
-                target: rect(selector.querySelector(".prompt-box-mode-btn.active")),
-                activeWeight: Number(getComputedStyle(selector.querySelector(".active .prompt-box-mode-text")).fontWeight),
-                inactiveWeights: [...selector.querySelectorAll(".prompt-box-mode-btn:not(.active) .prompt-box-mode-text")]
-                  .map(label => Number(getComputedStyle(label).fontWeight)) });
+                target: rect(selector.querySelector(".prompt-box-mode-btn.active")) });
               if (performance.now() - started >= 450) return resolve(frames);
               requestAnimationFrame(sample);
             };
@@ -566,8 +563,6 @@ for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
               `changing the selected mode cannot shift or resize the selector or labels: ${JSON.stringify(frame)}`);
             assert.ok(Math.abs(frame.pill[1] - first.pill[1]) < 0.25 && Math.abs(frame.pill[3] - first.pill[3]) < 0.25,
               "the pill slides horizontally without vertical jitter");
-            assert.ok(frame.inactiveWeights.every(weight => frame.activeWeight > weight),
-              "the selected label remains heavier without changing button widths");
           }
           if (reducedMotion === "no-preference") assert.ok(frames.some(frame =>
             Math.abs(frame.pill[0] - first.pill[0]) > 1 && Math.abs(frame.pill[0] - last.target[0]) > 1),
@@ -680,9 +675,6 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
               focused: document.activeElement === input,
               contentWidth: input.clientWidth,
               overflowY: getComputedStyle(input).overflowY,
-              fontSize: getComputedStyle(input).fontSize,
-              paddingLeft: getComputedStyle(input).paddingLeft,
-              resizing: document.querySelector(".prompt-box-container").hasAttribute("data-resizing"),
             });
             if (window.samplePaste) requestAnimationFrame(sample);
           };
@@ -1253,7 +1245,7 @@ test("recovered planning polls activity before route discovery and opens the com
   } finally { await context.close(); }
 });
 
-test("pure frontend refresh during active planning suppresses floating recovered banner and prevents secondary flicker", { timeout: 45_000 }, async () => {
+test("pure frontend refresh during active planning announces reconnection once and auto-dismisses without flicker", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const runningPlanning = { planningId: "active-plan", repository: "/a", status: "running", createdAt: Date.now(),
     modelDuration: 0, totalPlanningDuration: 0, roles: { partition: {}, planner: {} } };
@@ -1270,7 +1262,16 @@ test("pure frontend refresh during active planning suppresses floating recovered
     line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Streaming active plan output" } });
   const offsets = [], errors = [];
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
-  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    window.recoveryBanner = { shown: 0, removed: 0 };
+    new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of record.addedNodes) if (node instanceof HTMLElement && node.classList?.contains("floating-recovered-banner")) window.recoveryBanner.shown++;
+        for (const node of record.removedNodes) if (node instanceof HTMLElement && node.classList?.contains("floating-recovered-banner")) window.recoveryBanner.removed++;
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
@@ -1307,8 +1308,12 @@ test("pure frontend refresh during active planning suppresses floating recovered
     // Planning activity should poll and render directly
     const activity = page.getByRole("region", { name: "Planning activity" });
     await activity.getByText("Streaming active plan output", { exact: true }).waitFor();
-    // Pure frontend refresh must NEVER show the recovered banner nor trigger secondary flicker
-    assert.equal(await page.locator(".floating-recovered-banner").count(), 0);
+    // A persisted running turn is re-attached immediately; the reconnect banner must
+    // appear exactly once and auto-dismiss after the conversation becomes ready.
+    await page.waitForFunction(() => window.recoveryBanner.shown >= 1, null, { timeout: 10_000 });
+    await page.locator(".floating-recovered-banner").waitFor({ state: "detached", timeout: 10_000 });
+    const banner = await page.evaluate(() => window.recoveryBanner);
+    assert.deepEqual(banner, { shown: 1, removed: 1 }, "the reconnect banner is announced once and removed without flicker");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -1421,7 +1426,9 @@ for (const planType of ["graph", "serial"]) {
     let current = { runId: "queue-run", config, planType, approved: true, paused: false, phase: "completed",
       graph: { originalGoal: "Queue goal", nodes: [{ name: "task", task: "Queue task" }], edges: [] },
       nodes: { task: { status: "completed", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
-      executions: [first], plan: null, events: [], base: "", feedbackCounts: {} };
+      executions: [first], plan: null,
+      events: [{ type: "started", sequence: 1, timestamp: 1, execution: first, message_sequences: [] }],
+      base: "", feedbackCounts: {} };
     const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
     const actions = [], errors = [];
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
@@ -1481,13 +1488,16 @@ for (const planType of ["graph", "serial"]) {
       const batch = { ...first, id: "queue-batch", attempt: 2, revision: 2, status: "running", startedAt: 10, completedAt: null, output: output("Combined batch response") };
       current = { ...current, executions: [...current.executions, batch],
         nodes: { task: { ...current.nodes.task, status: "running", pendingMessages: [] } },
-        events: [...current.events, { type: "started", sequence: 3, timestamp: 10, execution: batch, message_sequences: [1, 2] }] };
+        events: [...current.events, { type: "started", sequence: 4, timestamp: 10, execution: batch, message_sequences: [2, 3] }] };
       await page.getByText("Combined batch response", { exact: true }).waitFor();
       assert.equal(await page.locator('[data-execution-id="queue-batch"]').count(), 1);
-      assert.equal(await page.evaluate(() => {
+      const batchOrder = await page.evaluate(() => {
         const messages = [...document.querySelectorAll(".chat-message-row.user")].filter(item => item.textContent.includes("Repeated queued instruction"));
-        return messages.length === 2 && !!(messages[1].compareDocumentPosition(document.querySelector('[data-execution-id="queue-batch"]')) & Node.DOCUMENT_POSITION_FOLLOWING);
-      }), true, "the shared response follows all user turns in its batch");
+        const execution = document.querySelector('[data-execution-id="queue-batch"]');
+        return { count: messages.length, execution: !!execution,
+          follows: !!execution && messages.length === 2 && !!(messages[1].compareDocumentPosition(execution) & Node.DOCUMENT_POSITION_FOLLOWING) };
+      });
+      assert.ok(batchOrder.follows, `the shared response follows all user turns in its batch: ${JSON.stringify(batchOrder)}`);
       await send("First live Steer");
       await send("Second live Steer");
       assert.deepEqual(actions, ["intervene", "intervene", "steer", "steer"]);

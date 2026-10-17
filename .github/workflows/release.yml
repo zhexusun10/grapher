@@ -85,11 +85,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          if [ -f "docs/releases/$RELEASE_TAG.md" ]; then
-            cp "docs/releases/$RELEASE_TAG.md" release-notes.md
-          else
-            printf '# Grapher %s\n\nSee CHANGELOG.md for changes. Download the archive for your platform and verify its SHA256 checksum.\n' "$RELEASE_TAG" > release-notes.md
-          fi
+          printf '# Grapher %s\n\nSee CHANGELOG.md for changes. Download the archive for your platform and verify its SHA256 checksum.\n' "$RELEASE_TAG" > release-notes.md
       - name: Create or refresh unpublished release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

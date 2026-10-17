@@ -3,61 +3,13 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { runtimeService } from "../src/services/runtime.ts";
-import { ExecutionTranscript, executionTranscriptCache, prefetchExecutionTranscript } from "../src/components/ExecutionTranscript.tsx";
+import { ExecutionTranscript, executionTranscriptCache } from "../src/components/ExecutionTranscript.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState } from "../src/services/transcriptParser.ts";
 import { planningTranscriptCache } from "../src/components/PlanningActivity.tsx";
 import { BoundedLruCache, utf8Bytes } from "../src/lib/BoundedLruCache.ts";
 import { cachedPlanningOutput, invalidateTranscriptCaches, planningTranscriptKey, registerTranscriptReader } from "../src/services/transcriptCache.ts";
 import type { Execution, TranscriptItem } from "../src/types.ts";
-
-test("settled node requests share work and publish only complete history", async () => {
-  const original = runtimeService.getExecutionOutput;
-  const runId = "prefetch-test-run";
-  const execution = { id: "prefetch-test-exec", node: "node", status: "completed", outputBytes: 13 } as Execution;
-  const offsets: number[] = [];
-  let releaseSecond!: () => void;
-  const secondPage = new Promise<void>(resolve => { releaseSecond = resolve; });
-  runtimeService.getExecutionOutput = async (_runId, _execId, offset = 0, _signal, full) => {
-    assert.equal(full, true);
-    offsets.push(offset);
-    if (offset) await secondPage;
-    return {
-      runId, executionId: execution.id, content: offset ? "second\n" : "first\n",
-      nextOffset: offset ? 13 : 6, totalBytes: 13, complete: Boolean(offset), status: "completed",
-    };
-  };
-  try {
-    const first = prefetchExecutionTranscript(runId, execution);
-    assert.equal(prefetchExecutionTranscript(runId, execution), first);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(executionTranscriptCache.has(`${runId}:${execution.id}`), false);
-    releaseSecond();
-    assert.equal(await first, "first\nsecond\n");
-    assert.deepEqual(offsets, [0, 6]);
-    assert.equal(executionTranscriptCache.get(`${runId}:${execution.id}`)?.complete, true);
-  } finally {
-    releaseSecond(); runtimeService.getExecutionOutput = original;
-    executionTranscriptCache.clear();
-  }
-});
-
-test("aborted history never publishes stale text", async () => {
-  const original = runtimeService.getExecutionOutput;
-  const controller = new AbortController();
-  const execution = { id: "abort", status: "completed", outputBytes: 6 } as Execution;
-  let release!: () => void;
-  const response = new Promise<void>(resolve => { release = resolve; });
-  runtimeService.getExecutionOutput = async () => {
-    await response;
-    return { runId: "old", executionId: "abort", content: "stale\n", nextOffset: 6, totalBytes: 6, complete: true, status: "completed" };
-  };
-  try {
-    const pending = prefetchExecutionTranscript("old", execution, controller.signal);
-    controller.abort(); release(); await pending;
-    assert.equal(executionTranscriptCache.has("old:abort"), false);
-  } finally { release(); runtimeService.getExecutionOutput = original; }
-});
 
 test("LRU uses UTF-8 bytes, touches reads, replaces sizes and refuses oversized entries", () => {
   const cache = new BoundedLruCache<string, string>(utf8Bytes, 2, 12);

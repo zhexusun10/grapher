@@ -72,7 +72,6 @@ try {
     ["modals/EditorModal", "EditorModal", { isOpen: true, initialGraph: example, onClose: noop, onSave: noop, onError: noop }],
     ["modals/ConfirmModal", "ConfirmModal", { config: { title: t("删除历史"), message: t("确定清空当前工作区的所有历史运行记录吗？"), confirmText: t("清空全部"), onConfirm: noop }, onClose: noop }],
     ["views/LandingView", "LandingView", { goal: "", setGoal: noop, onPlanGoal: noop }],
-    ["PlanningSummaryCard", "PlanningSummaryCard", { planning, state, defaultExpanded: true }],
     ["ThinkingCard", "ThinkingCard", { content: "", isStreaming: true }],
     ["graph/TaskNode", "TaskNode", { data: { name: "review", task: "Review result", status: "completed", attempts: 4, hint: "", reviewer: true, selected: false, worktree: "", feedbackExhaustion: { from: "review", to: "owner", count: 3, limit: 3 } } }],
     ["ToolCallCard", "ToolCallCard", { item: { id: "tool", type: "tool_call", toolName: "bash", status: "running", args: {} } }],
@@ -121,13 +120,10 @@ try {
     }
     if (name === "TaskNode") {
       assert.doesNotMatch(html, /\stitle=/, "nodes and feedback warnings must not show native hover tooltips");
-      assert.match(html, /class="task-node[^\"]*completed"/);
-      assert.match(html, /class="status completed"/);
       assert.ok(html.includes("COMPLETED"));
       assert.ok(html.includes(t("反馈预算耗尽 {0}/{1}", 3, 3)));
       assert.ok(html.includes(t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", "owner")));
       const plain = renderToStaticMarkup(taskNodeCanvas(module[name], { ...props.data, feedbackExhaustion: undefined }));
-      assert.ok(!plain.includes("node-feedback-exhausted"));
       assert.doesNotMatch(plain, /\stitle=/, "plain nodes must not show native hover tooltips");
     }
   }

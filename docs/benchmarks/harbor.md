@@ -104,6 +104,8 @@ Do not exclude platform failures then label the remaining subset a full score. G
 python3 -m unittest discover -s benchmark -p 'test_*.py'
 ```
 
+The adapter unit tests target Linux (the same POSIX host assumptions as the Harbor task container): fixture backends are executed through shebang scripts and symlinks. Windows is not supported; run them inside the Linux/Harbor task environment or a Linux container.
+
 Without a separate Harbor installation, the import-path interface test is skipped. Passing adapter unit tests does not prove the real Linux task container, model, publication, or verifier chain; validate those in the actual target environment.
 
 Implementation: [harbor_agent.py](../../benchmark/harbor_agent.py) · [run.py](../../benchmark/run.py)

@@ -8,4 +8,6 @@ See the canonical [Harbor evaluation guide](../docs/benchmarks/harbor.md) for ta
 python3 -m unittest discover -s benchmark -p 'test_*.py'
 ```
 
+The adapter unit tests target Linux/POSIX; Windows is not supported. Use a Linux container or the Harbor task environment.
+
 The real import-path interface test needs a separate Harbor installation. Unit tests and protocol mocks are not benchmark scores. Read the guide before using it.

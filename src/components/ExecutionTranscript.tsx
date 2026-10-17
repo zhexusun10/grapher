@@ -6,7 +6,7 @@ import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
 import { isRuntimeEventsConnected, RUNTIME_EVENTS_WATCHDOG_MS, subscribeExecutionOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
-import { cacheTranscriptWindow, executionTranscriptCache, registerTranscriptReader, transcriptFromCache } from "../services/transcriptCache";
+import { cacheTranscriptWindow, executionTranscriptCache, transcriptFromCache } from "../services/transcriptCache";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
 import { markTranscriptPrepend } from "../services/transcriptScroll";
 import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES } from "../services/transcriptPaging";
@@ -15,47 +15,6 @@ import { useStableCallback } from "../hooks/useStableCallback";
 import { useTranscriptReader } from "../hooks/useTranscriptReader";
 import { useAutoTranscriptHistory } from "../hooks/useAutoTranscriptHistory";
 export { executionTranscriptCache } from "../services/transcriptCache";
-
-// Explicit full-output callers only; ordinary history never uses this path.
-const prefetches = new Map<string, Promise<string>>();
-export function prefetchExecutionTranscript(runId: string, execution: Execution, signal?: AbortSignal): Promise<string> {
-  const key = `${runId}:${execution.id}`;
-  const existing = prefetches.get(key);
-  if (existing) return existing;
-  const task = fetchExecutionTranscript(runId, execution, signal);
-  prefetches.set(key, task);
-  void task.finally(() => { if (prefetches.get(key) === task) prefetches.delete(key); }).catch(() => {});
-  return task;
-}
-
-async function fetchExecutionTranscript(runId: string, execution: Execution, outerSignal?: AbortSignal): Promise<string> {
-  const key = `${runId}:${execution.id}`;
-  const cached = executionTranscriptCache.get(key);
-  if (cached?.complete && (cached.startOffset ?? 0) === 0) return cached.text;
-  if (execution.outputBytes === undefined) return execution.output ?? "";
-  const controller = new AbortController();
-  const dispose = registerTranscriptReader("execution", key, controller);
-  const signal = outerSignal ? AbortSignal.any([outerSignal, controller.signal]) : controller.signal;
-  let text = (cached?.startOffset ?? 0) === 0 ? cached?.text ?? "" : "";
-  let offset = (cached?.startOffset ?? 0) === 0 ? cached?.offset ?? 0 : 0;
-  try {
-    while (!signal.aborted) {
-      const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, signal, true);
-      if (signal.aborted) return text;
-      if (page.runId !== runId || page.executionId !== execution.id || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
-        throw new Error(t("执行记录与请求不匹配"));
-      }
-      text += page.content;
-      offset = page.nextOffset;
-      const complete = page.complete && page.status !== "running";
-      if (complete || execution.status === "running") {
-        executionTranscriptCache.set(key, { text, offset, startOffset: 0, totalBytes: page.totalBytes, complete, status: page.status });
-      }
-      if (page.complete) return complete && text && !text.endsWith("\n") ? `${text}\n` : text;
-    }
-    return text;
-  } finally { dispose(); }
-}
 
 type Props = {
   runId: string;

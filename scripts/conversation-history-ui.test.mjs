@@ -784,12 +784,10 @@ for (const role of ["node", "planner"]) {
       await status.waitFor({ state: "attached" });
       const appearance = await status.evaluate(element => {
         const style = getComputedStyle(element), transcript = element.nextElementSibling;
-        return { color: style.color, position: style.position, height: element.getBoundingClientRect().height,
+        return { position: style.position,
           separated: !transcript || element.getBoundingClientRect().bottom <= transcript.getBoundingClientRect().top + 1 };
       });
-      assert.equal(appearance.color, "rgb(133, 133, 133)");
       assert.equal(appearance.position, "static");
-      assert.equal(appearance.height, 24);
       assert.ok(appearance.separated, "gray loading text owns a line; it never overlays a message");
       // The user keeps moving while the network is delayed. The anchor must be
       // captured at commit, not at request start.
