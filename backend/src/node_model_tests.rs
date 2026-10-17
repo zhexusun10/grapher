@@ -69,6 +69,32 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
 }
 
 #[test]
+fn newly_added_nodes_use_the_latest_saved_node_agent_settings() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let latest = replacement(runtime.state.config.as_ref().unwrap());
+    // Save settings exactly as the API does. Scheduling must read the shared
+    // on-disk defaults even when another service instance handled the save.
+    fs::write(runtime.root.join("config.json"), serde_json::to_vec(&latest).unwrap()).unwrap();
+    let mut graph = runtime.state.graph.clone();
+    graph.nodes.push(Node { name: "added".into(), task: "added".into() });
+    runtime.revise_graph(graph, PlanningSummary {
+        planning_id: Uuid::new_v4().to_string(),
+        status: Some("success".into()),
+        ..Default::default()
+    }).unwrap();
+    let jobs = runtime.jobs().unwrap();
+    for name in ["task", "added"] {
+        let job = jobs.iter().find(|job| job.execution.node == name).unwrap();
+        assert_eq!(job.config.node_agent_settings(), latest.node_agent_settings(),
+            "a never-executed node must use the current Node Agent settings");
+        assert_eq!(job.execution.metrics.as_ref().and_then(|metrics| metrics.model.as_deref()),
+            Some(latest.node_agent_settings().model.as_str()),
+            "session details must see the selected model before launch");
+    }
+}
+
+#[test]
 fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_completed_nodes() {
     let graph = Graph {
         nodes: ["failed", "completed", "running", "after", "pending"].into_iter()

@@ -798,6 +798,7 @@ fn save_config_projection(
     if run_id.is_some() {
         runtime.update_node_models(&config)?;
     }
+    runtime.set_latest_node_agent_settings(&config);
     drop(runtime);
     #[cfg(not(feature = "fixture"))]
     {
@@ -1717,21 +1718,14 @@ fn plan_goal_internal_with_started(
                     },
                     "graph" => {
                         // The planning gate prevents new dispatch/publication.
-                        // Drain the selected writer before lending its worktree;
-                        // unrelated parallel nodes need not finish first.
+                        // The newest recorded workspace is mandatory: start
+                        // immediately even if its node/Merger writer is active
+                        // rather than waiting or retreating to source.
                         let selected = if revision_run_id.is_some() && !background_review {
-                            loop {
-                                check_planning_cancelled(&owner)?;
-                                let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                                if runtime.state.run_id != owner { return Err("Run changed during workspace selection".into()); }
-                                let selected = runtime.planner_workspace()?;
-                                if selected.as_ref().is_none_or(|execution|
-                                    !runtime.path_is_running(std::path::Path::new(&execution.worktree))) {
-                                    break selected;
-                                }
-                                drop(runtime);
-                                thread::sleep(std::time::Duration::from_millis(50));
-                            }
+                            check_planning_cancelled(&owner)?;
+                            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                            if runtime.state.run_id != owner { return Err("Run changed during workspace selection".into()); }
+                            runtime.planner_workspace()?
                         } else { None };
                         let planner_workspace_targets = service
                             .runtime
@@ -2041,7 +2035,7 @@ fn plan_goal_internal_with_started(
                 let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                 check_planning_cancelled(&owner)?;
                 if let Some(execution_id) = &planner_execution_id {
-                    runtime.capture_planner_workspace(execution_id)?;
+                    capture_planner_workspace_when_idle(&mut runtime, execution_id)?;
                 }
                 if let Some(ref run_id) = revision_run_id {
                     if runtime.state.run_id != *run_id {
@@ -2159,7 +2153,7 @@ fn plan_goal_internal_with_started(
                             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                             if runtime.state.approved && revision_run_id.as_deref() == Some(&runtime.state.run_id) {
                                 let capture = if let Some(id) = &planner_execution_id {
-                                    runtime.capture_planner_workspace(id)
+                                    capture_planner_workspace_when_idle(&mut runtime, id)
                                 } else { runtime.capture_planner_source() };
                                 if let Err(error) = capture {
                                     if !runtime.state.paused { let _ = runtime.pause(true); }
@@ -2361,6 +2355,21 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The Planner may share its workspace with a node/Merger that is still
+/// running. Git-snapshotting that directory concurrently is unsafe, so leave
+/// the capture to the writer's own completion path; it snapshots every byte
+/// (including Planner writes) exactly once when the shared directory drains.
+fn capture_planner_workspace_when_idle(runtime: &mut Runtime, execution_id: &str) -> Result<(), String> {
+    let running = runtime
+        .state
+        .executions
+        .iter()
+        .find(|execution| execution.id == execution_id)
+        .is_some_and(|execution| runtime.path_is_running(std::path::Path::new(&execution.worktree)));
+    if running { return Ok(()); }
+    runtime.capture_planner_workspace(execution_id)
 }
 
 fn plan_goal(
@@ -2784,10 +2793,26 @@ fn control(
         if !service.planning.load(Ordering::SeqCst) {
             return Err("Planner is no longer accepting messages".into());
         }
-        let active_run_id = if let Some(ref id) = run_id {
-            crate::engine::planner_revision_run_id_for_run(id)?
-        } else {
-            crate::engine::planner_revision_run_id()?
+        // A reconnected browser can steer while the replacement Planner is
+        // still starting. Wait only for that short registration window; the
+        // message is not a new planning request and must not be rejected just
+        // because the Pi RPC entry is not visible yet.
+        let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let active_run_id = loop {
+            let lookup = if let Some(ref id) = run_id {
+                crate::engine::planner_revision_run_id_for_run(id)
+            } else {
+                crate::engine::planner_revision_run_id()
+            };
+            match lookup {
+                Ok(id) => break id,
+                Err(_) if service.planning.load(Ordering::SeqCst) &&
+                    std::time::Instant::now() < wait_until => {
+                    thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         };
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
         if active_run_id
@@ -2839,9 +2864,9 @@ fn control(
         let snapshot = runtime.state.clone();
         drop(runtime);
         if let Some(id) = run_id {
-            crate::engine::steer_planner_for_run(&id, &message, images)?;
+            crate::engine::steer_planner_for_run_nowait(&id, &message, images)?;
         } else {
-            crate::engine::steer_planner(&message, images)?;
+            crate::engine::steer_planner_nowait(&message, images)?;
         }
         return Ok(snapshot);
     }
@@ -2898,7 +2923,7 @@ fn control(
                 );
             }
         }
-        crate::engine::steer(&execution_id, instruction.trim(), images.clone())?;
+        crate::engine::steer_nowait(&execution_id, instruction.trim(), images.clone())?;
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
         if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
             return Err("Run changed while steering".into());

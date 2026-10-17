@@ -111,8 +111,10 @@ of that snapshot.
 <workspace-parent>/.grapher-worktrees/<run>/<node>-<execution>/
 ```
 
-A physical directory is a reusable single-writer slot, not a permanent node
-identity or a security sandbox.
+A physical directory is a reusable node/Merger single-writer slot, not a
+permanent node identity or a security sandbox. A Planner follow-up may share the
+newest slot with its active writer; the writer snapshots the combined directory
+when it drains.
 
 | Transition | Git behavior | Physical behavior |
 | --- | --- | --- |

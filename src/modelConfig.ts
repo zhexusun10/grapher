@@ -105,9 +105,11 @@ export function resolveExecutionModelAndThinking(
     ? (envOverrides.mergerThinking?.trim() || envOverrides.nodeAgentThinking?.trim() || nodeSettings?.thinkingLevel || config.thinkingLevel || "low")
     : (envOverrides.nodeAgentThinking?.trim() || nodeSettings?.thinkingLevel || config.thinkingLevel || "low");
 
+  // Durable execution metrics record what actually ran after transcripts are
+  // stripped; never substitute the settings newly saved for a future retry.
   return {
-    model: modelFromOutput || configModel || t("未设置模型"),
-    thinkingLevel: thinkingFromOutput || configThinking || "low",
+    model: execution.metrics?.model || modelFromOutput || configModel || t("未设置模型"),
+    thinkingLevel: execution.metrics?.thinkingLevel || thinkingFromOutput || configThinking || "low",
   };
 }
 

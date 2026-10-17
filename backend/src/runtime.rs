@@ -86,6 +86,25 @@ fn known_engine(engine: &str) -> bool {
     engine == "pi"
 }
 
+fn same_repository_binding(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.trim().is_empty() { return false; }
+    if left == right { return true; }
+    let (left, right) = (Path::new(left), Path::new(right));
+    left.is_absolute() && right.is_absolute()
+        && left.canonicalize().ok().zip(right.canonicalize().ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn latest_node_agent_settings(root: &Path, current: Option<&Config>) -> Option<(String, RoleModelConfig)> {
+    let latest = fs::read(root.join("config.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())?;
+    if current.is_some_and(|current| !same_repository_binding(&current.repository, &latest.repository)) {
+        return None;
+    }
+    let settings = latest.node_agent_settings();
+    (!settings.model.trim().is_empty()).then_some((latest.repository, settings))
+}
+
 pub(crate) fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf, String> {
     #[cfg(feature = "fixture")]
     if config.engine == crate::fixture::ENGINE {
@@ -123,6 +142,9 @@ pub struct Runtime {
     epoch: Uuid,
     revision: u64,
     pub root: PathBuf,
+    /// Latest saved Node Agent selection for future, never-executed nodes.
+    /// The Run's original `state.config` stays immutable for reproducibility.
+    latest_node_agent: Option<(String, RoleModelConfig)>,
     _lock: Arc<RuntimeLock>,
 }
 
@@ -160,12 +182,14 @@ impl Runtime {
                 config.engine = "pi".into();
             }
         }
+        let latest_node_agent = latest_node_agent_settings(root, state.config.as_ref());
         let mut runtime = Self {
             store,
             state,
             epoch: Uuid::new_v4(),
             revision: 0,
             root: root.into(),
+            latest_node_agent,
             _lock: lock,
         };
         let interrupted: Vec<_> = runtime
@@ -218,12 +242,14 @@ impl Runtime {
                 config.engine = "pi".into();
             }
         }
+        let latest_node_agent = latest_node_agent_settings(&root, state.config.as_ref());
         let mut runtime = Self {
             store,
             state,
             epoch: Uuid::new_v4(),
             revision: 0,
             root,
+            latest_node_agent,
             _lock: lock,
         };
         let interrupted: Vec<_> = runtime
@@ -260,6 +286,31 @@ impl Runtime {
         defaults.environment = None;
         let bytes = serde_json::to_vec_pretty(&defaults).map_err(|e| e.to_string())?;
         fs::write(self.root.join("config.json"), bytes).map_err(|e| e.to_string())
+    }
+
+    /// Settings saved after a Run started still govern nodes that have never
+    /// executed (especially nodes the Planner adds later). Running/completed
+    /// nodes keep their recorded model, and the Run's original config is not
+    /// rewritten for replay stability.
+    pub(crate) fn set_latest_node_agent_settings(&mut self, config: &Config) {
+        if self.state.config.as_ref().is_some_and(|current|
+            !same_repository_binding(&current.repository, &config.repository))
+        {
+            return;
+        }
+        let settings = config.node_agent_settings();
+        if !settings.model.trim().is_empty() {
+            self.latest_node_agent = Some((config.repository.clone(), settings));
+        }
+    }
+
+    /// Settings are global to the project, while each Run has its own service
+    /// projection. Refresh from disk before scheduling so a save handled by a
+    /// different service instance still governs this Run's future nodes.
+    fn refresh_latest_node_agent_settings(&mut self) {
+        if let Some(latest) = latest_node_agent_settings(&self.root, self.state.config.as_ref()) {
+            self.latest_node_agent = Some(latest);
+        }
     }
 
     pub fn snapshot_version(&self) -> String {
@@ -1043,10 +1094,11 @@ impl Runtime {
             .transpose()
     }
 
-    /// Called while the planning gate prevents dispatch/publication. A running
-    /// selection is a wait target, not permission to launch: the caller must
-    /// wait for this path's writer, then reselect. Other branches may continue.
-    /// Allocation names aren't ownership: linear handoff reuses directories.
+    /// Called while the planning gate prevents dispatch/publication. The
+    /// newest recorded workspace is always selected, even when its node/Merger
+    /// writer is still active: a follow-up must start immediately instead of
+    /// waiting or falling back to an older/source directory. Allocation names
+    /// aren't ownership: linear handoff reuses directories.
     pub(crate) fn planner_workspace(&self) -> Result<Option<Execution>, String> {
         let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
         // Retained published slots can be older than subsequent source edits.
@@ -1126,6 +1178,8 @@ impl Runtime {
                 continue;
             }
             let path = Path::new(&execution.worktree);
+            // Even an active frontier is the latest workspace. Planner starts
+            // directly in it; the writer snapshots the shared directory later.
             if self.path_is_running(path) { return Ok(Some(execution.clone())); }
             // Published-node follow-ups can use source directly, outside the
             // private Run root. Once their writer drains, Planner uses source too.
@@ -1205,7 +1259,6 @@ impl Runtime {
             }
             let owner = self.planner_workspace_owner(requested).unwrap_or(requested);
             if self.state.superseded_execution_ids.contains(&owner.id)
-                || self.path_is_running(Path::new(&owner.worktree))
                 || !Path::new(&owner.worktree).is_dir() {
                 continue;
             }
@@ -2027,6 +2080,7 @@ impl Runtime {
         self.require_current_file_contract()?;
         self.drain_feedback()?;
         let config = self.state.config.clone().ok_or("Missing config")?;
+        self.refresh_latest_node_agent_settings();
         // Check before emitting Started or allocating workspaces, including jobs
         // resumed without a UI request. perform() checks again before filesystem work.
         resolve_repository(&self.root, &config)?;
@@ -2478,7 +2532,7 @@ impl Runtime {
                     .map(|execution| execution.id.clone())
                     .unwrap_or_else(|| previous.id.clone())
             });
-            let execution = Execution {
+            let mut execution = Execution {
                 id: id.clone(),
                 node: node.name.clone(),
                 revision: self.state.nodes[&node.name].revision,
@@ -2507,6 +2561,23 @@ impl Runtime {
                 completed_at: None,
                 metrics: None,
             };
+            // Record the selected Node Agent model before launch so session
+            // details can show what this attempt will actually use. Completion
+            // replaces this placeholder with parsed live metrics.
+            let node_settings = self.state.nodes[&node.name].model_config.clone().or_else(|| {
+                (execution.attempt == 1)
+                    .then(|| self.latest_node_agent.as_ref()
+                        .filter(|(repository, _)| same_repository_binding(repository, &config.repository))
+                        .map(|(_, settings)| settings.clone()))
+                    .flatten()
+            });
+            if let Some(settings) = &node_settings {
+                execution.metrics = Some(ExecutionMetrics {
+                    model: Some(settings.model.clone()),
+                    thinking_level: settings.thinking_level.clone(),
+                    ..Default::default()
+                });
+            }
             let state = &self.state.nodes[&node.name];
             let task = if let Some((prompt, _)) = &queued_prompt {
                 if resume.is_none() {
@@ -2701,8 +2772,8 @@ impl Runtime {
                 None
             };
             let mut node_config = config.clone();
-            if let Some(settings) = &self.state.nodes[&node.name].model_config {
-                node_config.role_models.insert("nodeAgent".into(), settings.clone());
+            if let Some(settings) = node_settings {
+                node_config.role_models.insert("nodeAgent".into(), settings);
             }
             jobs.push(Job {
                 execution,

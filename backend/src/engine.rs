@@ -305,31 +305,68 @@ pub fn steer_planner(
     steer(&sole_planner()?.0, instruction, images)
 }
 
+pub fn steer_planner_nowait(
+    instruction: &str,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+) -> Result<(), String> {
+    steer_nowait(&sole_planner()?.0, instruction, images)
+}
+
 pub fn steer_planner_for_run(
     run_id: &str,
     instruction: &str,
     images: Option<Vec<crate::model::ImageAttachment>>,
 ) -> Result<(), String> {
+    steer(&planner_for_run(run_id)?, instruction, images)
+}
+
+pub fn steer_planner_for_run_nowait(
+    run_id: &str,
+    instruction: &str,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+) -> Result<(), String> {
+    steer_nowait(&planner_for_run(run_id)?, instruction, images)
+}
+
+fn planner_for_run(run_id: &str) -> Result<String, String> {
     let rpc = NODE_RPC
         .get_or_init(Default::default)
         .lock()
         .map_err(|e| e.to_string())?;
-    let id = rpc
-        .iter()
+    rpc.iter()
         .find(|(id, planner)| {
             id.starts_with("planner:") && planner.run_id.as_deref() == Some(run_id)
         })
         .map(|(id, _)| id.clone())
-        .ok_or("Planner is no longer accepting messages")?;
-    drop(rpc);
-    steer(&id, instruction, images)
+        .ok_or("Planner is no longer accepting messages".into())
 }
 
 /// Acknowledged by Pi's RPC protocol, not merely by a successful pipe write.
+/// Tests and protocol probes use this strict form.
 pub fn steer(
     execution_id: &str,
     instruction: &str,
     images: Option<Vec<crate::model::ImageAttachment>>,
+) -> Result<(), String> {
+    send_steer(execution_id, instruction, images, true)
+}
+
+/// Delivery to a live RPC input, without waiting for the model process to
+/// acknowledge. HTTP control must stay responsive while a long tool turn is
+/// still running; Pi consumes the queued steer at its next safe boundary.
+pub fn steer_nowait(
+    execution_id: &str,
+    instruction: &str,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+) -> Result<(), String> {
+    send_steer(execution_id, instruction, images, false)
+}
+
+fn send_steer(
+    execution_id: &str,
+    instruction: &str,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+    acknowledge: bool,
 ) -> Result<(), String> {
     let rpc = NODE_RPC
         .get_or_init(Default::default)
@@ -339,11 +376,16 @@ pub fn steer(
         .cloned()
         .ok_or("Node execution is no longer accepting messages")?;
     let id = uuid::Uuid::new_v4().to_string();
-    let (tx, rx) = mpsc::channel();
-    rpc.pending
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(id.clone(), tx);
+    let pending = if acknowledge {
+        let (tx, rx) = mpsc::channel();
+        rpc.pending
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(id.clone(), tx);
+        Some(rx)
+    } else {
+        None
+    };
     let mut command_val = serde_json::json!({"id": id, "type": "prompt", "message": instruction, "streamingBehavior": "steer"});
     if let Some(imgs) = images {
         if !imgs.is_empty() {
@@ -352,9 +394,12 @@ pub fn steer(
     }
     let command = command_val.to_string();
     if rpc.sender.send(command).is_err() {
-        rpc.pending.lock().map_err(|e| e.to_string())?.remove(&id);
+        if pending.is_some() {
+            rpc.pending.lock().map_err(|e| e.to_string())?.remove(&id);
+        }
         return Err("Node RPC input closed".into());
     }
+    let Some(rx) = pending else { return Ok(()); };
     let result = rx
         .recv_timeout(Duration::from_secs(10))
         .map_err(|_| "Node did not acknowledge the steer request".to_string());

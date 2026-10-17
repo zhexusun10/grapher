@@ -255,6 +255,13 @@ pub struct ExecutionMetrics {
     pub tool_errors: usize,
     #[serde(default)]
     pub usage: TokenUsage,
+    /// Actual model/thinking selected by this Execution's Pi session. Kept
+    /// separately from mutable Node Agent settings so session details never
+    /// claim that a finished run used the model newly configured for a retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -927,6 +934,8 @@ pub fn parse_execution_metrics(
     let mut tools = 0;
     let mut tool_errors = 0;
     let mut usage = TokenUsage::default();
+    let mut model = None;
+    let mut thinking_level = None;
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -969,6 +978,19 @@ pub fn parse_execution_metrics(
                         }
                     }
                 }
+                "model_change" => {
+                    let model_id = value.get("modelId").and_then(|v| v.as_str());
+                    if let Some(model_id) = model_id {
+                        model = Some(value.get("provider").and_then(|v| v.as_str())
+                            .filter(|provider| !provider.is_empty())
+                            .map_or_else(|| model_id.to_string(), |provider| format!("{provider}/{model_id}")));
+                    }
+                }
+                "thinking_level_change" => {
+                    if let Some(level) = value.get("thinkingLevel").and_then(|v| v.as_str()) {
+                        thinking_level = Some(level.to_string());
+                    }
+                }
                 "tool_execution_start" => {
                     tools += 1;
                 }
@@ -1001,6 +1023,8 @@ pub fn parse_execution_metrics(
         tools,
         tool_errors,
         usage,
+        model,
+        thinking_level,
     }
 }
 

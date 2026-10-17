@@ -90,7 +90,7 @@ Planner writes reach the source **before graph approval**; rejection, failure an
 2. Scheduling does not depend on a persistent LLM coordinator.
 3. Ordinary dependencies form a DAG; cycles require explicit bounded feedback.
 4. A new node starts a fresh session; continuation never imports another agent's chat history.
-5. Ordinary dependencies and applied feedback inherit completed workspace state, not conversations; each physical directory has at most one active writer.
+5. Ordinary dependencies and applied feedback inherit completed workspace state, not conversations; each physical directory has at most one active node/Merger writer, while a Planner follow-up may share the latest workspace with that writer.
 6. Backend state and append-only events are authoritative; the UI is a projection.
 7. Graph completion requires successful publication, not merely finished model calls.
 8. Independent Git repositories are not, by themselves, security sandboxes.

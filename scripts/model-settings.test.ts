@@ -323,6 +323,21 @@ test("failed-node model overrides provide the next attempt's fallback without re
   assert.equal(resolveExecutionModelAndThinking(execution, false, legacy, {}, replacement).model, "recorded/original");
 });
 
+test("execution metrics keep the actual model after a later settings change", () => {
+  const execution: Execution = {
+    id: "recorded", node: "task", revision: 1, attempt: 1, sessionId: "same-session", worktree: "/worktree",
+    before: "base", after: null, status: "failed", output: "", startedAt: 1000, completedAt: 2000,
+    metrics: {
+      durationSeconds: 50, assistantMessages: 1, tools: 0, toolErrors: 0,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 },
+      model: "actual/provider-model", thinkingLevel: "xhigh",
+    },
+  };
+  const replacement = { model: "latest/config", thinkingLevel: "high" as const };
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, false, legacy, {}, replacement),
+    { model: "actual/provider-model", thinkingLevel: "xhigh" });
+});
+
 test("resolveExecutionModelAndThinking falls back to config and role models when not in output", () => {
   const execution: Execution = {
     id: "exec-2",

@@ -69,6 +69,24 @@ test("uses now - startedAt when execution is running without completedAt", () =>
   assert.equal(formatToolDuration(ms!), "2.5s");
 });
 
+test("pre-launch model metrics do not freeze a running execution clock at zero", () => {
+  const exec = createMockExecution({
+    startedAt: 1000,
+    completedAt: null,
+    status: "running",
+    metrics: {
+      durationSeconds: 0,
+      assistantMessages: 0,
+      tools: 0,
+      toolErrors: 0,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 },
+      model: "actual/model",
+      thinkingLevel: "high",
+    },
+  });
+  assert.equal(calculateExecutionDurationMs(exec, 3500), 2500);
+});
+
 test("calculatePlannerDurationMs returns null when planner is idle and has no duration", () => {
   assert.equal(calculatePlannerDurationMs({ isPlanning: false, durationSeconds: null }), null);
   assert.equal(calculatePlannerDurationMs({ isPlanning: false, durationSeconds: undefined }), null);

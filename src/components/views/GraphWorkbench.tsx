@@ -575,7 +575,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       isMerger,
       state.config || config,
       envOverrides,
-      execution.id === latestAttemptId ? state.nodes[execution.node]?.modelConfig : undefined
+      // Only a live attempt may still be governed by a pre-dispatch override.
+      // A finished/failed attempt's actual model comes from its metrics.
+      execution.id === latestAttemptId && execution.status === "running"
+        ? state.nodes[execution.node]?.modelConfig : undefined
     );
   }, [execution, isMerger, latestAttemptId, state.nodes, state.config, config, envOverrides]);
   const nodeTaskText = selectedNode?.task ?? "";
@@ -673,10 +676,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     : (routeType === "graph" ? state.planningId : undefined));
   // Actual per-turn cwd comes from backend selection, never inferred from the
   // newest node card (linear handoff and parallel branches can change ownership).
-  const plannerWorkspaces = state.events.flatMap(event =>
-    event.type === "planner_workspace_selected" && event.planning?.worktree ? [event.planning] : []);
-  const plannerWorkspace = plannerWorkspaces.at(-1)?.worktree
-    ?? failedPlanning?.worktree ?? state.planning?.worktree;
+  // Checkpointed snapshots may omit older selection events, so fold in the
+  // durable current/failed summaries rather than showing an empty history.
+  const plannerWorkspaces = useMemo(() => {
+    const turns = state.events.flatMap(event =>
+      event.type === "planner_workspace_selected" && event.planning?.worktree ? [event.planning] : []);
+    const seen = new Set(turns.map(turn => turn.planningId));
+    for (const summary of [failedPlanning, state.planning]) {
+      if (summary?.worktree && !seen.has(summary.planningId)) {
+        turns.push(summary);
+        seen.add(summary.planningId);
+      }
+    }
+    return turns;
+  }, [state.events, state.planning, failedPlanning]);
+  const plannerWorkspace = state.planning?.worktree
+    ?? failedPlanning?.worktree ?? plannerWorkspaces.at(-1)?.worktree;
   const plannerRole = state.planning?.roles?.planner ?? failedPlanning?.roles?.planner;
   const plannerModelInfo = (() => {
     const configured = roleModelConfig(config, "planner", envOverrides);
@@ -761,6 +776,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const useSavedPlanner = savedPlannerIds.length > 0 &&
     (!showLivePlanner || readySavedPlannerKey === savedPlannerKey || Boolean(plannerStream.isContinuation));
   const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
+  // A new user turn or any live Planner token makes the committed result cards
+  // stale for the moment. Hide them until this turn settles, including while a
+  // detached stream is recovered from durable output.
+  const hidePlannerResultCards = isPlanning || !!recoveredPlanningId ||
+    plannerStream.stage === "planning" || plannerStream.plannerThinkingActive ||
+    Boolean(plannerStream.compacting);
   const { workbenchRef, isResizing, splitRatio, handleStartResize, handleResetResizer } = useWorkbenchResizer();
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const expandedCardObserverRef = useRef<ResizeObserver | null>(null);
@@ -1923,7 +1944,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                   onAfterToggle={handleWorkspaceDetailsAfterToggle}
                 >
-                  <p>worktree: {execution?.worktree || config.repository || "preparing workspace…"}</p>
+                  <p>workspace: {execution?.worktree || config.repository || "preparing workspace…"}</p>
                   <p>session id: {execution?.sessionId || "waiting for initialization…"}</p>
                   <p>commit before: {execution?.before || "not snapshotted"}</p>
                   <p>commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
@@ -2114,7 +2135,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                       onAfterToggle={handleWorkspaceDetailsAfterToggle}
                     >
-                      <p>working directory: {serialExecution?.worktree || config.repository || repoInfo?.name || "preparing workspace…"}</p>
+                      <p>workspace: {serialExecution?.worktree || config.repository || repoInfo?.name || "preparing workspace…"}</p>
                       <p>session id: {serialExecution?.sessionId || "waiting for initialization…"}</p>
                       {serialModelInfo && (
                         <>
@@ -2298,7 +2319,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                     onAfterToggle={handleWorkspaceDetailsAfterToggle}
                   >
-                    <p>worktree: {plannerWorkspace || config.repository || "preparing workspace…"}</p>
+                    <p>workspace: {plannerWorkspace || config.repository || "preparing workspace…"}</p>
                     {plannerWorkspaces.length > 1 && (
                       <details>
                         <summary>workspace history</summary>
@@ -2343,9 +2364,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               )}
 
               {routeType === "graph" && (state.graph.nodes.length > 0 || hasCompletedPublication) && (
-                <div className={`planner-result-cards${isPlanning ? " is-hidden" : ""}`}
-                  aria-hidden={isPlanning || undefined}
-                  inert={isPlanning ? true : undefined}>
+                <div className={`planner-result-cards${hidePlannerResultCards ? " is-hidden" : ""}`}
+                  aria-hidden={hidePlannerResultCards || undefined}
+                  inert={hidePlannerResultCards ? true : undefined}>
                   <div className="planner-result-cards-inner">{plannerResultCards}</div>
                 </div>
               )}

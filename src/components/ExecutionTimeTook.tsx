@@ -6,10 +6,12 @@ export function calculateExecutionDurationMs(execution?: Execution | null, now =
   if (!execution || !execution.startedAt) {
     return null;
   }
-  if (execution.metrics?.durationSeconds != null) {
-    return Math.max(0, execution.metrics.durationSeconds * 1000);
-  }
+  // A live attempt may carry a pre-launch model placeholder in metrics; only
+  // its wall clock is authoritative until the process settles.
   if (execution.completedAt != null) {
+    if (execution.metrics?.durationSeconds != null && execution.metrics.durationSeconds > 0) {
+      return Math.max(0, execution.metrics.durationSeconds * 1000);
+    }
     return Math.max(0, execution.completedAt - execution.startedAt);
   }
   return Math.max(0, now - execution.startedAt);

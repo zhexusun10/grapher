@@ -101,15 +101,16 @@ unrelated ordinary failure.
 
 Saving changed Node Agent model/thinking settings from a conversation records
 per-node overrides for every node that has never had an execution, including
-unapproved drafts and nodes waiting for dependencies or blocked before their first
-attempt. Their first dispatch uses those settings. Saving does not dispatch work,
-approve a draft, unpause a Run, or rewrite its original configuration. Nodes that
-have already executed retain their settings, except for the explicit failed-node
-recovery below; a waiting/dirty status alone does not make a node never-started.
+unapproved drafts, nodes waiting for dependencies or blocked before their first
+attempt, and nodes the Planner adds later. Their first dispatch uses those
+settings. Saving does not dispatch work, approve a draft, unpause a Run, or
+rewrite its original configuration. Nodes that have already executed retain
+their settings, except for the explicit failed-node recovery below; a
+waiting/dirty status alone does not make a node never-started.
 Overrides survive replay and repeated saves update the previous override. A
 pre-dispatch override does not opt a later provider failure into Continue recovery.
 
-Scheduling enforces one writer per physical Run directory and retains directories required by pending feedback/repair. Allocation, reuse and reclamation follow the [workspace directory contract](workspace-snapshots-and-feedback.md#physical-workspaces-and-ownership).
+Scheduling enforces one node/Merger writer per physical Run directory and retains directories required by pending feedback/repair. Planner follow-ups may share the newest workspace with its active writer so they never wait. Allocation, reuse and reclamation follow the [workspace directory contract](workspace-snapshots-and-feedback.md#physical-workspaces-and-ownership).
 
 Source locks cover approval and recorded Git snapshots after approved Planner revisions, not the Planner's live Bash/model session. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce Git conflicts, surfaced by each execution/publication result.
 
@@ -154,11 +155,12 @@ still pauses unfinished Runs for explicit recovery rather than silently making
 model calls. Dispatched messages remain bound to their execution, including its
 failure/interruption evidence; a claim is not evidence of model completion.
 
-Running nodes continue to accept acknowledged Pi RPC Steers in order, without a
-new Execution or queue-capacity rejection. If a stale browser sends `intervene`
-after dispatch has already started, the API routes it to that live writer as a
-Steer. RPC transport/acknowledgement failures still surface as failures, not false
-success or automatic resends.
+Running nodes continue to accept ordered Pi RPC Steers without a new Execution
+or queue-capacity rejection. If a stale browser sends `intervene` after dispatch
+has already started, the API routes it to that live writer as a Steer. Control
+records delivery once the live RPC input accepts the command and does not block
+the HTTP request on a long tool turn's acknowledgement; a closed RPC input still
+surfaces as a failure, not false success or an automatic resend.
 
 Focused evidence: [queue/replay regressions](../../backend/src/node_message_queue_tests.rs),
 [live delivery regressions](../../backend/src/node_message_delivery_tests.rs) and

@@ -447,8 +447,11 @@ export default function App() {
     state.executions.some((item) => item.status === "running") ||
     (state.mergers ?? []).some((item) => item.status === "running") ||
     state.resultExecution?.status === "running";
-  const locked = busy || !!recoveredPlanning || repositoryBlocked;
-  const backendPlanning = state.phase === "planning";
+  // A recovered Planner turn must not lock the composer: the user may still
+  // steer the live process or send a follow-up once the turn settles.
+  const locked = busy || repositoryBlocked;
+  const persistedRunningPlanning = state.planning?.status === "running";
+  const backendPlanning = state.phase === "planning" || persistedRunningPlanning;
   const isAgentWorking = active || isPlanning || backendPlanning;
 
   const effectiveMessages = useMemo<ChatMessage[]>(() => {
@@ -667,7 +670,9 @@ export default function App() {
       return submitNodeMessage("steer", message, execution.id);
     }
     if (isPlanning || backendPlanning || recoveredPlanning?.status === "running") {
-      const planningRunId = plannerStream.runId || state.runId;
+      // The viewed Run owns the Planner. A detached stream from an older
+      // conversation must never receive this message.
+      const planningRunId = state.runId || plannerStream.runId;
       if (plannerStream.stage === "partitioning" || !planningRunId || planningRunId.startsWith("pending-")) {
         setError(t("任务路由器仍在工作，请等待 Planner 启动后再追加消息。"));
         return false;
@@ -2856,7 +2861,10 @@ export default function App() {
   // submitting the goal again. Every response is scoped to this repository.
   useEffect(() => {
     setRecoveredPlanning(null);
-    if (!autoRecoverPlanning || busy || isPlanning || hasCurrentPlan || !config.repository) return;
+    // Existing conversations also have a current Run. A revision planning
+    // turn is still recoverable when its durable summary is running.
+    if (!autoRecoverPlanning || busy || isPlanning || !config.repository ||
+      (hasCurrentPlan && !persistedRunningPlanning)) return;
     const repository = config.repository;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
@@ -2935,7 +2943,29 @@ export default function App() {
     };
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, [autoRecoverPlanning, busy, isPlanning, hasCurrentPlan, config.repository, planningRecovery]);
+  }, [autoRecoverPlanning, busy, isPlanning, hasCurrentPlan, persistedRunningPlanning, config.repository, planningRecovery]);
+
+  // The snapshot itself is durable enough to re-attach immediately. This is
+  // the fast path after an SSE drop: show the persisted running turn instead
+  // of waiting for a listPlannings round trip (or leaving a stale error).
+  useEffect(() => {
+    const running = state.planning?.status === "running" ? state.planning : null;
+    if (running && !isPlanning && !busy) {
+      if (!recoveredPlanning || recoveredPlanning.planningId !== running.planningId ||
+        recoveredPlanning.status !== "running") {
+        setRecoveredPlanning(running);
+        // The durable turn is now visible; do not keep a stale transport error
+        // above the recovered Planner conversation.
+        setError("");
+        setSelected("");
+      }
+      return;
+    }
+    if (recoveredPlanning?.planningId === state.planning?.planningId &&
+      state.planning?.status !== "running") {
+      setRecoveredPlanning(null);
+    }
+  }, [state.planning, isPlanning, busy, recoveredPlanning]);
 
   useEffect(() => {
     // Only an actual serial route may auto-start. A manually edited Graph IR
@@ -3195,7 +3225,12 @@ export default function App() {
                     composerDrafts={composerDrafts}
                     activity={activities[state.runId] ?? []}
                     routeType={routeType}
-                    initialPlanMode={runModes[state.runId] || (plannerStream.runId === state.runId ? plannerStream.initialPlanMode : undefined)}
+                    initialPlanMode={
+                      plannerStream.runId === state.runId && plannerStream.initialPlanMode
+                        ? plannerStream.initialPlanMode
+                        : (state.approved && state.planType === "graph" && persistedRunningPlanning
+                          ? "graph" : runModes[state.runId])
+                    }
                     selected={selected}
                     setSelected={setSelected}
                     selectedMergerId={selectedMergerId}

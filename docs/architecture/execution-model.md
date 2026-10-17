@@ -43,22 +43,25 @@ Source locks protect approval and source snapshots, not a source-native Planner'
 
 Every Graph Planner follow-up selects its working directory again immediately
 before launch; it does not blindly reuse a stale directory. During selection and
-the turn, the Run dispatches no new nodes and defers publication. The selected
-workspace's node/Merger writer finishes naturally before Planner starts,
-preserving one active writer per physical directory; unrelated parallel writers
-can continue.
+the turn, the Run dispatches no new nodes and defers publication. The newest
+recorded workspace is mandatory: Planner starts in it immediately even when its
+node/Merger writer is still active, rather than waiting, skipping to an older
+slot, or retreating to source. A follow-up therefore never freezes behind a
+long-running frontier. The shared writer owns the later Git snapshot, so Planner
+writes in that directory are captured when the writer drains; if Planner outlives
+the writer, Planner captures the combined directory itself. Unrelated parallel
+writers can continue.
 
-On a linear graph, Planner uses the current execution frontier's worktree. For
+On a linear graph, Planner uses the current execution frontier's workspace. For
 parallel branches, any current branch is sufficient: Runtime deterministically
-chooses the most recently started eligible execution's surviving worktree. It
+chooses the most recently started eligible execution's surviving workspace. It
 uses recorded execution ownership, not the directory's allocation name, and
 resolves redirected requests to the latest downstream owner instead of
 re-entering a stale node workspace. Missing unpublished prepared workspaces
-remain refused. Feedback
-input directories remain reserved immutable evidence, not writable Planner slots.
-Before any node workspace exists, and after successful publication, Planner uses
-the source project. This does not allocate another Planner checkout or merge all
-parallel branches into one view.
+remain refused. Feedback input directories remain reserved immutable evidence,
+not writable Planner slots. Before any node workspace exists, and after
+successful publication, Planner uses the source project. This does not allocate
+another Planner checkout or merge all parallel branches into one view.
 
 The first user follow-up on an existing approved Graph receives a transport
 context block containing the current workspace's node name and every node's
@@ -90,7 +93,7 @@ one-shot. The browser removes the transport context from the displayed
 conversation.
 `PlanningSummary.worktree` and
 `workspaceExecutionId`, plus durable `planner_workspace_selected` events, record
-the selection. **Planning session details** displays the actual worktree and
+the selection. **Planning session details** displays the actual workspace and
 per-turn workspace history, including failed turns.
 
 Planner Bash/write/edit writes affect the selected directory immediately. Writes in a node
@@ -148,7 +151,7 @@ Focused evidence: [runtime review regressions](../../backend/src/planner_review_
 <workspace-parent>/.grapher-worktrees/<run>/<node>-<execution>/
 ```
 
-Graph executions use Run-owned private repositories, not `git worktree` checkouts. A directory is a reusable single-writer execution slot; its allocation name does not identify its current node owner.
+Graph executions use Run-owned private repositories, not `git worktree` checkouts. A directory is a reusable node/Merger single-writer execution slot; its allocation name does not identify its current node owner. A Planner follow-up may share the latest slot with its active writer under the [follow-up workspace rule](#planner-follow-up-workspaces).
 
 1. Runtime selects the current workspace state from the latest recorded source
    snapshot and completed dependency results. A completed workspace is handed off

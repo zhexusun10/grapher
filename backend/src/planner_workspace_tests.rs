@@ -225,6 +225,22 @@ fn planner_workspace_does_not_wait_for_an_unrelated_parallel_writer() {
 }
 
 #[test]
+fn planner_workspace_uses_the_latest_running_frontier_without_waiting() {
+    let (_temp, _repo, service, _config) = setup(false);
+    let mut runtime = service.runtime.lock().unwrap();
+    let root = runtime.jobs().unwrap().remove(0);
+    complete(&mut runtime, root);
+    // Starting both parallel children leaves the whole frontier busy.
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs.iter().all(|job| runtime.state.nodes[&job.execution.node].status == "running"));
+    let selected = runtime.planner_workspace().unwrap().expect("the latest workspace is mandatory");
+    assert!(jobs.iter().any(|job| job.execution.id == selected.id),
+        "an active frontier is selected directly instead of falling back to source");
+    assert!(runtime.path_is_running(std::path::Path::new(&selected.worktree)));
+}
+
+#[test]
 fn planner_workspace_writes_survive_success_failure_and_reach_children() {
     for action in ["success", "fail"] {
         let (temp, repo, service, config) = setup(false);
@@ -260,7 +276,7 @@ fn planner_workspace_writes_survive_success_failure_and_reach_children() {
 }
 
 #[test]
-fn planner_workspace_rejects_redirected_or_missing_frontier_and_running_writers() {
+fn planner_workspace_uses_a_running_writer_and_rejects_a_missing_frontier() {
     let (_temp, _repo, service, _config) = setup(false);
     let mut runtime = service.runtime.lock().unwrap();
     let job = runtime.jobs().unwrap().remove(0);

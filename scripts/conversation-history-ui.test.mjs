@@ -318,10 +318,10 @@ test("Planner details show the backend-selected cwd for every turn", { timeout: 
     await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "Planning session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
-    await details.getByText("worktree: /mock", { exact: true }).waitFor();
+    await details.getByText("workspace: /mock", { exact: true }).waitFor();
     for (const worktree of ["/worktrees/run/root", "/worktrees/run/right", "/mock"]) {
       await page.evaluate(path => window.audit.selectPlannerWorkspace(path), worktree);
-      await details.getByText(`worktree: ${worktree}`, { exact: true }).waitFor();
+      await details.getByText(`workspace: ${worktree}`, { exact: true }).waitFor();
     }
     await details.locator("summary").click();
     await details.getByText("turn-1: /worktrees/run/root", { exact: true }).waitFor();
@@ -409,6 +409,115 @@ for (const [mode, turn] of [
     } finally { releaseOutput(); await context.close(); }
   });
 }
+
+test("actual App shows a Planner follow-up while its turn is stalled before launch", { timeout: 45_000 }, async () => {
+  const config = { repository: "/mock/stalled-append", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const running = { ...empty, runId: "stalled-run", config, planType: "graph", phase: "running", approved: true, planningId: "old-plan",
+    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    nodes: { worker: { status: "running", revision: 1, instruction: "", error: null } },
+    executions: [{ id: "running-execution", node: "worker", status: "running", revision: 1, attempt: 1,
+      startedAt: 1, completedAt: null, sessionId: "worker-session", worktree: "/mock/stalled-append-worker",
+      before: "", after: null, output: "", outputBytes: 0 }],
+    events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }] };
+  let streamed = null;
+  onPlanStream = (body, res) => {
+    assert.equal(body.revisionRunId, running.runId);
+    streamed = res;
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    res.write(`event: run_started
+data: ${JSON.stringify({ runId: running.runId })}
+
+`);
+  };
+  const { context, page, errors } = await newPage(route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [running.runId], repositoryInfo: { path: config.repository, name: "Stalled append", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = running; break;
+      case "snapshot_if_changed": result = { version: "running", snapshot: running }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": {
+        const content = assistant("Old planner turn");
+        result = { planningId: body.planningId, role: "planner", content: body.offset ? "" : content,
+          startOffset: body.offset ?? 0, nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, running: false };
+        break;
+      }
+      case "get_execution_output": result = { runId: body.runId, executionId: body.executionId, content: "",
+        startOffset: body.offset ?? 0, nextOffset: 0, totalBytes: 0, complete: true, status: "running" }; break;
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="stalled-run"]').click();
+    await page.locator(".pane-bottom-chat").first().waitFor();
+    const input = page.locator(".pane-bottom-chat textarea");
+    await input.fill("APPEND_DURING_RUN"); await input.press("Enter");
+    await page.locator('.chat-bubble-user', { hasText: "APPEND_DURING_RUN" }).waitFor();
+    for (let i = 0; !streamed && i < 100; i++) await page.waitForTimeout(20);
+    assert.ok(streamed, "the stalled Planner turn started");
+    assert.equal(await page.locator('.chat-bubble-user', { hasText: "APPEND_DURING_RUN" }).count(), 1);
+    await page.locator(".planner-result-cards.is-hidden").waitFor({ state: "attached" });
+    assert.deepEqual(errors, []);
+  } finally {
+    onPlanStream = undefined; streamed?.destroy(); streamResponse = undefined; await context.close();
+  }
+});
+
+test("actual App re-attaches a running revision plan without locking or stale route badges", { timeout: 45_000 }, async () => {
+  const config = { repository: "/mock/recovered-revision", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const summary = { planningId: "revision-plan", status: "running", goal: "Add a cleanup node", planType: "graph",
+    runId: "recovered-run", repository: config.repository, createdAt: 2, worktree: "/mock/revision-workspace",
+    roles: {}, totalPlanningDuration: 0, modelDuration: 0 };
+  const saved = { ...empty, runId: "recovered-run", config, planType: "graph", phase: "running", approved: true,
+    planningId: summary.planningId, planning: summary,
+    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Worker" }], edges: [] },
+    nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
+    events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }] };
+  const { context, page, errors } = await newPage(route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [saved.runId], repositoryInfo: { path: config.repository, name: "Recovered", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = saved; break;
+      case "snapshot_if_changed": result = { version: "recovered", snapshot: saved }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": case "get_planning": result = command === "get_planning" ? summary : [summary]; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      default: result = { planningId: summary.planningId, role: "planner", content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: false, running: true };
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="recovered-run"]').click();
+    const banner = page.locator(".floating-recovered-banner");
+    await banner.waitFor();
+    assert.match(await banner.innerText(), /Connected to the active planning session/);
+    const input = page.locator(".pane-bottom-chat textarea");
+    await input.waitFor();
+    assert.equal(await input.isDisabled(), false, "recovering a plan must not lock the composer");
+    await page.locator(".planner-result-cards.is-hidden").waitFor({ state: "attached" });
+    assert.equal(await page.getByText("Evaluating task routing...").count(), 0,
+      "a running revision must not render the initial auto-route badge");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
 
 test("actual App: first Serial message keeps the footer still through approval and execution startup", { timeout: 30_000 }, async () => {
   const config = { repository: "/mock/first-serial", model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };

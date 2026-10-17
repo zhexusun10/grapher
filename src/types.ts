@@ -24,6 +24,9 @@ interface ExecutionMetrics {
   tools: number;
   toolErrors: number;
   usage: TokenUsage;
+  /** Actual model/thinking this Execution's Pi session selected. */
+  model?: string;
+  thinkingLevel?: string;
 }
 
 interface RunMetrics {

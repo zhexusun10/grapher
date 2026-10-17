@@ -5,7 +5,7 @@ fn node_message_delivery_stale_intervene_and_consecutive_steers_use_one_live_wri
     let temp = tempfile::tempdir().unwrap();
     let repository = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("rpc.py");
-    fs::write(&script, r#"import json, sys
+    fs::write(&script, r#"import json, sys, time
 first = json.loads(sys.stdin.readline())
 assert first['message'] == 'original'
 print(json.dumps({'type':'response','command':'prompt','success':True}), flush=True)
@@ -15,6 +15,9 @@ for index, expected in enumerate(['stale browser message', 'same', 'same']):
     assert message['streamingBehavior'] == 'steer'
     assert message['message'] == expected
     assert message['images'][0]['data'] == str(index)
+    # A long tool turn may not acknowledge promptly. Control must return after
+    # delivery instead of blocking the HTTP worker on this response.
+    time.sleep(1.2)
     print(json.dumps({'type':'response','id':message['id'],'command':'prompt','success':True}), flush=True)
 print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'all received'}]}}), flush=True)
 print(json.dumps({'type':'agent_settled'}), flush=True)
@@ -50,9 +53,12 @@ sys.stdin.read()
     });
     ready_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
     for (index, text) in ["stale browser message", "same", "same"].into_iter().enumerate() {
+        let started = std::time::Instant::now();
         let snapshot = control(if index == 0 { "intervene" } else { "steer" }.into(), Some("task".into()),
             Some(text.into()), Some(run_id.clone()), (index > 0).then(|| execution_id.clone()),
             Some(vec![crate::model::ImageAttachment { r#type: "image".into(), mime_type: "image/png".into(), data: index.to_string(), name: None }]), &service).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(500),
+            "control must not wait for Pi's steer acknowledgement");
         assert_eq!(snapshot.executions.len(), 1);
         assert!(snapshot.nodes["task"].pending_messages.is_empty());
     }
