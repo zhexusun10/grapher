@@ -17,8 +17,6 @@ Graph uses bubblewrap inside the task container. The outer container must permit
 
 The node's private repository/session is exposed while source/sibling/data paths are masked and engine/install paths are read-only. The outer container itself is not the per-node boundary. See [Filesystem isolation](../architecture/filesystem-isolation.md).
 
-[benchmark/tb4-compose.yaml](../../benchmark/tb4-compose.yaml) is a specialized local nested-namespace overlay, not a general multi-tenant security recommendation. Evaluate its privileges against your environment before use.
-
 ## Build a pinned installation
 
 From the repository root:
@@ -99,12 +97,6 @@ Record and align:
 - Every trial's terminal state, verifier result, trace integrity, and environment failures.
 
 Do not exclude platform failures then label the remaining subset a full score. Git-tag task hashes may differ from a published Harbor Hub package; do not substitute them for the job's locked digests. One task, a protocol mock, or successful installation is not an aggregate quality result.
-
-### Terminal-Bench helper
-
-[benchmark/tb4.py](../../benchmark/tb4.py) is a specialized single-user macOS/Colima ARM64 launcher, with fixed checkout/model/path assumptions and private credentials read from the local Pi directory. It is not a portable quick start. Inspect and provision its exact prerequisites before using `python3.12 -m benchmark.tb4 smoke` or `all`; use the general Harbor example for other environments.
-
-The helper retains invocation provenance and checks smoke-trial artifacts before full evaluation. Its task budget is 28800 seconds; runs with different budgets are not equivalent. Native ARM64 task-image builds and required nested namespace permissions affect comparability. No machine-specific historical result directory or prior mock reward is presented here as a current score.
 
 ## Adapter tests
 

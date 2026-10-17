@@ -42,7 +42,6 @@ the maintenance area, not a fictitious team owner.
 | Document | Responsibility |
 | --- | --- |
 | [README.md](../README.md) / [Chinese README](../README.zh-CN.md) | Product overview and quick start; Chinese is a translation |
-| [README.en.md](../README.en.md) | Compatibility URL pointing to the English homepage |
 | [Architecture overview](architecture/overview.md) | System boundaries, invariants and implementation map |
 | [Why compile?](architecture/why-compile.md) | Design rationale and trade-offs, not a benchmark claim |
 | [Execution model](architecture/execution-model.md) | User-visible planning, sessions, composition, publication and cleanup |
@@ -71,9 +70,8 @@ requires design history. Promotion requires implementation and verification.
 
 | Status | Document | Use / current authority |
 | --- | --- | --- |
-| `draft` | [Planner write/edit implementation plan (中文)](../IMPLEMENTATION_PLAN.md) | Proposed Planner-only tool exposure and schema optimization; not implemented. Current role contract: [Pi integration](development/pi-integration.md#role-loading-policy) |
 | `archived` | [2026-10-06 run/system audit (中文)](reviews/latest-run-system-design-audit-2026-10-06.md) | Review-time evidence and superseded suggestions, not today's protocol; see its warning and the current [execution model](architecture/execution-model.md) |
-| `archived` | [v0.1.0-alpha.2 notes](releases/v0.1.0-alpha.2.md) / [initial preview notes](../.github/releases/v0.1.0.md) | Release-specific statements; current setup: [Installation](guides/installation.md) |
+| `archived` | [v0.1.0-alpha.2 notes](releases/v0.1.0-alpha.2.md) | Release-specific statements; current setup: [Installation](guides/installation.md) |
 | `archived` | [v1.0.1 notes](releases/v1.0.1.md) | Release-specific statements; current setup: [Installation](guides/installation.md) |
 | `archived` | [v1.0.0 notes](releases/v1.0.0.md) | Release-specific statements; current setup: [Installation](guides/installation.md) |
 | Release history | [CHANGELOG.md](../CHANGELOG.md) | Versioned change record, not a full current architecture specification |

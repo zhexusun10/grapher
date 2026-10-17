@@ -119,8 +119,7 @@ is recorded once as a `planner_turn_aborted` history event, so the conversation
 replay keeps its durable output without touching the graph, phase or approval
 state. Publication completion remains distinct from review success.
 
-Focused evidence: [runtime review regressions](../../backend/src/planner_review_tests.rs)
-and the opt-in [real-browser saved-model acceptance](../../scripts/planner-review-acceptance.mjs).
+Focused evidence: [runtime review regressions](../../backend/src/planner_review_tests.rs).
 
 ## Node workspaces and inheritance
 

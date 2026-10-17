@@ -94,33 +94,6 @@ it does not prove the exact cause of a past production stall without its trace.
 
 Local deterministic model responses exercise production integration without paid API calls. They are not a real-model benchmark. Similarly, fixture engines cannot establish real launcher permissions or shell compatibility.
 
-### Saved-model Planner review acceptance
-
-[`scripts/planner-review-acceptance.mjs`](../../scripts/planner-review-acceptance.mjs)
-is an opt-in paid-provider test with the real Rust backend, pinned Pi and a
-headless browser. It requires the saved `antigravity/gemini-3.8-flash` model and
-credentials; every role uses that model. It creates disposable Git projects and
-runtime data, tests the Settings toggle, live Planner output and node/edge
-rendering, manual and automatic continuation, published-file inheritance, final
-reply and hidden-notification behavior after reload. Model choices can still make
-an acceptance attempt fail; fixtures are the deterministic contract evidence.
-
-Build production into an isolated target first (do not rebuild a binary while
-that acceptance backend is running). Then, from the repo root:
-
-```sh
-CARGO_TARGET_DIR=.grapher/verification-target node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --no-default-features --bin grapher
-GRAPHER_PAID_ACCEPTANCE=1 node scripts/planner-review-acceptance.mjs
-```
-
-The script honors `CARGO_TARGET_DIR`, `GRAPHER_SAVED_CONFIG`, and
-`GRAPHER_BROWSER_CHANNEL`. It copies the saved provider configuration into a
-private disposable agent directory and removes that copy after shutdown. It uses
-low thinking and disables optional `pi-continuity` only in that disposable
-configuration so extra recovery turns do not obscure the phase boundary under
-test. It does not change user settings or production prompts. Project/data
-artifacts remain in the printed temporary directory for inspection, not Git.
-
 ## Platform checks
 
 - [Planner source CI](../../.github/workflows/planner-source.yml) runs weekly (and on manual dispatch) on macOS, Windows, and Linux. It covers the snapshot/replay fixtures, real Planner Bash contract, native launcher tests, Linux bubblewrap preflight and namespace boundaries, the full backend library suite and native Bash/Pi acceptance on Windows (it does not expect filesystem permission rejection from Windows Graph), managed-environment state/launch/native acceptance with Python 3.12, macOS Seatbelt child-process tests, and production Planner/Merger acceptance. Windows acceptance includes extended-drive-prefix paths; shared tests use Unicode and spaces. Pushes and pull requests do not trigger it; run the focused local suites above instead.
@@ -168,18 +141,12 @@ still apply. Fixture regressions run with `npm run test:environment`.
 
 Grapher registers `read`, `write`, `edit` and `bash` for every project and role; Pi's separate `ls`, `find` and `grep` tools are not registered, so no suite requires ripgrep or fd on PATH — agents list and search through Bash. Tests that load production extensions pin `PI_OFFLINE=1` so nothing downloads implicitly at test time; this avoids test-time downloads, not initial dependency installation. The Harbor base image still preinstalls pinned ripgrep/fd binaries for agent Bash use in [benchmark/Dockerfile](../../benchmark/Dockerfile).
 
-## Offline native ML acceptance tools
+## Offline native ML acceptance
 
-This is developer acceptance provisioning, **not** a product environment-settings
-workflow. Use only explicitly owned disposable directories. The
-[provisioner](../../scripts/provision-environment-ml.mjs) verifies the official
-Miniforge installer checksum, disables PATH/Python registration, and records
-hashed offline wheels. It does not use model credentials or alter the host's
-installed Python. Provisioning downloads public packages; acceptance itself
-uses the resulting local artifacts.
+Use only explicitly owned disposable directories for acceptance. Acceptance itself
+uses local artifacts and a supplied manifest:
 
 ```sh
-node scripts/provision-environment-ml.mjs --directory C:/tmp/grapher-ml-tools --backend cuda
 GRAPHER_ENV_TEST_ML_MANIFEST=C:/tmp/grapher-ml-tools/manifest.json GRAPHER_ENV_TEST_PARENT=C:/tmp CARGO_TARGET_DIR=C:/tmp/grapher-env-control-target npm run test:environment
 ```
 
@@ -221,11 +188,6 @@ Follow [Conversation logs and acceptance](../testing/conversation-logs.md) for s
 
 ## Diagnostic probes
 
-```sh
-npm run probe:file-mapping
-npm run probe:native-mapping
-```
-
 For owned large artifacts, the opt-in read-only
 [storage probe](../../backend/examples/environment_storage_probe.rs) measures
 libgit2 blob hashing without writing Git objects or changing runtime data:
@@ -239,8 +201,6 @@ Use optimized builds for large-ML performance checks; ordinary debug fixtures
 establish functional behavior, not production throughput. The
 [environment builder](../../scripts/environment-build.mjs) selects that profile
 automatically when the offline ML manifest is supplied.
-
-The mapping probes investigate tool/subprocess mapping boundaries; they are not substitutes for production launcher or sandbox tests. The native mapping probe requires macOS and writes local evidence under `.grapher/probes/`. A demonstrated mapping limit is not a reason to claim transparent remapping or loosen source access controls.
 
 ## Real-model and evaluation acceptance
 
