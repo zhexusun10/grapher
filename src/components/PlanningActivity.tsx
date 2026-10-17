@@ -163,7 +163,10 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
 
   return <section ref={sectionRef} className="planning-activity" aria-label={t("规划活动记录")} aria-busy={!initialReady}>
     {error && <p role="alert">{localizeError(error)} <button type="button" onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
-    <TranscriptHistoryStatus loading={loadingOlder} />
+    {/* Idle Planner history must not reserve a blank line between the user card
+        and the first reply. The line only takes height while its label is shown,
+        and stays put through brief gaps between paging requests. */}
+    <TranscriptHistoryStatus loading={loadingOlder} reserve={false} />
     {ready && !error && !output && <p>{t("没有可用的规划输出。")}</p>}
     {output && <div className="planning-activity-output">
       <VirtualizedTranscript output={activeOutput} inline

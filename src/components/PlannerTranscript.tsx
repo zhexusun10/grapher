@@ -6,6 +6,7 @@ import { VirtualizedList } from "./VirtualizedList";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
+import { AnimatedUserTurn } from "./AnimatedUserTurn";
 
 type Props = {
   items: TranscriptItem[]; isPlanning: boolean; locked: boolean;
@@ -23,14 +24,14 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
 }) {
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
-  if (item.role === "user") return <motion.div className="chat-message-row user planner-user-turn" initial={false}
-    animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}>
+  if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
+    className="chat-message-row user planner-user-turn">
     <EditableUserBubble text={stripPlannerContext(item.content || "")} editing={editing} draft={draft} onDraftChange={onDraftChange}
       onEdit={onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: stripPlannerContext(item.content || "") }) : undefined}
       onCancel={() => onCancelEdit?.()}
       onSend={value => onEditSubmit ? onEditSubmit({ id: item.id, parentId: null, role: "user", text: stripPlannerContext(item.content || "") }, value) : onSendMessage(value)}
       disabled={locked} />
-  </motion.div>;
+  </AnimatedUserTurn>;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}><span className="system-pill">{item.content}</span></div>;
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={streaming} title="Chain of Thought"

@@ -4,6 +4,7 @@ import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { EditableUserBubble } from "./views/ChatBubbles";
+import { AnimatedUserTurn } from "./AnimatedUserTurn";
 
 export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExpandedChange, editing, draft,
   onDraftChange, onStartEdit, onCancelEdit, onEditUser }: {
@@ -19,7 +20,8 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
     title="Chain of Thought"
     defaultExpanded={item.defaultExpanded ?? (item.status === "running")} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand} /></div>;
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}><span className="system-pill">{item.content}</span></div>;
-  if (item.role === "user") return <div className="transcript-row text-row user planner-user-turn"><EditableUserBubble text={item.content || ""}
+  if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
+    className="transcript-row text-row user planner-user-turn"><EditableUserBubble text={item.content || ""}
     editing={editing} draft={draft} onDraftChange={onDraftChange}
     onEdit={onEditUser ? () => onStartEdit(item.id, item.content || "") : undefined}
     onCancel={onCancelEdit} onSend={onEditUser ? text => {
@@ -27,7 +29,7 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
         if (accepted !== false) onCancelEdit();
         return accepted === false ? false : true;
       });
-    } : () => {}} /></div>;
+    } : () => {}} /></AnimatedUserTurn>;
   return <div className={`transcript-row text-row ${item.role || "assistant"}`}><div className="transcript-message-bubble">
     <MarkdownRenderer content={item.content || ""} isStreaming={item.status === "running"} />
   </div></div>;

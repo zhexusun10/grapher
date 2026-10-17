@@ -10,12 +10,15 @@ interface PublicationCompletedCardProps {
   state: Snapshot;
   routeType: PlanRouteType;
   repository?: string;
+  /** Suppress the entrance when the previous plan is reflowed above a follow-up. */
+  animateAppear?: boolean;
 }
 
 export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> = React.memo(({
   state,
   routeType,
   repository,
+  animateAppear = true,
 }) => {
   const [copiedRepo, setCopiedRepo] = useState(false);
   const [copiedHead, setCopiedHead] = useState(false);
@@ -58,7 +61,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
     <motion.div
       className="workspace-written-completed-card"
       data-testid="workspace-written-completed-card"
-      initial={{ opacity: 0, y: 12, scale: 0.99 }}
+      initial={animateAppear ? { opacity: 0, y: 12, scale: 0.99 } : false}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ duration: 0.36, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
     >

@@ -605,7 +605,7 @@ export default function App() {
       const message: ChatMessage = {
         id: `msg-${crypto.randomUUID()}`, parentId: (sessionEntries.at(-1) || effectiveMessages.at(-1))?.id ?? null,
         role: "user", text: textToRecord, images: options?.images, files: fileAttachments, timestamp: Date.now(),
-        runId: state.runId || plannerStream.runId, node: targetNodeName, delivery, executionId,
+        runId: state.runId || plannerStream.runId, node: targetNodeName, delivery, executionId, animateAppear: true,
       };
       setSessionEntries(prev => [...(prev.length ? prev : effectiveMessages), message]);
       setEditingMessage(null);
@@ -677,7 +677,7 @@ export default function App() {
         ...prev,
         startedAt: prev.startedAt || Date.now(),
         items: [...closeRunningThinkingItem(prev.items), {
-          id: message.id, type: "text", role: "user", content: displayMsg, timestamp: message.timestamp,
+          id: message.id, type: "text", role: "user", content: displayMsg, timestamp: message.timestamp, animateAppear: true,
         }],
       }));
       return run(async () => {
@@ -1530,6 +1530,7 @@ export default function App() {
         files: fileAttachments || editedMessage?.files,
         timestamp: Date.now(),
         runId: effectiveRevisionRunId,
+        animateAppear: !editedMessage,
       };
       if (editedMessage) {
         // The replacement is already in the truncated local branch.
@@ -1549,6 +1550,7 @@ export default function App() {
             role: "user",
             content: options?.displayText || targetGoal,
             timestamp: Date.now(),
+            animateAppear: !editedMessage,
           },
         ],
         plannerThinking: "",

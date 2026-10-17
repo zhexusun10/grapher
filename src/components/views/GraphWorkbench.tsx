@@ -46,6 +46,7 @@ import { PublicationCompletedCard } from "../PublicationCompletedCard";
 import { EnvironmentResult } from "../EnvironmentResult";
 import { PlannerTranscript } from "../PlannerTranscript";
 import { resolveExecutionModelAndThinking, roleModelConfig } from "../../modelConfig";
+import { AnimatedUserTurn } from "../AnimatedUserTurn";
 
 /** Transient I/O status takes precedence over the durable phase copy. */
 function activityStatusText(activity: RuntimeActivity[]): string | null {
@@ -1491,7 +1492,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     resultExecution: state.resultExecution,
   });
   const activityStatus = activityStatusText(activity);
-  const isWorkspaceWritten = !isPlanning && routeType === "graph" && (
+  const hasCompletedPublication = routeType === "graph" && (
     state.publication?.status === "completed" ||
     (state.phase === "completed" && state.publication?.status !== "failed" && state.publication?.status !== "publishing" && state.publication?.status !== "merging")
   );
@@ -1648,6 +1649,75 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       setAttemptId("");
     }
   });
+
+  const plannerResultCards = <>
+    {routeType === "graph" && state.graph.nodes.length > 0 && (
+      <motion.div
+        className="plan-summary-card"
+        initial={false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.38, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
+      >
+        <div className="plan-summary-header">
+          <span>{t("执行拓扑概览")}</span>
+          <span className={`phase-tag ${graphPhase}`}>{phaseText[graphPhase] ?? t("草稿")}</span>
+        </div>
+
+        <div className="plan-stats-row">
+          <div className="plan-stat">
+            <span className="stat-num">{state.graph.nodes.length}</span>
+            <span className="stat-lbl">{t("规划节点")}</span>
+          </div>
+          <div className="plan-stat">
+            <span className="stat-num">{state.plan?.executionBatches.length ?? 1}</span>
+            <span className="stat-lbl">{t("执行批次")}</span>
+          </div>
+          <div className="plan-stat">
+            <span className="stat-num">{state.graph.edges.length}</span>
+            <span className="stat-lbl">{t("拓扑边")}</span>
+          </div>
+          <div className="plan-stat">
+            <span className="stat-num">
+              {`${completed}/${state.graph.nodes.length}`}
+            </span>
+            <span className="stat-lbl">{t("已完成")}</span>
+          </div>
+        </div>
+
+        <div className="plan-nodes-list">
+          <span className="nodes-list-title">
+            {t("节点列表（点击聚焦查看详细日志与独立沙箱）：")}
+          </span>
+          <div className="nodes-chips">
+            {summaryNodes.map((node) => {
+              const nState = state.nodes[node.name];
+              return (
+                <button
+                  type="button"
+                  key={node.name}
+                  className="node-chip"
+                  onClick={() => { setSelected(node.name); setSelectedMergerId(""); }}
+                >
+                  <span className={`chip-dot ${nState?.status ?? "waiting"}`} />
+                  <span className="chip-name">{node.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </motion.div>
+    )}
+
+    {/* 此次执行已完成，已完成写入源文件工作区卡片 */}
+    {hasCompletedPublication && (
+      <PublicationCompletedCard
+        state={state}
+        routeType={routeType}
+        repository={config?.repository || repoInfo?.path}
+        animateAppear={false}
+      />
+    )}
+  </>;
 
   return (
     <section
@@ -2161,7 +2231,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       }
                       return true;
                     }).map((msg) => (
-                      <div className="chat-message-row user" key={msg.id}>
+                      <AnimatedUserTurn id={msg.id} animateAppear={msg.animateAppear}
+                        className="chat-message-row user planner-follow-up" key={msg.id}>
                         <EditableUserBubble
                           text={msg.text.trim()}
                           images={msg.images}
@@ -2177,7 +2248,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           currentVersionIndex={msg.currentVersionIndex}
                           onSwitchVersion={(idx) => onSwitchMessageVersion?.(msg, idx)}
                         />
-                      </div>
+                      </AnimatedUserTurn>
                     ))}
 
                     {/* Planner 顺序流式记录：严格按实际发生时序呈现用户追加消息、工具调用、思维链与输出文字 */}
@@ -2271,70 +2342,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
 
-              {!isPlanning && routeType === "graph" && state.graph.nodes.length > 0 && (
-                <motion.div
-                  className="plan-summary-card"
-                  initial={false}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.38, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
-                >
-                  <div className="plan-summary-header">
-                    <span>{t("执行拓扑概览")}</span>
-                    <span className={`phase-tag ${graphPhase}`}>{phaseText[graphPhase] ?? t("草稿")}</span>
-                  </div>
-
-                  <div className="plan-stats-row">
-                    <div className="plan-stat">
-                      <span className="stat-num">{state.graph.nodes.length}</span>
-                      <span className="stat-lbl">{t("规划节点")}</span>
-                    </div>
-                    <div className="plan-stat">
-                      <span className="stat-num">{state.plan?.executionBatches.length ?? 1}</span>
-                      <span className="stat-lbl">{t("执行批次")}</span>
-                    </div>
-                    <div className="plan-stat">
-                      <span className="stat-num">{state.graph.edges.length}</span>
-                      <span className="stat-lbl">{t("拓扑边")}</span>
-                    </div>
-                    <div className="plan-stat">
-                      <span className="stat-num">
-                        {`${completed}/${state.graph.nodes.length}`}
-                      </span>
-                      <span className="stat-lbl">{t("已完成")}</span>
-                    </div>
-                  </div>
-
-                  <div className="plan-nodes-list">
-                    <span className="nodes-list-title">
-                      {t("节点列表（点击聚焦查看详细日志与独立沙箱）：")}
-                    </span>
-                    <div className="nodes-chips">
-                      {summaryNodes.map((node) => {
-                        const nState = state.nodes[node.name];
-                        return (
-                          <button
-                            type="button"
-                            key={node.name}
-                            className="node-chip"
-                            onClick={() => { setSelected(node.name); setSelectedMergerId(""); }}
-                          >
-                            <span className={`chip-dot ${nState?.status ?? "waiting"}`} />
-                            <span className="chip-name">{node.name}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </motion.div>
-              )}
-
-              {/* 此次执行已完成，已完成写入源文件工作区卡片 */}
-              {isWorkspaceWritten && (
-                <PublicationCompletedCard
-                  state={state}
-                  routeType={routeType}
-                  repository={config?.repository || repoInfo?.path}
-                />
+              {routeType === "graph" && (state.graph.nodes.length > 0 || hasCompletedPublication) && (
+                <div className={`planner-result-cards${isPlanning ? " is-hidden" : ""}`}
+                  aria-hidden={isPlanning || undefined}
+                  inert={isPlanning ? true : undefined}>
+                  <div className="planner-result-cards-inner">{plannerResultCards}</div>
+                </div>
               )}
             </div>
             <button

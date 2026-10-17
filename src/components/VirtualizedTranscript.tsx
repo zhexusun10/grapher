@@ -151,6 +151,9 @@ function annotateSegmentItems(
       const shouldAnimate = !settled && (inline ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
       item = { ...item, animateAppear: shouldAnimate };
     }
+    if (item.role === "user" && item.animateAppear === undefined) {
+      item = { ...item, animateAppear: !settled && previousItems.length > 0 && isNewInLiveChunk };
+    }
     if (item.type !== "thinking") return item;
     const key = `${item.thinkingContentIndex ?? 0}_${item.content?.trim() || ""}`;
     const isLive = item.status === "running" ||
@@ -575,6 +578,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       if ((item.type === "thinking" || item.type === "tool_call") && item.animateAppear === undefined) {
         const shouldAnimate = !settled && (inline ? isNewInLiveChunk : (item.status === "running" || isNewInLiveChunk));
         item = { ...item, animateAppear: shouldAnimate };
+      }
+      if (item.role === "user" && item.animateAppear === undefined) {
+        item = { ...item, animateAppear: !settled && previousItems.length > 0 && isNewInLiveChunk };
       }
       if (item.type !== "thinking") return item;
       const key = `${item.thinkingContentIndex ?? 0}_${item.content?.trim() || ""}`;

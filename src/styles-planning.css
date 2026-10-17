@@ -1025,9 +1025,48 @@
   margin-bottom: 8px;
 }
 
+/* A new user turn starts a new request: give it more air from the previous
+   Planner reply. The tighter 8px above still applies to non-Planner rows. */
+.planning-activity .transcript-row.text-row.user {
+  margin-top: 48px;
+}
+
 .planner-transcript .chat-message-row.user.planner-user-turn {
-  margin-top: 8px;
+  margin-top: 48px;
   margin-bottom: 8px;
+}
+
+/* Fallback rows for an acknowledged follow-up, before the live transcript or
+   saved JSONL claims the turn. */
+.chat-messages-stream>.chat-message-row.user.planner-follow-up {
+  margin-top: 44px;
+}
+
+/* Result cards stay at the very end of the conversation. During a new Planner
+   turn they collapse/fade out smoothly; when the new plan settles they expand
+   back with the updated summary instead of popping or jumping above the turn. */
+.planner-result-cards {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  transition: grid-template-rows 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.22s ease, transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.planner-result-cards.is-hidden {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+
+.planner-result-cards-inner {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .planning-activity .transcript-row.text-row.user .transcript-message-bubble {
@@ -1115,6 +1154,13 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Callers that opt out of an idle reserved line collapse it until the loading
+   label is actually visible, avoiding a blank band between messages. */
+.transcript-history-status.collapsed {
+  height: 0;
+  line-height: 0;
 }
 
 .transcript-loading {

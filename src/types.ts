@@ -217,6 +217,8 @@ export interface ChatMessage {
   delivery?: "node_messaged" | "steered";
   versions?: ChatMessageVersion[];
   currentVersionIndex?: number;
+  /** A just-sent or just-appended turn; one-shot entrance animation only. */
+  animateAppear?: boolean;
 }
 
 export interface PlanStreamEvent {
