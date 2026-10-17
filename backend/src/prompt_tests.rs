@@ -721,7 +721,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     );
     assert_eq!(
         planner_followup_prompt("Follow up", Some(&run_id), &runtime.state),
-        format!("Current graph node status:\n{PLANNER_REWORK_NOTE}\n- keep: waiting\n\nFollow up")
+        format!("You are now at source's workspace.\nCurrent graph node status:\n- keep: waiting\n\n{PLANNER_REWORK_NOTE}\nFollow up")
     );
     let base = runtime.state.base.clone();
     let service = Arc::new(Service {
@@ -1085,7 +1085,7 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
     );
     assert_eq!(
         planner_node_status(&runtime.state),
-        format!("Current graph node status:\n{PLANNER_REWORK_NOTE}\n- first: waiting\n")
+        format!("Current graph node status:\n- first: waiting\n")
     );
 }
 
@@ -1163,7 +1163,7 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
 
     // Verify planner_followup_prompt carries the distinguished status
     let followup = planner_followup_prompt("Please replan", Some("test-run"), &snapshot);
-    assert!(followup.starts_with("Current graph node status:\n"));
+    assert!(followup.starts_with("You are now at source's workspace.\nCurrent graph node status:\n"));
     assert!(followup.contains("- completed_task: completed\n"));
     assert!(followup.contains("- paused_task: paused (manually paused by user)\n"));
     assert!(followup.contains("- failed_task: failed (error: TypeError: unsupported operand type(s))\n"));

@@ -60,6 +60,11 @@ pub struct Job {
     pub initial_recovery: bool,
 }
 
+pub(crate) struct PlannerWorkspaceResolution {
+    pub execution: Execution,
+    pub redirected_from: Option<String>,
+}
+
 pub(crate) struct ResultJob {
     run_id: String,
     root: PathBuf,
@@ -69,6 +74,7 @@ pub(crate) struct ResultJob {
     args: Vec<String>,
     retry: bool,
 }
+
 
 /// Test builds alone support actuator selection.
 #[cfg(feature = "fixture")]
@@ -1042,7 +1048,6 @@ impl Runtime {
     /// wait for this path's writer, then reselect. Other branches may continue.
     /// Allocation names aren't ownership: linear handoff reuses directories.
     pub(crate) fn planner_workspace(&self) -> Result<Option<Execution>, String> {
-        if self.state.phase == "completed" { return Ok(None); }
         let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
         // Retained published slots can be older than subsequent source edits.
         // Only work recorded since publication can supersede the source cwd.
@@ -1054,6 +1059,63 @@ impl Runtime {
                 | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. } => Some(execution_id.as_str()),
                 _ => None,
             }).collect();
+
+        // A Planner may explicitly ask to move to another existing node
+        // workspace. Keep that choice for another follow-up when no newer node
+        // execution has produced a workspace. This is important because the
+        // Planner's current cwd is conversation state too: reselecting the
+        // globally newest execution on every message would undo the explicit
+        // move even when the graph has not changed.
+        if let Some(current_id) = self.state.planning.as_ref().and_then(|planning| planning.workspace_execution_id.as_deref()) {
+            let current_index = self.state.executions.iter().position(|execution| execution.id == current_id);
+            let selection_sequence = self.state.events.iter().rev().find_map(|event| {
+                matches!(&event.kind, EventKind::PlannerWorkspaceSelected { planning }
+                    if planning.workspace_execution_id.as_deref() == Some(current_id))
+                    .then_some(event.sequence)
+            });
+            let newer_workspace = if let Some(sequence) = selection_sequence {
+                self.state.events.iter().filter(|event| event.sequence > sequence).any(|event| {
+                    let execution_id = match &event.kind {
+                        EventKind::Started { execution, .. } => Some(execution.id.as_str()),
+                        EventKind::Prepared { execution_id, .. }
+                        | EventKind::Finished { execution_id, .. }
+                        | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. }
+                        | EventKind::WorkspaceResolved { execution_id, .. } => Some(execution_id.as_str()),
+                        EventKind::Failed { execution_id: Some(execution_id), .. } => Some(execution_id.as_str()),
+                        _ => None,
+                    };
+                    execution_id.is_some_and(|execution_id| execution_id != current_id)
+                })
+            } else {
+                current_index.is_some_and(|index| self.state.executions.iter().skip(index + 1).any(|execution|
+                    !self.state.superseded_execution_ids.contains(&execution.id)
+                        && self.state.nodes.contains_key(&execution.node)))
+            };
+            let current_is_new = self.state.published_head.is_none() || unpublished.contains(current_id);
+            if current_index.is_some() && !newer_workspace && current_is_new {
+                if let Some(current) = self.state.executions.iter().find(|execution| execution.id == current_id) {
+                    let path = Path::new(&current.worktree);
+                    if self.path_is_running(path) {
+                        return Ok(Some(current.clone()));
+                    }
+                    if path.is_dir() {
+                        if self.state.config.as_ref().is_some_and(|config|
+                            path.canonicalize().ok().zip(Path::new(&config.repository).canonicalize().ok())
+                                .is_some_and(|(path, source)| path == source)) {
+                            return Ok(Some(current.clone()));
+                        }
+                        if let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? {
+                            if actual.join(".git").is_dir() {
+                                let mut selected = current.clone();
+                                selected.worktree = workspace::normalize_workspace_display_path(&actual);
+                                return Ok(Some(selected));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut seen = BTreeSet::new();
         let mut reserved = false;
         for execution in self.state.executions.iter().rev() {
@@ -1107,6 +1169,87 @@ impl Runtime {
         }
         if reserved { return Err("Current workspaces are reserved for feedback; continue the repair before planning".into()); }
         Ok(None)
+    }
+
+    fn same_workspace_path(left: &Path, right: &Path) -> bool {
+        left == right
+            || left
+                .canonicalize()
+                .ok()
+                .zip(right.canonicalize().ok())
+                .is_some_and(|(left, right)| left == right)
+    }
+
+    fn planner_workspace_owner(&self, target: &Execution) -> Option<&Execution> {
+        self.state.executions.iter().rev().find(|execution| {
+            !self.state.superseded_execution_ids.contains(&execution.id)
+                && Self::same_workspace_path(Path::new(&target.worktree), Path::new(&execution.worktree))
+        })
+    }
+
+    pub(crate) fn planner_workspace_for_node(&self, node: &str) -> Result<Option<PlannerWorkspaceResolution>, String> {
+        let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
+        let unpublished: BTreeSet<_> = self.state.events.iter().rev()
+            .take_while(|event| !matches!(event.kind, EventKind::PublicationCompleted { .. }))
+            .filter_map(|event| match &event.kind {
+                EventKind::Started { execution, .. } => Some(execution.id.as_str()),
+                EventKind::Prepared { execution_id, .. } | EventKind::Finished { execution_id, .. }
+                | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. } => Some(execution_id.as_str()),
+                _ => None,
+            }).collect();
+        for requested in self.state.executions.iter().rev() {
+            if requested.node != node
+                || self.state.superseded_execution_ids.contains(&requested.id)
+                || (self.state.published_head.is_some() && !unpublished.contains(requested.id.as_str())) {
+                continue;
+            }
+            let owner = self.planner_workspace_owner(requested).unwrap_or(requested);
+            if self.state.superseded_execution_ids.contains(&owner.id)
+                || self.path_is_running(Path::new(&owner.worktree))
+                || !Path::new(&owner.worktree).is_dir() {
+                continue;
+            }
+            let path = Path::new(&owner.worktree);
+            let is_source = self.state.config.as_ref().is_some_and(|config|
+                path.canonicalize().ok().zip(Path::new(&config.repository).canonicalize().ok())
+                    .is_some_and(|(path, source)| path == source));
+            let selected = if is_source {
+                owner.clone()
+            } else {
+                let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? else {
+                    continue;
+                };
+                if !actual.join(".git").is_dir() {
+                    continue;
+                }
+                let mut selected = owner.clone();
+                selected.worktree = workspace::normalize_workspace_display_path(&actual);
+                selected
+            };
+            return Ok(Some(PlannerWorkspaceResolution {
+                redirected_from: (owner.node != node).then(|| node.to_string()),
+                execution: selected,
+            }));
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn planner_workspace_targets(&self, current_node: Option<&str>) -> Result<serde_json::Value, String> {
+        let mut targets = serde_json::Map::new();
+        for node in &self.state.graph.nodes {
+            if current_node == Some(node.name.as_str()) {
+                continue;
+            }
+            let Some(resolution) = self.planner_workspace_for_node(&node.name)? else { continue; };
+            targets.insert(node.name.clone(), serde_json::json!({
+                "requestedNode": node.name,
+                "actualNode": resolution.execution.node,
+                "executionId": resolution.execution.id,
+                "workspace": resolution.execution.worktree,
+                "redirected": resolution.redirected_from.is_some(),
+            }));
+        }
+        Ok(serde_json::Value::Object(targets))
     }
 
     pub(crate) fn capture_planner_workspace(&mut self, execution_id: &str) -> Result<(), String> {

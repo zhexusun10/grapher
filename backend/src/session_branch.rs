@@ -156,7 +156,7 @@ fn branch_before_user_matching(
         let matches_text = content.as_deref().is_some_and(|text| text == old_text ||
             (!planner && text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS) == Some(old_text)) ||
             (planner && text.ends_with(&format!("\n{old_text}")) &&
-                (text.starts_with("Current graph node status:\n") || text.starts_with("User query:\n"))));
+                (text.starts_with("Current graph node status:\n") || text.starts_with("User query:\n") || text.starts_with("You are now at "))));
         if !matches_text { continue; }
         let time = entry.get("message").and_then(|message| message.get("timestamp"))
             .and_then(Value::as_u64).unwrap_or(0);

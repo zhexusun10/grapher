@@ -6,21 +6,22 @@
  */
 export function stripPlannerContext(text: string): string {
   let value = text.replace(/^User query:\s*\r?\n\r?\n?/, "");
-  if (!value.startsWith("Current graph node status:")) return value;
-
   const lines = value.split(/\r?\n/);
-  let index = 1;
-  // Transport lines may precede the `- node: status` list: the rework note in
-  // current prompts, and an "Already published in this run: ..." paragraph in
-  // historical ones. Skip them so existing transcripts render clean too.
+  const statusStart = value.startsWith("Current graph node status:")
+    ? 0
+    : lines[0]?.startsWith("You are now at ") && lines[1] === "Current graph node status:"
+      ? 1
+      : -1;
+  if (statusStart < 0) return value;
+
+  let index = statusStart + 1;
+  // Transport lines may precede/follow the `- node: status` list: the
+  // workspace announcement, the rework note in current prompts, and an
+  // "Already published in this run: ..." paragraph in historical prompts.
   const transportPrefixes = ["Modifying a completed node's task", "Already published in this run:"];
-  while (index < lines.length && transportPrefixes.some(prefix => lines[index].startsWith(prefix))) {
-    index += 1;
-  }
-  // The status block is a sequence of `- node: status` lines. Older Planner
-  // prompts did not put a blank line before the actual instruction, so stop at
-  // the first non-status line instead of relying on a double newline.
-  while (index < lines.length && (lines[index].trim() === "" || /^- [^:\n]+:\s*\S/.test(lines[index]))) {
+  while (index < lines.length && (lines[index].trim() === "" ||
+    transportPrefixes.some(prefix => lines[index].startsWith(prefix)) ||
+    /^- [^:\n]+:\s*\S/.test(lines[index]))) {
     index += 1;
   }
   return lines.slice(index).join("\n");

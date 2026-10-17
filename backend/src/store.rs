@@ -32,6 +32,8 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::PlannerReviewFinished { .. } => "planner_review_finished",
         EventKind::PlannerTurnAborted { .. } => "planner_turn_aborted",
         EventKind::PlannerWorkspaceSelected { .. } => "planner_workspace_selected",
+        EventKind::PlannerReworkNoteInjected => "planner_rework_note_injected",
+        EventKind::PlannerWorkspaceRedirected { .. } => "planner_workspace_redirected",
         EventKind::PlannerWorkspaceSnapshotted { .. } => "planner_workspace_snapshotted",
         EventKind::Created { .. } => "created",
         EventKind::Routed { .. } => "routed",

@@ -43,21 +43,41 @@ Source locks protect approval and source snapshots, not a source-native Planner'
 ### Planner follow-up workspaces
 
 Every Graph Planner follow-up selects its working directory again immediately
-before launch; it never reuses the previous turn's cwd merely because the Pi
-conversation is the same. During selection and the turn, the Run dispatches no
-new nodes and defers publication. The selected workspace's node/Merger writer
-finishes naturally before Planner starts, preserving one active writer per
-physical directory; unrelated parallel writers can continue.
+before launch; it does not blindly reuse a stale directory. During selection and
+the turn, the Run dispatches no new nodes and defers publication. The selected
+workspace's node/Merger writer finishes naturally before Planner starts,
+preserving one active writer per physical directory; unrelated parallel writers
+can continue.
 
 On a linear graph, Planner uses the current execution frontier's worktree. For
 parallel branches, any current branch is sufficient: Runtime deterministically
 chooses the most recently started eligible execution's surviving worktree. It
 uses recorded execution ownership, not the directory's allocation name, and
-rejects redirected paths and missing unpublished prepared workspaces. Feedback
+resolves redirected requests to the latest downstream owner instead of
+re-entering a stale node workspace. Missing unpublished prepared workspaces
+remain refused. Feedback
 input directories remain reserved immutable evidence, not writable Planner slots.
 Before any node workspace exists, and after successful publication, Planner uses
 the source project. This does not allocate another Planner checkout or merge all
 parallel branches into one view.
+
+The first user follow-up on an existing approved Graph receives a transport
+context block containing the current workspace's node name and every node's
+status. The rework explanation is injected only on that first follow-up, while
+the workspace name and node-status list are regenerated for every follow-up.
+The workspace-move instruction is included only when another valid workspace is
+currently available; a linear frontier with no alternate workspace does not
+receive it. The transport context is recorded in Pi's session but removed from
+the browser conversation projection. The Planner can request a move with the follow-up-only `switch_workspace`
+tool. The tool returns the actual selected node and workspace state in the
+same turn. If its physical slot has already been inherited and modified by a
+downstream node, Runtime resolves the request to that downstream execution
+instead of binding the old node to a stale path, and the tool result explains
+the redirect. Runtime records the new `PlanningSummary.worktree` and
+`workspaceExecutionId`; the same Planner session and its read/write/edit/Bash
+operations then use the selected workspace. If no node workspace has been updated since that
+explicit move, later follow-ups keep it; a newer node workspace takes
+precedence.
 
 The same Pi conversation/ID survives cwd changes, reload, and reclamation of the
 old workspace; only its validated session-header cwd is rebound, recorded as
@@ -65,8 +85,10 @@ the literal cwd the resumed process reports (Pi matches it without realpath
 normalization, and that spelling differs by platform). Planner uses
 the same stable model-facing path namespace as Node Agent: existing prompt cwd,
 read/bash/write/edit results and conversation context are normalized, while recognized
-project-root paths resolve to the current physical workspace. Switching cwd adds
-no reminder, working-directory announcement or other prompt instructions.
+project-root paths resolve to the current physical workspace. The transport
+context is regenerated for each follow-up; only the rework explanation is
+one-shot. The browser removes the transport context from the displayed
+conversation.
 `PlanningSummary.worktree` and
 `workspaceExecutionId`, plus durable `planner_workspace_selected` events, record
 the selection. **Planning session details** displays the actual worktree and

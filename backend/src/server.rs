@@ -440,7 +440,7 @@ const POST_TASK_REVIEW_PROMPT: &str = "All tasks you assigned are completed. Con
 /// Rework semantics shared by the injected Planner status block and the
 /// post-task review turn so revisions price downstream re-runs correctly.
 /// Runtime enforces the same rule in `revision_affected` regardless.
-const PLANNER_REWORK_NOTE: &str = "Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the updated dependencies' project-file results); unrelated branches keep their results and history.";
+const PLANNER_REWORK_NOTE: &str = "Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the updated dependencies' workspace states); unrelated branches keep their work.";
 
 fn post_task_review_task() -> String {
     format!("{POST_TASK_REVIEW_PROMPT}\n\n{PLANNER_REWORK_NOTE}")
@@ -1092,8 +1092,6 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 
 fn planner_node_status(snapshot: &Snapshot) -> String {
     let mut text = String::from("Current graph node status:\n");
-    text.push_str(PLANNER_REWORK_NOTE);
-    text.push('\n');
     for node in &snapshot.graph.nodes {
         if let Some(state) = snapshot.nodes.get(&node.name) {
             let status_desc = if snapshot.is_node_user_paused(&node.name) {
@@ -1123,6 +1121,59 @@ fn planner_node_status(snapshot: &Snapshot) -> String {
     text
 }
 
+fn planner_rework_note_pending(snapshot: &Snapshot, revision_run_id: Option<&str>) -> bool {
+    revision_run_id == Some(snapshot.run_id.as_str())
+        && snapshot.approved
+        && snapshot.plan_type.as_deref() == Some("graph")
+        && !snapshot.events.iter().any(|event| {
+            matches!(event.kind, EventKind::PlannerReworkNoteInjected)
+        })
+}
+
+fn planner_workspace_label(snapshot: &Snapshot, selected_node: Option<&str>) -> String {
+    selected_node
+        .or_else(|| {
+            snapshot
+                .planning
+                .as_ref()
+                .and_then(|planning| planning.workspace_execution_id.as_deref())
+                .and_then(|execution_id| snapshot.executions.iter().find(|execution| execution.id == execution_id))
+                .map(|execution| execution.node.as_str())
+        })
+        .unwrap_or("source")
+        .to_string()
+}
+
+fn planner_followup_prompt_for_workspace(
+    instruction: &str,
+    workspace_node: Option<&str>,
+    snapshot: &Snapshot,
+    include_rework_note: bool,
+    include_workspace_move: bool,
+    workspace_notice: Option<&str>,
+) -> String {
+    let workspace = planner_workspace_label(snapshot, workspace_node);
+    let move_instruction = include_workspace_move.then_some(
+        " You can use the switch_workspace tool to move to another node's latest workspace state.",
+    ).unwrap_or("");
+    let notice = workspace_notice
+        .map(|notice| format!("\n{notice}"))
+        .unwrap_or_default();
+    let note = include_rework_note
+        .then_some(format!("\n{PLANNER_REWORK_NOTE}"))
+        .unwrap_or_default();
+    format!(
+        "You are now at {}'s workspace.{}{}\n{}{}\n{}",
+        workspace,
+        move_instruction,
+        notice,
+        planner_node_status(snapshot),
+        note,
+        instruction,
+    )
+}
+
+#[cfg(test)]
 fn planner_followup_prompt(
     instruction: &str,
     revision_run_id: Option<&str>,
@@ -1132,7 +1183,7 @@ fn planner_followup_prompt(
         && snapshot.approved
         && snapshot.plan_type.as_deref() == Some("graph")
     {
-        format!("{}\n{}", planner_node_status(snapshot), instruction)
+        planner_followup_prompt_for_workspace(instruction, None, snapshot, true, false, None)
     } else {
         instruction.to_string()
     }
@@ -1550,6 +1601,7 @@ fn plan_goal_internal_with_started(
                     }
                 }
             }
+            let mut planner_execution_id: Option<String> = None;
             let plan_outcome = (|| -> Result<Snapshot, String> {
                 let route_path = directory.join("route.json");
                 let (route, partition_metrics) = match mode {
@@ -1681,8 +1733,17 @@ fn plan_goal_internal_with_started(
                                 thread::sleep(std::time::Duration::from_millis(50));
                             }
                         } else { None };
-                        let planner_workspace = selected.as_ref().map(|execution| PathBuf::from(&execution.worktree))
+                        let planner_workspace_targets = service
+                            .runtime
+                            .lock()
+                            .map_err(|e| e.to_string())?
+                            .planner_workspace_targets(selected.as_ref().map(|execution| execution.node.as_str()))?;
+                        let planner_workspace_targets_file = directory.join("planner-workspaces.json");
+                        fs::write(&planner_workspace_targets_file, planner_workspace_targets.to_string())
+                            .map_err(|e| e.to_string())?;
+                        let mut planner_workspace = selected.as_ref().map(|execution| PathBuf::from(&execution.worktree))
                             .unwrap_or_else(|| repository.clone());
+                        planner_execution_id = selected.as_ref().map(|execution| execution.id.clone());
                         running.worktree = Some(crate::native::host_path(&planner_workspace).to_string_lossy().into_owned());
                         running.workspace_execution_id = selected.as_ref().map(|execution| execution.id.clone());
                         write_planning_summary(&directory, &running)?;
@@ -1694,18 +1755,35 @@ fn plan_goal_internal_with_started(
                         let planner_config = planner_model_cfg.effective_config(&config);
                         let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                             .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
-                        // Append dynamic state only to the new user turn, never to
-                        // the shared system prompt or previous Planner turns.
                         let task = if background_review {
                             post_task_review_task()
                         } else {
-                            let runtime =
+                            let mut runtime =
                                 service.runtime.lock().map_err(|error| error.to_string())?;
-                            planner_followup_prompt(
-                                &goal,
-                                revision_run_id.as_deref(),
+                            let include_rework_note = planner_rework_note_pending(
                                 &runtime.state,
-                            )
+                                revision_run_id.as_deref(),
+                            );
+                            let workspace_node = selected.as_ref().map(|execution| execution.node.as_str());
+                            let workspace_targets = runtime.planner_workspace_targets(workspace_node)?;
+                            let include_workspace_move = workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
+                            let task = if revision_run_id.is_some() {
+                                let task = planner_followup_prompt_for_workspace(
+                                    &goal,
+                                    workspace_node,
+                                    &runtime.state,
+                                    include_rework_note,
+                                    include_workspace_move,
+                                    None,
+                                );
+                                if include_rework_note {
+                                    runtime.emit(EventKind::PlannerReworkNoteInjected)?;
+                                }
+                                task
+                            } else {
+                                goal.clone()
+                            };
+                            task
                         };
                         let mut planner_extra_args = Vec::new();
                         if let Some(thinking) = &planner_model_cfg.thinking {
@@ -1769,11 +1847,12 @@ fn plan_goal_internal_with_started(
                         let mut log_error = None;
                         check_planning_cancelled(&owner)?;
                         let planner_start = std::time::Instant::now();
+                        let launch_workspace = planner_workspace.clone();
                         let planner_result = run_pi(
                             PiRequest {
                                 role: PiRole::Planner,
                                 config: &planner_config,
-                                cwd: &planner_workspace,
+                                cwd: &launch_workspace,
                                 task: &task,
                                 session_dir: &planner_session_dir,
                                 extension: Some(&service.extension),
@@ -1782,10 +1861,10 @@ fn plan_goal_internal_with_started(
                                 extra_args: planner_extra_args,
                                 environment: vec![
                                     ("GRAPHER_MODE", "planner".into()),
-                                    (
-                                        "GRAPHER_PLANNER_RUN_ID",
-                                        revision_run_id.clone().unwrap_or_default(),
-                                    ),
+                                    ("GRAPHER_PLANNER_RUN_ID", revision_run_id.clone().unwrap_or_default()),
+                                    ("GRAPHER_PLANNER_FOLLOWUP", (revision_run_id.is_some() && !background_review).to_string()),
+                                    ("GRAPHER_PLANNER_WORKSPACES", planner_workspace_targets.to_string()),
+                                    ("GRAPHER_PLANNER_WORKSPACES_FILE", planner_workspace_targets_file.to_string_lossy().into()),
                                     ("GRAPHER_ACTIVE_RUN_ID", owner.clone()),
                                     ("GRAPHER_GRAPH_PATH", graph_path.to_string_lossy().into()),
                                     (
@@ -1811,11 +1890,38 @@ fn plan_goal_internal_with_started(
                                 }
                                 log.push_str(&text);
                                 on_planner_line(&text);
-                                if background_review {
-                                    notify_planning_output(&owner, &planning_id);
-                                    let event = serde_json::from_str::<serde_json::Value>(&text).ok();
-                                    if event.as_ref().is_some_and(|event| event["type"] == "tool_execution_end"
-                                        && matches!(event["toolName"].as_str(), Some("node" | "edge"))) {
+                                if let Some(event) = serde_json::from_str::<serde_json::Value>(&text).ok() {
+                                    if event["type"] == "tool_execution_end" && event["toolName"] == "switch_workspace" && event["isError"] != true {
+                                        let result_text = event["result"]["content"].as_array().map(|parts| parts.iter()
+                                            .filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n"));
+                                        if let Some(result) = result_text.and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()) {
+                                            let requested_node = result["requestedNode"].as_str().unwrap_or_default().to_string();
+                                            let resolution = service.runtime.lock().ok()
+                                                .and_then(|runtime| runtime.planner_workspace_for_node(&requested_node).ok().flatten());
+                                            if let Some(resolution) = resolution {
+                                                let target = resolution.execution;
+                                                planner_execution_id = Some(target.id.clone());
+                                                planner_workspace = PathBuf::from(&target.worktree);
+                                                running.worktree = Some(crate::native::host_path(&planner_workspace).to_string_lossy().into_owned());
+                                                running.workspace_execution_id = Some(target.id.clone());
+                                                let _ = fs::write(directory.join("planner-workspace"), planner_workspace.to_string_lossy().as_bytes());
+                                                if let Ok(mut runtime) = service.runtime.lock() {
+                                                    if runtime.state.run_id == owner {
+                                                        let _ = runtime.emit(EventKind::PlannerWorkspaceSelected { planning: running.clone() });
+                                                        if let Some(requested_node) = resolution.redirected_from {
+                                                            let actual_node = target.node.clone();
+                                                            let _ = runtime.emit(EventKind::PlannerWorkspaceRedirected {
+                                                                requested_node,
+                                                                actual_node: actual_node.clone(),
+                                                                reason: format!("the requested workspace was inherited and modified by {actual_node}; using the latest downstream workspace state"),
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if background_review && event["toolName"].as_str().is_some_and(|name| matches!(name, "node" | "edge")) && event["type"] == "tool_execution_end" {
                                         let candidate = fs::read(&graph_path).map_err(|e| e.to_string())
                                             .and_then(|bytes| serde_json::from_slice::<Graph>(&bytes).map_err(|e| e.to_string()));
                                         match candidate.and_then(|graph| {
@@ -1841,16 +1947,20 @@ fn plan_goal_internal_with_started(
                             m.duration_seconds = planner_wall_sec;
                         }
                         planner_metrics = Some(m);
-                        fs::copy(&graph_path, directory.join("graph.json"))
-                            .map_err(|e| e.to_string())?;
                         planner_result.map_err(|error| {
                             check_planning_cancelled(&owner).err().unwrap_or(error)
                         })?;
-                        serde_json::from_str(
-                            &fs::read_to_string(graph_path).map_err(|error| error.to_string())?,
+                        if background_review {
+                            notify_planning_output(&owner, &planning_id);
+                        }
+                        let candidate_graph: Graph = serde_json::from_str(
+                            &fs::read_to_string(&graph_path).map_err(|error| error.to_string())?,
                         )
-                        .map_err(|error| error.to_string())?
-                    }
+                        .map_err(|error| error.to_string())?;
+                        fs::copy(&graph_path, directory.join("graph.json"))
+                            .map_err(|e| e.to_string())?;
+                        candidate_graph
+                    },
                     _ => return Err("Partitioner returned an invalid route".into()),
                 };
                 let total_planning_duration = planning_start.elapsed().as_secs_f64();
@@ -1928,7 +2038,7 @@ fn plan_goal_internal_with_started(
                 };
                 let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                 check_planning_cancelled(&owner)?;
-                if let Some(execution_id) = &running.workspace_execution_id {
+                if let Some(execution_id) = &planner_execution_id {
                     runtime.capture_planner_workspace(execution_id)?;
                 }
                 if let Some(ref run_id) = revision_run_id {
@@ -2046,7 +2156,7 @@ fn plan_goal_internal_with_started(
                             let _guard = lock.lock().map_err(|e| e.to_string())?;
                             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                             if runtime.state.approved && revision_run_id.as_deref() == Some(&runtime.state.run_id) {
-                                let capture = if let Some(id) = &running.workspace_execution_id {
+                                let capture = if let Some(id) = &planner_execution_id {
                                     runtime.capture_planner_workspace(id)
                                 } else { runtime.capture_planner_source() };
                                 if let Err(error) = capture {
@@ -2677,15 +2787,50 @@ fn control(
         } else {
             crate::engine::planner_revision_run_id()?
         };
-        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
         if active_run_id
             .as_ref()
             .is_some_and(|id| id != &runtime.state.run_id)
         {
             return Err("Run changed while steering Planner".into());
         }
-        let message =
-            planner_followup_prompt(instruction.trim(), active_run_id.as_deref(), &runtime.state);
+        let include_rework_note = planner_rework_note_pending(
+            &runtime.state,
+            active_run_id.as_deref(),
+        );
+        let workspace_node = runtime
+            .state
+            .planning
+            .as_ref()
+            .and_then(|planning| planning.workspace_execution_id.as_deref())
+            .and_then(|execution_id| runtime.state.executions.iter().find(|execution| execution.id == execution_id))
+            .map(|execution| execution.node.as_str());
+        let workspace_targets = runtime.planner_workspace_targets(workspace_node)?;
+        let include_workspace_move = workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
+        let workspace_targets_file = runtime
+            .state
+            .planning
+            .as_ref()
+            .map(|planning| runtime.root.join("planning").join(&planning.planning_id).join("planner-workspaces.json"));
+        if let Some(file) = &workspace_targets_file {
+            fs::write(file, workspace_targets.to_string()).map_err(|e| e.to_string())?;
+        }
+        let message = if active_run_id.is_some() {
+            let message = planner_followup_prompt_for_workspace(
+                instruction.trim(),
+                workspace_node,
+                &runtime.state,
+                include_rework_note,
+                include_workspace_move,
+                None,
+            );
+            if include_rework_note {
+                runtime.emit(EventKind::PlannerReworkNoteInjected)?;
+            }
+            message
+        } else {
+            instruction.trim().to_string()
+        };
         let snapshot = runtime.state.clone();
         drop(runtime);
         if let Some(id) = run_id {

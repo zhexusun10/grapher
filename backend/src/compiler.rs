@@ -111,7 +111,7 @@ pub fn unremovable_node_diagnostics(graph: &Graph, unremovable: &[String]) -> Ve
         .map(|name| Diagnostic {
             code: "E210".into(),
             message: format!(
-                "Cannot remove node '{name}': its result is already published in this run. Keep the node and change its task to rework it, or add a new node for follow-up work.",
+                "Cannot remove node '{name}': its workspace state is already published in this run.",
             ),
         })
         .collect()

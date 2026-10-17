@@ -5,7 +5,7 @@ import { plannerUserTurns } from "../src/services/plannerUserTurns.ts";
 
 test("Planner status context is not shown as conversation text", () => {
   assert.equal(stripPlannerContext("Current graph node status:\n- worker: completed\n继续优化"), "继续优化");
-  assert.equal(stripPlannerContext("Current graph node status:\n- worker: completed\n\n继续优化"), "继续优化");
+  assert.equal(stripPlannerContext("You are now at backend's workspace. You can move to another node's workspace by outputting exactly one line containing only the target node name.\nCurrent graph node status:\n- worker: completed\n\nModifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the updated dependencies' workspace states); unrelated branches keep their work.\n\n继续优化"), "继续优化");
   assert.equal(stripPlannerContext("User query:\n\nOriginal"), "Original");
   // Current and historical rework notes are transport context, not user text.
   for (const dependencyInput of ["the updated dependencies' project-file results", "the new dependency filesystem state"]) {

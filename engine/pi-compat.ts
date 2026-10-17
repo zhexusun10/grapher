@@ -14,6 +14,7 @@ export {
 } from '../pi/packages/coding-agent/src/index.ts';
 export type { ExtensionAPI, BashOperations } from '../pi/packages/coding-agent/src/index.ts';
 
+export { Type } from '../pi/packages/ai/src/index.ts';
 import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from '../pi/packages/ai/src/index.ts';
 
 // This is the protocol vocabulary, not a list of levels every model supports.

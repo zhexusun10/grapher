@@ -16,12 +16,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 let input = ''; for await (const chunk of process.stdin) input += chunk;
-if (process.env.GRAPHER_MODE === 'planner') {
-  if (!input.startsWith('Current graph node status:\n') || !input.endsWith('\nadditional information'))
-    throw Error('Planner follow-up must contain only its existing status block and user instruction');
+  if (process.env.GRAPHER_MODE === 'planner') {
+  const context = input.startsWith('You are now at ') && input.includes('\nCurrent graph node status:\n');
+  if (!context || !input.endsWith('\nadditional information'))
+    throw Error('Every Planner follow-up must contain the current workspace and graph status');
   const arg = name => process.argv[process.argv.indexOf(name)+1];
   const directory = arg('--session-dir'), id = arg('--session-id');
   const file = path.join(directory, `grapher_${id}.jsonl`);
+  const rework = `Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the updated dependencies' workspace states); unrelated branches keep their work.`;
+  const priorTurn = fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes('preserved history');
+  if (input.includes(rework) !== !priorTurn)
+    throw Error('Planner rework note must appear only on the first follow-up');
   if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n');
   const header = JSON.parse(fs.readFileSync(file,'utf8').split('\n')[0]);
   // Pi matches a custom-session-dir resume by the literal header cwd
@@ -31,13 +36,25 @@ if (process.env.GRAPHER_MODE === 'planner') {
   fs.appendFileSync(file, JSON.stringify({type:'custom',id:crypto.randomUUID(),data:'preserved history'})+'\n');
   const action = path.join(path.dirname(fileURLToPath(import.meta.url)), 'action');
   if (fs.existsSync(action)) {
-    fs.writeFileSync('planner.txt', 'Planner writes at the frontier');
-    if (fs.readFileSync(action,'utf8') === 'fail') throw Error('deliberate Planner failure');
+    const actionText = fs.readFileSync(action,'utf8');
+    if (actionText === 'move-left') {
+      // An exact node-name response is a Planner workspace move command.
+    } else {
+      fs.writeFileSync('planner.txt', 'Planner writes at the frontier');
+      if (actionText === 'fail') throw Error('deliberate Planner failure');
+    }
   }
 } else {
   fs.writeFileSync(`${process.env.GRAPHER_NODE_NAME}.txt`, 'node result');
 }
-console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));
+const actionText = fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'action'))
+  ? fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'action'),'utf8') : '';
+if (process.env.GRAPHER_MODE === 'planner' && actionText === 'move-left') {
+  const target = JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES || '{}').left;
+  console.log(JSON.stringify({type:'tool_execution_end',toolName:'switch_workspace',isError:false,result:{content:[{type:'text',text:JSON.stringify(target)}]}}));
+}
+const finalText = 'done';
+console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:finalText}]}}));
 "#).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repo, "engine": "pi", "piCommand": "node", "piArgs": [script],
@@ -80,6 +97,58 @@ fn turn(service: &Arc<Service>, config: &Config) -> Result<Snapshot, (String, Op
         Some(run), service, |_| {}, |_| {}, |_| {})
 }
 
+#[test]
+fn planner_workspace_output_move_is_persisted_and_stable_until_a_new_execution() {
+    let (temp, _repo, service, config) = setup(false);
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        let job = runtime.jobs().unwrap().remove(0);
+        complete(&mut runtime, job);
+    }
+    // Establish the first follow-up and complete both parallel branches so
+    // that the next turn starts in the most recently completed branch.
+    turn(&service, &config).unwrap();
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        let jobs = runtime.jobs().unwrap();
+        assert_eq!(jobs.len(), 2);
+        for job in jobs { complete(&mut runtime, job); }
+    }
+    fs::write(temp.path().join("action"), "move-left").unwrap();
+    let moved = turn(&service, &config).unwrap();
+    let left = moved.executions.iter().rev().find(|execution| execution.node == "left").unwrap();
+    assert_eq!(moved.planning.as_ref().unwrap().workspace_execution_id.as_deref(), Some(left.id.as_str()));
+    assert_eq!(moved.planning.as_ref().unwrap().worktree.as_deref(), Some(left.worktree.as_str()));
+
+    // No node execution was added after the explicit move, so another user
+    // message keeps the same workspace instead of snapping back to right.
+    let repeated = turn(&service, &config).unwrap();
+    assert_eq!(repeated.planning.as_ref().unwrap().workspace_execution_id.as_deref(), Some(left.id.as_str()));
+    assert_eq!(repeated.planning.as_ref().unwrap().worktree.as_deref(), Some(left.worktree.as_str()));
+}
+
+#[test]
+fn planner_redirects_to_a_workspace_reused_by_a_later_node() {
+    let (_temp, _repo, service, config) = setup(false);
+    let mut runtime = service.runtime.lock().unwrap();
+    let root_job = runtime.jobs().unwrap().remove(0);
+    let root = complete(&mut runtime, root_job);
+    drop(runtime);
+    turn(&service, &config).unwrap();
+    let mut runtime = service.runtime.lock().unwrap();
+    let mut jobs = runtime.jobs().unwrap();
+    let right_job = jobs.pop().unwrap();
+    let left = complete(&mut runtime, jobs.pop().unwrap());
+    let right = complete(&mut runtime, right_job);
+    let join_job = runtime.jobs().unwrap().remove(0);
+    let join = complete(&mut runtime, join_job);
+    let reused = [root, left, right].into_iter().find(|execution| execution.worktree == join.worktree)
+        .expect("the linear handoff should reuse one parent workspace");
+    let resolution = runtime.planner_workspace_for_node(&reused.node).unwrap().unwrap();
+    assert_eq!(resolution.execution.id, join.id);
+    assert_eq!(resolution.redirected_from.as_deref(), Some(reused.node.as_str()));
+    assert_eq!(runtime.planner_workspace_for_node("join").unwrap().unwrap().execution.id, join.id);
+}
 #[test]
 fn planner_workspace_tracks_linear_and_parallel_frontiers_across_turns_and_reload() {
     for shadow in [false, true] {
@@ -132,6 +201,7 @@ fn planner_workspace_tracks_linear_and_parallel_frontiers_across_turns_and_reloa
         assert_eq!(contents.matches("preserved history").count(), 4);
         let replay = runtime.store.load(&final_turn.run_id).unwrap();
         assert_eq!(replay.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerWorkspaceSelected { .. })).count(), 4);
+        assert_eq!(replay.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerReworkNoteInjected)).count(), 1);
         assert_eq!(replay.planning.unwrap().worktree, final_turn.planning.unwrap().worktree);
     }
 }

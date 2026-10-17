@@ -1,5 +1,7 @@
+import { Type } from './pi-compat.ts';
 import { createWorkspacePaths } from './workspace-paths.mjs';
 import { registerWorkspaceTools } from './workspace-tools.ts';
+import { configurePlannerWorkspace, onPlannerWorkspaceChanged, plannerWorkspaceState, switchPlannerWorkspace } from './planner-workspace.ts';
 import { managedLaunch, managedBashOptions, managedBashCommand } from './launch-binding.mjs';
 import {
   createBashToolDefinition,
@@ -47,11 +49,40 @@ export default function (pi: ExtensionAPI) {
   const project = process.env.GRAPHER_ORIGINAL_ROOT || (planner && !graph ? cwd : undefined);
   // Planner uses the same model-facing namespace before, during and after
   // private execution. Its physical cwd is backend/UI metadata, not a prompt.
-  const paths = !partition && (graph || planner) && project
+  let activePaths = !partition && (graph || planner) && project
     ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;
-  const view = (value: any): any => paths ? paths.view(value) : value;
+  const paths = activePaths;
+  const view = (value: any): any => activePaths ? activePaths.view(value) : value;
   // Execution roles receive path guidance directly; Planner need not repeat it in handoffs.
   const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
+  const plannerTargets = planner && process.env.GRAPHER_PLANNER_FOLLOWUP === 'true'
+    ? JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES || '{}') as Record<string, unknown>
+    : {};
+  if (planner && project && process.env.GRAPHER_PLANNER_FOLLOWUP === 'true' && Object.keys(plannerTargets).length > 0) {
+    configurePlannerWorkspace(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project);
+    activePaths = plannerWorkspaceState().paths;
+    onPlannerWorkspaceChanged(next => { activePaths = next.paths; });
+    pi.registerTool({
+      name: 'switch_workspace',
+      label: 'switch workspace',
+      description: "Switch to the latest valid workspace state for a graph node. The result tells you the actual node and workspace state selected.",
+      parameters: Type.Object({
+        node: Type.String({ description: 'Node whose latest workspace state you want to inspect or modify' }),
+      }, { additionalProperties: false }),
+      promptSnippet: 'Switch Planner workspace',
+      async execute(_id: string, params: { node: string }) {
+        const target = switchPlannerWorkspace(params.node);
+        return { content: [{ type: 'text', text: JSON.stringify({
+          switched: true,
+          requestedNode: target.requestedNode,
+          actualNode: target.actualNode,
+          message: target.redirected
+            ? `The requested node's workspace was inherited and modified by ${target.actualNode}; you are now at the latest downstream workspace state.`
+            : `You are now at ${target.actualNode}'s workspace.`,
+        }) }] };
+      },
+    } as any);
+  }
   if (!partition && (paths || !planner)) {
     pi.on('before_agent_start', async event => {
       // Pi 1.0 projects forceSystemPrompt after context_with_system handlers.
@@ -80,8 +111,8 @@ export default function (pi: ExtensionAPI) {
   if (partition) return;
   if (graph && !project) throw new Error('Graph execution is missing its host-owned project binding');
   if (paths && project) {
-    registerWorkspaceTools(pi, cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view,
-      planner ? ['read', 'write', 'edit'] : undefined);
+    registerWorkspaceTools(pi, activePaths?.root || cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view,
+      planner ? ['read', 'write', 'edit'] : undefined, () => activePaths?.root || cwd);
 
     // Normalize model-facing paths only; never change stored files, tool input
     // contents, provider signatures, or image bytes.
@@ -95,8 +126,8 @@ export default function (pi: ExtensionAPI) {
   const baseBashTool = createBashToolDefinition(cwd);
   if (launch) {
     pi.on('user_bash', async () => ({ operations: {
-      exec: (command, workingDirectory, options) => localOps.exec(managedBashCommand(paths ? paths.command(command) : command),
-        workingDirectory, managedBashOptions(options)),
+      exec: (command, workingDirectory, options) => localOps.exec(managedBashCommand(activePaths ? activePaths.command(command) : command),
+        activePaths?.root || workingDirectory, managedBashOptions(options)),
     } }));
   }
 
@@ -111,7 +142,7 @@ export default function (pi: ExtensionAPI) {
       let callExitCode: number | null = null;
       const scopedOps: BashOperations = {
         exec: async (command, cwd, options) => {
-          const res = await localOps.exec(managedBashCommand(command), cwd, managedBashOptions(options));
+          const res = await localOps.exec(managedBashCommand(command), activePaths?.root || cwd, managedBashOptions(options));
           callExitCode = res.exitCode;
           return res;
         },
@@ -124,9 +155,10 @@ export default function (pi: ExtensionAPI) {
       let result: any;
       let execError: any;
       try {
-        const mapped = { ...params, command: paths ? paths.command(rawCmd) : rawCmd };
+        const mapped = { ...params, command: activePaths ? activePaths.command(rawCmd) : rawCmd };
+        const toolContext = activePaths && ctx ? { ...ctx, cwd: activePaths.root } : ctx;
         result = view(await scopedBashTool.execute(toolCallId, mapped, signal,
-          onUpdate ? update => onUpdate(view(update)) : undefined, ctx));
+          onUpdate ? update => onUpdate(view(update)) : undefined, toolContext));
       } catch (err) {
         execError = err;
       }
@@ -136,7 +168,7 @@ export default function (pi: ExtensionAPI) {
       toolCallExitCodes.set(toolCallId, { exitCode, command: rawCmd, truncated: isTruncated });
 
       if (execError) {
-        if (execError instanceof Error && paths) execError.message = paths.visible(execError.message);
+        if (execError instanceof Error && activePaths) execError.message = activePaths.visible(execError.message);
         throw execError;
       }
 

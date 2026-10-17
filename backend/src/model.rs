@@ -524,6 +524,14 @@ pub enum EventKind {
         head: String,
         invalidated: Vec<String>,
     },
+    /// Planner requested an old node's workspace, but its physical slot is
+    /// now owned by a downstream execution. The next Planner prompt explains
+    /// the redirect and the actual latest workspace state.
+    PlannerWorkspaceRedirected {
+        requested_node: String,
+        actual_node: String,
+        reason: String,
+    },
     /// A source-published phase may append one background Planner turn.
     PlannerReviewStarted {
         planning: PlanningSummary,
@@ -536,6 +544,9 @@ pub enum EventKind {
         planning: PlanningSummary,
         approval_required: bool,
     },
+    /// The rework explanation is injected only into the first Planner
+    /// follow-up of a Run. Workspace and node-status context remains dynamic.
+    PlannerReworkNoteInjected,
     /// A revision Planner turn (follow-up or stopped/interrupted attempt) ended
     /// without committing a graph. History only: the durable planner.jsonl stays
     /// part of the Run conversation, but the compiled graph and phase are kept.
@@ -1209,7 +1220,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.plan_type = plan_type.clone();
             state.phase = "planning".into();
         }
-        EventKind::PlannerWorkspaceSelected { .. } => {}
+        EventKind::PlannerWorkspaceSelected { planning } => {
+            state.planning_id = Some(planning.planning_id.clone());
+            state.planning = Some(planning.clone());
+        }
+        EventKind::PlannerReworkNoteInjected => {}
+        EventKind::PlannerWorkspaceRedirected { .. } => {}
         EventKind::PlannerWorkspaceSnapshotted { execution_id, head, invalidated } => {
             if let Some(execution) = state.executions.iter_mut().find(|e| e.id == *execution_id) {
                 let old_head = execution.after.clone();
@@ -1273,9 +1289,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.phase = "running".into();
             }
         }
-        // History marker only: an aborted revision keeps the compiled graph,
-        // the phase and the current planning identity untouched.
-        EventKind::PlannerTurnAborted { .. } => {}
+        // History marker only: an aborted revision keeps the compiled graph
+        // and phase, but the latest planning summary remains visible so the UI
+        // can show the failed turn's workspace and status.
+        EventKind::PlannerTurnAborted { planning } => {
+            state.planning_id = Some(planning.planning_id.clone());
+            state.planning = Some(planning.clone());
+        }
         EventKind::PlanningFailed { planning } => {
             state.planning = Some(planning.clone());
             state.phase = "planning_failed".into();

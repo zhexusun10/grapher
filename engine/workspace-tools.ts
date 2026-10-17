@@ -23,8 +23,8 @@ export function workspacePathMapper(workspace: string, project: string, alias = 
   };
 }
 
-export function registerWorkspaceTools(pi: ExtensionAPI, workspace: string, project: string, alias = project, view: (value: any) => any = value => value, names?: readonly string[]) {
-  const physical = workspacePathMapper(workspace, project, alias);
+export function registerWorkspaceTools(pi: ExtensionAPI, workspace: string, project: string, alias = project, view: (value: any) => any = value => value, names?: readonly string[], workspaceGetter: () => string = () => workspace) {
+  const physical = (input: string) => workspacePathMapper(workspaceGetter(), project, alias)(input);
   // ls/find/grep are deliberately absent for every project and role: search and
   // listing go through Bash, so the model-facing tool surface stays read/write/edit.
   for (const factory of [createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition]) {
@@ -34,13 +34,14 @@ export function registerWorkspaceTools(pi: ExtensionAPI, workspace: string, proj
       ...tool,
       async execute(id: string, params: any, signal?: AbortSignal, update?: any, ctx?: any) {
         if (signal?.aborted) throw new Error('Operation aborted');
+        const currentWorkspace = workspaceGetter();
         const mapped = { ...params, path: physical(params.path ?? '.') };
         // Mapping before native path resolution also covers Pi's own read
         // existence/Unicode checks. Native results stay intact.
         try {
           return view(await (tool.execute as any)(id, mapped, signal,
             update ? (value: any) => update(view(value)) : undefined,
-            ctx ? { ...ctx, cwd: workspace } : ctx));
+            ctx ? { ...ctx, cwd: currentWorkspace } : ctx));
         } catch (error) {
           if (error instanceof Error) error.message = view(error.message);
           throw error;
