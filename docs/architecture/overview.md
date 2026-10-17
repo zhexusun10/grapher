@@ -5,8 +5,6 @@
 
 > Don't orchestrate agents. Compile work.
 
-> Do not inject prior bias into the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
-
 Grapher is a local multi-agent coding system. Models route, plan, and perform coding tasks; a Rust compiler and runtime own validation, scheduling, state transitions, and delivery. The planner is not a persistent execution coordinator.
 
 ## Motivation
@@ -96,6 +94,10 @@ Planner writes reach the source **before graph approval**; rejection, failure an
 6. Backend state and append-only events are authoritative; the UI is a projection.
 7. Graph completion requires successful publication, not merely finished model calls.
 8. Independent Git repositories are not, by themselves, security sandboxes.
+
+## Design philosophy
+
+Do not inject prior bias into the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
 
 ## Implementation map
 

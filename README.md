@@ -46,7 +46,7 @@ Built on [Pi](https://github.com/earendil-works/pi).
 ## Why Grapher?
 
 - **Integrated coding-agent environment** — Chat with coding agents, manage provider authentication and model settings, inspect tool calls and logs, and intervene from the same UI.
-- **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions.
+- **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions. We don't introduce prior bias to the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
 - **Workspace inheritance** — Children inherit parent Git history and its complete project-file state, including files matched by `.gitignore`. Linear work can hand off a Git working tree; fan-out branches use independent Git worktrees; Git handles conflicts and publication. Conversations stay with their own nodes.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
