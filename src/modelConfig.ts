@@ -4,7 +4,7 @@ import type { ProviderCatalog } from "./services/providerAuth";
 
 export const modelRoles: Array<{ id: ModelRole; label: string; description: string }> = [
   { id: "nodeAgent", label: "Node Agent", description: t("负责 Serial 与 Graph 节点的实际执行。其他未单独设置的角色使用此模型作为默认值。") },
-  { id: "planner", label: "Planner", description: t("负责分析项目并生成协作拓扑图。推荐选择中大型模型，以获得更可靠的规划能力。") },
+  { id: "planner", label: "Planner", description: t("负责分析项目并生成执行拓扑图。推荐选择中大型模型，以获得更可靠的规划能力。") },
   { id: "partitioner", label: "Partitioner", description: t("负责判断任务走 Serial 还是 Graph。推荐选择小型、低延迟模型。") },
 ];
 
