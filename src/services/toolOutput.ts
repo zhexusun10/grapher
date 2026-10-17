@@ -35,3 +35,48 @@ export function toolOutputPreview(content: unknown): { text: string; truncated: 
   }
   return truncateToolText(parts.join(""));
 }
+
+/**
+ * `write`/`edit` arguments carry whole file bodies, so a tool card's argument
+ * tree can be megabytes even when its result is bounded. Keep a preview of each
+ * string value; JSON shape, keys and small values stay intact so the card can
+ * still explain what the tool was asked to do. Returns the input untouched when
+ * nothing needed cutting (identity matters for memoized rows).
+ */
+export function truncateToolArgs<T extends Record<string, unknown> | undefined>(args: T):
+  { args: T; truncated: boolean } {
+  if (!args || typeof args !== "object") return { args, truncated: false };
+  let truncated = false;
+  // Return original containers when nothing below changed, so memoized rows keep
+  // their identity and small arguments allocate nothing.
+  const bound = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      const preview = truncateToolText(value);
+      if (!preview.truncated) return value;
+      truncated = true;
+      return preview.text;
+    }
+    if (Array.isArray(value)) {
+      let changed = false;
+      const next = value.map(item => {
+        const boundedItem = bound(item);
+        if (boundedItem !== item) changed = true;
+        return boundedItem;
+      });
+      return changed ? next : value;
+    }
+    if (value && typeof value === "object") {
+      let changed = false;
+      const next: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(value)) {
+        const boundedItem = bound(item);
+        if (boundedItem !== item) changed = true;
+        next[key] = boundedItem;
+      }
+      return changed ? next : value;
+    }
+    return value;
+  };
+  const bounded = bound(args) as T;
+  return truncated ? { args: bounded, truncated } : { args, truncated: false };
+}

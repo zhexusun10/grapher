@@ -130,7 +130,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: source,
         GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, GRAPHER_GRAPH_PATH: graph,
         GRAPHER_ACTIVE_RUN_ID: `run-${role}`, GRAPHER_NODE_EXECUTION_ID: `execution-${role}`,
-        ...(role === 'planner' ? { GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['published']) } : {}),
+        ...(role === 'planner' ? { GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['published']), GRAPHER_PLANNER_WRITE_TOOLS: 'true' } : {}),
         ...(role === 'node' ? { GRAPHER_NODE_NAME: 'task', GRAPHER_CONTINUE_INTERRUPTED: 'false' } : {}),
         GRAPHER_COMPILER_PATH: join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`),
         GRAPHER_TRUSTED_GIT: process.env.GRAPHER_TRUSTED_GIT ?? 'git',

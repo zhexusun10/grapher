@@ -42,6 +42,9 @@ impl ToolOutputProjection {
                 for message in messages { limit_message(message); }
             }
         }
+        // `write`/`edit` arguments carry whole file bodies; the browser only
+        // needs a preview and would otherwise hold megabytes per card.
+        limit_arguments(event);
         true
     }
 }
@@ -57,6 +60,51 @@ fn limit_result(result: &mut Value) {
     let details = object.entry("details").or_insert_with(|| json!({}));
     if !details.is_object() { *details = json!({}); }
     details["truncated"] = true.into();
+}
+
+/// Bound every `args`/`arguments` subtree in place and mark its owner so the UI
+/// can report the preview. The JSON shape, keys and small values stay intact.
+fn limit_arguments(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            let mut truncated = false;
+            for key in ["args", "arguments"] {
+                if let Some(arguments) = object.get_mut(key) {
+                    truncated |= limit_strings(arguments);
+                }
+            }
+            if truncated { object.insert("argsTruncated".into(), true.into()); }
+            for child in object.values_mut() { limit_arguments(child); }
+        }
+        Value::Array(items) => {
+            for item in items { limit_arguments(item); }
+        }
+        _ => {}
+    }
+}
+
+fn limit_strings(value: &mut Value) -> bool {
+    match value {
+        Value::String(text) => {
+            if text.len() <= PREVIEW_BYTES { return false; }
+            let mut end = PREVIEW_BYTES - ELLIPSIS.len();
+            while !text.is_char_boundary(end) { end -= 1; }
+            text.truncate(end);
+            text.push_str(ELLIPSIS);
+            true
+        }
+        Value::Array(items) => {
+            let mut changed = false;
+            for item in items { changed |= limit_strings(item); }
+            changed
+        }
+        Value::Object(map) => {
+            let mut changed = false;
+            for item in map.values_mut() { changed |= limit_strings(item); }
+            changed
+        }
+        _ => false,
+    }
 }
 
 fn limit_content(content: &mut Value) -> bool {
@@ -106,6 +154,40 @@ mod tests {
         assert_eq!(event["durationMs"], 1234);
         assert_eq!(event["isError"], true);
         assert!(original["result"]["content"][0]["text"].as_str().unwrap().len() > PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn tool_output_projection_bounds_arguments_and_keeps_small_values() {
+        let mut event = json!({ "type": "tool_execution_start", "toolCallId": "write",
+            "toolName": "write",
+            "args": { "path": "src/big.ts", "content": "中🚀".repeat(PREVIEW_BYTES) } });
+        assert!(ToolOutputProjection::default().project(&mut event));
+        assert_eq!(event["args"]["path"], "src/big.ts");
+        let content = event["args"]["content"].as_str().unwrap();
+        assert!(content.len() <= PREVIEW_BYTES);
+        assert!(content.ends_with("\n..."));
+        assert_eq!(event["argsTruncated"], true);
+
+        let mut message = json!({ "type": "message",
+            "message": { "role": "assistant", "content": [
+                { "type": "toolCall", "id": "t", "name": "write",
+                    "arguments": { "path": "a", "content": "x".repeat(PREVIEW_BYTES + 1) } },
+                { "type": "text", "text": "kept" }
+            ] } });
+        assert!(ToolOutputProjection::default().project(&mut message));
+        let part = &message["message"]["content"][0];
+        assert_eq!(part["argsTruncated"], true);
+        assert_eq!(part["name"], "write");
+        assert_eq!(part["arguments"]["path"], "a");
+        assert!(part["arguments"]["content"].as_str().unwrap().len() <= PREVIEW_BYTES);
+        assert_eq!(message["message"]["content"][1]["text"], "kept");
+
+        // Small arguments stay byte-identical and unmarked.
+        let mut small = json!({ "type": "tool_execution_start", "toolCallId": "bash",
+            "args": { "command": "npm test" } });
+        assert!(ToolOutputProjection::default().project(&mut small));
+        assert_eq!(small["args"], json!({ "command": "npm test" }));
+        assert!(small.get("argsTruncated").is_none());
     }
 
     #[test]

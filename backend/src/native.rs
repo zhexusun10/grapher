@@ -770,6 +770,7 @@ export default async function () {
             command.args(["--mode", "json", "--print", "--no-session", "--no-extensions", "--no-skills", "--extension"])
                 .arg(&probe).arg("--session-dir").arg(&session)
                 .env("GRAPHER_MODE", "planner").env("GRAPHER_EXECUTION_KIND", "graph")
+                .env("GRAPHER_PLANNER_WRITE_TOOLS", "true")
                 .env("GRAPHER_TEST_RUNTIME", &engine).env("EXPECTED_CWD", &cwd)
                 .env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_SOURCE_ALIAS", &source)
                 .env("PI_CODING_AGENT_DIR", base.join("agent"))

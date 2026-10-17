@@ -34,6 +34,7 @@ fn snapshot_poll_reports_transient_activity_without_waiting_for_the_run_mutex() 
     let value = result.expect("snapshot poll waited for the Run mutex").unwrap();
     assert_eq!(value["version"], "unchanged");
     assert!(value["snapshot"].is_null());
+    assert_eq!(value["busy"], true, "a busy Run mutex must ask the client to retry soon");
     assert_eq!(value["activity"], serde_json::json!([
         { "kind": "source_capture", "nodes": [] },
         { "kind": "workspace_prepare", "nodes": ["left", "right"] }
@@ -46,6 +47,7 @@ fn snapshot_poll_reports_transient_activity_without_waiting_for_the_run_mutex() 
         "runId": run_id, "version": value["version"]
     })).unwrap();
     assert!(cached["snapshot"].is_null());
+    assert!(cached["busy"].is_null(), "an unchanged poll is not a busy response");
     assert_eq!(cached["activity"], serde_json::json!([]));
 }
 
@@ -686,7 +688,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -801,7 +803,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     )
     .unwrap();
     let config = Config {
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -1060,7 +1062,7 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
                 max_feedback: 1,
                 auto_approve: false,
                 role_models: Default::default(),
-                post_task_review: false,
+                post_task_review: false, planner_write_tools: true,
             },
         )
         .unwrap();
@@ -1171,19 +1173,99 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
 }
 
 #[test]
+fn planner_followup_context_is_omitted_when_there_is_no_active_work() {
+    let mut snapshot = Snapshot::default();
+    snapshot.run_id = "test-run".into();
+    snapshot.approved = true;
+    snapshot.plan_type = Some("graph".into());
+    snapshot.phase = "completed".into();
+    snapshot.graph = Graph {
+        original_goal: "test goal".into(),
+        nodes: vec![
+            Node { name: "first".into(), task: "first".into() },
+            Node { name: "second".into(), task: "second".into() },
+        ],
+        edges: vec![],
+    };
+    for name in ["first", "second"] {
+        let mut node = NodeState::default();
+        node.status = "completed".into();
+        snapshot.nodes.insert(name.into(), node);
+    }
+    assert_eq!(
+        planner_followup_prompt_for_workspace(
+            "Please review",
+            Some("second"),
+            &snapshot,
+            true,
+            true,
+            Some("workspace notice"),
+        ),
+        "Please review"
+    );
+
+    // A new draft awaiting approval has no execution status to report either.
+    snapshot.approved = false;
+    snapshot.phase = "awaiting_approval".into();
+    snapshot.nodes.get_mut("second").unwrap().status = "waiting".into();
+    assert_eq!(
+        planner_followup_prompt_for_workspace(
+            "Draft feedback",
+            None,
+            &snapshot,
+            true,
+            true,
+            None,
+        ),
+        "Draft feedback"
+    );
+
+    // Legacy snapshots may still carry approval while showing a draft phase.
+    snapshot.approved = true;
+    assert_eq!(
+        planner_followup_prompt_for_workspace(
+            "Still a draft",
+            None,
+            &snapshot,
+            false,
+            false,
+            None,
+        ),
+        "Still a draft"
+    );
+
+    // An executing graph still receives the workspace and status context.
+    snapshot.phase = "running".into();
+    let prompt = planner_followup_prompt_for_workspace(
+        "Rework",
+        Some("second"),
+        &snapshot,
+        false,
+        true,
+        None,
+    );
+    assert!(prompt.starts_with("You are now at second's workspace."));
+    assert!(prompt.contains("Current graph node status:\n- first: completed\n- second: waiting\n"));
+    assert!(prompt.ends_with("\nRework"));
+}
+
+#[test]
 fn planner_node_status_uses_completed_after_loading_a_legacy_snapshot() {
     let mut snapshot = Snapshot::default();
     snapshot.run_id = "legacy-planner-status".into();
     snapshot.approved = true;
     snapshot.plan_type = Some("graph".into());
     snapshot.graph.nodes.push(Node { name: "task".into(), task: "Retain the result".into() });
+    snapshot.graph.nodes.push(Node { name: "pending".into(), task: "Keep working".into() });
     snapshot.nodes.insert("task".into(), NodeState::default());
+    snapshot.nodes.insert("pending".into(), NodeState::default());
     let mut saved = serde_json::to_value(snapshot).unwrap();
     saved["nodes"]["task"]["status"] = "done".into();
     let restored: Snapshot = serde_json::from_value(saved).unwrap();
     let followup = planner_followup_prompt("Please replan", Some("legacy-planner-status"), &restored);
     assert!(followup.contains("- task: completed\n"));
     assert!(!followup.contains("- task: done\n"));
+    assert!(followup.contains("- pending: waiting\n"));
     assert!(followup.ends_with("\nPlease replan"));
 }
 
@@ -1262,7 +1344,7 @@ fn legacy_planner_session_keeps_its_original_pi_identity() {
                 max_feedback: 1,
                 auto_approve: false,
                 role_models: Default::default(),
-                post_task_review: false,
+                post_task_review: false, planner_write_tools: true,
             },
             Some(planning_id.clone()),
             None,
@@ -1322,7 +1404,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 "#).unwrap();
     let root = temp.path().join("runtime");
     let config = Config {
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -1430,7 +1512,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_feedback: 1,
         auto_approve: false,
         role_models: Default::default(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime
@@ -1530,7 +1612,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_feedback: 1,
         auto_approve: false,
         role_models: Default::default(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime
@@ -1603,7 +1685,7 @@ printf '%s' '{"originalGoal":"test","nodes":[{"name":"work","task":"work"}],"edg
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
 "#).unwrap();
     let config = Config {
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -1681,7 +1763,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -1787,7 +1869,7 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
         pi_args: vec![],
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         model: "mock/model".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
@@ -1900,7 +1982,7 @@ esac
         repository: repo.to_string_lossy().into(), engine: "pi".into(),
         pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
         model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
-        max_parallel: 1, max_feedback: 0, auto_approve: false, post_task_review: false,
+        max_parallel: 1, max_feedback: 0, auto_approve: false, post_task_review: false, planner_write_tools: true,
     };
     let snapshot = plan_goal_internal("test".into(), config, None, None, None, &service,
         |_| {}, |_| {}, |_| {}).unwrap();
@@ -1951,7 +2033,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_feedback: 1,
         auto_approve: false,
         role_models: Default::default(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
     };
     let snapshot = plan_goal_internal(
         "Build two modules".into(),
@@ -1998,7 +2080,7 @@ fn partitioner_failure_persists_history_without_compiling_or_approving_a_run() {
             thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             auto_approve: false,
             role_models: Default::default(),
         },
@@ -2086,7 +2168,7 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
         pi_args: vec![script.to_string_lossy().into()],
         model: "mock/model".into(),
         thinking_level: "medium".into(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         max_parallel: 1,
         max_feedback: 0,
         auto_approve: false,
@@ -2222,7 +2304,7 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
             repository: repository.to_string_lossy().into(), engine: "pi".into(),
             pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
             model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
-            max_parallel: 1, max_feedback: 0, auto_approve: false, post_task_review: false,
+            max_parallel: 1, max_feedback: 0, auto_approve: false, post_task_review: false, planner_write_tools: true,
         };
         let graph = Graph { original_goal: "original graph".into(),
             nodes: vec![Node { name: "worker".into(), task: "original task".into() }], edges: vec![] };
@@ -2296,7 +2378,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), if fail { "exit 1" } else { ":" })).unwrap();
             let config = Config {
-                post_task_review: false,
+                post_task_review: false, planner_write_tools: true,
                 environment: None,
                 repository: repository.to_string_lossy().into(), engine: "pi".into(),
                 pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
@@ -2376,7 +2458,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), label, label)).unwrap();
         let config = Config {
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             environment: None,
             repository: repository.to_string_lossy().into(),
             engine: "pi".into(),
@@ -2451,7 +2533,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display())).unwrap();
         let config = Config {
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             environment: None,
             repository: repository.to_string_lossy().into(),
             engine: "pi".into(),
@@ -2541,7 +2623,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                         edges: vec![],
                     },
                     Config {
-                        post_task_review: false,
+                        post_task_review: false, planner_write_tools: true,
                         environment: None,
                         repository: repository.to_string_lossy().into(),
                         engine: "pi".into(),
@@ -2762,7 +2844,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 thinking_level: "medium".into(),
                 max_parallel: 4,
                 max_feedback: 2,
-                post_task_review: false,
+                post_task_review: false, planner_write_tools: true,
                 auto_approve: false,
                 role_models: Default::default(),
             },
@@ -3123,7 +3205,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 max_parallel: 4,
                 max_feedback: 1,
                 auto_approve: false,
-                post_task_review: false,
+                post_task_review: false, planner_write_tools: true,
             },
         )
         .unwrap();
@@ -3261,7 +3343,7 @@ fn planning_metrics_parsing_and_persistence() {
         #[cfg(feature = "fixture")]
         pi_args: Vec::new(),
         model: "test-model".into(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         thinking_level: "medium".into(),
         max_parallel: 4,
         max_feedback: 1,
@@ -3303,6 +3385,65 @@ fn planning_metrics_parsing_and_persistence() {
     let loaded = runtime.store.load(&runtime.state.run_id).unwrap();
     assert_eq!(loaded.planning_id.as_deref(), Some("test-plan-id"));
     assert_eq!(loaded.planning.as_ref(), Some(&summary));
+}
+
+#[test]
+fn execution_metrics_record_the_model_that_answered_without_a_model_change_event() {
+    // Pi's JSON stream does not forward the session's startup model selection.
+    let output = r#"
+{"type":"grapher_process_started","pid":123,"timestamp":1726300000000}
+{"type":"message_start","message":{"role":"assistant","provider":"antigravity","model":"gemini-3.8-flash","stopReason":"pending"}}
+{"type":"message_end","message":{"role":"assistant","provider":"antigravity","model":"gemini-3.8-flash","thinkingLevel":"high","usage":{"input":10,"output":20,"totalTokens":30}}}
+{"type":"grapher_process_exited","elapsedMs":1250,"success":true,"timestamp":1726300001250}
+"#;
+    let metrics = crate::model::parse_execution_metrics(output, 1726300000000, 1726300001250);
+    assert_eq!(metrics.model.as_deref(), Some("antigravity/gemini-3.8-flash"));
+    assert_eq!(metrics.thinking_level.as_deref(), Some("high"));
+    assert_eq!(metrics.assistant_messages, 1);
+}
+
+#[test]
+fn completion_keeps_the_prelaunch_model_when_the_transcript_recorded_none() {
+    let mut state = Snapshot::default();
+    state.nodes.insert("task".into(), NodeState::default());
+    state.executions.push(Execution {
+        id: "exec-model".into(),
+        node: "task".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "session-model".into(),
+        worktree: "".into(),
+        before: "".into(),
+        workspace_lineage: vec![],
+        after: None,
+        input: None,
+        result: None,
+        status: "running".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: 1726300000000,
+        completed_at: None,
+        metrics: Some(ExecutionMetrics {
+            model: Some("antigravity/gemini-3.8-flash".into()),
+            thinking_level: Some("high".into()),
+            ..Default::default()
+        }),
+    });
+    apply(&mut state, &Event {
+        sequence: 1,
+        timestamp: 1726300002000,
+        kind: EventKind::Finished {
+            execution_id: "exec-model".into(),
+            head: "head".into(),
+            output: String::new(),
+            output_bytes: 0,
+            metrics: Some(ExecutionMetrics::default()),
+        },
+    });
+    let metrics = state.executions[0].metrics.as_ref().unwrap();
+    assert_eq!(metrics.model.as_deref(), Some("antigravity/gemini-3.8-flash"));
+    assert_eq!(metrics.thinking_level.as_deref(), Some("high"));
 }
 
 #[test]
@@ -3362,7 +3503,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
     };
     runtime
         .create(
@@ -3443,7 +3584,7 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {
         environment: None,
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         repository: "/workspace/repo-a".into(),
         #[cfg(feature = "fixture")]
         engine: "fixture".into(),
@@ -3555,7 +3696,7 @@ fn completed_graph_is_published_by_driver() {
         repository: String::new(),
         engine: "fixture".into(),
         pi_command: String::new(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         pi_args: Vec::new(),
         model: String::new(),
         thinking_level: "medium".into(),
@@ -3875,7 +4016,7 @@ fn planning_preflight_checks_model_format() {
     let mut config = Config {
         environment: None,
         repository: "/tmp/fake".into(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         model: "".into(),
         thinking_level: "medium".into(),
         max_parallel: 4,
@@ -3910,7 +4051,7 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
     let config = Config {
         environment: None,
         repository: "/tmp/fake".into(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         model: "example/test".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
@@ -4018,11 +4159,20 @@ fn saving_node_model_settings_targets_failed_and_unstarted_nodes_only_in_the_req
     assert_eq!(result["snapshot"]["nodes"]["pending"]["modelRetry"], false);
     assert_eq!(result["snapshot"]["executions"].as_array().unwrap().len(), 1);
     assert_eq!(result["snapshot"]["config"]["model"], "old/model");
+    assert_eq!(result["snapshot"]["modelConfig"]["roleModels"]["nodeAgent"]["model"], "new/coder");
     assert!(!second.driving.load(Ordering::SeqCst), "saving is not Continue");
     assert_eq!(serde_json::to_value(&first.runtime.lock().unwrap().state).unwrap(), first_before);
     assert_eq!(primary.runtime.lock().unwrap().snapshot_version(), primary_before);
+    let reloaded = dispatch(&selected, "history", serde_json::json!({
+        "runId": second_id, "detail": "metadata"
+    })).unwrap();
+    assert_eq!(reloaded["modelConfig"]["roleModels"]["nodeAgent"]["model"], "new/coder",
+        "a reloaded conversation must project the saved model selection");
     let root = second.runtime.lock().unwrap().root.clone();
     let saved = fs::read(root.join("config.json")).unwrap();
+    let saved_defaults: Config = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(saved_defaults.model, "old/model",
+        "a conversation save must not replace the global model defaults");
     let mut mismatched = body;
     mismatched["config"]["repository"] = serde_json::json!(temp.path().join("other"));
     assert!(dispatch(&selected, "save_config", mismatched).unwrap_err().contains("repository"));
@@ -4064,7 +4214,7 @@ fn save_config_updates_bootstrap_and_persists() {
         max_parallel: 2,
         max_feedback: 3,
         auto_approve: true,
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: false,
         #[cfg(feature = "fixture")]
         engine: "pi".into(),
         #[cfg(feature = "fixture")]
@@ -4134,12 +4284,14 @@ fn save_config_updates_bootstrap_and_persists() {
     assert_eq!(saved_disk.model, "openai/gpt-4o");
     assert_eq!(saved_disk.thinking_level, "high");
     assert!(saved_disk.auto_approve);
+    assert!(!saved_disk.planner_write_tools, "Planner tool settings must persist");
 
     // 4. Verify new bootstrap reloads the persisted config
     let reloaded = bootstrap(&service, false).unwrap();
     assert_eq!(reloaded.config.model, "openai/gpt-4o");
     assert_eq!(reloaded.config.thinking_level, "high");
     assert!(reloaded.config.auto_approve);
+    assert!(!reloaded.config.planner_write_tools);
     assert_eq!(
         reloaded.effective_role_models.get("planner").unwrap(),
         "openai/gpt-4o"

@@ -1,7 +1,7 @@
 import { t, localizeError, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
 import React, { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch, Languages, RefreshCw } from "lucide-react";
+import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch, Languages, RefreshCw, FilePenLine, Brain } from "lucide-react";
 import { Config } from "../../types";
 import { normalizeModelThinkingLevels } from "../../modelConfig";
 import { providerAuth, type ProviderCatalog } from "../../services/providerAuth";
@@ -9,6 +9,7 @@ import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
 import { ExtensionSettings } from "../ExtensionSettings";
 import { normalizeWorkspacePath } from "../../services/workspaceConversations";
+import { autoExpandCotEnabled, setAutoExpandCot } from "../../services/displayPreferences";
 import { ConfirmModal } from "./ConfirmModal";
 
 interface SettingsModalProps {
@@ -18,6 +19,7 @@ interface SettingsModalProps {
   dataPath: string;
   envOverrides?: Record<string, string>;
   error?: string;
+  conversationScoped?: boolean;
   onSaveConfig: (config: Config) => void | Promise<boolean>;
 }
 
@@ -28,12 +30,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   dataPath,
   envOverrides,
   error,
+  conversationScoped = false,
   onSaveConfig,
 }) => {
   const reduceMotion = useReducedMotion();
   const [draftConfig, setDraftConfig] = useState(() => ({ ...config }));
   const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? false);
   const [postTaskReview, setPostTaskReview] = useState(config.postTaskReview ?? true);
+  const [plannerWriteTools, setPlannerWriteTools] = useState(config.plannerWriteTools ?? false);
+  // Display-only preference, but it follows the same contract as the other
+  // toggles: staged here, committed only when the settings save is accepted.
+  const [autoExpandCot, setAutoExpandCotDraft] = useState(() => autoExpandCotEnabled());
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState("");
@@ -43,11 +50,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     setSaving(true);
     setSaveError("");
     try {
-      const ok = await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove, postTaskReview });
+      const ok = await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove, postTaskReview, plannerWriteTools });
       if (ok === false) {
         savingRef.current = false;
         setSaving(false);
+        return;
       }
+      // The backend accepted the save, so the browser draft may commit too:
+      // cancelling or failing the save leaves the stored preference untouched.
+      setAutoExpandCot(autoExpandCot);
     } catch (error) {
       savingRef.current = false;
       setSaving(false);
@@ -119,35 +130,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 <Terminal size={16} />
                 <h4 id="role-model-settings-title">{t("角色模型配置")}</h4>
               </div>
+              <p className="section-desc">{conversationScoped
+                ? t("当前显示并编辑此对话的模型配置；保存只影响此对话。")
+                : t("当前显示并编辑新对话的默认模型配置；已有对话保留各自配置。")}</p>
               <RoleModelSettings config={draftConfig} setConfig={setDraftConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy || saving} />
             </section>
 
             <ExtensionSettings disabled={saving} />
-            <section className="settings-card" aria-labelledby="language-settings-title">
-              <div className="settings-card-title">
-                <Languages size={16} />
-                <h4 id="language-settings-title">{t("界面语言")}</h4>
-              </div>
-              <div className="settings-language-row">
-                <p className="section-desc">{t("切换语言需确认并重启前端后生效。")}</p>
-                <select
-                  aria-label={t("界面语言")}
-                  disabled={saving}
-                  value={languagePreference}
-                  onChange={(event) => {
-                    const next = event.target.value as LanguagePreference;
-                    if (next === languagePreference) return;
-                    setLanguageError("");
-                    setPendingLanguage(next);
-                  }}
-                >
-                  <option value="auto">{languageLabels.auto}</option>
-                  <option value="zh-CN">{languageLabels["zh-CN"]}</option>
-                  <option value="en">{languageLabels.en}</option>
-                </select>
-              </div>
-              {languageError && <p role="alert" className="settings-language-error">{languageError}</p>}
-            </section>
 
             {/* 图纸审批 */}
             <div className="settings-card">
@@ -182,6 +171,74 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 />
               </label>
             </div>
+
+            {/* Planner 工具 */}
+            <div className="settings-card">
+              <div className="settings-card-title">
+                <FilePenLine size={16} />
+                <h4>{t("Planner 文件工具")}</h4>
+              </div>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("挂载 write 和 edit 工具")}</strong>
+                  <small>{t("允许 Planner 直接修改工作区文件；默认关闭。关闭时不再挂载 write 和 edit，但 read、Bash、node/edge 及扩展工具仍然可用。对后续规划生效。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={plannerWriteTools}
+                  disabled={saving}
+                  onChange={(event) => setPlannerWriteTools(event.target.checked)}
+                  aria-label={t("挂载 Planner write 和 edit 工具")}
+                />
+              </label>
+            </div>
+
+            {/* 思维链展示 */}
+            <div className="settings-card">
+              <div className="settings-card-title">
+                <Brain size={16} />
+                <h4>{t("思维链展示")}</h4>
+              </div>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("执行时自动展开思维链")}</strong>
+                  <small>{t("节点或 Planner 思考时自动展开 COT 卡片。关闭时保持折叠，点击标题才展开；折叠状态不渲染卡片内容。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={autoExpandCot}
+                  disabled={saving}
+                  onChange={(event) => setAutoExpandCotDraft(event.target.checked)}
+                  aria-label={t("执行时自动展开思维链")}
+                />
+              </label>
+            </div>
+
+            <section className="settings-card" aria-labelledby="language-settings-title">
+              <div className="settings-card-title">
+                <Languages size={16} />
+                <h4 id="language-settings-title">{t("界面语言")}</h4>
+              </div>
+              <div className="settings-language-row">
+                <p className="section-desc">{t("切换语言需确认并重启前端后生效。")}</p>
+                <select
+                  aria-label={t("界面语言")}
+                  disabled={saving}
+                  value={languagePreference}
+                  onChange={(event) => {
+                    const next = event.target.value as LanguagePreference;
+                    if (next === languagePreference) return;
+                    setLanguageError("");
+                    setPendingLanguage(next);
+                  }}
+                >
+                  <option value="auto">{languageLabels.auto}</option>
+                  <option value="zh-CN">{languageLabels["zh-CN"]}</option>
+                  <option value="en">{languageLabels.en}</option>
+                </select>
+              </div>
+              {languageError && <p role="alert" className="settings-language-error">{languageError}</p>}
+            </section>
 
             {/* 存储与重置 */}
             <div className="settings-card">

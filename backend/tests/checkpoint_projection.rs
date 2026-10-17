@@ -27,6 +27,10 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
         graph: Graph { nodes: vec![Node { name: "task".into(), task: "test".into() }], ..Default::default() },
         config, planning_id: None, planning: None,
     }).unwrap();
+    runtime.emit(EventKind::ConversationModelsUpdated {
+        settings: RunModelConfig { model: "conversation/model".into(), ..Default::default() },
+        nodes: vec![],
+    }).unwrap();
     runtime.emit(EventKind::Started { execution: execution("node", "task"), message_sequences: None, fresh_restart: false }).unwrap();
     runtime.emit(EventKind::MergerStarted { execution: execution("merge", "merge:task") }).unwrap();
     let db = Connection::open(&path).unwrap();
@@ -42,8 +46,9 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
         assert_eq!(projection["events"], serde_json::json!([]));
         assert_eq!(projection["executions"][0]["output"], "");
         assert_eq!(projection["mergers"][0]["output"], "");
+        assert_eq!(projection["modelConfig"]["model"], "conversation/model");
         let loaded = runtime.store.load("run").unwrap();
-        assert_eq!(loaded.events.len(), 3);
+        assert_eq!(loaded.events.len(), 4);
         assert!(loaded.executions[0].output.is_empty());
         assert_eq!(snapshot_metadata(&loaded).unwrap(), snapshot_metadata(&runtime.state).unwrap());
     }

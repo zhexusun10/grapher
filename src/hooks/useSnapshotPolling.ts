@@ -73,9 +73,12 @@ export function useSnapshotPolling(
     const poll = async () => {
       // Pushes carry the changed Run; the watchdog only re-reads Runs that can
       // still move, so a missed notification cannot freeze the watched view.
-      const targetIds = dirtyRuns.current.size > 0
-        ? [...dirtyRuns.current]
-        : isRuntimeEventsConnected() ? watchdogIds() : ids;
+      // The watched Run is always included so a retried background Run cannot
+      // starve it while that Run's mutex stays busy.
+      const connected = isRuntimeEventsConnected();
+      const targetIds = dirtyRuns.current.size > 0 || connected
+        ? [...new Set([...dirtyRuns.current, ...(connected ? watchdogIds() : [])])]
+        : ids;
       dirtyRuns.current.clear();
       // A slow/unavailable background Run cannot serialize the foreground request.
       await mapWithConcurrency(targetIds, 4, async id => {
@@ -85,8 +88,11 @@ export function useSnapshotPolling(
         if (!isViewed && phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id) && !notifiedVersions.current.has(id)) return;
         const revision = revisions.current.get(id) ?? 0;
         try {
-          const { version, snapshot, activity } = await runtimeService.snapshotIfChanged(versions.current.get(id) ?? null, abort.signal, id || undefined);
+          const { version, snapshot, activity, busy } = await runtimeService.snapshotIfChanged(versions.current.get(id) ?? null, abort.signal, id || undefined);
           if (cancelled || revision !== (revisions.current.get(id) ?? 0)) return;
+          // The Run mutex was busy, so this response says nothing about state:
+          // retry at the dirty cadence instead of waiting for another event.
+          if (busy) dirtyRuns.current.add(id);
           if (snapshot && id && snapshot.runId !== id) return;
           const held = !!heldRunIdRef.current &&
             (id === heldRunIdRef.current || snapshot?.runId === heldRunIdRef.current);

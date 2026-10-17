@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
-import { normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
+import { applyModelConfig, normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import { providerAuth, type ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
@@ -28,6 +28,21 @@ const catalog: ProviderCatalog = {
 };
 
 const legacy: Config = { ...defaultConfig, model: "example/default", thinkingLevel: "high" };
+
+test("conversation selections replace each other without changing non-model settings", () => {
+  const base: Config = { ...legacy, autoApprove: true, maxParallel: 4, roleModels: { planner: { model: "example/default", thinkingLevel: "high" } } };
+  const beta = applyModelConfig(base, { model: "example/plain", thinkingLevel: "off", roleModels: { nodeAgent: { model: "example/plain" } } });
+  assert.equal(beta.model, "example/plain");
+  assert.equal(beta.thinkingLevel, "off");
+  assert.deepEqual(beta.roleModels, { nodeAgent: { model: "example/plain" } });
+  assert.equal(beta.autoApprove, true);
+  assert.equal(beta.maxParallel, 4);
+  const unset = applyModelConfig(beta, null);
+  assert.equal(unset.model, "");
+  assert.equal(unset.thinkingLevel, "low");
+  assert.equal(unset.roleModels, undefined, "an unconfigured conversation must not inherit another conversation's roles");
+  assert.equal(base.model, "example/default", "projection never mutates the input");
+});
 
 test("legacy settings inherit models but Partitioner defaults to thinking low", () => {
   assert.deepEqual(roleModelConfig(legacy, "partitioner"), { model: "example/default", thinkingLevel: "low" });
@@ -212,6 +227,9 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
     assert.ok(render(true, true, false).includes(t('{0}扩展 {1}', t('删除'), 'pi-continuity')));
     assert.ok(render(true, false, false).includes(t('{0}扩展 {1}', t('添加'), 'pi-continuity')));
     assert.ok(!render(true, true, false).includes(t('始终启用，不可删除')));
+    assert.match(render(true, true, false),
+      /more robust loop engineering: auto-recovers unexpected stream interruptions, truncated messages, network disconnections, and API 5h\/week quota limits/,
+      'continuity describes its recovery guarantees');
     for (const enabled of [true, false]) {
       const path = '/Users/jerry/.pi/agent/npm/node_modules/pi-continuity/extensions/index.ts';
       const markup = renderToStaticMarkup(React.createElement(ExtensionItem, {
@@ -225,9 +243,10 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
   } finally { await vite.close(); }
 });
 
-test('auto approval defaults off and post-task review defaults on, including legacy configs', async () => {
+test('approval, review and Planner file-tool defaults survive legacy configs', async () => {
   assert.equal(defaultConfig.autoApprove, false);
   assert.equal(defaultConfig.postTaskReview, true);
+  assert.equal(defaultConfig.plannerWriteTools, false);
   const { createServer } = await import('vite');
   const vite = await createServer({
     configFile: false, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] },
@@ -256,6 +275,40 @@ test('auto approval defaults off and post-task review defaults on, including leg
     // The two toggles remain independent.
     assert.doesNotMatch(checkbox({ ...defaultConfig, autoApprove: true, postTaskReview: false }, '任务后 Planner 复盘'), /checked=""/);
     assert.match(checkbox({ ...defaultConfig, autoApprove: false, postTaskReview: true }, '任务后 Planner 复盘'), /checked=""/);
+    // Planner file tools default off, including legacy configs that predate the toggle.
+    assert.doesNotMatch(checkbox(defaultConfig, '挂载 Planner write 和 edit 工具'), /checked=""/);
+    const legacyPlannerTools: Partial<Config> = { ...defaultConfig }; delete legacyPlannerTools.plannerWriteTools;
+    assert.doesNotMatch(checkbox(legacyPlannerTools as Config, '挂载 Planner write 和 edit 工具'), /checked=""/);
+    assert.match(checkbox({ ...defaultConfig, plannerWriteTools: true }, '挂载 Planner write 和 edit 工具'), /checked=""/);
+
+    // Reasoning cards:
+    // - auto-expansion is a display-only, default-off option rendered below plan
+    //   approval and above the language selector;
+    // - it follows the same contract as the other toggles: staged in the modal
+    //   and committed only after the settings save is accepted.
+    const prefs = await vite.ssrLoadModule('/src/services/displayPreferences.ts');
+    const markup = renderToStaticMarkup(React.createElement(SettingsModal, {
+      isOpen: true, onClose() {}, config: defaultConfig, dataPath: '', onSaveConfig() {},
+    }));
+    const headings = [t('图纸审批'), t('Planner 文件工具'), t('思维链展示'), t('界面语言')]
+      .map(label => markup.indexOf(`>${label}<`));
+    assert.ok(headings.every(index => index >= 0), 'all requested setting sections are present');
+    assert.deepEqual([...headings].sort((a, b) => a - b), headings,
+      'Planner file tools sit between plan approval and reasoning display, above the language selector');
+    const cotToggle = markup.match(/<input\b[^>]*>/g)?.find(input => input.includes(`aria-label="${t('执行时自动展开思维链')}"`));
+    assert.ok(cotToggle, 'reasoning auto-expand checkbox is present');
+    assert.doesNotMatch(cotToggle, /checked=""/, 'reasoning auto-expansion is off by default');
+    try {
+      prefs.setAutoExpandCot(true);
+      const enabled = renderToStaticMarkup(React.createElement(SettingsModal, {
+        isOpen: true, onClose() {}, config: defaultConfig, dataPath: '', onSaveConfig() {},
+      }));
+      const enabledToggle = enabled.match(/<input\b[^>]*>/g)
+        ?.find(input => input.includes(`aria-label="${t('执行时自动展开思维链')}"`));
+      assert.match(enabledToggle ?? '', /checked=""/, 'the toggle reflects the stored preference on open');
+    } finally {
+      prefs.setAutoExpandCot(false);
+    }
   } finally { await vite.close(); }
 });
 
@@ -336,6 +389,21 @@ test("execution metrics keep the actual model after a later settings change", ()
   const replacement = { model: "latest/config", thinkingLevel: "high" as const };
   assert.deepEqual(resolveExecutionModelAndThinking(execution, false, legacy, {}, replacement),
     { model: "actual/provider-model", thinkingLevel: "xhigh" });
+});
+
+test("legacy completed attempts fall back to their node override instead of the conversation default", () => {
+  const execution: Execution = {
+    id: "legacy", node: "task", revision: 1, attempt: 1, sessionId: "session", worktree: "/worktree",
+    before: "base", after: "head", status: "completed", output: "", startedAt: 1000, completedAt: 2000,
+  };
+  const nodeOverride = { model: "antigravity/gemini-3.8-flash", thinkingLevel: "high" as const };
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, false, legacy, {}, nodeOverride), nodeOverride);
+  execution.metrics = {
+    durationSeconds: 50, assistantMessages: 1, tools: 0, toolErrors: 0,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 },
+    model: "actual/model", thinkingLevel: "xhigh",
+  };
+  assert.equal(resolveExecutionModelAndThinking(execution, false, legacy, {}, nodeOverride).model, "actual/model");
 });
 
 test("resolveExecutionModelAndThinking falls back to config and role models when not in output", () => {

@@ -53,7 +53,7 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
         // provider. An unavailable saved value is displayed but not selectable.
         const choices = currentModel && !models.includes(currentModel) ? [currentModel, ...models] : models;
         return (
-          <section className="role-model-card" key={role.id} aria-label={t("{0} 模型配置", role.label)}>
+          <section className="role-model-group" key={role.id} aria-label={t("{0} 模型配置", role.label)}>
             <h5>{role.label}</h5>
             <p>{role.description}</p>
             <div className="form-grid">

@@ -9,7 +9,7 @@ export function ExtensionItem({ extension, disabled, onToggle }: {
 }) {
   const isContinuity = extension.bundled && extension.id === 'npm:pi-continuity';
   const description = isContinuity
-    ? `${extension.source} · extension for more robust loop engineering`
+    ? `${extension.source} · more robust loop engineering: auto-recovers unexpected stream interruptions, truncated messages, network disconnections, and API 5h/week quota limits`
     : extension.bundled ? extension.source : `${extension.source} · ${extension.path}`;
   return <li className="extension-settings-row">
     <div>

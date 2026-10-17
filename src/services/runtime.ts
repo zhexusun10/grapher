@@ -113,7 +113,7 @@ export const runtimeService = {
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
   snapshotForRun: (runId: string, signal?: AbortSignal) => request<Snapshot>("snapshot", { runId }, signal),
   snapshotIfChanged: (version: string | null, signal?: AbortSignal, runId?: string) =>
-    request<{ version: string; snapshot: Snapshot | null; activity?: RuntimeActivity[] }>("snapshot_if_changed", { version, ...(runId ? { runId } : {}) }, signal),
+    request<{ version: string; snapshot: Snapshot | null; activity?: RuntimeActivity[]; busy?: boolean }>("snapshot_if_changed", { version, ...(runId ? { runId } : {}) }, signal),
   history: (runId: string) => {
     const pending = historyRequests.get(runId);
     if (pending) return pending;

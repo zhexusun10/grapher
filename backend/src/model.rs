@@ -141,6 +141,43 @@ pub struct RoleModelConfig {
     pub thinking_level: Option<String>,
 }
 
+/// Conversation-scoped model selection. New Runs inherit the saved settings;
+/// a settings save inside an existing Run records an override here instead.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunModelConfig {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_thinking_level")]
+    pub thinking_level: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub role_models: BTreeMap<String, RoleModelConfig>,
+}
+
+impl Default for RunModelConfig {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            thinking_level: default_thinking_level(),
+            role_models: BTreeMap::new(),
+        }
+    }
+}
+
+impl RunModelConfig {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            model: config.model.clone(),
+            thinking_level: config.thinking_level.clone(),
+            role_models: config.role_models.clone(),
+        }
+    }
+
+    pub fn node_agent_settings(&self) -> RoleModelConfig {
+        node_agent_settings(&self.model, &self.thinking_level, &self.role_models)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -169,24 +206,39 @@ pub struct Config {
     pub auto_approve: bool,
     #[serde(default = "default_post_task_review")]
     pub post_task_review: bool,
+    // Planner file mutations are an explicit capability, not an implication of
+    // model selection. Legacy configs keep the historical write/edit surface.
+    #[serde(default = "default_planner_write_tools")]
+    pub planner_write_tools: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<crate::environment::EnvironmentConfig>,
+}
+
+/// Saved Node Agent settings, before process-level environment overrides.
+pub(crate) fn node_agent_settings(
+    model: &str,
+    thinking_level: &str,
+    role_models: &BTreeMap<String, RoleModelConfig>,
+) -> RoleModelConfig {
+    let settings = role_models.get("nodeAgent");
+    RoleModelConfig {
+        model: settings
+            .map(|settings| settings.model.trim())
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| model.trim())
+            .into(),
+        thinking_level: Some(
+            settings
+                .and_then(|settings| settings.thinking_level.clone())
+                .unwrap_or_else(|| thinking_level.to_string()),
+        ),
+    }
 }
 
 impl Config {
     /// Saved Node Agent settings, before process-level environment overrides.
     pub fn node_agent_settings(&self) -> RoleModelConfig {
-        let settings = self.role_models.get("nodeAgent");
-        RoleModelConfig {
-            model: settings
-                .map(|settings| settings.model.trim())
-                .filter(|model| !model.is_empty())
-                .unwrap_or(self.model.trim())
-                .into(),
-            thinking_level: Some(settings
-                .and_then(|settings| settings.thinking_level.clone())
-                .unwrap_or_else(|| self.thinking_level.clone())),
-        }
+        node_agent_settings(&self.model, &self.thinking_level, &self.role_models)
     }
 
     pub fn validate_model_settings(&self) -> Result<(), String> {
@@ -218,12 +270,16 @@ fn default_max_feedback() -> usize {
     3
 }
 
-fn default_thinking_level() -> String {
+pub(crate) fn default_thinking_level() -> String {
     "low".into()
 }
 
 fn default_post_task_review() -> bool {
     true
+}
+
+fn default_planner_write_tools() -> bool {
+    false
 }
 
 #[cfg(feature = "fixture")]
@@ -551,8 +607,10 @@ pub enum EventKind {
         planning: PlanningSummary,
         approval_required: bool,
     },
-    /// The rework explanation is injected only into the first Planner
-    /// follow-up of a Run. Workspace and node-status context remains dynamic.
+    /// One-shot marker for the rework explanation. The first Planner follow-up
+    /// consumes it; the explanation itself is included only when that follow-up
+    /// also carries transport context. Workspace and node-status context remains
+    /// dynamic.
     PlannerReworkNoteInjected,
     /// A revision Planner turn (follow-up or stopped/interrupted attempt) ended
     /// without committing a graph. History only: the durable planner.jsonl stays
@@ -652,6 +710,12 @@ pub enum EventKind {
     NodeModelsUpdated {
         nodes: Vec<String>,
         settings: RoleModelConfig,
+    },
+    /// Conversation-scoped settings save. `nodes` receive Node Agent overrides;
+    /// the full selection governs nodes this conversation creates later.
+    ConversationModelsUpdated {
+        settings: RunModelConfig,
+        nodes: Vec<String>,
     },
     /// Marks failed/blocked work eligible for explicit recovery as ready
     /// for a new Execution Instance. This is deliberately separate from a
@@ -881,6 +945,10 @@ pub struct Snapshot {
     pub planning: Option<PlanningSummary>,
     pub graph: Graph,
     pub config: Option<Config>,
+    /// Model/thinking selection saved for this conversation. Missing on Runs
+    /// that never changed models; those keep using their creation settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_config: Option<RunModelConfig>,
     pub plan: Option<Plan>,
     pub nodes: BTreeMap<String, NodeState>,
     pub executions: Vec<Execution>,
@@ -936,6 +1004,12 @@ pub fn parse_execution_metrics(
     let mut usage = TokenUsage::default();
     let mut model = None;
     let mut thinking_level = None;
+    // Pi's stream only emits `model_change`/`thinking_level_change` when the
+    // session switches after startup, never for the model selected at launch.
+    // Assistant messages carry the model that actually answered, so keep the
+    // last observed one as a fallback for durable session details.
+    let mut observed_model = None;
+    let mut observed_thinking = None;
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -953,27 +1027,53 @@ pub fn parse_execution_metrics(
                         duration_seconds += elapsed / 1000.0;
                     }
                 }
-                "message_end" => {
+                "message_start" | "message_end" => {
                     if let Some(msg) = value.get("message") {
                         if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
-                            assistant_messages += 1;
-                            if let Some(u) = msg.get("usage") {
-                                usage.input +=
-                                    u.get("input").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.output +=
-                                    u.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.cache_read +=
-                                    u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
-                                usage.cache_write +=
-                                    u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
-                                usage.reasoning +=
-                                    u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
-                                usage.total_tokens +=
-                                    u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
+                            if let Some(model_id) = msg
+                                .get("model")
+                                .and_then(|v| v.as_str())
+                                .filter(|model_id| !model_id.is_empty())
+                            {
+                                observed_model = Some(
+                                    msg.get("provider")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|provider| !provider.is_empty())
+                                        .map_or_else(
+                                            || model_id.to_string(),
+                                            |provider| format!("{provider}/{model_id}"),
+                                        ),
+                                );
+                            }
+                            if let Some(level) = msg
+                                .get("thinkingLevel")
+                                .and_then(|v| v.as_str())
+                                .filter(|level| !level.is_empty())
+                            {
+                                observed_thinking = Some(level.to_string());
+                            }
+                            if value.get("type").and_then(|v| v.as_str()) == Some("message_end") {
+                                assistant_messages += 1;
+                                if let Some(u) = msg.get("usage") {
+                                    usage.input +=
+                                        u.get("input").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as usize;
+                                    usage.output +=
+                                        u.get("output").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as usize;
+                                    usage.cache_read +=
+                                        u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as usize;
+                                    usage.cache_write +=
+                                        u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as usize;
+                                    usage.reasoning +=
+                                        u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as usize;
+                                    usage.total_tokens +=
+                                        u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as usize;
+                                }
                             }
                         }
                     }
@@ -1023,12 +1123,56 @@ pub fn parse_execution_metrics(
         tools,
         tool_errors,
         usage,
-        model,
-        thinking_level,
+        model: model.or(observed_model),
+        thinking_level: thinking_level.or(observed_thinking),
+    }
+}
+
+/// Completion replaces the pre-launch model placeholder with parsed live
+/// metrics. Keep the recorded actual model when the transcript never produced
+/// an assistant message (for example an immediate provider failure).
+fn merge_recorded_model(metrics: &mut ExecutionMetrics, previous: Option<&ExecutionMetrics>) {
+    let Some(previous) = previous else { return };
+    if metrics.model.is_none() {
+        metrics.model = previous.model.clone();
+    }
+    if metrics.thinking_level.is_none() {
+        metrics.thinking_level = previous.thinking_level.clone();
     }
 }
 
 impl Snapshot {
+    /// Older checkpoints stored per-node overrides before Run-level model
+    /// selections existed. Recover the conversation selection from them so the
+    /// Settings projection and future nodes do not fall back to the creation
+    /// config after replaying an old checkpoint.
+    pub fn hydrate_legacy_model_config(&mut self) {
+        if self.model_config.is_some() {
+            return;
+        }
+        let Some(config) = self.config.as_ref() else { return; };
+        let Some(settings) = self.nodes.values()
+            .find_map(|node| node.model_config.clone())
+        else {
+            return;
+        };
+        let mut models = RunModelConfig::from_config(config);
+        models.role_models.insert("nodeAgent".into(), settings);
+        self.model_config = Some(models);
+    }
+
+    /// Creation config overlaid with this conversation's saved model selection.
+    /// Non-model settings and repository stay with the original configuration.
+    pub fn effective_config(&self) -> Option<Config> {
+        let mut config = self.config.clone()?;
+        if let Some(models) = &self.model_config {
+            config.model = models.model.clone();
+            config.thinking_level = models.thinking_level.clone();
+            config.role_models = models.role_models.clone();
+        }
+        Some(config)
+    }
+
     pub fn interrupted_nodes(&self) -> Vec<String> {
         self.nodes
             .iter()
@@ -1452,6 +1596,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = if *paused { "paused" } else { "running" }.into();
         }
         EventKind::FailedNodeModelsUpdated { nodes, settings } => {
+            let mut models = state.model_config.clone()
+                .unwrap_or_else(|| state.config.as_ref().map(RunModelConfig::from_config).unwrap_or_default());
+            models.role_models.insert("nodeAgent".into(), settings.clone());
+            state.model_config = Some(models);
             for name in nodes {
                 if let Some(node) = state.nodes.get_mut(name) {
                     if node.status == "failed" {
@@ -1462,6 +1610,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
         }
         EventKind::NodeModelsUpdated { nodes, settings } => {
+            let mut models = state.model_config.clone()
+                .unwrap_or_else(|| state.config.as_ref().map(RunModelConfig::from_config).unwrap_or_default());
+            models.role_models.insert("nodeAgent".into(), settings.clone());
+            state.model_config = Some(models);
             for name in nodes {
                 let never_executed = !state.executions.iter()
                     .any(|execution| execution.node == *name);
@@ -1469,6 +1621,21 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     if node.status == "failed"
                         || (never_executed && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")) {
                         node.model_config = Some(settings.clone());
+                        node.model_retry = Some(node.status == "failed");
+                    }
+                }
+            }
+        }
+        EventKind::ConversationModelsUpdated { settings, nodes } => {
+            state.model_config = Some(settings.clone());
+            let node_settings = settings.node_agent_settings();
+            for name in nodes {
+                let never_executed = !state.executions.iter()
+                    .any(|execution| execution.node == *name);
+                if let Some(node) = state.nodes.get_mut(name) {
+                    if node.status == "failed"
+                        || (never_executed && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")) {
+                        node.model_config = Some(node_settings.clone());
                         node.model_retry = Some(node.status == "failed");
                     }
                 }
@@ -1719,11 +1886,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     execution.after = Some(head.clone());
                     execution.completed_at = Some(event.timestamp);
                     execution.output_bytes = (*output_bytes).max(output.len());
-                    execution.metrics = metrics.clone().or_else(|| {
-                        (!output.is_empty()).then(|| {
-                            parse_execution_metrics(output, execution.started_at, event.timestamp)
+                    let recorded = execution.metrics.take();
+                    execution.metrics = metrics
+                        .clone()
+                        .or_else(|| {
+                            (!output.is_empty()).then(|| {
+                                parse_execution_metrics(output, execution.started_at, event.timestamp)
+                            })
                         })
-                    });
+                        .or_else(|| recorded.clone());
+                    if let Some(current) = execution.metrics.as_mut() {
+                        merge_recorded_model(current, recorded.as_ref());
+                    }
                     execution.output = String::new();
                     (node_name, lineage, execution.result.clone())
                 });
@@ -1833,15 +2007,22 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 execution.output_bytes = (*output_bytes)
                     .max(execution.output_bytes)
                     .max(execution.output.len());
-                execution.metrics = metrics.clone().or_else(|| {
-                    (!execution.output.is_empty()).then(|| {
-                        parse_execution_metrics(
-                            &execution.output,
-                            execution.started_at,
-                            event.timestamp,
-                        )
+                let recorded = execution.metrics.take();
+                execution.metrics = metrics
+                    .clone()
+                    .or_else(|| {
+                        (!execution.output.is_empty()).then(|| {
+                            parse_execution_metrics(
+                                &execution.output,
+                                execution.started_at,
+                                event.timestamp,
+                            )
+                        })
                     })
-                });
+                    .or_else(|| recorded.clone());
+                if let Some(current) = execution.metrics.as_mut() {
+                    merge_recorded_model(current, recorded.as_ref());
+                }
                 execution.output = String::new();
             }
         }
@@ -2170,15 +2351,22 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 execution.output_bytes = (*output_bytes)
                     .max(execution.output_bytes)
                     .max(execution.output.len());
-                execution.metrics = metrics.clone().or_else(|| {
-                    (!execution.output.is_empty()).then(|| {
-                        parse_execution_metrics(
-                            &execution.output,
-                            execution.started_at,
-                            event.timestamp,
-                        )
+                let recorded = execution.metrics.take();
+                execution.metrics = metrics
+                    .clone()
+                    .or_else(|| {
+                        (!execution.output.is_empty()).then(|| {
+                            parse_execution_metrics(
+                                &execution.output,
+                                execution.started_at,
+                                event.timestamp,
+                            )
+                        })
                     })
-                });
+                    .or_else(|| recorded.clone());
+                if let Some(current) = execution.metrics.as_mut() {
+                    merge_recorded_model(current, recorded.as_ref());
+                }
                 execution.output = String::new();
             }
             let publication_attempt = state
@@ -2212,15 +2400,22 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 execution.output_bytes = (*output_bytes)
                     .max(execution.output_bytes)
                     .max(execution.output.len());
-                execution.metrics = metrics.clone().or_else(|| {
-                    (!execution.output.is_empty()).then(|| {
-                        parse_execution_metrics(
-                            &execution.output,
-                            execution.started_at,
-                            event.timestamp,
-                        )
+                let recorded = execution.metrics.take();
+                execution.metrics = metrics
+                    .clone()
+                    .or_else(|| {
+                        (!execution.output.is_empty()).then(|| {
+                            parse_execution_metrics(
+                                &execution.output,
+                                execution.started_at,
+                                event.timestamp,
+                            )
+                        })
                     })
-                });
+                    .or_else(|| recorded.clone());
+                if let Some(current) = execution.metrics.as_mut() {
+                    merge_recorded_model(current, recorded.as_ref());
+                }
                 execution.output = String::new();
                 execution.node.strip_prefix("merge:").map(|s| s.to_string())
             } else {
@@ -2264,6 +2459,19 @@ fn default_image_type() -> String {
 #[cfg(test)]
 mod metrics_tests {
     use super::*;
+
+    #[test]
+    fn legacy_configs_disable_planner_file_tools_by_default() {
+        let legacy: Config = serde_json::from_value(serde_json::json!({
+            "repository": "repo", "model": "provider/model", "maxParallel": 1
+        })).unwrap();
+        assert!(!legacy.planner_write_tools);
+        let enabled: Config = serde_json::from_value(serde_json::json!({
+            "repository": "repo", "model": "provider/model", "maxParallel": 1,
+            "plannerWriteTools": true
+        })).unwrap();
+        assert!(enabled.planner_write_tools);
+    }
 
     #[test]
     fn streaming_output_is_not_retained_as_business_history() {

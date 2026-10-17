@@ -35,7 +35,7 @@ Goal -> Partitioner --serial--> one Pi agent in the user's project
 ```
 
 - **Partitioner:** a tool-free classifier. Its `parallel` response maps to the internal `graph` route. A provider failure is a failure, not an auto-approved Serial fallback.
-- **Planner:** initially runs in the source project, can write files directly with native Bash, and defines self-contained tasks and edges. Each follow-up reselects a current node worktree (source before execution or after publication), after that workspace's writer drains. It stops after planning and can be called again for an explicit graph revision.
+- **Planner:** initially runs in the source project, can write files directly with native Bash, and defines self-contained tasks and edges. Each follow-up reselects its working directory: a current node worktree while node work is unfinished, otherwise source (before execution, after publication, when every node is completed, or while the Graph awaits approval); node-workspace selection does not wait for its writer. It stops after planning, and can be called again for an explicit graph revision or via **Post-task Planner review** after publication to audit the result, formulate follow-ups, or report to the user without node-to-node messaging (enabling robust loop engineering when paired with Auto Approve).
 - **Compiler:** validates graph structure and produces roots, terminals, and dependency batches.
 - **Runtime:** dispatches ready tasks, tracks executions, handles bounded feedback, invalidation, pause, and publication.
 - **Pi:** the pinned production coding-agent engine, responsible for model calls, tools, and provider authentication.
@@ -97,7 +97,9 @@ Planner writes reach the source **before graph approval**; rejection, failure an
 
 ## Design philosophy
 
-Do not inject prior bias into the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
+- **Don't orchestrate agents. Compile work.** No more "lost in translation": decouple model usage from system orchestration. Deterministic and systemic rules belong to the runtime and compiler, not prompts that expose system internals or orchestrators playing conversational telephone games.
+- **Zero conversational message passing**: Agents never exchange chat messages. Project state and technical constraints are passed exclusively through verifiable Git workspaces and filesystem snapshots, guaranteeing that requirements, types, and code state never degrade across execution hops.
+- **No prior bias injected into the model**: Keep agents flexible and general-purpose. Deterministic and systemic rules belong to the runtime/harness, not to prompts that expose volatile system details.
 
 ## Implementation map
 

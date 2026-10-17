@@ -56,6 +56,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::Paused { .. } => "paused",
         EventKind::FailedNodeModelsUpdated { .. } => "failed_node_models_updated",
         EventKind::NodeModelsUpdated { .. } => "node_models_updated",
+        EventKind::ConversationModelsUpdated { .. } => "conversation_models_updated",
         EventKind::RecoveryQueued { .. } => "recovery_queued",
         EventKind::StopRequested => "stop_requested",
         EventKind::ExecutionStopRequested { .. } => "execution_stop_requested",
@@ -669,6 +670,7 @@ impl Store {
                 state.events.push(event);
             }
         }
+        state.hydrate_legacy_model_config();
         for execution in state.executions.iter_mut().chain(state.mergers.iter_mut()) {
             execution.output_bytes = execution
                 .output_bytes

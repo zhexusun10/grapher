@@ -17,6 +17,20 @@ export function calculateExecutionDurationMs(execution?: Execution | null, now =
   return Math.max(0, now - execution.startedAt);
 }
 
+/** Stable English timestamp for the session details panel. */
+export function formatSessionStartTime(value?: number | string | null): string {
+  const ms = typeof value === "string" ? Number(value) : value;
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) {
+    return "-";
+  }
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export function ExecutionTimeTookText({ execution }: { execution?: Execution | null }) {
   const [now, setNow] = useState(Date.now);
   const running = execution?.status === "running" && execution?.completedAt == null;

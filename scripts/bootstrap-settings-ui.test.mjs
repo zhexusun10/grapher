@@ -26,13 +26,13 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function app(handler) {
+async function app(handler, projects = [{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }]) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "en-US", reducedMotion: "reduce" });
-  await context.addInitScript(({ repository, config }) => {
+  await context.addInitScript(({ projects, config }) => {
     localStorage.setItem("grapher_language_v1", "en");
-    localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }]));
+    localStorage.setItem("grapher_projects", JSON.stringify(projects));
     localStorage.setItem("grapher_config", JSON.stringify({ ...config, model: "stale/browser-model" }));
-  }, { repository, config });
+  }, { projects, config });
   const errors = [], calls = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
@@ -50,7 +50,7 @@ async function app(handler) {
   await page.goto(origin, { waitUntil: "domcontentloaded" });
   return { context, page, errors, calls };
 }
-const nodeModel = page => page.locator(".role-model-card").nth(0).locator("select").first();
+const nodeModel = page => page.locator(".role-model-group").nth(0).locator("select").first();
 async function openSettings(page) {
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.locator(".settings-modal").waitFor();
@@ -79,6 +79,58 @@ test("one stalled history cannot keep validated sidebar cards and saved models l
     assert.equal(await nodeModel(page).inputValue(), "test/old", "backend settings are ready before all histories finish");
     await page.clock.fastForward(15_001);
     await page.locator(".sidebar-load-error").filter({ hasText: "Some conversation histories failed to load" }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("conversation settings stay scoped and new conversations use defaults", { timeout: 30_000 }, async () => {
+  const globalConfig = { ...config, model: "test/plain" };
+  const other = { ...fast, runId: "other", phase: "completed",
+    graph: { ...fast.graph, originalGoal: "Other conversation" },
+    config: { ...config, model: "test/old" },
+    modelConfig: { model: "test/new", thinkingLevel: "high" } };
+  const snapshots = { fast, other };
+  const { context, page, errors } = await app(async (route, command, body) => {
+    if (command === "bootstrap") {
+      await route.fulfill({ json: { result: { ...bootstrap, config: globalConfig, snapshot: fast, runs: ["fast", "other"] } } });
+      return true;
+    }
+    if (command === "history" || command === "snapshot") {
+      await route.fulfill({ json: { result: snapshots[body.runId] || fast } }); return true;
+    }
+    return false;
+  });
+  const openConversation = async id => {
+    await page.locator(`[data-run-id="${id}"]`).click();
+    await page.waitForFunction(id => {
+      const item = document.querySelector(`[data-run-id="${id}"]`);
+      return item?.classList.contains("chosen") && !item.classList.contains("is-loading");
+    }, id);
+  };
+  const thinking = () => page.locator(".role-model-group").nth(0).locator("select").nth(1);
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await page.locator('[data-run-id="other"]').waitFor();
+    await openConversation("other");
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/new", "the conversation override is loaded");
+    assert.equal(await thinking().inputValue(), "high");
+    await page.getByRole("button", { name: "Close dialog" }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+
+    await openConversation("fast");
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/old",
+      "a conversation that never switched models keeps its creation settings");
+    assert.equal(await thinking().inputValue(), "off");
+    await page.getByRole("button", { name: "Close dialog" }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+
+    await page.getByRole("button", { name: "New conversation" }).click();
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/plain",
+      "a new conversation uses the global settings composition");
+    assert.equal(await thinking().inputValue(), "off");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -201,7 +253,7 @@ test("model-specific thinking levels update inherited roles, remain independent 
   });
   try {
     await page.locator('[data-run-id="fast"]').waitFor(); await openSettings(page);
-    const cards = page.locator(".role-model-card");
+    const cards = page.locator(".role-model-group");
     const model = i => cards.nth(i).locator("select").first();
     const thinking = i => cards.nth(i).locator("select").nth(1);
     const levels = i => thinking(i).locator("option").evaluateAll(options => options.map(option => option.value));
@@ -246,7 +298,7 @@ test("saving an incompatible legacy level persists the Pi-adjusted value display
   });
   try {
     await page.locator('[data-run-id="fast"]').waitFor(); await openSettings(page);
-    const thinking = page.locator(".role-model-card").nth(0).locator("select").nth(1);
+    const thinking = page.locator(".role-model-group").nth(0).locator("select").nth(1);
     assert.equal(await thinking.inputValue(), "high");
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).thinkingLevel), "max", "opening settings must not persist corrections");
     await page.locator(".save-config-btn").click();

@@ -5,7 +5,7 @@ import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
-import { isRuntimeEventsConnected, RUNTIME_EVENTS_WATCHDOG_MS, subscribeExecutionOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
+import { isRuntimeEventsConnected, RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS, subscribeExecutionOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
 import { cacheTranscriptWindow, executionTranscriptCache, transcriptFromCache } from "../services/transcriptCache";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
 import { markTranscriptPrepend } from "../services/transcriptScroll";
@@ -129,7 +129,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
         if (page.status !== "running") return null;
         // A missed output notification (dropped SSE frame, half-open stream)
         // must degrade to timer reads instead of stalling the transcript.
-        return isRuntimeEventsConnected() ? RUNTIME_EVENTS_WATCHDOG_MS : liveOutputDelay(emptyPages);
+        return isRuntimeEventsConnected() ? RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS : liveOutputDelay(emptyPages);
       } catch (caught) {
         if (!signal.aborted) { setError(String(caught)); setReady(true); }
         return null;
@@ -148,7 +148,9 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
 
   return <div ref={wrapperRef} data-execution-id={execution.id} data-run-id={runId} aria-busy={!initialReady}>
     {error && <p role="alert">{localizeError(error)} <button onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
-    <TranscriptHistoryStatus loading={loadingOlder} />
+    {/* Live reads keep the status line reserved so paging never shifts output;
+        settled history collapses the idle line to the same rhythm as Planner. */}
+    <TranscriptHistoryStatus loading={loadingOlder} reserve={!settled} />
     {settled && !ready && !error ? <div className="transcript-loading" role="status" aria-label={t("正在加载历史记录…")}>
       <Loader2 size={14} className="spin" aria-hidden="true" />
     </div> : <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}

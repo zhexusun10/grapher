@@ -626,7 +626,7 @@ fn bootstrap_projection(
             max_parallel: 0,
             max_feedback: 3,
             auto_approve: false,
-            post_task_review: true,
+            post_task_review: true, planner_write_tools: false,
             environment: None,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
@@ -774,6 +774,22 @@ fn save_config(config: Config, service: &Arc<Service>) -> Result<Bootstrap, Stri
     save_config_projection(config, None, service, false)
 }
 
+/// A save inside a conversation owns only that Run's model selection. Keep the
+/// last-saved global model defaults so other conversations and new ones do not
+/// inherit this conversation's switch; all non-model settings stay global.
+fn conversation_save_defaults(runtime: &Runtime, config: &Config) -> Config {
+    let mut saved = config.clone();
+    let global = fs::read(runtime.root.join("config.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())
+        .or_else(|| runtime.state.config.clone());
+    if let Some(global) = global {
+        saved.model = global.model;
+        saved.thinking_level = global.thinking_level;
+        saved.role_models = global.role_models;
+    }
+    saved
+}
+
 fn save_config_projection(
     mut config: Config,
     run_id: Option<String>,
@@ -793,12 +809,13 @@ fn save_config_projection(
             return Err("Settings repository does not match the selected Run".into());
         }
     }
-    let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(runtime.root.join("config.json"), bytes).map_err(|e| e.to_string())?;
+    let defaults = run_id.as_ref()
+        .map(|_| conversation_save_defaults(&runtime, &config))
+        .unwrap_or_else(|| config.clone());
+    runtime.save_default_config(&defaults)?;
     if run_id.is_some() {
         runtime.update_node_models(&config)?;
     }
-    runtime.set_latest_node_agent_settings(&config);
     drop(runtime);
     #[cfg(not(feature = "fixture"))]
     {
@@ -1131,6 +1148,20 @@ fn planner_rework_note_pending(snapshot: &Snapshot, revision_run_id: Option<&str
         })
 }
 
+/// Planner transport context narrates an executing Graph. A draft awaiting
+/// approval has no execution to report, and a finished Graph has no work left
+/// to coordinate, so those turns carry only the user's instruction.
+fn planner_followup_context_required(snapshot: &Snapshot) -> bool {
+    snapshot.approved
+        && snapshot.phase != "awaiting_approval"
+        && snapshot.graph.nodes.iter().any(|node| {
+            snapshot
+                .nodes
+                .get(&node.name)
+                .is_none_or(|state| state.status != "completed")
+        })
+}
+
 fn planner_workspace_label(snapshot: &Snapshot, selected_node: Option<&str>) -> String {
     selected_node
         .or_else(|| {
@@ -1153,6 +1184,9 @@ fn planner_followup_prompt_for_workspace(
     include_workspace_move: bool,
     workspace_notice: Option<&str>,
 ) -> String {
+    if !planner_followup_context_required(snapshot) {
+        return instruction.to_string();
+    }
     let workspace = planner_workspace_label(snapshot, workspace_node);
     let move_instruction = include_workspace_move.then_some(
         " You can use the switch_workspace tool to move to another node's latest workspace state.",
@@ -1718,20 +1752,28 @@ fn plan_goal_internal_with_started(
                     },
                     "graph" => {
                         // The planning gate prevents new dispatch/publication.
-                        // The newest recorded workspace is mandatory: start
-                        // immediately even if its node/Merger writer is active
-                        // rather than waiting or retreating to source.
-                        let selected = if revision_run_id.is_some() && !background_review {
+                        // While node work is unfinished, the newest recorded
+                        // workspace is mandatory: start immediately even if its
+                        // node/Merger writer is active rather than waiting or
+                        // retreating to source. Otherwise only source exists
+                        // for this turn and no workspace switch is offered.
+                        let (selected, planner_context_required) = if revision_run_id.is_some() && !background_review {
                             check_planning_cancelled(&owner)?;
                             let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                             if runtime.state.run_id != owner { return Err("Run changed during workspace selection".into()); }
-                            runtime.planner_workspace()?
-                        } else { None };
-                        let planner_workspace_targets = service
-                            .runtime
-                            .lock()
-                            .map_err(|e| e.to_string())?
-                            .planner_workspace_targets(selected.as_ref().map(|execution| execution.node.as_str()))?;
+                            let context_required = planner_followup_context_required(&runtime.state);
+                            let selected = if context_required { runtime.planner_workspace()? } else { None };
+                            (selected, context_required)
+                        } else { (None, false) };
+                        let planner_workspace_targets = if planner_context_required {
+                            service
+                                .runtime
+                                .lock()
+                                .map_err(|e| e.to_string())?
+                                .planner_workspace_targets(selected.as_ref().map(|execution| execution.node.as_str()))?
+                        } else {
+                            serde_json::json!({})
+                        };
                         let planner_workspace_targets_file = directory.join("planner-workspaces.json");
                         fs::write(&planner_workspace_targets_file, planner_workspace_targets.to_string())
                             .map_err(|e| e.to_string())?;
@@ -1755,30 +1797,33 @@ fn plan_goal_internal_with_started(
                             let mut runtime =
                                 service.runtime.lock().map_err(|error| error.to_string())?;
                             let is_approved = runtime.state.approved;
-                            let is_followup = revision_run_id.is_some() && is_approved;
+                            let is_followup = revision_run_id.is_some()
+                                && is_approved
+                                && planner_context_required;
                             let include_rework_note = planner_rework_note_pending(
                                 &runtime.state,
                                 revision_run_id.as_deref(),
                             );
                             let workspace_node = selected.as_ref().map(|execution| execution.node.as_str());
-                            let workspace_targets = runtime.planner_workspace_targets(workspace_node)?;
-                            let include_workspace_move = workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
+                            let include_workspace_move = is_followup
+                                && planner_workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
                             let task = if is_followup {
-                                let task = planner_followup_prompt_for_workspace(
+                                planner_followup_prompt_for_workspace(
                                     &goal,
                                     workspace_node,
                                     &runtime.state,
                                     include_rework_note,
                                     include_workspace_move,
                                     None,
-                                );
-                                if include_rework_note {
-                                    runtime.emit(EventKind::PlannerReworkNoteInjected)?;
-                                }
-                                task
+                                )
                             } else {
                                 goal.clone()
                             };
+                            // The one-shot marker is consumed by this follow-up
+                            // even when the transport context is omitted.
+                            if include_rework_note {
+                                runtime.emit(EventKind::PlannerReworkNoteInjected)?;
+                            }
                             (task, is_followup)
                         };
                         let mut planner_extra_args = Vec::new();
@@ -2560,11 +2605,10 @@ fn drive(service: Arc<Service>) {
                                 }
                                 let review = {
                                     let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                                    runtime.state.config.as_ref().filter(|config| config.post_task_review)
+                                    runtime.state.effective_config().filter(|config| config.post_task_review)
                                         .filter(|_| runtime.state.plan_type.as_deref() == Some("graph")
                                             && runtime.state.phase == "completed" && !runtime.state.stop_requested
                                             && runtime.state.nodes.values().all(|node| node.status == "completed"))
-                                        .cloned()
                                 };
                                 if let Some(config) = review {
                                     if let Err((error, _)) = plan_goal_internal_with_started(
@@ -2832,7 +2876,18 @@ fn control(
             .and_then(|planning| planning.workspace_execution_id.as_deref())
             .and_then(|execution_id| runtime.state.executions.iter().find(|execution| execution.id == execution_id))
             .map(|execution| execution.node.as_str());
-        let workspace_targets = runtime.planner_workspace_targets(workspace_node)?;
+        let is_followup = active_run_id.is_some()
+            && runtime.state.approved
+            && runtime.state.plan_type.as_deref() == Some("graph")
+            && planner_followup_context_required(&runtime.state);
+        // An empty file makes a switch_workspace call left over from the
+        // launch-time tool registration fail once this turn no longer has
+        // another workspace worth selecting.
+        let workspace_targets = if is_followup {
+            runtime.planner_workspace_targets(workspace_node)?
+        } else {
+            serde_json::json!({})
+        };
         let include_workspace_move = workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
         let workspace_targets_file = runtime
             .state
@@ -2842,25 +2897,23 @@ fn control(
         if let Some(file) = &workspace_targets_file {
             fs::write(file, workspace_targets.to_string()).map_err(|e| e.to_string())?;
         }
-        let is_followup = active_run_id.is_some()
-            && runtime.state.approved
-            && runtime.state.plan_type.as_deref() == Some("graph");
         let message = if is_followup {
-            let message = planner_followup_prompt_for_workspace(
+            planner_followup_prompt_for_workspace(
                 instruction.trim(),
                 workspace_node,
                 &runtime.state,
                 include_rework_note,
                 include_workspace_move,
                 None,
-            );
-            if include_rework_note {
-                runtime.emit(EventKind::PlannerReworkNoteInjected)?;
-            }
-            message
+            )
         } else {
             instruction.trim().to_string()
         };
+        // The one-shot marker is consumed by this follow-up even when the
+        // transport context itself is omitted.
+        if include_rework_note {
+            runtime.emit(EventKind::PlannerReworkNoteInjected)?;
+        }
         let snapshot = runtime.state.clone();
         drop(runtime);
         if let Some(id) = run_id {
@@ -2974,7 +3027,7 @@ fn control(
             if runtime.path_is_running(std::path::Path::new(&previous.worktree)) {
                 return Err("This workspace is currently in use; wait for it to finish".into());
             }
-            let config = runtime.state.config.clone().ok_or("Missing config")?;
+            let config = runtime.state.effective_config().ok_or("Missing config")?;
             // The model turn continues the previous Pi session in its original
             // directory. The new execution owns the native identity so it stays
             // steerable in its own right.
@@ -4467,11 +4520,13 @@ pub fn dispatch(
             .to_owned();
         let Ok(runtime) = service.runtime.try_lock() else {
             // The Run mutex is held by long filesystem work. Report progress
-            // instead of queueing this poll behind the lock.
+            // instead of queueing this poll behind the lock, and tell the client
+            // to retry soon rather than wait for another change notification.
             return Ok(serde_json::json!({
                 "version": requested,
                 "snapshot": null,
-                "activity": activity
+                "activity": activity,
+                "busy": true
             }));
         };
         let version = runtime.snapshot_version();
@@ -4879,11 +4934,13 @@ fn broadcast_sse_bytes(bytes: &[u8]) {
     let Ok(mut subscribers) = sse_subscribers().lock() else {
         return;
     };
-    subscribers.retain(|(_, tx)| {
-        !matches!(
-            tx.try_send(bytes.to_vec()),
-            Err(std::sync::mpsc::TrySendError::Disconnected(_))
-        )
+    subscribers.retain(|(_, tx)| match tx.try_send(bytes.to_vec()) {
+        Ok(()) => true,
+        // A full queue already missed this frame, which may be the only terminal
+        // notification for a Run. Drop the subscriber so the browser reconnects
+        // and re-reads durable state instead of silently staying stale.
+        Err(std::sync::mpsc::TrySendError::Full(_))
+        | Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
     });
     ACTIVE_SSE_CLIENTS.store(subscribers.len(), Ordering::SeqCst);
 }

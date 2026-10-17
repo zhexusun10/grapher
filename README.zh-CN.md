@@ -1,8 +1,9 @@
 # Grapher
 
-> **不编排智能体，编译工作。**
+> **不编排智能体，编译工作。彻底告别“转述失真”。**
 >
-> Don't orchestrate agents. Compile work.
+> **Don't orchestrate agents. Compile work.**  
+> **No more "lost in translation".**
 
 [![CI](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -30,7 +31,7 @@ Grapher
 **核心区别：**
 
 1. **执行循环中没有主管** — LLM 规划执行图后退出调度器。
-2. **并行工作继承代码，不继承对话** — 每个节点接收已完成父节点的工作区状态。
+2. **彻底告别转述失真（Zero Conversational Message Passing，绝无 Lost in Translation）** — 传统多 Agent 系统依赖密集的 Agent 间对话，技术约束与设计细节在层层“传话筒”汇报中极易衰减和失真。Grapher 在节点间完全杜绝对话消息传递，任务间继承的是确定性的 Git 代码状态与文件历史，而不是容易产生幻觉的聊天记录。
 3. **执行图就是可执行状态** — 依赖、重试、反馈和发布都是明确的运行时状态转换。
 4. **没有预定义 Agent 角色** — 所有节点运行通用 Coding Agent；专业化来自任务上下文，而不是硬编码角色。
 
@@ -46,7 +47,7 @@ Grapher
 
 - **集成式 Coding Agent 环境** — 在同一个界面中与 Coding Agent 对话、管理服务商认证与模型设置、查看工具调用和日志，并进行干预。
 - **确定性编排** — 调度、依赖、结果失效和有界反馈是明确的 Rust 状态转换。我们不向模型注入 prior bias；模型使用层与系统编排层解耦，让模型保持灵活通用：确定性、系统性规则由 runtime/harness 负责，而不是靠 prompt 向模型暴露系统细节。
-- **工作区继承** — 子节点继承父节点的 Git 历史和完整项目文件状态，包括匹配 `.gitignore` 的文件。线性任务可以交接 Git 工作区；fan-out 分支使用独立 Git worktree；Git 负责冲突和发布。对话始终属于各自节点。
+- **工作区继承（传递代码，而非闲聊）** — 子节点直接继承父节点的 Git 提交历史以及包含 `.gitignore` 在内的完整项目文件状态。节点之间绝不互相“对齐聊天”，彻底避免技术细节在多轮转述中失真（Lost in translation）；每个 Agent 的上下文保持干净专注，代码的交接与冲突由 Git 机制精确处理。线性任务可以交接 Git 工作区；fan-out 分支使用独立 Git worktree；Git 负责冲突和发布。
 - **可检查的执行图** — 执行前查看并批准任务图；执行中可以看到依赖、并行分支和有界返工。
 - **本地优先** — 在你的机器上运行，并在宣告完成前把有效的 Graph 结果发布回代码库。模型请求仍会发送给你配置的服务商。
 
@@ -117,6 +118,7 @@ npm start
 - 工作区状态继承
 - 有界反馈边
 - 结果发布机制
+- 任务后 Planner 复盘与闭环自主迭代（Loop Engineering）
 - Linux 沙箱（bubblewrap）
 - Windows/macOS/Linux 发布包与一键开发启动
 
@@ -157,7 +159,9 @@ Partitioner
                           发布到项目
 ```
 
-模型负责拆分工作并执行具体任务，编译器负责验证图。编译完成后，Planner 可以退出：调度不再依赖协调器的下一条消息。普通依赖构成 DAG：子节点在父节点完成后运行，并继承父节点的 Git 历史以及完整项目文件状态，包括匹配 `.gitignore` 的路径。已应用的反馈会向固定目标发送有界返工指令，并把发送方已完成的工作区交给目标；目标继续自己的对话。所有项目输出都是 Git 提交；对话不会在节点之间交换。
+模型负责拆分工作并执行具体任务，编译器负责验证图。编译完成后，Planner 可以退出：调度不再依赖协调器的下一条消息。普通依赖构成 DAG：子节点在父节点完成后运行，并继承父节点的 Git 历史以及完整项目文件状态，包括匹配 `.gitignore` 的路径。已应用的反馈会向固定目标发送有界返工指令，并把发送方已完成的工作区交给目标；目标继续自己的对话。所有项目输出都是 Git 提交；节点之间绝不交换对话上下文，确保技术意图与代码真实状态永远不会在多 Agent 传话中失真（Never lost in translation）。
+
+开启**任务后 Planner 复盘**（Post-task Planner review）后，当图任务全部执行完毕并将代码发布写回源项目后，系统会自动唤起 Planner 审查最新状态并自主决定下一步行动——包括审核工作区、制定新计划/派发新节点、向用户汇报结果或完成收尾工作等，不做人工限制。整个流程始终严格遵循节点间无 message 传递的核心设计（通过 Git 工作区状态继承而非会话传递）。配合**自动批准（Auto Approve）**，可形成鲁棒的 Loop Engineering 自主迭代闭环。
 
 ## 架构
 

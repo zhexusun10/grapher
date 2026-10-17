@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TOOL_OUTPUT_PREVIEW_BYTES, toolOutputPreview, truncateToolText } from "../src/services/toolOutput.ts";
+import { TOOL_OUTPUT_PREVIEW_BYTES, toolOutputPreview, truncateToolArgs, truncateToolText } from "../src/services/toolOutput.ts";
 
 const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
 
@@ -38,4 +38,22 @@ test("tool output bounds a joined content array rather than allowing one budget 
   assert.ok(!result.text.includes("NEVER_RETAIN_THIS_TAIL"));
   assert.deepEqual(toolOutputPreview([{ type: "text", text: "" }, { type: "text", text: "ok" }]), { text: "\nok", truncated: false });
   assert.deepEqual(toolOutputPreview(null), { text: "", truncated: false });
+});
+
+test("tool arguments bound each large value while preserving keys, shape and identity", () => {
+  const small = { command: "npm test", nested: { flag: true, list: [1, "ok"] } };
+  assert.equal(truncateToolArgs(small).args, small, "small arguments keep their object identity");
+  assert.equal(truncateToolArgs(small).truncated, false);
+  assert.deepEqual(truncateToolArgs(undefined), { args: undefined, truncated: false });
+
+  const giant = "x".repeat(TOOL_OUTPUT_PREVIEW_BYTES + 1);
+  const result = truncateToolArgs({ path: "src/big.ts", content: giant, list: [giant, "keep"] });
+  assert.equal(result.truncated, true);
+  assert.equal(result.args.path, "src/big.ts");
+  assert.equal(result.args.list[1], "keep");
+  for (const value of [result.args.content, result.args.list[0]]) {
+    assert.ok(bytes(value) <= TOOL_OUTPUT_PREVIEW_BYTES);
+    assert.ok(value.endsWith("\n..."));
+  }
+  assert.ok(!JSON.stringify(result.args).includes("x".repeat(TOOL_OUTPUT_PREVIEW_BYTES + 1)));
 });

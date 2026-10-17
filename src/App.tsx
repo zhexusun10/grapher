@@ -9,13 +9,14 @@ import {
   type Snapshot, type PlanRouteType, type TranscriptItem,
   type RuntimeActivity,
   type PlanningSummary, type PlanMode, type ChatMessage,
-  type ImageAttachment, type FileAttachment, type ChatMessageVersion
+  type ImageAttachment, type FileAttachment, type ChatMessageVersion,
+  type ConversationModelConfig
 } from "./types";
 import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
 import { providerAuth } from "./services/providerAuth";
-import { modelRoles, planningModelRoles, roleModelConfig } from "./modelConfig";
+import { applyModelConfig, modelRoles, planningModelRoles, roleModelConfig } from "./modelConfig";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
@@ -49,6 +50,26 @@ import { EditorModal } from "./components/modals/EditorModal";
 
 const nodeTypes = { work: TaskNode };
 const edgeTypes = { workflow: SmoothWorkflowEdge };
+
+// A conversation without an explicit override keeps the model composition it
+// was created with. Snapshots always describe their own Run, never whichever
+// conversation happened to save settings last.
+function snapshotModelConfig(snapshot: Snapshot | null | undefined, repository: string): ConversationModelConfig | null {
+  if (!snapshot?.runId || !snapshotBelongsToWorkspace(snapshot, repository)) return null;
+  if (snapshot.modelConfig) return snapshot.modelConfig;
+  const config = snapshot.config;
+  if (!config) return null;
+  // Older checkpoints may only carry per-node Node Agent overrides.
+  const nodeSettings = Object.values(snapshot.nodes ?? {})
+    .find(node => node.modelConfig)?.modelConfig;
+  return {
+    model: config.model,
+    thinkingLevel: config.thinkingLevel,
+    roleModels: nodeSettings
+      ? { ...config.roleModels, nodeAgent: nodeSettings }
+      : config.roleModels,
+  };
+}
 
 export default function App() {
   const [state, setState] = useSnapshotState(emptySnapshot);
@@ -89,6 +110,9 @@ export default function App() {
     } catch { }
     return { ...initialConfig, repository: normalizeWorkspacePath(initialConfig.repository), maxFeedback: 3 };
   });
+  // Model defaults for new conversations. A settings save inside a conversation
+  // records a conversation override instead of replacing these defaults.
+  const [defaultSettings, setDefaultSettings] = useState<Config>(() => ({ ...config }));
   const [repoInfo, setRepoInfo] = useState<RepositoryInfo | null>(null);
   const [envOverrides, setEnvOverrides] = useState<Record<string, string>>({});
   const repositoryStatus = useRepositoryStatus(config.repository);
@@ -821,13 +845,22 @@ export default function App() {
     }
 
     setRepoInfo(activeInfo);
-    // Bootstrap owns the persisted model. A browser cache from an older session
-    // must not silently replace it or write it back to the backend.
-    const nextConfigObj: Config = {
-      ...((acceptedSettingsRef.current !== acceptedAtStart ? acceptedSettingsRef.current : null) ?? data.config),
-      repository: activeRepo || (activeInfo ? activeInfo.path : ""),
+    // Bootstrap owns the defaults for new conversations. A selected conversation
+    // applies its own model selection once its snapshot becomes foreground.
+    const activeRepository = activeRepo || (activeInfo ? activeInfo.path : "");
+    const accepted = acceptedSettingsRef.current !== acceptedAtStart ? acceptedSettingsRef.current : null;
+    let nextConfigObj: Config = {
+      ...(accepted ?? data.config),
+      repository: activeRepository,
       maxFeedback: 3,
     };
+    // A settings save accepted while this bootstrap was in flight wins over the
+    // disk snapshot it was based on.
+    if (acceptedSettingsRef.current !== acceptedAtStart && acceptedSettingsRef.current) {
+      nextConfigObj = { ...acceptedSettingsRef.current, repository: activeRepository, maxFeedback: 3 };
+    } else {
+      setDefaultSettings({ ...data.config, maxFeedback: 3 });
+    }
     setConfig(nextConfigObj);
     setIsBootstrapReady(true);
     if (data.dataPath) {
@@ -840,7 +873,7 @@ export default function App() {
     try {
       localStorage.setItem("grapher_config", JSON.stringify(nextConfigObj));
     } catch { }
-    if (nextConfigObj.repository && nextConfigObj.repository !== data.config.repository) {
+    if (nextConfigObj.repository && workspaceKey(nextConfigObj.repository) !== workspaceKey(data.config.repository)) {
       void runtimeService.saveConfig(nextConfigObj).catch(() => { });
     }
 
@@ -978,6 +1011,10 @@ export default function App() {
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
       setSelected("");
+      const conversationConfig = snapshotModelConfig(data.snapshot, activeRepository);
+      if (!accepted && conversationConfig) {
+        setConfig(prev => applyModelConfig(prev, conversationConfig));
+      }
     } else {
       // Opening the UI must not reset or delete another Run's checkout.
       setState(emptySnapshot);
@@ -1026,7 +1063,7 @@ export default function App() {
           const normalizedPath = normalizeWorkspacePath(info.path);
           const scope = detachForeground(normalizedPath);
           setRepoInfo({ ...info, path: normalizedPath });
-          setConfig((prev) => ({ ...prev, repository: normalizedPath }));
+          setConfig((prev) => applyModelConfig({ ...prev, repository: normalizedPath }, defaultSettings));
           const item: ProjectItem = {
             id: normalizedPath,
             name: info.name,
@@ -1065,8 +1102,10 @@ export default function App() {
     if (workspaceKey(config.repository) === workspaceKey(proj.path)) return;
     setSwitchingProjectPath(proj.path);
     const scope = detachForeground(proj.path);
-    // Clear the old view synchronously, before repository detection can yield.
-    setConfig(prev => ({ ...prev, repository: normalizeWorkspacePath(proj.path) }));
+    // Reset to new-conversation defaults synchronously; the selected Run applies
+    // its own model selection once its snapshot is loaded.
+    setConfig(prev => applyModelConfig(
+      { ...prev, repository: normalizeWorkspacePath(proj.path) }, defaultSettings));
     setRepoInfo(null);
     setState(emptySnapshot);
     setRouteType("undecided");
@@ -1076,9 +1115,11 @@ export default function App() {
     resetSessionMessages();
     return run(async () => {
       let loadedSnapshot: Snapshot = emptySnapshot;
+      let targetPath = normalizeWorkspacePath(proj.path);
       try {
         const info = await runtimeService.detectRepository(proj.path);
         if (!planningRecovery.current(scope)) return;
+        if (info) targetPath = normalizeWorkspacePath(info.path);
         if (info) {
           setRepoInfo({ ...info, path: normalizeWorkspacePath(info.path) });
           setConfig((prev) => ({ ...prev, repository: normalizeWorkspacePath(info.path) }));
@@ -1129,6 +1170,12 @@ export default function App() {
           setPlannerStream(initialPlannerStream);
           setGoal("");
           resetSessionMessages();
+        }
+        const conversationConfig = snapshotModelConfig(loadedSnapshot, targetPath);
+        if (conversationConfig) {
+          setConfig((prev) => workspaceKey(prev.repository) === workspaceKey(targetPath)
+            ? applyModelConfig(prev, conversationConfig)
+            : prev);
         }
         setError("");
         void planningRecovery.restore(scope, loadedSnapshot);
@@ -1194,7 +1241,7 @@ export default function App() {
           detachForeground("");
           setPlannerStream(initialPlannerStream);
           setConfig((prev) => {
-            const next = { ...prev, repository: "" };
+            const next = applyModelConfig({ ...prev, repository: "" }, defaultSettings);
             try { localStorage.setItem("grapher_config", JSON.stringify(next)); } catch { }
             return next;
           });
@@ -1252,6 +1299,7 @@ export default function App() {
       resetSessionMessages();
       setPlannerStream(initialPlannerStream);
       setState(emptySnapshot);
+      setConfig(prev => applyModelConfig(prev, defaultSettings));
       setRouteType("undecided");
       setGoal("");
       setSelected("");
@@ -1262,6 +1310,8 @@ export default function App() {
           if (deleteGeneration !== foregroundGeneration.current || !planningRecovery.current(scope)) return;
           if (!snapshotBelongsToWorkspace(snapshot, config.repository)) throw new Error("Workspace ownership mismatch");
           setState(snapshot);
+          setConfig(prev => applyModelConfig(
+            prev, snapshotModelConfig(snapshot, config.repository) ?? defaultSettings));
           setRouteType(deduceRouteType(snapshot));
           setGoal(snapshot.graph.originalGoal || "");
           setSessionEntries(messagesByRunRef.current.get(snapshot.runId) ?? []);
@@ -1271,11 +1321,13 @@ export default function App() {
           if (deleteGeneration !== foregroundGeneration.current || !planningRecovery.current(scope)) return;
           setRouteType("undecided");
           setState(emptySnapshot);
+          setConfig(prev => applyModelConfig(prev, defaultSettings));
           setGoal("");
           setSelected("");
         }
       } else {
         setState(emptySnapshot);
+        setConfig(prev => applyModelConfig(prev, defaultSettings));
         setGoal("");
         setLandingGoal(loadLandingDraft(config.repository));
         setSelected("");
@@ -1304,6 +1356,7 @@ export default function App() {
   // executing the previous Run; never reset or terminate it from this button.
   const handleNewConversation = () => {
     detachForeground(config.repository);
+    setConfig(prev => applyModelConfig(prev, defaultSettings));
     resetSessionMessages();
     setState(emptySnapshot);
     setRouteType("undecided");
@@ -1312,6 +1365,30 @@ export default function App() {
     setLandingGoal(loadLandingDraft(config.repository));
     setSelected("");
     setError("");
+  };
+
+  // Settings is a projection of the selected conversation. Re-read the Run
+  // before mounting the modal so a stale local copy cannot keep showing the
+  // model selection from an older checkpoint/publication.
+  const handleOpenSettings = async () => {
+    const runId = state.runId;
+    const generation = foregroundGeneration.current;
+    if (runId && !runId.startsWith("pending-")) {
+      try {
+        const snapshot = await runtimeService.snapshotForRun(runId);
+        if (generation !== foregroundGeneration.current) return;
+        if (snapshot.runId === runId && snapshotBelongsToWorkspace(snapshot, config.repository)) {
+          const conversationConfig = snapshotModelConfig(snapshot, config.repository);
+          if (conversationConfig) {
+            setConfig(prev => applyModelConfig(prev, conversationConfig));
+          }
+        }
+      } catch {
+        if (generation !== foregroundGeneration.current) return;
+        // Opening Settings must remain available when a snapshot read fails.
+      }
+    }
+    setModal("settings");
   };
 
   const handleCloseSettings = useCallback(() => setModal(null), []);
@@ -1341,6 +1418,7 @@ export default function App() {
         } catch { }
       }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
+      setDefaultSettings({ ...boot.config, maxFeedback: 3 });
     } catch (error) {
       throw new Error(t("保存设置失败：{0}", String(error)));
     }
@@ -3037,7 +3115,7 @@ export default function App() {
     newConversation: useStableCallback(handleNewConversation), send: useStableCallback(handleSendMessage),
     edit: useStableCallback(handleEditMessageSubmit), switchVersion: useStableCallback(handleSwitchMessageVersion),
     control: useStableCallback(control), save: useStableCallback(save),
-    openSettings: useStableCallback(() => setModal("settings")), openEditor: useStableCallback(() => setModal("editor")),
+    openSettings: useStableCallback(handleOpenSettings), openEditor: useStableCallback(() => setModal("editor")),
     openApproval: useStableCallback(() => setModal("approval")), retryPublication: useStableCallback(() => control("retry_publication")),
     plan: useStableCallback(async (val: string, options?: Parameters<typeof handlePlanGoal>[1]) => (await handlePlanGoal(val, options)) !== false),
   };
@@ -3071,6 +3149,7 @@ export default function App() {
         }
         setState(snapshot);
         markSnapshotRead(snapshot);
+        setConfig(prev => applyModelConfig(prev, snapshotModelConfig(snapshot, config.repository) ?? defaultSettings));
         setRouteType(deduceRouteType(snapshot));
         setGoal(snapshot.graph.originalGoal || (id ? runLabels[id] : "") || "");
         if (id !== state.runId) {
@@ -3286,6 +3365,7 @@ export default function App() {
                 dataPath={dataPath}
                 envOverrides={envOverrides}
                 error={error}
+                conversationScoped={!!state.runId}
                 onSaveConfig={handleSaveConfig}
               />
             )}

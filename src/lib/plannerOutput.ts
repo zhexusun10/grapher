@@ -26,6 +26,54 @@ export function plannerTurnIds(events: ReadonlyArray<PlannerEvent>): string[] {
   return turns.sort((a, b) => (a.createdAt - b.createdAt) || (a.index - b.index)).map(turn => turn.id);
 }
 
+/** Durable Planner revisions whose JSONL is replayed as conversation history.
+ *
+ * A live Planner transcript already renders the attempt it owns. Replaying
+ * that attempt's growing JSONL at the same time duplicates its user turn,
+ * thinking and tools. Fully committed turns stay in history, including during
+ * a continuation. `savedPlannerId` may still name the last completed turn
+ * until the backend announces the new revision, so only attempts that are not
+ * committed yet are withheld from the replay.
+ */
+export function plannerHistoryIds(options: {
+  events: ReadonlyArray<PlannerEvent>;
+  savedPlannerId?: string;
+  planning: boolean;
+  live: boolean;
+  continuation: boolean;
+  backgroundReview: boolean;
+  recoveredPlanningId?: string;
+  routeType: string;
+  representedIds?: ReadonlyArray<string>;
+}): string[] {
+  const { events, savedPlannerId, planning, live, continuation, backgroundReview,
+    recoveredPlanningId, routeType } = options;
+  // Recovery discovers the planning ID before the route is known. Mount the
+  // durable activity poller now, rather than waiting for the finished graph.
+  if ((!recoveredPlanningId && routeType !== "graph") ||
+    (planning && !backgroundReview && !recoveredPlanningId && !continuation)) return [];
+  const completed = plannerTurnIds(events);
+  const committed = new Set(completed);
+  const ids = savedPlannerId ? [...completed, savedPlannerId] : completed;
+  // The live stream owns exactly the uncommitted attempt named by the snapshot.
+  const streamingId = planning && live && savedPlannerId && !committed.has(savedPlannerId)
+    ? savedPlannerId : "";
+  const represented = options.representedIds ?? [];
+  const seen = new Set<string>();
+  return ids.filter(id => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    if (id === streamingId) return false;
+    // Only suppress a durable turn while it is actively streaming. Once
+    // planning stops, the JSONL is authoritative even if SSE was partial.
+    // A continuation keeps earlier represented turns; only its new revision is live.
+    if (!continuation && planning && live && (id === savedPlannerId || represented.includes(id))) {
+      return false;
+    }
+    return true;
+  });
+}
+
 export function activePlannerOutput(output: string, edits: Array<{ old_instruction?: string; nextPlanningId?: string }>): string {
   let active = output;
   for (const edit of edits) {

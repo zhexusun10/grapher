@@ -10,9 +10,11 @@ export interface OutputAvailableEvent {
   settled?: boolean;
 }
 
-/** Bounded re-check while pushes are nominally connected. A dropped frame or a
- * half-open stream must degrade to timer polling instead of freezing the view. */
-export const RUNTIME_EVENTS_WATCHDOG_MS = 5_000;
+/** Bounded re-check of Run state while pushes are nominally connected. A dropped
+ * frame or a half-open stream must degrade to timer polling, not freeze the view. */
+export const RUNTIME_EVENTS_WATCHDOG_MS = 2_000;
+/** Transcript bytes are latency-sensitive: a missed output push costs at most this. */
+export const RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS = 1_000;
 /** EventSource stops retrying after a fatal HTTP failure; recreate it ourselves. */
 export const RUNTIME_EVENTS_RETRY_MS = 1_000;
 

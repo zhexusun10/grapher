@@ -18,15 +18,24 @@ import { fileURLToPath } from 'node:url';
 let input = ''; for await (const chunk of process.stdin) input += chunk;
   if (process.env.GRAPHER_MODE === 'planner') {
   const context = input.startsWith('You are now at ') && input.includes('\nCurrent graph node status:\n');
-  if (!context || !input.endsWith('\nadditional information'))
-    throw Error('Every Planner follow-up must contain the current workspace and graph status');
+  const bare = input === 'additional information';
+  if (!context && !bare)
+    throw Error('Planner follow-up must be either transport context or a bare instruction');
+  if (context && !input.endsWith('\nadditional information'))
+    throw Error('Transport context must end with the user instruction');
+  if (context && process.env.GRAPHER_PLANNER_FOLLOWUP !== 'true')
+    throw Error('Context-bearing Planner turn must expose follow-up workspace mode');
+  if (bare && process.env.GRAPHER_PLANNER_FOLLOWUP !== 'false')
+    throw Error('Context-free Planner turn must not expose switch_workspace');
   const arg = name => process.argv[process.argv.indexOf(name)+1];
   const directory = arg('--session-dir'), id = arg('--session-id');
   const file = path.join(directory, `grapher_${id}.jsonl`);
   const rework = `Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the updated dependencies' workspace states); unrelated branches keep their work.`;
   const priorTurn = fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes('preserved history');
-  if (input.includes(rework) !== !priorTurn)
-    throw Error('Planner rework note must appear only on the first follow-up');
+  if (bare && input.includes(rework))
+    throw Error('A bare Planner turn must not contain the rework note');
+  if (context && input.includes(rework) !== !priorTurn)
+    throw Error('Planner rework note must appear only on the first context-bearing follow-up');
   if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n');
   const header = JSON.parse(fs.readFileSync(file,'utf8').split('\n')[0]);
   // Pi matches a custom-session-dir resume by the literal header cwd
@@ -184,14 +193,21 @@ fn planner_workspace_tracks_linear_and_parallel_frontiers_across_turns_and_reloa
         let selected = second.planning.as_ref().unwrap();
         assert_eq!(selected.worktree.as_deref(), Some(right.worktree.as_str()));
         assert_eq!(selected.workspace_execution_id.as_deref(), Some(right.id.as_str()));
-        let join = {
+        let _join = {
             let mut runtime = service.runtime.lock().unwrap();
             if runtime.state.paused { runtime.pause(false).unwrap(); }
             let job = runtime.jobs().unwrap().remove(0);
             complete(&mut runtime, job)
         };
         let final_turn = turn(&service, &config).unwrap();
-        assert_eq!(final_turn.planning.as_ref().unwrap().workspace_execution_id.as_deref(), Some(join.id.as_str()));
+        // With every node completed there is no node workspace to follow;
+        // the next turn uses source and offers no workspace switch.
+        assert_eq!(final_turn.planning.as_ref().unwrap().workspace_execution_id, None);
+        assert_eq!(
+            PathBuf::from(final_turn.planning.as_ref().unwrap().worktree.as_deref().unwrap())
+                .canonicalize().unwrap(),
+            repo.canonicalize().unwrap()
+        );
         let runtime = service.runtime.lock().unwrap();
         let session = runtime.root.join("planner-sessions").join(&final_turn.run_id);
         let files: Vec<_> = fs::read_dir(session).unwrap().flatten()
@@ -204,6 +220,30 @@ fn planner_workspace_tracks_linear_and_parallel_frontiers_across_turns_and_reloa
         assert_eq!(replay.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerReworkNoteInjected)).count(), 1);
         assert_eq!(replay.planning.unwrap().worktree, final_turn.planning.unwrap().worktree);
     }
+}
+
+#[test]
+fn completed_graph_consumes_rework_marker_and_uses_source_without_switch() {
+    let (_temp, repo, service, config) = setup(false);
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        while !runtime.state.nodes.values().all(|node| node.status == "completed") {
+            let jobs = runtime.jobs().unwrap();
+            assert!(!jobs.is_empty());
+            for job in jobs { complete(&mut runtime, job); }
+        }
+    }
+    let snapshot = turn(&service, &config).unwrap();
+    let planning = snapshot.planning.as_ref().unwrap();
+    assert_eq!(planning.workspace_execution_id, None);
+    assert_eq!(
+        PathBuf::from(planning.worktree.as_deref().unwrap()).canonicalize().unwrap(),
+        repo.canonicalize().unwrap()
+    );
+    let replay = service.runtime.lock().unwrap().store.load(&snapshot.run_id).unwrap();
+    assert_eq!(replay.events.iter()
+        .filter(|event| matches!(event.kind, EventKind::PlannerReworkNoteInjected))
+        .count(), 1);
 }
 
 #[test]

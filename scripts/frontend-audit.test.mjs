@@ -38,9 +38,14 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function fixture(name, handler = async () => false, reducedMotion = "reduce") {
+async function fixture(name, handler = async () => false, reducedMotion = "reduce", autoExpandCot = false) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion });
-  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.addInitScript(enabled => {
+    localStorage.setItem("grapher_language_v1", "en");
+    // COT cards fold while watching unless the (default-off) display option is on.
+    if (enabled) localStorage.setItem("grapher_auto_expand_cot_v1", "1");
+    else localStorage.removeItem("grapher_auto_expand_cot_v1");
+  }, autoExpandCot);
   const errors = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
@@ -121,6 +126,38 @@ test("cancelled Provider login/respond replies cannot reopen the panel or replac
     assert.equal(responses, 1);
     assert.deepEqual(errors, []);
   } finally { loginGate.resolve(); responseGate.resolve(); await context.close(); }
+});
+
+test("reasoning auto-expand is committed by Save and discarded by Cancel", { timeout: 30_000 }, async () => {
+  const saves = [];
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "save_config") return false;
+    saves.push(body.config);
+    await route.fulfill({ json: { result: { config: body.config, snapshot: null, dataPath: "/mock" } } });
+    return true;
+  });
+  const toggle = () => page.getByLabel("Auto-expand chain of thought while running");
+  const stored = () => page.evaluate(() => localStorage.getItem("grapher_auto_expand_cot_v1"));
+  try {
+    assert.equal(await toggle().isChecked(), false, "display option starts off");
+
+    // Cancel closes the modal without touching the stored preference.
+    await toggle().check();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    assert.equal(await stored(), null);
+    await page.evaluate(() => window.audit.open());
+    assert.equal(await toggle().isChecked(), false, "reopening restores the unsaved draft");
+
+    // Save commits the display option alongside the backend settings.
+    await toggle().check();
+    await page.getByRole("button", { name: /save settings/i }).click();
+    await page.waitForFunction(() => localStorage.getItem("grapher_auto_expand_cot_v1") === "1");
+    assert.equal(saves.length, 1, "the backend config save still runs");
+    await page.evaluate(() => window.audit.open());
+    assert.equal(await toggle().isChecked(), true, "the saved option survives reopening");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
 });
 
 test("polling graph metadata cannot overwrite an open editor draft", { timeout: 30_000 }, async () => {
@@ -251,7 +288,7 @@ async function pauseCardEntrance(card) {
 for (const type of ["thinking", "tool"]) {
   for (const source of ["direct", "node"]) {
     test(`${source} ${type} card entrance survives live updates and completion without snapping`, { timeout: 30_000 }, async () => {
-      const { context, page, errors } = await fixture(`cardPresentation&type=${type}&source=${source}`, undefined, "no-preference");
+      const { context, page, errors } = await fixture(`cardPresentation&type=${type}&source=${source}`, undefined, "no-preference", type === "thinking");
       try {
         await page.addStyleTag({ content: ".appear-active { animation-duration: 10s !important; }" });
         await page.evaluate(() => window.audit.showCards());
@@ -285,7 +322,7 @@ for (const type of ["thinking", "tool"]) {
 
     test(`${source} ${type} card entrance works in StrictMode and respects reduced motion and old history`, { timeout: 30_000 }, async () => {
       for (const reducedMotion of ["no-preference", "reduce"]) {
-        const { context, page, errors } = await fixture(`cardPresentation&type=${type}&source=${source}&strict=1`, undefined, reducedMotion);
+        const { context, page, errors } = await fixture(`cardPresentation&type=${type}&source=${source}&strict=1`, undefined, reducedMotion, type === "thinking");
         try {
           await page.addStyleTag({ content: ".appear-active { animation-duration: 10s !important; }" });
           await page.evaluate(() => window.audit.showCards(true));
@@ -1621,7 +1658,7 @@ test("late node sends and edits cannot overwrite another workspace or its compos
 });
 
 test("thinking cards hide empty blocks and backfill text in place in live and replay views", { timeout: 30_000 }, async () => {
-  const { context, page, errors } = await fixture("thinking");
+  const { context, page, errors } = await fixture("thinking", undefined, "reduce", true);
   const append = event => page.evaluate(event => window.audit.append(event), event);
   const update = (type, contentIndex, extra = {}) => append({
     type: "message_update", assistantMessageEvent: { type, contentIndex, ...extra },
@@ -1674,7 +1711,7 @@ test("thinking cards hide empty blocks and backfill text in place in live and re
 });
 
 test("completed thinking stays visible and copyable through empty or replacement summaries", { timeout: 30_000 }, async () => {
-  const { context, page, errors } = await fixture("thinking");
+  const { context, page, errors } = await fixture("thinking", undefined, "reduce", true);
   const append = event => page.evaluate(event => window.audit.append(event), event);
   const update = (type, extra = {}) => append({
     type: "message_update", assistantMessageEvent: { type, contentIndex: 0, ...extra },
@@ -1727,6 +1764,27 @@ test("completed thinking stays visible and copyable through empty or replacement
       for (const data of turns) assert.ok((await view.innerText()).includes(data.seed + data.delta));
     }
     assert.equal(await views[1].locator("[data-transcript-id]").count(), 2, "empty history blocks reserve no rows");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("thinking stays folded while watching until a click opens it by default", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("thinking");
+  const append = event => page.evaluate(event => window.audit.append(event), event);
+  const views = [page.locator('[data-thinking-view="live"]'), page.locator('[data-thinking-view="history"]')];
+  try {
+    await append({ type: "message_start", message: { role: "assistant", content: [] } });
+    await append({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } });
+    await append({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "FOLDED_AUTO_COT" } });
+    for (const view of views) {
+      const card = view.locator(".thinking-card").first();
+      await card.waitFor();
+      assert.match(await card.getAttribute("class"), /streaming collapsed/);
+      assert.equal(await view.locator(".thinking-card-body").count(), 0,
+        "a folded COT must not render its Markdown body");
+      await card.locator(".thinking-card-header").click();
+      await view.locator(".thinking-card-body", { hasText: "FOLDED_AUTO_COT" }).waitFor();
+    }
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

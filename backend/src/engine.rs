@@ -698,6 +698,18 @@ pub struct PiRequest<'request> {
     pub images: Option<&'request [crate::model::ImageAttachment]>,
 }
 
+/// The Planner keeps a fixed base surface (read/bash plus graph tools); the
+/// saved setting only decides whether file mutation tools are mounted. The
+/// request's tool list is descriptive for the Planner (Pi never receives it as
+/// an allowlist), so Config remains the single source of truth here.
+fn planner_excluded_tools(write_tools: bool) -> String {
+    let mut excluded = vec!["ls", "find", "grep"];
+    if !write_tools {
+        excluded.extend(["write", "edit"]);
+    }
+    excluded.join(",")
+}
+
 pub fn clean_model_error(error: &str) -> String {
     let trimmed = error.trim();
     if let Some((code, rest)) = trimmed.split_once(':') {
@@ -835,9 +847,11 @@ fn run_pi_with_timeout(
         command.args(["--no-extensions", "--no-skills", "--no-approve"]);
     }
     // An allowlist would also hide tools contributed by user extensions/MCP.
-    // Retain the Planner's read/bash/write/edit base while allowing extension tools.
+    // Retain the Planner's base surface while allowing extension tools, and
+    // withhold write/edit when the saved settings disable file mutations.
     if request.role == PiRole::Planner {
-        command.args(["--exclude-tools", "ls,find,grep"]);
+        let excluded = planner_excluded_tools(config.planner_write_tools);
+        command.args(["--exclude-tools", excluded.as_str()]);
     }
     match request.tools {
         Some(tools) if tools.trim().is_empty() => {
@@ -927,6 +941,18 @@ fn run_pi_with_timeout(
             PiRole::Merger => "merger",
         },
     );
+    if request.role == PiRole::Planner {
+        // The workspace extension owns its tool registration, so it must see
+        // the same decision that produced --exclude-tools above.
+        command.env(
+            "GRAPHER_PLANNER_WRITE_TOOLS",
+            if config.planner_write_tools {
+                "true"
+            } else {
+                "false"
+            },
+        );
+    }
     #[cfg(not(feature = "fixture"))]
     {
         let graph = request.cwd.canonicalize().map_err(|e| e.to_string())?
@@ -1617,6 +1643,12 @@ mod tests {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    #[test]
+    fn planner_file_tools_follow_the_saved_setting() {
+        assert_eq!(planner_excluded_tools(true), "ls,find,grep");
+        assert_eq!(planner_excluded_tools(false), "ls,find,grep,write,edit");
+    }
+
     #[cfg(feature = "fixture")]
     fn test_python() -> String {
         #[cfg(windows)]
@@ -1664,7 +1696,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             max_parallel: 1,
             max_feedback: 3,
             auto_approve: false,
@@ -1716,7 +1748,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             environment: None,
             repository: repository.to_string_lossy().into(),
             model: "openai-codex/gpt-6-sol".into(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             thinking_level: "high".into(),
             max_parallel: 1,
             max_feedback: 0,
@@ -1804,7 +1836,7 @@ sys.stdin.read()
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
             repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
             thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
-            role_models: Default::default(), post_task_review: false,
+            role_models: Default::default(), post_task_review: false, planner_write_tools: true,
         };
         let mut output = String::new();
         let result = run_pi(PiRequest {
@@ -1855,7 +1887,7 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
         };
         let mut events = String::new();
         let result = run_pi(
@@ -1911,7 +1943,7 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
         };
         let session = temp.path().join("planning-1").join("planner-session");
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -1984,7 +2016,7 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
         };
         // Both the first-attempt layout and manual Graph revisions must keep
         // independent RPC channels. Manual revisions share the parent directory
@@ -2068,7 +2100,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -2146,7 +2178,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -2226,7 +2258,7 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
         };
         let result = run_pi_with_timeout(
             PiRequest {
@@ -2267,7 +2299,7 @@ sys.stdin.read()
                 model: "mock/model".into(),
                 role_models: Default::default(),
                 thinking_level: "medium".into(),
-                post_task_review: false,
+                post_task_review: false, planner_write_tools: true,
                 max_parallel: 1,
                 max_feedback: 0,
                 auto_approve: false,
@@ -2321,7 +2353,7 @@ sys.stdin.read()
             model: "mock/model".into(),
             thinking_level: "medium".into(),
             max_parallel: 1,
-            max_feedback: 0, auto_approve: false, post_task_review: false,
+            max_feedback: 0, auto_approve: false, post_task_review: false, planner_write_tools: true,
             role_models: Default::default(),
         };
         let result = run_pi(
@@ -2354,7 +2386,7 @@ sys.stdin.read()
         let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             environment: None,
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
@@ -2401,7 +2433,7 @@ sys.stdin.read()
         let _guard = lock_env();
         let original = std::env::var_os("PLANNER_THINKING");
         let mut config = Config {
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             environment: None,
             repository: "/tmp/fake".into(),
             model: "mock/model".into(),
@@ -2469,7 +2501,7 @@ sys.stdin.read()
         std::env::remove_var("PARTITIONER_THINKING");
 
         let custom_config = Config {
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             environment: None,
             repository: "/tmp/fake".into(),
             model: "anthropic/claude-3-7-sonnet".into(),
@@ -2507,7 +2539,7 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             model: String::new(),
             role_models: Default::default(),
             thinking_level: "medium".into(),
@@ -2535,7 +2567,7 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             model: "some-model".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
@@ -2630,7 +2662,7 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
-            post_task_review: false,
+            post_task_review: false, planner_write_tools: true,
             model: "claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,

@@ -1,5 +1,5 @@
 import { t } from "./i18n";
-import type { Config, Execution, ModelRole, RoleModelConfig, ThinkingLevel } from "./types";
+import type { Config, ConversationModelConfig, Execution, ModelRole, RoleModelConfig, ThinkingLevel } from "./types";
 import type { ProviderCatalog } from "./services/providerAuth";
 
 export const modelRoles: Array<{ id: ModelRole; label: string; description: string }> = [
@@ -7,6 +7,16 @@ export const modelRoles: Array<{ id: ModelRole; label: string; description: stri
   { id: "planner", label: "Planner", description: t("负责分析项目并生成协作拓扑图。推荐选择中大型模型，以获得更可靠的规划能力。") },
   { id: "partitioner", label: "Partitioner", description: t("负责判断任务走 Serial 还是 Graph。推荐选择小型、低延迟模型。") },
 ];
+
+/** Project one conversation's saved selection onto the shared settings object. */
+export function applyModelConfig(config: Config, settings: ConversationModelConfig | null | undefined): Config {
+  return {
+    ...config,
+    model: settings?.model ?? "",
+    thinkingLevel: settings?.thinkingLevel ?? "low",
+    roleModels: settings?.roleModels,
+  };
+}
 
 export function roleModelConfig(config: Config, role: ModelRole, envOverrides: Record<string, string> = {}): Required<RoleModelConfig> {
   const settings = config.roleModels?.[role];

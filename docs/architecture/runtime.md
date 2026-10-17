@@ -109,6 +109,14 @@ their settings, except for the explicit failed-node recovery below; a
 waiting/dirty status alone does not make a node never-started.
 Overrides survive replay and repeated saves update the previous override. A
 pre-dispatch override does not opt a later provider failure into Continue recovery.
+Model selections are conversation-scoped: a save made inside a Run records
+that conversation's override, including nodes the Planner adds later. Other
+conversations keep their own creation or saved selection, so their running and
+never-started nodes are not retargeted. Conversations that never changed models
+continue with the settings composition used when they were created, while new
+conversations use the saved global defaults. `config.json` remains the defaults
+document for new Runs; the Run projection carries `modelConfig` for its own
+conversation.
 
 Scheduling enforces one node/Merger writer per physical Run directory and retains directories required by pending feedback/repair. Planner follow-ups may share the newest workspace with its active writer so they never wait. Allocation, reuse and reclamation follow the [workspace directory contract](workspace-snapshots-and-feedback.md#physical-workspaces-and-ownership).
 
@@ -178,7 +186,9 @@ cursor/projection updates remain commit-ordered.
 
 Grapher's tool-output display log is a projection, not a raw Pi-session dump. The
 [engine projection](../../backend/src/engine/tool_output.rs) retains at most
-100 KiB of UTF-8 text per tool-result body and suppresses redundant cumulative
+100 KiB of UTF-8 text per tool-result body and per tool-call argument value
+(`write`/`edit` carry whole file bodies), marks the owner with
+`truncated`/`argsTruncated`, and suppresses redundant cumulative
 `tool_execution_update.partialResult` bodies. Pi's own session, model context and
 actual tool result are untouched; `full=true` exports the retained display log
 and does not bypass producer-side truncation.

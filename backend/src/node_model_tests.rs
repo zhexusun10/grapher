@@ -69,13 +69,11 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
 }
 
 #[test]
-fn newly_added_nodes_use_the_latest_saved_node_agent_settings() {
+fn newly_added_nodes_use_this_conversations_saved_settings() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let latest = replacement(runtime.state.config.as_ref().unwrap());
-    // Save settings exactly as the API does. Scheduling must read the shared
-    // on-disk defaults even when another service instance handled the save.
-    fs::write(runtime.root.join("config.json"), serde_json::to_vec(&latest).unwrap()).unwrap();
+    runtime.update_node_models(&latest).unwrap();
     let mut graph = runtime.state.graph.clone();
     graph.nodes.push(Node { name: "added".into(), task: "added".into() });
     runtime.revise_graph(graph, PlanningSummary {
@@ -87,7 +85,7 @@ fn newly_added_nodes_use_the_latest_saved_node_agent_settings() {
     for name in ["task", "added"] {
         let job = jobs.iter().find(|job| job.execution.node == name).unwrap();
         assert_eq!(job.config.node_agent_settings(), latest.node_agent_settings(),
-            "a never-executed node must use the current Node Agent settings");
+            "a node added after the conversation changed models must use that selection");
         assert_eq!(job.execution.metrics.as_ref().and_then(|metrics| metrics.model.as_deref()),
             Some(latest.node_agent_settings().model.as_str()),
             "session details must see the selected model before launch");
@@ -232,10 +230,11 @@ fn previously_started_waiting_blocked_and_dirty_nodes_keep_their_models() {
         // These states can also represent rescheduled work, not just a first attempt.
         runtime.state.nodes.get_mut("task").unwrap().status = status.into();
         runtime.state.superseded_execution_ids.push(job.execution.id.clone());
-        let version = runtime.snapshot_version();
         runtime.update_node_models(&replacement(runtime.state.config.as_ref().unwrap())).unwrap();
-        assert_eq!(runtime.snapshot_version(), version);
-        assert!(runtime.state.nodes["task"].model_config.is_none());
+        assert!(runtime.state.nodes["task"].model_config.is_none(),
+            "an already-started node keeps its own model");
+        assert_eq!(runtime.state.model_config.as_ref().unwrap().node_agent_settings().model,
+            "replacement/coder", "the conversation still records the selection for future nodes");
     }
 }
 
@@ -276,8 +275,8 @@ fn unrelated_settings_do_not_opt_provider_failures_into_continue() {
     });
     config.auto_approve = true;
     runtime.update_node_models(&config).unwrap();
-    assert_eq!(runtime.snapshot_version(), version);
-    assert!(!runtime.state.can_resume());
+    assert_ne!(runtime.snapshot_version(), version, "the conversation records its planner settings");
+    assert!(!runtime.state.can_resume(), "a planner-only change does not opt a failed node into Continue");
     runtime.pause(false).unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.nodes["task"].status, "failed");
@@ -287,4 +286,81 @@ fn unrelated_settings_do_not_opt_provider_failures_into_continue() {
     runtime.update_node_models(&config).unwrap();
     assert!(runtime.state.can_resume());
     assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
+}
+
+#[test]
+fn conversation_settings_do_not_leak_into_another_run_or_global_defaults() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    let original = runtime.state.config.clone().unwrap();
+    let run_a = runtime.state.run_id.clone();
+    let mut changed = replacement(&original);
+    changed.role_models.get_mut("nodeAgent").unwrap().model = "conversation/a".into();
+    runtime.update_node_models(&changed).unwrap();
+
+    // A different conversation created later uses its own settings, not A's save.
+    runtime.create(single(), original.clone()).unwrap();
+    runtime.set_route("graph").unwrap();
+    runtime.approve().unwrap();
+    let mut graph = runtime.state.graph.clone();
+    graph.nodes.push(Node { name: "added".into(), task: "added".into() });
+    runtime.revise_graph(graph, PlanningSummary {
+        planning_id: Uuid::new_v4().to_string(),
+        status: Some("success".into()),
+        ..Default::default()
+    }).unwrap();
+    for job in runtime.jobs().unwrap() {
+        assert_eq!(job.config.node_agent_settings(), original.node_agent_settings(),
+            "another conversation keeps its creation settings");
+    }
+
+    // A global defaults save must not rewrite A either.
+    let mut global = original.clone();
+    global.model = "global/default".into();
+    runtime.save_default_config(&global).unwrap();
+    let saved_a = runtime.store.load(&run_a).unwrap();
+    assert_eq!(saved_a.model_config.as_ref().unwrap().node_agent_settings().model, "conversation/a");
+    assert_eq!(saved_a.config.as_ref().unwrap().model, original.model);
+}
+
+#[test]
+fn a_finished_conversation_records_models_for_future_followups() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+    runtime.jobs().unwrap();
+    runtime.emit(EventKind::PublicationCompleted { head: runtime.state.base.clone() }).unwrap();
+    assert_eq!(runtime.state.phase, "completed", "test setup reaches the settled phase");
+    let node_before = serde_json::to_value(&runtime.state.nodes["task"]).unwrap();
+    let config = replacement(runtime.state.config.as_ref().unwrap());
+    runtime.update_node_models(&config).unwrap();
+    assert_eq!(serde_json::to_value(&runtime.state.nodes["task"]).unwrap(), node_before,
+        "an executed node keeps its recorded model");
+    assert_eq!(runtime.state.model_config.as_ref().unwrap().node_agent_settings(),
+        config.node_agent_settings(), "the conversation selects the model for future turns");
+    let root = runtime.root.clone();
+    drop(runtime);
+    let restored = Runtime::open(&root).unwrap();
+    assert_eq!(restored.state.model_config.as_ref().unwrap().node_agent_settings(),
+        config.node_agent_settings(), "the settled conversation keeps the selection after restart");
+    let metadata = crate::snapshot_view::snapshot_metadata(&restored.state).unwrap();
+    assert_eq!(metadata["modelConfig"]["roleModels"]["nodeAgent"]["model"], "replacement/coder",
+        "the Settings projection receives the restored conversation selection");
+}
+
+#[test]
+fn legacy_checkpoints_hydrate_the_conversation_selection_from_node_overrides() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    let config = replacement(runtime.state.config.as_ref().unwrap());
+    runtime.emit(EventKind::NodeModelsUpdated {
+        nodes: vec!["task".into()],
+        settings: config.node_agent_settings(),
+    }).unwrap();
+    // Simulate a checkpoint written before Run-level model selections existed.
+    runtime.state.model_config = None;
+    runtime.state.hydrate_legacy_model_config();
+    let settings = runtime.state.model_config.as_ref().unwrap();
+    assert_eq!(settings.node_agent_settings(), config.node_agent_settings());
+    assert_eq!(settings.model, runtime.state.config.as_ref().unwrap().model,
+        "legacy hydration keeps the Run's original non-node roles");
 }

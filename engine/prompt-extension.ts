@@ -44,6 +44,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   const planner = process.env.GRAPHER_MODE === 'planner';
+  const plannerWriteTools = process.env.GRAPHER_PLANNER_WRITE_TOOLS === 'true';
   const partition = process.env.GRAPHER_MODE === 'partition';
   const graph = process.env.GRAPHER_EXECUTION_KIND === 'graph';
   const project = process.env.GRAPHER_ORIGINAL_ROOT || (planner && !graph ? cwd : undefined);
@@ -107,12 +108,13 @@ export default function (pi: ExtensionAPI) {
     });
   }
   // Partitioner has no tools. Planner shares the execution path adapter but
-  // retains its read/bash/write/edit surface; node/edge belong to the Planner extension.
+  // retains its read/bash surface; write/edit are mounted only when enabled by
+  // settings, and node/edge belong to the Planner extension.
   if (partition) return;
   if (graph && !project) throw new Error('Graph execution is missing its host-owned project binding');
   if (paths && project) {
     registerWorkspaceTools(pi, activePaths?.root || cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view,
-      planner ? ['read', 'write', 'edit'] : undefined, () => activePaths?.root || cwd);
+      planner ? (plannerWriteTools ? ['read', 'write', 'edit'] : ['read']) : undefined, () => activePaths?.root || cwd);
 
     // Normalize model-facing paths only; never change stored files, tool input
     // contents, provider signatures, or image bytes.

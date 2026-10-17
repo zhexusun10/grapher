@@ -1,5 +1,5 @@
 import { t } from "../i18n";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useDeferredValue } from "react";
 import { Brain, ChevronRight, Copy, Check, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { TranscriptItem } from "../types";
@@ -7,6 +7,7 @@ import { MarkdownRenderer } from "./MarkdownRenderer";
 import { useSmoothStreamText } from "../hooks/useSmoothStreamText";
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
 import { useCardAppear } from "../services/cardAnimations";
+import { useAutoExpandCot } from "../services/displayPreferences";
 
 interface ThinkingCardProps {
   item?: TranscriptItem;
@@ -37,6 +38,13 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const rawContent = (item ? item.content : directContent) || "";
     const isStreaming = item ? item.status === "running" : Boolean(directStreaming);
     const smoothContent = useSmoothStreamText(rawContent, isStreaming);
+    // Markdown parsing is O(content) per delta. Defer the render so streamed
+    // answer text and scrolling stay responsive, and superseded intermediate
+    // deltas are skipped instead of parsed one by one.
+    const renderedContent = useDeferredValue(smoothContent);
+    // The Settings toggle (default off) decides whether watching a run may pop
+    // reasoning cards open. A collapsed card never mounts its Markdown body.
+    const autoExpandCot = useAutoExpandCot();
 
     // If user explicitly collapses/expands, respect their choice; otherwise auto-expand while streaming
     const [userToggled, setUserToggled] = useState<boolean | null>(null);
@@ -47,7 +55,8 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const lastScrollTopRef = useRef(0);
     const wasStreamingRef = useRef(isStreaming);
 
-    const isExpanded = expanded ?? (userToggled !== null ? userToggled : defaultExpanded || (autoExpandWhileStreaming && isStreaming));
+    const isExpanded = expanded ?? (userToggled !== null ? userToggled
+      : autoExpandCot && (defaultExpanded || (autoExpandWhileStreaming && isStreaming)));
 
     // Auto-scroll within the thinking box while streaming if user hasn't scrolled up
     useEffect(() => {
@@ -57,7 +66,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
         bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
         lastScrollTopRef.current = bodyRef.current.scrollTop;
       }
-    }, [smoothContent, isStreaming, isExpanded]);
+    }, [renderedContent, isStreaming, isExpanded]);
 
     const handleScroll = () => {
       const el = bodyRef.current;
@@ -170,10 +179,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             className="thinking-card-body"
             onScroll={handleScroll}
           >
-            {smoothContent.trim() ? (
+            {renderedContent.trim() ? (
               <div className="thinking-content-container">
                 <MarkdownRenderer
-                  content={smoothContent}
+                  content={renderedContent}
                   isStreaming={isStreaming}
                   streamingCursor={isStreaming}
                   className="thinking-markdown"

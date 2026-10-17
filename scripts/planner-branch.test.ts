@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { activePlannerOutput, plannerTurnIds } from '../src/lib/plannerOutput.ts';
+import { activePlannerOutput, plannerHistoryIds, plannerTurnIds } from '../src/lib/plannerOutput.ts';
 
 const source = (id: string) => JSON.stringify({ type: 'grapher_planning_source', planningId: id });
 const user = (text: string) => JSON.stringify({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } });
@@ -17,6 +17,25 @@ test('Planner branch hides only abandoned turns while retaining earlier context 
 test('Planner branch matches Pi follow-ups with a dynamic status prefix', () => {
   const log = [source('a'), user('first'), user('Current graph node status:\n- task: completed\n\nlater'), 'old reply'].join('\n') + '\n';
   assert.doesNotMatch(activePlannerOutput(log, [{ old_instruction: 'later' }]), /old reply/);
+});
+
+test('live Planner continuation does not replay the revision it is streaming', () => {
+  const events = [
+    { type: 'created', planning_id: 'initial', planning: { planningId: 'initial', createdAt: 100 } },
+    { type: 'graph_revised', planning_id: 'revision', planning: { planningId: 'revision', createdAt: 200 } },
+  ];
+  const base = { events, planning: true, live: true, backgroundReview: false, routeType: 'graph', representedIds: ['revision'] };
+  // The snapshot announces the new attempt before it commits a graph; its
+  // durable JSONL must wait until the live transcript releases it.
+  assert.deepEqual(plannerHistoryIds({ ...base, savedPlannerId: 'next', continuation: true }), ['initial', 'revision']);
+  // `savedPlannerId` still names the last completed turn until the backend
+  // announces the revision, so that turn stays visible during the handoff.
+  assert.deepEqual(plannerHistoryIds({ ...base, savedPlannerId: 'revision', continuation: true }), ['initial', 'revision']);
+  // Once the turn settles, the JSONL is authoritative and the newest attempt returns.
+  assert.deepEqual(plannerHistoryIds({ ...base, savedPlannerId: 'next', continuation: true, planning: false }),
+    ['initial', 'revision', 'next']);
+  // Fresh planning renders only the live transcript, never durable history.
+  assert.deepEqual(plannerHistoryIds({ ...base, savedPlannerId: 'next', continuation: false }), []);
 });
 
 test('aborted revision turns stay in the replayed Planner conversation', () => {

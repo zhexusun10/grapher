@@ -875,7 +875,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         style={{ overflowAnchor: "none", minHeight: inline || compact ? 0 : 200 }}
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
-        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} /> :
+        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} gap={8} /> :
           <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
             {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{renderRow(item)}</MeasuredRow>)}
           </div>}

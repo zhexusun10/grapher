@@ -60,7 +60,8 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "nodeMessageQueueVersion": 1,
         "runId": state.run_id, "planType": state.plan_type,
         "planningId": state.planning_id, "planning": state.planning,
-        "graph": state.graph, "config": state.config, "plan": state.plan, "nodes": state.nodes,
+        "graph": state.graph, "config": state.config, "modelConfig": state.model_config,
+        "plan": state.plan, "nodes": state.nodes,
         "executions": state.executions.iter().map(execution_metadata).collect::<Vec<_>>(),
         "mergers": state.mergers.iter().map(execution_metadata).collect::<Vec<_>>(),
         "supersededExecutionIds": state.superseded_execution_ids,
@@ -88,7 +89,8 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
     }).collect::<Vec<_>>();
     let mut metadata = json!({
         "runId": state.run_id, "planningId": state.planning_id, "planning": state.planning,
-        "graph": state.graph, "config": state.config, "plan": state.plan, "nodes": state.nodes,
+        "graph": state.graph, "config": state.config, "modelConfig": state.model_config,
+        "plan": state.plan, "nodes": state.nodes,
         "executions": state.executions.iter().map(execution_metadata).collect::<Vec<_>>(),
         "mergers": state.mergers.iter().map(execution_metadata).collect::<Vec<_>>(),
         "supersededExecutionIds": state.superseded_execution_ids,

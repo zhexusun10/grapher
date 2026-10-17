@@ -28,10 +28,10 @@ import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking"
 import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
-import { ExecutionTimeTookText, PlannerTimeTookText } from "../ExecutionTimeTook";
+import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } from "../ExecutionTimeTook";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
-import { plannerTurnIds } from "../../lib/plannerOutput";
+import { plannerHistoryIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
 import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
@@ -565,7 +565,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
     return activeNodeExecutions(state, selectedNode.name).sort((a, b) => a.startedAt - b.startedAt);
   }, [selectedNode?.name, publicationMergerSelected, isNodeMergerSelected, nodeMergerTarget, state.executions, state.supersededExecutionIds, state.mergers]);
-  const latestAttemptId = attempts.length > 0 ? attempts[attempts.length - 1].id : "";
   const execution: Execution | undefined = selectedMerger ?? attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
   const isMerger = publicationMergerSelected || isNodeMergerSelected;
   const snapshotModelInfo = useMemo(() => {
@@ -575,12 +574,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       isMerger,
       state.config || config,
       envOverrides,
-      // Only a live attempt may still be governed by a pre-dispatch override.
-      // A finished/failed attempt's actual model comes from its metrics.
-      execution.id === latestAttemptId && execution.status === "running"
-        ? state.nodes[execution.node]?.modelConfig : undefined
+      // Parsed metrics always win. Legacy attempts that recorded no model still
+      // belong to this node's override; the conversation-wide Node Agent
+      // setting would misreport nodes that used a different model.
+      state.nodes[execution.node]?.modelConfig
     );
-  }, [execution, isMerger, latestAttemptId, state.nodes, state.config, config, envOverrides]);
+  }, [execution, isMerger, state.nodes, state.config, config, envOverrides]);
   const nodeTaskText = selectedNode?.task ?? "";
   const latestNodeMessage = nodeMessages.length > 0 ? nodeMessages[nodeMessages.length - 1] : undefined;
   // Keep each human turn in the same conversation as its Pi execution. A
@@ -703,6 +702,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       thinkingLevel: configured.thinkingLevel || "low",
     };
   })();
+  // Keep the start time aligned with whichever clock `time took` uses: the live
+  // turn while planning, the settled Planner session afterwards.
+  const plannerStartTime = isPlanning
+    ? (plannerStream?.startedAt ?? plannerRole?.sessionStart)
+    : (plannerRole?.sessionStart ?? plannerStream?.startedAt);
   // The panel also carries the planner's working indicator, so it must exist
   // for the whole live-planning window, before the summary reaches a snapshot.
   const showPlannerDetails = routeType !== "serial" &&
@@ -710,26 +714,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // A run owns one Planner conversation, although each planning attempt has
   // its own durable output log. Replay every recorded turn after a reload —
   // including aborted revision turns — excluding turns still live-streaming.
-  const savedPlannerIds = useMemo(() => {
-    // Recovery discovers the planning ID before the route is known. Mount the
-    // durable activity poller now, rather than waiting for the finished graph.
-    if ((!recoveredPlanningId && routeType !== "graph") ||
-      (isPlanning && !backgroundReview && !recoveredPlanningId && !plannerStream.isContinuation)) return [];
-    const ids = plannerTurnIds(state.events);
-    if (savedPlannerId) ids.push(savedPlannerId);
-    const seen = new Set<string>();
-    return ids.filter((id) => {
-      if (seen.has(id)) return false;
-      seen.add(id);
-      // Only suppress a durable turn while it is actively streaming. Once
-      // planning stops, the JSONL is authoritative even if SSE was partial.
-      // Continuation turns stream a new revision; previous completed turns belong to history.
-      if (!plannerStream.isContinuation && isPlanning && showLivePlanner && (id === savedPlannerId || plannerStream.representedPlanningIds?.includes(id))) {
-        return false;
-      }
-      return true;
-    });
-  }, [routeType, isPlanning, backgroundReview, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.isContinuation, plannerStream.representedPlanningIds]);
+  const savedPlannerIds = useMemo(() => plannerHistoryIds({
+    events: state.events,
+    savedPlannerId,
+    planning: isPlanning,
+    live: Boolean(showLivePlanner),
+    continuation: plannerStream.isContinuation,
+    backgroundReview,
+    recoveredPlanningId,
+    routeType,
+    representedIds: plannerStream.representedPlanningIds,
+  }), [routeType, isPlanning, backgroundReview, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.isContinuation, plannerStream.representedPlanningIds]);
   const plannerEdits = useMemo(() => state.events.flatMap((event, index) => {
     if (event.type !== "planner_conversation_edited") return [];
     const nextPlanningId = state.events.slice(index + 1).find(item =>
@@ -1878,7 +1873,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   return (
                     <React.Fragment key={turn.id}>
                       {turn.userMessage && (
-                        <div className="chat-message-row user">
+                        <div className={`chat-message-row user${turn.isInitial ? "" : " planner-follow-up"}`}>
                           <EditableUserBubble
                             text={turn.userMessage.text.replace(/^\[@[^\]]+\]\s*/, "").trim()}
                             images={turn.userMessage.images}
@@ -1960,6 +1955,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <p>thinking level: {snapshotModelInfo.thinkingLevel}</p>
                     </>
                   )}
+                  <p>start time: {formatSessionStartTime(execution?.startedAt)}</p>
                   <p>time took: <ExecutionTimeTookText execution={execution} /></p>
                 </WorkspaceDetailsPanel>
 
@@ -2065,7 +2061,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <React.Fragment key={turn.id}>
                           {turn.userMessage && (
                             <motion.div
-                              className="chat-message-row user"
+                              className={`chat-message-row user${turn.isInitial ? "" : " planner-follow-up"}`}
                               initial={isPlanning && turn.isInitial ? { opacity: 0 } : false}
                               animate={{ opacity: 1, y: 0, scale: 1 }}
                               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
@@ -2149,6 +2145,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           <p>thinking level: {serialModelInfo.thinkingLevel}</p>
                         </>
                       )}
+                      <p>start time: {formatSessionStartTime(serialExecution?.startedAt)}</p>
                       <p>time took: <ExecutionTimeTookText execution={serialExecution} /></p>
                     </WorkspaceDetailsPanel>
                     {serialNodeState?.error && (
@@ -2338,6 +2335,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
                     <p>model: {plannerModelInfo.model}</p>
                     <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
+                    <p>start time: {formatSessionStartTime(plannerStartTime)}</p>
                     <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerStream?.startedAt} durationSeconds={plannerRole?.durationSeconds} /></p>
                   </WorkspaceDetailsPanel>
                 )}

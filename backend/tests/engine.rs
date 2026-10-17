@@ -24,7 +24,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
         pi_args: vec![script_path.to_string_lossy().into()],
         model: String::new(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false, post_task_review: false,
+        max_feedback: 3, auto_approve: false, post_task_review: false, planner_write_tools: true,
         thinking_level: "medium".into(),
         role_models: Default::default(),
     };
@@ -295,7 +295,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
         role_models: Default::default(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
     };
     for role in [PiRole::Merger, PiRole::NodeAgent, PiRole::Planner, PiRole::Partitioner] {
         let mut output = String::new();
@@ -329,6 +329,7 @@ fn planner_and_node_allow_resources_while_partitioner_disables_them() {
     let script_path = temp.path().join("fake-pi.sh");
     let script = r#"cat >/dev/null
 echo "ARGS: $@"
+echo "PLANNER_WRITE_TOOLS: ${GRAPHER_PLANNER_WRITE_TOOLS:-unset}"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
 "#;
     fs::write(&script_path, script).unwrap();
@@ -339,7 +340,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script_path.to_string_lossy().into()],
         model: "test-model".into(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
@@ -420,6 +421,44 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(
         planner_out.contains("--exclude-tools ls,find,grep") && !planner_out.contains("--tools"),
         "Planner must restrict base tools without excluding extension tools"
+    );
+    assert!(
+        planner_out.contains("PLANNER_WRITE_TOOLS: true"),
+        "Planner extension must be told to mount its file tools"
+    );
+    // A saved setting can withhold file mutation tools; it must not use a
+    // --tools allowlist that would also hide extension-contributed tools. The
+    // request keeps the full descriptive list so Config stays authoritative.
+    let read_only_config = Config {
+        planner_write_tools: false,
+        ..config.clone()
+    };
+    let mut read_only_planner_out = String::new();
+    let _ = run_pi(
+        PiRequest {
+            role: PiRole::Planner,
+            config: &read_only_config,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &temp.path().join("session-planner-read-only"),
+            extension: None,
+            tools: Some("node,edge,read,bash,write,edit"),
+            session_id: Some("planner-session-read-only"),
+            extra_args: Vec::new(),
+            environment: Vec::new(),
+            system_prompt: None,
+            images: None,
+        },
+        |text| read_only_planner_out.push_str(&text),
+    );
+    assert!(
+        read_only_planner_out.contains("--exclude-tools ls,find,grep,write,edit")
+            && !read_only_planner_out.contains("--tools"),
+        "Planner file tools must be excluded without hiding extension tools"
+    );
+    assert!(
+        read_only_planner_out.contains("PLANNER_WRITE_TOOLS: false"),
+        "Planner extension must be told to skip file tool registration"
     );
 
     // 3. Partitioner: MUST have --no-skills, --no-extensions, --no-approve, and --no-tools
@@ -510,7 +549,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script.to_string_lossy().into()],
         model: "test-model".into(),
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         max_parallel: 2,
         max_feedback: 3, auto_approve: false,
         thinking_level: "medium".into(),
@@ -587,7 +626,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         model: "test-model".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false, post_task_review: false,
+        max_feedback: 3, auto_approve: false, post_task_review: false, planner_write_tools: true,
         role_models: Default::default(),
     };
     let mut output = String::new();
@@ -654,7 +693,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         role_models: Default::default(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false, post_task_review: false,
+        max_feedback: 3, auto_approve: false, post_task_review: false, planner_write_tools: true,
     };
 
     // Verify PiModelConfig::resolve for NodeAgent ignores PI_MODEL and uses base_config.model

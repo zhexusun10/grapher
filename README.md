@@ -1,7 +1,8 @@
 # Grapher
 
-> **Don't orchestrate agents. Compile work.**
->
+> **Don't orchestrate agents. Compile work.**  
+> **No more "lost in translation".**
+
 
 [![CI](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -29,7 +30,7 @@ Goal → Planner → Compiled Graph → Deterministic Runtime
 **Core differences:**
 
 1. **No supervisor in the execution loop** — The LLM plans the graph, then gets out of the scheduler.
-2. **Parallel work inherits code, not conversations** — Each node receives completed parent workspace state.
+2. **Never lost in translation (Zero conversational message passing)** — Traditional multi-agent systems rely on endless agent-to-agent chatter where requirements and constraints degrade like a game of telephone. In Grapher, nodes never exchange chat messages; parallel tasks inherit verifiable Git code states and history, not conversations.
 3. **The graph is executable state** — Dependencies, retries, feedback and publication are explicit runtime transitions.
 4. **No predefined agent roles** — All nodes run general-purpose coding agents; specialization comes from task context, not hardcoded roles.
 
@@ -45,7 +46,7 @@ Built on [Pi](https://github.com/earendil-works/pi). [Quick start](#quick-start)
 
 - **Integrated coding-agent environment** — Chat with coding agents, manage provider authentication and model settings, inspect tool calls and logs, and intervene from the same UI.
 - **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions. We don't introduce prior bias to the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
-- **Workspace inheritance** — Children inherit parent Git history and its complete project-file state, including files matched by `.gitignore`. Linear work can hand off a Git working tree; fan-out branches use independent Git worktrees; Git handles conflicts and publication. Conversations stay with their own nodes.
+- **Workspace inheritance (Code, not chat)** — Children inherit parent Git history and its complete project-file state, including files matched by `.gitignore`. Nothing is lost in translation across inter-agent dialogue because agents never chat with each other: conversations stay strictly within their own nodes, while code flows through verified Git snapshots. Linear work can hand off a Git working tree; fan-out branches use independent Git worktrees; Git handles conflicts and publication.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
@@ -116,6 +117,7 @@ Open <http://127.0.0.1:1421>.
 - Workspace inheritance
 - Bounded feedback edges
 - Result publication
+- Post-task Planner review and autonomous loop engineering
 - Linux sandbox (bubblewrap)
 - Release archives (Windows/macOS/Linux) and one-command dev setup
 
@@ -156,7 +158,9 @@ Partitioner
                                   Publish to project
 ```
 
-Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits parent Git history plus the complete project-file state, including paths matched by `.gitignore`. Applied feedback sends bounded rework instructions and hands the sender's completed workspace to a fixed target, which continues its own conversation. All project outputs are Git commits; conversations are not exchanged.
+Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits parent Git history plus the complete project-file state, including paths matched by `.gitignore`. Applied feedback sends bounded rework instructions and hands the sender's completed workspace to a fixed target, which continues its own conversation. All project outputs are Git commits; conversations are never exchanged between nodes, ensuring technical intent and codebase reality are never lost in translation.
+
+When enabled, **Post-task Planner review** invokes the Planner once all nodes finish and valid changes are published to the project. The Planner inspects the updated workspace and decides the next step—auditing results, formulating a follow-up plan, reporting to the user, or completing wrap-up work—without violating node isolation (Git workspace inheritance with zero node-to-node messaging). Paired with **Auto Approve**, this supports robust, multi-turn loop engineering.
 
 ## Architecture
 

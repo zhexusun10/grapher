@@ -1138,6 +1138,7 @@ button.session-label-toggle:focus-visible {
 .planning-activity-output .transcript-inline .transcript-scroll-area {
   display: block;
   min-height: 0 !important;
+  padding: 0;
 }
 
 .pane-bottom-chat {
@@ -2483,7 +2484,7 @@ button.session-label-toggle:focus-visible {
 .role-model-settings {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 18px;
 }
 
 .role-model-note {
@@ -2493,31 +2494,28 @@ button.session-label-toggle:focus-visible {
   color: var(--text-secondary);
 }
 
-.role-model-card {
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  padding: 12px;
+.role-model-group {
   min-width: 0;
 }
 
-.role-model-card h5 {
+.role-model-group h5 {
   margin: 0 0 6px;
   font-size: 13px;
   color: var(--text-primary);
 }
 
-.role-model-card p {
+.role-model-group p {
   margin: 0 0 12px;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-secondary);
 }
 
-.role-model-card .form-grid {
+.role-model-group .form-grid {
   grid-template-columns: minmax(0, 2fr) minmax(130px, 1fr);
 }
 
-.role-model-card .form-field {
+.role-model-group .form-field {
   min-width: 0;
 }
 
@@ -2526,16 +2524,13 @@ button.session-label-toggle:focus-visible {
 .settings-modal select:active,
 .role-model-settings select:focus,
 .role-model-settings select:focus-visible,
-.role-model-settings select:active,
-.role-model-card select:focus,
-.role-model-card select:focus-visible,
-.role-model-card select:active {
+.role-model-settings select:active {
   outline: none !important;
   box-shadow: none !important;
   border-color: var(--border-default) !important;
 }
 
-.role-model-card .provider-filter-select {
+.role-model-group .provider-filter-select {
   max-width: 100%;
 }
 
@@ -2556,7 +2551,7 @@ button.session-label-toggle:focus-visible {
 }
 
 @media (max-width: 600px) {
-  .role-model-card .form-grid {
+  .role-model-group .form-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -29,7 +29,7 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 
 1. The Partitioner classifies the goal directly in the bound source cwd, with no tools and no separate project checkout. It selects a route unless the user explicitly selects Serial or Graph.
 2. For Graph's initial planning, the Planner runs directly in the bound source project directory, not a private copy. Later turns select their cwd afresh as described below.
-3. The Planner uses `node`, `edge`, `read`, native `bash`, plus `write` and `edit`. Writes are not filtered, and files appear in the selected directory immediately, even if planning fails or is cancelled.
+3. The Planner uses `node`, `edge`, `read`, and native `bash`. `write` and `edit` are mounted only when the persistent `plannerWriteTools` setting is enabled (off by default). When mounted, writes are not filtered, and files appear in the selected directory immediately, even if planning fails or is cancelled. Bash remains available in either mode.
 4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records that turn's actual cwd for session/legacy compatibility; it is not a directory allocation.
 5. The graph is validated and presented for approval. Approval validates the binding. A Graph on a standard Git repository records a Git source snapshot; an ordinary folder records no snapshot until its first node is dispatched, when Grapher lazily materializes a temporary shadow snapshot with forced collection of project files. Serial keeps source-native behavior and records no approval snapshot. Managed environment scopes and Runtime data remain outside project Git.
 
@@ -43,10 +43,10 @@ Source locks protect approval and source snapshots, not a source-native Planner'
 
 Every Graph Planner follow-up selects its working directory again immediately
 before launch; it does not blindly reuse a stale directory. During selection and
-the turn, the Run dispatches no new nodes and defers publication. The newest
-recorded workspace is mandatory: Planner starts in it immediately even when its
-node/Merger writer is still active, rather than waiting, skipping to an older
-slot, or retreating to source. A follow-up therefore never freezes behind a
+the turn, the Run dispatches no new nodes and defers publication. While node
+work is unfinished, the newest recorded workspace is mandatory: Planner starts
+in it immediately even when its node/Merger writer is still active, rather than
+waiting, skipping to an older slot, or retreating to source. A follow-up therefore never freezes behind a
 long-running frontier. The shared writer owns the later Git snapshot, so Planner
 writes in that directory are captured when the writer drains; if Planner outlives
 the writer, Planner captures the combined directory itself. Unrelated parallel
@@ -59,25 +59,33 @@ uses recorded execution ownership, not the directory's allocation name, and
 resolves redirected requests to the latest downstream owner instead of
 re-entering a stale node workspace. Missing unpublished prepared workspaces
 remain refused. Feedback input directories remain reserved immutable evidence,
-not writable Planner slots. Before any node workspace exists, and after
-successful publication, Planner uses the source project. This does not allocate
-another Planner checkout or merge all parallel branches into one view.
+not writable Planner slots. Before any node workspace exists, after successful
+publication, and when every node is completed or the Graph awaits approval,
+Planner uses the source project. This does not allocate another Planner
+checkout or merge all parallel branches into one view.
 
-The first user follow-up on an existing approved Graph receives a transport
-context block containing the current workspace's node name and every node's
-status. The rework explanation is injected only on that first follow-up, while
-the workspace name and node-status list are regenerated for every follow-up.
-The workspace-move instruction is included only when another valid workspace is
-currently available; a linear frontier with no alternate workspace does not
-receive it. The transport context is recorded in Pi's session but removed from
-the browser conversation projection. The Planner can request a move with the follow-up-only `switch_workspace`
-tool. The tool returns the actual selected node and workspace state in the
+The first user follow-up on an existing approved Graph that still has
+unfinished node work receives a transport context block containing the current
+workspace's node name and every node's status. The rework explanation is
+injected only while its one-shot marker is pending on a context-bearing
+follow-up, while the workspace name and node-status list are regenerated for
+every context-bearing follow-up. When
+every node is already completed, or the Graph is still a new draft awaiting
+approval, Planner runs in the source project, receives only the user's
+instruction with no workspace/status context, and is not offered the
+workspace-move instruction or `switch_workspace` tool. Such a turn still
+consumes the one-shot rework marker if it is pending, but the explanation is
+not injected without the transport context. The workspace-move instruction is included only
+when another valid workspace is currently available; a linear frontier with no
+alternate workspace does not receive it. The transport context is recorded in Pi's session but removed from
+the browser conversation projection. On a context-bearing follow-up the Planner
+can request a move with the follow-up-only `switch_workspace` tool. The tool returns the actual selected node and workspace state in the
 same turn. If its physical slot has already been inherited and modified by a
 downstream node, Runtime resolves the request to that downstream execution
 instead of binding the old node to a stale path, and the tool result explains
 the redirect. Runtime records the new `PlanningSummary.worktree` and
-`workspaceExecutionId`; the same Planner session and its read/write/edit/Bash
-operations then use the selected workspace. If no node workspace has been updated since that
+`workspaceExecutionId`; the same Planner session and its `read`/Bash (plus
+`write`/`edit` when mounted) operations then use the selected workspace. If no node workspace has been updated since that
 explicit move, later follow-ups keep it; a newer node workspace takes
 precedence.
 
@@ -88,8 +96,8 @@ normalization, and that spelling differs by platform). Planner uses
 the same stable model-facing path namespace as Node Agent: existing prompt cwd,
 read/bash/write/edit results and conversation context are normalized, while recognized
 project-root paths resolve to the current physical workspace. The transport
-context is regenerated for each follow-up; only the rework explanation is
-one-shot. The browser removes the transport context from the displayed
+context is regenerated for each context-bearing follow-up; only the rework
+explanation is one-shot. The browser removes the transport context from the displayed
 conversation.
 `PlanningSummary.worktree` and
 `workspaceExecutionId`, plus durable `planner_workspace_selected` events, record
@@ -118,8 +126,19 @@ to Graph Runs, which already have a Planner conversation, not Serial Runs.
 After every successful publication, when all nodes are completed, an enabled Run
 appends a brief neutral completion notification to its existing Planner session.
 The notification is not a user bubble and is omitted from the browser transcript,
-including after reload; the shared Planner system prompt is unchanged. The
-Planner can reply, inspect the published source, or use its usual graph tools.
+including after reload; the shared Planner system prompt is unchanged.
+
+Grapher imposes no artificial restrictions on what the Planner decides to do
+next:
+- **Audit & verify**: inspect the published source and verify acceptance criteria;
+- **Plan further work**: define new task nodes and edges for subsequent iterations;
+- **Report & wait**: summarize completed work to the user and await further guidance;
+- **Wrap up**: perform final administrative edits or conclude cleanly.
+
+Crucially, this turn strictly obeys the fundamental system invariant: **no messages
+or conversations are passed between nodes**. Execution instances receive completed
+workspace state through Git, not other agents' conversation logs.
+
 Its output streams through durable planning logs and SSE wake-ups. Successful
 node/edge edits immediately project a live candidate graph without dispatching
 work before the turn finishes.
@@ -130,8 +149,10 @@ Approve dispatches it immediately; otherwise the new graph waits for **Approve**
 without rerunning completed nodes. New workspaces use the newly published source
 plus any source writes made during review, never the previous approval baseline.
 Each later successful execution/publication can trigger another review; a final
-reply without further work does not trigger itself again. This can incur extra
-model calls, and Auto Approve permits additional work chosen by the Planner.
+reply without further work does not trigger itself again. When combined with Auto
+Approve, this establishes a robust, autonomous **loop engineering** cycle that
+continues iteratively until the Planner concludes. This can incur extra model
+calls, and users can disable it at any time in Settings.
 
 Failed publication or failed/blocked execution does not trigger review. A failed
 or stopped review retains its logs and source writes but discards its uncommitted

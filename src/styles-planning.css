@@ -956,6 +956,12 @@
   overflow: visible;
 }
 
+/* Execution transcripts share the Planner transcript's card rhythm: the list
+   owns the 8px gap, so the scroll area must not add its own inset. */
+.virtualized-transcript-container.transcript-compact .transcript-scroll-area {
+  padding: 0;
+}
+
 .transcript-scroll-area {
   padding: 4px 2px;
   display: flex;
@@ -1016,7 +1022,6 @@
   line-height: 1.68;
 }
 
-.planning-activity .transcript-row.text-row.user,
 .transcript-row.text-row.user {
   align-items: flex-end;
   margin-top: 8px;
@@ -1025,18 +1030,17 @@
 
 /* A new user turn starts a new request: give it more air from the previous
    Planner reply. The tighter 8px above still applies to non-Planner rows. */
-.planning-activity .transcript-row.text-row.user {
-  margin-top: 48px;
-}
-
+.planning-activity .chat-message-row.user,
 .planner-transcript .chat-message-row.user.planner-user-turn {
   margin-top: 48px;
   margin-bottom: 8px;
 }
 
-/* Fallback rows for an acknowledged follow-up, before the live transcript or
-   saved JSONL claims the turn. */
-.chat-messages-stream>.chat-message-row.user.planner-follow-up {
+/* Follow-up turns rendered outside the Planner transcript (serial/node views
+   and the live Planner fallback) keep the same 56px total air, counting the
+   shared column gap. */
+.chat-messages-stream>.chat-message-row.user.planner-follow-up,
+.serial-turns-container>.chat-message-row.user.planner-follow-up {
   margin-top: 44px;
 }
 
@@ -1065,17 +1069,6 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.planning-activity .transcript-row.text-row.user .transcript-message-bubble {
-  width: auto;
-  max-width: 86%;
-  padding: 10px 14px;
-  border: 1px solid var(--brand-border);
-  border-radius: 12px 12px 2px 12px;
-  background: var(--brand-subtle);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .transcript-message-bubble .markdown-content code:not(pre code) {

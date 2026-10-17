@@ -41,6 +41,8 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     // Also protect direct/live card callers that do not use the JSONL parser.
     const resultPreview = useMemo(() => truncateToolText(item.result || ""), [item.result]);
     const resultText = resultPreview.text;
+    // Direct callers may still hand us whole file bodies as arguments.
+    const argsText = useMemo(() => truncateToolText(JSON.stringify(args, null, 2)), [args]);
 
     // Extract structured exit code
     const exitCode = useMemo(() => {
@@ -50,10 +52,11 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     const isError = item.isError || status === "error" || (exitCode !== null && exitCode !== 0);
 
-    // Detect if output was truncated
+    // Detect if output was truncated in either the result body or its arguments
     const isTruncated = useMemo(() => {
-      return !!(item.truncated || resultPreview.truncated || resultText.includes("[Showing lines") || resultText.includes("Full output:"));
-    }, [item.truncated, resultPreview.truncated, resultText]);
+      return !!(item.truncated || item.argsTruncated || resultPreview.truncated || argsText.truncated ||
+        resultText.includes("[Showing lines") || resultText.includes("Full output:"));
+    }, [item.truncated, item.argsTruncated, resultPreview.truncated, argsText.truncated, resultText]);
 
     // Detect masked subcommand step errors or real test failures (avoiding false positives from mere word FAIL)
     const hasSubcommandWarning = useMemo(() => {
@@ -141,7 +144,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     const handleCopy = (e: React.MouseEvent) => {
       e.stopPropagation();
-      const textToCopy = resultText || JSON.stringify(args, null, 2);
+      const textToCopy = resultText || argsText.text;
       navigator.clipboard.writeText(textToCopy);
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 1800);
@@ -282,9 +285,9 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
             {Object.keys(args).length > 0 && (
               <div className="tool-args-section">
-                <div className="section-label">{t("参数 (Arguments)")}</div>
+                <div className="section-label">{t("参数 (Arguments)")}{item.argsTruncated && ` · ${t("已截断")}`}</div>
                 <pre className="tool-args-code">
-                  {JSON.stringify(args, null, 2)}
+                  {argsText.text}
                 </pre>
               </div>
             )}

@@ -12,6 +12,7 @@ import {
   dispatchSnapshotChangedForTest,
   enableRuntimeEvents,
   isRuntimeEventsConnected,
+  RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS,
   RUNTIME_EVENTS_RETRY_MS,
   RUNTIME_EVENTS_WATCHDOG_MS,
   setRuntimeEventsConnectedForTest,
@@ -282,6 +283,9 @@ test("a failed push channel wakes suspended pollers and recreates a dead stream"
   // Infinite suspension is only safe while pushes actually arrive; a fallback
   // that is never rescheduled leaves the transcript and Run status frozen.
   assert.ok(Number.isFinite(RUNTIME_EVENTS_WATCHDOG_MS));
+  assert.ok(RUNTIME_EVENTS_WATCHDOG_MS <= 2_000, "missed status pushes must self-heal within two seconds");
+  assert.ok(RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS <= RUNTIME_EVENTS_WATCHDOG_MS,
+    "streamed text must recover at least as fast as status");
   const settle = () => new Promise(resolve => setTimeout(resolve, 5));
   const original = (globalThis as { EventSource?: unknown }).EventSource;
   class FakeEventSource {

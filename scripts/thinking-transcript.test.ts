@@ -10,6 +10,7 @@ import { injectStreamingCursor } from "../src/components/MarkdownRenderer.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
 import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../src/services/thinkingTranscript.ts";
+import { setAutoExpandCot, readAutoExpandCot, autoExpandCotEnabled, AUTO_EXPAND_COT_KEY } from "../src/services/displayPreferences.ts";
 import type { TranscriptItem } from "../src/types.ts";
 
 const line = (event: unknown) => JSON.stringify(event) + "\n";
@@ -23,6 +24,11 @@ const render = (events: unknown[]) => renderToStaticMarkup(createElement(Virtual
 }));
 const cardCount = (html: string) => (html.match(/class="thinking-card /g) || []).length;
 const toolCount = (html: string) => (html.match(/class="tool-call-card /g) || []).length;
+/** Opt-in display preference: tests that assert auto-expansion must enable it. */
+const withAutoExpandCot = <T,>(run: () => T): T => {
+  setAutoExpandCot(true);
+  try { return run(); } finally { setAutoExpandCot(false); }
+};
 
 test("background Planner replies stay separate across turns with no visible user bubble", () => {
   const events = [
@@ -105,6 +111,35 @@ test("a settled progress-only tail shows the recovered tool as interrupted", () 
   assert.match(html, /tool-status interrupted/);
 });
 
+test("giant tool arguments keep their card and shape, but only render a bounded preview", () => {
+  const content = "ARGS_HEAD " + "中🚀".repeat(TOOL_OUTPUT_PREVIEW_BYTES) + "HUGE_ARGS_TAIL";
+  const result = parseTranscriptChunkLines([line({ type: "tool_execution_start", toolCallId: "giant-args",
+    toolName: "write", args: { path: "src/big.ts", content },
+  }).trimEnd()], [], new Map(), {
+    source: "output", byteOffset: 0, leadingFragment: false, inTagThinking: false, inFinalResponse: false,
+    finalResponseSuppressed: false, seenFirstUser: false, pendingUserStart: false, assistantStartIndex: 0,
+    userMessageStarts: new Set(), compacting: false,
+  }, { showUserTurns: false, skipFirstUser: false });
+  const item = result.currentItems[0];
+  assert.equal(item.toolCallId, "giant-args");
+  assert.equal(item.args?.path, "src/big.ts");
+  assert.equal(item.argsTruncated, true);
+  assert.ok(new TextEncoder().encode(item.args?.content).byteLength <= TOOL_OUTPUT_PREVIEW_BYTES);
+  const html = renderToStaticMarkup(createElement(ToolCallCard, { item, defaultExpanded: true }));
+  assert.match(html, /tool-truncated-pill/);
+  assert.match(html, /ARGS_HEAD/);
+  assert.match(html, /src\/big\.ts/);
+  assert.match(html, /已截断/);
+  assert.doesNotMatch(html, /HUGE_ARGS_TAIL/);
+  // The runtime projection marks already-cut arguments; the card must still say so.
+  const marked = renderToStaticMarkup(createElement(ToolCallCard, {
+    item: { ...item, args: { path: "src/big.ts", content: "preview\n..." }, argsTruncated: true },
+    defaultExpanded: true,
+  }));
+  assert.match(marked, /tool-truncated-pill/);
+  assert.match(marked, /已截断/);
+});
+
 test("a giant tool result keeps its card and failure metadata, but only renders a bounded preview", () => {
   const text = "PREVIEW_HEAD " + "中🚀".repeat(TOOL_OUTPUT_PREVIEW_BYTES) + "HUGE_OUTPUT_TAIL";
   const result = parseTranscriptChunkLines([line({ type: "tool_execution_end", toolCallId: "giant-tool", toolName: "bash",
@@ -175,21 +210,63 @@ test("incremental prepend parsing preserves tail items and backfills tool calls 
   assert.match(prependedMarkup, /TAIL_ASSISTANT_TEXT/);
 });
 
+test("auto-expand COT is an opt-in display preference with safe storage fallbacks", () => {
+  assert.equal(readAutoExpandCot({ getItem: () => null }), false, "default is folded");
+  assert.equal(readAutoExpandCot({ getItem: () => "1" }), true);
+  assert.equal(readAutoExpandCot({ getItem: () => "0" }), false);
+  assert.equal(readAutoExpandCot({ getItem: () => { throw new Error("blocked"); } }), false);
+  const writes: unknown[] = [];
+  const storage = {
+    setItem: (key: string, value: string) => { writes.push(["set", key, value]); },
+    removeItem: (key: string) => { writes.push(["remove", key]); },
+  };
+  try {
+    setAutoExpandCot(true, storage);
+    assert.equal(autoExpandCotEnabled(), true);
+    setAutoExpandCot(false, storage);
+    assert.equal(autoExpandCotEnabled(), false);
+    assert.deepEqual(writes, [["set", AUTO_EXPAND_COT_KEY, "1"], ["remove", AUTO_EXPAND_COT_KEY]]);
+  } finally {
+    setAutoExpandCot(false);
+  }
+});
+
 test("active agent conversation auto-opens running COT while settled history stays folded", () => {
-  const running = render([start(), update("thinking_delta", 0, { delta: "ACTIVE_STREAMING_TEXT" })]);
-  assert.match(running, /thinking-card streaming expanded/);
-  assert.match(running, /thinking-card-body/);
-  assert.match(running, /ACTIVE_STREAMING_TEXT/);
+  withAutoExpandCot(() => {
+    const running = render([start(), update("thinking_delta", 0, { delta: "ACTIVE_STREAMING_TEXT" })]);
+    assert.match(running, /thinking-card streaming expanded/);
+    assert.match(running, /thinking-card-body/);
+    assert.match(running, /ACTIVE_STREAMING_TEXT/);
 
-  const settled = render([start(), update("thinking_delta", 0, { delta: "HISTORICAL_TEXT" }), update("thinking_end", 0, { content: "" })]);
-  assert.match(settled, /thinking-card settled collapsed/);
-  assert.doesNotMatch(settled, /thinking-card-body|HISTORICAL_TEXT/);
+    const settled = render([start(), update("thinking_delta", 0, { delta: "HISTORICAL_TEXT" }), update("thinking_end", 0, { content: "" })]);
+    assert.match(settled, /thinking-card settled collapsed/);
+    assert.doesNotMatch(settled, /thinking-card-body|HISTORICAL_TEXT/);
 
-  const live = renderToStaticMarkup(createElement(ThinkingCard, { content: "Live reasoning", isStreaming: true, defaultExpanded: false }));
-  assert.match(live, /thinking-card streaming expanded/);
-  assert.match(live, /thinking-card-body/);
-  assert.match(live, /<span class="thinking-title">Chain of Thought<\/span>/);
-  assert.doesNotMatch(live, /思维链推理/);
+    const live = renderToStaticMarkup(createElement(ThinkingCard, { content: "Live reasoning", isStreaming: true, defaultExpanded: false }));
+    assert.match(live, /thinking-card streaming expanded/);
+    assert.match(live, /thinking-card-body/);
+    assert.match(live, /<span class="thinking-title">Chain of Thought<\/span>/);
+    assert.doesNotMatch(live, /思维链推理/);
+  });
+});
+
+test("chain of thought stays folded while watching unless the display option is enabled", () => {
+  const running = render([start(), update("thinking_delta", 0, { delta: "HIDDEN_STREAMING_COT" })]);
+  assert.match(running, /thinking-card streaming collapsed/);
+  assert.doesNotMatch(running, /thinking-card-body|HIDDEN_STREAMING_COT/);
+
+  const plannerItem: TranscriptItem = { id: "think-default-off", type: "thinking", role: "assistant", content: "HIDDEN_PLANNER_COT", status: "running" };
+  const planner = renderToStaticMarkup(createElement(PlannerTranscript, {
+    items: [plannerItem], isPlanning: true, locked: false, draft: "",
+    onDraftChange: () => {}, onSendMessage: () => false, onUserResize: () => {},
+  }));
+  assert.match(planner, /thinking-card streaming collapsed/);
+  assert.doesNotMatch(planner, /HIDDEN_PLANNER_COT/);
+
+  // An explicit click still opens the card, with or without the option.
+  const opened = renderToStaticMarkup(createElement(ThinkingCard, { content: "OPT_IN_CONTENT", isStreaming: true, expanded: true }));
+  assert.match(opened, /thinking-card streaming expanded/);
+  assert.match(opened, /OPT_IN_CONTENT/);
 });
 
 test("thinking_end settles the original card without replacing captured thinking or mutating state", () => {
@@ -334,9 +411,15 @@ test("settled empty blocks render no misleading card while pending blocks still 
     const html = renderToStaticMarkup(createElement(ThinkingCard, { content, isStreaming: false }));
     assert.equal(html, "");
   }
+  // A pending block keeps its progress label even while the (default-folded)
+  // body is not mounted; with auto-expand enabled it also shows the shimmer.
   const running = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true }));
-  assert.match(running, /thinking-shimmer/);
+  assert.match(running, /thinking-card streaming collapsed/);
+  assert.match(running, /思考中\.\.\./);
   assert.doesNotMatch(running, /thinking-empty/);
+  const expanded = withAutoExpandCot(() => renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true })));
+  assert.match(expanded, /thinking-shimmer/);
+  assert.doesNotMatch(expanded, /thinking-empty/);
 });
 
 test("history replay retains streamed thinking, recovers end-only text, and hides truly empty blocks", () => {
@@ -389,7 +472,8 @@ test("process exit hides an unfinished empty block but preserves captured thinki
   assert.doesNotMatch(captured, /thinking-empty|thinking-shimmer/);
 });
 
-test("PlannerTranscript live stream defaults both running and completed thinking cards to expanded", () => {
+test("PlannerTranscript opens running and completed thinking when auto-expand is enabled", () => {
+  withAutoExpandCot(() => {
   const runningItem: TranscriptItem = {
     id: "think-live-1",
     type: "thinking",
@@ -427,6 +511,7 @@ test("PlannerTranscript live stream defaults both running and completed thinking
   }));
   assert.match(htmlCompleted, /thinking-card settled expanded/);
   assert.match(htmlCompleted, /Settled planner reasoning while on page/);
+  });
 });
 
 test("tail-paged message_end backfills thinking before streamed assistant text", () => {
@@ -457,11 +542,11 @@ test("streaming cursor is injected inline on the latest line and not pushed to a
   const injectedCode = injectStreamingCursor("<pre><code>console.log('hi');</code></pre>\n", cursor);
   assert.match(injectedCode, /console\.log\('hi'\);<span class="thinking-streaming-cursor"><\/span><\/code><\/pre>/);
 
-  const renderedCard = renderToStaticMarkup(createElement(ThinkingCard, {
+  const renderedCard = withAutoExpandCot(() => renderToStaticMarkup(createElement(ThinkingCard, {
     content: "Step 1: check files\n\nStep 2: latest action line",
     isStreaming: true,
     defaultExpanded: true,
-  }));
+  })));
   // Cursor should be inline within the latest paragraph, not following after </p> or outside the markdown div
   assert.match(renderedCard, /latest action line<span class="thinking-streaming-cursor"><\/span><\/p>/);
   assert.doesNotMatch(renderedCard, /<\/div><span class="thinking-streaming-cursor">/);

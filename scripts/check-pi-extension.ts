@@ -20,6 +20,7 @@ symlinkSync(root, join(repository, "outside"), process.platform === "win32" ? "j
 process.env.GRAPHER_GRAPH_PATH = join(root, "graph.json");
 process.env.GRAPHER_COMPILER_PATH ||= join(resolve(process.env.CARGO_TARGET_DIR || 'backend/target'), `debug/grapher${process.platform === "win32" ? ".exe" : ""}`);
 process.env.GRAPHER_MODE = "planner";
+process.env.GRAPHER_PLANNER_WRITE_TOOLS = "true";
 // Planner behavior must not depend on the host's feedback retry setting.
 process.env.GRAPHER_MAX_FEEDBACK = "0";
 writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({ originalGoal: "Test", nodes: [], edges: [] }));

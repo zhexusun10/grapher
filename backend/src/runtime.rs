@@ -86,25 +86,6 @@ fn known_engine(engine: &str) -> bool {
     engine == "pi"
 }
 
-fn same_repository_binding(left: &str, right: &str) -> bool {
-    if left.is_empty() || right.trim().is_empty() { return false; }
-    if left == right { return true; }
-    let (left, right) = (Path::new(left), Path::new(right));
-    left.is_absolute() && right.is_absolute()
-        && left.canonicalize().ok().zip(right.canonicalize().ok())
-            .is_some_and(|(left, right)| left == right)
-}
-
-fn latest_node_agent_settings(root: &Path, current: Option<&Config>) -> Option<(String, RoleModelConfig)> {
-    let latest = fs::read(root.join("config.json")).ok()
-        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())?;
-    if current.is_some_and(|current| !same_repository_binding(&current.repository, &latest.repository)) {
-        return None;
-    }
-    let settings = latest.node_agent_settings();
-    (!settings.model.trim().is_empty()).then_some((latest.repository, settings))
-}
-
 pub(crate) fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf, String> {
     #[cfg(feature = "fixture")]
     if config.engine == crate::fixture::ENGINE {
@@ -142,9 +123,6 @@ pub struct Runtime {
     epoch: Uuid,
     revision: u64,
     pub root: PathBuf,
-    /// Latest saved Node Agent selection for future, never-executed nodes.
-    /// The Run's original `state.config` stays immutable for reproducibility.
-    latest_node_agent: Option<(String, RoleModelConfig)>,
     _lock: Arc<RuntimeLock>,
 }
 
@@ -182,14 +160,12 @@ impl Runtime {
                 config.engine = "pi".into();
             }
         }
-        let latest_node_agent = latest_node_agent_settings(root, state.config.as_ref());
         let mut runtime = Self {
             store,
             state,
             epoch: Uuid::new_v4(),
             revision: 0,
             root: root.into(),
-            latest_node_agent,
             _lock: lock,
         };
         let interrupted: Vec<_> = runtime
@@ -242,14 +218,12 @@ impl Runtime {
                 config.engine = "pi".into();
             }
         }
-        let latest_node_agent = latest_node_agent_settings(&root, state.config.as_ref());
         let mut runtime = Self {
             store,
             state,
             epoch: Uuid::new_v4(),
             revision: 0,
             root,
-            latest_node_agent,
             _lock: lock,
         };
         let interrupted: Vec<_> = runtime
@@ -286,31 +260,6 @@ impl Runtime {
         defaults.environment = None;
         let bytes = serde_json::to_vec_pretty(&defaults).map_err(|e| e.to_string())?;
         fs::write(self.root.join("config.json"), bytes).map_err(|e| e.to_string())
-    }
-
-    /// Settings saved after a Run started still govern nodes that have never
-    /// executed (especially nodes the Planner adds later). Running/completed
-    /// nodes keep their recorded model, and the Run's original config is not
-    /// rewritten for replay stability.
-    pub(crate) fn set_latest_node_agent_settings(&mut self, config: &Config) {
-        if self.state.config.as_ref().is_some_and(|current|
-            !same_repository_binding(&current.repository, &config.repository))
-        {
-            return;
-        }
-        let settings = config.node_agent_settings();
-        if !settings.model.trim().is_empty() {
-            self.latest_node_agent = Some((config.repository.clone(), settings));
-        }
-    }
-
-    /// Settings are global to the project, while each Run has its own service
-    /// projection. Refresh from disk before scheduling so a save handled by a
-    /// different service instance still governs this Run's future nodes.
-    fn refresh_latest_node_agent_settings(&mut self) {
-        if let Some(latest) = latest_node_agent_settings(&self.root, self.state.config.as_ref()) {
-            self.latest_node_agent = Some(latest);
-        }
     }
 
     pub fn snapshot_version(&self) -> String {
@@ -1569,40 +1518,49 @@ impl Runtime {
         })
     }
 
-    /// Synchronize settings to unstarted nodes and opt failed nodes into explicit
-    /// Continue recovery. Never dispatch jobs or rewrite results/history here.
+    /// Synchronize this conversation's model selection to unstarted nodes and
+    /// opt failed nodes into explicit Continue recovery. Never dispatch jobs,
+    /// rewrite results/history, or touch another Run's settings.
     pub fn update_node_models(&mut self, config: &Config) -> Result<(), String> {
         config.validate_model_settings()?;
         let Some(original) = self.state.config.as_ref() else {
             return Ok(());
         };
-        if matches!(self.state.phase.as_str(),
-            "completed" | "publishing" | "merging" | "publication_failed") {
+        // The event only records the conversation selection and never rewrites
+        // results, publication evidence, or already-executed nodes, so it is
+        // safe in every phase.
+        let settings = RunModelConfig::from_config(config);
+        let previous = self.state.model_config.clone()
+            .unwrap_or_else(|| RunModelConfig::from_config(original));
+        if settings == previous {
             return Ok(());
         }
-        let settings = config.node_agent_settings();
-        if settings.model.is_empty() {
+        let node_settings = settings.node_agent_settings();
+        if node_settings.model.is_empty() {
             return Ok(());
         }
-        let original = original.node_agent_settings();
-        let started: BTreeSet<_> = self.state.executions.iter()
-            .map(|execution| execution.node.as_str()).collect();
-        let nodes: Vec<_> = self.state.nodes.iter().filter_map(|(name, node)| {
-            let unstarted = matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")
-                && !started.contains(name.as_str());
-            let failed = node.status == "failed"
-                && self.state.executions.iter().rev()
-                    .find(|execution| execution.node == *name
-                        && !self.state.superseded_execution_ids.contains(&execution.id))
-                    .is_some_and(|execution| execution.status == "failed");
-            ((unstarted || failed)
-                && node.model_config.as_ref().unwrap_or(&original) != &settings)
-                .then(|| name.clone())
-        }).collect();
-        if nodes.is_empty() {
-            return Ok(());
-        }
-        self.emit(EventKind::NodeModelsUpdated { nodes, settings })
+        let previous_node = previous.node_agent_settings();
+        let nodes = if node_settings == previous_node {
+            // Planner/Partitioner changes are conversation settings only; they
+            // must never opt a failed Node Agent attempt into Continue.
+            Vec::new()
+        } else {
+            let started: BTreeSet<_> = self.state.executions.iter()
+                .map(|execution| execution.node.as_str()).collect();
+            self.state.nodes.iter().filter_map(|(name, node)| {
+                let unstarted = matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")
+                    && !started.contains(name.as_str());
+                let failed = node.status == "failed"
+                    && self.state.executions.iter().rev()
+                        .find(|execution| execution.node == *name
+                            && !self.state.superseded_execution_ids.contains(&execution.id))
+                        .is_some_and(|execution| execution.status == "failed");
+                ((unstarted || failed)
+                    && node.model_config.as_ref().unwrap_or(&previous_node) != &node_settings)
+                    .then(|| name.clone())
+            }).collect()
+        };
+        self.emit(EventKind::ConversationModelsUpdated { settings, nodes })
     }
 
     fn queue_node_recovery(&mut self) -> Result<(), String> {
@@ -2079,8 +2037,7 @@ impl Runtime {
         }
         self.require_current_file_contract()?;
         self.drain_feedback()?;
-        let config = self.state.config.clone().ok_or("Missing config")?;
-        self.refresh_latest_node_agent_settings();
+        let config = self.state.effective_config().ok_or("Missing config")?;
         // Check before emitting Started or allocating workspaces, including jobs
         // resumed without a UI request. perform() checks again before filesystem work.
         resolve_repository(&self.root, &config)?;
@@ -2566,9 +2523,7 @@ impl Runtime {
             // replaces this placeholder with parsed live metrics.
             let node_settings = self.state.nodes[&node.name].model_config.clone().or_else(|| {
                 (execution.attempt == 1)
-                    .then(|| self.latest_node_agent.as_ref()
-                        .filter(|(repository, _)| same_repository_binding(repository, &config.repository))
-                        .map(|(_, settings)| settings.clone()))
+                    .then(|| self.state.model_config.as_ref().map(RunModelConfig::node_agent_settings))
                     .flatten()
             });
             if let Some(settings) = &node_settings {
@@ -2927,7 +2882,7 @@ impl Runtime {
             else {
                 return;
             };
-            if let Some(config) = self.state.config.clone() {
+            if let Some(config) = self.state.effective_config() {
                 engine::warm_node(
                     config,
                     PathBuf::from(&execution.worktree),

@@ -15,7 +15,8 @@ export interface CompositeResult { domain: { platform: string; arch: string; bas
 export interface ResultEntry { name: string; result: CompositeResult; workspace: string }
 export interface ResultDescriptor { schema: number; runId: string; result: CompositeResult; config: EnvironmentConfig; workspace: string; entries?: ResultEntry[]; defaultEntry?: string }
 export interface EnvironmentCapabilities { platform: string; arch: string; nativeWorkspace: boolean; fixedPhysicalLayout: boolean; namespaceLayout: boolean; basicSnapshots: boolean; extendedMetadata: boolean; sharedWorkingLayers: boolean; fullSystemSnapshot: boolean; gpuVerified: boolean; resourceQuotas: boolean; cpuQuota: boolean; memoryQuota: boolean; deviceLeases: boolean; storage: string }
-export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; postTaskReview?: boolean; environment?: EnvironmentConfig | null }
+export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; postTaskReview?: boolean; plannerWriteTools?: boolean; environment?: EnvironmentConfig | null }
+export interface ConversationModelConfig { model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>> }
 interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; result?: CompositeResult | null; modelConfig?: RoleModelConfig; pendingMessages?: Array<{ sequence: number; instruction: string; images?: ImageAttachment[] | null }> }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
 interface ExecutionMetrics {
@@ -94,6 +95,8 @@ export interface Snapshot {
   planning?: PlanningSummary | null;
   graph: Graph;
   config: Config | null;
+  /** Conversation-scoped model selection; absence means use creation settings. */
+  modelConfig?: ConversationModelConfig | null;
   plan: Plan | null;
   nodes: Record<string, NodeState>;
   executions: Execution[];
@@ -151,7 +154,7 @@ export interface Bootstrap {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: 0, maxFeedback: 3, autoApprove: false, postTaskReview: true };
+export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: 0, maxFeedback: 3, autoApprove: false, postTaskReview: true, plannerWriteTools: false };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},
@@ -251,6 +254,8 @@ export interface TranscriptItem {
   toolName?: string;
   toolCallId?: string;
   args?: Record<string, any>;
+  /** Display preview only: `write`/`edit` arguments can carry whole file bodies. */
+  argsTruncated?: boolean;
   result?: string;
   isError?: boolean;
   status?: "running" | "success" | "error" | "interrupted";

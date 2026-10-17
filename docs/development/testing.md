@@ -27,7 +27,7 @@ npm test
 
 1. **Scope limits:** `npm test` uses Rust fixtures (no paid API calls). Frontend tests check UI logic/smoke cases, not real provider/sandbox behavior. Update the canonical documentation page when a public contract changes, and check links in the pages you touch.
 2. **Test design rules:** Assert public contract outcomes (scheduling, replay, publication, isolation, schema compatibility, cancellation, timeouts). Never lock source spelling, exact translation counts, decorative CSS/icon sizes, or workflow indentation.
-3. **Registered agent tools:** Node, Serial, and Merger workspaces expose only `read`, `write`, `edit`, and `bash`; the Planner additionally exposes `node`/`edge` and a follow-up-only `switch_workspace`. Agents search via Bash, so host `rg`/`fd` are not required by `test:extensions`; the [benchmark image](../../benchmark/Dockerfile) installs them for Pi's own search tools.
+3. **Registered agent tools:** Node, Serial, and Merger workspaces expose only `read`, `write`, `edit`, and `bash`; the Planner exposes `read`/`bash` plus `write`/`edit` when `plannerWriteTools` is enabled (off by default), and additionally exposes `node`/`edge` and a follow-up-only `switch_workspace`. Agents search via Bash, so host `rg`/`fd` are not required by `test:extensions`; the [benchmark image](../../benchmark/Dockerfile) installs them for Pi's own search tools.
 
 ## 2. Cargo Build Cache & Target Isolation
 

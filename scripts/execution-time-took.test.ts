@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateExecutionDurationMs, calculatePlannerDurationMs } from "../src/components/ExecutionTimeTook.tsx";
+import { calculateExecutionDurationMs, calculatePlannerDurationMs, formatSessionStartTime } from "../src/components/ExecutionTimeTook.tsx";
 import { formatToolDuration } from "../src/utils/toolTiming.ts";
 import type { Execution } from "../src/types.ts";
 
@@ -21,6 +21,17 @@ function createMockExecution(overrides: Partial<Execution> = {}): Execution {
     ...overrides,
   };
 }
+
+test("formatSessionStartTime renders a stable English timestamp for session details", () => {
+  const local = new Date(2026, 9, 17, 16, 1, 16);
+  assert.equal(formatSessionStartTime(local.getTime()), "2026-10-17 16:01:16");
+  // Planning summaries persist the Planner's session start as epoch milliseconds in a string.
+  assert.equal(formatSessionStartTime(String(local.getTime())), "2026-10-17 16:01:16");
+  assert.equal(formatSessionStartTime(undefined), "-");
+  assert.equal(formatSessionStartTime(null), "-");
+  assert.equal(formatSessionStartTime(0), "-");
+  assert.equal(formatSessionStartTime("not-a-time"), "-");
+});
 
 test("returns null when execution is missing or has no startedAt", () => {
   assert.equal(calculateExecutionDurationMs(null), null);

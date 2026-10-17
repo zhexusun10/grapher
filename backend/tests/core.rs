@@ -47,7 +47,7 @@ fn config() -> Config {
         max_parallel: 2,
         max_feedback: 3,
         auto_approve: false,
-        post_task_review: false,
+        post_task_review: false, planner_write_tools: true,
         role_models: Default::default(),
     }
 }

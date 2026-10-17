@@ -17,9 +17,9 @@ const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const shellPath = (value: string) => process.platform === 'win32' ? value.replaceAll('\\', '/') : value;
 const text = (result: any) => result.content.filter((part: any) => part.type === 'text').map((part: any) => part.text).join('\n');
 
-async function plannerTools(source: string, workspace = source) {
+async function plannerTools(source: string, workspace = source, writeTools = true) {
   const previous = process.cwd();
-  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS', 'GRAPHER_LAUNCH_BINDING'];
+  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS', 'GRAPHER_LAUNCH_BINDING', 'GRAPHER_PLANNER_WRITE_TOOLS'];
   const environment = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   try {
     process.chdir(workspace);
@@ -27,7 +27,7 @@ async function plannerTools(source: string, workspace = source) {
     // Windows); capture that exact spelling for prompt/history inputs.
     const boundCwd = process.cwd();
     Object.assign(process.env, { GRAPHER_MODE: 'planner', GRAPHER_EXECUTION_KIND: workspace === source ? 'source' : 'graph',
-      GRAPHER_ORIGINAL_ROOT: source, GRAPHER_SOURCE_ALIAS: source });
+      GRAPHER_ORIGINAL_ROOT: source, GRAPHER_SOURCE_ALIAS: source, GRAPHER_PLANNER_WRITE_TOOLS: String(writeTools) });
     delete process.env.GRAPHER_LAUNCH_BINDING;
     const loaded = await loadExtensions([join(root, 'backend/resources/planner.ts')], workspace);
     assert.deepEqual(loaded.errors, []);
@@ -37,7 +37,9 @@ async function plannerTools(source: string, workspace = source) {
       registerTool(tool: any) { assert.ok(!tools.has(tool.name), 'one owner per tool'); tools.set(tool.name, tool); },
       on(name: string, hook: any) { hooks.set(name, [...(hooks.get(name) ?? []), hook]); },
     } as any);
-    assert.deepEqual([...tools.keys()].sort(), ['bash', 'edge', 'edit', 'node', 'read', 'write']);
+    assert.deepEqual([...tools.keys()].sort(), writeTools
+      ? ['bash', 'edge', 'edit', 'node', 'read', 'write']
+      : ['bash', 'edge', 'node', 'read'], 'the setting controls only write/edit mounting');
     // ctx.cwd mirrors what production Pi passes to tools: its own process.cwd().
     return { boundCwd, tools, hooks, context: { cwd: boundCwd, sessionManager: { getSessionId: () => 'planner-test', getSessionFile: () => undefined } } as any };
   } finally {
@@ -47,6 +49,20 @@ async function plannerTools(source: string, workspace = source) {
     }
   }
 }
+
+test('Planner can withhold write and edit tools while retaining read and Bash', { timeout: 30_000 }, async () => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-planner-files-')));
+  try {
+    await writeFile(join(directory, 'plan.txt'), 'read-only');
+    const { tools, context } = await plannerTools(directory, directory, false);
+    assert.equal(tools.has('write'), false);
+    assert.equal(tools.has('edit'), false);
+    assert.equal(text(await tools.get('read').execute('read', { path: './plan.txt' }, undefined, undefined, context)).trim(), 'read-only');
+    assert.equal(text(await tools.get('bash').execute('bash', { command: 'printf ready' }, undefined, undefined, context)).trim(), 'ready');
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+  }
+});
 
 test('Planner preserves native Bash semantics and immediate source writes on every platform', { timeout: 30_000 }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-planner-bash-')));

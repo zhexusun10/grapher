@@ -464,7 +464,8 @@ export default function (pi) {
         input: '{"id":"ready","type":"get_state"}\n',
         env: { ...process.env, PI_CODING_AGENT_DIR: f.own, GRAPHER_GLOBAL_PI_AGENT_DIR: f.global,
           GRAPHER_MODE: role, GRAPHER_TEST_RESULT: result, GRAPHER_ISOLATED_PI_MODELS: '1',
-          GRAPHER_EXECUTION_KIND: 'source', PI_OFFLINE: '1' },
+          GRAPHER_EXECUTION_KIND: 'source', PI_OFFLINE: '1',
+          ...(role === 'planner' ? { GRAPHER_PLANNER_WRITE_TOOLS: 'true' } : {}) },
       });
       assert.ok(output.includes('"success":true'), output);
       const allowed = role === 'planner' || role === 'node';
