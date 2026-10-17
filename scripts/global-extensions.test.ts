@@ -456,7 +456,7 @@ export default function (pi) {
       const result = join(f.base, `${role}.json`);
       const args = ['--mode', 'rpc', '--no-session', '--no-context-files'];
       if (role === 'node') args.push('--approve');
-      if (role === 'planner') args.push('--exclude-tools', 'edit,write,ls,find,grep');
+      if (role === 'planner') args.push('--exclude-tools', 'ls,find,grep');
       if (role === 'partition') args.push('--no-extensions', '--no-skills');
       if (role === 'merger') args.push('--no-skills');
       const output = execFileSync(process.execPath, [join(root, 'engine/entrypoint.mjs'), ...args], {
@@ -475,7 +475,7 @@ export default function (pi) {
         assert.ok(state.commands.includes('pi-trim'), `${role}: bundled trim loaded`);
         assert.ok(state.commands.includes('pi-continuity'), `${role}: removable bundled continuity loaded`);
         assert.match(state.prompt, /global-skill/, `${role}: global skills available`);
-        if (role === 'planner') assert.ok(!state.tools.includes('write'));
+        if (role === 'planner') assert.ok(state.tools.includes('write') && state.tools.includes('edit'), `${role}: workspace file tools opened`);
       }
     }
   } finally { f.close(); }

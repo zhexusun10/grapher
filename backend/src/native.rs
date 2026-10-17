@@ -740,13 +740,18 @@ export default async function () {
     const { default: policy } = await import(pathToFileURL(join(process.env.GRAPHER_TEST_RUNTIME, 'engine/prompt-extension.ts')).href);
     const tools = new Map(), hooks = new Map();
     policy({ registerTool(tool) { tools.set(tool.name, tool); }, on(name, hook) { hooks.set(name, hook); } });
-    assert.deepEqual([...tools.keys()].sort(), ['bash', 'read']);
+    assert.deepEqual([...tools.keys()].sort(), ['bash', 'edit', 'read', 'write']);
     const bash = tools.get('bash');
     const text = result => result.content.filter(part => part.type === 'text').map(part => part.text).join('\n').trim();
     await bash.execute('planner-cwd', { command: 'printf frontier > planner-probe.txt' });
     assert.equal(readFileSync('planner-probe.txt', 'utf8'), 'frontier');
     assert.equal(text(await bash.execute('pwd', { command: 'pwd -P' })), '.');
     assert.equal(text(await tools.get('read').execute('read', { path: join(process.env.GRAPHER_ORIGINAL_ROOT, 'planner-probe.txt') })), 'frontier');
+    const modelPath = join(process.env.GRAPHER_ORIGINAL_ROOT, 'planner-plan.md');
+    await tools.get('write').execute('write', { path: modelPath, content: 'planned: first\n' });
+    assert.equal(readFileSync('planner-plan.md', 'utf8'), 'planned: first\n');
+    await tools.get('edit').execute('edit', { path: modelPath, edits: [{ oldText: 'first', newText: 'second' }] });
+    assert.equal(readFileSync('planner-plan.md', 'utf8'), 'planned: second\n');
     const options = { cwd: process.cwd(), appendSystemPrompt: 'Existing instructions.' };
     await hooks.get('before_agent_start')({ systemPromptOptions: options });
     assert.equal(options.cwd, '.');
@@ -776,6 +781,8 @@ export default async function () {
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             assert_eq!(fs::read_to_string(cwd.join("planner-probe.txt")).unwrap(), "frontier");
             assert!(!source.join("planner-probe.txt").exists());
+            assert_eq!(fs::read_to_string(cwd.join("planner-plan.md")).unwrap(), "planned: second\n");
+            assert!(!source.join("planner-plan.md").exists());
         }
     }
 

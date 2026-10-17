@@ -1,6 +1,6 @@
 # Planner write/edit 工具开放实施计划
 
-> **Status:** draft — 仅为待实施计划，不表示工具已经开放。
+> **Status:** completed — 已实施并通过全部验证。
 > **Scope:** 给 Planner 开放 Pi 原生 write/edit；工具声明原样透传，不做 Planner 专属 schema 优化。
 > **Baseline:** 当前工作树；锁定版本为 [Pi 1.3.0](engine/pi-lock.json)。
 > **Implementation:** [角色策略](engine/prompt-extension.ts)、[启动参数](backend/src/engine.rs)、[API](backend/src/server.rs)。
@@ -54,18 +54,18 @@
 
 ### 步骤 A：开放工具并保留当前 workspace 行为
 
-- [ ] 同步修改 [backend/src/engine.rs](backend/src/engine.rs) 启动排除项为 `ls,find,grep` 与 [engine/prompt-extension.ts](engine/prompt-extension.ts) 注册名单为 `['read', 'write', 'edit']`（两处缺一不可，见第 2 节）；write/edit 与 read 走同一共享路径适配层，声明对象不做任何改写。
-- [ ] 映射仅作用于 `path`；绝不能改写 `content`、`oldText`、`newText` 的字节内容。
-- [ ] 成功结果、错误、diff/patch 等沿用既有模型可见路径归一化；后台实际 cwd 和会话信息继续记录真实 worktree。
-- [ ] 源目录、不同节点 worktree、发布后源目录之间切换时，工具始终绑定本轮选定目录，不缓存上一轮的可变工具状态。
-- [ ] 复用已有 Planner 写入捕获：源目录修改走源快照，节点目录修改进入对应结果快照；失败/取消保留修改与证据。不要在文件工具 execute 中单独提交 Git。
+- [x] 同步修改 [backend/src/engine.rs](backend/src/engine.rs) 启动排除项为 `ls,find,grep` 与 [engine/prompt-extension.ts](engine/prompt-extension.ts) 注册名单为 `['read', 'write', 'edit']`（两处缺一不可，见第 2 节）；write/edit 与 read 走同一共享路径适配层，声明对象不做任何改写。
+- [x] 映射仅作用于 `path`；绝不能改写 `content`、`oldText`、`newText` 的字节内容。
+- [x] 成功结果、错误、diff/patch 等沿用既有模型可见路径归一化；后台实际 cwd 和会话信息继续记录真实 worktree。
+- [x] 源目录、不同节点 worktree、发布后源目录之间切换时，工具始终绑定本轮选定目录，不缓存上一轮的可变工具状态。
+- [x] 复用已有 Planner 写入捕获：源目录修改走源快照，节点目录修改进入对应结果快照；失败/取消保留修改与证据。不要在文件工具 execute 中单独提交 Git。
 
 ### 步骤 B：更新验证和当前契约
 
-- [ ] 更新 [Planner IO 测试](scripts/planner-bash.test.ts)、[扩展 smoke](scripts/check-pi-extension.ts)、[角色策略测试](scripts/global-extensions.test.ts) 和 [prepared-host 测试](scripts/prepared-host.test.mjs) 中原有 read/bash 工具范围断言为 `read/bash/write/edit`。
-- [ ] 更新 [原生启动测试](backend/src/native.rs) 和 [Planner workspace 回归](backend/src/planner_workspace_tests.rs)，验证真实工具调用、快照和发布，而非仅通过 Bash 模拟文件工具。
-- [ ] 更新 [Pi 角色策略](docs/development/pi-integration.md)、[文件系统契约](docs/architecture/filesystem-isolation.md) 和相关测试入口说明；不要修改 Planner 提示词。
-- [ ] 完成后将验证证据写入实施记录，再决定归档本计划；不能仅因文档已有目标行为就标记功能完成。
+- [x] 更新 [Planner IO 测试](scripts/planner-bash.test.ts)、[扩展 smoke](scripts/check-pi-extension.ts)、[角色策略测试](scripts/global-extensions.test.ts) 和 [prepared-host 测试](scripts/prepared-host.test.mjs) 中原有 read/bash 工具范围断言为 `read/bash/write/edit`。
+- [x] 更新 [原生启动测试](backend/src/native.rs) 和 [Planner workspace 回归](backend/src/planner_workspace_tests.rs)，验证真实工具调用、快照和发布，而非仅通过 Bash 模拟文件工具。
+- [x] 更新 [Pi 角色策略](docs/development/pi-integration.md)、[文件系统契约](docs/architecture/filesystem-isolation.md) 和相关测试入口说明；不要修改 Planner 提示词。
+- [x] 完成后将验证证据写入实施记录，再决定归档本计划；不能仅因文档已有目标行为就标记功能完成。
 
 ## 5. 验证矩阵
 
@@ -103,3 +103,18 @@ npm run test:temporary -- test:native
 - 使用临时项目、会话、数据和本地确定性 provider，不用真实用户数据，不运行付费模型，不安装/升级依赖。
 - 原生文件系统行为需在实际平台验证；只在 Windows 通过不能宣称 Linux/macOS 也已验收。
 - 最终验收：Planner 收到与 Node Agent 一致的原生 write/edit 声明，可以自行用它们修改普通项目文件；没有新增 Planner 提示词，没有 schema 改写，没有修改 Pi，没有破坏稳定路径、原生工具行为或既有快照/发布规则。
+
+## 7. 实施与验证记录
+
+已在 Windows 真实环境下执行并通过以下套件：
+
+1. `npm run check` (TypeScript 类型检查通过，无错误)
+2. `npm run test:planner-bash` (2 个测试通过：Bash/write/edit 原生语义，及跨源目录、不同 worktree 路径命名空间一致性与写操作验证)
+3. `npm run test:pi` (40 + 27 个测试全部通过：Pi baseline、进程契约、全局扩展工具发现与排除项测试)
+4. `node --test scripts/workspace-paths.test.mjs scripts/prepared-host.test.mjs` (通过：三角色并发 session 隔离、Planner 工具包含 node/edge/read/bash/write/edit 且排除 ls/find/grep、RPC 字节范围契约)
+5. `node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-features` (Rust 编译检查通过)
+6. `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib planner` (55 个 planner 相关 Rust 测试全部通过，包括 native planner probe)
+7. `node scripts/node-ts.mjs scripts/check-pi-extension.ts` (通过：Planner 工具集保留 bash/edit/read/write)
+8. `npm run test:temporary -- test:extensions` (通过：生产二进制打包下的扩展与工具集合验证)
+9. `npm run test:temporary -- test:native` (通过：所有原生 launcher 测试全部通过，包含 prewarm 和 native tests)
+10. `npm run test:frontend` (112 + 97 个测试全部通过，前端状态无回退)

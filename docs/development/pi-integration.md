@@ -72,7 +72,7 @@ The committed baseline (`engine/model-data/`, `engine/pi-lock.json` and the upst
 | Role | Policy |
 | --- | --- |
 | Partitioner | No tools, context files, user extensions, MCP or skills; bundled `pi-trim` only; thinking defaults to `low` |
-| Planner | `node`, `edge`, `read`, `bash` plus selected global extension/MCP tools and skills; no automatic project context files |
+| Planner | `node`, `edge`, `read`, `bash`, `write`, `edit` plus selected global extension/MCP tools and skills; no automatic project context files |
 | Node Agent | Pi native tools, selected global extensions/MCP/skills, and trusted workspace resources |
 | Merger | Pi default prompt; Git-conflict repair appends the Git repair addendum (`--append-system-prompt`), while follow-ups send the user's instruction unchanged with no new Merger-specific system prompt; fixed tools; bundled `pi-trim` and `pi-continuity` (as an exception for robust merge resolution); no user extensions, MCP, skills or automatic context files |
 
@@ -81,7 +81,7 @@ addendum is injected directly for Node Agent and Merger, not Partitioner or
 Planner; Planner does not need to repeat execution conventions in node tasks.
 Planner shares the Node Agent path mapper and model-facing normalization without
 receiving an additional path-convention or workspace-switch prompt. The shared
-workspace policy owns its `read`/`bash` tools; the Planner extension owns only
+workspace policy owns its `read`/`bash`/`write`/`edit` tools; the Planner extension owns only
 `node`/`edge`.
 It directly follows any preceding addendum or explicit prompt override with a
 single newline, not a blank-line separator; it also applies to Merger follow-ups.

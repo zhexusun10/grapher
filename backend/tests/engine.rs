@@ -386,7 +386,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         "Node agent must not restrict tools via --tools"
     );
 
-    // 2. Planner: accepts skills/extensions, keeps native tools read-only without hiding extension tools.
+    // 2. Planner: accepts skills/extensions, excludes ls/find/grep without hiding extension tools.
     let mut planner_out = String::new();
     let _ = run_pi(
         PiRequest {
@@ -396,7 +396,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             task: "task",
             session_dir: &temp.path().join("session-planner"),
             extension: None,
-            tools: Some("node,edge,read,bash"),
+            tools: Some("node,edge,read,bash,write,edit"),
             session_id: Some("planner-session"),
             extra_args: Vec::new(),
             environment: Vec::new(),
@@ -418,7 +418,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         "Planner must have --no-approve"
     );
     assert!(
-        planner_out.contains("--exclude-tools edit,write,ls,find,grep") && !planner_out.contains("--tools"),
+        planner_out.contains("--exclude-tools ls,find,grep") && !planner_out.contains("--tools"),
         "Planner must restrict base tools without excluding extension tools"
     );
 

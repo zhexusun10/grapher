@@ -123,7 +123,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       const args = ['--mode', 'rpc', '--no-prompt-templates', '--no-themes', '--model', `prepared-test/${role}`,
         '--thinking', 'off', '--session-id', sessionId, '--session-dir', session];
       if (role === 'partition') args.push('--no-tools', '--no-extensions', '--no-skills', '--no-approve');
-      else if (role === 'planner') args.push('--no-approve', '--exclude-tools', 'edit,write,ls,find,grep', '--no-context-files',
+      else if (role === 'planner') args.push('--no-approve', '--exclude-tools', 'ls,find,grep', '--no-context-files',
         '--extension', join(root, 'backend/resources/planner.ts'));
       else args.push('--approve');
       const binding = { type: 'grapher_bind', role, cwd: source, args, environment: {
@@ -166,8 +166,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       const tools = body.tools?.map(tool => tool.function.name) ?? [];
       if (role === 'partition') assert.deepEqual(tools, []);
       else if (role === 'planner') {
-        assert.ok(['node', 'edge', 'read', 'bash'].every(tool => tools.includes(tool)));
-        assert.ok(['edit', 'write', 'ls', 'find', 'grep'].every(tool => !tools.includes(tool)));
+        assert.ok(['node', 'edge', 'read', 'bash', 'write', 'edit'].every(tool => tools.includes(tool)));
+        assert.ok(['ls', 'find', 'grep'].every(tool => !tools.includes(tool)));
         const edgeDescription = body.tools.find(tool => tool.function.name === 'edge').function.description;
         assert.doesNotMatch(edgeDescription, /ignored|non-Git|drain|fork/i);
         const rejected = JSON.parse(requests[before + 1].messages.find(message => message.role === 'tool').content);

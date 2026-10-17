@@ -1777,7 +1777,7 @@ fn plan_goal_internal_with_started(
                                 task: &task,
                                 session_dir: &planner_session_dir,
                                 extension: Some(&service.extension),
-                                tools: Some("node,edge,read,bash"),
+                                tools: Some("node,edge,read,bash,write,edit"),
                                 session_id: Some(&planner_session_id),
                                 extra_args: planner_extra_args,
                                 environment: vec![

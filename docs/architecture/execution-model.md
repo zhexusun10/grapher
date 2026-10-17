@@ -30,7 +30,7 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 
 1. The Partitioner classifies the goal directly in the bound source cwd, with no tools and no separate project checkout. It selects a route unless the user explicitly selects Serial or Graph.
 2. For Graph's initial planning, the Planner runs directly in the bound source project directory, not a private copy. Later turns select their cwd afresh as described below.
-3. The Planner uses `node`, `edge`, `read`, and native `bash`. Bash writes are not filtered, and files appear in the source immediately, even if planning fails or is cancelled.
+3. The Planner uses `node`, `edge`, `read`, native `bash`, plus `write` and `edit`. Writes are not filtered, and files appear in the selected directory immediately, even if planning fails or is cancelled.
 4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records that turn's actual cwd for session/legacy compatibility; it is not a directory allocation.
 5. The graph is validated and presented for approval. Approval validates the binding and records a Git source snapshot for a standard Git repository; an ordinary folder records no snapshot until its first node is dispatched, when Grapher lazily materializes a temporary shadow snapshot with forced collection of project files. Managed environment scopes and Runtime data remain outside project Git.
 
@@ -64,7 +64,7 @@ old workspace; only its validated session-header cwd is rebound, recorded as
 the literal cwd the resumed process reports (Pi matches it without realpath
 normalization, and that spelling differs by platform). Planner uses
 the same stable model-facing path namespace as Node Agent: existing prompt cwd,
-read/bash results and conversation context are normalized, while recognized
+read/bash/write/edit results and conversation context are normalized, while recognized
 project-root paths resolve to the current physical workspace. Switching cwd adds
 no reminder, working-directory announcement or other prompt instructions.
 `PlanningSummary.worktree` and
@@ -72,7 +72,7 @@ no reminder, working-directory announcement or other prompt instructions.
 the selection. **Planning session details** displays the actual worktree and
 per-turn workspace history, including failed turns.
 
-Planner Bash writes affect the selected directory immediately. Writes in a node
+Planner Bash/write/edit writes affect the selected directory immediately. Writes in a node
 worktree are Git-snapshotted/imported back into that execution's result before
 scheduling resumes; they are not copied into the source prematurely. Children
 inherit the updated result through normal graph dependencies. Source-native

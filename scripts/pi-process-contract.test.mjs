@@ -166,7 +166,7 @@ test('pi-trim transforms actual provider requests for every role without removin
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
     } } }));
     for (const role of ['partition', 'planner', 'node', 'merger']) {
-      const args = role === 'node' ? ['--approve'] : role === 'planner' ? ['--exclude-tools', 'edit,write,ls,find,grep']
+      const args = role === 'node' ? ['--approve'] : role === 'planner' ? ['--exclude-tools', 'ls,find,grep']
         : ['--no-extensions', '--no-skills'];
       const custom = `<role_policy>\n${role} instructions remain intact\n<docs>\nProject documentation\n</docs>\n</role_policy>`;
       if (role === 'partition' || role === 'planner') {

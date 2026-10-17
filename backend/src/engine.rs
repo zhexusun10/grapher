@@ -790,9 +790,9 @@ fn run_pi_with_timeout(
         command.args(["--no-extensions", "--no-skills", "--no-approve"]);
     }
     // An allowlist would also hide tools contributed by user extensions/MCP.
-    // Retain the Planner's read/bash base while allowing extension tools.
+    // Retain the Planner's read/bash/write/edit base while allowing extension tools.
     if request.role == PiRole::Planner {
-        command.args(["--exclude-tools", "edit,write,ls,find,grep"]);
+        command.args(["--exclude-tools", "ls,find,grep"]);
     }
     match request.tools {
         Some(tools) if tools.trim().is_empty() => {

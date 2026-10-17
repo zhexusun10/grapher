@@ -37,7 +37,7 @@ async function plannerTools(source: string, workspace = source) {
       registerTool(tool: any) { assert.ok(!tools.has(tool.name), 'one owner per tool'); tools.set(tool.name, tool); },
       on(name: string, hook: any) { hooks.set(name, [...(hooks.get(name) ?? []), hook]); },
     } as any);
-    assert.deepEqual([...tools.keys()].sort(), ['bash', 'edge', 'node', 'read']);
+    assert.deepEqual([...tools.keys()].sort(), ['bash', 'edge', 'edit', 'node', 'read', 'write']);
     // ctx.cwd mirrors what production Pi passes to tools: its own process.cwd().
     return { boundCwd, tools, hooks, context: { cwd: boundCwd, sessionManager: { getSessionId: () => 'planner-test', getSessionFile: () => undefined } } as any };
   } finally {
@@ -115,6 +115,11 @@ test('Planner keeps one visible path namespace across source, different worktree
       assert.equal(text(await bash.execute('pwd', { command: 'pwd -P' }, undefined, undefined, context)).trim(), '.');
       assert.equal(text(await read.execute('read-relative', { path: './value.txt' }, undefined, undefined, context)).trim(), expected);
       assert.equal(text(await read.execute('read-absolute', { path: join(source, 'value.txt') }, undefined, undefined, context)).trim(), expected);
+      const write = tools.get('write'), edit = tools.get('edit');
+      await write.execute('write-relative', { path: './plan.md', content: `plan ${expected}` }, undefined, undefined, context);
+      assert.equal(await readFile(join(workspace, 'plan.md'), 'utf8'), `plan ${expected}`);
+      await edit.execute('edit-absolute', { path: join(source, 'plan.md'), edits: [{ oldText: `plan ${expected}`, newText: `planned ${expected}` }] }, undefined, undefined, context);
+      assert.equal(await readFile(join(workspace, 'plan.md'), 'utf8'), `planned ${expected}`);
       assert.equal(text(await bash.execute('bash-absolute', { command: `cat ${quote(shellPath(join(source, 'value.txt')))}` }, undefined, undefined, context)).trim(), expected);
       const updates: any[] = [];
       const result = await bash.execute('stream', { command: 'pwd -P' }, undefined, (update: any) => updates.push(update), context);
@@ -141,6 +146,9 @@ test('Planner keeps one visible path namespace across source, different worktree
         (error: Error) => !error.message.includes(workspace) && !error.message.includes(shellPath(workspace))
           && !error.message.includes(boundCwd) && !error.message.includes(shellPath(boundCwd)));
     }
+    // Worktree turns edit through the model-visible source path; the source
+    // copy must only ever reflect the source-native turns.
+    assert.equal(await readFile(join(source, 'plan.md'), 'utf8'), 'planned source');
   } finally {
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }

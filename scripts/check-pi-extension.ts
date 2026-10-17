@@ -29,7 +29,7 @@ try {
   const adapterPath = join(source, "engine/prompt-extension.ts");
   const loaded = await loadExtensions([join(source, "backend/resources/planner.ts"), adapterPath], repository);
   assert.deepEqual(loaded.errors, []);
-  assert.deepEqual([...loaded.extensions[1].tools.keys()].sort(), ["bash", "read"], "Planner adapter preserves its tool surface");
+  assert.deepEqual([...loaded.extensions[1].tools.keys()].sort(), ["bash", "edit", "read", "write"], "Planner adapter preserves its tool surface");
   assert.equal(loaded.extensions[1].handlers.has("tool_call"), false, "Planner graph tools must not get shell hooks");
   const extension = loaded.extensions[0];
   assert.deepEqual([...extension.tools.keys()].sort(), ["edge", "node"]);
@@ -408,7 +408,7 @@ fn main() {
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeUnavailable);
   process.env.GRAPHER_COMPILER_PATH = compilerPath;
 
-  // Graph mutations remain self-contained; the shared adapter owns read/bash.
+  // Graph mutations remain self-contained; the shared adapter owns read/bash/write/edit.
   process.env.GRAPHER_MODE = "planner";
   writeFileSync(join(root, "grapher-planner.ts"), readFileSync(join(source, "backend/resources/planner.ts")));
   const extracted = await loadExtensions([join(root, "grapher-planner.ts"), adapterPath], repository);

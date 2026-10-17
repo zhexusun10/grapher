@@ -76,12 +76,12 @@ export default function (pi: ExtensionAPI) {
     });
   }
   // Partitioner has no tools. Planner shares the execution path adapter but
-  // retains its read/bash surface; node/edge belong to the Planner extension.
+  // retains its read/bash/write/edit surface; node/edge belong to the Planner extension.
   if (partition) return;
   if (graph && !project) throw new Error('Graph execution is missing its host-owned project binding');
   if (paths && project) {
     registerWorkspaceTools(pi, cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view,
-      planner ? ['read'] : undefined);
+      planner ? ['read', 'write', 'edit'] : undefined);
 
     // Normalize model-facing paths only; never change stored files, tool input
     // contents, provider signatures, or image bytes.
