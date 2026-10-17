@@ -1755,11 +1755,13 @@ fn plan_goal_internal_with_started(
                         let planner_config = planner_model_cfg.effective_config(&config);
                         let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                             .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
-                        let task = if background_review {
-                            post_task_review_task()
+                        let (task, is_followup) = if background_review {
+                            (post_task_review_task(), false)
                         } else {
                             let mut runtime =
                                 service.runtime.lock().map_err(|error| error.to_string())?;
+                            let is_approved = runtime.state.approved;
+                            let is_followup = revision_run_id.is_some() && is_approved;
                             let include_rework_note = planner_rework_note_pending(
                                 &runtime.state,
                                 revision_run_id.as_deref(),
@@ -1767,7 +1769,7 @@ fn plan_goal_internal_with_started(
                             let workspace_node = selected.as_ref().map(|execution| execution.node.as_str());
                             let workspace_targets = runtime.planner_workspace_targets(workspace_node)?;
                             let include_workspace_move = workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
-                            let task = if revision_run_id.is_some() {
+                            let task = if is_followup {
                                 let task = planner_followup_prompt_for_workspace(
                                     &goal,
                                     workspace_node,
@@ -1783,7 +1785,7 @@ fn plan_goal_internal_with_started(
                             } else {
                                 goal.clone()
                             };
-                            task
+                            (task, is_followup)
                         };
                         let mut planner_extra_args = Vec::new();
                         if let Some(thinking) = &planner_model_cfg.thinking {
@@ -1862,7 +1864,7 @@ fn plan_goal_internal_with_started(
                                 environment: vec![
                                     ("GRAPHER_MODE", "planner".into()),
                                     ("GRAPHER_PLANNER_RUN_ID", revision_run_id.clone().unwrap_or_default()),
-                                    ("GRAPHER_PLANNER_FOLLOWUP", (revision_run_id.is_some() && !background_review).to_string()),
+                                    ("GRAPHER_PLANNER_FOLLOWUP", is_followup.to_string()),
                                     ("GRAPHER_PLANNER_WORKSPACES", planner_workspace_targets.to_string()),
                                     ("GRAPHER_PLANNER_WORKSPACES_FILE", planner_workspace_targets_file.to_string_lossy().into()),
                                     ("GRAPHER_ACTIVE_RUN_ID", owner.clone()),
@@ -2815,7 +2817,10 @@ fn control(
         if let Some(file) = &workspace_targets_file {
             fs::write(file, workspace_targets.to_string()).map_err(|e| e.to_string())?;
         }
-        let message = if active_run_id.is_some() {
+        let is_followup = active_run_id.is_some()
+            && runtime.state.approved
+            && runtime.state.plan_type.as_deref() == Some("graph");
+        let message = if is_followup {
             let message = planner_followup_prompt_for_workspace(
                 instruction.trim(),
                 workspace_node,
