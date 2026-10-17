@@ -10,9 +10,13 @@ import { liveOutputDelay, startVisibilityPolling } from "../src/services/visibil
 import {
   dispatchOutputAvailableForTest,
   dispatchSnapshotChangedForTest,
+  enableRuntimeEvents,
   isRuntimeEventsConnected,
+  RUNTIME_EVENTS_RETRY_MS,
+  RUNTIME_EVENTS_WATCHDOG_MS,
   setRuntimeEventsConnectedForTest,
   subscribeExecutionOutput,
+  subscribeRuntimeEventsStatus,
   subscribeSnapshotChanges,
 } from "../src/services/runtimeEvents.ts";
 import { runtimeService } from "../src/services/runtime.ts";
@@ -271,5 +275,67 @@ test("SSE push-wake suspends empty polling at Infinity, ignores unwatched nodes 
     unsubSnapshot();
     stop();
     setRuntimeEventsConnectedForTest(false);
+  }
+});
+
+test("a failed push channel wakes suspended pollers and recreates a dead stream", async () => {
+  // Infinite suspension is only safe while pushes actually arrive; a fallback
+  // that is never rescheduled leaves the transcript and Run status frozen.
+  assert.ok(Number.isFinite(RUNTIME_EVENTS_WATCHDOG_MS));
+  const settle = () => new Promise(resolve => setTimeout(resolve, 5));
+  const original = (globalThis as { EventSource?: unknown }).EventSource;
+  class FakeEventSource {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSED = 2;
+    static instances: FakeEventSource[] = [];
+    readyState = FakeEventSource.CONNECTING;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    closed = false;
+    constructor(readonly url: string) { FakeEventSource.instances.push(this); }
+    addEventListener() {}
+    close() { this.closed = true; this.readyState = FakeEventSource.CLOSED; }
+  }
+  (globalThis as { EventSource?: unknown }).EventSource = FakeEventSource;
+  const statuses: boolean[] = [];
+  const unsubscribeStatus = subscribeRuntimeEventsStatus(status => statuses.push(status.connected));
+  const unsubscribeSnapshot = subscribeSnapshotChanges(() => {});
+  try {
+    enableRuntimeEvents();
+    const first = FakeEventSource.instances.at(-1);
+    assert.ok(first, "subscribing opens the shared event stream");
+    first.readyState = FakeEventSource.OPEN;
+    first.onopen!();
+    await settle();
+    assert.equal(isRuntimeEventsConnected(), true);
+    assert.deepEqual(statuses, [true]);
+
+    // Browser-managed reconnect: status listeners must stop trusting the push channel.
+    first.readyState = FakeEventSource.CONNECTING;
+    first.onerror!();
+    await settle();
+    assert.equal(isRuntimeEventsConnected(), false);
+    assert.deepEqual(statuses, [true, false]);
+
+    // Fatal failure: EventSource stops retrying, so the app must recreate it.
+    first.readyState = FakeEventSource.CLOSED;
+    first.onerror!();
+    await new Promise(resolve => setTimeout(resolve, RUNTIME_EVENTS_RETRY_MS + 50));
+    const retried = FakeEventSource.instances.at(-1)!;
+    assert.notEqual(retried, first, "fatal close is retried while subscribers exist");
+    retried.readyState = FakeEventSource.OPEN;
+    retried.onopen!();
+    await settle();
+    assert.equal(isRuntimeEventsConnected(), true);
+    const transitions = statuses.filter((value, index) => index === 0 || value !== statuses[index - 1]);
+    assert.deepEqual(transitions, [true, false, true]);
+  } finally {
+    unsubscribeSnapshot();
+    unsubscribeStatus();
+    setRuntimeEventsConnectedForTest(false);
+    if (original === undefined) delete (globalThis as { EventSource?: unknown }).EventSource;
+    else (globalThis as { EventSource?: unknown }).EventSource = original;
+    FakeEventSource.instances = [];
   }
 });

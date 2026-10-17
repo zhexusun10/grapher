@@ -204,6 +204,15 @@ streams, approvals and native result execution do not. A settings timeout asks t
 user to refresh and verify; it never rolls back or automatically retries a save.
 See [request deadlines](../../src/services/requestTimeout.ts).
 
+`/api/events` SSE notifications (`snapshot_changed`, `output_available`,
+`planning_output_available`) are a latency accelerator, never the authority. The
+browser keeps a bounded re-check of durable state while the stream is connected,
+resumes timer polling when it errors or closes, and recreates a stream the
+`EventSource` gave up on. A missed push therefore costs latency, not a frozen
+transcript or status. See
+[runtimeEvents.ts](../../src/services/runtimeEvents.ts) and
+[ExecutionTranscript.tsx](../../src/components/ExecutionTranscript.tsx).
+
 Planning attempts retain requests, graph candidates, summaries, and Pi JSONL
 streams. The planning SSE `complete` event is terminal even if the HTTP transport
 remains open: the client releases the reader and supersedes in-flight draft polls

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } fr
 import type { RuntimeActivity, Snapshot } from "../types";
 import { runtimeService } from "../services/runtime";
 import { startVisibilityPolling } from "../services/visibilityPolling";
-import { isRuntimeEventsConnected, subscribeRuntimeEventsConnect, subscribeSnapshotChanges } from "../services/runtimeEvents";
+import { isRuntimeEventsConnected, RUNTIME_EVENTS_WATCHDOG_MS, subscribeRuntimeEventsStatus, subscribeSnapshotChanges } from "../services/runtimeEvents";
 import { mapWithConcurrency } from "../services/boundedRequests";
 
 const livePhases = new Set(["planning", "running", "awaiting_approval", "publishing", "merging", "paused", "needs_attention"]);
@@ -63,13 +63,19 @@ export function useSnapshotPolling(
     const fallbackDelay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) || (viewedRunId && (phases.current.get(viewedRunId) === "needs_attention" || viewedHasActiveExecutions)) ? 750 : 2500;
     const nextDelay = () => {
       if (dirtyRuns.current.size > 0) return 150;
-      if (isRuntimeEventsConnected()) return Number.POSITIVE_INFINITY;
+      // Pushes are an accelerator, not the authority. Re-read durable state on a
+      // bounded cadence so one missed notification cannot freeze the view.
+      if (isRuntimeEventsConnected()) return RUNTIME_EVENTS_WATCHDOG_MS;
       return fallbackDelay();
     };
+    const watchdogIds = () => ids.filter(id => id === viewedRunId || activeRuns.current.has(id) ||
+      writerRuns.current.has(id) || workingPhases.has(phases.current.get(id) ?? ""));
     const poll = async () => {
-      const targetIds = isRuntimeEventsConnected() && dirtyRuns.current.size > 0
+      // Pushes carry the changed Run; the watchdog only re-reads Runs that can
+      // still move, so a missed notification cannot freeze the watched view.
+      const targetIds = dirtyRuns.current.size > 0
         ? [...dirtyRuns.current]
-        : ids;
+        : isRuntimeEventsConnected() ? watchdogIds() : ids;
       dirtyRuns.current.clear();
       // A slow/unavailable background Run cannot serialize the foreground request.
       await mapWithConcurrency(targetIds, 4, async id => {
@@ -154,18 +160,21 @@ export function useSnapshotPolling(
       dirtyRuns.current.add(targetId);
       stopPolling.wake();
     });
-    const unsubscribeConnect = subscribeRuntimeEventsConnect(reconnected => {
-      if (reconnected) {
-        for (const id of ids) dirtyRuns.current.add(id);
-        stopPolling.wake();
-      } else if (activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? ""))) {
+    const unsubscribeConnect = subscribeRuntimeEventsStatus(status => {
+      // A fallen push channel must hand suspended pollers back to timer polling;
+      // a (re)connected channel re-reads everything it may have missed.
+      const reconnected = status.connected && status.reconnected;
+      const hasActive = activeRuns.current.size > 0 || writerRuns.current.size > 0 ||
+        ids.some(id => workingPhases.has(phases.current.get(id) ?? ""));
+      if (status.connected && (reconnected || hasActive)) {
         for (const id of ids) {
-          if (workingPhases.has(phases.current.get(id) ?? "") || writerRuns.current.has(id) || activeRuns.current.has(id) || id === viewedRunId) {
+          if (reconnected || workingPhases.has(phases.current.get(id) ?? "") ||
+              writerRuns.current.has(id) || activeRuns.current.has(id) || id === viewedRunId) {
             dirtyRuns.current.add(id);
           }
         }
-        stopPolling.wake();
       }
+      stopPolling.wake();
     });
     return () => { cancelled = true; unsubscribeSnapshot(); unsubscribeConnect(); stopPolling(); abort.abort(); };
   }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, viewedPhase, viewedHasActiveExecutions]);

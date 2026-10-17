@@ -5,7 +5,7 @@ import type { Execution } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
-import { isRuntimeEventsConnected, subscribeExecutionOutput, subscribeRuntimeEventsConnect } from "../services/runtimeEvents";
+import { isRuntimeEventsConnected, RUNTIME_EVENTS_WATCHDOG_MS, subscribeExecutionOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
 import { cacheTranscriptWindow, executionTranscriptCache, registerTranscriptReader, transcriptFromCache } from "../services/transcriptCache";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
 import { markTranscriptPrepend } from "../services/transcriptScroll";
@@ -168,7 +168,9 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
         emptyPages = page.content ? 0 : emptyPages + 1;
         if (!page.complete) return 0;
         if (page.status !== "running") return null;
-        return isRuntimeEventsConnected() ? Number.POSITIVE_INFINITY : liveOutputDelay(emptyPages);
+        // A missed output notification (dropped SSE frame, half-open stream)
+        // must degrade to timer reads instead of stalling the transcript.
+        return isRuntimeEventsConnected() ? RUNTIME_EVENTS_WATCHDOG_MS : liveOutputDelay(emptyPages);
       } catch (caught) {
         if (!signal.aborted) { setError(String(caught)); setReady(true); }
         return null;
@@ -179,7 +181,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
       if (!event.settled && current && current.end >= event.totalBytes) return;
       stop.wake();
     });
-    const unsubscribeConnect = settled ? () => {} : subscribeRuntimeEventsConnect(() => {
+    const unsubscribeConnect = settled ? () => {} : subscribeRuntimeEventsStatus(() => {
       stop.wake();
     });
     return () => { unsubscribeOutput(); unsubscribeConnect(); abort.abort(); stop(); };

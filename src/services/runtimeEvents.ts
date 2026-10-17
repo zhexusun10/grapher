@@ -10,22 +10,57 @@ export interface OutputAvailableEvent {
   settled?: boolean;
 }
 
+/** Bounded re-check while pushes are nominally connected. A dropped frame or a
+ * half-open stream must degrade to timer polling instead of freezing the view. */
+export const RUNTIME_EVENTS_WATCHDOG_MS = 5_000;
+/** EventSource stops retrying after a fatal HTTP failure; recreate it ourselves. */
+export const RUNTIME_EVENTS_RETRY_MS = 1_000;
+
+export interface RuntimeEventsStatus {
+  connected: boolean;
+  /** This open follows an earlier failure, so durable state may have moved on. */
+  reconnected: boolean;
+}
+
 let enabled = false;
 let connected = false;
 let hadConnectionOrError = false;
 let source: EventSource | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 const planningListeners = new Set<(event: { runId: string; planningId: string }) => void>();
 const snapshotListeners = new Set<(event: SnapshotChangedEvent) => void>();
 const outputListeners = new Map<string, Set<(event: OutputAvailableEvent) => void>>();
-const connectListeners = new Set<(reconnected: boolean) => void>();
+const statusListeners = new Set<(status: RuntimeEventsStatus) => void>();
 
 function hasSubscribers(): boolean {
   return snapshotListeners.size > 0 || outputListeners.size > 0 || planningListeners.size > 0;
 }
 
+function notifyStatus(status: RuntimeEventsStatus): void {
+  queueMicrotask(() => {
+    for (const listener of statusListeners) listener(status);
+  });
+}
+
+function clearRetry(): void {
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+function scheduleRetry(): void {
+  if (retryTimer !== null || !enabled || !hasSubscribers()) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    ensureConnection();
+  }, RUNTIME_EVENTS_RETRY_MS);
+}
+
 function closeConnection(): void {
   connected = false;
+  clearRetry();
   if (source) {
     source.close();
     source = null;
@@ -44,17 +79,18 @@ function ensureConnection(): void {
       const reconnected = hadConnectionOrError;
       hadConnectionOrError = true;
       connected = true;
-      queueMicrotask(() => {
-        if (!connected) return;
-        for (const listener of connectListeners) listener(reconnected);
-      });
+      clearRetry();
+      notifyStatus({ connected: true, reconnected });
     };
     es.onerror = () => {
       if (source !== es) return;
       hadConnectionOrError = true;
       connected = false;
+      // Pollers suspend while connected; a failed push channel must resume them.
+      notifyStatus({ connected: false, reconnected: false });
       if (es.readyState === EventSource.CLOSED) {
         source = null;
+        scheduleRetry();
       }
     };
     es.addEventListener("snapshot_changed", (event: MessageEvent) => {
@@ -105,10 +141,11 @@ export function isRuntimeEventsConnected(): boolean {
   return enabled && connected;
 }
 
-export function subscribeRuntimeEventsConnect(listener: (reconnected: boolean) => void): () => void {
-  connectListeners.add(listener);
+/** Observe connect *and* disconnect so suspended pollers can resume on either. */
+export function subscribeRuntimeEventsStatus(listener: (status: RuntimeEventsStatus) => void): () => void {
+  statusListeners.add(listener);
   return () => {
-    connectListeners.delete(listener);
+    statusListeners.delete(listener);
   };
 }
 
@@ -157,7 +194,7 @@ export function setRuntimeEventsConnectedForTest(isConnected: boolean, reconnect
   enabled = isConnected;
   connected = isConnected;
   if (isConnected) {
-    for (const listener of connectListeners) listener(reconnected);
+    for (const listener of statusListeners) listener({ connected: true, reconnected });
   } else {
     hadConnectionOrError = false;
     closeConnection();
