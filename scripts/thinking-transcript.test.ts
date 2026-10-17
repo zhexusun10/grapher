@@ -12,6 +12,7 @@ import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../src/services/thinkingTranscript.ts";
 import { setAutoExpandCot, readAutoExpandCot, autoExpandCotEnabled, AUTO_EXPAND_COT_KEY } from "../src/services/displayPreferences.ts";
 import type { TranscriptItem } from "../src/types.ts";
+import { t } from "../src/i18n/index.ts";
 
 const line = (event: unknown) => JSON.stringify(event) + "\n";
 const update = (type: string, contentIndex: number, extra = {}) => ({
@@ -126,18 +127,18 @@ test("giant tool arguments keep their card and shape, but only render a bounded 
   assert.equal(item.argsTruncated, true);
   assert.ok(new TextEncoder().encode(item.args?.content).byteLength <= TOOL_OUTPUT_PREVIEW_BYTES);
   const html = renderToStaticMarkup(createElement(ToolCallCard, { item, defaultExpanded: true }));
-  assert.match(html, /tool-truncated-pill/);
-  assert.match(html, /ARGS_HEAD/);
-  assert.match(html, /src\/big\.ts/);
-  assert.match(html, /已截断/);
-  assert.doesNotMatch(html, /HUGE_ARGS_TAIL/);
+  assert.ok(html.includes("tool-truncated-pill"), "truncated arguments render the truncation pill");
+  assert.ok(html.includes("ARGS_HEAD"), "the bounded preview keeps its head");
+  assert.ok(html.includes("src/big.ts"), "small argument values remain readable");
+  assert.ok(html.includes(t("已截断")), "the truncation pill uses the active locale");
+  assert.ok(!html.includes("HUGE_ARGS_TAIL"), "the bounded preview drops the giant tail");
   // The runtime projection marks already-cut arguments; the card must still say so.
   const marked = renderToStaticMarkup(createElement(ToolCallCard, {
     item: { ...item, args: { path: "src/big.ts", content: "preview\n..." }, argsTruncated: true },
     defaultExpanded: true,
   }));
-  assert.match(marked, /tool-truncated-pill/);
-  assert.match(marked, /已截断/);
+  assert.ok(marked.includes("tool-truncated-pill"), "runtime-marked arguments also show the pill");
+  assert.ok(marked.includes(t("已截断")), "runtime-marked truncation uses the active locale");
 });
 
 test("a giant tool result keeps its card and failure metadata, but only renders a bounded preview", () => {
@@ -159,15 +160,15 @@ test("a giant tool result keeps its card and failure metadata, but only renders 
   assert.ok(new TextEncoder().encode(item.result).byteLength <= TOOL_OUTPUT_PREVIEW_BYTES);
   const html = renderToStaticMarkup(createElement(ToolCallCard, { item, defaultExpanded: true }));
   assert.equal(toolCount(html), 1);
-  assert.match(html, /tool-truncated-pill|PREVIEW_HEAD/);
-  assert.match(html, /tool-result-code error/);
-  assert.match(html, /\.\.\./);
-  assert.doesNotMatch(html, /HUGE_OUTPUT_TAIL/);
+  assert.ok(html.includes("tool-truncated-pill") || html.includes("PREVIEW_HEAD"), "the result preview is bounded");
+  assert.ok(html.includes("tool-result-code error"), "failed results keep their error presentation");
+  assert.ok(html.includes("..."), "truncated output shows an ellipsis");
+  assert.ok(!html.includes("HUGE_OUTPUT_TAIL"), "the bounded result drops the giant tail");
   // Direct/live card callers have the same cap, even without parsing first.
   const direct = renderToStaticMarkup(createElement(ToolCallCard, { item: { ...item, result: text, truncated: false }, defaultExpanded: true }));
-  assert.match(direct, /tool-truncated-pill/);
-  assert.match(direct, /PREVIEW_HEAD/);
-  assert.doesNotMatch(direct, /HUGE_OUTPUT_TAIL/);
+  assert.ok(direct.includes("tool-truncated-pill"), "direct callers show the truncation pill");
+  assert.ok(direct.includes("PREVIEW_HEAD"), "direct callers keep the preview head");
+  assert.ok(!direct.includes("HUGE_OUTPUT_TAIL"), "direct callers drop the giant tail");
   assert.ok(direct.length < TOOL_OUTPUT_PREVIEW_BYTES + 20_000);
 });
 
@@ -415,7 +416,7 @@ test("settled empty blocks render no misleading card while pending blocks still 
   // body is not mounted; with auto-expand enabled it also shows the shimmer.
   const running = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true }));
   assert.match(running, /thinking-card streaming collapsed/);
-  assert.match(running, /思考中\.\.\./);
+  assert.ok(running.includes(t("思考中...")), "pending reasoning shows progress in the active locale");
   assert.doesNotMatch(running, /thinking-empty/);
   const expanded = withAutoExpandCot(() => renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true })));
   assert.match(expanded, /thinking-shimmer/);
