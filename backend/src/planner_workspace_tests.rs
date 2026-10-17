@@ -24,7 +24,10 @@ if (process.env.GRAPHER_MODE === 'planner') {
   const file = path.join(directory, `grapher_${id}.jsonl`);
   if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n');
   const header = JSON.parse(fs.readFileSync(file,'utf8').split('\n')[0]);
-  if (fs.realpathSync(header.cwd) !== fs.realpathSync(process.cwd())) throw Error('stale session cwd');
+  // Pi matches a custom-session-dir resume by the literal header cwd
+  // (resolvePath comparison, no realpath). Assert exactly that contract and
+  // include both spellings so a host-specific mismatch is diagnosable.
+  if (header.cwd !== process.cwd()) throw Error(`stale session cwd: ${JSON.stringify([header.cwd, process.cwd()])}`);
   fs.appendFileSync(file, JSON.stringify({type:'custom',id:crypto.randomUUID(),data:'preserved history'})+'\n');
   const action = path.join(path.dirname(fileURLToPath(import.meta.url)), 'action');
   if (fs.existsSync(action)) {

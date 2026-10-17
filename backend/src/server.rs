@@ -1231,10 +1231,18 @@ fn session_path_identity(path: &std::path::Path) -> String {
 }
 
 /// Keep the same Pi identity/history when the Planner's cwd changes between
-/// turns. Pi discovers sessions by both ID and cwd.
-fn rebind_planner_session(directory: &std::path::Path, id: &str, repository: &std::path::Path) -> Result<(), String> {
+/// turns. Pi matches a custom-session-dir resume by the literal header cwd
+/// (`SessionManager.findById` -> `sessionCwdMatches`), and the resumed child's
+/// `process.cwd()` spelling is platform-dependent: Windows keeps the launched
+/// path as-is (8.3 short names are not expanded), while Unix resolves
+/// symlinks through `getcwd`. Record exactly that spelling.
+fn rebind_planner_session(directory: &std::path::Path, id: &str, workspace: &std::path::Path) -> Result<(), String> {
     if !directory.is_dir() { return Ok(()); }
-    let repository = repository.canonicalize().map_err(|error| error.to_string())?;
+    let canonical = workspace.canonicalize().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    let resumed = crate::native::host_path(workspace);
+    #[cfg(not(windows))]
+    let resumed = crate::native::host_path(&canonical);
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let path = entry.map_err(|error| error.to_string())?.path();
         if path.extension().is_none_or(|ext| ext != "jsonl") { continue; }
@@ -1243,12 +1251,12 @@ fn rebind_planner_session(directory: &std::path::Path, id: &str, repository: &st
         input.read_line(&mut line).map_err(|error| error.to_string())?;
         let mut header: serde_json::Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
         if header["id"].as_str() != Some(id) { continue; }
-        if header["cwd"].as_str().and_then(|cwd| PathBuf::from(cwd).canonicalize().ok()).as_ref() == Some(&repository) {
+        if header["cwd"].as_str().and_then(|cwd| PathBuf::from(cwd).canonicalize().ok()).as_ref() == Some(&canonical) {
             continue;
         }
         // Ownership was validated by planner_session_directory_for_workspace.
         // Stream the unchanged history instead of allocating the entire JSONL.
-        header["cwd"] = serde_json::json!(crate::native::host_path(&repository));
+        header["cwd"] = serde_json::json!(resumed);
         let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
         let result = (|| -> Result<(), String> {
             let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|error| error.to_string())?;

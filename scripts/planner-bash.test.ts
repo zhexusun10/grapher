@@ -23,6 +23,9 @@ async function plannerTools(source: string, workspace = source) {
   const environment = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   try {
     process.chdir(workspace);
+    // Production Pi reports process.cwd() (realpath'd on macOS, as-launched on
+    // Windows); capture that exact spelling for prompt/history inputs.
+    const boundCwd = process.cwd();
     Object.assign(process.env, { GRAPHER_MODE: 'planner', GRAPHER_EXECUTION_KIND: workspace === source ? 'source' : 'graph',
       GRAPHER_ORIGINAL_ROOT: source, GRAPHER_SOURCE_ALIAS: source });
     delete process.env.GRAPHER_LAUNCH_BINDING;
@@ -35,7 +38,8 @@ async function plannerTools(source: string, workspace = source) {
       on(name: string, hook: any) { hooks.set(name, [...(hooks.get(name) ?? []), hook]); },
     } as any);
     assert.deepEqual([...tools.keys()].sort(), ['bash', 'edge', 'node', 'read']);
-    return { tools, hooks, context: { cwd: workspace, sessionManager: { getSessionId: () => 'planner-test', getSessionFile: () => undefined } } as any };
+    // ctx.cwd mirrors what production Pi passes to tools: its own process.cwd().
+    return { boundCwd, tools, hooks, context: { cwd: boundCwd, sessionManager: { getSessionId: () => 'planner-test', getSessionFile: () => undefined } } as any };
   } finally {
     process.chdir(previous);
     for (const key of keys) {
@@ -105,7 +109,7 @@ test('Planner keeps one visible path namespace across source, different worktree
     // capture only its own current worktree, not reuse another turn's binding.
     const turns: Array<Awaited<ReturnType<typeof plannerTools>> & { workspace: string }> = [];
     for (const workspace of [source, first, second, source]) turns.push({ workspace, ...await plannerTools(source, workspace) });
-    for (const { workspace, tools, hooks, context } of turns) {
+    for (const { workspace, boundCwd, tools, hooks, context } of turns) {
       const expected = workspace === source ? 'source' : workspace === first ? 'first' : 'second';
       const bash = tools.get('bash'), read = tools.get('read');
       assert.equal(text(await bash.execute('pwd', { command: 'pwd -P' }, undefined, undefined, context)).trim(), '.');
@@ -115,24 +119,27 @@ test('Planner keeps one visible path namespace across source, different worktree
       const updates: any[] = [];
       const result = await bash.execute('stream', { command: 'pwd -P' }, undefined, (update: any) => updates.push(update), context);
       assert.ok(updates.length);
+      // No spelling of the physical cwd may leak, including the as-launched one.
       assert.ok(!JSON.stringify([result, updates]).includes(shellPath(workspace)));
+      assert.ok(!JSON.stringify([result, updates]).includes(shellPath(boundCwd)));
       const encoded = `console.log(JSON.stringify({path:process.cwd(),uri:require('node:url').pathToFileURL(process.cwd()).href}))`;
       const output = JSON.parse(text(await bash.execute('encoded', { command: `${quote(shellPath(process.execPath))} -e ${quote(encoded)}` }, undefined, undefined, context)));
       assert.deepEqual(output, { path: '.', uri: pathToFileURL(source).href });
-      const options = normalizeBuildSystemPromptOptions({ cwd: workspace, customPrompt: 'Planner system prompt.', appendSystemPrompt: 'Existing instructions.' });
+      const options = normalizeBuildSystemPromptOptions({ cwd: boundCwd, customPrompt: 'Planner system prompt.', appendSystemPrompt: 'Existing instructions.' });
       for (const hook of hooks.get('before_agent_start') ?? []) await hook({ systemPromptOptions: options });
       assert.equal(options.cwd, '.');
       assert.equal(options.customPrompt, 'Planner system prompt.');
       assert.equal(options.appendSystemPrompt, 'Existing instructions.');
       assert.equal(options.forceSystemPrompt, undefined);
-      assert.ok(!buildSystemPrompt(options).includes(workspace), 'system prompt must not reveal the changing physical cwd');
+      assert.ok(!buildSystemPrompt(options).includes(boundCwd), 'system prompt must not reveal the changing physical cwd');
       const user = { role: 'user', content: 'Continue the plan.' };
-      const history = { role: 'toolResult', toolCallId: 'read-1', content: [{ type: 'text', text: join(workspace, 'value.txt') }] };
+      const history = { role: 'toolResult', toolCallId: 'read-1', content: [{ type: 'text', text: join(boundCwd, 'value.txt') }] };
       const normalized = await hooks.get('context')![0]({ messages: [user, history] });
       assert.deepEqual(normalized.messages[0], user, 'no extra user instructions');
       assert.equal(normalized.messages[1].content[0].text.replaceAll('\\', '/'), './value.txt');
       await assert.rejects(() => read.execute('missing', { path: 'missing.txt' }, undefined, undefined, context),
-        (error: Error) => !error.message.includes(workspace) && !error.message.includes(shellPath(workspace)));
+        (error: Error) => !error.message.includes(workspace) && !error.message.includes(shellPath(workspace))
+          && !error.message.includes(boundCwd) && !error.message.includes(shellPath(boundCwd)));
     }
   } finally {
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });

@@ -60,7 +60,9 @@ the source project. This does not allocate another Planner checkout or merge all
 parallel branches into one view.
 
 The same Pi conversation/ID survives cwd changes, reload, and reclamation of the
-old workspace; only its validated session-header cwd is rebound. Planner uses
+old workspace; only its validated session-header cwd is rebound, recorded as
+the literal cwd the resumed process reports (Pi matches it without realpath
+normalization, and that spelling differs by platform). Planner uses
 the same stable model-facing path namespace as Node Agent: existing prompt cwd,
 read/bash results and conversation context are normalized, while recognized
 project-root paths resolve to the current physical workspace. Switching cwd adds
