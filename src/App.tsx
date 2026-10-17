@@ -882,15 +882,41 @@ export default function App() {
       return result;
     };
 
+    // Histories validate one by one. Adding the validated cards is enough for the
+    // progressive publish; replacing the list with the partial set would unmount
+    // warm-cached cards and replay their entrance animation once the remaining
+    // histories resolve.
+    const mergeValidatedRuns = (
+      current: Record<string, string[]>,
+      validated: Record<string, string[]>,
+    ): Record<string, string[]> => {
+      const merged: Record<string, string[]> = {};
+      for (const [owner, ids] of Object.entries(current)) merged[owner] = [...ids];
+      // Validation is authoritative for ownership, so a cached card proven to
+      // belong to another workspace must leave its old list right away.
+      for (const id of validatedSnapshots.keys()) {
+        for (const [owner, ids] of Object.entries(merged)) {
+          if (validated[owner]?.includes(id)) continue;
+          const index = ids.indexOf(id);
+          if (index !== -1) ids.splice(index, 1);
+        }
+      }
+      for (const [owner, ids] of Object.entries(validated)) {
+        const list = merged[owner] || (merged[owner] = []);
+        for (const id of ids) if (!list.includes(id)) list.push(id);
+      }
+      return merged;
+    };
+
     const schedulePublish = () => {
       if (publishScheduled) return;
       publishScheduled = true;
       queueMicrotask(() => {
         publishScheduled = false;
         if (!planningRecovery.current(scope)) return;
-        const nextRuns = buildValidatedRuns();
-        const activeRuns = nextRuns[workspaceKey(activeRepo)] || [];
-        setWorkspaceRuns(nextRuns);
+        const validatedRuns = buildValidatedRuns();
+        const activeRuns = validatedRuns[workspaceKey(activeRepo)] || [];
+        setWorkspaceRuns(prev => mergeValidatedRuns(prev, validatedRuns));
         if (activeRuns.length > 0 || candidateActiveIds.size === 0) {
           setIsSidebarReady(true);
         }
