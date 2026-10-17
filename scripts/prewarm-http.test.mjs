@@ -15,6 +15,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
   const directory = await mkdtemp(join(tmpdir(), 'grapher-prewarm-http-'));
   let backend;
   let diagnostics = '';
+  let executionSummary;
   let releaseRoute;
   const routeRelease = new Promise(completed => { releaseRoute = completed; });
   let enteredRoute;
@@ -91,10 +92,19 @@ test('Auto refills during routing and older completions cannot revert a newly co
         assert.equal(backend.exitCode, null, diagnostics);
         assert.equal(backend.signalCode, null, diagnostics);
         assert.deepEqual(errors, []);
-        if (await check()) return;
+        try {
+          if (await check()) return;
+        } catch (error) {
+          // A stalled loopback fetch must still report the recorded model calls
+          // and backend output, not only the abort reason.
+          if (error instanceof Error && ['AbortError', 'TimeoutError', 'DOMException'].includes(error.name)) {
+            throw new Error(`${label}: ${error.name}: ${error.message}\nmodel calls: ${JSON.stringify(requests)}\n${executionSummary ?? '(no snapshot yet)'}\n${diagnostics}`);
+          }
+          throw error;
+        }
         await delay(50);
       }
-      throw new Error(`${label}\n${diagnostics}`);
+      throw new Error(`${label}\nmodel calls: ${JSON.stringify(requests)}\n${executionSummary ?? '(no snapshot yet)'}\n${diagnostics}`);
     };
     await until(async () => { try { await api('snapshot'); return true; } catch { return false; } }, 'Backend not ready');
     // The independent credential host warms without a selected project. Its
@@ -138,6 +148,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
     await assertReused(state);
     await until(async () => {
       const snapshot = await api('snapshot', { runId: state.runId });
+      executionSummary = `executions: ${snapshot.executions.map(value => `${value.node}:${value.status}${value.error ? ` error=${value.error}` : ''}`).join(', ') || '(none)'}`;
       const execution = snapshot.executions.find(value => value.node === 'task' && value.status === 'completed');
       if (!execution) return false;
       const output = await api('get_execution_output', { runId: state.runId, executionId: execution.id, full: true });
