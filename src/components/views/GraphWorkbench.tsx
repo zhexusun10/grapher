@@ -24,7 +24,7 @@ import { runtimeService } from "../../services/runtime";
 import { shouldShowRouteBadge } from "../../services/executionRoute";
 import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
 import { captureViewScrollState, resolveViewScroll, calculateWorkspaceDetailsScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
-import { isNodeWorking } from "../../lib/nodeWorking";
+import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
@@ -633,9 +633,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [selectedNode?.name, attempts, nodeMessages]);
   // While a merger is selected its own process decides the working state, not
   // the node status that covers the whole preparation/execution cycle.
+  const selectedDependenciesCompleted = !selectedNode ||
+    nodeDependenciesCompleted(state.graph, state.nodes, selectedNode.name);
   const isSelectedNodeWorking = selectedMerger
     ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
-    : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage, state.paused);
+    : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage,
+        state.paused, selectedDependenciesCompleted, (selectedState?.pendingMessages?.length ?? 0) > 0);
   const isSelectedNodeCompacting = isSelectedNodeWorking &&
     !!execution?.id && !!compactingAttempts[execution.id];
   const latestNodeTurn = nodeTurns.at(-1);
@@ -1478,8 +1481,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
   const serialWorkingAfterMessage = serialTurns.length > 0 && serialTurns[serialTurns.length - 1].executions.length === 0 &&
     !serialTurns[serialTurns.length - 1].userMessage.executionId;
+  const serialDependenciesCompleted = !serialNode ||
+    nodeDependenciesCompleted(state.graph, state.nodes, serialNode.name);
   const isSerialWorking = isNodeWorking(serialNodeState?.status, serialExecution, pendingRequest,
-    serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined, state.paused);
+    serialWorkingAfterMessage ? serialTurns[serialTurns.length - 1].userMessage : undefined,
+    state.paused, serialDependenciesCompleted, (serialNodeState?.pendingMessages?.length ?? 0) > 0);
   // Serial auto-approval runs after planning releases its busy state, and
   // approval returns before the background driver starts the waiting node.
   // Both phases belong to first-execution startup, not an idle conversation.

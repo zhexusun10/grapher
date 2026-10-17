@@ -1,13 +1,39 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isNodeWorking } from "../src/lib/nodeWorking.ts";
+import { isNodeWorking, nodeDependenciesCompleted } from "../src/lib/nodeWorking.ts";
 import { resolveGraphPhase } from "../src/lib/graphPhase.ts";
 
 test("a submitted node message shows working before the next execution starts", () => {
   const previous = { status: "completed", completedAt: 1 };
   assert.equal(isNodeWorking("completed", previous, true, {}), true);
-  assert.equal(isNodeWorking("dirty", previous, false), true);
+  assert.equal(isNodeWorking("dirty", previous, false, undefined, false, true, true), true);
   assert.equal(isNodeWorking("running", { status: "running", completedAt: null }, false), true);
+});
+
+test("a dirty downstream node waiting for feedback ancestors is not Working", () => {
+  const previous = { status: "completed", completedAt: 1 };
+  assert.equal(isNodeWorking("dirty", previous, false, undefined, false, false, true), false);
+  assert.equal(isNodeWorking("dirty", previous, false, undefined, false, true, false), false,
+    "a dirty node with an earlier execution and no queued message is not Working");
+  assert.equal(isNodeWorking("dirty", previous, false, undefined, false, true, true), true);
+  assert.equal(isNodeWorking("dirty", undefined, false, undefined, false, true, false), true,
+    "a first execution that is dirty and ready still shows startup Working");
+
+  const graph = { edges: [
+    { from: "root", to: "review", feedback: false },
+    { from: "review", to: "repair", feedback: false },
+    { from: "repair", to: "deliver", feedback: false },
+    { from: "deliver", to: "repair", feedback: true },
+  ] };
+  const nodes = {
+    root: { status: "completed" }, review: { status: "completed" },
+    repair: { status: "running" }, deliver: { status: "dirty" },
+  };
+  assert.equal(nodeDependenciesCompleted(graph, nodes, "deliver"), false,
+    "a transitive running ancestor blocks the dirty node");
+  assert.equal(nodeDependenciesCompleted(graph, nodes, "repair"), true,
+    "feedback edges do not participate in dependency readiness");
+  assert.equal(nodeDependenciesCompleted(graph, { ...nodes, repair: { status: "completed" } }, "deliver"), true);
 });
 
 test("settled and delivered messages do not leave working behind", () => {
