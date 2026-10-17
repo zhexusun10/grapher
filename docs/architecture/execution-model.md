@@ -29,16 +29,58 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 ## Planning and approval
 
 1. The Partitioner classifies the goal directly in the bound source cwd, with no tools and no separate project checkout. It selects a route unless the user explicitly selects Serial or Graph.
-2. For Graph, the Planner runs directly in the bound source project directory, not a private copy.
+2. For Graph's initial planning, the Planner runs directly in the bound source project directory, not a private copy. Later turns select their cwd afresh as described below.
 3. The Planner uses `node`, `edge`, `read`, and native `bash`. Bash writes are not filtered, and files appear in the source immediately, even if planning fails or is cancelled.
-4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records the source path for session/legacy compatibility; it is not a directory allocation.
+4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records that turn's actual cwd for session/legacy compatibility; it is not a directory allocation.
 5. The graph is validated and presented for approval. Approval validates the binding and records a Git source snapshot for a standard Git repository; an ordinary folder records no snapshot until its first node is dispatched, when Grapher lazily materializes a temporary shadow snapshot with forced collection of project files. Managed environment scopes and Runtime data remain outside project Git.
 
 **Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Planner commands change the source before approval. Reject, failure, and cancellation do not undo those changes, Git commits, or external command side effects. Existing user changes can also be staged and committed during source snapshots.
 
 Planner can inspect and write any files in the source. Git snapshots force-collect project files regardless of `.gitignore`; managed environment scopes and Runtime/Git internal directories are excluded. New root slots use the recorded Git commit, with the physical copier reserved for files outside that commit or managed workspace preparation.
 
-Source locks protect approval and snapshots taken after approved Planner revisions, not the Planner's Bash/model session. During a live revision, already-running nodes drain, while new nodes in that Run wait for its complete source snapshot. Failed/cancelled approved revisions keep the previous graph but record their surviving source writes for future jobs; a snapshot failure pauses the Run instead of scheduling stale inputs. Concurrent Planners still share the source and can overwrite one another's files; there is no private merge protecting those writes. Node model sessions and final Graph publication do not hold a project-wide execution lock.
+Source locks protect approval and source snapshots, not a source-native Planner's Bash/model session. Concurrent source-native Planners can overwrite one another's files; there is no private merge protecting those writes. Node model sessions and final Graph publication do not hold a project-wide execution lock.
+
+### Planner follow-up workspaces
+
+Every Graph Planner follow-up selects its working directory again immediately
+before launch; it never reuses the previous turn's cwd merely because the Pi
+conversation is the same. During selection and the turn, the Run dispatches no
+new nodes and defers publication. The selected workspace's node/Merger writer
+finishes naturally before Planner starts, preserving one active writer per
+physical directory; unrelated parallel writers can continue.
+
+On a linear graph, Planner uses the current execution frontier's worktree. For
+parallel branches, any current branch is sufficient: Runtime deterministically
+chooses the most recently started eligible execution's surviving worktree. It
+uses recorded execution ownership, not the directory's allocation name, and
+rejects redirected paths and missing unpublished prepared workspaces. Feedback
+input directories remain reserved immutable evidence, not writable Planner slots.
+Before any node workspace exists, and after successful publication, Planner uses
+the source project. This does not allocate another Planner checkout or merge all
+parallel branches into one view.
+
+The same Pi conversation/ID survives cwd changes, reload, and reclamation of the
+old workspace; only its validated session-header cwd is rebound. Planner uses
+the same stable model-facing path namespace as Node Agent: existing prompt cwd,
+read/bash results and conversation context are normalized, while recognized
+project-root paths resolve to the current physical workspace. Switching cwd adds
+no reminder, working-directory announcement or other prompt instructions.
+`PlanningSummary.worktree` and
+`workspaceExecutionId`, plus durable `planner_workspace_selected` events, record
+the selection. **Planning session details** displays the actual worktree and
+per-turn workspace history, including failed turns.
+
+Planner Bash writes affect the selected directory immediately. Writes in a node
+worktree are Git-snapshotted/imported back into that execution's result before
+scheduling resumes; they are not copied into the source prematurely. Children
+inherit the updated result through normal graph dependencies. Source-native
+writes keep their source-snapshot behavior. Failed/cancelled turns retain the
+previous graph but capture surviving writes too. Interrupted private turns are
+captured during recovery; a snapshot/recovery failure pauses the Run rather than
+scheduling stale inputs. Node conversations are never imported into Planner.
+
+Focused evidence: [Planner workspace regressions](../../backend/src/planner_workspace_tests.rs)
+and the Planner details browser case in [conversation UI tests](../../scripts/conversation-history-ui.test.mjs).
 
 ### Post-task Planner review
 

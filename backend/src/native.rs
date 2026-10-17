@@ -225,11 +225,11 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         .canonicalize()
         .map_err(|e| format!("Invalid execution directory: {e}"))?;
     if cwd != repository {
-        // Conflict repair belongs in the checkout containing the merge, not
-        // necessarily the source. Private Mergers retain the same workspace
-        // validation and platform boundaries as other private executions.
-        if matches!(role, PiRole::Partitioner | PiRole::Planner) {
-            return Err(format!("{} must use the bound source directory", if role == PiRole::Planner { "Planner" } else { "Partitioner" }));
+        // Planner follow-ups and conflict repair can use a current node slot.
+        // Private Planner/Merger turns retain the same workspace validation and
+        // platform boundaries as other private executions.
+        if role == PiRole::Partitioner {
+            return Err("Partitioner must use the bound source directory".into());
         }
         if cwd.starts_with(&repository) || repository.starts_with(&cwd) {
             return Err("Graph workspace must not overlap the source directory".into());
@@ -612,8 +612,9 @@ mod tests {
         let private = temp.path().join(".grapher-workspaces/run/planner");
         fs::create_dir_all(&private).unwrap();
         crate::workspace::git(&private, &["init", "-q"]).unwrap();
-        assert!(validate_workspace(PiRole::Planner, &source, &private)
-            .unwrap_err().contains("Planner must use the bound source directory"));
+        validate_workspace(PiRole::Planner, &source, &private).unwrap();
+        assert!(command(PiRole::Planner, &source, &private)
+            .unwrap_err().contains("platform context"));
         assert!(validate_workspace(PiRole::Partitioner, &source, &private).is_err());
         #[cfg(unix)]
         {
@@ -714,6 +715,67 @@ export default function () {
             (r"C:\source\file", r"C:\source\file"),
         ] {
             assert_eq!(host_path(Path::new(input)), PathBuf::from(expected));
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn planner_private_launcher_uses_each_selected_worktree_and_native_bash() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = host_path(&temp.path().canonicalize().unwrap());
+        let source = base.join("source");
+        let data = source.join(".grapher");
+        fs::create_dir_all(&data).unwrap();
+        crate::workspace::git(&source, &["init", "-q"]).unwrap();
+        let engine = prepared_runtime().unwrap();
+        let probe = base.join("planner-probe.ts");
+        fs::write(&probe, r#"
+import assert from 'node:assert/strict';
+import { readFileSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+export default async function () {
+  try {
+    assert.equal(realpathSync(process.cwd()), realpathSync(process.env.EXPECTED_CWD));
+    const { default: policy } = await import(pathToFileURL(join(process.env.GRAPHER_TEST_RUNTIME, 'engine/prompt-extension.ts')).href);
+    const tools = new Map(), hooks = new Map();
+    policy({ registerTool(tool) { tools.set(tool.name, tool); }, on(name, hook) { hooks.set(name, hook); } });
+    assert.deepEqual([...tools.keys()].sort(), ['bash', 'read']);
+    const bash = tools.get('bash');
+    const text = result => result.content.filter(part => part.type === 'text').map(part => part.text).join('\n').trim();
+    await bash.execute('planner-cwd', { command: 'printf frontier > planner-probe.txt' });
+    assert.equal(readFileSync('planner-probe.txt', 'utf8'), 'frontier');
+    assert.equal(text(await bash.execute('pwd', { command: 'pwd -P' })), '.');
+    assert.equal(text(await tools.get('read').execute('read', { path: join(process.env.GRAPHER_ORIGINAL_ROOT, 'planner-probe.txt') })), 'frontier');
+    const options = { cwd: process.cwd(), appendSystemPrompt: 'Existing instructions.' };
+    await hooks.get('before_agent_start')({ systemPromptOptions: options });
+    assert.equal(options.cwd, '.');
+    assert.equal(options.appendSystemPrompt, 'Existing instructions.');
+    process.exit(0);
+  } catch (error) { console.error(error); process.exit(1); }
+}
+"#).unwrap();
+        for label in ["first", "next"] {
+            let cwd = base.join(".grapher-worktrees/run").join(label);
+            let session = data.join("planner-session");
+            fs::create_dir_all(&cwd).unwrap();
+            fs::create_dir_all(&session).unwrap();
+            crate::workspace::git(&cwd, &["init", "-q"]).unwrap();
+            let mut command = execution_command(PiRole::Planner, &source, &cwd, &data, &session).unwrap();
+            command.args(["--mode", "json", "--print", "--no-session", "--no-extensions", "--no-skills", "--extension"])
+                .arg(&probe).arg("--session-dir").arg(&session)
+                .env("GRAPHER_MODE", "planner").env("GRAPHER_EXECUTION_KIND", "graph")
+                .env("GRAPHER_TEST_RUNTIME", &engine).env("EXPECTED_CWD", &cwd)
+                .env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_SOURCE_ALIAS", &source)
+                .env("PI_CODING_AGENT_DIR", base.join("agent"))
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            crate::process_control::configure_command(&mut command);
+            let child = command.spawn().unwrap();
+            let _tree = crate::process_control::track(&child).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(fs::read_to_string(cwd.join("planner-probe.txt")).unwrap(), "frontier");
+            assert!(!source.join("planner-probe.txt").exists());
         }
     }
 

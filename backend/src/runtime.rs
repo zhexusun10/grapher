@@ -1037,6 +1037,100 @@ impl Runtime {
             .transpose()
     }
 
+    /// Called while the planning gate prevents dispatch/publication. A running
+    /// selection is a wait target, not permission to launch: the caller must
+    /// wait for this path's writer, then reselect. Other branches may continue.
+    /// Allocation names aren't ownership: linear handoff reuses directories.
+    pub(crate) fn planner_workspace(&self) -> Result<Option<Execution>, String> {
+        if self.state.phase == "completed" { return Ok(None); }
+        let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
+        // Retained published slots can be older than subsequent source edits.
+        // Only work recorded since publication can supersede the source cwd.
+        let unpublished: BTreeSet<_> = self.state.events.iter().rev()
+            .take_while(|event| !matches!(event.kind, EventKind::PublicationCompleted { .. }))
+            .filter_map(|event| match &event.kind {
+                EventKind::Started { execution, .. } => Some(execution.id.as_str()),
+                EventKind::Prepared { execution_id, .. } | EventKind::Finished { execution_id, .. }
+                | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. } => Some(execution_id.as_str()),
+                _ => None,
+            }).collect();
+        let mut seen = BTreeSet::new();
+        let mut reserved = false;
+        for execution in self.state.executions.iter().rev() {
+            if self.state.superseded_execution_ids.contains(&execution.id)
+                || !self.state.nodes.contains_key(&execution.node)
+                || (self.state.published_head.is_some() && !unpublished.contains(execution.id.as_str()))
+                || !seen.insert(execution.worktree.clone()) {
+                continue;
+            }
+            let path = Path::new(&execution.worktree);
+            if self.path_is_running(path) { return Ok(Some(execution.clone())); }
+            // Published-node follow-ups can use source directly, outside the
+            // private Run root. Once their writer drains, Planner uses source too.
+            if self.state.published_head.is_some() && self.state.config.as_ref().is_some_and(|config|
+                path.canonicalize().ok().zip(Path::new(&config.repository).canonicalize().ok())
+                    .is_some_and(|(path, source)| path == source)) {
+                return Ok(None);
+            }
+            // Do not retreat to an ancestor just because its current child is
+            // reserved. Another parallel frontier is valid; a stale ancestor isn't.
+            let descendants = downstream(&self.state.graph, &execution.node);
+            if descendants.iter().any(|name| name != &execution.node
+                && self.state.nodes.get(name).is_some_and(|node| matches!(node.status.as_str(), "completed" | "failed" | "running"))
+                && self.state.executions.iter().any(|child| child.node == *name
+                    && Path::new(&child.worktree).is_dir()
+                    && !self.state.superseded_execution_ids.contains(&child.id))) {
+                continue;
+            }
+            if !path.is_dir() {
+                if self.state.events.iter().rev()
+                    .take_while(|event| !matches!(event.kind, EventKind::PublicationCompleted { .. }))
+                    .any(|event| matches!(&event.kind,
+                        EventKind::Prepared { execution_id, .. } | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. }
+                        if execution_id == &execution.id)) {
+                    return Err("Latest Planner workspace is missing; refusing to use stale source files".into());
+                }
+                continue;
+            }
+            // Only a recorded, real child of this Run may become a Planner cwd.
+            let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? else { continue; };
+            if self.workspace_reserved(path, None) {
+                reserved = true;
+                continue;
+            }
+            if !actual.join(".git").is_dir() {
+                return Err("Latest Planner workspace is not a private Git repository".into());
+            }
+            let mut selected = execution.clone();
+            selected.worktree = workspace::normalize_workspace_display_path(&actual);
+            return Ok(Some(selected));
+        }
+        if reserved { return Err("Current workspaces are reserved for feedback; continue the repair before planning".into()); }
+        Ok(None)
+    }
+
+    pub(crate) fn capture_planner_workspace(&mut self, execution_id: &str) -> Result<(), String> {
+        let execution = self.state.executions.iter().find(|e| e.id == execution_id)
+            .cloned().ok_or("Planner workspace execution is missing")?;
+        let path = Path::new(&execution.worktree);
+        if self.path_is_running(path) { return Err("Planner workspace still has an active writer".into()); }
+        let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
+        crate::path_safety::real_child_path(&root, path, false)?
+            .ok_or("Planner workspace is no longer owned by this Run")?;
+        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let expected = execution.after.as_deref().unwrap_or(&execution.before);
+        workspace::verify_prepared_ancestor(path, expected)?;
+        let head = workspace::snapshot_node_scoped(path, &repository, &execution.node,
+            Some(&self.state.run_id), &self.exclusions()?)?;
+        if head != expected {
+            let invalidated = downstream(&self.state.graph, &execution.node).into_iter()
+                .filter(|name| name != &execution.node && !execution.workspace_lineage.contains(name))
+                .collect();
+            self.emit(EventKind::PlannerWorkspaceSnapshotted { execution_id: execution.id, head, invalidated })?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn capture_planner_source(&mut self) -> Result<(), String> {
         self.require_current_file_contract()?;
         let repository = resolve_repository(

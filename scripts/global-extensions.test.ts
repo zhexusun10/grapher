@@ -141,8 +141,17 @@ test('execution path guidance directly follows existing prompts without a blank 
         const hooks = new Map<string, any>();
         workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
         const hook = hooks.get('before_agent_start');
-        if (role === 'planner' || role === 'partition') {
-          assert.equal(hook, undefined, `${role}: no execution path addendum`);
+        if (role === 'partition') {
+          assert.equal(hook, undefined, 'Partitioner receives no path hooks');
+          continue;
+        }
+        if (role === 'planner') {
+          assert.ok(hook, 'Planner normalizes paths without an addendum');
+          const options = { cwd: process.cwd(), appendSystemPrompt: 'Keep existing instructions.', forceSystemPrompt: 'Existing override.' };
+          await hook({ systemPromptOptions: options });
+          assert.equal(options.cwd, '.');
+          assert.equal(options.appendSystemPrompt, 'Keep existing instructions.');
+          assert.equal(options.forceSystemPrompt, 'Existing override.');
           continue;
         }
         assert.ok(hook, `${role}/${kind}: path addendum registered`);

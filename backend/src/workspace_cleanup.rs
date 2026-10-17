@@ -1,5 +1,6 @@
 //! Run-owned directory cleanup. Never use an execution's arbitrary cwd as a
-//! deletion target: Serial executions and modern Planners use the user's source.
+//! deletion target: Serial/Planner cwd may be the user's source; borrowed node
+//! slots are already covered by their recorded Run-owned workspace root.
 use crate::{
     model::{EventKind, Snapshot},
     path_safety::real_child_path,
@@ -41,7 +42,8 @@ pub(crate) fn planning_ids(root: &Path, state: &Snapshot) -> Result<BTreeSet<Str
             | EventKind::PlanningFailed { planning }
             | EventKind::PlannerReviewStarted { planning }
             | EventKind::PlannerReviewFinished { planning, .. }
-            | EventKind::PlannerTurnAborted { planning } => {
+            | EventKind::PlannerTurnAborted { planning }
+            | EventKind::PlannerWorkspaceSelected { planning } => {
                 ids.insert(planning.planning_id.clone());
             }
             _ => {}

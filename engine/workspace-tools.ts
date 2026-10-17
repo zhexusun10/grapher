@@ -26,11 +26,12 @@ export function workspacePathMapper(workspace: string, project: string, alias = 
   };
 }
 
-export function registerWorkspaceTools(pi: ExtensionAPI, workspace: string, project: string, alias = project, view: (value: any) => any = value => value) {
+export function registerWorkspaceTools(pi: ExtensionAPI, workspace: string, project: string, alias = project, view: (value: any) => any = value => value, names?: readonly string[]) {
   const physical = workspacePathMapper(workspace, project, alias);
   for (const factory of [createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
     createLsToolDefinition, createFindToolDefinition, createGrepToolDefinition]) {
     const tool = factory(workspace);
+    if (names && !names.includes(tool.name)) continue;
     pi.registerTool({
       ...tool,
       async execute(id: string, params: any, signal?: AbortSignal, update?: any, ctx?: any) {

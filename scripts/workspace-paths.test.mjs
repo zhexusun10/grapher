@@ -77,6 +77,10 @@ test('Windows workspace mapping preserves native and slash paths without requiri
     const slashWorkspace = workspace.replaceAll('\\', '/');
     assert.equal(paths.physical(join(source, 'marker')), join(workspace, 'marker'));
     assert.equal(paths.visible(join(workspace, 'marker')), '.\\marker');
+    const sourceUri = pathToFileURL(source).href;
+    assert.equal(paths.visible(`${pathToFileURL(workspace).href}/marker`), `${sourceUri}/marker`);
+    assert.equal(createWorkspacePaths(source, source).visible(sourceUri), sourceUri,
+      'source-native and private turns must retain the same valid file URI');
     assert.equal(paths.visible(`${slashWorkspace}/marker`), './marker');
     assert.equal(paths.command(`cat ${slashSource}/marker`), `cat '${slashWorkspace}/marker'`);
     assert.equal(paths.command(`cat ${slashSource}-other/marker`), `cat ${slashSource}-other/marker`);

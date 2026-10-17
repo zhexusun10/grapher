@@ -36,7 +36,7 @@ Goal -> Partitioner --serial--> one Pi agent in the user's project
 ```
 
 - **Partitioner:** a tool-free classifier. Its `parallel` response maps to the internal `graph` route. A provider failure is a failure, not an auto-approved Serial fallback.
-- **Planner:** runs in the source project, can write files directly with native Bash, and defines self-contained tasks and edges. It stops after planning and can be called again for an explicit graph revision.
+- **Planner:** initially runs in the source project, can write files directly with native Bash, and defines self-contained tasks and edges. Each follow-up reselects a current node worktree (source before execution or after publication), after that workspace's writer drains. It stops after planning and can be called again for an explicit graph revision.
 - **Compiler:** validates graph structure and produces roots, terminals, and dependency batches.
 - **Runtime:** dispatches ready tasks, tracks executions, handles bounded feedback, invalidation, pause, and publication.
 - **Pi:** the pinned production coding-agent engine, responsible for model calls, tools, and provider authentication.

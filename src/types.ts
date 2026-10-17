@@ -70,6 +70,8 @@ export interface PlanningSummary {
   error?: string;
   createdAt?: number;
   repository?: string;
+  worktree?: string;
+  workspaceExecutionId?: string;
   planType?: PlanRouteType;
   goal?: string;
   runId?: string;

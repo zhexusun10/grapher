@@ -1407,12 +1407,12 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 
 #[cfg(feature = "fixture")]
 #[test]
-fn planner_revises_waiting_node_while_unaffected_node_is_running() {
+fn planner_waits_for_running_node_before_revising_waiting_node() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("live-revise.sh");
     fs::write(&script, r#"input="$(cat)"
-printf '%s' "$input" | grep -q -- '- keep: running' || exit 11
+printf '%s' "$input" | grep -q -- '- keep: completed' || exit 11
 printf '%s' "$input" | grep -q -- '- pending: waiting' || exit 12
 printf '%s' "$input" | grep -q 'Update pending' || exit 13
 printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"name":"pending","task":"updated"}],"edges":[{"from":"keep","to":"pending","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
@@ -1467,6 +1467,21 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
+    let finisher = {
+        let service = service.clone();
+        let running = running.clone();
+        thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !service.planning.load(Ordering::SeqCst) {
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let mut runtime = service.runtime.lock().unwrap();
+            let head = runtime.state.base.clone();
+            runtime.emit(EventKind::Finished { execution_id: running.id, head,
+                output: String::new(), output_bytes: 0, metrics: None }).unwrap();
+        })
+    };
     let snapshot = plan_goal_internal(
         "Update pending".into(),
         config,
@@ -1482,16 +1497,9 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert_eq!(snapshot.run_id, run_id);
     assert!(snapshot.approved);
     assert!(!snapshot.paused);
-    assert_eq!(snapshot.nodes["keep"].status, "running");
-    assert_eq!(
-        snapshot
-            .executions
-            .iter()
-            .find(|exec| exec.id == running.id)
-            .unwrap()
-            .status,
-        "running"
-    );
+    finisher.join().unwrap();
+    assert_eq!(snapshot.nodes["keep"].status, "completed");
+    assert_eq!(snapshot.executions.iter().find(|exec| exec.id == running.id).unwrap().status, "completed");
     assert_eq!(snapshot.nodes["pending"].status, "waiting");
     assert_eq!(
         snapshot
@@ -1507,7 +1515,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 
 #[cfg(feature = "fixture")]
 #[test]
-fn running_revision_drains_only_affected_execution_before_commit() {
+fn running_revision_waits_for_its_selected_writer_before_workspace_selection() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("running-revise.sh");
@@ -1550,8 +1558,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     runtime.approve().unwrap();
     let run_id = runtime.state.run_id.clone();
     runtime.jobs().unwrap();
-    // Pretend the driver owns the already-started jobs; complete only the
-    // affected one below. The unrelated job remains running throughout.
+    // Pretend the driver owns already-started jobs. The most recently started
+    // writer must drain before its workspace can be lent to Planner.
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(true),
@@ -1578,35 +1586,26 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let snapshot = service.runtime.lock().unwrap().state.clone();
-        if snapshot.paused {
-            assert_eq!(snapshot.nodes["other"].status, "running");
-            let execution = snapshot
-                .executions
-                .iter()
-                .find(|item| item.node == "change")
-                .unwrap();
-            service
-                .runtime
-                .lock()
-                .unwrap()
-                .emit(EventKind::Finished {
-                    execution_id: execution.id.clone(),
-                    head: snapshot.base,
+        if service.planning.load(Ordering::SeqCst) {
+            let mut runtime = service.runtime.lock().unwrap();
+            for execution in &snapshot.executions {
+                runtime.emit(EventKind::Finished {
+                    execution_id: execution.id.clone(), head: snapshot.base.clone(),
                     output: "completed".into(), output_bytes: 0, metrics: None,
-                })
-                .unwrap();
+                }).unwrap();
+            }
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "Planner did not pause for affected execution"
+            "Planner did not start draining active executions"
         );
         thread::sleep(std::time::Duration::from_millis(10));
     }
     let snapshot = worker.join().unwrap().unwrap();
     assert!(!snapshot.paused);
     assert_eq!(snapshot.nodes["change"].status, "dirty");
-    assert_eq!(snapshot.nodes["other"].status, "running");
+    assert_eq!(snapshot.nodes["other"].status, "completed");
 }
 
 #[cfg(feature = "fixture")]

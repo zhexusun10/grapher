@@ -31,6 +31,8 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::PlannerReviewProgress { .. } => "planner_review_progress",
         EventKind::PlannerReviewFinished { .. } => "planner_review_finished",
         EventKind::PlannerTurnAborted { .. } => "planner_turn_aborted",
+        EventKind::PlannerWorkspaceSelected { .. } => "planner_workspace_selected",
+        EventKind::PlannerWorkspaceSnapshotted { .. } => "planner_workspace_snapshotted",
         EventKind::Created { .. } => "created",
         EventKind::Routed { .. } => "routed",
         EventKind::Approved { .. } => "approved",
@@ -90,6 +92,7 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
         EventKind::Prepared { execution_id, .. }
         | EventKind::ExecutionInputRecorded { execution_id, .. }
         | EventKind::ExecutionResultRecorded { execution_id, .. }
+        | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. }
         | EventKind::Steered { execution_id, .. }
         | EventKind::Output { execution_id, .. }
         | EventKind::Finished { execution_id, .. }

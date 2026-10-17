@@ -162,7 +162,7 @@ function getConversationViewport(scroll: HTMLElement) {
 interface WorkspaceDetailsPanelProps {
   showWorking?: boolean;
   compacting?: boolean;
-  /** Defaults to the node wording; the Planner variant owns no workspace rows. */
+  /** Defaults to the node wording; Planner turns may use different workspaces. */
   label?: string;
   children: React.ReactNode;
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
@@ -670,9 +670,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const savedPlannerId = recoveredPlanningId || (failedPlanning
     ? (failedPlanning.roles?.planner ? failedPlanning.planningId : undefined)
     : (routeType === "graph" ? state.planningId : undefined));
-  // Planner conversation facts. The Planner owns no worktree and no commits
-  // (execution-model.md), so this panel only lists what actually exists:
-  // resolved model, thinking level and role duration.
+  // Actual per-turn cwd comes from backend selection, never inferred from the
+  // newest node card (linear handoff and parallel branches can change ownership).
+  const plannerWorkspaces = state.events.flatMap(event =>
+    event.type === "planner_workspace_selected" && event.planning?.worktree ? [event.planning] : []);
+  const plannerWorkspace = plannerWorkspaces.at(-1)?.worktree
+    ?? failedPlanning?.worktree ?? state.planning?.worktree;
   const plannerRole = state.planning?.roles?.planner ?? failedPlanning?.roles?.planner;
   const plannerModelInfo = (() => {
     const configured = roleModelConfig(config, "planner", envOverrides);
@@ -2224,6 +2227,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                     onAfterToggle={handleWorkspaceDetailsAfterToggle}
                   >
+                    <p>worktree: {plannerWorkspace || config.repository || "preparing workspace…"}</p>
+                    {plannerWorkspaces.length > 1 && (
+                      <details>
+                        <summary>workspace history</summary>
+                        {plannerWorkspaces.map(turn => (
+                          <p key={turn.planningId} title={turn.planningId}>
+                            {turn.planningId.slice(0, 8)}: {turn.worktree}
+                          </p>
+                        ))}
+                      </details>
+                    )}
                     <p>model: {plannerModelInfo.model}</p>
                     <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
                     <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerStream?.startedAt} durationSeconds={plannerRole?.durationSeconds} /></p>

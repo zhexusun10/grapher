@@ -40,11 +40,11 @@ try {
   const adapterPath = join(source, "engine/prompt-extension.ts");
   const loaded = await loadExtensions([join(source, "backend/resources/planner.ts"), adapterPath], repository);
   assert.deepEqual(loaded.errors, []);
-  assert.equal(loaded.extensions[1].tools.size, 0, "Planner adapter must not add execution tools");
+  assert.deepEqual([...loaded.extensions[1].tools.keys()].sort(), ["bash", "read"], "Planner adapter preserves its tool surface");
   assert.equal(loaded.extensions[1].handlers.has("tool_call"), false, "Planner graph tools must not get shell hooks");
   const extension = loaded.extensions[0];
-  assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edge", "node"]);
-  const bashDescription = extension.tools.get("bash")!.definition.description;
+  assert.deepEqual([...extension.tools.keys()].sort(), ["edge", "node"]);
+  const bashDescription = loaded.extensions[1].tools.get("bash")!.definition.description;
   assert.match(bashDescription, /Execute a bash command/);
   assert.equal(extension.handlers.has("tool_call"), false, "Planner has no path or read guards");
   const edgeDescription = extension.tools.get("edge")!.definition.description;
@@ -52,7 +52,7 @@ try {
   assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork|workspace/i);
   const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
-    const tool = extension.tools.get(name)!.definition;
+    const tool = (extension.tools.get(name) ?? loaded.extensions[1].tools.get(name))!.definition;
     const args = validateToolArguments(tool, { type: "toolCall", id: "test", name, arguments: parameters });
     const response = await tool.execute("test", args, undefined, undefined, context);
     if (name === "node" || name === "edge") {
@@ -419,17 +419,19 @@ fn main() {
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeUnavailable);
   process.env.GRAPHER_COMPILER_PATH = compilerPath;
 
-  // The Planner extension is self-contained; no path adapter is needed.
+  // Graph mutations remain self-contained; the shared adapter owns read/bash.
   process.env.GRAPHER_MODE = "planner";
   writeFileSync(join(root, "grapher-planner.ts"), readFileSync(join(source, "backend/resources/planner.ts")));
   const extracted = await loadExtensions([join(root, "grapher-planner.ts"), adapterPath], repository);
   assert.deepEqual(extracted.errors, []);
-  assert.deepEqual([...extracted.extensions[0].tools.keys()].sort(), ["bash", "edge", "node"]);
-  const listed = await extracted.extensions[0].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
+  assert.deepEqual([...extracted.extensions[0].tools.keys()].sort(), ["edge", "node"]);
+  const listed = await extracted.extensions[1].tools.get("bash")!.definition.execute("extracted", { command: "ls" }, undefined, undefined, context);
   assert.match(JSON.stringify(listed), /sample.txt/);
-  assert.equal(extracted.extensions[1].handlers.has("before_agent_start"), false,
-    "Planner must not receive the execution path-convention addendum");
   const plannerOptions = normalizeBuildSystemPromptOptions({ customPrompt: "base", cwd: repository });
+  const addendum = plannerOptions.appendSystemPrompt;
+  await extracted.extensions[1].handlers.get("before_agent_start")![0]({ systemPromptOptions: plannerOptions });
+  assert.equal(plannerOptions.appendSystemPrompt, addendum, "Planner gets no injected instructions");
+  assert.equal(plannerOptions.cwd, ".");
   const plannerPrompt = buildSystemPrompt(plannerOptions);
   assert.doesNotMatch(plannerPrompt, /Use project-root-relative paths|node task handoffs|generated configuration/);
 

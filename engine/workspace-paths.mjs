@@ -77,19 +77,11 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   const aliases = [...new Set([...new Set([resolve(directory), root])].flatMap(variants))].sort((a, b) => b.length - a.length);
   const projects = [...new Set([...new Set([base, resolve(sourceAlias)])].flatMap(variants))].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s\\/"'`<>:;,&|()\[\]{}]/.test(c);
-  function replace(text, source, replacement) {
-    if (typeof text !== 'string') return text;
-    let output = '', cursor = 0;
-    for (;;) {
-      const at = text.indexOf(source, cursor);
-      if (at < 0) return output + text.slice(cursor);
-      output += text.slice(cursor, at);
-      const after = at + source.length;
-      const end = boundary(text[after]) || (text[after] === '.' && (text[after + 1] === undefined || /\s/.test(text[after + 1])));
-      const valid = (at === 0 || boundary(text[at - 1]) || text[at - 1] === '=' || text[at - 1] === '\\') && (end || text.slice(after, after + 3).toLowerCase() === '%2f' || text.slice(after, after + 2) === '\\/');
-      output += valid ? replacement : source;
-      cursor = at + source.length;
-    }
+  function replaceable(text, at, length) {
+    const after = at + length;
+    const end = boundary(text[after]) || (text[after] === '.' && (text[after + 1] === undefined || /\s/.test(text[after + 1])));
+    return (at === 0 || boundary(text[at - 1]) || text[at - 1] === '=' || text[at - 1] === '\\')
+      && (end || text.slice(after, after + 3).toLowerCase() === '%2f' || text.slice(after, after + 2) === '\\/');
   }
   const spellings = [
     value => value,
@@ -110,7 +102,13 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   const pathPrefix = (value, prefix) => value === prefix || value.startsWith(prefix + '/') || value.startsWith(prefix + '\\');
   const commandPrefixes = [...new Set(variants(WORKSPACE_PATH))].sort((a, b) => b.length - a.length);
   const commandRoot = process.platform === 'win32' ? root.replaceAll('\\', '/') : root;
-  const visible = text => replacements.reduce((value, [alias, project]) => replace(value, alias, project), text);
+  // Replace original input only, longest spelling first. Reprocessing a newly
+  // normalized URI can corrupt it (especially when source cwd == workspace),
+  // making the visible namespace differ between source and private turns.
+  const visibleReplacements = new Map(replacements);
+  const visiblePattern = new RegExp(replacements.map(([alias]) => alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  const visible = text => typeof text !== 'string' ? text : text.replace(visiblePattern,
+    (alias, at) => replaceable(text, at, alias.length) ? visibleReplacements.get(alias) : alias);
   const physical = value => {
     if (typeof value !== 'string') return value;
     const project = projects.find(project => pathPrefix(value, project));

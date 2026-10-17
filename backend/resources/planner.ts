@@ -1,5 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -57,12 +57,8 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       return { isError: true };
     }
   });
-  // Planner runs natively at the source project path. Commands and file
-  // contents are passed unchanged; this role needs no private mapping.
-  const repository = process.cwd();
-  const nativeBash = createBashToolDefinition(repository);
-  // Use native bash without write-command filtering.
-  pi.registerTool(defineTool(nativeBash));
+  // The shared engine policy owns read/bash and their stable path view.
+  // Keep this extension limited to graph mutations, regardless of cwd.
   function mutate(change: (graph: Graph) => Diagnostic[] | void) {
     const saved: Graph = JSON.parse(readFileSync(graphPath, "utf8"));
     const graph: Graph = structuredClone(saved);

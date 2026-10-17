@@ -119,6 +119,11 @@ pub struct PlanningSummary {
     pub created_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// Actual cwd of this Planner turn, independent of the bound source project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_execution_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -508,6 +513,16 @@ pub enum EventKind {
     },
     PlanningFailed {
         planning: PlanningSummary,
+    },
+    /// Per-turn cwd evidence; does not replace the committed graph/planning ID.
+    PlannerWorkspaceSelected {
+        planning: PlanningSummary,
+    },
+    /// Planner writes advance the selected result, never another node's chat.
+    PlannerWorkspaceSnapshotted {
+        execution_id: String,
+        head: String,
+        invalidated: Vec<String>,
     },
     /// A source-published phase may append one background Planner turn.
     PlannerReviewStarted {
@@ -1193,6 +1208,44 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.planning = Some(planning.clone());
             state.plan_type = plan_type.clone();
             state.phase = "planning".into();
+        }
+        EventKind::PlannerWorkspaceSelected { .. } => {}
+        EventKind::PlannerWorkspaceSnapshotted { execution_id, head, invalidated } => {
+            if let Some(execution) = state.executions.iter_mut().find(|e| e.id == *execution_id) {
+                let old_head = execution.after.clone();
+                execution.after = Some(head.clone());
+                if let Some(result) = &mut execution.result { result.code_ref = head.clone(); }
+                let mut lineage = execution.workspace_lineage.clone();
+                lineage.push(execution.node.clone());
+                for name in lineage {
+                    if let Some(node) = state.nodes.get_mut(&name) {
+                        if node.status == "completed" && node.head == old_head {
+                            node.head = Some(head.clone());
+                            if let Some(result) = &mut node.result { result.code_ref = head.clone(); }
+                        }
+                    }
+                }
+            }
+            for name in invalidated {
+                let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
+                if let Some(node) = state.nodes.get_mut(name) {
+                    let unstarted = node.status == "waiting" || (node.status == "blocked" && never_executed);
+                    node.status = if unstarted { "waiting" } else { "dirty" }.into();
+                    if !unstarted { node.revision += 1; }
+                    node.head = None;
+                    node.result = None;
+                    node.error = None;
+                    node.baseline_head = None;
+                    node.feedback_workspace = None;
+                    node.instruction.clear();
+                    node.instruction_images = None;
+                    node.edit_execution_id = None;
+                    node.human_instruction = false;
+                    node.continuation = false;
+                    node.shared_workspace = false;
+                }
+            }
+            state.publication = None;
         }
         EventKind::PlannerReviewStarted { planning } => {
             state.planning_id = Some(planning.planning_id.clone());

@@ -71,6 +71,7 @@ requires design history. Promotion requires implementation and verification.
 
 | Status | Document | Use / current authority |
 | --- | --- | --- |
+| `draft` | [Planner write/edit implementation plan (中文)](../IMPLEMENTATION_PLAN.md) | Proposed Planner-only tool exposure and schema optimization; not implemented. Current role contract: [Pi integration](development/pi-integration.md#role-loading-policy) |
 | `archived` | [2026-10-06 run/system audit (中文)](reviews/latest-run-system-design-audit-2026-10-06.md) | Review-time evidence and superseded suggestions, not today's protocol; see its warning and the current [execution model](architecture/execution-model.md) |
 | `archived` | [v0.1.0-alpha.2 notes](releases/v0.1.0-alpha.2.md) / [initial preview notes](../.github/releases/v0.1.0.md) | Release-specific statements; current setup: [Installation](guides/installation.md) |
 | `archived` | [v1.0.1 notes](releases/v1.0.1.md) | Release-specific statements; current setup: [Installation](guides/installation.md) |

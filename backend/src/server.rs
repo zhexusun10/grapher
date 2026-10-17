@@ -499,6 +499,9 @@ mod node_message_delivery_tests;
 #[cfg(all(test, feature = "fixture"))]
 #[path = "planner_review_tests.rs"]
 mod planner_review_tests;
+#[cfg(all(test, feature = "fixture"))]
+#[path = "planner_workspace_tests.rs"]
+mod planner_workspace_tests;
 #[cfg(test)]
 #[path = "transcript_page_tests.rs"]
 mod transcript_page_tests;
@@ -1151,17 +1154,21 @@ fn stored_planner_session_id(
     let repository = repository
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    // A migrated session already uses source cwd; its old private checkout
-    // may have been removed by successful Run cleanup.
+    // A previously selected checkout may have been reclaimed after publication.
+    // Its recorded layout/identity still permits rebinding the same conversation.
     let erased_workspace = (|| -> Result<Option<String>, String> {
         let Some(leaf) = workspace.file_name().and_then(|name| name.to_str()) else { return Ok(None); };
         let Some(owner_dir) = workspace.parent() else { return Ok(None); };
         let Some(owner) = owner_dir.file_name().and_then(|name| name.to_str()) else { return Ok(None); };
         let Some(bucket) = owner_dir.parent() else { return Ok(None); };
-        if leaf != expected || Uuid::parse_str(leaf).is_err() || Uuid::parse_str(owner).is_err()
-            || bucket.file_name().is_none_or(|name| name != ".grapher-workspaces") { return Ok(None); }
+        let legacy = bucket.file_name().is_some_and(|name| name == ".grapher-workspaces")
+            && leaf == expected && Uuid::parse_str(leaf).is_ok();
+        let node = bucket.file_name().is_some_and(|name| name == ".grapher-worktrees")
+            && leaf.get(leaf.len().saturating_sub(36)..).is_some_and(|id| Uuid::parse_str(id).is_ok());
+        if Uuid::parse_str(owner).is_err() || !(legacy || node) { return Ok(None); }
         let Some(parent) = bucket.parent().and_then(|parent| parent.canonicalize().ok()) else { return Ok(None); };
-        if crate::path_safety::real_child_path(&parent, &parent.join(".grapher-workspaces").join(owner).join(leaf), false)?.is_some() {
+        let recorded = parent.join(bucket.file_name().ok_or("Missing workspace bucket")?).join(owner).join(leaf);
+        if crate::path_safety::real_child_path(&parent, &recorded, false)?.is_some() {
             return Ok(None);
         }
         Ok(Some(session_path_identity(workspace)))
@@ -1223,8 +1230,8 @@ fn session_path_identity(path: &std::path::Path) -> String {
     if cfg!(windows) { path.replace('\\', "/").to_lowercase() } else { path }
 }
 
-/// Keep the same Pi identity/history when moving a legacy private Planner
-/// session to source-native execution. Pi discovers sessions by both ID and cwd.
+/// Keep the same Pi identity/history when the Planner's cwd changes between
+/// turns. Pi discovers sessions by both ID and cwd.
 fn rebind_planner_session(directory: &std::path::Path, id: &str, repository: &std::path::Path) -> Result<(), String> {
     if !directory.is_dir() { return Ok(()); }
     let repository = repository.canonicalize().map_err(|error| error.to_string())?;
@@ -1286,8 +1293,23 @@ fn planner_session_directory_for_workspace(
     if Uuid::parse_str(&snapshot.run_id).is_err() {
         return Err("Invalid run identity for Planner session".into());
     }
-    // Prefer the oldest surviving conversation, not the latest attempt. Its
-    // directory and Pi ID are stable across retries, reloads, and revisions.
+    // The session header follows the latest cwd, while the conversation stays
+    // in its original directory. Accept only source or recorded turn workspaces.
+    let stored = |session: &std::path::Path, original: &std::path::Path, id: &str| {
+        let candidates = snapshot.events.iter().rev().filter_map(|event| match &event.kind {
+            EventKind::PlannerWorkspaceSelected { planning } => planning.worktree.as_deref().map(std::path::Path::new),
+            _ => None,
+        }).chain(std::iter::once(original));
+        let mut error = None;
+        for cwd in candidates {
+            match stored_planner_session_id(session, repository, cwd, id) {
+                Ok(value) => return Ok(value),
+                Err(err) => error = Some(err),
+            }
+        }
+        Err(error.unwrap_or_else(|| "Invalid Planner session".into()))
+    };
+    // Prefer the oldest surviving conversation, not the latest attempt.
     let mut prior_planner_attempt = false;
     for event in &snapshot.events {
         let id = match &event.kind {
@@ -1308,12 +1330,12 @@ fn planner_session_directory_for_workspace(
         let session = previous.join("planner-session");
         let previous_workspace = fs::read_to_string(previous.join("planner-workspace"))
             .map(PathBuf::from).unwrap_or_else(|_| workspace.to_path_buf());
-        if let Some(pi_id) = stored_planner_session_id(&session, repository, &previous_workspace, id)? {
+        if let Some(pi_id) = stored(&session, &previous_workspace, id)? {
             return Ok((session, pi_id));
         }
     }
     let session = root.join("planner-sessions").join(&snapshot.run_id);
-    if let Some(id) = stored_planner_session_id(&session, repository, workspace, &snapshot.run_id)?
+    if let Some(id) = stored(&session, workspace, &snapshot.run_id)?
     {
         return Ok((session, id));
     }
@@ -1634,14 +1656,32 @@ fn plan_goal_internal_with_started(
                         edges: Vec::new(),
                     },
                     "graph" => {
-                        // Planner uses the real source cwd. Native Bash writes are
-                        // immediately visible, even if planning fails or is rejected.
-                        // Keep the marker for session ownership/legacy recovery only.
-                        fs::write(
-                            directory.join("planner-workspace"),
-                            repository.to_string_lossy().as_bytes(),
-                        )
-                        .map_err(|e| e.to_string())?;
+                        // The planning gate prevents new dispatch/publication.
+                        // Drain the selected writer before lending its worktree;
+                        // unrelated parallel nodes need not finish first.
+                        let selected = if revision_run_id.is_some() && !background_review {
+                            loop {
+                                check_planning_cancelled(&owner)?;
+                                let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                                if runtime.state.run_id != owner { return Err("Run changed during workspace selection".into()); }
+                                let selected = runtime.planner_workspace()?;
+                                if selected.as_ref().is_none_or(|execution|
+                                    !runtime.path_is_running(std::path::Path::new(&execution.worktree))) {
+                                    break selected;
+                                }
+                                drop(runtime);
+                                thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                        } else { None };
+                        let planner_workspace = selected.as_ref().map(|execution| PathBuf::from(&execution.worktree))
+                            .unwrap_or_else(|| repository.clone());
+                        running.worktree = Some(crate::native::host_path(&planner_workspace).to_string_lossy().into_owned());
+                        running.workspace_execution_id = selected.as_ref().map(|execution| execution.id.clone());
+                        write_planning_summary(&directory, &running)?;
+                        fs::write(directory.join("planner-workspace"), planner_workspace.to_string_lossy().as_bytes())
+                            .map_err(|e| e.to_string())?;
+                        service.runtime.lock().map_err(|e| e.to_string())?
+                            .emit(EventKind::PlannerWorkspaceSelected { planning: running.clone() })?;
                         let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
                         let planner_config = planner_model_cfg.effective_config(&config);
                         let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
@@ -1674,12 +1714,12 @@ fn plan_goal_internal_with_started(
                                 &root,
                                 &directory,
                                 &repository,
-                                &repository,
+                                &planner_workspace,
                                 original_graph.as_ref().map(|_| &runtime.state),
                             )?
                         };
-                        rebind_planner_session(&planner_session_dir, &planner_session_id, &repository)?;
-                        // Keep Graph IR and conversation logs out of the source snapshot.
+                        rebind_planner_session(&planner_session_dir, &planner_session_id, &planner_workspace)?;
+                        // Keep Graph IR and conversation logs out of project snapshots.
                         fs::create_dir_all(&planner_session_dir).map_err(|e| e.to_string())?;
                         let graph_path =
                             planner_session_dir.join(format!("graph-{planning_id}.json"));
@@ -1725,7 +1765,7 @@ fn plan_goal_internal_with_started(
                             PiRequest {
                                 role: PiRole::Planner,
                                 config: &planner_config,
-                                cwd: &repository,
+                                cwd: &planner_workspace,
                                 task: &task,
                                 session_dir: &planner_session_dir,
                                 extension: Some(&service.extension),
@@ -1837,6 +1877,8 @@ fn plan_goal_internal_with_started(
                     error: None,
                     created_at: Some(now_ms),
                     repository: Some(repo_str.clone()),
+                    worktree: running.worktree.clone(),
+                    workspace_execution_id: running.workspace_execution_id.clone(),
                     plan_type: Some(route.plan_type.clone()),
                     goal: running.goal.clone(),
                     run_id: Some(owner.clone()),
@@ -1878,6 +1920,9 @@ fn plan_goal_internal_with_started(
                 };
                 let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                 check_planning_cancelled(&owner)?;
+                if let Some(execution_id) = &running.workspace_execution_id {
+                    runtime.capture_planner_workspace(execution_id)?;
+                }
                 if let Some(ref run_id) = revision_run_id {
                     if runtime.state.run_id != *run_id {
                         return Err("Run changed during graph revision".into());
@@ -1966,6 +2011,8 @@ fn plan_goal_internal_with_started(
                         error: Some(err.clone()),
                         created_at: Some(now_ms),
                         repository: Some(repo_str.clone()),
+                        worktree: running.worktree.clone(),
+                        workspace_execution_id: running.workspace_execution_id.clone(),
                         plan_type: fs::read(directory.join("route.json")).ok()
                             .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
                             .map(|route| route.plan_type)
@@ -1985,13 +2032,16 @@ fn plan_goal_internal_with_started(
                             eprintln!("Cannot persist failed planning Run: {error}");
                         }
                     } else {
-                        // Failed/cancelled revisions keep the old graph, but their
-                        // native source writes still belong to subsequent jobs.
+                        // Failed/cancelled revisions keep the old graph, but writes
+                        // in the selected workspace still belong to subsequent jobs.
                         let captured = (|| -> Result<(), String> {
                             let _guard = lock.lock().map_err(|e| e.to_string())?;
                             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                             if runtime.state.approved && revision_run_id.as_deref() == Some(&runtime.state.run_id) {
-                                if let Err(error) = runtime.capture_planner_source() {
+                                let capture = if let Some(id) = &running.workspace_execution_id {
+                                    runtime.capture_planner_workspace(id)
+                                } else { runtime.capture_planner_source() };
+                                if let Err(error) = capture {
                                     if !runtime.state.paused { let _ = runtime.pause(true); }
                                     return Err(error);
                                 }
@@ -2145,7 +2195,23 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
                 && primary.store.contains_run(&run_id)?
             {
                 let mut recovered = primary.open_run(&run_id)?;
+                // A crash can leave Planner writes in a borrowed node slot.
+                // Keep those bytes/history, snapshot them before any later jobs,
+                // and pause rather than silently scheduling stale inputs on error.
+                if interrupted {
+                    if let Some(id) = &summary.workspace_execution_id {
+                        if let Err(error) = recovered.capture_planner_workspace(id) {
+                            recovered.pause(true)?;
+                            summary.error = Some(format!("{}; workspace recovery failed: {error}", summary.error.as_deref().unwrap_or("Planner interrupted")));
+                            write_planning_summary(&directory, &summary)?;
+                        }
+                    }
+                }
                 recovered.emit(EventKind::PlannerTurnAborted { planning: summary })?;
+                if primary.state.run_id == run_id {
+                    primary.state = recovered.state;
+                    primary.touch();
+                }
             }
             continue;
         }
@@ -2239,9 +2305,9 @@ fn drive(service: Arc<Service>) {
                     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                     // Only nodes that a pending feedback verdict could invalidate
                     // must drain. Independent branches may fill available slots.
-                    // Source-native Planner writes may still be in progress.
-                    // Drain existing nodes, but dispatch new work only after the
-                    // turn records its complete source snapshot and graph.
+                    // Drain the selected writer before Planner borrows its worktree.
+                    // Dispatch new work only after the turn records its selected
+                    // workspace snapshot and graph.
                     let jobs = if service.planning.load(Ordering::SeqCst) {
                         Vec::new()
                     } else {

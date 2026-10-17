@@ -312,6 +312,25 @@ for (const role of ["node", "planner"]) {
   });
 }
 
+test("Planner details show the backend-selected cwd for every turn", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "Planning session details", exact: true }).click();
+    const details = page.locator(".workspace-details-body");
+    await details.getByText("worktree: /mock", { exact: true }).waitFor();
+    for (const worktree of ["/worktrees/run/root", "/worktrees/run/right", "/mock"]) {
+      await page.evaluate(path => window.audit.selectPlannerWorkspace(path), worktree);
+      await details.getByText(`worktree: ${worktree}`, { exact: true }).waitFor();
+    }
+    await details.locator("summary").click();
+    await details.getByText("turn-1: /worktrees/run/root", { exact: true }).waitFor();
+    await details.getByText("turn-2: /worktrees/run/right", { exact: true }).waitFor();
+    await details.getByText("turn-3: /mock", { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 for (const [mode, turn] of [
   ["serial", "provisional"], ["serial", "initial"], ["serial", "follow-up"], ["graph", "initial"], ["graph", "follow-up"],
 ]) {

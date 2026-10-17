@@ -41,19 +41,27 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  const project = process.env.GRAPHER_ORIGINAL_ROOT;
-  const paths = process.env.GRAPHER_EXECUTION_KIND === 'graph' && project
+  const planner = process.env.GRAPHER_MODE === 'planner';
+  const partition = process.env.GRAPHER_MODE === 'partition';
+  const graph = process.env.GRAPHER_EXECUTION_KIND === 'graph';
+  const project = process.env.GRAPHER_ORIGINAL_ROOT || (planner && !graph ? cwd : undefined);
+  // Planner uses the same model-facing namespace before, during and after
+  // private execution. Its physical cwd is backend/UI metadata, not a prompt.
+  const paths = !partition && (graph || planner) && project
     ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;
   const view = (value: any): any => paths ? paths.view(value) : value;
   // Execution roles receive path guidance directly; Planner need not repeat it in handoffs.
   const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
-  if (process.env.GRAPHER_MODE !== 'partition' && process.env.GRAPHER_MODE !== 'planner') {
+  if (!partition && (paths || !planner)) {
     pi.on('before_agent_start', async event => {
       // Pi 1.0 projects forceSystemPrompt after context_with_system handlers.
       // Returning systemPrompt here would overwrite pi-trim's request-time edits.
       // Keep ordinary prompts structured so the upstream extension can trim them.
       const options = event.systemPromptOptions;
       if (paths) Object.assign(options, paths.view(options));
+      // Normalize existing prompt paths only. Planner gets no extra addendum,
+      // cwd announcement, environment hint or instruction to re-read files.
+      if (planner) return;
       const hints = process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS?.trim();
       const guidance = hints ? `${pathGuideline}\n${hints}` : pathGuideline;
       if (options.forceSystemPrompt !== undefined) {
@@ -67,14 +75,13 @@ export default function (pi: ExtensionAPI) {
       }
     });
   }
-  // Planner owns its native bash tool; Partitioner has no tools.
-  // The launcher loads this adapter for every role, so execution-only tool
-  // overrides and hooks must not register on either planning role.
-  if (process.env.GRAPHER_MODE === "planner") return;
-  if (process.env.GRAPHER_MODE === "partition") return;
-  if (process.env.GRAPHER_EXECUTION_KIND === 'graph') {
-    if (!project) throw new Error('Graph execution is missing its host-owned project binding');
-    registerWorkspaceTools(pi, cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view);
+  // Partitioner has no tools. Planner shares the execution path adapter but
+  // retains its read/bash surface; node/edge belong to the Planner extension.
+  if (partition) return;
+  if (graph && !project) throw new Error('Graph execution is missing its host-owned project binding');
+  if (paths && project) {
+    registerWorkspaceTools(pi, cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project, view,
+      planner ? ['read'] : undefined);
 
     // Normalize model-facing paths only; never change stored files, tool input
     // contents, provider signatures, or image bytes.
