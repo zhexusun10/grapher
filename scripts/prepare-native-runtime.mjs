@@ -88,7 +88,8 @@ try {
     // dependency copy already. Avoid doubling the install in every Graph copy.
     filter: path => resolve(path) !== join(root, 'engine/pi-dependencies/node_modules'),
   });
-  // Bundled extensions have only type-only peer imports; do not copy another Pi runtime.
+  // Bundled extensions resolve Pi peers through the runtime source aliases;
+  // copy only their packages, never another Pi runtime.
   for (const name of bundledExtensionNames) {
     cpSync(join(root, 'node_modules', name), join(destination, 'node_modules', name), options);
   }

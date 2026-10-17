@@ -90,6 +90,85 @@ try {
       assert.ok(item.properties[field].anyOf.some((variant: any) => variant.type === "null"));
     }
   }
+  // Models routinely collapse the one-element batch wrapper into the edit
+  // object itself (the reported Planner failure) or re-add a single edit next
+  // to the batch. Normalize those shapes before Pi's generic schema validator
+  // runs; the wire schema above stays array-only for strict providers.
+  async function preparedCall(name: string, raw: unknown) {
+    const tool = extension.tools.get(name)!.definition;
+    assert.equal(typeof tool.prepareArguments, "function", `${name} must normalize single-edit arguments`);
+    const prepared = tool.prepareArguments!(raw);
+    const args = validateToolArguments(tool, { type: "toolCall", id: "test-prepared", name, arguments: prepared as Record<string, unknown> });
+    return await tool.execute("test-prepared", args, undefined, undefined, context);
+  }
+  function captureError(fn: () => unknown): string {
+    try {
+      fn();
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    assert.fail("Expected the call to be rejected");
+  }
+  const bareNode = JSON.parse((await preparedCall("node", { name: "tolerant-bare", task: "Bare node" })).content[0].text);
+  assert.equal(bareNode.applied, true);
+  const arrayNode = JSON.parse((await preparedCall("node", [{ name: "tolerant-array", task: "Array node" }])).content[0].text);
+  assert.equal(arrayNode.applied, true);
+  const objectNode = JSON.parse((await preparedCall("node", { nodes: { name: "tolerant-object", task: "Object node" } })).content[0].text);
+  assert.equal(objectNode.applied, true);
+  const mixedNode = JSON.parse((await preparedCall("node", {
+    nodes: [{ name: "tolerant-mixed", task: "Mixed node" }],
+    name: "ignored", task: "Ignored",
+  })).content[0].text);
+  assert.equal(mixedNode.applied, true);
+  assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8")).nodes.some((n: any) => n.name === "ignored"), false, "The batch array wins over stray single-edit fields");
+  const stringNode = JSON.parse((await preparedCall("node", {
+    nodes: '[{"name":"tolerant-string","task":"String node"}]',
+  })).content[0].text);
+  assert.equal(stringNode.applied, true);
+  const bareEdge = JSON.parse((await preparedCall("edge", { from: "tolerant-bare", to: "tolerant-array" })).content[0].text);
+  assert.equal(bareEdge.applied, true);
+  const arrayEdge = JSON.parse((await preparedCall("edge", [{ from: "tolerant-array", to: "tolerant-object" }])).content[0].text);
+  assert.equal(arrayEdge.applied, true);
+  // Argument errors state the invariant but never echo the graph or task text.
+  const taskTexts = /Bare node|Array node|Object node|Mixed node|String node/;
+  function assertArgumentError(message: string, pattern: RegExp) {
+    assert.match(message, pattern);
+    assert.match(message, /The graph is unchanged\./);
+    assert.doesNotMatch(message, /Current topology|tolerant-/);
+    assert.doesNotMatch(message, taskTexts);
+  }
+  const invalidRoot = captureError(() => extension.tools.get("node")!.definition.prepareArguments!({ task: "Missing name" }));
+  assertArgumentError(invalidRoot, /Invalid node call.*Expected \{"nodes":/);
+  const invalidEdgeShape = captureError(() => extension.tools.get("edge")!.definition.prepareArguments!({ from: "tolerant-bare" }));
+  assertArgumentError(invalidEdgeShape, /Invalid edge call.*Expected \{"edges":/);
+  // Item-level violations are converted to the same short domain errors, so
+  // Pi's generic validator never gets to append `Received arguments:`.
+  const invalidItem = captureError(() => extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{}] }));
+  assertArgumentError(invalidItem, /Invalid node edit: "name" must be a string/);
+  const unsupportedItem = captureError(() => extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{ name: "x", extra: true }] }));
+  assertArgumentError(unsupportedItem, /Invalid node edit: unsupported field\(s\) extra.*Allowed fields: name, task, delete/);
+  const invalidEdgeItem = captureError(() => extension.tools.get("edge")!.definition.prepareArguments!({ edges: [{ from: "x" }] }));
+  assertArgumentError(invalidEdgeItem, /Invalid edge edit: "to" must be a string/);
+  assert.deepEqual(
+    extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{ name: 123, task: 456, delete: 0 }] }),
+    { nodes: [{ name: "123", task: "456", delete: false }] },
+    "Primitive coercion matches Pi's Value.Convert",
+  );
+  assert.deepEqual(
+    extension.tools.get("node")!.definition.prepareArguments!({ name: 123, task: 456 }),
+    { nodes: [{ name: "123", task: "456" }] },
+    "A bare single edit is coerced through the same item path",
+  );
+  assert.deepEqual(
+    extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{ name: "nullable-args", task: null, delete: null }] }),
+    { nodes: [{ name: "nullable-args" }] },
+    "Optional nulls are dropped before validation",
+  );
+  const cleanedTolerant = JSON.parse((await call("node", { nodes: [
+    "tolerant-bare", "tolerant-array", "tolerant-object", "tolerant-mixed", "tolerant-string",
+  ].map(name => ({ name, delete: true })) })).content[0].text);
+  assert.equal(cleanedTolerant.applied, true);
+  assert.deepEqual(cleanedTolerant.topology, { nodes: [], edges: [] });
   const nullableNodes = JSON.parse((await call("node", {
     nodes: [{ name: "nullable-build", task: "Build", delete: null }, { name: "nullable-review", task: "Review", delete: null }],
   })).content[0].text);

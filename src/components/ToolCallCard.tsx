@@ -10,6 +10,7 @@ import {
   GitFork,
   Boxes,
   Compass,
+  Globe,
   Wrench,
   ChevronRight,
   CheckCircle2,
@@ -28,6 +29,28 @@ interface ToolCallCardProps {
   defaultExpanded?: boolean;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean, card?: HTMLElement) => void;
+}
+
+function compactText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  return text || undefined;
+}
+
+/** One-line summary for the bundled web_search extension tool. */
+function webSearchSummary(args: Record<string, any>): string {
+  const query = compactText(args.query);
+  const urls = Array.isArray(args.urls)
+    ? args.urls.map(compactText).filter((url): url is string => url !== undefined)
+    : [];
+  if (query) {
+    return urls.length
+      ? `${query} · ${urls.length === 1 ? urls[0] : t("{0} 个链接", urls.length)}`
+      : query;
+  }
+  if (urls.length === 1) return urls[0];
+  if (urls.length > 1) return t("{0} 个链接", urls.length);
+  return t("搜索网络或分析指定链接");
 }
 
 export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
@@ -129,6 +152,13 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                 ? `${args.feedback ? t("反馈边") : t("依赖边")}: [${args.from}] → [${args.to}]`
                 : t("连接依赖关系"),
             type: "graph",
+          };
+        case "web_search":
+          return {
+            icon: <Globe size={14} className="tool-icon web" />,
+            badge: "web_search",
+            summary: webSearchSummary(args),
+            type: "web",
           };
         default:
           return {

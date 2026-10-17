@@ -22,12 +22,16 @@ function writableStorage(storage?: WritableStorage): WritableStorage | null {
   return null;
 }
 
-/** Watching an execution must not unfold every reasoning block. Opt-in, default off. */
+/** Watching an execution auto-expands reasoning blocks by default. Opt-out via stored preference. */
 export function readAutoExpandCot(storage?: ReadableStorage): boolean {
   try {
-    return readableStorage(storage)?.getItem(AUTO_EXPAND_COT_KEY) === "1";
+    const store = readableStorage(storage);
+    if (!store) return true;
+    const value = store.getItem(AUTO_EXPAND_COT_KEY);
+    if (value === null) return true;
+    return value !== "0" && value !== "false";
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -43,7 +47,7 @@ export function setAutoExpandCot(enabled: boolean, storage?: WritableStorage): v
   try {
     const store = writableStorage(storage);
     if (enabled) store?.setItem(AUTO_EXPAND_COT_KEY, "1");
-    else store?.removeItem(AUTO_EXPAND_COT_KEY);
+    else store?.setItem(AUTO_EXPAND_COT_KEY, "0");
   } catch {
     // Storage may be blocked; the in-memory preference still applies this session.
   }

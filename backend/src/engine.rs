@@ -1442,12 +1442,22 @@ fn run_pi_with_timeout(
     }
     #[cfg(not(feature = "fixture"))]
     if source_role { process_prewarm::request(config, request.role, true); }
-    // If the process completed successfully and emitted valid assistant text,
-    // a BrokenPipe on writing stdin simply indicates that the process finished
+    // A settled turn is complete even if the runtime crashes on its way out.
+    // Node on Windows can fail-fast (0xc0000409) while disposing the session
+    // after the final text and agent_settled have already been emitted; that
+    // teardown fault must not discard the completed response.
+    let settled_response = rpc_agent
+        && agent_ended.is_some()
+        && agent_error.is_none()
+        && !final_text.trim().is_empty();
+    // If the process completed its turn and emitted valid assistant text, a
+    // BrokenPipe on writing stdin simply indicates that the process finished
     // its work and closed its stdin pipe early.
     let input_broken_pipe_on_success = input_error
         .as_ref()
-        .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe && status.success() && !final_text.trim().is_empty());
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe
+            && (status.success() || settled_response)
+            && !final_text.trim().is_empty());
     if managed { process_tree.ensure_drained()?; }
     // ProcessGuard clears the process group. Detached descendants are not
     // guaranteed to be covered; tasks must finish background work before returning.
@@ -1464,7 +1474,7 @@ fn run_pi_with_timeout(
     if let Some(error) = agent_error {
         return Err(clean_model_error(&error));
     }
-    if !status.success() {
+    if !status.success() && !settled_response {
         let stderr_summary = if !stderr_tail.trim().is_empty() {
             stderr_tail.trim().to_string()
         } else {
@@ -1490,6 +1500,11 @@ fn run_pi_with_timeout(
         } else {
             format!("Pi exited with {status}: {tail}")
         });
+    }
+    if !status.success() {
+        on_output(format!(
+            "[stderr] {phase} exited with {status} after the turn settled; keeping the completed response.\n"
+        ));
     }
     if let Some(error) = input_error {
         if !input_broken_pipe_on_success {
@@ -1909,6 +1924,57 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
         );
         assert_eq!(result.unwrap(), "parallel");
         assert!(events.contains("grapher_process_exited"));
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn settled_partition_keeps_its_route_when_the_runtime_crashes_during_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("partition_crash.py");
+        fs::write(&script, r#"import json, sys
+request = json.loads(sys.stdin.readline())
+assert request['type'] == 'prompt'
+print(json.dumps({'type':'response','id':request['id'],'success':True}), flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'parallel'}]}}), flush=True)
+print(json.dumps({'type':'agent_settled'}), flush=True)
+sys.exit(3)  # Windows fail-fast teardown cannot be represented portably; any nonzero code must be tolerated after settle.
+"#).unwrap();
+        let config = Config {
+            environment: None,
+            engine: "pi".into(),
+            pi_command: test_python(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            role_models: Default::default(),
+            post_task_review: false,
+            planner_write_tools: true,
+        };
+        let mut events = String::new();
+        let result = run_pi(
+            PiRequest {
+                role: PiRole::Partitioner,
+                config: &config,
+                cwd: temp.path(),
+                task: "test",
+                session_dir: &temp.path().join("partition-session"),
+                extension: None,
+                tools: Some(""),
+                session_id: None,
+                extra_args: vec![],
+                environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
+                system_prompt: None,
+                images: None,
+            },
+            |line| events.push_str(&line),
+        );
+        assert_eq!(result.unwrap(), "parallel");
+        assert!(events.contains("after the turn settled"), "the abnormal exit stays visible in the log");
+        assert!(events.contains("\"success\":false"));
     }
 
     #[cfg(feature = "fixture")]

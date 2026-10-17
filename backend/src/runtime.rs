@@ -55,7 +55,8 @@ pub struct Job {
     /// Resume the existing Pi session through its public continuation boundary
     /// rather than sending the original task again.
     pub continuation: bool,
-    /// An explicitly paused preparation never launched its first Pi session.
+    /// The previous attempt never persisted a Pi conversation (an explicitly
+    /// paused preparation, or a startup failure before Pi created its session).
     /// Send the initial task, but retain the selected workspace and session slot.
     pub initial_recovery: bool,
 }
@@ -1805,14 +1806,29 @@ impl Runtime {
             .ok_or("Missing Pi session origin")?
             .id
             .clone();
-        let branch = crate::session_branch::branch_before_user(
-            &self.root.join("sessions").join(&first_id),
-            &anchor.session_id,
-            Path::new(&anchor.worktree),
-            old_text,
-            anchor.started_at,
-            anchor.completed_at.unwrap_or(u64::MAX),
-        )?;
+        let session_dir = self.root.join("sessions").join(&first_id);
+        let suffix = format!("_{}.jsonl", anchor.session_id);
+        let persisted = fs::read_dir(&session_dir).ok().is_some_and(|entries| {
+            entries.filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().ends_with(&suffix))
+        });
+        // A failed attempt that exited before Pi created its conversation has
+        // no user turn to branch. The edit then replaces the message and the
+        // next attempt starts the first turn in the retained session slot. A
+        // completed or running conversation still fails closed if its history
+        // disappeared, instead of silently losing the abandoned branch.
+        let branch = if !persisted && anchor.status == "failed" {
+            None
+        } else {
+            Some(crate::session_branch::branch_before_user(
+                &session_dir,
+                &anchor.session_id,
+                Path::new(&anchor.worktree),
+                old_text,
+                anchor.started_at,
+                anchor.completed_at.unwrap_or(u64::MAX),
+            )?)
+        };
         if let Err(error) = self.emit(EventKind::ConversationEdited {
             nodes: vec![node.into()],
             target: node.into(),
@@ -1824,9 +1840,12 @@ impl Runtime {
             first_turn: anchor.id == first_id,
             selected_version,
         }) {
-            return Err(match branch.rollback() {
-                Ok(()) => error,
-                Err(rollback) => format!("{error}; {rollback}"),
+            return Err(match branch {
+                Some(branch) => match branch.rollback() {
+                    Ok(()) => error,
+                    Err(rollback) => format!("{error}; {rollback}"),
+                },
+                None => error,
             });
         }
         Ok(())
@@ -2173,6 +2192,22 @@ impl Runtime {
             let message_sequences = self.state.nodes[&node.name].pending_messages.iter()
                 .map(|message| message.sequence).collect::<Vec<_>>();
             let continuation = self.state.nodes[&node.name].continuation && queued_prompt.is_none();
+            // Pi writes the session file when it creates the conversation, before
+            // the first turn. A startup failure (process exit, extension load
+            // error, interrupted preparation) leaves the execution's session
+            // directory empty, so there is no conversation to resume.
+            let session_missing = |previous: &Execution| {
+                let origin = self.state.executions.iter()
+                    .find(|execution| execution.node == previous.node
+                        && execution.session_id == previous.session_id)
+                    .unwrap_or(previous);
+                let suffix = format!("_{}.jsonl", previous.session_id);
+                match fs::read_dir(self.root.join("sessions").join(&origin.id)) {
+                    Ok(mut entries) => !entries.any(|entry| entry.map_or(true, |entry|
+                        entry.file_name().to_string_lossy().ends_with(&suffix))),
+                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                }
+            };
             let resume = if continuation {
                 self.state
                     .executions
@@ -2196,21 +2231,7 @@ impl Runtime {
                             && anchor.is_none_or(|id| execution.id == id)
                     })
                     .ok_or("No previous node session to continue")?;
-                let origin = self
-                    .state
-                    .executions
-                    .iter()
-                    .find(|execution| execution.session_id == previous.session_id)
-                    .unwrap_or(previous);
-                let suffix = format!("_{}.jsonl", previous.session_id);
-                let persisted = fs::read_dir(self.root.join("sessions").join(&origin.id))
-                    .ok()
-                    .is_some_and(|entries| {
-                        entries
-                            .filter_map(Result::ok)
-                            .any(|entry| entry.file_name().to_string_lossy().ends_with(&suffix))
-                    });
-                if !persisted && self.state.nodes[&node.name].feedback_workspace.is_some() {
+                if session_missing(previous) && self.state.nodes[&node.name].feedback_workspace.is_some() {
                     let input = self.state.nodes[&node.name]
                         .feedback_workspace
                         .as_ref()
@@ -2230,7 +2251,11 @@ impl Runtime {
             };
             // Session continuation and physical workspace recovery are distinct:
             // a first preparation may have stopped before Pi accepted any task.
-            let initial_recovery = continuation && resume.is_some_and(|previous| {
+            // A human follow-up after an attempt that died during startup (for
+            // example while loading an extension) has the same problem: there is
+            // no persisted conversation to resume, but the attempt's workspace
+            // and session slot must be retained and the task sent again.
+            let stopped_recovery = continuation && resume.is_some_and(|previous| {
                 if !self.state.execution_stop_requests.contains(&previous.id)
                     || self.state.nodes[&node.name].human_instruction
                     || self.state.nodes[&node.name].feedback_workspace.as_ref().is_some_and(|input| !input.additional_sources.is_empty())
@@ -2238,15 +2263,11 @@ impl Runtime {
                         && (execution.pid.is_some() || execution.status == "completed")) {
                     return false;
                 }
-                let origin = self.state.executions.iter().find(|execution|
-                    execution.node == node.name && execution.session_id == previous.session_id).unwrap();
-                let suffix = format!("_{}.jsonl", previous.session_id);
-                match fs::read_dir(self.root.join("sessions").join(&origin.id)) {
-                    Ok(mut entries) => !entries.any(|entry| entry.map_or(true, |entry|
-                        entry.file_name().to_string_lossy().ends_with(&suffix))),
-                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                }
+                session_missing(previous)
             });
+            let failed_before_session = self.state.nodes[&node.name].human_instruction
+                && resume.is_some_and(|previous| previous.status == "failed" && session_missing(previous));
+            let initial_recovery = stopped_recovery || failed_before_session;
             let continuation = continuation && !initial_recovery;
             let preserved_workspace = resume
                 .filter(|previous| {
@@ -2534,7 +2555,37 @@ impl Runtime {
                 });
             }
             let state = &self.state.nodes[&node.name];
-            let task = if let Some((prompt, _)) = &queued_prompt {
+            // Editing the opening user turn replaces the node task itself; a
+            // follow-up edit on a never-started attempt still needs the node
+            // task sent first.
+            let edited_opening_turn = state.edit_execution_id.as_deref().is_some_and(|anchor_id| {
+                let Some(anchor) = self.state.executions.iter().find(|execution| execution.id == anchor_id) else {
+                    return false;
+                };
+                self.state.executions.iter()
+                    .find(|execution| execution.node == anchor.node && execution.session_id == anchor.session_id)
+                    .is_some_and(|first| first.id == anchor.id)
+            });
+            let task = if failed_before_session {
+                // The failed attempt never sent anything to Pi, so the retained
+                // session slot starts with the node task, followed by the
+                // accepted human turn(s).
+                let followup = match &queued_prompt {
+                    Some((prompt, _)) if !state.instruction.is_empty() && !state.pending_messages.iter()
+                        .any(|message| message.instruction == state.instruction) => {
+                        format!("{}\n\n{prompt}", state.instruction)
+                    }
+                    Some((prompt, _)) => prompt.clone(),
+                    None => state.instruction.clone(),
+                };
+                if followup.is_empty() {
+                    node.task.clone()
+                } else if edited_opening_turn {
+                    followup
+                } else {
+                    format!("{}\n{}", node.task, followup)
+                }
+            } else if let Some((prompt, _)) = &queued_prompt {
                 if resume.is_none() {
                     // A Planner revision may have replaced the original task
                     // and session while these accepted turns were waiting.

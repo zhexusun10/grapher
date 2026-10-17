@@ -32,7 +32,8 @@ Names are semantic identifiers, not literal directory names. Edges contain only 
 
 The compiler returns `executionBatches`, `roots`, `terminals`, and warnings. Batches describe topology; scheduling does not wait for every slow node in a batch before dispatching a ready descendant.
 
-During foreground planning, the graph pane opens on a `node`/`edge` tool call.
+During foreground planning, the graph pane opens on an accepted (successful)
+`node`/`edge` tool result, not on a pending or failed call.
 Successful tool results update the unapproved draft preview before the Planner's
 text stream ends. Cards appear centered as soon as they are measured; edge edits
 animate the layout while the viewport follows its center. Draft edits invalidate
@@ -84,7 +85,13 @@ for that Run, without stopping its Planner or another Run. The browser shows
 Continue requeues the interrupted nodes using their own Pi sessions and retained
 workspaces. If an initial preparation was paused before Pi launched and no
 conversation exists, Continue dispatches the initial task instead of attempting
-to resume a nonexistent session; the unstarted attempt remains in history.
+to resume a nonexistent session; the unstarted attempt remains in history. A
+user follow-up after an attempt died before Pi persisted its conversation (for
+example while loading an extension) recovers the same way: the retained
+workspace and session slot receive the node task and the follow-up turn instead
+of failing with `Cannot resume node session`. Retrying or editing a message from
+such an attempt also skips the missing JSONL branch: an edited opening turn
+replaces the node task, and an edited follow-up is appended to it.
 A node conversation's Stop interrupts only that node; global
 Stop/cancel also cancels planning. Internal scheduling-only pauses used to drain
 an affected branch for a Planner revision still let active calls finish.

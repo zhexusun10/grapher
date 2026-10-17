@@ -605,6 +605,10 @@
   color: #ec4899;
 }
 
+.tool-icon.web {
+  color: #06b6d4;
+}
+
 .tool-summary {
   font-family: var(--font-mono, monospace);
   font-size: 12px;

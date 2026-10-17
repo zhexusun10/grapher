@@ -31,6 +31,140 @@ function duplicateTargets(field: "nodes" | "edges", targets: string[]): Diagnost
   return diagnostics;
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseArguments(raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function parseEditString(value: unknown): unknown[] | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed;
+    if (isRecord(parsed)) return [parsed];
+  } catch {}
+  return undefined;
+}
+
+function singleEdit(raw: JsonRecord, fields: readonly string[]): JsonRecord {
+  const edit: JsonRecord = {};
+  for (const field of fields) {
+    if (raw[field] !== undefined) edit[field] = raw[field];
+  }
+  return edit;
+}
+
+function normalizeEdits(raw: unknown, key: "nodes" | "edges", required: readonly string[], fields: readonly string[]): unknown {
+  if (Array.isArray(raw)) return { [key]: raw };
+  if (!isRecord(raw)) return raw;
+  const value = raw[key];
+  const hasSingle = required.every(field => raw[field] !== undefined && raw[field] !== null);
+  let list: unknown[] | undefined;
+  if (Array.isArray(value)) list = value;
+  else if (isRecord(value)) list = [value];
+  else list = parseEditString(value);
+  // Models often omit the one-element batch wrapper, or send a bare edit next
+  // to an empty batch. Treat the single edit as the intended payload.
+  if (hasSingle && (list === undefined || list.length === 0)) list = [singleEdit(raw, fields)];
+  return list === undefined ? raw : { [key]: list };
+}
+
+function describeShape(value: unknown): string {
+  if (Array.isArray(value)) return "an array";
+  if (isRecord(value)) {
+    const keys = Object.keys(value);
+    return keys.length ? `an object with keys ${keys.join(", ")}` : "an empty object";
+  }
+  return value === null ? "null" : typeof value;
+}
+
+// Keep this item-level pass in sync with the TypeBox schema: it runs before
+// Pi's validator so invalid edits never reach the generic error path.
+function normalizeEdit(
+  raw: unknown,
+  label: string,
+  required: readonly string[],
+  fields: readonly string[],
+  booleanFields: readonly string[],
+  example: string,
+): JsonRecord {
+  if (!isRecord(raw)) {
+    throw new Error(`Invalid ${label} edit. Expected an object. Received ${describeShape(raw)}.`);
+  }
+  const allowed = new Set(fields);
+  const unsupported = Object.keys(raw).filter(field => !allowed.has(field));
+  if (unsupported.length) {
+    throw new Error(`Invalid ${label} edit: unsupported field(s) ${unsupported.join(", ")}. Allowed fields: ${fields.join(", ")}. Expected ${example}.`);
+  }
+  const optionalStrings = fields.filter(field => !required.includes(field) && !booleanFields.includes(field));
+  const edit: JsonRecord = {};
+  for (const field of required) {
+    const value = raw[field];
+    if (typeof value === "string") edit[field] = value;
+    else if (typeof value === "number" || typeof value === "boolean") edit[field] = String(value);
+    else throw new Error(`Invalid ${label} edit: "${field}" must be a string. Expected ${example}.`);
+  }
+  for (const field of optionalStrings) {
+    const value = raw[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string") edit[field] = value;
+    else if (typeof value === "number" || typeof value === "boolean") edit[field] = String(value);
+    else throw new Error(`Invalid ${label} edit: "${field}" must be a string. Expected ${example}.`);
+  }
+  for (const field of booleanFields) {
+    const value = raw[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value === "boolean") edit[field] = value;
+    else if (value === "true" || value === "false") edit[field] = value === "true";
+    else if (value === 1 || value === 0) edit[field] = value === 1;
+    else throw new Error(`Invalid ${label} edit: "${field}" must be a boolean. Expected ${example}.`);
+  }
+  return edit;
+}
+
+// Pi validates parameters before execute(), and its generic validator reports
+// shape mismatches as `schema is false` / `must have required properties`.
+// Normalize the common single-edit variants here so the model's intent wins,
+// and keep the canonical wire schema array-only so strict providers still
+// generate the batch shape.
+function editArguments(
+  raw: unknown,
+  key: "nodes" | "edges",
+  required: readonly string[],
+  fields: readonly string[],
+  example: string,
+): any {
+  const label = key === "nodes" ? "node" : "edge";
+  const parsed = parseArguments(raw);
+  if (isRecord(parsed)) {
+    const allowed = new Set([key, ...fields]);
+    const unsupported = Object.keys(parsed).filter(field => !allowed.has(field));
+    if (unsupported.length) {
+      throw new Error(`Invalid ${label} call: unsupported field(s) ${unsupported.join(", ")}. Expected ${example}.`);
+    }
+  }
+  const normalized = normalizeEdits(parsed, key, required, fields);
+  if (!isRecord(normalized) || !Array.isArray(normalized[key])) {
+    throw new Error(`Invalid ${label} call. Expected ${example}. Received ${describeShape(parsed)}.`);
+  }
+  if (normalized[key].length === 0) {
+    throw new Error(`Invalid ${label} call: ${key} must contain at least one edit. Expected ${example}.`);
+  }
+  const booleanFields = key === "nodes" ? ["delete"] : ["feedback", "delete"];
+  const edits = normalized[key].map(edit => normalizeEdit(edit, label, required, fields, booleanFields, example));
+  return { [key]: edits };
+}
+
 function applyNode(graph: Graph, edit: NodeEdit) {
   graph.nodes = graph.nodes.filter(node => node.name !== edit.name);
   if (edit.delete) graph.edges = graph.edges.filter(edge => edge.from !== edit.name && edge.to !== edit.name);
@@ -87,6 +221,16 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       ...(output.plan.warnings?.length ? { warnings: output.plan.warnings.map(stripDiagnosticCode) } : {}),
     }));
   }
+  // Argument errors happen before execute(), so no mutation or graph read has
+  // occurred. State that invariant without echoing the graph or task text.
+  function prepareWithContext<T>(prepare: () => T): T {
+    try {
+      return prepare();
+    } catch (error) {
+      if (error instanceof Error) throw new Error(`${error.message}\nThe graph is unchanged.`);
+      throw error;
+    }
+  }
   pi.registerTool(defineTool({
     name: "node", label: "Graph node",
     // Pi normalizes nullable optional edit fields before local validation.
@@ -100,6 +244,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
         delete: Type.Optional(Type.Boolean({ description: "Delete the node and its connected edges (default: false)" })),
       }, { additionalProperties: false }), { minItems: 1, description: "One or more node edits, applied in order" }),
     }, { additionalProperties: false }),
+    prepareArguments: raw => prepareWithContext(() => editArguments(raw, "nodes", ["name"], ["name", "task", "delete"], '{"nodes":[{"name":"...","task":"..."}]}')),
     async execute(_id, parameters) {
       return mutate(graph => {
         const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.name));
@@ -121,6 +266,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
         delete: Type.Optional(Type.Boolean({ description: "Delete the edge (default: false)" })),
       }, { additionalProperties: false }), { minItems: 1, description: "One or more edge edits, applied in order" }),
     }, { additionalProperties: false }),
+    prepareArguments: raw => prepareWithContext(() => editArguments(raw, "edges", ["from", "to"], ["from", "to", "feedback", "delete"], '{"edges":[{"from":"...","to":"..."}]}')),
     async execute(_id, parameters) {
       return mutate(graph => {
         const duplicates = duplicateTargets("edges", parameters.edges.map(edit => JSON.stringify([edit.from, edit.to])));

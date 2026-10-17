@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bundledTrim, bundledContinuity, continuityId, extensionCatalog, executionResources, setExtensionEnabled, trimId, workspacePolicyName } from '../engine/global-extensions.ts';
+import { bundledTrim, bundledContinuity, bundledWebSearch, continuityId, extensionCatalog, executionResources, setExtensionEnabled, trimId, webSearchId, workspacePolicyName } from '../engine/global-extensions.ts';
 import workspacePolicy from '../engine/prompt-extension.ts';
 import { loadGrapherMcpConfig } from '../engine/mcp-config.ts';
 import { loadMcpConfig } from '../engine/pi-compat.ts';
@@ -239,6 +239,42 @@ test('bundled continuity defaults on, supports persistent removal/restore and ob
   } finally { f.close(); }
 });
 
+test('bundled web search defaults on, persists opt-out for Planner/Node only and obeys exclusion flags', async () => {
+  const f = fixture();
+  try {
+    const initial = (await extensionCatalog(f.own)).extensions.find(extension => extension.id === webSearchId)!;
+    assert.ok(initial);
+    assert.equal(initial.path, bundledWebSearch);
+    assert.equal(initial.bundled, true);
+    assert.equal(initial.required, false);
+    assert.equal(initial.enabled, true);
+    for (const role of ['planner', 'node']) {
+      assert.equal((await executionResources([], f.own, role)).args.filter(arg => arg === bundledWebSearch).length, 1);
+      for (const flag of ['--no-extensions', '-ne']) {
+        assert.ok(!(await executionResources([flag], f.own, role)).args.includes(bundledWebSearch));
+      }
+    }
+    for (const role of ['partition', 'merger']) {
+      assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
+    }
+    const disabled = await setExtensionEnabled(f.own, webSearchId, false);
+    assert.equal(disabled.extensions.find(extension => extension.id === webSearchId)?.enabled, false);
+    assert.equal(JSON.parse(readFileSync(join(f.own, 'extensions.json'), 'utf8')).overrides[webSearchId], false);
+    for (const role of ['partition', 'merger', 'planner', 'node']) {
+      assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
+    }
+    const enabled = await setExtensionEnabled(f.own, webSearchId, true);
+    assert.equal(enabled.extensions.find(extension => extension.id === webSearchId)?.enabled, true);
+    for (const role of ['planner', 'node']) {
+      assert.equal((await executionResources([], f.own, role)).args.filter(arg => arg === bundledWebSearch).length, 1);
+    }
+    for (const role of ['partition', 'merger']) {
+      assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
+    }
+    assert.ok(existsSync(bundledWebSearch), 'removal must not uninstall the bundled package');
+  } finally { f.close(); }
+});
+
 test('MCP is available only to allowed roles and respects global/dedicated builtin exclusions', async () => {
   const f = fixture();
   try {
@@ -272,7 +308,11 @@ test('selection also works when dedicated and global Pi directories are identica
   } finally { f.close(); }
 });
 
-for (const [name, bundled] of [['pi-trim', bundledTrim], ['pi-continuity', bundledContinuity]]) {
+for (const [name, id, bundled, toggles] of [
+  ['pi-trim', trimId, bundledTrim, [true]],
+  ['pi-continuity', continuityId, bundledContinuity, [true, false, true]],
+  ['pi-better-web-search', webSearchId, bundledWebSearch, [true, false, true]],
+] as const) {
   test(`global/dedicated ${name} is deduplicated with the bundle, including multi-entry packages`, async () => {
     const f = fixture();
     try {
@@ -286,8 +326,8 @@ for (const [name, bundled] of [['pi-trim', bundledTrim], ['pi-continuity', bundl
       });
       const catalog = await extensionCatalog(f.own);
       assert.equal(catalog.extensions.filter(extension => extension.name === name).length, 1);
-      for (const enabled of name === 'pi-continuity' ? [true, false, true] : [true]) {
-        if (name === 'pi-continuity') await setExtensionEnabled(f.own, continuityId, enabled);
+      for (const enabled of toggles) {
+        if (id !== trimId) await setExtensionEnabled(f.own, id, enabled);
         const resources = await executionResources([], f.own, 'planner');
         assert.equal(resources.args.filter(arg => arg === bundled).length, enabled ? 1 : 0);
         for (const pkg of packages) {
@@ -298,6 +338,56 @@ for (const [name, bundled] of [['pi-trim', bundledTrim], ['pi-continuity', bundl
     } finally { f.close(); }
   });
 }
+
+test('duplicate extension package or skill in dedicated directory shadows external global copy', async () => {
+  const f = fixture();
+  try {
+    const pkgName = 'duplicate-probe-package';
+    const ownPkg = join(f.own, 'packages/duplicate-probe-package');
+    const globalPkg = join(f.global, 'packages/duplicate-probe-package');
+    for (const dir of [ownPkg, globalPkg]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: pkgName, pi: { extensions: ['index.ts'] } }));
+      writeFileSync(join(dir, 'index.ts'), 'export default function () {}');
+    }
+    writeFileSync(join(f.own, 'settings.json'), JSON.stringify({ packages: [ownPkg] }));
+    writeFileSync(join(f.global, 'settings.json'), JSON.stringify({ packages: [globalPkg] }));
+
+    const ownSkill = join(f.own, 'skills/probe');
+    mkdirSync(ownSkill, { recursive: true });
+    writeFileSync(join(ownSkill, 'SKILL.md'), '---\nname: own-skill\ndescription: dedicated probe\n---\n');
+
+    const resources = await executionResources([], f.own, 'node');
+    assert.ok(resources.args.includes(join(ownPkg, 'index.ts')));
+    assert.ok(!resources.args.includes(join(globalPkg, 'index.ts')));
+    assert.equal(resources.args.filter(arg => arg.endsWith('index.ts') && arg.includes(pkgName)).length, 1);
+
+    assert.ok(resources.args.some(arg => arg.startsWith(ownSkill)));
+    assert.ok(!resources.args.some(arg => arg.startsWith(join(f.global, 'skills/probe'))));
+  } finally { f.close(); }
+});
+
+test('scoped skill packages keep their full name instead of colliding on the directory basename', async () => {
+  const f = fixture();
+  try {
+    const packages = [
+      { directory: join(f.own, 'packages/@a/tools'), name: '@a/tools' },
+      { directory: join(f.global, 'packages/@b/tools'), name: '@b/tools' },
+    ];
+    for (const pkg of packages) {
+      mkdirSync(join(pkg.directory, 'skills/probe'), { recursive: true });
+      writeFileSync(join(pkg.directory, 'package.json'), JSON.stringify({ name: pkg.name }));
+      writeFileSync(join(pkg.directory, 'skills/probe/SKILL.md'), '---\nname: probe\ndescription: scoped probe\n---\n');
+    }
+    writeFileSync(join(f.own, 'settings.json'), JSON.stringify({ packages: [packages[0].directory] }));
+    writeFileSync(join(f.global, 'settings.json'), JSON.stringify({ packages: [packages[1].directory] }));
+
+    const resources = await executionResources([], f.own, 'node');
+    assert.ok(resources.args.includes(join(packages[0].directory, 'skills/probe/SKILL.md')));
+    assert.ok(resources.args.includes(join(packages[1].directory, 'skills/probe/SKILL.md')),
+      'a different scoped package with the same directory basename must not be shadowed');
+  } finally { f.close(); }
+});
 
 test('Pi 1.0.1 project MCP overrides apply to external globals without moving credentials or editing files', () => {
   const f = fixture();
@@ -424,22 +514,27 @@ test('prepared native runtime includes continuity and respects the same removabl
     }).trim();
     assert.ok(existsSync(join(runtime, 'node_modules/pi-continuity/extensions/index.ts')));
     assert.ok(existsSync(join(runtime, 'node_modules/pi-continuity/lib/continuity.ts')));
+    assert.ok(existsSync(join(runtime, 'node_modules/pi-better-web-search/src/index.ts')));
     const result = join(f.base, 'native-commands.json');
     writeFileSync(f.extension, `import { writeFileSync } from 'node:fs';
 export default function (pi) {
-  pi.on('session_start', () => writeFileSync(process.env.GRAPHER_TEST_RESULT, JSON.stringify(pi.getCommands().map(c => c.name))));
+  pi.on('session_start', () => writeFileSync(process.env.GRAPHER_TEST_RESULT, JSON.stringify({
+    commands: pi.getCommands().map(c => c.name), tools: pi.getAllTools().map(t => t.name),
+  })));
 }`);
     for (const enabled of [true, false, true]) {
       await setExtensionEnabled(f.own, continuityId, enabled);
+      await setExtensionEnabled(f.own, webSearchId, enabled);
       const output = execFileSync(process.execPath, [join(runtime, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-session', '--no-context-files'], {
         cwd: f.workspace, encoding: 'utf8', timeout: 20000, input: '{"id":"ready","type":"get_state"}\n',
         env: { ...process.env, PI_CODING_AGENT_DIR: f.own, GRAPHER_GLOBAL_PI_AGENT_DIR: f.global,
           GRAPHER_MODE: 'node', GRAPHER_TEST_RESULT: result, GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1' },
       });
       assert.ok(output.includes('"success":true'), output);
-      const commands = JSON.parse(readFileSync(result, 'utf8'));
-      assert.equal(commands.includes('pi-continuity'), enabled);
-      assert.ok(commands.includes('pi-trim'));
+      const state = JSON.parse(readFileSync(result, 'utf8'));
+      assert.equal(state.commands.includes('pi-continuity'), enabled);
+      assert.ok(state.commands.includes('pi-trim'));
+      assert.equal(state.tools.includes('web_search'), enabled, 'prepared runtime loads the bundled web search tool');
     }
   } finally { f.close(); }
 });

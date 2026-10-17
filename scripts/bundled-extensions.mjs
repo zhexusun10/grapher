@@ -2,20 +2,25 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const bundledExtensionNames = ['pi-trim', 'pi-continuity'];
+export const bundledExtensions = [
+  { name: 'pi-trim', entry: 'extensions/index.ts' },
+  { name: 'pi-continuity', entry: 'extensions/index.ts' },
+  { name: 'pi-better-web-search', entry: 'src/index.ts' },
+];
+export const bundledExtensionNames = bundledExtensions.map(extension => extension.name);
 
 export function missingBundledExtensions(root) {
   const project = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  return bundledExtensionNames.filter(name => {
+  return bundledExtensions.filter(({ name, entry }) => {
     const directory = join(root, 'node_modules', name);
     try {
       const installed = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
       return installed.name !== name || installed.version !== project.dependencies[name] ||
-        !existsSync(join(directory, 'extensions/index.ts'));
+        !existsSync(join(directory, entry));
     } catch {
       return true;
     }
-  });
+  }).map(({ name }) => name);
 }
 
 export function verifyBundledExtensions(root) {

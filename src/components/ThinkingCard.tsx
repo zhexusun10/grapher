@@ -42,7 +42,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // answer text and scrolling stay responsive, and superseded intermediate
     // deltas are skipped instead of parsed one by one.
     const renderedContent = useDeferredValue(smoothContent);
-    // The Settings toggle (default off) decides whether watching a run may pop
+    // The Settings toggle (default on) decides whether watching a run may pop
     // reasoning cards open. A collapsed card never mounts its Markdown body.
     const autoExpandCot = useAutoExpandCot();
 

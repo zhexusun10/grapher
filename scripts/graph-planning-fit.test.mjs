@@ -89,13 +89,21 @@ test("actual App: node results render before Planner completion; edges rearrange
     planner({ type: "message_start", message: { role: "assistant", content: [] } });
     textTimer = setInterval(() => planner({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Still planning. " } }), 50);
 
+    // A rejected first mutation must not open an empty topology pane.
+    tool("rejected-first", "node", { nodes: [{ name: "ghost", task: "Invalid edit" }] }, { nodes: [], edges: [] }, true);
+    await page.locator(".tool-call-card.error").first().waitFor();
+    assert.equal(await page.locator(".graph-pane").count(), 0, "a failed node call does not open the pane");
+
     startTool("node-a", "node", { nodes: nodes.slice(0, 1) });
+    // Only an accepted mutation opens the pane; a pending node call would
+    // otherwise show an empty topology that may still fail validation.
+    await page.waitForTimeout(150);
+    assert.equal(await page.locator(".graph-pane").count(), 0, "a pending node call does not open the pane");
+    endTool("node-a", "node", { nodes: ["a"], edges: [] });
     await page.waitForFunction(() => {
       const pane = document.querySelector(".graph-pane");
       return pane && +getComputedStyle(pane).opacity > 0.99;
     });
-    assert.equal(await page.locator(".react-flow__node").count(), 0, "show the pane on tool start, but only accepted results become cards");
-    endTool("node-a", "node", { nodes: ["a"], edges: [] });
     await assertFitted(page, [["a"]]);
     tool("node-bc", "node", { nodes: nodes.slice(1) }, { nodes: ["a", "b", "c"], edges: [] });
     await assertFitted(page, [["a", "b", "c"]]);

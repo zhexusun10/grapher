@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { InMemoryCredentialStore } from '../pi/packages/ai/src/auth/credential-store.ts';
 import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
-import { bundledTrim, bundledContinuity } from '../engine/global-extensions.ts';
+import { bundledTrim, bundledContinuity, bundledWebSearch } from '../engine/global-extensions.ts';
 import { buildSystemPromptState } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
 import {
   ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities,
@@ -13,7 +13,11 @@ import {
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
 } from '../engine/pi-compat.ts';
 
-for (const name of ['pi-trim', 'pi-continuity']) {
+for (const [name, entry] of [
+  ['pi-trim', './extensions/index.ts'],
+  ['pi-continuity', './extensions/index.ts'],
+  ['pi-better-web-search', './src/index.ts'],
+]) {
   test(`bundled ${name} matches the selected exact release, manifest and lock integrity`, () => {
     const installed = JSON.parse(readFileSync(new URL(`../node_modules/${name}/package.json`, import.meta.url), 'utf8'));
     const project = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -22,7 +26,7 @@ for (const name of ['pi-trim', 'pi-continuity']) {
     const pinned = lock.packages[`node_modules/${name}`];
     assert.equal(lock.packages[''].dependencies[name], spec);
     assert.equal(pinned.version, installed.version);
-    assert.deepEqual(installed.pi.extensions, ['./extensions/index.ts'], 'Review the launcher if the upstream entrypoint changes');
+    assert.deepEqual(installed.pi.extensions, [entry], 'Review the launcher if the upstream entrypoint changes');
     assert.deepEqual(Object.keys(installed.dependencies ?? {}), [], 'Graph copies bundled packages without peers; review new runtime dependencies before upgrading');
     assert.match(pinned.integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
     assert.equal(spec, installed.version, 'Registry updates must pin an exact release, not latest or a version range');
@@ -40,6 +44,17 @@ test('bundled continuity loads against the pinned Pi public boundary API', async
   }
   assert.ok(extension.commands.has('pi-continuity'));
   assert.ok(extension.flags.has('continuity'));
+});
+
+test('bundled web search loads its provider-native tool against the pinned Pi public boundary API', async () => {
+  const loaded = await loadExtensions([bundledWebSearch], process.cwd());
+  assert.deepEqual(loaded.errors, []);
+  assert.equal(loaded.extensions.length, 1);
+  const extension = loaded.extensions[0];
+  assert.ok(extension.tools.has('web_search'));
+  for (const event of ['session_start', 'session_tree', 'model_select', 'before_agent_start']) {
+    assert.ok(extension.handlers.has(event), `${event}: dynamic exposure boundary registered`);
+  }
 });
 
 test('bundled pi-trim replaces Grapher prompt trimming', async () => {

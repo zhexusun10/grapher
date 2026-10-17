@@ -1,7 +1,7 @@
 // Grapher-owned launch boundary. Applied before extension/MCP factories, not
 // merely in one Bash subprocess. Hooks are part of the frozen native policy,
 // not a frontend/user environment-selection surface.
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { delimiter, isAbsolute, dirname, resolve } from 'node:path';
 
@@ -91,9 +91,28 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
     for (const key of Object.keys(process.env)) if (!identityKey(key)) delete process.env[key];
     for (const [key, value] of Object.entries(environment)) if (!identityKey(key)) process.env[key] = value;
   }
-  const canonical = value => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value);
+  // Resolve existing directories so macOS /var aliases, symlinked environments
+  // and Windows path spellings still identify the same declared PATH root.
+  const canonical = value => {
+    const resolved = resolve(value);
+    let real = resolved;
+    try { real = realpathSync(resolved); } catch {}
+    return process.platform === 'win32' ? real.toLowerCase() : real;
+  };
+  // Case-insensitive macOS volumes can expose the same directory with different
+  // letter casing; compare the filesystem identity before the string spelling.
+  const sameDirectory = (left, right) => {
+    if (process.platform !== 'win32') {
+      try {
+        const a = statSync(left, { bigint: true });
+        const b = statSync(right, { bigint: true });
+        if (a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino) return true;
+      } catch {}
+    }
+    return canonical(left) === canonical(right);
+  };
   if (!existsSync(launch.entry) || !statSync(launch.entry).isFile() ||
-      canonical(process.env.PATH?.split(delimiter)[0] || '') !== canonical(dirname(launch.entry))) {
+      !sameDirectory(process.env.PATH?.split(delimiter)[0] || '', dirname(launch.entry))) {
     throw new Error('Declared default entry/PATH is unavailable or changed by the hook; no fallback');
   }
   Object.assign(process.env, deviceEnvironment);

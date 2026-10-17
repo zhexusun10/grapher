@@ -29,19 +29,18 @@ const config = { ...defaultConfig, repository: "/a", model: "test/old" };
 function SettingsFixture() {
   const [committed, setCommitted] = useState(config);
   const [open, setOpen] = useState(true);
-  const [error, setError] = useState("");
-  audit.open = () => { setError(""); setOpen(true); };
+  audit.open = () => setOpen(true);
   audit.committed = committed;
   return <>
     <output data-committed-model>{committed.model}</output>
-    {open && <SettingsModal config={committed} isOpen onClose={() => setOpen(false)} dataPath="/mock" error={error}
+    {open && <SettingsModal config={committed} isOpen onClose={() => setOpen(false)} dataPath="/mock"
       onSaveConfig={async next => {
         try {
           await runtimeService.saveConfig(next);
           setCommitted(next);
           setOpen(false);
           return true;
-        } catch (error) { setError(String(error)); return false; }
+        } catch { return false; }
       }} />}
   </>;
 }

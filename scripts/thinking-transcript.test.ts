@@ -25,10 +25,14 @@ const render = (events: unknown[]) => renderToStaticMarkup(createElement(Virtual
 }));
 const cardCount = (html: string) => (html.match(/class="thinking-card /g) || []).length;
 const toolCount = (html: string) => (html.match(/class="tool-call-card /g) || []).length;
-/** Opt-in display preference: tests that assert auto-expansion must enable it. */
+/** Helper to run a test with auto-expansion forced on or off. */
 const withAutoExpandCot = <T,>(run: () => T): T => {
   setAutoExpandCot(true);
-  try { return run(); } finally { setAutoExpandCot(false); }
+  try { return run(); } finally { setAutoExpandCot(true); }
+};
+const withFoldedCot = <T,>(run: () => T): T => {
+  setAutoExpandCot(false);
+  try { return run(); } finally { setAutoExpandCot(true); }
 };
 
 test("background Planner replies stay separate across turns with no visible user bubble", () => {
@@ -74,6 +78,20 @@ test("session JSONL toolCall and toolResult records replay as tool cards", () =>
   assert.equal(toolCount(html), 1);
   assert.match(html, /src\/App\.tsx/);
   assert.doesNotMatch(html, /\{"type":"message"/);
+});
+
+test("bundled web_search calls render a dedicated card with query and URL details", () => {
+  const output = line({ type: "message", id: "assistant-search", message: { role: "assistant", content: [
+    { type: "toolCall", id: "web-query", name: "web_search", arguments: { query: "rust async\nruntime" } },
+    { type: "toolCall", id: "web-urls", name: "web_search",
+      arguments: { urls: ["https://example.com/a", "https://example.com/b"] } },
+  ] } });
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }));
+  assert.equal(toolCount(html), 2);
+  assert.equal((html.match(/tool-call-card web /g) || []).length, 2, "web_search uses the web card type");
+  assert.match(html, /tool-icon web/);
+  assert.match(html, /rust async runtime/, "queries collapse to a one-line summary");
+  assert.ok(html.includes(t("{0} 个链接", 2)), "URL-only searches summarize the URL count");
 });
 
 test("a tail result without its start still has a tool card, never raw JSON", () => {
@@ -211,24 +229,24 @@ test("incremental prepend parsing preserves tail items and backfills tool calls 
   assert.match(prependedMarkup, /TAIL_ASSISTANT_TEXT/);
 });
 
-test("auto-expand COT is an opt-in display preference with safe storage fallbacks", () => {
-  assert.equal(readAutoExpandCot({ getItem: () => null }), false, "default is folded");
+test("auto-expand COT defaults to enabled with safe storage fallbacks", () => {
+  assert.equal(readAutoExpandCot({ getItem: () => null }), true, "default is auto-expanded");
   assert.equal(readAutoExpandCot({ getItem: () => "1" }), true);
   assert.equal(readAutoExpandCot({ getItem: () => "0" }), false);
-  assert.equal(readAutoExpandCot({ getItem: () => { throw new Error("blocked"); } }), false);
+  assert.equal(readAutoExpandCot({ getItem: () => { throw new Error("blocked"); } }), true);
   const writes: unknown[] = [];
   const storage = {
     setItem: (key: string, value: string) => { writes.push(["set", key, value]); },
     removeItem: (key: string) => { writes.push(["remove", key]); },
   };
   try {
-    setAutoExpandCot(true, storage);
-    assert.equal(autoExpandCotEnabled(), true);
     setAutoExpandCot(false, storage);
     assert.equal(autoExpandCotEnabled(), false);
-    assert.deepEqual(writes, [["set", AUTO_EXPAND_COT_KEY, "1"], ["remove", AUTO_EXPAND_COT_KEY]]);
+    setAutoExpandCot(true, storage);
+    assert.equal(autoExpandCotEnabled(), true);
+    assert.deepEqual(writes, [["set", AUTO_EXPAND_COT_KEY, "0"], ["set", AUTO_EXPAND_COT_KEY, "1"]]);
   } finally {
-    setAutoExpandCot(false);
+    setAutoExpandCot(true);
   }
 });
 
@@ -251,23 +269,25 @@ test("active agent conversation auto-opens running COT while settled history sta
   });
 });
 
-test("chain of thought stays folded while watching unless the display option is enabled", () => {
-  const running = render([start(), update("thinking_delta", 0, { delta: "HIDDEN_STREAMING_COT" })]);
-  assert.match(running, /thinking-card streaming collapsed/);
-  assert.doesNotMatch(running, /thinking-card-body|HIDDEN_STREAMING_COT/);
+test("chain of thought stays folded while watching when the display option is disabled", () => {
+  withFoldedCot(() => {
+    const running = render([start(), update("thinking_delta", 0, { delta: "HIDDEN_STREAMING_COT" })]);
+    assert.match(running, /thinking-card streaming collapsed/);
+    assert.doesNotMatch(running, /thinking-card-body|HIDDEN_STREAMING_COT/);
 
-  const plannerItem: TranscriptItem = { id: "think-default-off", type: "thinking", role: "assistant", content: "HIDDEN_PLANNER_COT", status: "running" };
-  const planner = renderToStaticMarkup(createElement(PlannerTranscript, {
-    items: [plannerItem], isPlanning: true, locked: false, draft: "",
-    onDraftChange: () => {}, onSendMessage: () => false, onUserResize: () => {},
-  }));
-  assert.match(planner, /thinking-card streaming collapsed/);
-  assert.doesNotMatch(planner, /HIDDEN_PLANNER_COT/);
+    const plannerItem: TranscriptItem = { id: "think-default-off", type: "thinking", role: "assistant", content: "HIDDEN_PLANNER_COT", status: "running" };
+    const planner = renderToStaticMarkup(createElement(PlannerTranscript, {
+      items: [plannerItem], isPlanning: true, locked: false, draft: "",
+      onDraftChange: () => {}, onSendMessage: () => false, onUserResize: () => {},
+    }));
+    assert.match(planner, /thinking-card streaming collapsed/);
+    assert.doesNotMatch(planner, /HIDDEN_PLANNER_COT/);
 
-  // An explicit click still opens the card, with or without the option.
-  const opened = renderToStaticMarkup(createElement(ThinkingCard, { content: "OPT_IN_CONTENT", isStreaming: true, expanded: true }));
-  assert.match(opened, /thinking-card streaming expanded/);
-  assert.match(opened, /OPT_IN_CONTENT/);
+    // An explicit click still opens the card, with or without the option.
+    const opened = renderToStaticMarkup(createElement(ThinkingCard, { content: "OPT_IN_CONTENT", isStreaming: true, expanded: true }));
+    assert.match(opened, /thinking-card streaming expanded/);
+    assert.match(opened, /OPT_IN_CONTENT/);
+  });
 });
 
 test("thinking_end settles the original card without replacing captured thinking or mutating state", () => {
@@ -412,15 +432,20 @@ test("settled empty blocks render no misleading card while pending blocks still 
     const html = renderToStaticMarkup(createElement(ThinkingCard, { content, isStreaming: false }));
     assert.equal(html, "");
   }
-  // A pending block keeps its progress label even while the (default-folded)
-  // body is not mounted; with auto-expand enabled it also shows the shimmer.
+  // By default (auto-expand on), a pending block auto-expands and displays shimmer progress.
   const running = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true }));
-  assert.match(running, /thinking-card streaming collapsed/);
+  assert.match(running, /thinking-card streaming expanded/);
   assert.ok(running.includes(t("思考中...")), "pending reasoning shows progress in the active locale");
+  assert.match(running, /thinking-shimmer/);
   assert.doesNotMatch(running, /thinking-empty/);
-  const expanded = withAutoExpandCot(() => renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true })));
-  assert.match(expanded, /thinking-shimmer/);
-  assert.doesNotMatch(expanded, /thinking-empty/);
+
+  // When auto-expand is disabled, the pending card stays collapsed without mounting the shimmer body.
+  withFoldedCot(() => {
+    const collapsed = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true }));
+    assert.match(collapsed, /thinking-card streaming collapsed/);
+    assert.ok(collapsed.includes(t("思考中...")));
+    assert.doesNotMatch(collapsed, /thinking-shimmer|thinking-empty/);
+  });
 });
 
 test("history replay retains streamed thinking, recovers end-only text, and hides truly empty blocks", () => {

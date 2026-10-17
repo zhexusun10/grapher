@@ -89,7 +89,7 @@ try {
     assert.ok(html.length > 0, `${name} must render`);
     if (locale === "en") assert.doesNotMatch(html, /\p{Script=Han}/u, `${name} has untranslated UI copy`);
     if (name === "SettingsModal") {
-      assert.ok(html.includes(t("设置")));
+      assert.ok(html.includes("Settings"));
       assert.ok(html.includes(t("界面语言")));
       assert.ok(html.includes(`value="${preference}" selected=""`));
       assert.ok(!html.includes('role="alertdialog"'), "confirmation is not shown before a language change");

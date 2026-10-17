@@ -38,12 +38,13 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function fixture(name, handler = async () => false, reducedMotion = "reduce", autoExpandCot = false) {
+async function fixture(name, handler = async () => false, reducedMotion = "reduce", autoExpandCot = undefined) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion });
   await context.addInitScript(enabled => {
     localStorage.setItem("grapher_language_v1", "en");
-    // COT cards fold while watching unless the (default-off) display option is on.
-    if (enabled) localStorage.setItem("grapher_auto_expand_cot_v1", "1");
+    // COT cards auto-expand by default; "0" disables, "1" enables.
+    if (enabled === true) localStorage.setItem("grapher_auto_expand_cot_v1", "1");
+    else if (enabled === false) localStorage.setItem("grapher_auto_expand_cot_v1", "0");
     else localStorage.removeItem("grapher_auto_expand_cot_v1");
   }, autoExpandCot);
   const errors = [];
@@ -139,23 +140,23 @@ test("reasoning auto-expand is committed by Save and discarded by Cancel", { tim
   const toggle = () => page.getByLabel("Auto-expand chain of thought while running");
   const stored = () => page.evaluate(() => localStorage.getItem("grapher_auto_expand_cot_v1"));
   try {
-    assert.equal(await toggle().isChecked(), false, "display option starts off");
+    assert.equal(await toggle().isChecked(), true, "display option starts checked by default");
 
     // Cancel closes the modal without touching the stored preference.
-    await toggle().check();
+    await toggle().uncheck();
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
     await page.locator(".settings-modal").waitFor({ state: "detached" });
     assert.equal(await stored(), null);
     await page.evaluate(() => window.audit.open());
-    assert.equal(await toggle().isChecked(), false, "reopening restores the unsaved draft");
+    assert.equal(await toggle().isChecked(), true, "reopening restores the unsaved draft");
 
     // Save commits the display option alongside the backend settings.
-    await toggle().check();
+    await toggle().uncheck();
     await page.getByRole("button", { name: /save settings/i }).click();
-    await page.waitForFunction(() => localStorage.getItem("grapher_auto_expand_cot_v1") === "1");
+    await page.waitForFunction(() => localStorage.getItem("grapher_auto_expand_cot_v1") === "0");
     assert.equal(saves.length, 1, "the backend config save still runs");
     await page.evaluate(() => window.audit.open());
-    assert.equal(await toggle().isChecked(), true, "the saved option survives reopening");
+    assert.equal(await toggle().isChecked(), false, "the saved option survives reopening");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -1768,8 +1769,8 @@ test("completed thinking stays visible and copyable through empty or replacement
   } finally { await context.close(); }
 });
 
-test("thinking stays folded while watching until a click opens it by default", { timeout: 30_000 }, async () => {
-  const { context, page, errors } = await fixture("thinking");
+test("thinking stays folded while watching when disabled, until a click opens it", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("thinking", undefined, "reduce", false);
   const append = event => page.evaluate(event => window.audit.append(event), event);
   const views = [page.locator('[data-thinking-view="live"]'), page.locator('[data-thinking-view="history"]')];
   try {

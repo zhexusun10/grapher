@@ -797,6 +797,12 @@ fn messaging_a_failed_node_resumes_its_session_without_a_successful_result() {
             let failed = runtime.jobs().unwrap().remove(0);
             runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
             runtime.jobs().unwrap();
+            // A provider failure happens after Pi created the conversation, so
+            // the follow-up resumes that persisted session.
+            let session_dir = runtime.root.join("sessions").join(&failed.execution.id);
+            fs::create_dir_all(&session_dir).unwrap();
+            fs::write(session_dir.join(format!("test_{}.jsonl", failed.execution.session_id)),
+                format!("{}\n", serde_json::json!({"type": "session", "id": failed.execution.session_id, "cwd": failed.execution.worktree}))).unwrap();
             assert_eq!(runtime.state.phase, "needs_attention");
             assert!(!runtime.state.can_resume_interrupted());
             assert_eq!(runtime.state.nodes["task"].status, "failed");
@@ -833,6 +839,7 @@ fn messaging_a_failed_node_resumes_its_session_without_a_successful_result() {
             assert_eq!(serde_json::to_value(&next.images).unwrap(), serde_json::to_value(&images).unwrap());
             assert_ne!(next.execution.id, failed.execution.id);
             assert_eq!(next.execution.attempt, 2);
+            assert!(!next.initial_recovery, "a persisted conversation is resumed instead of restarted");
             assert_eq!(next.execution.session_id, failed.execution.session_id);
             assert_eq!(next.execution.worktree, failed.execution.worktree);
             assert_eq!(next.resume_execution_id, Some(failed.execution.id.clone()));
@@ -842,6 +849,65 @@ fn messaging_a_failed_node_resumes_its_session_without_a_successful_result() {
             assert_eq!(runtime.state.nodes["task"].status, "completed");
         }
     }
+}
+
+#[test]
+fn failed_start_followup_restarts_the_task_in_the_retained_session_slot() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    // The first attempt exited while loading extensions, before Pi created any
+    // conversation file in the execution's session directory.
+    let failed = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&failed.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime.jobs().unwrap();
+    assert_eq!(runtime.state.phase, "needs_attention");
+
+    runtime.intervene("task", "continue your work").unwrap();
+    let next = runtime.jobs().unwrap().remove(0);
+    assert!(next.initial_recovery, "a missing conversation restarts the first turn in the retained slot");
+    assert!(!next.continuation);
+    assert_eq!(next.resume_execution_id, Some(failed.execution.id.clone()));
+    assert_eq!(next.execution.session_id, failed.execution.session_id);
+    assert_eq!(next.execution.worktree, failed.execution.worktree);
+    assert_eq!(next.task, "self-contained task\ncontinue your work", "the fresh session still receives the node task");
+}
+
+#[test]
+fn editing_a_failed_start_opening_turn_replaces_the_task_without_branching() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&failed.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime.jobs().unwrap();
+
+    // There is no JSONL to branch, but the opening turn can still be replaced.
+    runtime.edit_node_message("task", &failed.execution.id, "self-contained task", "edited task", None).unwrap();
+    assert_eq!(runtime.state.graph.nodes[0].task, "edited task");
+    let next = runtime.jobs().unwrap().remove(0);
+    assert!(next.initial_recovery);
+    assert_eq!(next.resume_execution_id, Some(failed.execution.id.clone()));
+    assert_eq!(next.execution.session_id, failed.execution.session_id);
+    assert_eq!(next.task, "edited task", "the replacement opening turn is not duplicated");
+}
+
+#[test]
+fn editing_a_failed_start_followup_keeps_the_node_task() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&first.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime.jobs().unwrap();
+    runtime.intervene("task", "continue your work").unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&retry.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime.jobs().unwrap();
+
+    runtime.edit_node_message("task", &retry.execution.id, "continue your work", "keep going", None).unwrap();
+    let next = runtime.jobs().unwrap().remove(0);
+    assert!(next.initial_recovery);
+    assert_eq!(next.resume_execution_id, Some(first.execution.id.clone()));
+    assert_eq!(next.execution.session_id, first.execution.session_id);
+    assert_eq!(next.task, "self-contained task\nkeep going");
 }
 
 #[test]

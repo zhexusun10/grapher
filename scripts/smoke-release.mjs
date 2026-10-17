@@ -54,6 +54,7 @@ try {
   for (const file of ['scripts/pi-baseline.mjs', 'scripts/pi-dependencies.mjs', 'scripts/prepare-native-runtime.mjs',
     'scripts/cargo.mjs', 'scripts/bundled-extensions.mjs', 'scripts/model-data-manifest.mjs', 'package.json', 'dist/index.html', 'pi/.git/HEAD',
     'node_modules/pi-trim/extensions/index.ts', 'node_modules/pi-continuity/extensions/index.ts',
+    'node_modules/pi-better-web-search/src/index.ts',
     'START-HERE.md', platform === 'windows' ? 'start.bat' : 'start.sh']) {
     assert.ok(existsSync(join(installation, file)), `Missing package file: ${file}`);
   }
@@ -168,9 +169,12 @@ try {
   const catalog = await api('provider_auth', { version: 1, operation: 'catalog', refresh: false });
   assert.ok(catalog.providers.length > 0 && catalog.models.length > 0);
   const extensions = await api('pi_extensions', { version: 1, operation: 'catalog' });
-  for (const id of ['npm:pi-trim', 'npm:pi-continuity']) {
+  for (const [id, enabled] of [
+    ['npm:pi-trim', true], ['npm:pi-continuity', true], ['npm:pi-better-web-search', true],
+  ]) {
     const extension = extensions.extensions.find(value => value.id === id);
-    assert.ok(extension?.bundled && extension.enabled, `${id} must be bundled and enabled`);
+    assert.ok(extension?.bundled, `${id} must be bundled`);
+    assert.equal(extension.enabled, enabled, `${id} enabled state`);
     assert.ok(extension.path.replaceAll('\\', '/').includes('Relocated 安装 # %'), 'Backend must load relocated extensions');
   }
   await stopProcess(child);

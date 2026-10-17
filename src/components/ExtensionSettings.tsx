@@ -7,14 +7,17 @@ import './ExtensionSettings.css';
 export function ExtensionItem({ extension, disabled, onToggle }: {
   extension: PiExtension; disabled: boolean; onToggle: (extension: PiExtension) => void;
 }) {
-  const isContinuity = extension.bundled && extension.id === 'npm:pi-continuity';
-  const description = isContinuity
-    ? `${extension.source} · more robust loop engineering: auto-recovers unexpected stream interruptions, truncated messages, network disconnections, and API 5h/week quota limits`
-    : extension.bundled ? extension.source : `${extension.source} · ${extension.path}`;
+  const bundledDescriptions: Record<string, string> = {
+    'npm:pi-continuity': 'more robust loop engineering: auto-recovers unexpected stream interruptions, truncated messages, network disconnections, and API 5h/week quota limits',
+    'npm:pi-better-web-search': 'registers the web_search tool provided by available model providers; the tool is not registered when no provider can search',
+  };
+  const description = extension.bundled
+    ? `${extension.source}${bundledDescriptions[extension.id] ? ` · ${bundledDescriptions[extension.id]}` : ''}`
+    : `${extension.source} · ${extension.path}`;
   return <li className="extension-settings-row">
     <div>
       <strong>{extension.name}</strong>
-      <code title={isContinuity ? description : extension.path}>{description}</code>
+      <code title={description}>{description}</code>
     </div>
     {extension.required ? <span className="extension-settings-required" role="img" aria-label={t('始终启用，不可删除')} title={t('始终启用，不可删除')}>
       <LockKeyhole size={14} aria-hidden="true" />
@@ -63,7 +66,7 @@ export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) 
       <button type="button" className="icon-button" aria-label={t('刷新扩展')} disabled={busy || disabled} onClick={() => void update()}><RefreshCw size={14} /></button>
     </div>
     <p className="section-desc">{t('删除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。')}</p>
-    <p className="section-desc">{t('pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。')}</p>
+    <p className="section-desc">{t('pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；pi-better-web-search 默认启用且仅对 Planner、Node Agent 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。')}</p>
     {catalog && <code className="extension-settings-directory">{catalog.globalDirectory}</code>}
     {busy && <p role="status" className="section-desc">{t('正在读取扩展…')}</p>}
     {error && <p role="alert" className="settings-language-error">{localizeError(error)}</p>}

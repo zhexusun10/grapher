@@ -18,7 +18,6 @@ interface SettingsModalProps {
   config: Config;
   dataPath: string;
   envOverrides?: Record<string, string>;
-  error?: string;
   conversationScoped?: boolean;
   onSaveConfig: (config: Config) => void | Promise<boolean>;
 }
@@ -29,7 +28,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   config,
   dataPath,
   envOverrides,
-  error,
   conversationScoped = false,
   onSaveConfig,
 }) => {
@@ -108,7 +106,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
         <header className="settings-modal-header">
           <div className="settings-header-title-wrap">
             <Settings2 size={18} />
-            <h2 id="modal-title">{t("设置")}</h2>
+            <h2 id="modal-title">Settings</h2>
           </div>
           <button className="icon-button" aria-label={t("关闭弹窗")} disabled={saving} onClick={onClose}>
             <X size={18} />
@@ -267,23 +265,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             </div>
           </div>
 
-          {(() => {
-            const activeError = saveError || error;
-            if (!activeError) return null;
-            const str = String(activeError);
-            const localized = localizeError(activeError);
-            const invalidResponseKey = t("后端未返回有效响应 ({0})，请确认终端中的后端已启动。", "");
-            const invalidResponsePrefix = invalidResponseKey.replace(/\s*\(.*\).*/, "");
-            if (
-              (invalidResponsePrefix && (str.includes(invalidResponsePrefix) || localized.includes(invalidResponsePrefix))) ||
-              str.includes("backend returned an invalid response") ||
-              localized.includes("backend returned an invalid response") ||
-              /500|ECONNREFUSED/i.test(str)
-            ) {
-              return null;
-            }
-            return <p role="alert" className="settings-language-error">{localized}</p>;
-          })()}
+          {saveError && <p role="alert" className="settings-language-error">{localizeError(saveError)}</p>}
           <footer className="settings-modal-footer">
             <button type="button" className="settings-cancel-btn" disabled={saving} onClick={onClose}>
               {t("取消")}

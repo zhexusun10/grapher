@@ -1519,11 +1519,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     (state.phase === "completed" && state.publication?.status !== "failed" && state.publication?.status !== "publishing" && state.publication?.status !== "merging")
   );
   // Each conversation owns a fresh ReactFlow store and measured viewport.
+  // Only an accepted graph mutation may open the pane: a failed or still-running
+  // `node`/`edge` call leaves the draft graph unchanged, so it must not reveal an
+  // empty topology on the right.
+  const hasAcceptedGraphTool = (t: any) =>
+    (t?.toolName === "node" || t?.toolName === "edge") && t.status === "success" && !t.isError;
   const hasGraphToolCalled =
-    (plannerStream.items || []).some((t: any) => t.toolName === "node" || t.toolName === "edge") ||
-    (plannerStream.tools || []).some((t: any) => t.toolName === "node" || t.toolName === "edge");
-  const hasGraphContent = state.graph.nodes.length > 0 || hasGraphToolCalled;
-  const showGraphPane = routeType === "graph" && (hasGraphContent || (!isPlanning && state.graph.nodes.length > 0));
+    (plannerStream.items || []).some(hasAcceptedGraphTool) ||
+    (plannerStream.tools || []).some(hasAcceptedGraphTool);
+  const showGraphPane = routeType === "graph" && (state.graph.nodes.length > 0 || hasGraphToolCalled);
 
   const animatedNodes = useAnimatedNodes(nodes, state.runId);
   const { ready: isGraphReadyForRun, initialize: centerGraph, synchronize: synchronizeGraph } = useGraphViewport(

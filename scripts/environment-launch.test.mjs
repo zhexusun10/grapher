@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { dirname, join, resolve, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -40,6 +40,20 @@ test('actual native Bash PATH has no implicit MSYS host bins and temporary expor
   assert.equal(result.status, 0, result.stderr);
   const canonical = value => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value);
   assert.deepEqual(result.stdout.trim().split(delimiter).map(canonical), [canonical(dirname(process.execPath))]);
+});
+
+test('symlinked PATH directories identify the declared entry directory', { skip: process.platform === 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-launch-alias-'));
+  try {
+    const real = join(directory, 'real');
+    const alias = join(directory, 'alias');
+    mkdirSync(real);
+    symlinkSync(real, alias, 'dir');
+    const entry = join(real, 'node');
+    symlinkSync(process.execPath, entry);
+    const result = run({ ...base(), entry, path: [alias] }, '');
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('failed activation, replaced default PATH and corrupted reserved variables fail closed', () => {

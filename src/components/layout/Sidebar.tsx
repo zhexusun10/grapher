@@ -280,11 +280,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           type="button"
           className={`sidebar-bottom-btn ${isSettingsOpen ? "active" : ""}`}
           onClick={onOpenSettings}
-          aria-label={t("设置")}
-          title={t("设置")}
+          aria-label="Settings"
+          title="Settings"
         >
           <Settings2 size={18} />
-          <span>Setting</span>
+          <span>Settings</span>
         </button>
       </div>
 

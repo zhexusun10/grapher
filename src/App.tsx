@@ -36,7 +36,7 @@ import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
 import { Sidebar } from "./components/layout/Sidebar";
-import { bindRunToWorkspace, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey } from "./services/workspaceConversations";
+import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey } from "./services/workspaceConversations";
 import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
@@ -920,32 +920,10 @@ export default function App() {
       return result;
     };
 
-    // Histories validate one by one. Adding the validated cards is enough for the
-    // progressive publish; replacing the list with the partial set would unmount
-    // warm-cached cards and replay their entrance animation once the remaining
+    // Histories validate one by one. Merge each batch into the cached index
+    // instead of replacing it with the partial set; warm-cached cards stay
+    // mounted, so their entrance animation does not replay when the remaining
     // histories resolve.
-    const mergeValidatedRuns = (
-      current: Record<string, string[]>,
-      validated: Record<string, string[]>,
-    ): Record<string, string[]> => {
-      const merged: Record<string, string[]> = {};
-      for (const [owner, ids] of Object.entries(current)) merged[owner] = [...ids];
-      // Validation is authoritative for ownership, so a cached card proven to
-      // belong to another workspace must leave its old list right away.
-      for (const id of validatedSnapshots.keys()) {
-        for (const [owner, ids] of Object.entries(merged)) {
-          if (validated[owner]?.includes(id)) continue;
-          const index = ids.indexOf(id);
-          if (index !== -1) ids.splice(index, 1);
-        }
-      }
-      for (const [owner, ids] of Object.entries(validated)) {
-        const list = merged[owner] || (merged[owner] = []);
-        for (const id of ids) if (!list.includes(id)) list.push(id);
-      }
-      return merged;
-    };
-
     const schedulePublish = () => {
       if (publishScheduled) return;
       publishScheduled = true;
@@ -954,7 +932,7 @@ export default function App() {
         if (!planningRecovery.current(scope)) return;
         const validatedRuns = buildValidatedRuns();
         const activeRuns = validatedRuns[workspaceKey(activeRepo)] || [];
-        setWorkspaceRuns(prev => mergeValidatedRuns(prev, validatedRuns));
+        setWorkspaceRuns(prev => mergeValidatedWorkspaceRuns(prev, validatedRuns));
         if (activeRuns.length > 0 || candidateActiveIds.size === 0) {
           setIsSidebarReady(true);
         }
@@ -3203,7 +3181,9 @@ export default function App() {
             {/* 全局悬浮横幅 (居中于工作区主体，排除侧边栏) */}
             <div className="floating-error-banner-container">
               <AnimatePresence>
-                {error && (
+                {/* Settings owns its own save/language/auth errors; unrelated
+                    application failures must not float over the modal. */}
+                {error && modal !== "settings" && (
                   <motion.div
                     key="floating-error-banner"
                     className="floating-error-banner"
@@ -3364,7 +3344,6 @@ export default function App() {
                 config={config}
                 dataPath={dataPath}
                 envOverrides={envOverrides}
-                error={error}
                 conversationScoped={!!state.runId}
                 onSaveConfig={handleSaveConfig}
               />

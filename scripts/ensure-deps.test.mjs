@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } fro
 import { tmpdir, homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { bundledExtensionNames, missingBundledExtensions, verifyBundledExtensions } from './bundled-extensions.mjs';
+import { bundledExtensions, bundledExtensionNames, missingBundledExtensions, verifyBundledExtensions } from './bundled-extensions.mjs';
 import { assertSupportedNode, ensureDependencies, findCargoExecutable, rootDependenciesReady } from './ensure-deps.mjs';
 import { pathValue, prependPath } from './cargo.mjs';
 import { corePackages, dependencyManifest, dependencyProfileHashes } from './pi-dependencies.mjs';
@@ -32,8 +32,8 @@ function fixture(t) {
     write('node_modules/vite/bin/vite.js', '');
     write('node_modules/tsx/dist/cli.mjs', '');
     write('node_modules/typescript/bin/tsc', '');
-    for (const name of bundledExtensionNames) {
-      write(`node_modules/${name}/extensions/index.ts`, 'throw new Error("Readiness must not load extension code");');
+    for (const { name, entry } of bundledExtensions) {
+      write(`node_modules/${name}/${entry}`, 'throw new Error("Readiness must not load extension code");');
     }
   };
   installRoot();
@@ -53,7 +53,7 @@ test('root readiness checks dev tools and exact bundled releases without loading
   }
 });
 
-for (const name of bundledExtensionNames) {
+for (const { name, entry } of bundledExtensions) {
   test(`existing dev tools do not hide a missing ${name} installation`, t => {
     const f = fixture(t);
     rmSync(join(f.root, 'node_modules', name), { recursive: true });
@@ -76,7 +76,7 @@ for (const name of bundledExtensionNames) {
     rmSync(join(f.root, metadata));
     assert.equal(rootDependenciesReady(f.root), false);
     f.write(metadata, JSON.stringify({ name, version: '1.2.3' }));
-    rmSync(join(f.root, 'node_modules', name, 'extensions/index.ts'));
+    rmSync(join(f.root, 'node_modules', name, entry));
     assert.equal(rootDependenciesReady(f.root), false);
     assert.deepEqual(missingBundledExtensions(f.root), [name]);
   });

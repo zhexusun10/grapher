@@ -240,6 +240,16 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
       assert.ok(!markup.includes(path), 'bundled continuity describes its purpose instead of exposing a local path');
       assert.ok(markup.includes(t('{0}扩展 {1}', enabled ? t('删除') : t('添加'), 'pi-continuity')));
     }
+    const webSearch = renderToStaticMarkup(React.createElement(ExtensionItem, {
+      extension: { id: 'npm:pi-better-web-search', name: 'pi-better-web-search', source: 'npm:pi-better-web-search',
+        path: '/Users/jerry/.pi/agent/npm/node_modules/pi-better-web-search/src/index.ts', bundled: true,
+        required: false, enabled: false },
+      disabled: false, onToggle() {},
+    }));
+    assert.match(webSearch,
+      /registers the web_search tool provided by available model providers; the tool is not registered when no provider can search/,
+      'web search describes its provider-gated tool registration');
+    assert.ok(!webSearch.includes('src/index.ts'), 'bundled web search describes its purpose instead of exposing a local path');
   } finally { await vite.close(); }
 });
 
@@ -282,7 +292,7 @@ test('approval, review and Planner file-tool defaults survive legacy configs', a
     assert.match(checkbox({ ...defaultConfig, plannerWriteTools: true }, '挂载 Planner write 和 edit 工具'), /checked=""/);
 
     // Reasoning cards:
-    // - auto-expansion is a display-only, default-off option rendered below plan
+    // - auto-expansion is a display-only, default-on option rendered below plan
     //   approval and above the language selector;
     // - it follows the same contract as the other toggles: staged in the modal
     //   and committed only after the settings save is accepted.
@@ -297,17 +307,17 @@ test('approval, review and Planner file-tool defaults survive legacy configs', a
       'Planner file tools sit between plan approval and reasoning display, above the language selector');
     const cotToggle = markup.match(/<input\b[^>]*>/g)?.find(input => input.includes(`aria-label="${t('执行时自动展开思维链')}"`));
     assert.ok(cotToggle, 'reasoning auto-expand checkbox is present');
-    assert.doesNotMatch(cotToggle, /checked=""/, 'reasoning auto-expansion is off by default');
+    assert.match(cotToggle ?? '', /checked=""/, 'reasoning auto-expansion is on by default');
     try {
-      prefs.setAutoExpandCot(true);
-      const enabled = renderToStaticMarkup(React.createElement(SettingsModal, {
+      prefs.setAutoExpandCot(false);
+      const disabled = renderToStaticMarkup(React.createElement(SettingsModal, {
         isOpen: true, onClose() {}, config: defaultConfig, dataPath: '', onSaveConfig() {},
       }));
-      const enabledToggle = enabled.match(/<input\b[^>]*>/g)
+      const disabledToggle = disabled.match(/<input\b[^>]*>/g)
         ?.find(input => input.includes(`aria-label="${t('执行时自动展开思维链')}"`));
-      assert.match(enabledToggle ?? '', /checked=""/, 'the toggle reflects the stored preference on open');
+      assert.doesNotMatch(disabledToggle ?? '', /checked=""/, 'the toggle reflects the stored preference on open');
     } finally {
-      prefs.setAutoExpandCot(false);
+      prefs.setAutoExpandCot(true);
     }
   } finally { await vite.close(); }
 });
