@@ -35,9 +35,7 @@ Goal → Planner → Compiled Graph → Deterministic Runtime
 
 **Not all work needs multiple agents.** Grapher uses intent-based routing in **Auto** mode or lets you choose manually: **Serial** for linear tasks, **Graph** when parallelism helps.
 
-Built on [Pi](https://github.com/earendil-works/pi).
-
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
+Built on [Pi](https://github.com/earendil-works/pi). [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
 
 ![Grapher UI showing compiled execution graph with user prompt, planning tool calls, and 16-node dependency topology](assets/execution-graph.png)
 
@@ -57,7 +55,7 @@ Built on [Pi](https://github.com/earendil-works/pi).
 
 - Frontend + backend changes
 - Implementation + tests
-- Multiple independent modules
+- Machine Learning Task naturally contains multiple independent modules
 - Implementation followed by bounded review/rework
 
 For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph** when explicit dependencies and independent workstreams justify it; **Auto** lets the Partitioner choose.

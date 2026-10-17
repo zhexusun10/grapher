@@ -36,9 +36,7 @@ Grapher
 
 **并非所有工作都需要多个 Agent。** Grapher 在 **Auto** 模式下按意图路由，也允许手动选择：线性任务使用 **Serial**，并行有价值时使用 **Graph**。
 
-基于 [Pi](https://github.com/earendil-works/pi) 构建。
-
-[快速开始](#快速开始) · [工作方式](#工作方式) · [架构](docs/architecture/overview.md) · [English](README.md)
+基于 [Pi](https://github.com/earendil-works/pi) 构建。 [快速开始](#快速开始) · [工作方式](#工作方式) · [架构](docs/architecture/overview.md) · [English](README.md)
 
 ![Grapher 真实界面：完成多节点复杂依赖拓扑图编译与执行，包含需求提示词、规划过程工具调用与执行拓扑图](assets/execution-graph-zh.png)
 
@@ -58,7 +56,7 @@ Grapher
 
 - 前端 + 后端修改
 - 实现 + 测试
-- 多个独立模块
+- 机器学习任务天然具有多个独立模块
 - 实现后进行有界审查 / 返工
 
 小型、线性或高度耦合的任务应使用 **Serial**。只有当显式依赖和独立工作流值得拆图时才使用 **Graph**；**Auto** 让 Partitioner 选择路线。
