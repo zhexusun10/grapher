@@ -25,9 +25,9 @@ npm run test:frontend
 npm test
 ```
 
-1. **Scope limits:** `npm test` uses Rust fixtures (no paid API calls). Frontend tests check UI logic/smoke cases, not real provider/sandbox behavior. See [Documentation maintenance](documentation.md) for doc/link checks.
+1. **Scope limits:** `npm test` uses Rust fixtures (no paid API calls). Frontend tests check UI logic/smoke cases, not real provider/sandbox behavior. Update the canonical documentation page when a public contract changes, and check links in the pages you touch.
 2. **Test design rules:** Assert public contract outcomes (scheduling, replay, publication, isolation, schema compatibility, cancellation, timeouts). Never lock source spelling, exact translation counts, decorative CSS/icon sizes, or workflow indentation.
-3. **Registered agent tools:** Grapher registers only `read`, `write`, `edit`, and `bash` (agents search via Bash; `rg`/`fd` are not required on host PATH except in `test:extensions` and [benchmark/Dockerfile](../../benchmark/Dockerfile)). Production extension tests enforce `PI_OFFLINE=1`.
+3. **Registered agent tools:** Node, Serial, and Merger workspaces expose only `read`, `write`, `edit`, and `bash`; the Planner additionally exposes `node`/`edge` and a follow-up-only `switch_workspace`. Agents search via Bash, so host `rg`/`fd` are not required by `test:extensions`; the [benchmark image](../../benchmark/Dockerfile) installs them for Pi's own search tools.
 
 ## 2. Cargo Build Cache & Target Isolation
 
@@ -49,8 +49,8 @@ npm run test:build-cache                   # Verify target cleanup/lock/signal b
 | --- | --- |
 | `npm run test:ui` | Mocked-API Playwright browser flows (bootstrap, recovery, graph UI, settings). Needs Chromium or `GRAPHER_BROWSER_CHANNEL` (Edge on Windows). |
 | `npm run test:pi` | Pinned Pi CLI/SDK and isolated provider/auth transport (no paid model). |
-| `npm run test:extensions` | Real Pi extension tools and Planner graph mutations. Needs `rg` and `fd` on PATH. |
-| `npm run test:environment` | Full native environment admission, discovery, E/L, resources, launch binding, and process/Job cleanup ([contract](../architecture/native-environments.md), [lifecycle](../architecture/filesystem-isolation.md#process-lifecycle), [drain fixture](../../scripts/fixtures/environment-native.mjs)). Needs Python 3.11+, Git, Bash, plus Linux `bubblewrap` or macOS Seatbelt. |
+| `npm run test:extensions` | Real Pi extension tools and Planner graph mutations using local shell tools. |
+| `npm run test:environment` | Native environment admission, discovery, E/L, resources, launch binding, and process/Job cleanup ([contract](../architecture/native-environments.md), [lifecycle](../architecture/filesystem-isolation.md#process-lifecycle), [drain fixture](../../scripts/fixtures/environment-native.mjs)). Needs Python 3.11+, Git, Bash, plus Linux `bubblewrap` or macOS Seatbelt. |
 | `npm run test:environment-chain` | Fast companion to `test:environment`: parallel/serial private venv sharing (`--without-pip`), runtime-bound `python` launch, and fan-out publication using deterministic local responses. Needs Python 3.11+, Git, Bash. |
 | `npm run test:native` | Path adaptation and native launcher/filesystem isolation with pinned Pi. |
 | `npm run test:planner-bash` | Cross-platform Planner Bash semantics, worktree path stability, Unicode/space paths, pipelines, and timeouts. |

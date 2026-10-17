@@ -31,7 +31,7 @@ docker build -f benchmark/Dockerfile \
 
 Alternatively, build a pinned recursive checkout during task-image preparation, run `npm run pi:setup`, and build the production Rust binary. Git must support `--path-format=absolute`; a compiler toolchain is needed for building, not necessarily for every timed trial.
 
-Installation verifies bwrap, pinned Pi, checkout cleanliness, and binary `--build-identity` matching `git rev-parse HEAD`. It records that commit as the agent version. Do not download/compile Grapher during the timed trial. A non-root task user needs suitable read/access permissions and a trusted Git checkout.
+Installation verifies bwrap, the Pi entrypoint/tsx runtime files, checkout cleanliness, and binary `--build-identity` matching `git rev-parse HEAD`. It records that commit as the agent version; build the task image from the pinned commit rather than relying on `pi:verify`, which is currently a no-op. Do not download/compile Grapher during the timed trial. A non-root task user needs suitable read/access permissions and a trusted Git checkout.
 
 ## Run through Harbor
 
@@ -84,7 +84,7 @@ The trial's agent-log directory retains:
 
 Shadow Git, Pi auth directories, and symlinks are not copied into the trace archive. Logs may still contain private code, prompts, tool output, or secrets echoed by a task; treat them as sensitive. Ensure Harbor `include_logs`/`exclude_logs` does not omit required evidence. Trace archival failure fails the trial.
 
-Provider token usage maps to Harbor's AgentContext, including cache accounting; costs are not invented. Avoid tiny environment values such as `NODE_TLS_REJECT_UNAUTHORIZED=0` in `--agent-env`: global value-based redaction can corrupt JSON digits in logs. For local mock TLS tests, use a test CA through `NODE_EXTRA_CA_CERTS` instead.
+Provider token usage maps to Harbor's AgentContext, including cache accounting; costs are not invented.
 
 ## Comparable evaluation
 

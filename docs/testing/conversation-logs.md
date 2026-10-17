@@ -1,6 +1,5 @@
 # Conversation logs, maintenance, and acceptance
 
-> **Status:** active
 > **Scope:** Offline log maintenance and acceptance using retained copies, not permission to modify live user data. Runtime owns storage/API limits.
 > **Maintained with:** [store/logs.rs](../../backend/src/store/logs.rs), [maintenance.rs](../../backend/src/maintenance.rs), [transcriptCache.ts](../../src/services/transcriptCache.ts) and [acceptance harness](../../scripts/conversation-acceptance.mjs).
 
@@ -8,7 +7,7 @@ This page owns maintenance and acceptance methods, **not a published performance
 
 ## Storage contract
 
-The canonical [event/output contract](../architecture/runtime.md#event-and-output-storage) defines append-only events, UTF-8 byte cursors, metadata-first loading, page sizes and browser cache limits. Do not maintain a second copy of those limits here.
+The canonical [event/output contract](../architecture/runtime.md#event-and-output-storage) defines append-only events, UTF-8 byte cursors, metadata-first loading, and page sizes. Browser transcript caching is UI behavior, not a storage limit. Do not maintain a second copy of these limits here.
 
 Legacy output remains readable through per-execution compatibility migration without rewriting historical business events during normal reads. The browser opens selected execution/Planner history from a bounded tail and extends it toward older bytes on upward scroll; `full=true` is reserved for explicit full-output callers. See [store.rs](../../backend/src/store.rs) and [transcriptCache.ts](../../src/services/transcriptCache.ts).
 

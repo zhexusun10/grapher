@@ -1,6 +1,5 @@
 # Execution model
 
-> **Status:** active
 > **Scope:** User-visible planning, file/session inheritance, recovery and publication.
 > **Maintained with:** [server.rs](../../backend/src/server.rs), [workspace.rs](../../backend/src/workspace.rs), [graph_merge.rs](../../backend/src/graph_merge.rs) and [publication tests](../../backend/tests/publication.rs).
 
@@ -32,7 +31,7 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 2. For Graph's initial planning, the Planner runs directly in the bound source project directory, not a private copy. Later turns select their cwd afresh as described below.
 3. The Planner uses `node`, `edge`, `read`, native `bash`, plus `write` and `edit`. Writes are not filtered, and files appear in the selected directory immediately, even if planning fails or is cancelled.
 4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records that turn's actual cwd for session/legacy compatibility; it is not a directory allocation.
-5. The graph is validated and presented for approval. Approval validates the binding and records a Git source snapshot for a standard Git repository; an ordinary folder records no snapshot until its first node is dispatched, when Grapher lazily materializes a temporary shadow snapshot with forced collection of project files. Managed environment scopes and Runtime data remain outside project Git.
+5. The graph is validated and presented for approval. Approval validates the binding. A Graph on a standard Git repository records a Git source snapshot; an ordinary folder records no snapshot until its first node is dispatched, when Grapher lazily materializes a temporary shadow snapshot with forced collection of project files. Serial keeps source-native behavior and records no approval snapshot. Managed environment scopes and Runtime data remain outside project Git.
 
 **Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Planner commands change the source before approval. Reject, failure, and cancellation do not undo those changes, Git commits, or external command side effects. Existing user changes can also be staged and committed during source snapshots.
 
@@ -166,7 +165,7 @@ Inheritance is Git history plus physical working-tree ownership. Ordinary depend
 
 ### Backend Git storage
 
-Git is the host's snapshot/composition mechanism, not an agent messaging protocol. Object borrowing, fetch fallbacks and ref namespaces are documented once in [Workspace Git storage](workspace-snapshots-and-feedback.md#backend-git-storage). This heading remains for existing links.
+Git is the host's snapshot/composition mechanism, not an agent messaging protocol. Object borrowing, fetch fallbacks and ref namespaces are documented in [Workspace Git storage](workspace-snapshots-and-feedback.md#backend-git-storage).
 
 ### Parent composition conflicts
 
@@ -232,9 +231,10 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
   runtime.lock           # One backend writer per data directory
   planning/              # Planning attempts and JSONL output
   sessions/              # Node Pi sessions
-  planner-sessions/      # Planner history for manually created Runs
-  partition-workers/     # Temporary idle Partitioner sessions
+  planner-sessions/      # Planner history for Runs without a prior planning attempt
+  partition-workers/     # Legacy Partitioner sessions retained for cleanup/recovery
   mergers/               # Merger sessions/output (including composition attempts)
+  environments/          # Managed native-environment snapshots and launch records
   shadow_repos/          # Temporary Git metadata for ordinary folders (lazy, reclaimed after publication)
 ```
 
@@ -242,7 +242,7 @@ Graph workspaces default to the OS cache: `%LOCALAPPDATA%\Grapher\workspaces\.gr
 
 Removing a workspace in the UI deletes all of its conversations through the backend's `delete_workspace` command, including conversations absent from that browser's index. Repository bindings are matched exactly or by verified path aliases, not by path prefix. The backend rejects active conversations (including planning, publication and managed result execution), validates every cleanup manifest, and deletes events, checkpoints and execution logs together with durable cleanup ownership in one transaction. Filesystem cleanup failures remain queued for retry; small deletion tombstones remain to reject stale writers. The browser removes its workspace/conversation indexes only after this commit and does not recreate an explicitly empty workspace list from a stale default repository. Source project files and shared engine caches are never workspace-removal targets.
 
-All projects/backends with the same verified engine inputs share one content-keyed Pi runtime cache under the OS cache's `workspaces/.grapher-workspaces/` (override with `GRAPHER_NATIVE_RUNTIME_PARENT`). The key covers engine/adapters, Pi source/builds, dependency locks, bundled extensions and platform/Node ABI—not workspace/session paths. An exclusive cache lock serializes preparation; shared process-lifetime file leases protect active readers. Cached engine inputs are rechecked before reuse; damaged idle copies are rebuilt, never overwritten under live readers. Successful caches survive shutdown/restart. Failed preparations, abandoned per-backend copies and unused obsolete versions are reclaimed before preparation; live versions are never removed. Marked copies at the old project-adjacent default are also recovered. Unknown unmarked legacy directories require explicit offline cleanup rather than guessed deletion.
+All projects/backends with the same engine inputs share one content-keyed Pi runtime cache under the OS cache's `workspaces/.grapher-workspaces/` (override with `GRAPHER_NATIVE_RUNTIME_PARENT`). The key covers engine/adapters, Pi source/builds, dependency locks, bundled extensions and platform/Node ABI—not workspace/session paths. An exclusive cache lock serializes preparation; shared process-lifetime file leases protect active readers. Cached engine inputs are rechecked before reuse; damaged idle copies are rebuilt, never overwritten under live readers. Successful caches survive shutdown/restart. Failed preparations, abandoned per-backend copies and unused obsolete versions are reclaimed before preparation; live versions are never removed. Marked copies at the old project-adjacent default are also recovered. Unknown unmarked legacy directories require explicit offline cleanup rather than guessed deletion.
 
 Managed environment snapshots do not install missing dependencies or guarantee environment relocation; see the [managed environment boundary](workspace-snapshots-and-feedback.md#managed-environment-boundary). [Shared external state](filesystem-isolation.md#shared-runtime-and-external-state) is outside workspace version isolation.
 

@@ -1,6 +1,5 @@
 # Workspace directories and Git publication
 
-> **Status:** active
 > **Scope:** Git-backed project inheritance, physical workspace ownership, feedback handoff, publication, and managed-environment boundaries.
 > **Maintained with:** [workspace.rs](../../backend/src/workspace.rs), [native_copy.rs](../../backend/src/native_copy.rs), [runtime.rs](../../backend/src/runtime.rs), [graph_merge.rs](../../backend/src/graph_merge.rs), and the workspace/runtime tests.
 
@@ -47,10 +46,10 @@ private Graph nodes, Mergers, prewarmed hosts and managed launches — carries
 `PYTHONDONTWRITEBYTECODE=1`, set after any caller or launch binding so neither
 can re-enable it. Python then compiles modules in memory and writes no
 `__pycache__`/`.pyc` into the project tree, so a test or import run cannot leave
-bytecode churn that a later snapshot commit would collect. The managed
-`PYTHONPYCACHEPREFIX` redirect is therefore no longer declared by the automatic
-environment policy: Runtime owns bytecode policy uniformly instead of giving a
-managed cache scope its own rules.
+bytecode churn that a later snapshot commit would collect. The automatic
+environment policy does not declare a `PYTHONPYCACHEPREFIX` redirect: Runtime
+owns bytecode policy uniformly instead of giving a managed cache scope its own
+rules.
 
 This changes what agents *create*, not what a project already tracks. A `.pyc`
 that the user's own Git history committed stays an ordinary tracked project
@@ -59,12 +58,12 @@ file: it is collected, merged and published like any other project file, and
 is a cache, and CPU/NPU kernel caches such as Triton, TorchInductor and CUDA
 JIT outputs are separate systems that this policy does not touch.
 
-There is no automatic large-file rejection. A large project file is collected
+There is no automatic per-file size guard. A large project file is collected
 by Git like any other project file. Git will read/hash it and may create a
 large object; projects that need different storage must use an explicit Git
-LFS/artifact policy. Removing the guard avoids silently treating a large file
-differently from other project files, but it does not make Git large-file I/O
-cheap.
+LFS/artifact policy. Grapher keeps a single project-file channel, so a large
+file is treated like any other project file; this does not make Git large-file
+I/O cheap.
 
 The user's desktop folder is not an accepted binding: [detection and
 binding validation](../../backend/src/workspace.rs) refuse it before a shadow
@@ -133,6 +132,26 @@ files. It excludes Git/Grapher internals and managed environment scopes.
 Each execution has a fresh conversation unless it is an explicit continuation
 or feedback session fork. Conversations are never transferred through Git.
 
+## Backend Git storage
+
+A node repository borrows the source object database through
+`.git/objects/info/alternates` when the source has no chained alternates or
+promisor packs. Otherwise Runtime fetches the pinned source/result commits into
+an independent object store.
+
+Source snapshots and node results are pinned as Grapher-owned refs in the source
+repository:
+
+- `refs/grapher/heads/<commit>` pins snapshot heads;
+- `refs/grapher/runs/<run>/nodes/<node-id>` pins node results (legacy unscoped
+  refs use `refs/grapher/nodes/<node-id>`);
+- inside a node repository, `refs/grapher/base` and
+  `refs/grapher/parents/<node-id>` pin the prepared inputs.
+
+These refs are host storage, not an agent messaging protocol. Runtime fetches a
+node snapshot back into the source repository without touching the source
+working tree.
+
 ## Composition and conflicts
 
 Git is the composition authority. Before a task runs, parent commits are
@@ -140,8 +159,8 @@ merged using normal Git semantics. A conflict in any tracked path—including a
 path that the source project's `.gitignore` would normally ignore—is a Git
 conflict and follows the existing Merger flow.
 
-A physical ordinary-file conflict is no longer a separate concept: project
-files are committed before composition. If two parents create or modify the
+Project files are committed before composition, so an ordinary-file conflict is
+a Git conflict. If two parents create or modify the
 same path differently, Git reports the conflict. A successful Merger must
 stage the resolution and commit a clean result preserving the incoming
 parents.
@@ -203,10 +222,15 @@ read `.gitignore` to decide which node outputs to deliver. It preserves the
 existing Merger/retry/recovery lifecycle and only completes after
 `PublicationCompleted`.
 
+## Managed environment boundary
+
 Managed environment scopes/caches are not project output. They remain governed
 by `environment.rs` and their scoped evidence store; they are not force-added
-into project Git. Different terminal environments can publish separate business
-entries over the same final code; see [native environments](native-environments.md#publication-and-model-free-execution).
+into project Git. They are never merged between parents and never copied back
+into the source. Runtime may reuse a verified environment at the current physical
+workspace; otherwise the execution starts unbound. Different terminal
+environments can publish separate business entries over the same final code; see
+[native environments](native-environments.md#publication-and-model-free-execution).
 
 ## Cleanup and reproducibility
 

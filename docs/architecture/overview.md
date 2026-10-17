@@ -1,10 +1,11 @@
 # Architecture
 
-> **Status:** active
 > **Scope:** System boundaries and invariants; detailed execution/runtime contracts are linked below.
 > **Maintained with:** [compiler.rs](../../backend/src/compiler.rs), [runtime.rs](../../backend/src/runtime.rs) and [core tests](../../backend/tests/core.rs).
 
 > Don't orchestrate agents. Compile work.
+
+> Do not inject prior bias into the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
 
 Grapher is a local multi-agent coding system. Models route, plan, and perform coding tasks; a Rust compiler and runtime own validation, scheduling, state transitions, and delivery. The planner is not a persistent execution coordinator.
 
@@ -77,7 +78,7 @@ backend ---/     ^            |
                  '--feedback--'
 ```
 
-Alternatively, give each implementation its own reviewer. One reviewer cannot dynamically choose between two feedback targets. See [bounded feedback](runtime.md#bounded-feedback) for verdicts, budgets and invalidation, and [workspace handoff](workspace-snapshots-and-feedback.md#feedback-is-an-exclusive-workspace-handoff) for file/session transfer.
+Alternatively, give each implementation its own reviewer. One reviewer cannot dynamically choose between two feedback targets. See [bounded feedback](runtime.md#bounded-feedback) for verdicts, budgets and invalidation, and [workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits) for file/session transfer.
 
 ## Publication
 

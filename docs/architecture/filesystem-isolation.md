@@ -1,6 +1,5 @@
 # Filesystem isolation and path mapping
 
-> **Status:** active
 > **Scope:** Actual role/platform permissions and path-mapping limits, not a future isolation proposal.
 > **Maintained with:** [native.rs](../../backend/src/native.rs), [sandbox.rs](../../backend/src/sandbox.rs), [linux_sandbox.rs](../../backend/src/linux_sandbox.rs) and [native acceptance](../../scripts/windows-native.test.ts).
 
@@ -25,7 +24,7 @@ Unsupported requirements are rejected without a user-selected fallback.
 
 Exact tool, extension, MCP, skill and context loading belongs to the [Pi role policy](../development/pi-integration.md#role-loading-policy).
 
-Source-native Planner turns use host-user permissions and write the source immediately. Follow-ups in private node worktrees retain the platform boundaries below, without extra source/sibling access. There is no Bash write-command filter, and Reject, failure, and cancellation do not roll back writes in the selected directory. Private Merger filesystem permissions also follow the platform policy below; conflict repair does not grant source/sibling access. See [Planning and approval](execution-model.md#planning-and-approval).
+Source-native Planner turns use host-user permissions and write the source immediately. Follow-ups in private node worktrees retain the platform boundaries below, without extra source/sibling access. There is no Bash write-command filter, and Reject, failure, and cancellation do not roll back writes in the selected directory. A Merger's permissions follow the policy for its selected workspace; conflict repair does not grant access to the source or sibling workspaces beyond that. See [Planning and approval](execution-model.md#planning-and-approval).
 
 ## Platform boundaries
 
@@ -47,7 +46,7 @@ On macOS/Linux, a workspace using Git alternates also has read access to the bou
 
 Private workspaces run stock Node, pinned Pi, and Git for Windows Bash with the host user's permissions. There is **no VM, per-node filesystem sandbox, custom isolation driver, or patched Node/MSYS binary**.
 
-Processes may access the source, siblings, other sessions, engine files, HOME, and credentials where the host user can. Separate parallel workspaces, exclusive directory handoff, and private Git metadata organize edits and inherited snapshots, not access rights. See the [Windows guide](../guides/windows.md).
+Processes may access the source, siblings, other sessions, engine files, HOME, and credentials where the host user can. Separate parallel workspaces, exclusive directory handoff, and private Git metadata organize edits and inherited snapshots, not access rights.
 
 ## Path convention
 
@@ -95,7 +94,7 @@ The [managed environment portability boundary](workspace-snapshots-and-feedback.
 
 ## Shared runtime and external state
 
-Private executions load a verified shared engine copy prepared by [prepare-native-runtime.mjs](../../scripts/prepare-native-runtime.mjs), allowing self-hosting without source-engine write access. The copy holds engine/dependencies, not project snapshots or conversations. Cache paths, leases and reclamation belong to [Storage and cleanup](execution-model.md#storage-and-cleanup); role/process preparation belongs to [Pi prewarming](../development/pi-integration.md#prewarming-and-prepared-runtime).
+Private executions load a prepared shared engine copy prepared by [prepare-native-runtime.mjs](../../scripts/prepare-native-runtime.mjs), allowing self-hosting without source-engine write access. The copy holds engine/dependencies, not project snapshots or conversations. Cache paths, leases and reclamation belong to [Storage and cleanup](execution-model.md#storage-and-cleanup); role/process preparation belongs to [Pi prewarming](../development/pi-integration.md#prewarming-and-prepared-runtime).
 
 Pi authentication uses its dedicated configuration directory, not a per-node credential vault. Model tools may read auth material available to their process. Shared HOME, temporary files, hard links, services and global configuration are outside Git node-version isolation.
 

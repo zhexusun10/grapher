@@ -75,9 +75,9 @@ See the [execution model](docs/architecture/execution-model.md) for planning sid
 
 ## Quick start
 
-**Requirements:** Node.js 22.19+, stable Rust, Git, npm, network access, and provider authentication. Windows needs Git for Windows Bash; Linux Graph needs bubblewrap and permitted unprivileged user/mount/PID namespaces. See [Installation](docs/guides/installation.md) for host prerequisites and troubleshooting.
+**Requirements:** Node.js 22.19+, stable Rust, Git, npm, network access, and provider authentication. Windows needs Git for Windows Bash; Linux Graph needs bubblewrap and permitted unprivileged user/mount/PID namespaces.
 
-**No build tools?** Download a ready-to-run release archive instead: extract it and run `start.bat` (Windows) or `./start.sh` (macOS/Linux) — see [Installation](docs/guides/installation.md) for checksums, SmartScreen/Gatekeeper notes and prerequisites. Archives still require Node.js 22.19+ and Git at runtime; Rust and npm are not needed.
+**No build tools?** Download a ready-to-run release archive instead: verify its `.sha256` checksum, extract it, and run `start.bat` (Windows) or `./start.sh` (macOS/Linux). Archives still require Node.js 22.19+ and Git at runtime; Rust and npm are not needed.
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
@@ -89,7 +89,7 @@ npm run dev
 
 Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo compiles.
 
-1. In **Settings**, select a local project, authenticate a provider, and choose a `provider/model`. You can also sign in through `npm run pi`; see [Providers](docs/guides/providers.md).
+1. In **Settings**, select a local project, authenticate a provider, and choose a `provider/model`. You can also sign in through `npm run pi`.
 2. Enter a coding goal. Choose **Serial** for a single Pi agent, **Graph** for a task graph, or **Auto** to let the Partitioner select the route.
 3. For Graph, inspect and **approve** the plan. Follow node logs, pause running nodes and later continue their sessions, or send instructions.
 4. Graph work is complete only after valid results are published to your project. Publication failures preserve state for inspection or retry.
@@ -105,7 +105,7 @@ npm run build
 npm start
 ```
 
-Open <http://127.0.0.1:1421>. Configuration, credentials, data paths, and startup issues are covered in the [installation guide](docs/guides/installation.md).
+Open <http://127.0.0.1:1421>.
 
 ## Project status
 
@@ -183,9 +183,7 @@ Start with the [task-oriented documentation index](docs/index.md). Coding agents
 should use [AGENTS.md](AGENTS.md) for navigation and repository constraints.
 
 - [Architecture](docs/architecture/overview.md)
-- [Why compile agent work?](docs/architecture/why-compile.md)
 - [Execution model](docs/architecture/execution-model.md)
-- [Installation & providers](docs/guides/installation.md)
 - [Development guide](docs/development/contributing.md)
 - [Benchmarks](docs/benchmarks/harbor.md)
 

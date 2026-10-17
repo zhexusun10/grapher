@@ -1,6 +1,5 @@
 # Native workspace environment control
 
-> **Status:** active
 > **Maturity:** experimental; full native acceptance remains open.
 > **Scope:** Backend-owned environment admission, Graph NodeAgent E/L, native resource controls and model-free result execution. No VM, WSL, container fallback, new allocator or maintenance Agent.
 > **Maintained with:** [automatic admission](../../backend/src/environment_automatic.rs), [tool observations](../../backend/src/environment_discovery.rs), [environment state](../../backend/src/environment.rs), [resources](../../backend/src/environment_resources.rs), [runtime](../../backend/src/runtime.rs), [launch binding](../../engine/launch-binding.mjs), [state tests](../../backend/src/environment_tests.rs) and [native acceptance](../../scripts/environment-native.test.ts).
@@ -76,8 +75,8 @@ not by editing the policy. Traversal, overlapping paths, Runtime metadata and
 tracked-file conflicts fail. Windows case aliases and reserved names are checked.
 
 The default entry directory is first in the complete business PATH. Trusted
-engine Node and the bootstrap Git used for pinned-baseline verification are
-resolved independently, before that binding. Pi PATH processing and Windows MSYS
+engine Node and the bootstrap Git used for Pi build and dependency verification
+are resolved independently, before that binding. Pi PATH processing and Windows MSYS
 startup cannot add host bins; managed Bash resets PATH inside Bash. Hooks run
 before extension/MCP factories and cannot change Runtime/Pi identity, Node
 bootstrap or the default entry. Loader variables enter inside the established
@@ -164,7 +163,7 @@ topology are not preserved by the basic snapshot contract.
 unsupported storage operations. Other I/O errors fail. No writable hardlinks or
 shared mutable inodes are used. Native clones optimize copies, not logical path
 stability, shared working layers, sandboxing or system snapshots. Actual clone
-support is filesystem-specific; the tested Windows filesystem reported **Bytes**.
+support is filesystem-specific and may fall back to independent byte copies.
 
 ## Native resources
 
@@ -255,7 +254,7 @@ detached writers.
 - Namespace-backed fixed logical paths / transparent cross-slot migration.
 - Shared working layers, system snapshots and extended snapshot metadata.
 - Run/host-wide and Linux/macOS aggregate quotas, disk quotas and bounded GC.
-- Native Linux/macOS execution and actual reflink/APFS/block-clone outcomes.
+- Native Linux/macOS acceptance and actual reflink/APFS/block-clone outcomes.
 - Complete Conda/framework/GPU/platform matrix and large environment/checkpoint
   scan, seal, reconstruction and disk budgets.
 
@@ -263,81 +262,4 @@ Unsupported strong requirements fail closed, not by changing OS, mode, layout
 or device. Compiled capability reporting and configured CI are not native
 acceptance evidence.
 
-## Verification recorded for this working tree
-
-Best-effort Runtime regressions: [native-venv fixtures](../../backend/src/environment_best_effort_tests.rs)
-cover parallel bound fan-out, custom-prefix exclusions, local fan-in without a
-Merger, independent multi-entry publication/launch/republication, serialized
-roots retaining distinct terminal slots, HOME-only differences, discarded-input
-corruption, entry-scoped partial retry, project-requirement decoupling, ambient
-Python/pip exploration and saved policy compatibility, current-writer checks on
-reused paths and explicit ancestor follow-ups through reserved terminal views. [Focused Pi acceptance](../../scripts/environment-chain.test.ts)
-also covers default linear reuse and bound fan-out with existing business tasks,
-independent bound/unbound terminal entries and model-free named launch. These
-checks passed on Windows x86_64 with native Python 3.14 and pinned Pi. Verification
-commands: `npm run check`, `npm run build`, `npm run test:frontend`, `npm test`,
-`npm run test:environment`, `npm run test:environment-chain`, and the focused
-`environment-ui.test.ts` browser/transport suite (isolated Cargo target and
-disposable projects). They do not establish transparent relocation, offline
-rebuilding, CUDA/Conda quality, or Linux/macOS native acceptance.
-
-The following measurements are historical strict/lazy-profile evidence, not
-new best-effort throughput budgets:
-
-Windows x86_64, Node 24.16.0, Python 3.14.6, Git Bash, source base `c43b0c5` plus
-these uncommitted changes. Pi baseline `1cedd32724abfcb0915f76cc61b6827e2c16dbad`
-is an independent working-tree upgrade, not part of this environment change.
-
-- Empty Python/Conda/non-ML admission, native creation/use evidence, ambiguous and
-  stale receipts, host-prefix/package-mutation refusals, parallel unbound views,
-  append-only replay and preservation of draft policies have focused regressions.
-  Old Created records do not automatically become managed Runs.
-- [API/browser tests](../../scripts/environment-ui.test.ts) passed with **no
-  environment settings entry**, preservation of old policies on unrelated UI
-  saves, invalid business argument rejection and Run-scoped stale response guards.
-  The complete 15 existing browser tests also passed.
-- Production pinned Pi/native Python acceptance passed **without a client-supplied
-  environment policy**: install once, editable/console launchers, file/Bash and
-  extension views, current follow-up, immutable history, same-path reconstruction,
-  model-free results, cancellation/partial retry and background-writer refusal.
-- `npm run test:environment` passed both ordinary venv and offline **lazy Conda**
-  profiles without a client policy. Both include business creation, actual entry/
-  ABI/library-byte checks, chain/current follow-up, immutable history,
-  reconstruction, model-free results, cancellation/partial-result retry, drain
-  refusal, discovery on failed-created-environment retry, and a separate plain
-  project staying unbound despite `.env`/YAML creation. Latest debug venv: chain
-  **45.92 s**, reconstruction **9.21 s**, environment **6,587,601 bytes**,
-  harness **106.87 s**. Latest debug Conda: chain **133.80 s**, reconstruction
-  **43.38 s**, environment **144,950,409 bytes**, harness **354.43 s**. This minimal Python/pip fixture excludes Conda setuptools'
-  long packaged test data; tested Windows extraction of that package exceeded
-  MAX_PATH and failed, without registry changes, archive modification or fallback.
-  Neither fixture is a full ML/device acceptance or a production throughput budget.
-- Full Rust fixture regression passed **251 lib tests** plus integration suites;
-  the large synthetic storage benchmark remained explicitly ignored. Production
-  `cargo check --no-default-features`, frontend/build, environment UI/launch,
-  Pi/native/bindings/extensions/Merger/Windows-native/hardening and documentation
-  checks passed. These are scoped regressions, not additional host/device evidence.
-- Native Windows resource tests passed: one descendant fits a **384 MiB** Job
-  ceiling, two 220 MiB allocating descendants fail; subsequent unbound launches
-  do not inherit the limit. On **16 logical CPUs**, Job rate **312/10000** reduced
-  aggregate descendant CPU from **5,983 ms** to **1,562 ms** over the test interval.
-  Independent-process device-lock contention/crash release and partial multi-device
-  release passed; these lock tests use disposable UUID keys, not GPU computation.
-- An optimized Windows compatibility-policy Conda/PyTorch profile completed A→B→C,
-  current-view follow-up and a model-free synchronized CUDA forward/backward
-  result with retained computation proofs, including the framework's actual
-  leased device UUID. Its complete harness nevertheless hit the **30-minute**
-  timeout before long-result cancellation/retry and drain checks finished; it is
-  **not a passed full ML acceptance or automatic Conda/device-policy proof**.
-  The later optimized rerun also hit the **30-minute** timeout. Full ML acceptance
-  remains open; lazy Conda's smaller native fixture does not close it. Host
-  discovery or standalone computation alone is not managed acceptance. Native
-  Conda's packaged paths exceeded MAX_PATH in the ordinary
-  temporary layout, so its harness uses an explicitly short disposable workspace
-  parent, still with Unicode/spaces. No registry change, Runtime path repair,
-  execution fallback or allocator rewrite is used.
-
-Run `npm run test:environment`; use an isolated `CARGO_TARGET_DIR` when another
-backend is running. [Testing](../development/testing.md) covers offline ML
-provisioning and test prerequisites. The [three-host matrix](../../.github/workflows/planner-source.yml)
-is configured, not recorded as completed native Linux/macOS acceptance.
+Run `npm run test:environment` for local native regressions; see [Testing](../development/testing.md) for prerequisites and opt-in profiles.

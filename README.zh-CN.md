@@ -52,9 +52,9 @@
 
 ## 快速开始
 
-**依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、网络和服务商认证。Windows 需要 Git for Windows Bash；Linux Graph 需要 bubblewrap，并允许非特权 user/mount/PID namespace。各平台安装前提和排错见[安装指南](docs/guides/installation.md)。
+**依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、网络和服务商认证。Windows 需要 Git for Windows Bash；Linux Graph 需要 bubblewrap，并允许非特权 user/mount/PID namespace。
 
-**不想安装编译工具？** 直接下载可运行的发布包：解压后运行 `start.bat`（Windows）或 `./start.sh`（macOS/Linux），详见[安装指南](docs/guides/installation.md)。发布包在运行时仍需要 Node.js 22.19+ 与 Git；无需 Rust 和 npm。
+**不想安装编译工具？** 直接下载可运行的发布包：校验 `.sha256` 后解压，运行 `start.bat`（Windows）或 `./start.sh`（macOS/Linux）。发布包在运行时仍需要 Node.js 22.19+ 与 Git；无需 Rust 和 npm。
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
@@ -66,7 +66,7 @@ npm run dev
 
 打开 **<http://127.0.0.1:1420>**。首次启动可能需要等待 Cargo 编译。
 
-1. 在**设置**中选择本机项目，完成服务商认证并选择 `provider/model`。也可通过 `npm run pi` 登录；详见[服务商指南](docs/guides/providers.md)。
+1. 在**设置**中选择本机项目，完成服务商认证并选择 `provider/model`。也可通过 `npm run pi` 登录。
 2. 输入编程目标。选择 **Serial** 使用单个 Pi Agent，选择 **Graph** 规划任务图，或让 **Auto** 由 Partitioner 判断路线。
 3. Graph 模式下查看并**批准**计划。执行中可查看节点日志、暂停正在运行的节点并稍后继续原会话，或追加指令。
 4. Graph 的有效结果成功发布回项目后才算完成；发布失败会保留状态供检查或重试。
@@ -82,7 +82,7 @@ npm run build
 npm start
 ```
 
-打开 <http://127.0.0.1:1421>。配置、凭据、数据目录和启动问题见[安装指南](docs/guides/installation.md)。
+打开 <http://127.0.0.1:1421>。
 
 ## 工作方式
 
@@ -175,10 +175,8 @@ npm test                      # Rust 固定样例；无需付费模型
 `docs/` 采用英文作为权威版本，中文 README 保留产品入口。
 先按任务查看[文档索引](docs/index.md)；Coding Agent 从 [AGENTS.md](AGENTS.md) 获取导航与开发约束。
 
-- [为什么编译 Agent 工作？](docs/architecture/why-compile.md)
 - [架构](docs/architecture/overview.md)
 - [执行模型](docs/architecture/execution-model.md)
-- [安装与服务商](docs/guides/installation.md)
 - [开发指南](docs/development/contributing.md)
 - [Benchmark / Evaluation](docs/benchmarks/harbor.md)
 

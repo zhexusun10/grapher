@@ -17,6 +17,10 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
+# Local notes and generated release artifacts
+MYLOG.md
+/release/
+
 # Local environment and credentials; only the placeholder is publishable
 .env*
 !.env.example

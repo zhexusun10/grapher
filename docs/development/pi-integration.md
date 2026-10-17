@@ -1,6 +1,5 @@
 # Pi integration and upgrades
 
-> **Status:** active
 > **Scope:** Current pinned Pi baseline, integration contracts, verification limits and upgrade procedure.
 > **Maintained with:** [pi-compat.ts](../../engine/pi-compat.ts), [pi-lock.json](../../engine/pi-lock.json), [pi-baseline.mjs](../../scripts/pi-baseline.mjs) and [Pi contracts](../../scripts/pi-compat.test.ts).
 
@@ -13,7 +12,7 @@ Pi is Grapher's only production execution-instance engine. Grapher owns graph co
 | [pi/](../../pi/) | Unmodified upstream submodule |
 | [pi-compat.ts](../../engine/pi-compat.ts) | Central SDK/private-path/CLI compatibility boundary |
 | [mcp-config.ts](../../engine/mcp-config.ts) | Global/dedicated/project MCP layering using Pi validation |
-| [entrypoint.mjs](../../engine/entrypoint.mjs) | Verified entrypoint using Pi's source resolver; no global fallback |
+| [entrypoint.mjs](../../engine/entrypoint.mjs) | Source-resolved entrypoint that checks the dependency profile; no global fallback |
 | [pi-lock.json](../../engine/pi-lock.json) | Upstream commit, lockfile, and model-data checksums |
 | [pi-dependencies/](../../engine/pi-dependencies/) | Reviewed, exact runtime/build dependency profile and lock |
 | [model-data/](../../engine/model-data/) | Upstream-hydrated catalog plus checksum manifest |
@@ -29,34 +28,22 @@ The current baseline is **Pi 1.3.0**, the exact upstream release tag `v1.3.0` at
 
 This checkout is the release-tag commit, not a floating `main` checkout; upstream `main` already contained later post-release changes. Later upstream commits require explicit review and adoption.
 
-The lock manifest, submodule gitlink, and hydrated model data form one baseline. Runtime startup must not float to a different commit or silently use a global Pi. Catalog snapshots are not a separately maintained Grapher provider implementation.
+The lock manifest records the intended baseline commit and catalog. Baseline enforcement is currently intentionally relaxed: `verifyBaseline()` is a no-op so local Pi edits and unrecorded revisions are allowed. Runtime still loads the checked-out `pi/` source through `engine/entrypoint.mjs` and never falls back to a global Pi; `verifyPiDependencies` still rejects an unreviewed dependency profile. Catalog snapshots are not a separately maintained Grapher provider implementation.
 
-### Current baseline checks
-
-Checks against the pinned commit `71023aec1546d6d677a65669c5665c0927ce0dd0`:
-
-| Check | Result |
-| --- | --- |
-| `npm run pi:verify` | Passed; pinned commit, clean upstream tree, lockfile and catalog checksums verified |
-| `npm run pi -- --version` | Reports `1.3.0` |
-| Release ancestry/count checks | The pinned commit is the exact `v1.3.0` release tag; no commits follow it |
-| `npm run pi:upgrade-check` | Passed on Windows x86_64 on 2026-10-16: verify/build, Pi contracts, frontend typecheck, Rust fixtures, extension smoke, native/prewarm and binding suites. Two working-tree failures (`server::prompt_tests::planner_prompt_contains_status_differentiation_guidance` and the prewarm router-refill test) come from unrelated uncommitted planner-prompt and `GRAPHER_UNREMOVABLE_NODES` changes, not from this baseline |
-
-These checks establish baseline identity and the local regression suites, not provider quality: real authentication/model flows and Linux/macOS native acceptance were not run. The loaded version of already-running backend/prewarmed agents and prepared runtime copies remains unverified; restart the backend after an upgrade to load the new baseline.
+`npm run pi:verify` currently prints the recorded baseline commit; it does not hash the Pi tree or prove a clean checkout because `verifyBaseline()` is intentionally a no-op. `npm run pi:build` checks the reviewed dependency profile, runs Pi's model-data validation, and records a build fingerprint. `npm run pi:upgrade-check` runs the broader local regression set. These checks do not run real authentication/model flows or Linux/macOS native acceptance. Already-running backends, prewarmed agents, and prepared runtime copies keep their loaded baseline; restart the backend after an upgrade.
 
 ## Setup and verification
 
 ```sh
 git submodule update --init --recursive
 npm run pi:setup
-npm run pi:verify
 npm run pi -- --version
 npm run pi:build
 ```
 
-`pi:setup` verifies the upstream commit/lock/checksums, installs the reviewed exact dependency profile in `engine/pi-dependencies`, runs its audit, restores pinned model data, and builds the required core workspaces with Node filesystem operations. The profile excludes Pi's optional example workspaces and the `shx`/`shelljs` build chain; Pi's official source and upstream lockfile remain unchanged and are still checked by the baseline. `pi:build` rebuilds the same artifacts and rejects an unreviewed installation. Installing dependencies still requires network/cache access; "offline build" means the model catalog and build inputs are local after setup.
+`pi:setup` installs the reviewed exact dependency profile in `engine/pi-dependencies`, runs its audit, restores pinned model data, and builds the required core workspaces with Node filesystem operations. The profile excludes Pi's optional example workspaces and the `shx`/`shelljs` build chain; `verifyPiDependencies` compares that profile with the current Pi package manifests and rejects an unreviewed installation. `pi:build` rechecks the dependency profile, runs Pi's `check-model-data`, rebuilds the same artifacts, and records the build fingerprint. Neither command requires a clean Pi tree; `pi:adopt` is the clean-checkout/full-SHA gate when recording a new baseline. Installing dependencies still requires network/cache access; "offline build" means the model catalog and build inputs are local after setup.
 
-`npm run pi` starts the pinned CLI and shares the dedicated agent directory with Grapher. User-facing authentication and role selection are covered in [Providers](../guides/providers.md).
+`npm run pi` starts the pinned CLI and shares the dedicated agent directory with Grapher. User-facing authentication and role selection are available in Settings and through that CLI.
 
 ### Local model-data overlay
 
@@ -108,22 +95,13 @@ Grapher merges external global and dedicated MCP definitions **before** applying
 
 ## Compatibility findings
 
-- **Azure configuration:** the provider ID is `azure`; the Responses **API** ID is `azure-openai-responses`. Credentials, custom provider definitions and saved model selections must use the provider ID. See [Azure configuration](../guides/providers.md#azure-configuration).
-- **Pinned catalog:** the snapshots refreshed for 1.1.0, 1.2.0 and 1.3.0 retired `openrouter/qwen/qwen3.8-27b:free`, `openrouter/stealth/space-bunny-alpha`, `vercel-ai-gateway/inclusionai/ling-3.0-flash-sante-free`, `openrouter/inclusionai/ling-3.0-flash-sante:free`, `openrouter/inclusionai/ling-3.0-flash-sante` (the plain `inclusionai/ling-3.0-flash` and `ling-3.1-flash` remain), `opencode/fledge-alpha-free`, `opencode/step-5-preview-free` (`opencode-go/step-5-preview` remains), and the `google-vertex` `gemini-flash-latest`/`gemini-flash-lite-latest` aliases; select an available replacement if configured. `opencode-go/qwen3.7-plus` and `opencode-go/qwen3.8-max` use `anthropic-messages`. The 1.3.0 snapshot also shrinks the OpenCode Zen catalog to 27 chat models, so saved `opencode/*` selections must be re-checked. Catalog/API assertions are defined in the [Pi contracts](../../scripts/pi-compat.test.ts); actual endpoint, tool and thinking behavior requires provider acceptance.
-- **OpenCode endpoints (1.3.0):** OpenCode Zen and OpenCode Go moved to `https://opencode.ai/inference`, and OpenCode Go gained Google Generative AI (`opencode-go/gemini-4-argon-contributor` uses `google-generative-ai` against `https://opencode.ai/inference/go/v1`) and Anthropic Messages for MiniMax. `models.json` base-URL overrides follow the snapshot; provider credentials are unchanged.
-- **Kimi Code (1.3.0):** `kimi-coding` now speaks OpenAI Chat Completions at `https://api.kimi.com/coding/v1`, replacing the Messages-style endpoint. A custom `models.json` base URL for `kimi-coding` must now include the trailing `/v1`. Grapher does not override that base URL, so the pinned snapshot applies.
-- **OpenRouter key-scoped catalog (1.2.0):** with an OpenRouter key, Pi lists only the chat models that key may use, with the key's context size, max output and prices, and saves that list for offline use. The Settings catalog and `available` flags therefore follow the key and can narrow or change without a Pi upgrade. OpenRouter's negative placeholder price for router models such as `openrouter/auto` is now `0`, not `-$1,000,000` per 1M tokens.
-- **`before_agent_start` union (1.2.0):** the event also fires for runs started by `pi.sendMessage(..., { triggerTurn: true })` while idle and is now a union on `messageType`. Grapher's adapter edits only `systemPromptOptions`, which exists on both variants, so the path addendum applies to user and custom runs; the host contract covers the custom variant. Third-party handlers that assume a user `prompt` must check `messageType === "user"`. A session also counts as busy while a run starts (including inside `before_agent_start`), so `pi.sendUserMessage()` requires `deliverAs` in that window; Grapher drives prompts over RPC, whose prompt/steer/follow-up behavior is unchanged.
-- **MCP reporting (1.2.0):** Pi no longer lists resources when connecting, so `pi mcp list --json` reports `resources: true` instead of counts, and MCP tool declarations type `structuredContent` from the server's schema or as unknown. Grapher's layered MCP config, namespace validation and `createMcpExtension` usage are unaffected; startup no longer waits for resource listings.
-- **Themes and removed packages (1.2.0):** user themes are schema-validated during startup, and the unreleased experimental `client`, `protocol` and `server` packages are gone. Grapher launches execution roles with `--no-themes`, uses Pi's public theme-independent APIs, and no longer includes those experimental workspaces in the reviewed dependency profile; only `src/experimental/source-resolver.ts` remains and is still the source loader Grapher imports.
-- **Resume tool restoration (1.3.0):** a resumed session now restores the tools activated during that session, with `--tools +name`/`-name` entries applied on top; explicit `--tools <names>`, `--no-tools` and `--no-builtin-tools` still select tools themselves. Grapher's non-Planner roles pass explicit `--tools <names>` when a role tool policy exists and `--no-tools` when none is wanted, and the Planner uses `--exclude-tools`; only a role launched without either flag can now inherit session-activated tools on resume. Role tool/extension policies are covered by the production launcher and prewarm contracts.
-- **Provider selection and model switching (1.3.0):** `--model` now prefers the provider that holds credentials and reports ambiguity instead of resolving by catalog order, and switching models drops thinking blocks produced by a different model instead of replaying them as text. Grapher always sets `provider/model` explicitly for every role, so selection stays deterministic; the model-switch change only affects resumed conversations that changed models.
-- **Tool-call arguments (1.3.0):** arguments containing an invalid `\u` escape (for example `\usepackage`) no longer drop later fields, and a tool call whose final arguments are malformed JSON now carries `argumentsError` and fails validation with the raw text instead of running on the parsed prefix. Grapher's workspace tools, the Planner graph tools and the extension contract suite are unaffected; a third-party tool that relied on partial parsing needs review.
+- **Azure configuration:** the provider ID is `azure`; the Responses **API** ID is `azure-openai-responses`. Credentials, custom provider definitions and saved model selections must use the provider ID; the pinned catalog and Pi contracts are the authority.
+- **Catalog and API drift:** a Pi upgrade, or an OpenRouter key-scoped catalog, can retire models or change endpoints/APIs. Saved provider/model identifiers are not migrated automatically. Re-check selections after an upgrade; version-specific changes are recorded in [CHANGELOG.md](../../CHANGELOG.md) and asserted by the [Pi contracts](../../scripts/pi-compat.test.ts).
 - **Saved state and extensions:** configuration and conversations are not automatically migrated after catalog/provider changes. Verify saved selections before resuming. Third-party extensions require their own compatibility review; a passing bundled-extension contract does not establish arbitrary extension compatibility.
 
 ## Updating pi-trim independently
 
-`pi-trim` can be upgraded without moving the pinned Pi submodule, **provided the target release passes the contracts against the current Pi baseline**. The upstream peer-dependency range `*` is not a compatibility guarantee. The Pi contracts exercise local-model provider requests for all four roles, structured system-prompt sections and mid-turn updates, preserved tool declarations/project/user content, immutability, deduplication, and mandatory loading. `pi-trim@0.2.1` (the current upstream latest at the 1.3.0 baseline) only changes package metadata — description, keywords and gallery video — so Grapher keeps `0.2.0` pinned until a release changes behavior.
+`pi-trim` can be upgraded without moving the pinned Pi submodule, **provided the target release passes the contracts against the current Pi baseline**. The upstream peer-dependency range `*` is not a compatibility guarantee. The Pi contracts exercise local-model provider requests for all four roles, structured system-prompt sections and mid-turn updates, preserved tool declarations/project/user content, immutability, deduplication, and mandatory loading. `pi-trim@0.2.1` only changes package metadata — description, keywords and gallery video — so Grapher keeps `0.2.0` pinned until a release changes behavior.
 
 The Grapher prompt adapter edits `before_agent_start.systemPromptOptions`, not a full `systemPrompt` replacement. In the pinned Pi pipeline, `forceSystemPrompt` is projected **after** `context_with_system`, which can overwrite pi-trim's changes. Third-party extensions returning full prompt overrides therefore need separate review; prefer structured prompt-option changes. This is a Pi pipeline boundary, not something an arbitrary future pi-trim version can be assumed to fix.
 
@@ -140,7 +118,7 @@ Upgrade procedure:
 
 Process preparation and task/session binding are separate phases. For the configured source project, the backend concurrently keeps **one unbound process each for Auto's Partitioner, Graph's Planner and Serial's Node**. Each role has one preparation job: duplicate keys coalesce, the latest configuration replaces queued work, and generation checks cancel superseded/invalidation/shutdown preparations. Initialization and teardown run outside the pool lock. Unfinished preparation is a cache miss, not a request-path wait. Failures remain retryable.
 
-1. **Prepare:** run the verified Grapher entrypoint, load Pi's CLI/SDK and Grapher policy code and acknowledge a correlated `grapher_prepare`. No session directory, Run identity, project snapshot, extension factory, MCP connection, user prompt or model request is created. This is **process readiness**, not Pi session readiness.
+1. **Prepare:** run the Grapher-owned entrypoint, load Pi's CLI/SDK and Grapher policy code and acknowledge a correlated `grapher_prepare`. No session directory, Run identity, project snapshot, extension factory, MCP connection, user prompt or model request is created. This is **process readiness**, not Pi session readiness.
 2. **Claim/bind:** only a matching source project and role can claim the process. Model/thinking/prompt changes can reuse the unbound code-loaded process: those values have not been installed yet and are taken from the actual request. Rust assigns its process tree to the Run **before** binding. It supplies the exact arguments/environment built by the normal cold launcher: real session ID/directory, role prompt/tools, Graph path, compiler and Run/execution IDs. Only then does the child discover resources, instantiate extensions and construct/resume its ordinary Pi session. A correlated `get_state` must succeed before Rust sends the user's prompt. Every preparation/binding/readiness exchange has a 30-second deadline; an invalid binding fails closed and its process is terminated, not recycled into another Run.
 3. **Refill:** claiming immediately schedules the role's next unbound process, overlapping preparation with current initialization/model execution. A cold request also schedules future preparation. End-of-call retry deduplicates and cannot revert newer settings or rearm invalidated state. Claimed processes are never put back in the idle pool.
 
@@ -152,9 +130,9 @@ HTTP workers and shutdown handling start before speculative warming. Startup sel
 
 The mandatory Grapher workspace/prompt adapter uses a named **native ESM inline factory**. Its code shares the already imported Pi SDK instead of reloading its relative dependency graph through jiti. Importing it does not execute its factory: role, cwd, path mapping, tool overrides and handler state are still created after task binding. User/bundled extensions keep the existing loading and selection policy, including mandatory `pi-trim`.
 
-The independent **Provider/Auth host** also prepares asynchronously, even without a selected project. Its private correlated handshake verifies code/baseline readiness only: it does not construct `ModelRuntime`, enumerate/check credentials, refresh tokens, initiate login, connect MCP, or call a model. The first normal auth request claims the ready host; pending preparation is a cold-path miss and is cancelled, not awaited. Duplicate preparation coalesces; failure is retryable. Once claimed, this single backend-owned host retains login jobs and is not replenished or invalidated with individual Runs. Catalog/auth operations continue to use fresh upstream runtimes, not a cached credential result. Shutdown cancels pending readiness and rejects rearming. The host adds at most one steady-state process to the idle-role budget above.
+The independent **Provider/Auth host** also prepares asynchronously, even without a selected project. Its private correlated handshake verifies code/dependency-profile readiness only: it does not construct `ModelRuntime`, enumerate/check credentials, refresh tokens, initiate login, connect MCP, or call a model. The first normal auth request claims the ready host; pending preparation is a cold-path miss and is cancelled, not awaited. Duplicate preparation coalesces; failure is retryable. Once claimed, this single backend-owned host retains login jobs and is not replenished or invalidated with individual Runs. Catalog/auth operations continue to use fresh upstream runtimes, not a cached credential result. Shutdown cancels pending readiness and rejects rearming. The host adds at most one steady-state process to the idle-role budget above.
 
-Graph's verified shared runtime copy is prepared asynchronously as a separate optimization; concurrent preparation coalesces and failures remain retryable. It contains reusable engine/dependencies, not project snapshots or conversations. Source-native Planner turns use the source-role process pool above. **Private Planner turns, Graph execution nodes and Mergers cold-start:** an unbound source process cannot acquire a private node's filesystem sandbox after launch.
+Graph's shared runtime copy is prepared asynchronously as a separate optimization; concurrent preparation coalesces and failures remain retryable. It contains reusable engine/dependencies, not project snapshots or conversations. Source-native Planner turns use the source-role process pool above. **Private Planner turns, Graph execution nodes and Mergers cold-start:** an unbound source process cannot acquire a private node's filesystem sandbox after launch.
 
 The prepared engine lives outside the source so self-hosted private executions can protect their source while still loading Pi. macOS/Linux protect the engine copy from writes; Windows retains host-user permissions. Restart the backend after adapter changes. See the [runtime cleanup lifecycle](../architecture/execution-model.md#storage-and-cleanup) for leases and abandoned-copy recovery.
 
@@ -192,7 +170,7 @@ These checks do not replace a real login flow and model invocation when acceptin
 
 ## Upgrade procedure
 
-1. Run `npm run pi:verify`. Preserve unrelated parent-repository changes.
+1. Inspect `git -C pi status` and preserve unrelated parent-repository changes. `npm run pi:verify` only prints the recorded commit; it is not a cleanliness check.
 2. Fetch and review the target upstream commit in `pi/`; record its full 40-character SHA.
 3. Check out that exact SHA. Do not use startup `git pull` or `git submodule update --remote` as an upgrade policy.
 4. Prepare model data for the target checkout, then adopt the clean commit. The normal Grapher runtime uses the reviewed `engine/pi-dependencies` profile; a temporary upstream install may be needed only when an upstream hydration script introduces a new dependency before the target can be adopted:
@@ -208,7 +186,7 @@ These checks do not replace a real login flow and model invocation when acceptin
    npm run pi:adopt -- <full-40-character-sha>
    ```
 
-   Adoption requires a clean Pi tree and valid model data. It updates the lock manifest/checksums; it does not fetch or bypass verification. Review the parent gitlink and generated model-data changes together.
+   Adoption requires a clean Pi tree and valid model data. It updates the lock manifest/checksums and does not fetch. Its clean-tree/full-SHA checks and model-data validation are the baseline gate; `pi:verify` itself is a no-op. Review the parent gitlink and generated model-data changes together.
 
 6. Regenerate and audit the reviewed profile for the adopted Pi package manifests, then inspect the resulting lockfile before committing it:
 

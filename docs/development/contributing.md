@@ -1,6 +1,6 @@
 # Development guide
 
-Grapher uses a React/TypeScript UI, a Rust backend, and a pinned upstream Pi submodule. Start with [Installation](../guides/installation.md), then [Architecture](../architecture/overview.md).
+Grapher uses a React/TypeScript UI, a Rust backend, and a pinned upstream Pi submodule. Start with the root [README quick start](../../README.md#quick-start), then [Architecture](../architecture/overview.md).
 
 ## Set up a checkout
 
@@ -9,7 +9,6 @@ git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
 cd grapher
 npm ci --ignore-scripts
 npm run pi:setup
-npm run pi:verify
 npm run dev
 ```
 
@@ -44,16 +43,15 @@ A proposed runtime change should identify affected invariants and include regres
 
 ## Before submitting a change
 
-Run the checks appropriate to the affected area:
+Run the check matching the affected area:
 
 ```sh
 npm run check
 npm run build
-npm run test:frontend
-npm test
+# plus the targeted frontend/engine or Rust test from the testing guide
 ```
 
-Engine/provider/tool changes additionally need Pi contracts and applicable native/extension/binding tests. Platform changes need checks on the actual platform. [Testing](testing.md) explains prerequisites and what each suite can establish.
+Full suites (`npm run test:frontend`, `npm test`) are for cross-layer changes or when explicitly requested. Engine/provider/tool changes additionally need Pi contracts and applicable native/extension/binding tests. Platform changes need checks on the actual platform. [Testing](testing.md) explains prerequisites and what each suite can establish.
 
 Include a clear description of behavior, tests run, known limits, and any change to persisted state or credentials. Separate generated evidence from source. Do not claim a model-quality or sandbox guarantee based on fixtures alone.
 
@@ -61,17 +59,13 @@ Include a clear description of behavior, tests run, known limits, and any change
 
 English is canonical under `docs/`; [README.zh-CN.md](../../README.zh-CN.md) remains the Chinese product entrypoint.
 
-- User guides explain setup, supported behavior, failure recovery, and meaningful limits.
-- Architecture documents explain current contracts and invariants; link code for low-level details.
-- Tool prompts/contracts stay beside their implementations where they directly affect behavior.
-- Evaluation guides specify reproducible environments and evidence requirements, not private run diaries.
-- Replace duplicate contracts with links. Label useful superseded proposals/reviews as historical and link their current authority; do not treat them as implemented requirements.
+- Update the single canonical page when behavior changes, and link implementation/tests instead of copying volatile constants or UI details.
+- Do not add a second explanation of an existing contract, a dated verification log, or a local run report.
 - Keep sensitive logs and local reports in ignored runtime/output directories, not public documentation.
-- Keep every knowledge page discoverable from the [task-oriented index](../index.md). Root/local AGENTS.md files are navigation and development constraints, not architecture manuals.
 
-Follow [Documentation maintenance](documentation.md) for placement, statuses, related-code links, review triggers and agent exploration evaluation. When behavior changes, update the relevant canonical page and any affected README/translation summary. Do not create a second long document with a conflicting contract.
+When behavior changes, update the relevant canonical page and any affected README/translation summary. [docs/index.md](../index.md) is the discovery path; source, tests, and CI are the final authority.
 
-For log migration, see [Conversation logs](../testing/conversation-logs.md). Repository About-field maintenance is documented in [Repository homepage settings](../../.github/repository-homepage.md).
+For log migration, see [Conversation logs](../testing/conversation-logs.md).
 
 ## Licensing and sensitive data
 
