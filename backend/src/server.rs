@@ -701,7 +701,7 @@ fn bootstrap_projection(
         snapshot,
         config,
         runs,
-        data_path: root.to_string_lossy().into(),
+        data_path: crate::native::host_path(&root).to_string_lossy().into(),
         repository_info,
         effective_role_models,
         env_overrides,

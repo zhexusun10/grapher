@@ -231,7 +231,13 @@ export default function App() {
     Object.values(state.nodes).some(item => item.status === "running" || item.status === "dirty") ||
     state.resultExecution?.status === "running";
 
-  const [dataPath, setDataPath] = useState("");
+  const [dataPath, setDataPath] = useState(() => {
+    try {
+      return normalizeWorkspacePath(localStorage.getItem("grapher_data_path") || "");
+    } catch {
+      return "";
+    }
+  });
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
   const [dismissedRecoveryId, setDismissedRecoveryId] = useState<string | null>(null);
   const autoDismissTimerRef = useRef<number | null>(null);
@@ -711,7 +717,15 @@ export default function App() {
       if (planningRecovery.current(scope)) throw error;
       return null;
     });
-    if (!data || !planningRecovery.current(scope)) return;
+    if (!data) return;
+    if (data.dataPath) {
+      const cleanDataPath = normalizeWorkspacePath(data.dataPath);
+      setDataPath(cleanDataPath);
+      try {
+        localStorage.setItem("grapher_data_path", cleanDataPath);
+      } catch { }
+    }
+    if (!planningRecovery.current(scope)) return;
     if (data.envOverrides) setEnvOverrides(data.envOverrides);
 
     let storedProjects: ProjectItem[] | null = null;
@@ -811,7 +825,13 @@ export default function App() {
     };
     setConfig(nextConfigObj);
     setIsBootstrapReady(true);
-    setDataPath(data.dataPath);
+    if (data.dataPath) {
+      const cleanDataPath = normalizeWorkspacePath(data.dataPath);
+      setDataPath(cleanDataPath);
+      try {
+        localStorage.setItem("grapher_data_path", cleanDataPath);
+      } catch { }
+    }
     try {
       localStorage.setItem("grapher_config", JSON.stringify(nextConfigObj));
     } catch { }
@@ -1281,6 +1301,13 @@ export default function App() {
           setState(boot.snapshot);
           observeRunSnapshot(boot.snapshot);
         }
+      }
+      if (boot.dataPath) {
+        const cleanDataPath = normalizeWorkspacePath(boot.dataPath);
+        setDataPath(cleanDataPath);
+        try {
+          localStorage.setItem("grapher_data_path", cleanDataPath);
+        } catch { }
       }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
     } catch (error) {

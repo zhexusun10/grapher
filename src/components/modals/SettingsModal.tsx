@@ -8,6 +8,7 @@ import { providerAuth, type ProviderCatalog } from "../../services/providerAuth"
 import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
 import { ExtensionSettings } from "../ExtensionSettings";
+import { normalizeWorkspacePath } from "../../services/workspaceConversations";
 import { ConfirmModal } from "./ConfirmModal";
 
 interface SettingsModalProps {
@@ -191,11 +192,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <div className="section-desc">
                 <p>{t("数据路径")}</p>
                 <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                  <code>{dataPath || t("本地系统应用目录")}</code>
+                  <code>{normalizeWorkspacePath(dataPath) || t("本地系统应用目录")}</code>
                   <button 
                     type="button"
                     className="icon-tiny-btn"
-                    onClick={() => navigator.clipboard.writeText(dataPath || t("本地系统应用目录"))}
+                    disabled={!dataPath}
+                    onClick={() => {
+                      const cleanPath = normalizeWorkspacePath(dataPath);
+                      if (cleanPath) void navigator.clipboard.writeText(cleanPath);
+                    }}
                     title={t("复制路径")}
                   >
                     <Copy size={13} />
