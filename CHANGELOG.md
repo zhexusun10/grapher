@@ -7,9 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add the `switch_workspace` tool for the Planner: during revision and follow-up planning turns, the Planner can inspect and switch its working directory between different node worktrees and the base repository. The runtime resolves active target directories, tracks selection events (`PlannerWorkspaceSelected`), and automatically redirects requests to the latest downstream execution if an earlier node's workspace was inherited and modified (`PlannerWorkspaceRedirected`).
+- Register `write` and `edit` tools for the Planner: the Planner can directly draft or modify files within its active workspace in addition to reading.
+- Attach Planner revision sessions to the latest execution worktree: revision conversations now inspect the latest live worktree rather than only the initial repository state, with workspace-scoped `bash` execution enabled for real-time inspection.
+
 ### Changed
 
-- Remove the `ls`, `find` and `grep` tools from every agent's tool surface across all projects and roles: nodes and mergers register only `read`, `write`, `edit` and `bash` while the Planner keeps `read` plus its graph tools, and listing or search runs through Bash. Contract tests, the Pi compatibility surface and search-tool CI provisioning were updated to match.
+- Consolidate agent tool surfaces by removing dedicated `ls`, `find`, and `grep` tools across all roles and projects: nodes and mergers register `read`, `write`, `edit`, and `bash`, while the Planner registers `node`, `edge`, `read`, `write`, `edit`, `bash`, and `switch_workspace`; directory listing and code search are handled via `bash`.
+- Strip diagnostic and compiler code prefixes (e.g. `W301:`, `W302:`, `W303:`, `E210`) from node/edge tool errors and warnings, presenting clean, natural language diagnostics to the model and UI.
+- Inject the rework note explanation only once into the first Planner follow-up turn of a Run instead of repeating it in every prompt, while keeping dynamic node status and available workspace switch targets up-to-date.
+- Optimize system and cache path formatting in the Settings modal and application header with clear truncation and copy support.
+- Streamline repository agent instructions (`AGENTS.md`, `backend/AGENTS.md`, `engine/AGENTS.md`) and documentation navigation (`docs/index.md`) around strict on-demand task routing.
+
+### Removed
+
+- Remove unused legacy benchmarks (`tb4`), obsolete native-mapping probe scripts, and unused reproduction test fixtures.
+
+### Fixed
+
+- Prevent duplicate conversation history messages from appearing in the transcript when sending follow-up messages or steering instructions to the Planner.
+- Fix elapsed duration calculation ("time took") in model statistics and planning summaries.
 
 ## [1.0.1] - 2026-10-17
 
@@ -94,74 +113,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Match planning history across equivalent Windows repository bindings while keeping missing and unrelated paths fail-closed.
 - Install Pi through the audited core dependency profile and build required artifacts without the vulnerable optional-example and shelljs dependency chains.
 
-## [0.1.0-alpha.1] - TBD
+## [0.1.0-alpha.1] - Initial Alpha
 
-### What is Grapher?
+### Added
 
-Grapher is a local coding-agent workbench that compiles complex work into inspectable execution graphs. Built on Pi, it runs simple tasks as a single agent, or compiles complex work into a dependency-aware execution graph scheduled by a deterministic Rust runtime.
-
-### What's working
-
-- **Serial mode** — Single Pi coding agent for linear tasks
-- **Graph mode** — Multi-agent execution with explicit dependencies
-- **Partitioner** — Automatically routes simple tasks to Serial, complex to Graph
-- **Planner** — Creates execution plans with task decomposition
-- **Compiler** — Validates graph structure and dependencies
-- **Runtime** — Deterministic Rust scheduler with dependency-aware execution
-- **Workspace inheritance** — Child nodes inherit parent workspace state, not conversations
-- **Bounded feedback** — Explicit review/rework edges without conversation propagation
-- **Result publication** — Git-based merging and validation before completion
-- **Linux sandbox** — bubblewrap-based filesystem isolation for Graph nodes
-- **UI** — React workbench with graph visualization, logs, and approval flow
-- **Provider support** — OpenAI, Anthropic, and other Pi-compatible providers
-
-### Current limitations
-
-- **No packaged installers** — Requires manual Node.js, Rust, and build setup
-- **Windows sandboxing** — Graph nodes use process isolation only, not filesystem sandbox
-- **Routing heuristics** — Graph planning quality varies with task structure
-- **Provider coverage** — Some providers may have compatibility issues
-- **Performance** — No optimization work completed yet; expect some overhead
-
-### Installation requirements
-
-- Node.js 22.19+
-- Stable Rust toolchain
-- Git with submodule support
-- npm
-- Linux: bubblewrap for Graph mode
-- Windows: Git for Windows Bash
-- Provider API credentials
-
-### Platform status
-
-| Platform | Serial | Graph | Notes |
-|----------|--------|-------|-------|
-| Linux (Ubuntu 22.04+) | ✅ | ✅ | Full bubblewrap sandbox |
-| macOS | ✅ | ✅ | Uses sandbox-exec/Seatbelt |
-| Windows | ✅ | ⚠️ | Process isolation only |
-
-### Known issues
-
-- First launch takes time while Cargo compiles the Rust backend
-- Provider authentication requires manual setup
-- Graph workspace merges can fail on complex conflicts
-- Windows path handling edge cases
-- Documentation still evolving
-
-### Breaking changes
-
-None (initial alpha release)
-
-### Security notes
-
-- **Use trusted projects** — Agents have filesystem access within configured boundaries
-- **Windows warning** — No filesystem sandbox; agent can access full project
-- **Review before approval** — Graph plans should be inspected before execution
-- See [SECURITY.md](SECURITY.md) for vulnerability reporting
+- Initial local coding-agent workbench built on Pi with deterministic Rust runtime orchestration and React UI.
+- **Serial & Graph execution modes** with automatic task routing (Partitioner), task decomposition (Planner), and DAG validation (Compiler).
+- **Workspace & session boundaries**: Child nodes inherit parent workspace files without sharing conversation histories; explicit bounded feedback edges (`<ACCEPT>` / `<FEEDBACK>`) and Git-based final publication.
+- **Platform isolation**: Linux `bubblewrap` sandbox, macOS `sandbox-exec`/Seatbelt, and Windows process-group/Job isolation.
+- See [SECURITY.md](SECURITY.md) for vulnerability reporting and current security boundaries.
 
 ---
 
-[Unreleased]: https://github.com/zhexusun10/grapher/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/zhexusun10/grapher/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/zhexusun10/grapher/compare/v0.1.0-alpha.2...v1.0.0
 [0.1.0-alpha.2]: https://github.com/zhexusun10/grapher/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/zhexusun10/grapher/releases/tag/v0.1.0-alpha.1

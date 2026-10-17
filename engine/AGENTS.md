@@ -1,18 +1,14 @@
 # Pi Adapter Instructions
 
-Applies to `engine/`; supplements [../AGENTS.md](../AGENTS.md). Integration docs: [docs/development/pi-integration.md](../docs/development/pi-integration.md).
+Applies to `engine/`; supplements root `AGENTS.md`. Deep dive: [docs/development/pi-integration.md](../docs/development/pi-integration.md).
 
 ## Boundaries
 
-- `pi-compat.ts` is the central binding for upstream SDK/CLI. Prefer public Pi exports; never re-implement an auth/model stack.
-- `pi-lock.json`, `pi/`, `model-data/`, and `pi-dependencies/` form a frozen baseline. Upgrade only via documented procedure; never hand-edit or patch submodule in-place.
-- Model overrides belong only in git-ignored `model-data-local/`. Never commit real credentials.
-- Prewarming loads code without creating sessions or model calls; never share mutable run state.
-- Prepared runtime copies retain loaded code; do not restart user backend merely to refresh them.
+- **Single binding**: `pi-compat.ts` is the sole binding for upstream SDK/CLI. Use public Pi exports; never re-implement auth or model stacks.
+- **Frozen baseline**: `pi-lock.json`, `pi/`, `model-data/`, and `pi-dependencies/` are read-only. Upgrade only via documented procedure.
+- **Local overrides**: Place model overrides only in git-ignored `model-data-local/`. Never commit credentials.
+- **Prewarming**: Prewarming loads code without creating sessions or model calls; never share mutable run state. Do not restart user backend merely to refresh prepared runtime copies.
 
-## Verification (Targeted only)
+## Engine Verification
 
-- **Type checks**: `npm run check`
-- **Single targeted test**: `node --test scripts/<specific>.test.mjs` or `npx tsx --test scripts/<specific>.test.ts`
-
-Do NOT run heavy integration suites (`npm run test:pi`, `npm run test:native`, `pi:upgrade-check`) for routine edits.
+Use root `npm run check` and targeted `scripts/<specific>.test.{ts,mjs}`. **Never** run heavy suites (`test:pi`, `test:native`, `pi:upgrade-check`) unless explicitly requested.

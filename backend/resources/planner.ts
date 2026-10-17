@@ -9,6 +9,10 @@ type NodeEdit = { name: string; task?: string; delete?: boolean };
 type EdgeEdit = { from: string; to: string; feedback?: boolean; delete?: boolean };
 type Diagnostic = { code: string; message: string };
 
+function stripDiagnosticCode(message: string): string {
+  return message.replace(/^(?:\[?[A-Za-z]{1,5}[-_]?\d+\]?[:\-]?\s*)/, "");
+}
+
 function topology(graph: Graph) {
   return { nodes: graph.nodes.map(node => node.name), edges: graph.edges };
 }
@@ -65,7 +69,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     const rejected = (diagnostics: Diagnostic[]) => result(JSON.stringify({
       applied: false,
       topology: topology(saved),
-      diagnostics: diagnostics.map(diagnostic => diagnostic.message),
+      diagnostics: diagnostics.map(diagnostic => stripDiagnosticCode(diagnostic.message)),
     }), diagnostics.map(diagnostic => diagnostic.code));
     const inputErrors = change(graph);
     if (inputErrors?.length) return rejected(inputErrors);
@@ -80,7 +84,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     return result(JSON.stringify({
       applied: true,
       topology: topology(graph),
-      ...(output.plan.warnings?.length ? { warnings: output.plan.warnings } : {}),
+      ...(output.plan.warnings?.length ? { warnings: output.plan.warnings.map(stripDiagnosticCode) } : {}),
     }));
   }
   pi.registerTool(defineTool({

@@ -1,50 +1,64 @@
-# Documentation maintenance
-
-> **Status:** active
-> **Scope:** Repository knowledge placement, navigation and verification; not a product runtime contract.
+# Documentation Maintenance
+ 
+> **Scope:** Repository knowledge placement, navigation and verification; not a product runtime contract.  
 > **Maintained with:** [docs/index.md](../index.md) and [AGENTS.md](../../AGENTS.md).
 
-The goal is to find the smallest **relevant, trustworthy** context for a task.
-[AGENTS.md](../../AGENTS.md) is a map; [docs/index.md](../index.md) routes tasks to
-knowledge; source, tests and CI verify implementation. Neither navigation file
-should become a second architecture manual.
+## Goal
 
-## Placement and inventory
+Route tasks to the smallest relevant context.
 
-| Material | Canonical placement |
+- `AGENTS.md` is the top-level router.
+- `docs/index.md` maps tasks to source code and contracts.
+- Source, tests, and CI establish truth.
+
+## Placement & Inventory Rules
+
+- **Single inventory:** Every repo-owned knowledge Markdown file must be linked directly from [docs/index.md](../index.md).
+
+- **Exemptions:** The following are exempt from index coverage:
+  - Executable prompts (`backend/resources/prompts/`)
+  - GitHub templates
+  - Upstream `pi/`
+  - Dependencies
+  - Generated/runtime outputs
+
+- **Canonical locations:**
+  - **Product overview:** `README.md` / `README.zh-CN.md` (link contracts; do not copy).
+  - **Active contracts & guides:** `docs/architecture/`, `docs/guides/`, `docs/development/`, `docs/testing/`.
+  - **Local constraints:** Module `README.md`; use local `AGENTS.md` only for material workflow/validation differences (keep root `AGENTS.md` under ~100 lines, no duplicated rules).
+  - **Proposals (draft-only):** `docs/proposals/`.
+  - **Historical / release records:** `docs/reviews/`, `docs/releases/`, `docs/archive/`, `.github/releases/`.
+
+## Status & Section Boundaries
+
+In [docs/index.md](../index.md), keep these three `##` headings stable as strict routing boundaries:
+
+1. **Task routes**
+   - Active entrypoints only.
+   - `Implementation & tests` first.
+   - `Contract docs` second.
+
+2. **Current documentation**
+   - Active (`active`) canonical inventory only.
+
+3. **Proposals and historical evidence**
+   - All `draft`, `deprecated`, or `archived` pages.
+   - Each page must be paired with its current replacement link.
+
+### Documentation Status
+
+| Status | Meaning & Placement |
 | --- | --- |
-| Product overview / translation | Root README / README.zh-CN.md; detailed contracts are linked, not copied |
-| Cross-cutting current behavior | `docs/architecture/`, `docs/guides/`, `docs/development/`, `docs/testing/` |
-| Module entrypoint / local constraints | Module README; local AGENTS.md only for material differences |
-| New design discussion | `docs/proposals/`, visibly `draft`; promotion is not implied by approval of prose |
-| Historical reviews / releases | Existing `docs/reviews/`, `docs/releases/`, `.github/releases/`; visibly historical |
-| Production prompts / tool contracts | `backend/resources/`, beside their consumers; editing these changes behavior |
-| Private logs / generated evidence | Ignored runtime/output directories; never the public knowledge base |
-| Upstream Pi documentation | `pi/`; retain upstream organization and instructions |
+| `active` | Current contract/guide. Verify claims against code/tests. |
+| `draft` | Unimplemented proposal (`docs/proposals/`). Place under *Proposals and historical evidence*. |
+| `deprecated` | Superseded guidance retained temporarily; must link its replacement. |
+| `archived` | Historical evidence or release notes (`docs/reviews/`, `docs/releases/`, `docs/archive/`). |
 
-Physical consolidation is unnecessary. Preserve stable URLs and code-adjacent
-READMEs. Every repository-owned knowledge Markdown page must have a direct link
-from [the index](../index.md); executable prompts and GitHub templates are exempt.
-Upstream, dependencies, generated outputs and runtime data are out of scope.
-The index is the inventory as well as the task router—do not maintain a second
-unconnected catalogue.
+### Contract Header Format
 
-For a new area, record a task route, canonical page, implementation entry point
-and focused test/check. If two pages disagree, inspect code/tests, choose the
-canonical responsibility and replace duplicate explanations with links. Preserve
-unique design rationale or historical evidence; Git history alone is not a
-convenient discovery mechanism for an active investigation.
+Active contracts and operational guides must start with the following blockquote.
 
-## Status, responsibility and trust
-
-| Status | Meaning |
-| --- | --- |
-| `active` | Intended current contract/guide; still verify relevant claims against code/tests |
-| `draft` | Proposal, not implemented or accepted behavior |
-| `deprecated` | Superseded guidance retained temporarily; link its replacement |
-| `archived` | Historical evidence or release-specific description, not a current contract |
-
-Important contracts and operational guides use a short visible header, for example:
+Use real Markdown links so path checks can validate them:
 
 ```markdown
 > **Status:** active
@@ -52,64 +66,36 @@ Important contracts and operational guides use a short visible header, for examp
 > **Maintained with:** [implementation](../../backend/src/runtime.rs) and [regressions](../../backend/src/runtime_tests.rs).
 ```
 
-Use real Markdown links for related code/tests so path checks apply to them.
-Responsibility follows that implementation area and the contributor changing its
-contract; do not invent team owners. Ordinary forwarding READMEs need no header.
-If an actual maintainer is assigned, name them rather than implying ownership.
+### Verification & Superseding Rules
 
-Only add a `Last verified` date after reviewing the stated claims against named
-code/tests; include revision, commands/results and untested boundaries. An edit
-date is **not** such a review. Missing verification dates
-mean "not recorded", not "verified recently". Dated Pi compatibility results and
-benchmark observations apply only to their recorded revision/environment.
+- **Verification dates:**
+  - Add `Last verified` only after checking claims against code/tests.
+  - Include revision, commands run, and untested limits.
+  - Edit dates do not count as verification dates.
 
-A `draft`, `deprecated` or `archived` page cannot be a direct recommendation in
-the index's **Task routes** or **Current documentation** sections. Put it under
-**Proposals and historical evidence**, with its current replacement/limitations.
-These three level-two headings are the routing boundaries; keep them stable if
-renaming them.
-`docs/proposals/` is draft-only; `docs/reviews/`, `docs/releases/`,
-`docs/archive/` and `.github/releases/` are historical; an explicit status must
-not contradict these directory roles. Existing Chinese draft
-and historical warning banners remain valid; do not rewrite discussion content
-merely to standardize metadata.
+- **Superseding pages:**
+  - Add a top warning banner with a link to the current contract.
+  - Move the index link to *Proposals and historical evidence*.
+  - Repair inbound links.
+  - Do not rewrite historical Chinese/draft discussions merely to standardize metadata.
 
-When superseding a page, add a prominent warning and a current-contract link,
-update index placement, and preserve useful provenance. Move to `docs/archive/`
-only when it improves navigation; repair inbound links (or leave a forwarding
-page). Promotion out of a proposal directory requires verified implementation,
-canonical-page updates and a recorded decision, not just a status edit. Introduce
-an ADR directory only when there is a real decision to preserve; existing design
-rationale is already linked from the index.
+## Change-Driven Maintenance
 
-## Change-driven maintenance
+1. **When to update**
+   - Update the single canonical doc when changing:
+     - Public interfaces
+     - Persisted schemas
+     - Runtime behavior
+     - Module boundaries
+     - Permissions
+     - Setup commands
+   - Pure internal refactors need no prose edits.
 
-1. Public interfaces, persisted formats, runtime behavior, module boundaries,
-   launch/permission rules and setup commands trigger a relevant-document review.
-   Internal refactors do not automatically require prose changes.
-2. Update the one canonical page; adjust summaries/translations only when their
-   claims change. Link affected code/tests and repair task routes after renames.
-3. Keep root AGENTS.md roughly 50–100 lines. Local guides only add independent
-   constraints or validation differences; do not duplicate global rules.
-4. Run applicable behavior tests and repair links/routes after renames; report
-   what was not verified. A passing link check is not a semantic review.
+2. **Resolve conflicts via code**
+   - If two pages disagree, inspect source/tests.
+   - Update the canonical page.
+   - Replace duplicate explanations with links.
 
-## Agent exploration evaluation
-
-After navigation changes, start from AGENTS.md and try representative tasks.
-These are evaluation recipes, **not a claim that an agent has passed them**.
-
-| Task | Expected discovery |
-| --- | --- |
-| Find feedback budget/drain behavior and restart evidence | Index → runtime/workspace contracts → runtime.rs/store.rs → runtime/feedback tests |
-| Explain whether managed `.venv` state survives inheritance and remains portable | Workspace contract → environment.rs/workspace_files.rs/tests → explicit portability limits; no proposal-as-feature inference |
-| Locate the publication failure/retry boundary | Execution model → graph_merge.rs → publication tests and Merger acceptance prerequisites |
-| Change a transcript-loading contract | Conversation logs → store/logs.rs + frontend cache/API → applicable frontend/log checks |
-| Judge the old run audit or environment proposal | Historical/draft index row → warning/current authority → current implementation, not old recommendations |
-| Identify the Pi upgrade path without scanning its entire monorepo | Pi integration + engine local guide → lock/compat boundary → upgrade checks and real-provider acceptance limits |
-
-Record the task, revision, first relevant page, documents opened, exploration
-steps, found code/tests, missed constraints, and any historical misclassification.
-Compare before/after under the same agent/task settings; fewer unrelated reads
-matter more than a larger AGENTS.md. Periodically repeat after module/contract
-changes and fix the navigation where exploration actually gets stuck.
+3. **Verify**
+   - Run targeted behavior tests.
+   - Run documentation link/route checks after renaming files or changing contracts.

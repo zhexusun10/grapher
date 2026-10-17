@@ -1,22 +1,18 @@
 # Rust Backend Instructions
 
-Applies to `backend/`; supplements [../AGENTS.md](../AGENTS.md). Contracts & task routes: [docs/index.md](../docs/index.md).
+Applies to `backend/`; supplements root `AGENTS.md`.
 
-## Local constraints
+## Invariants
 
-- Preserve append-only event replay and persisted-data compatibility; trace changes through reducer, SQLite, API, and frontend types.
-- `Finished` plus queued feedback must remain atomic: generation checks, idempotent delivery, drain-before-handoff, one active writer per directory.
-- Keep node identity, execution attempt, physical directory, and Pi session distinct. Continuation keeps history; new node starts fresh.
-- Do not manufacture completion during conflict resolution; retain explicit failure/recovery state.
-- Production uses pinned engine. Fixture command injection is strictly feature-gated (`fixture`).
-- Put regression tests beside implementation (`src/*_tests.rs`) or in `tests/`. Cover failure/restart paths.
+- **Event sourcing**: Preserve append-only event replay and SQLite schema compatibility. Trace contract changes across reducer, SQLite, API (`server.rs`), and frontend types (`src/types.ts`).
+- **Atomic state transitions**: `Finished` state + queued feedback must remain atomic (enforce generation checks, idempotent delivery, drain-before-handoff, and single active writer per directory).
+- **Entity separation**: Keep node identity, execution attempt, physical directory, and Pi session strictly distinct. Continuation keeps history; a new node starts fresh.
+- **Explicit failure**: Never manufacture completion during conflict resolution; retain explicit failure/recovery state.
+- **Feature gates**: Production uses pinned engine; fixture command injection must stay behind `--features fixture`.
+- **Tests**: Place regression tests in `src/*_tests.rs` or `tests/`, covering failure and restart paths.
 
-## Validation
+## Backend Verification
 
-```sh
-node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-features
-node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib <test_filter>
-```
-
-Run only the targeted test for touched code; **never run full `npm test` by default**.
-On Windows, if the binary is locked by a running service, use `npm run test:isolated` or set `CARGO_TARGET_DIR=target/temp` rather than killing processes.
+- **Check**: `node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-features`
+- **Test**: `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib <test_filter>`
+- **Windows file lock**: If the binary is locked by a running service, use `npm run test:isolated` or set `CARGO_TARGET_DIR=target/temp` (never kill running processes).

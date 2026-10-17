@@ -68,7 +68,7 @@ try {
   const node = (edit: Record<string, unknown>) => call("node", { nodes: [edit] });
   const edge = (edit: Record<string, unknown>) => call("edge", { edges: [edit] });
   const feedbackWarning = (from: string, to: string, nodes: string[]) =>
-    `W303: If <FEEDBACK> from ${from} to ${to} is applied, the target and dependency descendants will be invalidated: ${nodes.join(", ")}. Completed results must be recomputed; ${to} continues from its own conversation history. Nodes outside this set are unaffected.`;
+    `If <FEEDBACK> from ${from} to ${to} is applied, the target and dependency descendants will be invalidated: ${nodes.join(", ")}. Completed results must be recomputed; ${to} continues from its own conversation history. Nodes outside this set are unaffected.`;
   // Regression: run 72feb3ad repeatedly supplied both single and batch fields.
   // Verify the actual provider schema, then exercise nullable wire arguments
   // through Pi's validator and the real compiler (not direct execute alone).
@@ -152,14 +152,14 @@ try {
   const duplicateTask = await node({ name: "review", task: "Build it" });
   const duplicateTaskFeedback = JSON.parse(duplicateTask.content[0].text);
   assert.equal(duplicateTaskFeedback.applied, true);
-  assert.deepEqual(duplicateTaskFeedback.warnings, ["W301: Nodes build, review have identical task text; they may duplicate work. Confirm that this is intentional."]);
+  assert.deepEqual(duplicateTaskFeedback.warnings, ["Nodes build, review have identical task text; they may duplicate work. Confirm that this is intentional."]);
   assert.equal(await toolResultHook({ toolName: "node", details: duplicateTask.details, isError: false }), undefined, "Duplicate tasks are advisory, not rejected edits");
   assert.equal(JSON.parse((await node({ name: "review", task: "Review it" })).content[0].text).warnings, undefined);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), before);
   const warning = await node({ name: "review", task: "Review it; return <FEEDBACK> when needed." });
   const warningFeedback = JSON.parse(warning.content[0].text);
   assert.equal(warningFeedback.applied, true);
-  assert.deepEqual(warningFeedback.warnings, ["W302: review mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback."]);
+  assert.deepEqual(warningFeedback.warnings, ["review mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback."]);
   assert.equal(await toolResultHook({ toolName: "node", details: warning.details, isError: false }), undefined, "Warnings do not reject mutations");
   const repaired = await edge({ from: "review", to: "build", feedback: true });
   const repairedFeedback = JSON.parse(repaired.content[0].text);
