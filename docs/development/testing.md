@@ -166,19 +166,7 @@ still apply. Fixture regressions run with `npm run test:environment`.
 
 ## Search tools and offline runs
 
-Pi's `grep`/`find` need compatible ripgrep and fd binaries. `test:extensions` resolves the actual executables and prints versions. Missing tools keep managed-download diagnostics; tests are not silently skipped.
-
-Install tools on PATH before offline runs, for example:
-
-```text
-Windows:       choco install ripgrep fd -y
-macOS:         brew install ripgrep fd
-Debian/Ubuntu: sudo apt-get install ripgrep fd-find
-```
-
-`fdfind` is recognized, but distribution packages must support the flags used by pinned Pi; an old fd package may need replacement. The Harbor base image pins compatible tool versions/checksums in [benchmark/Dockerfile](../../benchmark/Dockerfile).
-
-Windows CI explicitly provisions search tools, verifies both `rg` and `fd`, and retries transient Chocolatey community-feed failures. It sets `PI_OFFLINE=1` for extension tests. This avoids test-time implicit downloads, not initial dependency installation.
+Grapher registers `read`, `write`, `edit` and `bash` for every project and role; Pi's separate `ls`, `find` and `grep` tools are not registered, so no suite requires ripgrep or fd on PATH — agents list and search through Bash. Tests that load production extensions pin `PI_OFFLINE=1` so nothing downloads implicitly at test time; this avoids test-time downloads, not initial dependency installation. The Harbor base image still preinstalls pinned ripgrep/fd binaries for agent Bash use in [benchmark/Dockerfile](../../benchmark/Dockerfile).
 
 ## Offline native ML acceptance tools
 

@@ -11,9 +11,6 @@ export {
   createReadToolDefinition,
   createWriteToolDefinition,
   createEditToolDefinition,
-  createLsToolDefinition,
-  createFindToolDefinition,
-  createGrepToolDefinition,
 } from '../pi/packages/coding-agent/src/index.ts';
 export type { ExtensionAPI, BashOperations } from '../pi/packages/coding-agent/src/index.ts';
 

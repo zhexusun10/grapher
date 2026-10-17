@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Remove the `ls`, `find` and `grep` tools from every agent's tool surface across all projects and roles: nodes and mergers register only `read`, `write`, `edit` and `bash` while the Planner keeps `read` plus its graph tools, and listing or search runs through Bash. Contract tests, the Pi compatibility surface and search-tool CI provisioning were updated to match.
+
 ## [1.0.1] - 2026-10-17
 
 ### Changed

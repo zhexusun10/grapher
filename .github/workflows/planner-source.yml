@@ -39,16 +39,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y bubblewrap build-essential git ripgrep fd-find
+          sudo apt-get install -y bubblewrap build-essential git
           /usr/bin/bwrap --die-with-parent --unshare-user --unshare-pid --cap-drop ALL --bind / / --dev-bind /dev /dev --proc /proc -- /bin/sh -c ': <>/dev/null'
       - name: Install macOS tools and verify Seatbelt support
         if: runner.os == 'macOS'
         run: |
-          brew install ripgrep fd
           /usr/bin/sandbox-exec -p '(version 1)(allow default)' /bin/sh -c ': <>/dev/null'
-      - name: Install Windows native tools
-        if: runner.os == 'Windows'
-        uses: ./.github/actions/install-windows-search-tools
       - name: Install Grapher and pinned Pi
         run: npm ci --ignore-scripts
       - run: npm run pi:setup

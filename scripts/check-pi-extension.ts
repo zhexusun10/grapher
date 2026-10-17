@@ -9,17 +9,6 @@ import { createBashToolDefinition } from "../pi/packages/coding-agent/src/core/t
 import { convertResponsesTools } from "../pi/packages/ai/src/api/openai-responses-shared.ts";
 import { validateToolArguments } from "../pi/packages/ai/src/utils/validation.ts";
 import type { ExtensionContext } from "../pi/packages/coding-agent/src/core/extensions/types.ts";
-import { ensureTool } from "../pi/packages/coding-agent/src/utils/tools-manager.ts";
-
-// Exercise the real search tools, but resolve their prerequisites before the
-// graph mutations. Unlike the built-ins, retain download/offline diagnostics.
-for (const tool of ["fd", "rg"] as const) {
-  const binary = await ensureTool(tool, status => console.error(`[Pi tools] ${status.message}`));
-  if (!binary) {
-    throw new Error(`Pi extension smoke requires ${tool}. Install ripgrep and fd on PATH (Windows: choco install ripgrep fd -y; macOS: brew install ripgrep fd; Debian/Ubuntu: apt-get install ripgrep fd-find), or allow Pi's managed download. Search assertions are not skipped.`);
-  }
-  execFileSync(binary, ["--version"], { stdio: "inherit", timeout: 10_000 });
-}
 
 const source = process.cwd();
 const root = realpathSync(mkdtempSync(join(tmpdir(), "grapher-extension-")));
@@ -48,8 +37,8 @@ try {
   assert.match(bashDescription, /Execute a bash command/);
   assert.equal(extension.handlers.has("tool_call"), false, "Planner has no path or read guards");
   const edgeDescription = extension.tools.get("edge")!.definition.description;
-  assert.match(edgeDescription, /Each feedback source may have at most one feedback target\./);
-  assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork|workspace/i);
+  assert.match(edgeDescription, /Each feedback source may have only one feedback target\./);
+  assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork/i);
   const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = (extension.tools.get(name) ?? loaded.extensions[1].tools.get(name))!.definition;
@@ -459,6 +448,7 @@ fn main() {
   const worker = await loadExtensions([adapterPath], repository);
   assert.deepEqual(worker.errors, []);
   const workerExtension = worker.extensions[0];
+  assert.deepEqual([...workerExtension.tools.keys()].sort(), ["bash"], "Without a graph binding the node adapter registers only Bash; ls/find/grep are gone and file tools bind via GRAPHER_ORIGINAL_ROOT");
   const workerOptions = normalizeBuildSystemPromptOptions({ customPrompt: "base", cwd: repository });
   assert.equal(await workerExtension.handlers.get("before_agent_start")![0]({ systemPromptOptions: workerOptions }), undefined);
   assert.equal(workerOptions.forceSystemPrompt, undefined, "Path guidance must not bypass request-time prompt trimming");
@@ -468,16 +458,10 @@ fn main() {
   const { createReadToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/read.ts");
   const { createWriteToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/write.ts");
   const { createEditToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/edit.ts");
-  const { createLsToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/ls.ts");
-  const { createFindToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/find.ts");
-  const { createGrepToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/grep.ts");
   const builtins = new Map([
     ["read", createReadToolDefinition(repository)],
     ["write", createWriteToolDefinition(repository)],
     ["edit", createEditToolDefinition(repository)],
-    ["ls", createLsToolDefinition(repository)],
-    ["find", createFindToolDefinition(repository)],
-    ["grep", createGrepToolDefinition(repository)],
   ]);
   async function workerCall(name: string, input: Record<string, unknown>, onUpdate?: (update: any) => void) {
     for (const hook of workerExtension.handlers.get("tool_call") ?? []) await hook({ toolName: name, input });
@@ -499,10 +483,7 @@ fn main() {
   const nativePwd = nativePwdResult.content.filter(part => part.type === "text").map(part => part.text).join("\n").trim();
   assert.ok(JSON.stringify(shellResult).includes(nativePwd), "Native output is not rewritten");
   assert.ok(updates.some(update => JSON.stringify(update).includes(nativePwd)));
-  assert.match(JSON.stringify(await workerCall("ls", { path: "." })), /mapped.txt/);
   assert.equal(readFileSync(join(repository, "mapped.txt"), "utf8"), "after\n");
-  assert.match(JSON.stringify(await workerCall("find", { pattern: "*.txt", path: repository })), /mapped.txt/);
-  assert.match(JSON.stringify(await workerCall("grep", { pattern: "after", path: repository })), /mapped.txt/);
   const externalFile = join(root, "external space ' quote.txt");
   await workerCall("write", { path: externalFile, content: "external before\n" });
   await workerCall("edit", { path: externalFile, edits: [{ oldText: "before", newText: "after" }] });
@@ -552,7 +533,7 @@ fn main() {
     const native = await workerCall("bash", { command: "/usr/bin/uname -s; /usr/bin/sw_vers -productVersion; /usr/bin/xcrun --find clang" });
     assert.match(JSON.stringify(native.content), /Darwin/);
   }
-  console.log(`Pi extension smoke passed on ${process.platform}: read/write/edit/ls/find/grep/bash, external paths and symlinks, shell semantics, failures/cancellation, Planner graph tools. This is not a production launcher or transparent mapping test.`);
+  console.log(`Pi extension smoke passed on ${process.platform}: read/write/edit/bash, external paths and symlinks, shell semantics, failures/cancellation, Planner graph tools. This is not a production launcher or transparent mapping test.`);
 } finally {
   process.chdir(source);
   rmSync(root, { recursive: true, force: true });

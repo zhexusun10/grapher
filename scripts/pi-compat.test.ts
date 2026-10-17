@@ -11,7 +11,6 @@ import {
   ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities,
   createBashToolDefinition, createLocalBashOperations,
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
-  createLsToolDefinition, createFindToolDefinition, createGrepToolDefinition,
 } from '../engine/pi-compat.ts';
 
 for (const name of ['pi-trim', 'pi-continuity']) {
@@ -118,8 +117,6 @@ test('Pi SDK surface required by Grapher remains available', () => {
   for (const [name, factory] of Object.entries({
     bash: createBashToolDefinition, read: createReadToolDefinition,
     write: createWriteToolDefinition, edit: createEditToolDefinition,
-    ls: createLsToolDefinition, find: createFindToolDefinition,
-    grep: createGrepToolDefinition,
   })) {
     const tool = factory(cwd);
     assert.equal(tool.name, name);

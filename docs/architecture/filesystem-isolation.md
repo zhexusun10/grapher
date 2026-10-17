@@ -62,7 +62,8 @@ Use real host absolute paths for external resources. Within a Graph node, relati
 
 ## Graph tool adaptation
 
-- `read`, `write`, `edit`, `ls`, `find`, and `grep` adapt recognized source-project path prefixes to the current node repository.
+- `read`, `write`, and `edit` adapt recognized source-project path prefixes to the current node repository.
+- No project or role registers separate `ls`, `find` or `grep` tools; listing and search run inside Bash with its own command adaptation.
 - Graph Bash adapts recognized complete project-path literals: common arguments, assignments, options, escaped spaces, redirects, glob patterns, command substitutions, and literal nested `sh/bash/zsh/dash -c` commands.
 - Bash does not implicitly enable `set -e` or `pipefail` or change the caller's argument object.
 - File write content, edit replacement content, and existing script files are not rewritten.

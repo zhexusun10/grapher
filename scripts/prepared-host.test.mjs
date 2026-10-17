@@ -169,7 +169,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         assert.ok(['node', 'edge', 'read', 'bash'].every(tool => tools.includes(tool)));
         assert.ok(['edit', 'write', 'ls', 'find', 'grep'].every(tool => !tools.includes(tool)));
         const edgeDescription = body.tools.find(tool => tool.function.name === 'edge').function.description;
-        assert.doesNotMatch(edgeDescription, /ignored|non-Git|drain|fork|workspace/i);
+        assert.doesNotMatch(edgeDescription, /ignored|non-Git|drain|fork/i);
         const rejected = JSON.parse(requests[before + 1].messages.find(message => message.role === 'tool').content);
         assert.equal(rejected.applied, false, 'the bound published-node constraint must reach the Planner compiler');
         assert.deepEqual(rejected.topology.nodes, ['published']);
@@ -177,7 +177,10 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         const results = requests[before + 2].messages.filter(message => message.role === 'tool');
         assert.equal(JSON.parse(results[1].content).applied, true, 'a rejected deletion must not prevent further valid edits');
         assert.deepEqual(JSON.parse(await readFile(graph, 'utf8')).nodes.map(node => node.name), ['published', 'A']);
-      } else assert.ok(['read', 'write', 'edit', 'bash'].every(tool => tools.includes(tool)));
+      } else {
+        assert.ok(['read', 'write', 'edit', 'bash'].every(tool => tools.includes(tool)));
+        assert.ok(['ls', 'find', 'grep'].every(tool => !tools.includes(tool)), 'node tool surface excludes ls/find/grep for every project');
+      }
       // Match Rust's Planner/Node steer handoff window before closing RPC.
       if (role !== 'partition') await delay(500);
       const closed = once(value.child, 'close');

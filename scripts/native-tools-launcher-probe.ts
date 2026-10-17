@@ -51,9 +51,6 @@ export default async function () {
     assert.equal(text(await call('read', { path: externalMaterial })), 'external material');
     await call('write', { path: join(source, 'literal.txt'), content: `keep ${source} unchanged` });
     assert.equal(readFileSync(join(cwd, 'literal.txt'), 'utf8'), `keep ${source} unchanged`);
-    assert.match(text(await call('ls', { path: source })), /mapped.txt/);
-    assert.match(text(await call('find', { path: source, pattern: 'mapped.txt' })), /mapped.txt/);
-    assert.match(text(await call('grep', { path: source, pattern: `final-${label}` })), /mapped.txt/);
     // External absolute script and absolute script within the real workspace.
     const external = process.env.GRAPHER_TEST_EXTERNAL!;
     await call('write', { path: join(source, 'local.cjs'), content: "require('node:fs').writeFileSync('local-ran', 'ok')" });
