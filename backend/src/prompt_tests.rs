@@ -3342,6 +3342,21 @@ fn execution_and_run_metrics_parsing_and_persistence() {
     assert_eq!(exec_metrics.usage.output, 250);
     assert_eq!(exec_metrics.usage.total_tokens, 400);
 
+    // Multi-process restart / protocol repair case: duration must accumulate rather than overwrite
+    let multi_process_output = r#"
+{"type":"grapher_process_started","pid":100,"timestamp":1726300000000}
+{"type":"message_end","message":{"role":"assistant","usage":{"input":100,"output":200,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":300}}}
+{"type":"grapher_process_exited","elapsedMs":2400000,"success":true,"timestamp":1726302400000}
+{"type":"grapher_process_started","pid":101,"timestamp":1726302400100}
+{"type":"message_end","message":{"role":"assistant","usage":{"input":50,"output":50,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":100}}}
+{"type":"grapher_process_exited","elapsedMs":20000,"success":true,"timestamp":1726302420100}
+"#;
+    let multi_metrics =
+        crate::model::parse_execution_metrics(multi_process_output, 1726300000000, 1726302420100);
+    assert_eq!(multi_metrics.duration_seconds, 2420.0);
+    assert_eq!(multi_metrics.assistant_messages, 2);
+    assert_eq!(multi_metrics.usage.total_tokens, 400);
+
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {

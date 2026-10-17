@@ -930,7 +930,7 @@ pub fn parse_execution_metrics(
             {
                 "grapher_process_exited" => {
                     if let Some(elapsed) = value.get("elapsedMs").and_then(|v| v.as_f64()) {
-                        duration_seconds = elapsed / 1000.0;
+                        duration_seconds += elapsed / 1000.0;
                     }
                 }
                 "message_end" => {
