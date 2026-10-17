@@ -2151,7 +2151,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         item.role === "user" && item.id === msg.id)) return false;
                       // Keep an acknowledged steer visible across navigation
                       // until its completed turn actually appears in JSONL.
-                      if (useSavedPlanner && !isPlanning) {
+                      if (useSavedPlanner) {
                         const text = msg.text.trim();
                         const count = remainingPersistedTurns.get(text) ?? 0;
                         if (count > 0) {

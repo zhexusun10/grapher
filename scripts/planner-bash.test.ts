@@ -2,7 +2,7 @@
 // Pi tools through the production workspace policy, without model/provider calls.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -49,7 +49,7 @@ async function plannerTools(source: string, workspace = source) {
 }
 
 test('Planner preserves native Bash semantics and immediate source writes on every platform', { timeout: 30_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'grapher-planner-bash-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-planner-bash-')));
   const source = join(directory, '中文 space # %');
   try {
     await mkdir(source);
@@ -97,7 +97,7 @@ test('Planner preserves native Bash semantics and immediate source writes on eve
 });
 
 test('Planner keeps one visible path namespace across source, different worktrees and publication without prompt injection', { timeout: 30_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'grapher-planner-paths-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-planner-paths-')));
   const source = join(directory, 'source 中文 space');
   const first = join(directory, 'first worktree'), second = join(directory, 'second worktree');
   try {

@@ -44,3 +44,49 @@ test("planner messages filter out node and merger-directed messages", () => {
   const plannerMessages = messages.filter((msg) => !msg.node || msg.node === "planner");
   assert.deepEqual(plannerMessages.map(m => m.id), ["msg-initial", "msg-planner-1"]);
 });
+
+test("persisted user turns are not duplicated in follow-up message list during live planning continuation", () => {
+  const plannerMessages = [
+    { id: "msg-0", role: "user" as const, text: "Initial Goal" },
+    { id: "msg-1", role: "user" as const, text: "Cut edge 22 to 09" },
+    { id: "msg-2", role: "user" as const, text: "Will this affect our task?" },
+  ];
+  const savedPlannerOutput = [
+    JSON.stringify({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "Initial Goal" }] } }),
+    JSON.stringify({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "Cut edge 22 to 09" }] } }),
+  ].join("\n");
+  const turns = plannerUserTurns(savedPlannerOutput);
+  if (turns[0] === plannerMessages[0]?.text.trim()) turns.shift();
+  assert.deepEqual(turns, ["Cut edge 22 to 09"]);
+
+  const remainingPersistedTurns = new Map<string, number>();
+  for (const text of turns) {
+    remainingPersistedTurns.set(text, (remainingPersistedTurns.get(text) ?? 0) + 1);
+  }
+
+  const useSavedPlanner = true;
+  const renderLivePlanner = true;
+  const plannerStreamItems = [
+    { id: "msg-2", role: "user", content: "Will this affect our task?" },
+  ];
+
+  const visibleFollowUps = plannerMessages.slice(1).filter((msg) => {
+    if (msg.node && msg.node !== "planner") return false;
+    if (renderLivePlanner && plannerStreamItems.some((item) =>
+      item.role === "user" && item.id === msg.id)) return false;
+    if (useSavedPlanner) {
+      const text = msg.text.trim();
+      const count = remainingPersistedTurns.get(text) ?? 0;
+      if (count > 0) {
+        remainingPersistedTurns.set(text, count - 1);
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // msg-1 is persisted in saved planner history and msg-2 is in live stream,
+  // so neither should appear in visibleFollowUps (no duplicate user bubbles).
+  assert.deepEqual(visibleFollowUps, []);
+});
+
