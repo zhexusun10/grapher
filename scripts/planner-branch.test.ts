@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { activePlannerOutput, plannerHistoryIds, plannerTurnIds } from '../src/lib/plannerOutput.ts';
+import { activePlannerOutput, plannerConversationEdits, plannerHistoryIds, plannerTurnIds } from '../src/lib/plannerOutput.ts';
 
 const source = (id: string) => JSON.stringify({ type: 'grapher_planning_source', planningId: id });
 const user = (text: string) => JSON.stringify({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } });
@@ -36,6 +36,25 @@ test('live Planner continuation does not replay the revision it is streaming', (
     ['initial', 'revision', 'next']);
   // Fresh planning renders only the live transcript, never durable history.
   assert.deepEqual(plannerHistoryIds({ ...base, savedPlannerId: 'next', continuation: false }), []);
+});
+
+test('an edit keeps the failed replacement turn it started', () => {
+  const events = [
+    { type: 'created', planning_id: 'initial', planning: { planningId: 'initial', createdAt: 100 } },
+    { type: 'graph_revised', planning_id: 'followup', planning: { planningId: 'followup', createdAt: 200 } },
+    { type: 'planner_conversation_edited', old_instruction: 'followup' },
+    { type: 'planner_workspace_selected', planning: { planningId: 'replacement', createdAt: 300 } },
+    { type: 'planner_turn_aborted', planning: { planningId: 'replacement', createdAt: 300, status: 'failed' } },
+  ];
+  const edits = plannerConversationEdits(events);
+  assert.deepEqual(edits, [{ old_instruction: 'followup', nextPlanningId: 'replacement' }]);
+  const log = [source('initial'), user('first'), 'initial reply',
+    source('followup'), user('followup'), 'followup reply',
+    source('replacement'), user('replacement'), 'failed reply'].join('\n') + '\n';
+  const visible = activePlannerOutput(log, edits);
+  assert.match(visible, /initial reply/);
+  assert.match(visible, /failed reply/);
+  assert.doesNotMatch(visible, /followup reply/);
 });
 
 test('aborted revision turns stay in the replayed Planner conversation', () => {

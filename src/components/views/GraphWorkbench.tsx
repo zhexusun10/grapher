@@ -31,11 +31,11 @@ import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } from "../ExecutionTimeTook";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
-import { plannerHistoryIds } from "../../lib/plannerOutput";
+import { plannerConversationEdits, plannerHistoryIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
 import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
-import { plannerUserTurns } from "../../services/plannerUserTurns";
+import { plannerUserTurns, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
@@ -725,18 +725,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     routeType,
     representedIds: plannerStream.representedPlanningIds,
   }), [routeType, isPlanning, backgroundReview, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.isContinuation, plannerStream.representedPlanningIds]);
-  const plannerEdits = useMemo(() => state.events.flatMap((event, index) => {
-    if (event.type !== "planner_conversation_edited") return [];
-    const nextPlanningId = state.events.slice(index + 1).find(item =>
-      item.type === "graph_revised" && item.planning_id)?.planning_id;
-    return [{ old_instruction: event.old_instruction, nextPlanningId }];
-  }), [state.events]);
+  const plannerEdits = useMemo(() => plannerConversationEdits(state.events), [state.events]);
   const savedPlannerKey = savedPlannerIds.join(":");
   const [readySavedPlannerKey, setReadySavedPlannerKey] = useState("");
   const [savedPlannerRecord, setSavedPlannerRecord] = useState({ key: "", text: "" });
   const savedPlannerOutput = savedPlannerRecord.key === savedPlannerKey ? savedPlannerRecord.text
     : cachedPlanningOutput(transcriptRunId, savedPlannerIds);
   const plannerMessages = useMemo(() => effectiveMessages.filter((msg) => !msg.node || msg.node === "planner"), [effectiveMessages]);
+  const livePlannerItems = useMemo(() => {
+    const items = (plannerStream.items ?? []) as TranscriptItem[];
+    // The first turn is always rendered above the transcript. A continuation
+    // seeds the live stream with that same edited message, so keep the
+    // canonical bubble instead of rendering it twice.
+    return withoutLiveFirstTurn(items, plannerMessages[0]?.id);
+  }, [plannerStream.items, plannerMessages]);
   const persistedUserTurns = useMemo(() => {
     if (plannerMessages.length <= 1) return [];
     const turns = plannerUserTurns(activePlannerOutput(savedPlannerOutput, plannerEdits));
@@ -2280,8 +2282,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     ))}
 
                     {/* Planner 顺序流式记录：严格按实际发生时序呈现用户追加消息、工具调用、思维链与输出文字 */}
-                    {renderLivePlanner && plannerStream.items && plannerStream.items.length > 0 ? (
-                      <PlannerTranscript items={plannerStream.items} isPlanning={isPlanning} locked={locked}
+                    {renderLivePlanner && livePlannerItems.length > 0 ? (
+                      <PlannerTranscript items={livePlannerItems} isPlanning={isPlanning} locked={locked}
                         editingMessage={editingMessage} draft={editPrefillText ?? ""}
                         onDraftChange={onEditPrefillTextChange ?? (() => { })} onEditMessage={onEditMessage}
                         onCancelEdit={onCancelEditMessage} onEditSubmit={onEditMessageSubmit}

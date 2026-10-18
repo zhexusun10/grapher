@@ -5,6 +5,15 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-10-18
+
+### Fixed
+
+- **Connection stability and startup lock contention**: Deferred snapshot and label polling until initial bootstrap finishes (`src/App.tsx`, `src/hooks/useSnapshotPolling.ts`). This avoids lock contention between the frontend's early background polling and the backend's primary runtime lock during startup, stabilizing frontend-backend communication and automatically clearing transient "loading backend settings" banners once bootstrap completes. Added service responsiveness regression tests (`backend/src/service_responsiveness_tests.rs`).
+- **Inline message edit cursor jumping**: Fixed an issue where typing during an inline message edit would force the caret to jump to the end of the textarea on every keystroke (`src/components/views/ChatBubbles.tsx`). Caret selection is now set only once upon entering edit mode, preserving the cursor position during user typing.
+- **Planner session loss on interrupted first turn**: Fixed conversation session loss when interrupting, stopping, or editing the Planner's initial turn before a graph is committed (`backend/src/server.rs`, `backend/src/prompt_tests.rs`, `src/lib/plannerOutput.ts`). The backend now recognizes durable planning attempts across `PlanningStarted`, `PlannerWorkspaceSelected`, `PlannerTurnAborted`, and `PlanningFailed` events without requiring a committed `created` or `graph_revised` event, allowing session branching and rollback to operate safely.
+- **Duplicate rendering when editing Planner initial goal**: Fixed an issue where editing the Planner's initial goal caused the user turn to be rendered twice in the UI during streaming continuation (`src/components/views/GraphWorkbench.tsx`, `src/services/plannerUserTurns.ts`). The live transcript stream now deduplicates the seeded initial user turn against the canonical goal bubble.
+
 ## [1.2.1] - 2026-10-18
 
 ### Changed
@@ -83,6 +92,7 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
+[1.2.2]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.2
 [1.2.1]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.1
 [1.2.0]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.0
 [1.1.0]: https://github.com/zhexusun10/grapher/releases/tag/v1.1.0

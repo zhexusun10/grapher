@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { stripPlannerContext } from "../src/services/plannerText.ts";
-import { plannerUserTurns } from "../src/services/plannerUserTurns.ts";
+import { plannerUserTurns, withoutLiveFirstTurn } from "../src/services/plannerUserTurns.ts";
 
 test("Planner status context is not shown as conversation text", () => {
   assert.equal(stripPlannerContext("Current graph node status:\n- worker: completed\n继续优化"), "继续优化");
@@ -32,6 +32,18 @@ test("only completed Planner user turns replace optimistic messages", () => {
     line("message_end", "Current graph node status:\n- worker: completed\n\n继续优化"),
     "{incomplete",
   ].join("\n")), ["Original", "继续优化"]);
+});
+
+test("live continuation does not repeat the already rendered first turn", () => {
+  const items: Array<{ id: string; role: string; content: string }> = [
+    { id: "msg-0", role: "user", content: "Edited goal" },
+    { id: "tool-1", role: "assistant", content: "" },
+    { id: "msg-1", role: "user", content: "Follow-up" },
+  ];
+  assert.deepEqual(withoutLiveFirstTurn(items, "msg-0").map(item => item.id), ["tool-1", "msg-1"]);
+  assert.deepEqual(withoutLiveFirstTurn(items, undefined).map(item => item.id), ["msg-0", "tool-1", "msg-1"]);
+  // A different first id never hides a real follow-up user turn.
+  assert.deepEqual(withoutLiveFirstTurn(items, "msg-initial-goal").map(item => item.id), ["msg-0", "tool-1", "msg-1"]);
 });
 
 test("planner messages filter out node and merger-directed messages", () => {

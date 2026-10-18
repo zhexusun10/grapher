@@ -213,6 +213,7 @@ export default function App() {
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
 
   useEffect(() => {
+    if (!isBootstrapReady) return;
     const missing = runs.filter(id => !id.startsWith("pending-") && !(id in runLabels) && !pendingRunLabelIdsRef.current.has(id));
     if (missing.length > 0) {
       missing.forEach(id => pendingRunLabelIdsRef.current.add(id));
@@ -235,7 +236,7 @@ export default function App() {
         missing.forEach(id => pendingRunLabelIdsRef.current.delete(id));
       });
     }
-  }, [runs, runLabels, runtimeService]);
+  }, [runs, runLabels, runtimeService, isBootstrapReady]);
   const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot } = useRunIndicators(state);
   const allRunIds = useMemo(() => [...new Set(Object.values(workspaceRuns).flat())], [workspaceRuns]);
   const [activities, setActivities] = useState<Record<string, RuntimeActivity[]>>({});
@@ -540,7 +541,8 @@ export default function App() {
   const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions,
     // While a live Planner SSE stream owns this Run's draft topology, durable
     // snapshot polls must not clobber the incrementally assembled graph.
-    isPlanning && plannerStream.runId && !plannerStream.runId.startsWith("pending-") ? plannerStream.runId : "");
+    isPlanning && plannerStream.runId && !plannerStream.runId.startsWith("pending-") ? plannerStream.runId : "",
+    isBootstrapReady);
 
   const applyForegroundSnapshot = (snapshot: Snapshot, generation: number) => {
     if (snapshot.runId && snapshot.config?.repository) {
@@ -860,6 +862,9 @@ export default function App() {
     }
     setConfig(nextConfigObj);
     setIsBootstrapReady(true);
+    // A retry may have overlapped an edit attempt that was rejected only
+    // because settings were still loading. Do not leave that stale error up.
+    setError(previous => previous === t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。") ? "" : previous);
     if (data.dataPath) {
       const cleanDataPath = normalizeWorkspacePath(data.dataPath);
       setDataPath(cleanDataPath);

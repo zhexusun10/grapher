@@ -2,7 +2,7 @@
 // Extracted for use in tests without requiring TSX support
 import { stripPlannerContext } from "../services/plannerText";
 
-export type PlannerEvent = { type?: string; planning_id?: string; planning?: { planningId?: string; createdAt?: number } | null };
+export type PlannerEvent = { type?: string; planning_id?: string; old_instruction?: string; planning?: { planningId?: string; createdAt?: number } | null };
 
 /**
  * Planning attempts whose durable output belongs to the Run conversation, in
@@ -71,6 +71,24 @@ export function plannerHistoryIds(options: {
       return false;
     }
     return true;
+  });
+}
+
+/** Map each edited Planner turn to the attempt that replaced it.
+ *
+ * A replacement branch is durable before it commits a graph: it starts with
+ * `planner_workspace_selected` and may end as `planner_turn_aborted`. Mapping
+ * only `graph_revised` would cut a failed replacement (and all later turns)
+ * out of the replayed conversation.
+ */
+export function plannerConversationEdits(events: ReadonlyArray<PlannerEvent>): Array<{ old_instruction?: string; nextPlanningId?: string }> {
+  return events.flatMap((event, index) => {
+    if (event.type !== "planner_conversation_edited") return [];
+    const next = events.slice(index + 1).find(item =>
+      item.type === "graph_revised" || item.type === "planner_workspace_selected"
+      || item.type === "planner_review_started" || item.type === "planner_turn_aborted");
+    return [{ old_instruction: event.old_instruction,
+      nextPlanningId: next?.planning_id || next?.planning?.planningId }];
   });
 }
 

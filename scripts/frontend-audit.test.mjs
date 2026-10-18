@@ -211,6 +211,22 @@ test("unchanged inline edit keeps the confirm visible but disabled until an actu
   } finally { await context.close(); }
 });
 
+test("inline edit keeps the caret where the user typed", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("bubble");
+  try {
+    const editor = page.locator("textarea");
+    await editor.waitFor();
+    await editor.evaluate(element => element.setSelectionRange(7, 7));
+    await editor.press("X");
+    assert.equal(await editor.inputValue(), "Edited Xmessage");
+    assert.deepEqual(
+      await editor.evaluate(element => [element.selectionStart, element.selectionEnd]),
+      [8, 8],
+    );
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("interrupt control does not submit or clear a pending draft", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("interruptPrompt");
   try {

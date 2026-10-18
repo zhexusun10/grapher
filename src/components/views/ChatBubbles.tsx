@@ -66,6 +66,9 @@ export function EditableUserBubble({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const compositionEndedAtRef = useRef(0);
+  // Selecting the caret is only an entry behavior. Re-applying it whenever
+  // `draft` changes would jump the caret to the end on every keystroke.
+  const editingRef = useRef(false);
   const [copied, setCopied] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
@@ -108,6 +111,7 @@ export function EditableUserBubble({
 
   useLayoutEffect(() => {
     if (!editing) {
+      editingRef.current = false;
       return;
     }
     const textarea = textareaRef.current;
@@ -117,10 +121,13 @@ export function EditableUserBubble({
       if (scrollH > 0) {
         textarea.style.height = `${scrollH}px`;
       }
-      textarea.focus();
-      const end = textarea.value.length;
-      textarea.setSelectionRange(end, end);
+      if (!editingRef.current) {
+        textarea.focus();
+        const end = textarea.value.length;
+        textarea.setSelectionRange(end, end);
+      }
     }
+    editingRef.current = true;
   }, [editing, draft]);
 
   const submit = async () => {

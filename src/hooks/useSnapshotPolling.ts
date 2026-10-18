@@ -17,6 +17,9 @@ export function useSnapshotPolling(
   /** The Run whose live Planner SSE stream owns the displayed draft graph.
    * Durable polls for it must not clobber the in-flight topology. */
   heldRunId = "",
+  /** Bootstrap is the first authoritative read. Polling earlier only adds
+   * requests that contend with it for the primary runtime lock. */
+  enabled = true,
 ) {
   const versions = useRef(new Map<string, string>());
   const notifiedVersions = useRef(new Map<string, string>());
@@ -49,6 +52,7 @@ export function useSnapshotPolling(
   }
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     const abort = new AbortController();
     const ids = [...new Set([viewedRunId, ...runIds].filter(id => !!id && !id.startsWith("pending-")))];
@@ -183,6 +187,6 @@ export function useSnapshotPolling(
       stopPolling.wake();
     });
     return () => { cancelled = true; unsubscribeSnapshot(); unsubscribeConnect(); stopPolling(); abort.abort(); };
-  }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, viewedPhase, viewedHasActiveExecutions]);
+  }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, viewedPhase, viewedHasActiveExecutions, enabled]);
   return setBackendStatus;
 }

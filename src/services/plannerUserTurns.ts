@@ -1,5 +1,12 @@
 import { stripPlannerContext } from "./plannerText";
 
+/** A live continuation seeds the stream with the message being edited. The
+ * first turn is already rendered as the conversation header, so drop that
+ * duplicate while preserving later user turns and assistant events. */
+export function withoutLiveFirstTurn<T extends { id?: string; role?: string }>(items: T[], firstId?: string): T[] {
+  return firstId ? items.filter(item => !(item.role === "user" && item.id === firstId)) : items;
+}
+
 // Recover persisted user turns from the Planner's durable Pi JSONL. A steer
 // acknowledgement can precede its message_end, so only completed turns count
 // as replacements for optimistic browser messages.

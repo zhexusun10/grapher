@@ -273,6 +273,40 @@ fn materialize_job_source(
         .record_job_source(job, &repository, &head)
 }
 
+const SERVICE_LOOKUP_BUSY: &str =
+    "Run lookup is busy; retry after the current workspace operation";
+
+/// Polling a background Run can collide with another Run's replay. That is a
+/// retryable condition, not a client error; encode it in the same shape as a
+/// busy Run lock so the poller backs off without a failed HTTP request.
+fn busy_snapshot_poll(command: &str, input: &str, error: &str) -> Option<serde_json::Value> {
+    if command != "snapshot_if_changed" || error != SERVICE_LOOKUP_BUSY {
+        return None;
+    }
+    let version = serde_json::from_str::<serde_json::Value>(input).ok()
+        .and_then(|body| body.get("version")
+            .and_then(serde_json::Value::as_str).map(str::to_owned))
+        .unwrap_or_default();
+    Some(serde_json::json!({
+        "version": version, "snapshot": null, "activity": [], "busy": true
+    }))
+}
+
+fn remember_run_service(
+    root: &std::path::Path,
+    run_id: &str,
+    service: Arc<Service>,
+) -> Result<Arc<Service>, String> {
+    RUN_SERVICES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|error| error.to_string())?
+        .entry(root.to_owned())
+        .or_default()
+        .insert(run_id.to_owned(), Arc::downgrade(&service));
+    Ok(cache_service(root, run_id, service))
+}
+
 fn service_for_run(
     primary: &Arc<Service>,
     run_id: &str,
@@ -329,31 +363,53 @@ fn service_for_run(
     // Planning persists identities before publishing them. A new provisional
     // ID cannot alias an existing service, so it need not inspect busy Runs.
     if exists {
-        let mut busy_alias = false;
+        let mut busy_candidates = Vec::new();
         for service in candidates {
-            let matches = match service.runtime.try_lock() {
-                Ok(runtime) => runtime.state.run_id == run_id,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    busy_alias = true;
-                    false
-                }
+            let mut alias = false;
+            let mut busy = false;
+            match service.runtime.try_lock() {
+                Ok(runtime) => alias = runtime.state.run_id == run_id,
+                Err(std::sync::TryLockError::WouldBlock) => busy = true,
                 Err(error) => return Err(error.to_string()),
-            };
-            if matches {
-                RUN_SERVICES
-                    .get()
-                    .unwrap()
-                    .lock()
-                    .map_err(|e| e.to_string())?
-                    .entry(root.clone())
-                    .or_default()
-                    .insert(run_id.to_owned(), Arc::downgrade(&service));
-                return Ok(cache_service(&root, run_id, service));
+            }
+            if alias {
+                return remember_run_service(&root, run_id, service);
+            }
+            if busy {
+                busy_candidates.push(service);
             }
         }
-        // Do not create a second writer if an old alias cannot yet be checked.
-        if busy_alias {
-            return Err("Run lookup is busy; retry after the current workspace operation".into());
+        // A poll can collide with another Run's snapshot/replay for a few
+        // milliseconds. Give those short-lived readers a moment to release
+        // before treating an unverifiable identity as a real alias conflict.
+        if !busy_candidates.is_empty() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(80);
+            loop {
+                let mut remaining = Vec::new();
+                for service in busy_candidates {
+                    let mut alias = false;
+                    let mut busy = false;
+                    match service.runtime.try_lock() {
+                        Ok(runtime) => alias = runtime.state.run_id == run_id,
+                        Err(std::sync::TryLockError::WouldBlock) => busy = true,
+                        Err(error) => return Err(error.to_string()),
+                    }
+                    if alias {
+                        return remember_run_service(&root, run_id, service);
+                    }
+                    if busy {
+                        remaining.push(service);
+                    }
+                }
+                if remaining.is_empty() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(SERVICE_LOOKUP_BUSY.into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                busy_candidates = remaining;
+            }
         }
     }
     let mut child_runtime = open_run(if exists { run_id } else { "" })?;
@@ -1336,6 +1392,30 @@ fn planner_session_directory(
     planner_session_directory_for_workspace(root, attempt, repository, repository, revision)
 }
 
+/// Planner attempts are durable as soon as their first event is written. A
+/// failed or stopped first turn keeps its Pi conversation without committing
+/// a graph, so history edits must not require `created`/`graph_revised`.
+fn event_planner_id(kind: &EventKind) -> Option<&str> {
+    match kind {
+        EventKind::Created {
+            planning_id: Some(id),
+            ..
+        }
+        | EventKind::GraphRevised { planning_id: id, .. } => Some(id),
+        EventKind::Created {
+            planning: Some(planning),
+            ..
+        } => Some(&planning.planning_id),
+        EventKind::PlanningStarted { planning, .. }
+        | EventKind::PlannerWorkspaceSelected { planning }
+        | EventKind::PlannerReviewStarted { planning }
+        | EventKind::PlannerReviewFinished { planning, .. }
+        | EventKind::PlannerTurnAborted { planning }
+        | EventKind::PlanningFailed { planning } => Some(&planning.planning_id),
+        _ => None,
+    }
+}
+
 fn planner_session_directory_for_workspace(
     root: &std::path::Path,
     attempt: &std::path::Path,
@@ -1369,23 +1449,20 @@ fn planner_session_directory_for_workspace(
         }
         Err(error.unwrap_or_else(|| "Invalid Planner session".into()))
     };
-    // Prefer the oldest surviving conversation, not the latest attempt.
-    let mut prior_planner_attempt = false;
+    // Prefer the oldest surviving conversation, not the latest attempt. Only a
+    // committed attempt makes a missing session unrecoverable: an attempt that
+    // never launched Pi legitimately has no session yet.
+    let mut committed_planner_attempt = false;
     for event in &snapshot.events {
-        let id = match &event.kind {
-            EventKind::Created {
-                planning_id: Some(id),
-                ..
-            }
-            | EventKind::GraphRevised {
-                planning_id: id, ..
-            } => id,
-            _ => continue,
-        };
+        let Some(id) = event_planner_id(&event.kind) else { continue; };
+        if matches!(&event.kind,
+            EventKind::Created { planning_id: Some(_), .. } | EventKind::GraphRevised { .. })
+        {
+            committed_planner_attempt = true;
+        }
         if Uuid::parse_str(id).is_err() {
             continue;
         }
-        prior_planner_attempt = true;
         let previous = root.join("planning").join(id);
         let session = previous.join("planner-session");
         let previous_workspace = fs::read_to_string(previous.join("planner-workspace"))
@@ -1401,7 +1478,7 @@ fn planner_session_directory_for_workspace(
     }
     // A committed Planner turn with a missing session cannot safely start a
     // new conversation. Fixtures do not persist Pi session files.
-    if prior_planner_attempt && !cfg!(feature = "fixture") {
+    if committed_planner_attempt && !cfg!(feature = "fixture") {
         return Err("Planner conversation is missing; cannot silently start a new session".into());
     }
     Ok((session, snapshot.run_id.clone()))
@@ -3261,17 +3338,10 @@ fn edit_planner(
     let first = state
         .events
         .iter()
-        .find_map(|event| match &event.kind {
-            EventKind::Created {
-                planning_id: Some(id),
-                ..
-            }
-            | EventKind::GraphRevised {
-                planning_id: id, ..
-            } => Some(id.clone()),
-        _ => None,
-        })
-        .ok_or("No persisted Planner conversation")?;
+        .find_map(|event| event_planner_id(&event.kind))
+        .or(state.planning_id.as_deref())
+        .ok_or("No persisted Planner conversation")?
+        .to_owned();
     let attempt = runtime.root.join("planning").join(&first);
     let workspace = fs::read_to_string(attempt.join("planner-workspace"))
         .map(PathBuf::from)
@@ -3283,31 +3353,52 @@ fn edit_planner(
         &workspace,
         Some(state),
     )?;
-    let file = fs::read_dir(&session_dir)
-        .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .find(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with(&format!("_{session_id}.jsonl"))
-        })
-        .ok_or("Planner Pi session is missing")?
-        .path();
-    let header = fs::read_to_string(&file).map_err(|error| error.to_string())?;
-    let cwd = serde_json::from_str::<serde_json::Value>(
-        header.lines().next().ok_or("Empty Planner session")?,
-    )
-    .map_err(|error| error.to_string())?["cwd"]
-        .as_str()
-        .ok_or("Missing Planner cwd")?
-        .to_string();
-    let branch = crate::session_branch::branch_before_planner_user(
-        &session_dir,
-        &session_id,
-        std::path::Path::new(&cwd),
-        old_text.trim(),
-    )?;
+    let session_file = match fs::read_dir(&session_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(&format!("_{session_id}.jsonl"))
+            })
+            .map(|entry| entry.path()),
+        // An attempt that never launched Pi has no conversation to branch.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let branch = match session_file {
+        Some(file) => {
+            let header = fs::read_to_string(&file).map_err(|error| error.to_string())?;
+            let cwd = serde_json::from_str::<serde_json::Value>(
+                header.lines().next().ok_or("Empty Planner session")?,
+            )
+            .map_err(|error| error.to_string())?["cwd"]
+                .as_str()
+                .ok_or("Missing Planner cwd")?
+                .to_string();
+            Some(crate::session_branch::branch_before_planner_user(
+                &session_dir,
+                &session_id,
+                std::path::Path::new(&cwd),
+                old_text.trim(),
+            )?)
+        }
+        None => {
+            // A legacy conversation stored under an unexpected filename must
+            // fail loudly rather than be silently replaced by a fresh one.
+            let has_sessions = fs::read_dir(&session_dir).ok().is_some_and(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry.path().extension().is_some_and(|ext| ext == "jsonl")
+                        && entry.path().is_file()
+                })
+            });
+            if has_sessions {
+                return Err("Planner Pi session is missing".into());
+            }
+            None
+        }
+    };
     let mut first_turn = old_text.trim() == state.graph.original_goal.trim();
     if selected_version == Some(0) {
         first_turn = true;
@@ -3318,9 +3409,12 @@ fn edit_planner(
         first_turn,
         selected_version,
     }) {
-        return Err(match branch.rollback() {
-            Ok(()) => error,
-            Err(rollback) => format!("{error}; {rollback}"),
+        return Err(match branch {
+            Some(branch) => match branch.rollback() {
+                Ok(()) => error,
+                Err(rollback) => format!("{error}; {rollback}"),
+            },
+            None => error,
         });
     }
     Ok(runtime.state.clone())
@@ -5665,7 +5759,10 @@ fn handle_http_request(
         });
         let (status, body) = match result {
             Ok(value) => (200, serde_json::json!({"result": value})),
-            Err(error) => (400, serde_json::json!({"error": error})),
+            Err(error) => match busy_snapshot_poll(command, &input, &error) {
+                Some(result) => (200, serde_json::json!({"result": result})),
+                None => (400, serde_json::json!({"error": error})),
+            },
         };
         let mut response = Response::from_string(body.to_string())
             .with_status_code(status)

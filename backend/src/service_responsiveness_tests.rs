@@ -83,6 +83,34 @@ fn concurrent_lookups_of_one_identity_share_one_writer() {
 }
 
 #[test]
+fn a_briefly_busy_unrelated_run_does_not_fail_an_existing_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = primary(temp.path());
+    // A durable Run routes lookup through the alias-check path.
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": temp.path(), "model": "mock/model", "maxParallel": 1
+    }))
+    .unwrap();
+    let mut stored = Snapshot { run_id: "existing".into(), ..Default::default() };
+    primary.runtime.lock().unwrap().store.append(&mut stored, EventKind::Created {
+        graph: Graph::default(), config, planning_id: None, planning: None,
+    }).unwrap();
+    let busy = service_for_run(&primary, "busy", true).unwrap();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let holder = thread::spawn(move || {
+        let guard = busy.runtime.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        thread::sleep(Duration::from_millis(30));
+        drop(guard);
+    });
+    locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let lookup = service_for_run(&primary, "existing", false);
+    holder.join().unwrap();
+    assert!(lookup.is_ok(), "a short unrelated lock must not poison the lookup");
+    invalidate_service_cache(temp.path(), None);
+}
+
+#[test]
 fn a_busy_renamed_alias_fails_fast_instead_of_opening_a_second_writer() {
     let temp = tempfile::tempdir().unwrap();
     let primary = primary(temp.path());

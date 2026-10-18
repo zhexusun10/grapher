@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn busy_background_poll_is_retryable_instead_of_a_client_error() {
+    let result = busy_snapshot_poll(
+        "snapshot_if_changed",
+        r#"{"version":"run:7","runId":"run"}"#,
+        SERVICE_LOOKUP_BUSY,
+    ).unwrap();
+    assert_eq!(result["version"], "run:7");
+    assert_eq!(result["busy"], true);
+    assert!(result["snapshot"].is_null());
+    assert!(busy_snapshot_poll("history", "{}", SERVICE_LOOKUP_BUSY).is_none());
+    assert!(busy_snapshot_poll("snapshot_if_changed", "{}", "other").is_none());
+}
+
+#[test]
 fn snapshot_poll_reports_transient_activity_without_waiting_for_the_run_mutex() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
@@ -441,6 +455,64 @@ fn edit_planner_api_branches_the_same_run_and_keeps_the_previous_turn() {
     assert_eq!(restored.state.graph.original_goal, "replacement");
     assert!(restored.state.events.iter().any(|event|
         matches!(event.kind, EventKind::PlannerConversationEdited { .. })));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn edit_planner_api_branches_a_first_turn_that_never_committed_a_graph() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path().join("runtime");
+    let repository = crate::fixture::repository(temp.path()).unwrap();
+    let id = Uuid::new_v4().to_string();
+    let run_id = Uuid::new_v4().to_string();
+    let mut runtime = Runtime::open(&root).unwrap();
+    runtime.state = Snapshot { run_id: run_id.clone(), ..Default::default() };
+    let config = serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "mock/model", "engine": "fixture", "maxParallel": 1, "maxFeedback": 0,
+    })).unwrap();
+    runtime.emit(EventKind::PlanningStarted {
+        goal: "original".into(),
+        config,
+        planning: PlanningSummary {
+            planning_id: id.clone(), status: Some("running".into()),
+            plan_type: Some("graph".into()), goal: Some("original".into()),
+            run_id: Some(run_id.clone()), ..Default::default()
+        },
+        plan_type: Some("graph".into()),
+    }).unwrap();
+    let attempt = root.join("planning").join(&id);
+    let session = attempt.join("planner-session");
+    fs::create_dir_all(&session).unwrap();
+    let private = temp.path().join("private-planner-workspace");
+    fs::create_dir_all(&private).unwrap();
+    fs::write(attempt.join("planner-workspace"), private.to_string_lossy().as_bytes()).unwrap();
+    let path = session.join(format!("session_{id}.jsonl"));
+    fs::write(&path, [
+        serde_json::json!({"type":"session", "id":id, "cwd":private}),
+        serde_json::json!({"type":"message", "id":"first", "parentId":null,
+          "message":{"role":"user", "content":"original", "timestamp":1}}),
+        serde_json::json!({"type":"message", "id":"answer", "parentId":"first",
+          "message":{"role":"assistant", "content":[]}}),
+    ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+    runtime.emit(EventKind::PlanningFailed {
+        planning: PlanningSummary {
+            planning_id: id.clone(), status: Some("failed".into()),
+            error: Some("Planning was stopped for this Run".into()),
+            plan_type: Some("graph".into()), goal: Some("original".into()),
+            run_id: Some(run_id.clone()), ..Default::default()
+        },
+    }).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+    });
+    let result = dispatch(&service, "edit_planner", serde_json::json!({
+        "runId":run_id, "oldText":"original", "instruction":"replacement", "compact":true, "detail":"metadata",
+    })).unwrap();
+    assert_eq!(result["graph"]["originalGoal"], "replacement");
+    assert!(fs::read_to_string(&path).unwrap().contains("grapher-edit"));
+    assert_eq!(result["events"].as_array().unwrap().last().unwrap()["type"], "planner_conversation_edited");
 }
 
 #[cfg(feature = "fixture")]
