@@ -240,6 +240,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   const actualProjectRoots = process.platform === 'win32'
     ? projectRoots.map(root => actualPath(resolve(root)))
     : null;
+  const resolvedProjectRoots = actualProjectRoots ?? projectRoots.map(root => resolve(root));
   const aliases = [...new Set(allWorkspaces.flatMap(variants))].sort((a, b) => b.length - a.length);
   const projects = [...new Set(projectRoots.flatMap(variants))].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s\\/"'`<>:;,&|()\[\]{}]/.test(c);
@@ -443,8 +444,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       let mappedRoot;
       if (isAbsolute(host)) {
         resolved = process.platform === 'win32' ? actualPath(host) : resolve(host);
-        mappedRoot = (actualProjectRoots ?? projectRoots.map(candidate => resolve(candidate)))
-          .find(candidate => pathPrefix(resolved, candidate));
+        mappedRoot = resolvedProjectRoots.find(candidate => pathPrefix(resolved, candidate));
       }
       if (!project && !mappedRoot) continue;
       // A resolved path outside every project root is external. Do not fall
