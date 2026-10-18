@@ -1,5 +1,5 @@
 import { isAbsolute, resolve } from 'node:path';
-import { isCaseInsensitive, mapPhysicalPath, toHostInput } from './path-identity.mjs';
+import { isCaseInsensitive, mapPhysicalPath, msysHostInput, toHostInput } from './path-identity.mjs';
 import {
   resolveToCwd,
   createReadToolDefinition,
@@ -22,9 +22,9 @@ export function workspacePathMapper(workspace: string, project: string, alias = 
   const caseInsensitive = isCaseInsensitive(mappedWorkspace);
   return (input: string) => {
     if (!input || input.includes('\0')) throw new Error('Invalid file path');
-    // Accept file URLs and Git Bash drive spellings before Pi resolves the
-    // value against the workspace; otherwise `/c/...` becomes `C:\c\...`.
-    const path = resolveToCwd(toHostInput(input), mappedWorkspace);
+    // Accept file URLs, /c/... and registered Git Bash mounts such as /tmp
+    // before Pi resolves the value against the workspace.
+    const path = resolveToCwd(toHostInput(msysHostInput(input)), mappedWorkspace);
     return mapPhysicalPath(path, mappedWorkspace, roots, caseInsensitive);
   };
 }

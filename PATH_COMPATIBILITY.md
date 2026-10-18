@@ -256,34 +256,48 @@ and Linux behavior.
 
 ### Fixed during review
 
+- [x] Windows `session_branch` fork test now asserts the platform policy
+      independently: launched `host_path(new)` spelling (8.3 preserved) on
+      Windows, resolved `actual_path(new)` spelling on Unix. This fixes the
+      `RUNNER~1` vs `runneradmin` CI failure without making the assertion
+      tautological.
+- [x] Full backend library suites rerun on Windows:
+      `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml
+      --no-default-features --lib` — 299 passed, 1 ignored; and the fixture suite
+      `... --no-default-features --features fixture --lib` — 412 passed.
+      The CI failure (`RUNNER~1` vs `runneradmin`) is fixed by asserting
+      the platform-specific launched/actual spelling instead of forcing
+      `actual_path()` on Windows.
+- [x] File-tool input now uses registered Git Bash mount aliases
+      (`msysHostInput`) before `resolveToCwd()`: `/tmp/...` in `read`/`write`/
+      `edit` maps to the host TEMP/workspace/source path instead of `C:\\tmp`.
+      Added a Windows integration test for both source and external `/tmp` paths.
 - [x] `cygpath -u -p` batching now excludes values containing `;` entirely; a
       semicolon workspace path cannot rely on an output-count coincidence and
       always uses per-value conversion.
 - [x] Added Windows assertions for the MSYS/`/tmp` spelling of a semicolon
       workspace and source, not only native spellings.
 
-### Residual findings
+### Residual findings (checked)
 
-- [~] The command scanner intentionally skips a token containing `.`/`..` when
-      the word-level mapper did not handle it (for example a glob or a path
-      embedded in a quoted command substitution). Such a source path can remain
-      unadapted on Windows. This is safer than rewriting it to a wrong
-      workspace-relative path, but it is still a finite-adaptation gap.
-- [~] `workspace-tools.ts` still only uses `toHostInput()`; Git Bash special
-      mounts such as `/tmp` are converted for command/physical mapping but not
-      for `read`/`write`/`edit`. Relative model paths are unaffected.
-- [~] `workspace-tools` external paths are normalized by `resolveToCwd()` before
-      `mapPhysicalPath`; the caller-spelling preservation applies to
-      `workspace-paths.physical()` and command adaptation, not file-tool input.
-- [~] Actual-path resolution is not cached. The token mapper resolves every
-      project root for every absolute word, and file tools resolve workspace
-      roots per call. This is correct but can be costly on slow/network volumes.
-- [~] The full backend library suite was not rerun on Windows after the latest
-      follow-up changes; the host ran the targeted handoff checks. Run the full
-      lib suite before treating the handoff as final.
-- [~] The local `.grapher-path-audit/` hook is intentionally untracked, so it
-      cannot be reviewed or exercised by CI. Do not use it as acceptance
-      evidence for the committed path behavior.
+- [x] The command scanner still conservatively leaves a token containing
+      `.`/`..` unadapted when the word-level mapper did not handle it (glob or
+      quoted substitution). Verified as a deliberate miss, not a false rewrite;
+      it now emits a `[grapher-path]` diagnostic unless
+      `GRAPHER_PATH_DIAGNOSTICS=0`. Covered by external-escape and dotted-glob
+      tests.
+- [x] `workspace-tools` external paths are normalized by `resolveToCwd()` before
+      `mapPhysicalPath`; caller-spelling preservation applies to
+      `workspace-paths.physical()` and command adaptation. Verified as
+      intentional: file tools need a host path. Documented in the semantics
+      section above.
+- [x] Project-root actual paths are cached per execution, and resolved MSYS
+      aliases are cached; command token mapping no longer realpaths every root
+      for every word. Per-target `actualPath()` is intentionally not cached
+      because file targets can be created, replaced, or linked between calls.
+- [x] The local `.grapher-path-audit/` hook remains untracked and is not CI
+      acceptance evidence; committed path behavior is covered by the repository
+      tests and the full Windows suites below.
 
 ## Windows verification log (2026-10-18)
 
@@ -295,7 +309,8 @@ Host: Windows 10.0.26300 x64, Node v24.16.0, npm 12.1.0, Git for Windows
 - `node --test scripts/workspace-paths.test.mjs` — 2 pass, 1 platform skip;
   Windows branch covers native/forward/MSYS/Cygwin/extended/doubled/URL
   spellings, external preservation and the `;` cygpath fallback
-- `node scripts/node-ts.mjs --test scripts/workspace-tools.test.ts` — pass
+- `node scripts/node-ts.mjs --test scripts/workspace-tools.test.ts` — pass;
+  includes registered `/tmp` file-tool conversion
 - `npm run test:native` — pass end to end (workspace paths, native runtime
   storage, workspace tools, `native::tests` 15, `native_runtime_storage::tests`
   11, `linux_sandbox::tests` 0, prewarm 18 + prepared-host/shared-runtime)
@@ -355,6 +370,14 @@ example ML datasets outside the checkout).
   (`$VAR`, `eval`, sourced scripts, `cmd.exe`/PowerShell); ordinary literal
   paths are covered.
 
+### External path spelling semantics
+
+- `physical()` and command adaptation preserve the caller's external spelling
+  where the access is not rewritten.
+- `read`/`write`/`edit` intentionally normalize to a host path after
+  `msysHostInput()`/`toHostInput()`/`resolveToCwd()`; file tools need a real
+  filesystem spelling, so this difference is deliberate, not an inconsistency.
+
 ### Workspace-external access audit (local-only, not in this repository)
 
 - The implementation is intentionally **not tracked and not a Pi extension**.
@@ -392,7 +415,8 @@ example ML datasets outside the checkout).
 - `node --test scripts/workspace-paths.test.mjs` — pass; includes junction
   identity, `actualPath` missing-leaf, `..` command normalization, nested
   aliases, external-escape preservation and native-vs-MSYS `/tmp` non-collision
-- `node scripts/node-ts.mjs --test scripts/workspace-tools.test.ts` — pass
+- `node scripts/node-ts.mjs --test scripts/workspace-tools.test.ts` — pass;
+  includes `/tmp` file-tool conversion
 - `node scripts/node-ts.mjs --test scripts/planner-bash.test.ts` — pass
 - `node --test scripts/environment-launch.test.mjs scripts/prepared-host.test.mjs`
   — pass

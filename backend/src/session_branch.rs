@@ -345,9 +345,16 @@ mod tests {
         let (header, preserved) = result.split_once('\n').unwrap();
         let header: Value = serde_json::from_str(header).unwrap();
         assert_eq!(header["id"], next);
-        assert_eq!(header["cwd"], json!(crate::native::host_path(
+        // Windows deliberately keeps the launched 8.3 spelling Pi reports from
+        // process.cwd(); Unix resolves the filesystem spelling. Assert the
+        // platform policy independently of the fork implementation's helper.
+        #[cfg(windows)]
+        let expected_cwd = crate::native::host_path(&new);
+        #[cfg(not(windows))]
+        let expected_cwd = crate::native::host_path(
             &crate::path_identity::actual_path(&new).unwrap()
-        )));
+        );
+        assert_eq!(header["cwd"], json!(expected_cwd));
         assert_eq!(header["parentSession"], json!(crate::native::host_path(&path)));
         assert_eq!(preserved, body);
         assert_eq!(fs::read_to_string(path).unwrap(), bytes);

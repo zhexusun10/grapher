@@ -116,6 +116,44 @@ export function toHostInput(value) {
   return hostPath(text);
 }
 
+// Git Bash mounts such as /tmp are not derivable from the drive spelling.
+// workspace-paths registers the exact aliases discovered through cygpath; the
+// mapper can then use the same conversion for file-tool read/write/edit input.
+const msysHostAliases = [];
+export function setMsysHostAliases(entries = []) {
+  msysHostAliases.length = 0;
+  const seen = new Set();
+  for (const [msys, host] of entries) {
+    if (typeof msys !== 'string' || typeof host !== 'string') continue;
+    const from = msys.replaceAll('\\', '/');
+    const to = host.replaceAll('\\', '/');
+    if (!from.startsWith('/') || from.startsWith('//') || from === to || seen.has(from)) continue;
+    seen.add(from);
+    msysHostAliases.push([from, to]);
+  }
+  msysHostAliases.sort(([a], [b]) => b.length - a.length);
+}
+
+/** Convert a registered Git Bash mount to the host path for tool input. */
+export function msysHostInput(value) {
+  if (process.platform !== 'win32' || typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) {
+    return value;
+  }
+  for (const [msys, host] of msysHostAliases) {
+    if (value === msys || value.startsWith(`${msys}/`)) {
+      return `${host}${value.slice(msys.length)}`;
+    }
+  }
+  // Standalone file-tool mappers may not have created a workspace yet. Git
+  // Bash's conventional /tmp is the host TEMP mount; cygpath aliases above
+  // take precedence when a workspace has registered the exact spelling.
+  if (value === '/tmp' || value.startsWith('/tmp/')) {
+    const temp = process.env.TEMP || process.env.TMP;
+    if (temp) return `${temp.replace(/[\\/]+$/, '').replaceAll('\\', '/')}${value.slice(4)}`;
+  }
+  return value;
+}
+
 /**
  * Resolve a path to its actual host spelling, keeping missing leaf components
  * under the deepest existing ancestor. This mirrors Rust `actual_path()` and

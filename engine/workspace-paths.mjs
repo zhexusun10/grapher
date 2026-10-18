@@ -1,8 +1,9 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { actualPath, foldPath, hostPath, isCaseInsensitive, mapPhysicalPath, pathStartsWith, pathWithin, toHostInput } from './path-identity.mjs';
+import { actualPath, foldPath, hostPath, isCaseInsensitive, mapPhysicalPath, msysHostInput, pathStartsWith, pathWithin, setMsysHostAliases, toHostInput } from './path-identity.mjs';
 
 // Explicit tool adaptation, not an operating-system mount namespace.
 
@@ -218,30 +219,27 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     ...extraWorkspaces.map(workspace => resolve(workspace)),
   ])];
   const projectRoots = [...new Set([base, resolve(sourceAlias)])].sort((a, b) => b.length - a.length);
-  if (process.platform === 'win32') {
-    prefetchMsysPaths([...allWorkspaces, ...projectRoots]
-      .map(value => hostPath(value).replaceAll('\\', '/')));
-  }
+  const tempHostSlash = process.platform === 'win32' ? hostPath(tmpdir()).replaceAll('\\', '/') : '';
+  const msysRoots = process.platform === 'win32'
+    ? [...new Set([...allWorkspaces, ...projectRoots, tempHostSlash]
+        .filter(Boolean)
+        .map(value => hostPath(value).replaceAll('\\', '/')))]
+    : [];
+  if (process.platform === 'win32') prefetchMsysPaths(msysRoots);
   // Map known Git Bash spellings back to their host roots before passing a path
   // to the shared mapper. Treating /tmp as C:\tmp would risk a false match;
-  // only roots we actually converted through Git's cygpath are eligible.
-  const msysHostAliases = process.platform === 'win32'
-    ? [...new Set([...allWorkspaces, ...projectRoots].map(value => hostPath(value).replaceAll('\\', '/')))]
-        .map(slash => [msysPath(slash), slash])
-        .filter(([msys, host]) => msys && msys !== host)
-        .sort(([a], [b]) => b.length - a.length)
-    : [];
-  const hostInput = value => {
-    if (process.platform !== 'win32' || typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) {
-      return value;
-    }
-    for (const [msys, host] of msysHostAliases) {
-      if (value === msys || value.startsWith(`${msys}/`)) {
-        return `${host}${value.slice(msys.length)}`;
-      }
-    }
-    return value;
-  };
+  // only roots we actually converted through Git's cygpath are eligible. The
+  // same registry is used by workspace-tools for read/write/edit input.
+  const msysHostAliases = msysRoots
+    .map(slash => [msysPath(slash), slash])
+    .filter(([msys, host]) => msys && msys !== host)
+    .sort(([a], [b]) => b.length - a.length);
+  setMsysHostAliases(msysHostAliases);
+  // Project roots are stable for this execution; resolve their Windows actual
+  // spelling once instead of running realpath for every absolute command word.
+  const actualProjectRoots = process.platform === 'win32'
+    ? projectRoots.map(root => actualPath(resolve(root)))
+    : null;
   const aliases = [...new Set(allWorkspaces.flatMap(variants))].sort((a, b) => b.length - a.length);
   const projects = [...new Set(projectRoots.flatMap(variants))].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s\\/"'`<>:;,&|()\[\]{}]/.test(c);
@@ -301,7 +299,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     // Git Bash mounts such as /tmp are not convertible by toHostInput() alone.
     // Convert only known roots, then use canonical roots so a real C:\tmp
     // path cannot be mistaken for the MSYS /tmp mount.
-    const host = hostInput(value);
+    const host = msysHostInput(value);
     const mapped = mapPhysicalPath(host, root, projectRoots, caseInsensitive);
     if (mapped === host && host !== value
         && !pathWithin(host, root, caseInsensitive)
@@ -394,6 +392,12 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
         while (tokenEnd < text.length && !/[\s"'`<>|;&()]/.test(text[tokenEnd])) tokenEnd++;
         const token = text.slice(i, tokenEnd);
         if (/(^|[\\/])\.{1,2}([\\/]|$)/.test(token)) {
+          // Do not guess a workspace-relative spelling for a dotted token that
+          // the word mapper could not resolve. Surface the residual inference
+          // instead of leaving a source path silently unadapted.
+          if (process.env.GRAPHER_PATH_DIAGNOSTICS !== '0') {
+            console.error(`[grapher-path] source-like token left unadapted because it contains . or ..: ${token}`);
+          }
           result += token;
           i = tokenEnd - 1;
           continue;
@@ -431,7 +435,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       const prefix = (assignment?.[1] ?? attached?.[1]) ?? '';
       const value = (assignment?.[2] ?? attached?.[2]) ?? word.value;
       const project = projects.find(project => pathPrefix(value, project));
-      const host = toHostInput(hostInput(value));
+      const host = toHostInput(msysHostInput(value));
       if (!project && (process.platform !== 'win32' || !isAbsolute(host))) continue;
       // Unquoted globs must retain glob semantics; the scanner below handles them.
       if (/[*?\[\]{}]/.test(value)) continue;
@@ -439,9 +443,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       let mappedRoot;
       if (isAbsolute(host)) {
         resolved = process.platform === 'win32' ? actualPath(host) : resolve(host);
-        mappedRoot = projectRoots
-          .map(candidate => process.platform === 'win32' ? actualPath(resolve(candidate)) : resolve(candidate))
-          .sort((a, b) => b.length - a.length)
+        mappedRoot = (actualProjectRoots ?? projectRoots.map(candidate => resolve(candidate)))
           .find(candidate => pathPrefix(resolved, candidate));
       }
       if (!project && !mappedRoot) continue;
