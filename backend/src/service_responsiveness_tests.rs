@@ -97,10 +97,15 @@ fn a_briefly_busy_unrelated_run_does_not_fail_an_existing_lookup() {
     }).unwrap();
     let busy = service_for_run(&primary, "busy", true).unwrap();
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    // This hold is a stand-in for a brief reader, not a schedule guarantee:
+    // the lookup budget absorbs the jitter of waking this thread on a loaded
+    // host, so the hold must stay an order of magnitude below it.
+    let hold = Duration::from_millis(20);
+    assert!(hold * 8 < SERVICE_LOOKUP_GRACE, "the lookup grace must absorb jitter");
     let holder = thread::spawn(move || {
         let guard = busy.runtime.lock().unwrap();
         locked_tx.send(()).unwrap();
-        thread::sleep(Duration::from_millis(30));
+        thread::sleep(hold);
         drop(guard);
     });
     locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();

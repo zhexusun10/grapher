@@ -276,6 +276,16 @@ fn materialize_job_source(
 const SERVICE_LOOKUP_BUSY: &str =
     "Run lookup is busy; retry after the current workspace operation";
 
+/// How long an existing-Run lookup waits for an unrelated Run to release its
+/// projection lock before reporting [`SERVICE_LOOKUP_BUSY`].
+///
+/// A colliding reader usually finishes in milliseconds, but scheduler jitter on
+/// a loaded host stretches even a short critical section by an order of
+/// magnitude, so this budget cannot be a tight bound on that work. It must stay
+/// far below client retry patience instead: a genuinely busy alias still fails
+/// fast rather than queueing behind a long replay.
+const SERVICE_LOOKUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Polling a background Run can collide with another Run's replay. That is a
 /// retryable condition, not a client error; encode it in the same shape as a
 /// busy Run lock so the poller backs off without a failed HTTP request.
@@ -383,7 +393,7 @@ fn service_for_run(
         // milliseconds. Give those short-lived readers a moment to release
         // before treating an unverifiable identity as a real alias conflict.
         if !busy_candidates.is_empty() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(80);
+            let deadline = std::time::Instant::now() + SERVICE_LOOKUP_GRACE;
             loop {
                 let mut remaining = Vec::new();
                 for service in busy_candidates {
