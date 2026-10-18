@@ -115,6 +115,6 @@ a passing group check is not detection or cleanup evidence for detached Bash wri
 
 ## Validation
 
-[Testing](../development/testing.md) separates fixtures, real Pi launcher checks, platform boundary tests, and real-model acceptance. Passing one category does not prove the others.
+[Testing](../development/testing.md) lists fixture, Pi launcher, and platform-boundary checks. Validate permission changes on the affected platform.
 
 Implementation: [native.rs](../../backend/src/native.rs), [sandbox.rs](../../backend/src/sandbox.rs), [linux_sandbox.rs](../../backend/src/linux_sandbox.rs), [workspace-paths.mjs](../../engine/workspace-paths.mjs), [workspace-tools.ts](../../engine/workspace-tools.ts), and [prompt-extension.ts](../../engine/prompt-extension.ts).

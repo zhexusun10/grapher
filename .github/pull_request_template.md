@@ -4,7 +4,7 @@
 
 ## Validation
 
-<!-- List exact checks run and their results. Explain skipped checks. -->
+<!-- List checks run and their results. Mention only validation gaps relevant to this change. -->
 
 ## Risks and limitations
 
@@ -16,4 +16,4 @@
 - [ ] I added or updated relevant tests, or explained why none are needed.
 - [ ] I reviewed affected contracts/task routes and updated applicable canonical docs and summaries.
 - [ ] I reviewed logs/assets for secrets and private data.
-- [ ] I distinguish fixture/local-model checks from live-model results and do not claim untested sandbox guarantees.
+- [ ] My validation claims match the checks run and relevant platform coverage.

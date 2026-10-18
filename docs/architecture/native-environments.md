@@ -1,11 +1,23 @@
 # Native workspace environment control
 
 > **Maturity:** experimental; full native acceptance remains open.
-> **Scope:** Backend-owned environment admission, Graph NodeAgent E/L, native resource controls and model-free result execution. No VM, WSL, container fallback, new allocator or maintenance Agent.
+> **Scope:** Backend-owned environment admission, Graph node environment snapshots and launch bindings, native resource controls and model-free result execution. No VM, WSL, container fallback, new allocator or maintenance Agent.
 > **Maintained with:** [automatic admission](../../backend/src/environment_automatic.rs), [tool observations](../../backend/src/environment_discovery.rs), [environment state](../../backend/src/environment.rs), [resources](../../backend/src/environment_resources.rs), [runtime](../../backend/src/runtime.rs), [launch binding](../../engine/launch-binding.mjs), [state tests](../../backend/src/environment_tests.rs) and [native acceptance](../../scripts/environment-native.test.ts).
 
 This page owns the implemented contract. The capability limitations and native
 acceptance boundaries below distinguish it from unimplemented design goals.
+
+## Terms and stored references
+
+| Term | Meaning |
+| --- | --- |
+| W | Current physical workspace directory; ownership follows Runtime's allocator, not a permanent node identity. |
+| D | `Domain`: platform, architecture, baseline, policy, and execution-contract identity. |
+| E / `environmentRef` | Immutable managed-environment filesystem snapshot, separate from project Git files. |
+| L / `launchRef` | Versioned `LaunchConfig`: business entry, PATH, variables, hooks, and verified binding metadata; inherited credentials are named, not stored as values. |
+| `codeRef` | Git reference for the recorded project-code state. |
+
+[Domain, LaunchConfig, and CompositeResult](../../backend/src/environment.rs) define the stored shapes. E/L are evidence and launch inputs, not additional user-selectable modes.
 
 ## Admission and configuration
 
@@ -117,8 +129,9 @@ Verification does not save new blobs or repair missing history from a live direc
 
 A failed database commit may leave unreferenced storage but never a completion
 referring to an incomplete seal. A missing current workspace view is rebuilt only
-from the current managed composite when the result contract requires it; ordinary
-files have no reconstruction guarantee.
+from the current managed composite when the result contract requires it.
+Environment evidence alone does not reconstruct ordinary project files; those
+follow the [Git workspace contract](workspace-snapshots-and-feedback.md#cleanup-and-reproducibility).
 
 Feedback retains pinned sender results, generation/budget checks and
 **drain-before-handoff**. It forks only the receiver's own history. Failed and
@@ -262,4 +275,4 @@ Unsupported strong requirements fail closed, not by changing OS, mode, layout
 or device. Compiled capability reporting and configured CI are not native
 acceptance evidence.
 
-Run `npm run test:environment` for local native regressions; see [Testing](../development/testing.md) for prerequisites and opt-in profiles.
+For local native regressions, see [Testing](../development/testing.md) for suite selection, host prerequisites, and explicitly opt-in profiles.

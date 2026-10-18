@@ -1,8 +1,10 @@
 # Development guide
 
-Grapher uses a React/TypeScript UI, a Rust backend, and a pinned upstream Pi submodule. Start with the root [README quick start](../../README.md#quick-start), then [Architecture](../architecture/overview.md).
+This guide is for contributors changing Grapher itself. For application use, follow the [README quick start](../../README.md#quick-start). [Architecture](../architecture/overview.md) explains system boundaries; the [task index](../index.md#task-routes) locates implementation and tests.
 
 ## Set up a checkout
+
+Install Node.js 22.19+, npm, Git, stable Rust, and native compiler/linker tools. Windows needs Git for Windows Bash and the linker for the selected Rust toolchain; macOS needs Xcode Command Line Tools. Linux Graph execution needs bubblewrap and permitted unprivileged user/mount/PID namespaces. Initial setup needs network access.
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
@@ -12,7 +14,11 @@ npm run pi:setup
 npm run dev
 ```
 
-Use `npm run frontend` and `npm run backend` for separate terminals if needed; keep their `GRAPHER_PORT` setting consistent. The UI runs at `127.0.0.1:1420`, with `/api` proxied to the local backend at `1421` by default.
+The UI runs at `127.0.0.1:1420`, with `/api` proxied to the local backend at `1421` by default. The first Cargo build can take several minutes.
+
+For separate terminals, use `npm run frontend` and `npm run backend`, exporting the same `GRAPHER_PORT` to both if you change it. The combined dev launcher loads `.env` or `backend/.env`; the standalone Vite command reads the backend port from its process environment.
+
+After dependency setup, `npm run build` followed by `npm start` serves the production UI at `http://127.0.0.1:1421` (or the configured backend port), without Vite.
 
 ## Code ownership
 
@@ -43,22 +49,17 @@ A proposed runtime change should identify affected invariants and include regres
 
 ## Before submitting a change
 
-Run the check matching the affected area:
+Select relevant checks from [Testing](testing.md); include integration/platform checks when the changed behavior needs them. Report actual commands and results, plus relevant validation gaps—not a list of unrelated suites that were not run.
 
-```sh
-npm run check
-npm run build
-# plus the targeted frontend/engine or Rust test from the testing guide
-```
-
-Full suites (`npm run test:frontend`, `npm test`) are for cross-layer changes or when explicitly requested. Engine/provider/tool changes additionally need Pi contracts and applicable native/extension/binding tests. Platform changes need checks on the actual platform. [Testing](testing.md) explains prerequisites and what each suite can establish.
-
-Include a clear description of behavior, tests run, known limits, and any change to persisted state or credentials. Separate generated evidence from source. Do not claim a model-quality or sandbox guarantee based on fixtures alone.
+Describe behavior changes and effects on persisted state or credentials. Keep generated evidence separate from source.
 
 ## Documentation policy
 
 English is canonical under `docs/`; [README.zh-CN.md](../../README.zh-CN.md) remains the Chinese product entrypoint.
 
+- **User documentation:** README pages explain the product and the shortest usable startup path. Keep them concise; do not require readers to understand implementation contracts or run contributor tests.
+- **Developer documentation:** Explain the relevant scope, prerequisites, mechanisms, rationale, and verification limits. Distinguish implemented behavior from proposals and design goals; link focused implementation/tests rather than treating intent as proof.
+- **Agent instructions:** Follow the [instruction-file constraints](../../AGENTS.md#instruction-scope); keep task-specific rationale and procedures in developer documentation, not automatically loaded instructions.
 - Update the single canonical page when behavior changes, and link implementation/tests instead of copying volatile constants or UI details.
 - Do not add a second explanation of an existing contract, a dated verification log, or a local run report.
 - Keep sensitive logs and local reports in ignored runtime/output directories, not public documentation.
