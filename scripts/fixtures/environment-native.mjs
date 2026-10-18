@@ -16,7 +16,7 @@ export function venvCreationCommand(python) {
 
 export async function startBackgroundWriter(cwd, signal) {
   const marker = join(cwd, '.venv/background-partial');
-  const writer = "const fs=require('node:fs'),marker=process.argv[1]; let ticks=0; fs.writeFileSync(marker+'-heartbeat','0'); fs.writeFileSync(marker,'partial'); const timer=setInterval(()=>fs.writeFileSync(marker+'-heartbeat',String(++ticks)),100); setTimeout(()=>clearInterval(timer),90_000)";
+  const writer = "const fs=require('node:fs'),marker=process.argv[1],heartbeat=marker+'-heartbeat';let ticks=0;const writeHeartbeat=value=>{const temp=heartbeat+'.tmp';fs.writeFileSync(temp,value);try{fs.renameSync(temp,heartbeat)}catch{fs.writeFileSync(heartbeat,value);fs.rmSync(temp,{force:true})}};writeHeartbeat('0');fs.writeFileSync(marker,'partial');const timer=setInterval(()=>{ticks+=1;writeHeartbeat(String(ticks))},100);setTimeout(()=>clearInterval(timer),90_000)";
   const child = spawn(process.execPath, ['-e', writer, marker], {
     // Unix retains the owner's process group. On Windows, detached skips
     // libuv's own kill-on-parent-exit child Job but still inherits Rust's Job.

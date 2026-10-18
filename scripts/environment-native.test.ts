@@ -368,7 +368,17 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     }, 'background writer boundary');
     // A settled result must stop the 90-second writer instead of waiting it out.
     const settledHeartbeat = join(backgroundSettled.executions[0].worktree, '.venv/background-partial-heartbeat');
-    assert.match(await readFile(settledHeartbeat, 'utf8'), /^\d+$/, 'the extension writer really started');
+    let heartbeat = '';
+    const heartbeatDeadline = Date.now() + 10_000;
+    while (Date.now() < heartbeatDeadline) {
+      t.signal.throwIfAborted();
+      try {
+        const text = await readFile(settledHeartbeat, 'utf8');
+        if (/^\d+$/.test(text)) { heartbeat = text; break; }
+      } catch {}
+      await delay(50);
+    }
+    assert.match(heartbeat, /^\d+$/, 'the extension writer really started');
     const quiet = async (path: string) => {
       const before = await readFile(path, 'utf8');
       await delay(400);

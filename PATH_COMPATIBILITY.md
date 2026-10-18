@@ -339,8 +339,15 @@ Commands were run sequentially (parallel cargo builds can lock `grapher.exe`):
   `windows-native.test.ts` passed, `prepared-host.test.mjs` passed,
   `merger-native.test.ts` passed (including continuation/follow-up),
   `test:prewarm` passed 4/4, and `server::planner_workspace_tests` passed 10/10.
-  Node continue/follow-up state is covered by the full `runtime::tests` suite;
-  the UI Continue button was not manually clicked.
+- `environment-native.test.ts` with a `ge-中 space-*` Windows path passed in
+  116s (modelCalls 28): managed environment install once, editable/launchers,
+  current follow-up, result startup and drain.
+  The macOS CI writer heartbeat failure was fixed by atomically renaming the
+  fixture heartbeat and retrying the read briefly; the same test passed on
+  Windows, while the macOS CI rerun is still required to confirm that lane.
+- Node continue/follow-up state is covered by the full `runtime::tests` suite,
+  this real environment follow-up test, and the real Merger continuation; the
+  UI Continue button was not manually clicked.
 
 ## Windows verification log (2026-10-18)
 
