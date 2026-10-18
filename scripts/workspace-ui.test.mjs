@@ -297,19 +297,27 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     await page.locator('[data-run-id="run-a"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Alpha conversation" }).waitFor();
 
-    // Switching while repository detection yields cannot bind Alpha to Beta.
+    // Switching while repository detection yields cannot bind Alpha to Beta,
+    // and always lands on home instead of opening the newest conversation.
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    await page.locator(".landing-screen").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
+    assert.equal(await page.locator(".run-item.chosen").count(), 0);
     await page.locator('[data-run-id="run-b"]').waitFor();
-    await page.locator(".chat-messages-stream", { hasText: "Beta conversation" }).waitFor();
     assert.equal(await page.locator('.runs-list [data-run-id="run-a"]').count(), 0);
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_workspace_runs"))), {
       "c:/projects/alpha": ["run-a"], "c:/projects/beta": ["run-b"],
     });
 
+    // Opening a conversation remains an explicit action inside the workspace.
+    await page.locator('[data-run-id="run-b"]').click();
+    await page.locator(".chat-messages-stream", { hasText: "Beta conversation" }).waitFor();
+
     // Start Alpha planning, navigate away, then release its delayed SSE result.
     await page.locator(".project-workspace-item", { hasText: "Alpha" }).click();
-    await page.locator(".chat-messages-stream", { hasText: "Alpha conversation" }).waitFor();
-    await page.getByRole("button", { name: "New conversation", exact: true }).click();
+    await page.locator(".landing-screen").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
+    assert.equal(await page.locator(".run-item.chosen").count(), 0);
     await page.locator(".landing-screen textarea").fill("Detached Alpha conversation");
     await page.locator(".landing-screen textarea").press("Enter");
     await page.waitForFunction(() => !!document.querySelector('.run-item[data-run-id^="pending-"]'));
@@ -318,6 +326,9 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     await page.locator(".main-view-stage").click({ position: { x: 10, y: 10 } });
     while (!planningRequested) await page.waitForTimeout(20);
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    await page.locator(".landing-screen").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
+    await page.locator('[data-run-id="run-b"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Beta conversation" }).waitFor();
     releasePlanning();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_workspace_runs"))["c:/projects/alpha"]?.includes("new-a"));
@@ -431,6 +442,8 @@ test("workspace removal commits backend deletion before pruning indexes and surv
     while (removals.length < 2) await page.waitForTimeout(10);
     assert.equal(await page.locator(".project-workspace-item").count(), 2, "pending deletion must not hide the workspace");
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    await page.locator(".landing-screen").waitFor();
+    await page.locator('[data-run-id="run-b"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Beta conversation" }).waitFor();
     releaseDeletion();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_projects")).length === 1);
@@ -537,8 +550,12 @@ test("removing active workspace returns to home landing page instead of switchin
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_projects")).map(p => p.name)), ["Beta"]);
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).repository), "");
 
-    // User can still manually navigate to Beta if they choose to
+    // Switching to Beta still starts at home; the user opens its conversation explicitly.
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    await page.locator(".landing-screen").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
+    assert.equal(await page.locator(".run-item.chosen").count(), 0);
+    await page.locator('[data-run-id="run-b"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Beta conversation" }).waitFor();
     assert.deepEqual(errors, []);
   } finally {

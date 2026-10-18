@@ -514,7 +514,7 @@ test('prepared native runtime includes continuity and respects the same removabl
     }).trim();
     assert.ok(existsSync(join(runtime, 'node_modules/pi-continuity/extensions/index.ts')));
     assert.ok(existsSync(join(runtime, 'node_modules/pi-continuity/lib/continuity.ts')));
-    assert.ok(existsSync(join(runtime, 'node_modules/pi-better-web-search/src/index.ts')));
+    assert.ok(existsSync(join(runtime, 'node_modules/pi-better-web-search/extensions/index.ts')));
     const result = join(f.base, 'native-commands.json');
     writeFileSync(f.extension, `import { writeFileSync } from 'node:fs';
 export default function (pi) {

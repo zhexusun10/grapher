@@ -61,7 +61,7 @@ try {
   for (const file of ['scripts/pi-baseline.mjs', 'scripts/pi-dependencies.mjs', 'scripts/prepare-native-runtime.mjs',
     'scripts/cargo.mjs', 'scripts/bundled-extensions.mjs', 'scripts/model-data-manifest.mjs', 'package.json', 'dist/index.html', 'pi/.git/HEAD',
     'node_modules/pi-trim/extensions/index.ts', 'node_modules/pi-continuity/extensions/index.ts',
-    'node_modules/pi-better-web-search/src/index.ts',
+    'node_modules/pi-better-web-search/extensions/index.ts',
     'START-HERE.md', platform === 'windows' ? 'start.bat' : 'start.sh']) {
     assert.ok(existsSync(join(installation, file)), `Missing package file: ${file}`);
   }

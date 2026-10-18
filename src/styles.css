@@ -227,6 +227,7 @@ h3 {
 /* 侧边栏 (悬浮圆角卡片模式) */
 .sidebar {
   --sidebar-content-width: 230px;
+  --sidebar-scrollbar-offset: 10px;
   --sidebar-anim-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --sidebar-width-duration: 0.32s;
   --sidebar-content-duration: 0.2s;
@@ -272,8 +273,11 @@ h3 {
 
 .sidebar .projects-list,
 .sidebar .runs-list {
-  width: var(--sidebar-content-width, 230px);
-  min-width: var(--sidebar-content-width, 230px);
+  width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
+  min-width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
+  margin-right: calc(-1 * var(--sidebar-scrollbar-offset, 10px));
+  padding-right: var(--sidebar-scrollbar-offset, 10px);
+  box-sizing: border-box;
   flex-shrink: 0;
 }
 
@@ -448,9 +452,8 @@ a,
   opacity: 0;
   visibility: hidden;
   max-height: 0;
-  margin-bottom: 0;
-  padding-top: 0;
-  padding-bottom: 0;
+  margin: 0;
+  padding: 0;
   pointer-events: none;
   overflow: hidden;
   transform: translateX(-8px);
@@ -590,9 +593,11 @@ a,
   max-height: 240px;
   flex-shrink: 0;
   margin-bottom: 12px;
-  padding-right: 2px;
-  width: var(--sidebar-content-width, 230px);
-  min-width: var(--sidebar-content-width, 230px);
+  margin-right: calc(-1 * var(--sidebar-scrollbar-offset, 10px));
+  padding-right: var(--sidebar-scrollbar-offset, 10px);
+  width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
+  min-width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
+  box-sizing: border-box;
 }
 
 .project-workspace-item {
@@ -906,6 +911,9 @@ a,
   align-items: center;
   justify-content: center;
   padding: 20px 12px;
+  width: var(--sidebar-content-width, 230px);
+  min-width: var(--sidebar-content-width, 230px);
+  box-sizing: border-box;
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   border-radius: 8px;
@@ -1061,9 +1069,11 @@ a,
   overflow-x: hidden;
   flex: 1;
   min-height: 0;
-  padding-right: 2px;
-  width: var(--sidebar-content-width, 230px);
-  min-width: var(--sidebar-content-width, 230px);
+  margin-right: calc(-1 * var(--sidebar-scrollbar-offset, 10px));
+  padding-right: var(--sidebar-scrollbar-offset, 10px);
+  width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
+  min-width: calc(var(--sidebar-content-width, 230px) + var(--sidebar-scrollbar-offset, 10px));
+  box-sizing: border-box;
 }
 
 /* Modern shimmer skeleton loading placeholder */
@@ -1292,7 +1302,8 @@ a,
   white-space: normal;
   word-break: break-word;
   line-height: 1.4;
-  width: 100%;
+  width: var(--sidebar-content-width, 230px);
+  min-width: var(--sidebar-content-width, 230px);
   box-sizing: border-box;
   animation: sidebarListFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
 }

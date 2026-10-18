@@ -1,6 +1,6 @@
 {
   "name": "grapher",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -48,7 +48,7 @@
     "lucide-react": "0.468.0",
     "marked": "^18.0.13",
     "motion": "^13.2.0",
-    "pi-better-web-search": "0.1.0",
+    "pi-better-web-search": "0.1.4",
     "pi-continuity": "0.2.1",
     "pi-trim": "0.2.0",
     "react": "19.2.0",

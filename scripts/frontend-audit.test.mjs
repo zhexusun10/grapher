@@ -1636,7 +1636,12 @@ test("late node sends and edits cannot overwrite another workspace or its compos
     assert.ok(!(await page.locator(".chat-messages-stream").innerText()).includes("Retryable follow-up"));
     await composer.press("Enter");
     await waitFor(() => controls === 2);
+    // Switching workspaces lands on home; the Beta conversation is opened explicitly.
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    await page.locator(".landing-screen").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
+    assert.equal(await page.locator(".run-item.chosen").count(), 0);
+    await page.locator('[data-run-id="b"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Beta original" }).waitFor();
     await composer.fill("Beta draft");
     sendGate.resolve();
@@ -1646,6 +1651,9 @@ test("late node sends and edits cannot overwrite another workspace or its compos
     assert.equal(await page.locator(".run-item.chosen").getAttribute("data-run-id"), "b");
     assert.ok(!(await page.locator(".chat-messages-stream").innerText()).includes("Alpha"));
     await page.locator(".project-workspace-item", { hasText: "Alpha" }).click();
+    await page.locator(".landing-screen").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
+    await page.locator('[data-run-id="a"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Alpha original" }).waitFor();
     await page.locator(".chat-user-message-card-wrapper").first().hover();
     await page.locator(".chat-message-edit-btn").first().click();
@@ -1654,6 +1662,9 @@ test("late node sends and edits cannot overwrite another workspace or its compos
     await editor.press("Enter");
     await waitFor(() => edits === 1);
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    await page.locator(".landing-screen").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
+    await page.locator('[data-run-id="b"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Beta original" }).waitFor();
     await composer.fill("Beta next draft");
     editGate.resolve();

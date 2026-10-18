@@ -16,7 +16,7 @@ import {
 for (const [name, entry] of [
   ['pi-trim', './extensions/index.ts'],
   ['pi-continuity', './extensions/index.ts'],
-  ['pi-better-web-search', './src/index.ts'],
+  ['pi-better-web-search', './extensions/index.ts'],
 ]) {
   test(`bundled ${name} matches the selected exact release, manifest and lock integrity`, () => {
     const installed = JSON.parse(readFileSync(new URL(`../node_modules/${name}/package.json`, import.meta.url), 'utf8'));

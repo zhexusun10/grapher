@@ -19,7 +19,7 @@ export const bundledTrim = fileURLToPath(new URL('../node_modules/pi-trim/extens
 export const continuityId = 'npm:pi-continuity';
 export const bundledContinuity = fileURLToPath(new URL('../node_modules/pi-continuity/extensions/index.ts', import.meta.url));
 export const webSearchId = 'npm:pi-better-web-search';
-export const bundledWebSearch = fileURLToPath(new URL('../node_modules/pi-better-web-search/src/index.ts', import.meta.url));
+export const bundledWebSearch = fileURLToPath(new URL('../node_modules/pi-better-web-search/extensions/index.ts', import.meta.url));
 // Bundled extensions are pinned project dependencies; only trim is mandatory.
 const bundledExtensions = [
   { id: trimId, name: 'pi-trim', path: bundledTrim, required: true, defaultEnabled: true },

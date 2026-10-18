@@ -2678,6 +2678,7 @@ button.session-label-toggle:focus-visible {
 @media (max-width: 1180px) {
   .sidebar:not(.is-collapsed) {
     --sidebar-content-width: 162px;
+    --sidebar-scrollbar-offset: 7px;
     width: 184px;
     max-width: 184px;
     padding-left: 10px;

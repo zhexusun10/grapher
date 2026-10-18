@@ -242,14 +242,14 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
     }
     const webSearch = renderToStaticMarkup(React.createElement(ExtensionItem, {
       extension: { id: 'npm:pi-better-web-search', name: 'pi-better-web-search', source: 'npm:pi-better-web-search',
-        path: '/Users/jerry/.pi/agent/npm/node_modules/pi-better-web-search/src/index.ts', bundled: true,
+        path: '/Users/jerry/.pi/agent/npm/node_modules/pi-better-web-search/extensions/index.ts', bundled: true,
         required: false, enabled: false },
       disabled: false, onToggle() {},
     }));
     assert.match(webSearch,
       /registers the web_search tool provided by available model providers; the tool is not registered when no provider can search/,
       'web search describes its provider-gated tool registration');
-    assert.ok(!webSearch.includes('src/index.ts'), 'bundled web search describes its purpose instead of exposing a local path');
+    assert.ok(!webSearch.includes('extensions/index.ts'), 'bundled web search describes its purpose instead of exposing a local path');
   } finally { await vite.close(); }
 });
 

@@ -5,6 +5,25 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-18
+
+### Changed
+
+- Upgraded the bundled `pi-better-web-search` extension from `0.1.0` to `0.1.4`, adapting its entrypoint to `extensions/index.ts`.
+- Switching project workspaces now resets cleanly to the home view instead of auto-opening the most recent conversation; existing conversations remain accessible from the sidebar.
+- Clarified the Planner model description in Settings to refer to "Execution graph" (`执行拓扑图`) rather than "Collaborative graph" (`协作拓扑图`).
+
+### Fixed
+
+- Input composer now preserves the draft message when the backend does not acknowledge receipt or before the Planner bootstraps, preventing message loss on delivery failures.
+- Sidebar scroll container styling adjusted with dedicated offset and padding variables (`--sidebar-scrollbar-offset`), preventing the scrollbar from overlapping project and run cards.
+- Hardened cross-platform path compatibility across Windows, macOS, and Linux:
+  - Preserved launched session working directory spellings on Windows.
+  - Resolved workspace roots with native realpath to handle 8.3 short paths and junctions consistently.
+  - Normalized Git Bash / MSYS mount paths (such as `/tmp/...`) to host paths before file-tool resolution.
+  - Handled workspace paths containing semicolons safely with single-value `cygpath` fallbacks instead of broken batch splitting.
+  - Excluded platform-specific ignored host metadata from Git snapshots portably using `git ls-files`.
+
 ## [1.2.0] - 2026-10-18
 
 ### Added
@@ -64,5 +83,6 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
+[1.2.1]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.1
 [1.2.0]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.0
 [1.1.0]: https://github.com/zhexusun10/grapher/releases/tag/v1.1.0

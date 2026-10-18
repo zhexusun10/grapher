@@ -1077,8 +1077,9 @@ export default function App() {
     if (workspaceKey(config.repository) === workspaceKey(proj.path)) return;
     setSwitchingProjectPath(proj.path);
     const scope = detachForeground(proj.path);
-    // Reset to new-conversation defaults synchronously; the selected Run applies
-    // its own model selection once its snapshot is loaded.
+    // Switching workspaces always lands on the home view. The workspace's
+    // conversations stay available in the sidebar, but the newest one is not
+    // opened automatically; the user starts from a fresh conversation.
     setConfig(prev => applyModelConfig(
       { ...prev, repository: normalizeWorkspacePath(proj.path) }, defaultSettings));
     setRepoInfo(null);
@@ -1086,15 +1087,14 @@ export default function App() {
     setRouteType("undecided");
     setPlannerStream(initialPlannerStream);
     setGoal("");
+    setLandingGoal(loadLandingDraft(normalizeWorkspacePath(proj.path)));
     setSelected("");
+    setError("");
     resetSessionMessages();
     return run(async () => {
-      let loadedSnapshot: Snapshot = emptySnapshot;
-      let targetPath = normalizeWorkspacePath(proj.path);
       try {
         const info = await runtimeService.detectRepository(proj.path);
         if (!planningRecovery.current(scope)) return;
-        if (info) targetPath = normalizeWorkspacePath(info.path);
         if (info) {
           setRepoInfo({ ...info, path: normalizeWorkspacePath(info.path) });
           setConfig((prev) => ({ ...prev, repository: normalizeWorkspacePath(info.path) }));
@@ -1113,51 +1113,12 @@ export default function App() {
           setRepoInfo(null);
           setConfig((prev) => ({ ...prev, repository: proj.path }));
         }
-        const projRuns = workspaceRuns[workspaceKey(proj.path)] || [];
-        if (projRuns.length > 0) {
-          try {
-            const snapshot = await runtimeService.snapshotForRun(projRuns[0]);
-            if (!planningRecovery.current(scope)) return;
-            if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
-            if (!snapshotBelongsToWorkspace(snapshot, proj.path)) throw new Error("Workspace ownership mismatch");
-            const deduced = deduceRouteType(snapshot);
-            setState(snapshot);
-            setRouteType(deduced);
-            setGoal(snapshot.graph.originalGoal || "");
-            setSessionEntries(messagesByRunRef.current.get(snapshot.runId) ?? []);
-            setEditingMessage(null);
-            setEditPrefillText("");
-            setSelected("");
-            loadedSnapshot = snapshot;
-          } catch {
-            if (!planningRecovery.current(scope)) return;
-            setState(emptySnapshot);
-            loadedSnapshot = emptySnapshot;
-            setRouteType("undecided");
-            setPlannerStream(initialPlannerStream);
-            setGoal("");
-            resetSessionMessages();
-          }
-        } else {
-          setState(emptySnapshot);
-          loadedSnapshot = emptySnapshot;
-          setRouteType("undecided");
-          setPlannerStream(initialPlannerStream);
-          setGoal("");
-          resetSessionMessages();
-        }
-        const conversationConfig = snapshotModelConfig(loadedSnapshot, targetPath);
-        if (conversationConfig) {
-          setConfig((prev) => workspaceKey(prev.repository) === workspaceKey(targetPath)
-            ? applyModelConfig(prev, conversationConfig)
-            : prev);
-        }
         setError("");
-        void planningRecovery.restore(scope, loadedSnapshot);
       } finally {
-        if (planningRecovery.current(scope)) {
-          setSwitchingProjectPath(null);
-        }
+        // Clear this workspace's spinner even if a newer foreground action
+        // superseded the switch; a different switch keeps its own spinner.
+        setSwitchingProjectPath(current =>
+          current && workspaceKey(current) === workspaceKey(proj.path) ? null : current);
       }
     });
   };

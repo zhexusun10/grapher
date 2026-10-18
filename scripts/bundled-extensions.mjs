@@ -5,7 +5,7 @@ import { join } from 'node:path';
 export const bundledExtensions = [
   { name: 'pi-trim', entry: 'extensions/index.ts' },
   { name: 'pi-continuity', entry: 'extensions/index.ts' },
-  { name: 'pi-better-web-search', entry: 'src/index.ts' },
+  { name: 'pi-better-web-search', entry: 'extensions/index.ts' },
 ];
 export const bundledExtensionNames = bundledExtensions.map(extension => extension.name);
 
