@@ -78,6 +78,12 @@ remote-command and cross-volume case-heuristic limitations.
       `PathBuf` (Windows-only compile failure reported by the handoff host)
 - [x] Planner session rebind locates legacy/arbitrary JSONL filenames by header
       identity; Node session resume keeps the strict `_<id>.jsonl` contract
+- [x] Non-macOS `repository_status` reports new ignored host metadata that
+      forced snapshots would collect; tracked edits stay visible and internal
+      `.grapher*`/scope/data paths stay filtered. Covered by a platform-neutral
+      filter unit test.
+- [x] Prepared-host binding accepts runtime-owned CDPATH/OLDPWD/GLOBIGNORE
+      removals and TMP/TEMP/TMPDIR/XDG_RUNTIME_DIR values
 
 ## Windows host handoff (next)
 
@@ -161,6 +167,10 @@ Targeted checks run while implementing:
 - `node scripts/cargo.mjs check` and `npm run check` — pass
 - `server::prompt_tests` — 62 passed (includes revision/session follow-up)
 - `server::planner_review_tests` — 9 passed (includes auto/manual post-task review)
+- `workspace::workspace_tests` — 8 passed (host metadata snapshot/status)
+- `workspace::status_filter_tests` — 1 passed (macOS vs other-host filtering)
+- `scripts/prewarm-http.test.mjs` — auto-refill prepared-host binding pass
+- `scripts/prepared-host.test.mjs` — three-role binding pass
 - Windows-only assertions (drive-letter case, `/c/...`, batch `cygpath`,
   extended paths) are covered by the existing Windows test and run in the
   Windows CI lane; they could not be executed on this macOS host.

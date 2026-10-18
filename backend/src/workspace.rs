@@ -2115,22 +2115,48 @@ pub(crate) fn scoped_args<'a>(base: &[&'a str], exclusions: &'a [String]) -> Vec
 }
 
 pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<String, String> {
-    if !cfg!(target_os = "macos") {
-        let args = scoped_args(&["status", "--porcelain"], exclusions);
-        return repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>());
-    }
-    // NUL-delimited output applies to both standard and shadow repositories,
-    // lets the filter keep paths with spaces exact, and distinguishes tracked
-    // changes from untracked Finder metadata.
-    let args = scoped_args(&["status", "--porcelain", "-z"], exclusions);
+    // NUL-delimited output keeps paths with spaces exact. Non-macOS keeps
+    // ignored host metadata visible because `stage_scoped` force-collects
+    // ordinary ignored project files; Grapher internals and declared scopes are
+    // filtered below.
+    let base: &[&str] = if cfg!(target_os = "macos") {
+        &["status", "--porcelain", "-z"]
+    } else {
+        &["status", "--porcelain", "-z", "--ignored"]
+    };
+    let args = scoped_args(base, exclusions);
     let raw = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
-    Ok(filtered_status(raw))
+    Ok(filtered_status(raw, path, exclusions))
 }
 
-fn filtered_status(raw: String) -> String {
-    if !cfg!(target_os = "macos") || raw.is_empty() {
+fn filtered_status(raw: String, root: &Path, exclusions: &[String]) -> String {
+    filtered_status_for(raw, root, exclusions, cfg!(target_os = "macos"))
+}
+
+fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: bool) -> String {
+    if raw.is_empty() {
         return raw;
     }
+    let root = root.canonicalize().ok();
+    let data = data_root().canonicalize().ok();
+    let excluded = |name: &str| {
+        if crate::path_identity::is_runtime_metadata_path(Path::new(name)) {
+            return true;
+        }
+        if exclusions
+            .iter()
+            .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
+        {
+            return true;
+        }
+        root.as_ref().zip(data.as_ref()).is_some_and(|(root, data)| {
+            data.strip_prefix(root).ok().is_some_and(|relative| {
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                !relative.is_empty()
+                    && (name == relative || name.starts_with(&format!("{relative}/")))
+            })
+        })
+    };
     let mut lines = Vec::new();
     let mut fields = raw.split('\0');
     while let Some(entry) = fields.next() {
@@ -2140,7 +2166,17 @@ fn filtered_status(raw: String) -> String {
         let code = &entry[..2];
         let path = &entry[3..];
         let renamed = code.contains('R') || code.contains('C');
-        if code == "??" && is_host_metadata(path) {
+        // macOS treats Finder bookkeeping as host metadata. Elsewhere it is an
+        // ordinary project file, but only ignored host metadata is added by
+        // `--ignored`; unrelated build output stays out of the dirty report.
+        if is_host_metadata_name(path) {
+            if macos && (code == "??" || code == "!!") {
+                continue;
+            }
+            if code == "!!" && excluded(path) {
+                continue;
+            }
+        } else if code == "!!" {
             continue;
         }
         let mut line = format!("{code} {path}");
@@ -2154,15 +2190,20 @@ fn filtered_status(raw: String) -> String {
     lines.join("\n")
 }
 
+/// Host bookkeeping that macOS filters from dirty reports; other hosts still
+/// force-collect it as ordinary project data.
+fn is_host_metadata_name(relative: &str) -> bool {
+    let relative = relative.trim_end_matches('/');
+    let name = relative.rsplit('/').next().unwrap_or(relative);
+    name == ".DS_Store" || name.starts_with("._")
+}
+
+
 /// macOS host bookkeeping is not project output. Windows keeps its existing
 /// collection strategy because its metadata files are not part of this policy.
 /// Tracked metadata remains in the snapshot: the caller re-adds exact paths.
 fn is_host_metadata(relative: &str) -> bool {
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
-    let name = relative.rsplit('/').next().unwrap_or(relative);
-    name == ".DS_Store" || name.starts_with("._")
+    cfg!(target_os = "macos") && is_host_metadata_name(relative)
 }
 
 fn host_metadata_exclusions() -> Vec<String> {
@@ -2394,3 +2435,37 @@ pub(crate) fn snapshot_execution_scoped(
 #[cfg(test)]
 #[path = "workspace_tests.rs"]
 mod workspace_tests;
+
+
+#[cfg(test)]
+mod status_filter_tests {
+    use super::*;
+
+    #[test]
+    fn ignored_host_metadata_is_platform_specific_and_scoped() {
+        let raw = concat!(
+            "!! ._late\0",
+            "!! nested/.DS_Store\0",
+            "!! node_modules/build.o\0",
+            "!! managed/._cache\0",
+            "?? ._new\0",
+            " M .DS_Store\0",
+        ).to_string();
+        let root = Path::new("/nonexistent-grapher-status-root");
+        let exclusions = vec!["managed".to_string()];
+
+        let macos = filtered_status_for(raw.clone(), root, &exclusions, true);
+        assert!(!macos.contains("._late"), "{macos}");
+        assert!(!macos.contains("nested/.DS_Store"), "{macos}");
+        assert!(!macos.contains("._new"), "{macos}");
+        assert!(macos.contains(" M .DS_Store"), "{macos}");
+
+        let other = filtered_status_for(raw, root, &exclusions, false);
+        assert!(other.contains("!! ._late"), "{other}");
+        assert!(other.contains("!! nested/.DS_Store"), "{other}");
+        assert!(!other.contains("node_modules"), "{other}");
+        assert!(!other.contains("managed/._cache"), "{other}");
+        assert!(other.contains("?? ._new"), "{other}");
+        assert!(other.contains(" M .DS_Store"), "{other}");
+    }
+}
