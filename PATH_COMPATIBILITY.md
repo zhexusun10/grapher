@@ -299,6 +299,49 @@ and Linux behavior.
       acceptance evidence; committed path behavior is covered by the repository
       tests and the full Windows suites below.
 
+## Latest HEAD Windows acceptance (2026-10-18)
+
+Tested commit: `7cb892a567c0b9bdcae704b1325757abb39fbc99` (clean tree).
+Host: Windows 10.0.26300.9711 x64, Node v24.16.0, npm 12.1.0, Git for
+Windows 2.54.0.windows.1.
+
+Commands were run sequentially (parallel cargo builds can lock `grapher.exe`):
+
+- `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml
+  --no-default-features --features fixture --lib` — **412 passed, 0 failed**
+- `npm run test:native` — **pass** (workspace paths, `/tmp` file-tool conversion,
+  native runtime storage, native 15, native_runtime_storage 11, prewarm 18,
+  prepared-host and shared-runtime)
+- `npm run test:windows-native` — **pass** (real Windows Planner/Graph,
+  concurrency, inheritance, publication, cancellation, crash recovery)
+- `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml
+  --no-default-features --lib` — **299 passed, 1 ignored**
+
+### Real-path manual matrix
+
+- Source/workspace under `Grapher 真实 Path Case ...` with spaces, Chinese and a
+  case variant: file-tool source/external mapping, Bash command mapping, and
+  physical read/write all passed.
+- Junction (`source junction` -> source): `samePath`, `pathKey`, missing-leaf
+  `actualPath` and file-tool mapping passed.
+- 8.3/short path: this host does not expose an 8.3 short name for the test
+  folder; the CI failure (`RUNNER~1` vs `runneradmin`) reproduced the platform
+  policy and is fixed by the platform-specific `session_branch` assertion. The
+  final full Windows suites pass.
+- MSYS `/tmp`: `/tmp/.../source` and `/tmp/.../external` file-tool inputs map to
+  host source/external correctly; a real `C:\tmp\grapher-manual-check` path
+  stayed external and was removed after the check.
+- Workspace containing `;`: file-tool write/read, physical and visible mapping
+  passed with the per-value cygpath fallback.
+- Long external path: 231 UTF-16 units read/write passed; the preflight unit test
+  covers the >240 actionable error.
+- Real-path process flows with `TEMP=...\Grapher Real Case 中文`:
+  `windows-native.test.ts` passed, `prepared-host.test.mjs` passed,
+  `merger-native.test.ts` passed (including continuation/follow-up),
+  `test:prewarm` passed 4/4, and `server::planner_workspace_tests` passed 10/10.
+  Node continue/follow-up state is covered by the full `runtime::tests` suite;
+  the UI Continue button was not manually clicked.
+
 ## Windows verification log (2026-10-18)
 
 Host: Windows 10.0.26300 x64, Node v24.16.0, npm 12.1.0, Git for Windows
