@@ -12,6 +12,8 @@ For routine edits, run only the targeted check matching your changes:
 ```sh
 npm run check                                                                                                  # TypeScript & types
 npx tsx --test scripts/<specific>.test.ts                                                                      # Single TS test
+node --test scripts/<specific>.test.mjs                                                                        # Single JS test
+node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-features                            # Rust types/build check
 node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib <filter> # Single Rust test
 ```
 
