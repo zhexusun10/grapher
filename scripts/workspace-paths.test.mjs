@@ -119,7 +119,7 @@ test('literal shell mapping preserves quoting, external paths and opaque content
 });
 
 test('Windows workspace mapping preserves native and slash paths without requiring a POSIX shell', { skip: process.platform !== 'win32' }, () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-path-regression-')));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'grapher-path-regression-')));
   try {
     const source = join(root, 'source');
     const workspace = join(root, 'node with spaces');
@@ -140,7 +140,7 @@ test('Windows workspace mapping preserves native and slash paths without requiri
       assert.equal(samePath(junction, source), true);
       assert.equal(pathKey(junction), pathKey(source));
       assert.equal(actualPath(join(junction, 'missing', 'leaf')),
-        join(realpathSync(source), 'missing', 'leaf'));
+        join(actualPath(source), 'missing', 'leaf'));
     }
     assert.equal(paths.physical(join(source, 'marker')), join(workspace, 'marker'));
     assert.equal(paths.physical(pathToFileURL(join(source, 'marker')).href), join(workspace, 'marker'));

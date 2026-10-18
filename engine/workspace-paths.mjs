@@ -193,7 +193,7 @@ function insideRanges(ranges, at) {
 export function createWorkspacePaths(directory, originalRoot = directory, sourceAlias = originalRoot, extraWorkspaces = []) {
   // Rust canonicalize() emits extended Windows paths. Node and Git Bash also
   // expose normal drive paths and /c/... spellings of the same directory.
-  const root = hostPath(realpathSync(hostPath(directory)));
+  const root = hostPath(realpathSync.native(hostPath(directory)));
   // The source can be inaccessible under macOS/Linux isolation; never stat it.
   const base = hostPath(resolve(originalRoot));
   const WORKSPACE_PATH = base;

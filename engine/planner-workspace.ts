@@ -34,7 +34,7 @@ export function configurePlannerWorkspace(
   const parsed = JSON.parse(rawTargets) as Record<string, WorkspaceTarget>;
   targetFile = process.env.GRAPHER_PLANNER_WORKSPACES_FILE;
   targets = new Map(Object.entries(parsed));
-  const initial = realpathSync(workspace);
+  const initial = realpathSync.native(workspace);
   state = { workspace: initial, project, alias, paths: createWorkspacePaths(initial, project, alias, workspaceRoots(targets)) };
 }
 
@@ -55,7 +55,7 @@ export function switchPlannerWorkspace(requestedNode: string): WorkspaceTarget {
     : Object.fromEntries(targets);
   const target = currentTargets[requestedNode];
   if (!target) throw new Error(`No current workspace is available for node '${requestedNode}'`);
-  const workspace = realpathSync(target.workspace);
+  const workspace = realpathSync.native(target.workspace);
   targets = new Map(Object.entries(currentTargets));
   state = { ...state, workspace, paths: createWorkspacePaths(workspace, state.project, state.alias, workspaceRoots(targets)) };
   for (const listener of listeners) listener(state, target);
