@@ -246,6 +246,45 @@ Targeted checks run while implementing:
   extended paths) are covered by the existing Windows test and run in the
   Windows CI lane; they could not be executed on this macOS host.
 
+## Windows implementation review (2026-10-18)
+
+Reviewed the Windows handoff commit plus the follow-up path changes. The core
+direction is sound: Windows launched-spelling session rebind, 8.3/junction
+actual-path resolution, MSYS-root conversion, external-path preservation and
+the `git ls-files` ignored-metadata collection are consistent with the macOS
+and Linux behavior.
+
+### Fixed during review
+
+- [x] `cygpath -u -p` batching now excludes values containing `;` entirely; a
+      semicolon workspace path cannot rely on an output-count coincidence and
+      always uses per-value conversion.
+- [x] Added Windows assertions for the MSYS/`/tmp` spelling of a semicolon
+      workspace and source, not only native spellings.
+
+### Residual findings
+
+- [~] The command scanner intentionally skips a token containing `.`/`..` when
+      the word-level mapper did not handle it (for example a glob or a path
+      embedded in a quoted command substitution). Such a source path can remain
+      unadapted on Windows. This is safer than rewriting it to a wrong
+      workspace-relative path, but it is still a finite-adaptation gap.
+- [~] `workspace-tools.ts` still only uses `toHostInput()`; Git Bash special
+      mounts such as `/tmp` are converted for command/physical mapping but not
+      for `read`/`write`/`edit`. Relative model paths are unaffected.
+- [~] `workspace-tools` external paths are normalized by `resolveToCwd()` before
+      `mapPhysicalPath`; the caller-spelling preservation applies to
+      `workspace-paths.physical()` and command adaptation, not file-tool input.
+- [~] Actual-path resolution is not cached. The token mapper resolves every
+      project root for every absolute word, and file tools resolve workspace
+      roots per call. This is correct but can be costly on slow/network volumes.
+- [~] The full backend library suite was not rerun on Windows after the latest
+      follow-up changes; the host ran the targeted handoff checks. Run the full
+      lib suite before treating the handoff as final.
+- [~] The local `.grapher-path-audit/` hook is intentionally untracked, so it
+      cannot be reviewed or exercised by CI. Do not use it as acceptance
+      evidence for the committed path behavior.
+
 ## Windows verification log (2026-10-18)
 
 Host: Windows 10.0.26300 x64, Node v24.16.0, npm 12.1.0, Git for Windows

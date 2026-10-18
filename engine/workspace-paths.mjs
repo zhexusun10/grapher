@@ -38,7 +38,10 @@ function driveFallback(value) {
 
 function prefetchMsysPaths(values) {
   if (process.platform !== 'win32') return;
-  const pending = [...new Set(values)].filter(value => !msysPaths.has(value));
+  // A semicolon is Git's path-list separator; never put such a value in the
+  // one-shot batch, even if the output split count happens to look valid.
+  const pending = [...new Set(values)].filter(value =>
+    !msysPaths.has(value) && !value.includes(';'));
   if (!pending.length) return;
   for (const value of pending) msysPaths.set(value, driveFallback(value));
   if (cygpath === undefined) cygpath = gitCygpath();

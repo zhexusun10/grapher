@@ -202,6 +202,12 @@ test('Windows workspace mapping preserves native and slash paths without requiri
     const cygpath = join(gitRoot, '../../../usr/bin/cygpath.exe');
     const bashWorkspace = execFileSync(cygpath, ['-u', workspace], { encoding: 'utf8' }).trim();
     const bashSource = execFileSync(cygpath, ['-u', source], { encoding: 'utf8' }).trim();
+    const semicolonSource = execFileSync(cygpath, ['-u', source], { encoding: 'utf8' }).trim();
+    const semicolonWorkspace = execFileSync(cygpath, ['-u', semicolon], { encoding: 'utf8' }).trim();
+    assert.equal(semicolonPaths.physical(`${semicolonSource}/marker`), join(semicolon, 'marker'));
+    assert.equal(semicolonPaths.command(`cat ${semicolonSource}/marker`),
+      `cat '${semicolon.replaceAll('\\', '/')}/marker'`);
+    assert.equal(semicolonPaths.visible(`${semicolonWorkspace}/marker`), './marker');
     assert.equal(canonical.visible(`${bashWorkspace}/marker`), './marker');
     assert.equal(canonical.physical(`${bashSource}/marker`), join(workspace, 'marker'));
     assert.equal(canonical.command(`cat '${bashSource}/marker'`), `cat '${slashWorkspace}/marker'`);
