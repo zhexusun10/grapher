@@ -473,6 +473,72 @@ data: ${JSON.stringify({ runId: running.runId })}
   }
 });
 
+test("actual App keeps a Planner follow-up draft when bootstrap still blocks the turn", { timeout: 45_000 }, async () => {
+  const config = { repository: "/mock/bootstrap-gate", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const saved = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "completed",
+    graph: { originalGoal: "Existing conversation", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
+    plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
+    events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }] };
+  let releaseBootstrap;
+  const bootstrapGate = new Promise(resolve => { releaseBootstrap = resolve; });
+  let planRequests = 0;
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "bootstrap") {
+      await bootstrapGate;
+      return route.fulfill({ json: { result: { config, snapshot: empty, runs: [saved.runId],
+        repositoryInfo: { path: config.repository, name: "Bootstrap gate", branch: "main", head: "", clean: true }, dataPath: "/mock" } } });
+    }
+    if (command === "plan_goal_stream") {
+      planRequests += 1;
+      return route.fulfill({ json: { result: {} } });
+    }
+    let result;
+    switch (command) {
+      case "snapshot": case "history": result = saved; break;
+      case "snapshot_if_changed": result = { version: "fixed", snapshot: saved }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": result = { planningId: body.planningId, role: "planner", content: "",
+        startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false }; break;
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.addInitScript(({ config, saved }) => {
+      localStorage.setItem("grapher_projects", JSON.stringify([{ id: config.repository, path: config.repository,
+        name: "Bootstrap gate", branch: "main", clean: true, lastOpened: 1 }]));
+      localStorage.setItem("grapher_config", JSON.stringify(config));
+      localStorage.setItem("grapher_workspace_runs", JSON.stringify({ [config.repository]: [saved.runId] }));
+      localStorage.setItem("grapher_run_labels", JSON.stringify({ [saved.runId]: "Existing conversation" }));
+    }, { config, saved });
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await page.locator('[data-run-id="fast"]').click();
+    const input = page.locator(".pane-bottom-chat textarea").first();
+    await input.waitFor();
+    await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat textarea")?.disabled);
+    await input.fill("KEEP_PLANNER_DRAFT");
+    await input.press("Enter");
+    await page.locator(".floating-error-banner").filter({ hasText: "Backend settings are still loading" }).waitFor();
+    await page.waitForTimeout(100);
+    assert.equal(await input.inputValue(), "KEEP_PLANNER_DRAFT", "a blocked Planner turn must keep the draft");
+    assert.equal(planRequests, 0, "a blocked Planner turn must not reach the backend");
+    assert.equal(await page.locator('.chat-bubble-user', { hasText: "KEEP_PLANNER_DRAFT" }).count(), 0);
+    assert.deepEqual(errors, []);
+  } finally {
+    releaseBootstrap();
+    await context.close();
+  }
+});
+
 test("actual App re-attaches a running revision plan without locking or stale route badges", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/recovered-revision", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},

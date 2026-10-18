@@ -718,8 +718,7 @@ export default function App() {
           if (!isCurrent()) return false;
           const failure = error instanceof Error ? error.message : String(error);
           if (/no longer accepting messages|No active Planner/i.test(failure)) {
-            void handlePlanGoal(text, options, "graph", planningRunId, false, undefined, true);
-            return true;
+            return startPlanGoal(text, options, "graph", planningRunId, false, undefined, true).accepted;
           }
           throw error;
         }
@@ -731,12 +730,10 @@ export default function App() {
     // A Run with a persisted Planner identity is still the same conversation,
     // even while its graph is empty or the route decision is undecided.
     if ((routeType === "graph" || state.graph.nodes.length > 0 || !!state.planningId) && state.runId && state.phase !== "planning_failed") {
-      void handlePlanGoal(text, options, "graph", state.runId);
-    } else {
-      const baseGoal = state.graph.originalGoal || goal;
-      void handlePlanGoal(baseGoal ? t("{0}\n\n补充规划要求：\n{1}", baseGoal, text) : text, options);
+      return startPlanGoal(text, options, "graph", state.runId).accepted;
     }
-    return true;
+    const baseGoal = state.graph.originalGoal || goal;
+    return startPlanGoal(baseGoal ? t("{0}\n\n补充规划要求：\n{1}", baseGoal, text) : text, options).accepted;
   };
 
   const load = useCallback(async () => {
@@ -1447,7 +1444,10 @@ export default function App() {
 
   const closeRunningThinkingItem = closeThinkingItems;
 
-  const handlePlanGoal = (
+  // Synchronous acceptance is separate from completion: the composer must
+  // retain its draft when a Planner turn is rejected before anything durable
+  // is recorded, without waiting for the whole planning stream to finish.
+  const startPlanGoal = (
     inputGoal?: string,
     options?: { displayText?: string; rawText?: string; files?: Array<File | FileAttachment>; images?: ImageAttachment[] },
     mode?: PlanMode,
@@ -1458,17 +1458,17 @@ export default function App() {
     // caller already verified that turn is over, so continue instead of
     // rejecting the message as a second concurrent conversation.
     allowWhilePlanning?: boolean
-  ) => {
+  ): { accepted: boolean; completion: Promise<boolean> } => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : (landingGoal || goal)).trim();
-    if (!targetGoal) return Promise.resolve(false);
+    if (!targetGoal) return { accepted: false, completion: Promise.resolve(false) };
     if (!isBootstrapReady) {
       setError(t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。"));
-      return Promise.resolve(false);
+      return { accepted: false, completion: Promise.resolve(false) };
     }
 
     if (isPlanning && !allowWhilePlanning) {
       setError(t("另一个对话仍在规划中；请等待规划完成后再提交新对话，旧会话不会被中断。"));
-      return Promise.resolve(false);
+      return { accepted: false, completion: Promise.resolve(false) };
     }
 
     if (!revisionRunId || forceFresh) {
@@ -1483,7 +1483,7 @@ export default function App() {
     if (!targetRepo) {
       setModal("settings");
       setError(t("请先在左侧工作区选择绑定的本地 Git 仓库。"));
-      return Promise.resolve(false);
+      return { accepted: false, completion: Promise.resolve(false) };
     }
     const scope = planningRecovery.begin(targetRepo);
     let startedRunId: string | undefined;
@@ -1624,7 +1624,7 @@ export default function App() {
     setEditPrefillText("");
     setError("");
 
-    return run(async () => {
+    const completion = run(async () => {
       let abortController: AbortController | null = null;
       let routeConfirmed = false;
       let failureSummary: PlanningSummary | undefined;
@@ -2315,9 +2315,22 @@ export default function App() {
       if (planningRecovery.current(scope)) setIsPlanning(false);
     }
   });
+  return { accepted: true, completion };
 };
 
+  const handlePlanGoal = (...args: Parameters<typeof startPlanGoal>): Promise<boolean> => {
+    const { accepted, completion } = startPlanGoal(...args);
+    return accepted ? completion : Promise.resolve(false);
+  };
+
   const handleEditMessageSubmit = useCallback(async (targetMsg: ChatMessage, newText: string, selectedVersion?: number) => {
+    // Editing branches a durable Pi session before starting the replacement
+    // turn. Never branch before settings/bootstrap are ready, or the edited
+    // turn can be cut without a replacement ever being sent.
+    if (!isBootstrapReady) {
+      setError(t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。"));
+      return false;
+    }
     const generation = foregroundGeneration.current;
     const isCurrent = () => generation === foregroundGeneration.current;
     const requireEditRepository = async () => {
@@ -2874,6 +2887,7 @@ export default function App() {
     selected,
     selectedMergerId,
     isPlanning,
+    isBootstrapReady,
     active,
     config,
     plannerStream.runId,
