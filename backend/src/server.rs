@@ -195,7 +195,7 @@ fn check_planning_cancelled(run_id: &str) -> Result<(), String> {
 }
 
 fn source_lock(repository: &std::path::Path) -> Result<Arc<Mutex<()>>, String> {
-    let key = repository.canonicalize().map_err(|e| e.to_string())?;
+    let key = std::path::PathBuf::from(crate::path_identity::path_key(repository));
     let mut locks = SOURCE_LOCKS
         .get_or_init(Default::default)
         .lock()
@@ -1292,7 +1292,8 @@ fn stored_planner_session_id(
             .ok_or("Missing Planner session repository")?;
         if value.get("type").and_then(|kind| kind.as_str()) != Some("session")
             || Uuid::parse_str(id).is_err()
-            || !(matches!(std::path::Path::new(cwd).canonicalize().ok().as_deref(), Some(path) if path == repository || workspace.as_deref() == Some(path))
+            || !(crate::path_identity::same_path(std::path::Path::new(cwd), &repository)
+                || workspace.as_deref().is_some_and(|workspace| crate::path_identity::same_path(std::path::Path::new(cwd), workspace))
                 || erased_workspace.as_ref().is_some_and(|path| *path == session_path_identity(std::path::Path::new(cwd))))
         {
             return Err("Planner session belongs to another repository or is invalid".into());
@@ -1312,8 +1313,7 @@ fn stored_planner_session_id(
 }
 
 fn session_path_identity(path: &std::path::Path) -> String {
-    let path = crate::native::host_path(path).to_string_lossy().into_owned();
-    if cfg!(windows) { path.replace('\\', "/").to_lowercase() } else { path }
+    crate::path_identity::path_key(path)
 }
 
 /// Keep the same Pi identity/history when the Planner's cwd changes between
@@ -1324,40 +1324,7 @@ fn session_path_identity(path: &std::path::Path) -> String {
 /// symlinks through `getcwd`. Record exactly that spelling.
 fn rebind_planner_session(directory: &std::path::Path, id: &str, workspace: &std::path::Path) -> Result<(), String> {
     if !directory.is_dir() { return Ok(()); }
-    let canonical = workspace.canonicalize().map_err(|error| error.to_string())?;
-    #[cfg(windows)]
-    let resumed = crate::native::host_path(workspace);
-    #[cfg(not(windows))]
-    let resumed = crate::native::host_path(&canonical);
-    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
-        let path = entry.map_err(|error| error.to_string())?.path();
-        if path.extension().is_none_or(|ext| ext != "jsonl") { continue; }
-        let mut input = BufReader::new(fs::File::open(&path).map_err(|error| error.to_string())?);
-        let mut line = String::new();
-        input.read_line(&mut line).map_err(|error| error.to_string())?;
-        let mut header: serde_json::Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        if header["id"].as_str() != Some(id) { continue; }
-        if header["cwd"].as_str().and_then(|cwd| PathBuf::from(cwd).canonicalize().ok()).as_ref() == Some(&canonical) {
-            continue;
-        }
-        // Ownership was validated by planner_session_directory_for_workspace.
-        // Stream the unchanged history instead of allocating the entire JSONL.
-        header["cwd"] = serde_json::json!(resumed);
-        let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-        let result = (|| -> Result<(), String> {
-            let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|error| error.to_string())?;
-            serde_json::to_writer(&mut output, &header).map_err(|error| error.to_string())?;
-            output.write_all(b"\n").map_err(|error| error.to_string())?;
-            std::io::copy(&mut input, &mut output).map_err(|error| error.to_string())?;
-            output.sync_all().map_err(|error| error.to_string())?;
-            drop(output);
-            drop(input);
-            fs::rename(&temporary, &path).map_err(|error| error.to_string())
-        })();
-        if result.is_err() { let _ = fs::remove_file(&temporary); }
-        result?;
-    }
-    Ok(())
+    crate::session_branch::rebind_session_cwd(directory, id, workspace)
 }
 
 #[cfg(all(test, feature = "fixture"))]
@@ -4381,9 +4348,7 @@ fn list_skills(
     repository_param: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let repo_path = resolve_repo_path(service, repository_param);
-    let home_dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
+    let home_dir = crate::native::home_dir();
     let mut search_dirs: Vec<(PathBuf, &'static str)> = Vec::new();
 
     // 1. Pi 工作区技能规范 (Project Skills: .agents/skills, .pi/skills, skills)

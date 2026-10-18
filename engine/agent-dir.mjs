@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { toHostInput } from './path-identity.mjs';
 import { mkdirSync, existsSync, symlinkSync, copyFileSync, accessSync, statSync, constants } from 'node:fs';
 
 // Reuse only Pi's known managed executables, not its configuration or plugins.
@@ -28,8 +29,8 @@ export function reuseManagedTools(directory, upstreamDirectory) {
 // Provider/Auth, local login and native executions use the same dedicated
 // upstream-owned configuration directory. HOME itself stays the host HOME.
 export function configureAgentDir() {
-  let directory = process.env.PI_CODING_AGENT_DIR || join(homedir(), '.grapher', 'pi-agent');
-  if (directory === '~' || directory.startsWith('~/')) directory = homedir() + directory.slice(1);
+  let directory = toHostInput(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.grapher', 'pi-agent'));
+  if (directory === '~' || /^~[\\/]/.test(directory)) directory = homedir() + directory.slice(1);
   directory = resolve(directory);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   process.env.PI_CODING_AGENT_DIR = directory;

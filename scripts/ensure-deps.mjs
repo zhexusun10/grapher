@@ -69,12 +69,21 @@ export async function ensureDependencies({
 } = {}) {
   assertSupportedNode();
   // Fail before network/download work if the host cannot build the backend.
-  if (!cargoPath) throw new Error('Rust/Cargo is required. Install stable Rust from https://rustup.rs/ and your native compiler/linker, reopen your terminal, then run npm run dev again.');
+  if (!cargoPath) throw new Error(`Rust/Cargo is required. Install stable Rust from https://rustup.rs/ and a native compiler/linker${process.platform === 'darwin' ? ' (macOS: xcode-select --install)' : ''}, reopen your terminal, then run npm run dev again.`);
   const childEnv = toolchainEnv(prependPath({ ...env }, dirname(cargoPath)));
   const options = { cwd: installationRoot, env: childEnv, stdio: 'inherit' };
   for (const [command, name] of [['git', 'Git'], [cargoPath, 'Rust/Cargo']]) {
     try { await run(command, ['--version'], { ...options, stdio: 'pipe' }); }
-    catch { throw new Error(`${name} is not usable. Install ${name === 'Git' ? 'Git (Git for Windows includes Bash)' : 'a stable Rust toolchain from https://rustup.rs/ and native compiler/linker tools'}, reopen your terminal, and run npm run dev again.`); }
+    catch {
+      const install = name === 'Git'
+        ? process.platform === 'win32'
+          ? 'Git for Windows from https://git-scm.com/download/win (it includes Bash)'
+          : process.platform === 'darwin'
+            ? 'Git (macOS: xcode-select --install or brew install git)'
+            : 'Git from your package manager'
+        : `a stable Rust toolchain from https://rustup.rs/ and native compiler/linker tools${process.platform === 'darwin' ? ' (macOS: xcode-select --install)' : ''}`;
+      throw new Error(`${name} is not usable. Install ${install}, reopen your terminal, and run npm run dev again.`);
+    }
   }
   const npmCli = env.npm_execpath;
   const runNpm = async args => {

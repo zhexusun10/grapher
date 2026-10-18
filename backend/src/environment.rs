@@ -268,6 +268,7 @@ fn reserved(key: &str) -> bool {
         || matches!(
             key.as_str(),
             "PATH" | "NODE_OPTIONS" | "NODE_PATH" | "BASH_ENV" | "ENV" | "SHELLOPTS" | "BASHOPTS"
+                | "CDPATH" | "OLDPWD" | "GLOBIGNORE"
         )
 }
 
@@ -743,11 +744,12 @@ impl Environments {
             && selected
                 .layout
                 .as_ref()
-                .is_some_and(|original| *original != layout)
+                .is_some_and(|original| !crate::path_identity::same_path(Path::new(original), Path::new(&layout)))
         {
             return Err("Workspace composition blocked: fixed native environment cannot change physical layout; namespace/relocatable capability required".into());
         }
-        let same_view = selected.layout.as_deref() == Some(&layout);
+        let same_view = selected.layout.as_deref()
+            .is_some_and(|original| crate::path_identity::same_path(Path::new(original), Path::new(&layout)));
         let scoped = self.scoped_files(&selected.launch_ref)?;
         let unbound_best_effort = self.config.best_effort
             && selected.layout.is_none()
@@ -1320,13 +1322,8 @@ pub(crate) fn bind_command(
     // Rebinding L (also for proofs) must not rescan every environment byte.
     store.validate_result_metadata(input)?;
     let launch = store.load_launch(&input.launch_ref)?.expanded(path);
-    let global_agent = std::env::var_os("GRAPHER_GLOBAL_PI_AGENT_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|home| PathBuf::from(home).join(".pi/agent"))
-        });
+    let global_agent = crate::native::environment_path("GRAPHER_GLOBAL_PI_AGENT_DIR")
+        .or_else(|| crate::native::home_dir().map(|home| home.join(".pi/agent")));
     if let Some(directory) = global_agent {
         command.env("GRAPHER_GLOBAL_PI_AGENT_DIR", native::host_path(&directory));
     }

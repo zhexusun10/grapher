@@ -17,6 +17,7 @@ pub mod model;
 pub mod native;
 mod native_copy;
 mod native_runtime_storage;
+mod path_identity;
 mod path_safety;
 pub mod pi_extensions;
 pub mod process_control;

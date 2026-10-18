@@ -32,10 +32,17 @@ const stopProcess = async process_ => {
   if (process.platform === 'win32') {
     try { execFileSync('taskkill', ['/PID', String(process_.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
   } else {
-    process_.kill('SIGTERM');
-    const timer = setTimeout(() => process_.kill('SIGKILL'), 5000);
+    try { process_.kill('SIGTERM'); }
+    catch { return; }
+    // Keep a bounded escalation for a backend that ignores SIGTERM. The timer
+    // must survive until the process actually exits.
+    const timer = setTimeout(() => {
+      try { process_.kill('SIGKILL'); } catch {}
+    }, 5000);
     timer.unref();
+    await exited;
     clearTimeout(timer);
+    return;
   }
   await exited;
 };

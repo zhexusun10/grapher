@@ -21,6 +21,10 @@ let targetFile: string | undefined;
 let targets = new Map<string, WorkspaceTarget>();
 const listeners = new Set<(state: WorkspaceState, target: WorkspaceTarget) => void>();
 
+function workspaceRoots(current: Map<string, WorkspaceTarget>): string[] {
+  return [...new Set([...current.values()].map(target => target.workspace).filter(Boolean))];
+}
+
 export function configurePlannerWorkspace(
   workspace: string,
   project: string,
@@ -31,7 +35,7 @@ export function configurePlannerWorkspace(
   targetFile = process.env.GRAPHER_PLANNER_WORKSPACES_FILE;
   targets = new Map(Object.entries(parsed));
   const initial = realpathSync(workspace);
-  state = { workspace: initial, project, alias, paths: createWorkspacePaths(initial, project, alias) };
+  state = { workspace: initial, project, alias, paths: createWorkspacePaths(initial, project, alias, workspaceRoots(targets)) };
 }
 
 export function onPlannerWorkspaceChanged(listener: (state: WorkspaceState, target: WorkspaceTarget) => void) {
@@ -52,7 +56,8 @@ export function switchPlannerWorkspace(requestedNode: string): WorkspaceTarget {
   const target = currentTargets[requestedNode];
   if (!target) throw new Error(`No current workspace is available for node '${requestedNode}'`);
   const workspace = realpathSync(target.workspace);
-  state = { ...state, workspace, paths: createWorkspacePaths(workspace, state.project, state.alias) };
+  targets = new Map(Object.entries(currentTargets));
+  state = { ...state, workspace, paths: createWorkspacePaths(workspace, state.project, state.alias, workspaceRoots(targets)) };
   for (const listener of listeners) listener(state, target);
   return { ...target, workspace };
 }

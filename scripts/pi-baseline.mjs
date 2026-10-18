@@ -32,9 +32,13 @@ export const localModelData = join(root, "engine/model-data-local");
 // personal API tweaks). Overlay changes are not part of the reviewed baseline,
 // so their merged catalog gets a freshly computed manifest and upstream
 // validation still passes. The committed baseline itself stays pristine.
-export function restoreModelData(destination = join(source, "packages/ai/src/providers/data")) {
-  const overlay = existsSync(localModelData)
-    ? readdirSync(localModelData).filter(name => name.endsWith('.json'))
+// Tests may pass an isolated overlay directory instead of the developer's.
+export function restoreModelData(
+  destination = join(source, "packages/ai/src/providers/data"),
+  overlayDirectory = localModelData,
+) {
+  const overlay = existsSync(overlayDirectory)
+    ? readdirSync(overlayDirectory).filter(name => name.endsWith('.json'))
     : [];
   if (overlay.includes('.manifest.json')) throw new Error('The local model-data overlay must not contain .manifest.json; it is regenerated from the merged catalog');
   const unknown = overlay.filter(name => !(name in lock.modelData));
@@ -48,7 +52,7 @@ export function restoreModelData(destination = join(source, "packages/ai/src/pro
     if (name.endsWith('.json') && !allowed.has(name)) rmSync(join(destination, name));
   }
   for (const name of Object.keys(lock.modelData)) copyFileSync(join(root, "engine/model-data", name), join(destination, name));
-  for (const name of overlay) copyFileSync(join(localModelData, name), join(destination, name));
+  for (const name of overlay) copyFileSync(join(overlayDirectory, name), join(destination, name));
   if (overlay.length) regenerateModelDataManifest(join(destination, '..', '..', '..'));
 }
 

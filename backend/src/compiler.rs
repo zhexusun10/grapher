@@ -92,10 +92,23 @@ pub fn node_id(name: &str) -> String {
     format!("{slug}.{short}")
 }
 
+fn is_windows_reserved_name(name: &str) -> bool {
+    let device = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(device.as_str(), "con" | "prn" | "aux" | "nul" | "conin$" | "conout$")
+        || ((device.starts_with("com") || device.starts_with("lpt"))
+            && device.chars().count() == 4
+            && device.ends_with(['1', '2', '3', '4', '5', '6', '7', '8', '9']))
+}
+
 fn is_legacy_node_id(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        && !is_windows_reserved_name(name)
 }
 
 /// Runtime-state constraint surfaced at the Planner tool boundary: once a
@@ -139,12 +152,18 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         add("E001", "Graph must contain at least one node".into());
     }
     let mut names = BTreeSet::new();
+    let mut folded_names = BTreeMap::new();
     for node in &graph.nodes {
         if node.name.is_empty() {
             add("E201", "Node name must not be empty".into());
         }
         if !names.insert(node.name.clone()) {
             add("E202", format!("Duplicate node: {}", node.name));
+        } else if let Some(previous) = folded_names.insert(node.name.to_lowercase(), node.name.clone()) {
+            add("E202", format!(
+                "Node names '{previous}' and '{}' differ only by case and would collide on case-insensitive filesystems",
+                node.name
+            ));
         }
         if node.task.trim().is_empty() {
             add(
@@ -324,4 +343,35 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         terminals,
         warnings,
     })
+}
+
+
+#[cfg(test)]
+mod node_id_tests {
+    use super::*;
+
+    #[test]
+    fn windows_device_names_never_become_git_ref_components() {
+        for name in ["CON", "con", "NUL", "COM1", "lpt9"] {
+            let id = node_id(name);
+            assert_ne!(id, name);
+            assert!(id.starts_with("con") || id.starts_with("nul") || id.starts_with("com") || id.starts_with("lpt"));
+        }
+        assert_eq!(node_id("worker"), "worker");
+    }
+
+    #[test]
+    fn case_only_node_names_are_rejected_for_portable_refs() {
+        let graph = Graph {
+            original_goal: String::new(),
+            nodes: vec![
+                crate::model::Node { name: "Worker".into(), task: "one".into() },
+                crate::model::Node { name: "worker".into(), task: "two".into() },
+            ],
+            edges: vec![],
+        };
+        let errors = compile(&graph, true).unwrap_err();
+        assert!(errors.iter().any(|error| error.code == "E202"
+            && error.message.contains("differ only by case")));
+    }
 }

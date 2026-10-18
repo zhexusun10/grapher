@@ -35,7 +35,7 @@ The route is persisted separately from the graph's shape. A Planner-generated gr
 
 **Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Planner commands change the source before approval. Reject, failure, and cancellation do not undo those changes, Git commits, or external command side effects. Existing user changes can also be staged and committed during source snapshots.
 
-Planner can inspect and write any files in the source. Git snapshots force-collect project files regardless of `.gitignore`; managed environment scopes and Runtime/Git internal directories are excluded. New root slots use the recorded Git commit, with the physical copier reserved for files outside that commit or managed workspace preparation.
+Planner can inspect and write any files in the source. Git snapshots force-collect project files regardless of `.gitignore`; managed environment scopes, Runtime/Git internal directories and untracked macOS host metadata (`.DS_Store`, `._*`) are excluded. New root slots use the recorded Git commit, with the physical copier reserved for files outside that commit or managed workspace preparation.
 
 Source locks protect approval and source snapshots, not a source-native Planner's Bash/model session. Concurrent source-native Planners can overwrite one another's files; there is no private merge protecting those writes. Node model sessions and final Graph publication do not hold a project-wide execution lock.
 
@@ -193,7 +193,7 @@ Git is the host's snapshot/composition mechanism, not an agent messaging protoco
 
 ### Parent composition conflicts
 
-All project files participate in Git composition. A Git conflict while combining parents invokes the Merger in the child's workspace before the task starts. This includes `.gitignore` and paths that `.gitignore` would normally hide from a user `git add`. The selected physical directory supplies the working tree; the committed Git result supplies the project history.
+All project files participate in Git composition. A Git conflict while combining parents invokes the Merger in the child's workspace before the task starts. This includes `.gitignore` and paths that `.gitignore` would normally hide from a user `git add`; untracked macOS host metadata (`.DS_Store`, `._*`) is not project output and stays outside composition unless it was already tracked. The selected physical directory supplies the working tree; the committed Git result supplies the project history.
 
 Runtime also carries non-owning ambient hints from a completed Node to the
 next Node. A hint is rendered inside the managed process environment as

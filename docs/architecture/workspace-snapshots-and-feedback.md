@@ -26,13 +26,19 @@ with pathspec exclusions for:
 
 - `.git` and Git internals;
 - `.grapher*` and Runtime data;
-- managed environment/cache scopes.
+- managed environment/cache scopes;
+- untracked macOS host metadata (`.DS_Store`, `._*`). Tracked metadata stays
+  in the snapshot: exact index paths are staged again after the excluded add.
+  Windows and Linux retain their previous collection strategy.
 
 The collector does not ask Git whether a project path is ignored. Ignored
 project files, newly created files, modifications, and deletions therefore all
 enter the snapshot commit. This applies both to source snapshots and to node
 result snapshots. No `before-*`/`after-*` project-file manifests, content
-hashes, or Run blob stores are created.
+hashes, or Run blob stores are created. On macOS, untracked host metadata is
+also ignored by cleanliness/status checks, so merely browsing a project in
+Finder does not block publication; a tracked metadata edit remains a real
+change because exact index paths are staged again.
 
 This intentionally changes the meaning of `.gitignore` inside Grapher: it is
 still part of the project's Git history and still participates in Git merges,

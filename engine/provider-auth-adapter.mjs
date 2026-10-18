@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { toHostInput } from './path-identity.mjs';
 
 const KNOWN_PROVIDER_ENV_VARS = {
   anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"],
@@ -19,7 +20,7 @@ const KNOWN_PROVIDER_ENV_VARS = {
 };
 
 function getDisabledProvidersPath() {
-  const dir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".grapher", "pi-agent");
+  const dir = toHostInput(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".grapher", "pi-agent"));
   return join(dir, "disabled-providers.json");
 }
 

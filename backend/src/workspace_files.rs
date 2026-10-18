@@ -57,8 +57,10 @@ pub(crate) struct Files {
 }
 
 fn excluded(path: &Path) -> bool {
-    path.components().any(|part| matches!(part, Component::Normal(name) if
-        name == ".git" || name == ".grapher" || name == ".grapher-worktrees" || name == ".grapher-workspaces"))
+    path.components().any(|part| match part {
+        Component::Normal(name) => crate::path_identity::is_runtime_metadata_name(name),
+        _ => false,
+    })
 }
 
 fn relative(value: &str) -> Result<&Path, String> {

@@ -202,7 +202,7 @@ test('tool-check child envs keep a single PATH name and the cargo entry first', 
     run: (command, args, options) => { childEnvs.push(options.env); throw new Error('not installed'); },
   }), /Git is not usable/);
   assert.deepEqual(Object.keys(childEnvs[0]).filter(name => /^path$/i.test(name)), ['Path']);
-  assert.equal(childEnvs[0].Path, `${dirname(process.execPath)};C:\\Git\\cmd`);
+  assert.equal(childEnvs[0].Path, [dirname(process.execPath), 'C:\\Git\\cmd'].join(delimiter));
 });
 
 test('clean bootstrap initializes submodule, uses locked dev-inclusive npm install, then prepares Pi', async t => {

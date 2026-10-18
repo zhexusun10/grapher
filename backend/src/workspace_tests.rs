@@ -119,6 +119,112 @@ fn ordinary_copy_rejects_unsupported_special_files_explicitly() {
 }
 
 #[test]
+fn host_metadata_is_excluded_from_forced_snapshots_unless_already_tracked() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source");
+    fs::create_dir(&repository).unwrap();
+    workspace::git(&repository, &["init", "-q"]).unwrap();
+    fs::write(repository.join(".gitignore"), ".DS_Store\n._*\n").unwrap();
+    fs::write(repository.join("keep.txt"), "keep").unwrap();
+    fs::write(repository.join(".DS_Store"), "tracked metadata").unwrap();
+    workspace::git(&repository, &["add", "-f", ".gitignore", "keep.txt", ".DS_Store"]).unwrap();
+    workspace::git(&repository, &["commit", "-qm", "base"]).unwrap();
+
+    fs::create_dir(repository.join("nested")).unwrap();
+    fs::write(repository.join("nested/.DS_Store"), "untracked nested").unwrap();
+    fs::write(repository.join("._xattr"), "untracked apple double").unwrap();
+    fs::write(repository.join(".DS_Store"), "tracked metadata updated").unwrap();
+    fs::write(repository.join("keep.txt"), "keep updated").unwrap();
+    let head = workspace::snapshot_repository(&repository).unwrap();
+    let tree = workspace::git(&repository, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
+    let names: Vec<&str> = tree.lines().collect();
+
+    if cfg!(target_os = "macos") {
+        assert!(names.contains(&".DS_Store"), "explicitly tracked metadata remains: {names:?}");
+        assert_eq!(
+            workspace::git(&repository, &["show", "HEAD:.DS_Store"]).unwrap(),
+            "tracked metadata updated"
+        );
+        assert!(!names.contains(&"nested/.DS_Store"), "Finder metadata entered the snapshot: {names:?}");
+        assert!(!names.contains(&"._xattr"), "AppleDouble metadata entered the snapshot: {names:?}");
+    } else {
+        // Keep the Windows/Linux collection contract unchanged.
+        assert!(names.contains(&"nested/.DS_Store"), "non-macOS metadata collection changed: {names:?}");
+        assert!(names.contains(&"._xattr"), "non-macOS metadata collection changed: {names:?}");
+    }
+
+    // Untracked Finder metadata created after a snapshot must not keep the
+    // workspace permanently dirty, while tracked metadata edits stay visible.
+    fs::write(repository.join("._late"), "late apple double").unwrap();
+    fs::write(repository.join("._space file"), "quoted apple double").unwrap();
+    assert_eq!(
+        workspace::repository_status(&repository, &[]).unwrap().is_empty(),
+        cfg!(target_os = "macos")
+    );
+    assert_eq!(
+        workspace::repository_status(&repository, &["managed".into()]).unwrap().is_empty(),
+        cfg!(target_os = "macos")
+    );
+    fs::write(repository.join(".DS_Store"), "pending tracked edit").unwrap();
+    assert!(!workspace::repository_status(&repository, &[]).unwrap().is_empty());
+    assert!(!workspace::repository_status(&repository, &["managed".into()]).unwrap().is_empty());
+    fs::write(repository.join(".DS_Store"), "tracked metadata updated").unwrap();
+
+    let destination = temp.path().join("target");
+    prepared_copy(&repository, &destination, &head, &[], &temp.path().join("runtime"));
+    assert_eq!(
+        fs::read_to_string(destination.join(".DS_Store")).unwrap(),
+        "tracked metadata updated"
+    );
+    if cfg!(target_os = "macos") {
+        assert!(!destination.join("nested/.DS_Store").exists());
+        assert!(!destination.join("._xattr").exists());
+        assert!(!destination.join("._space file").exists());
+    } else {
+        assert_eq!(
+            fs::read_to_string(destination.join("nested/.DS_Store")).unwrap(),
+            "untracked nested"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("._xattr")).unwrap(),
+            "untracked apple double"
+        );
+    }
+}
+
+#[test]
+fn host_metadata_does_not_dirty_a_shadow_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("main.py"), "print('hello')\n").unwrap();
+    workspace::materialize_shadow_repo(&project, &[]).unwrap();
+    fs::write(project.join("._late"), "metadata").unwrap();
+    assert_eq!(
+        workspace::repository_status(&project, &[]).unwrap().is_empty(),
+        cfg!(target_os = "macos")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_filtered_status_preserves_tracked_and_rename_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source");
+    fs::create_dir(&repository).unwrap();
+    workspace::git(&repository, &["init", "-q"]).unwrap();
+    fs::write(repository.join("a.txt"), "a").unwrap();
+    workspace::git(&repository, &["add", "-A"]).unwrap();
+    workspace::git(&repository, &["commit", "-qm", "base"]).unwrap();
+    workspace::git(&repository, &["mv", "a.txt", "b.txt"]).unwrap();
+    workspace::repository_status(&repository, &["managed".into()]).unwrap();
+    fs::write(repository.join("._late"), "metadata").unwrap();
+    let status = workspace::repository_status(&repository, &["managed".into()]).unwrap();
+    assert!(status.contains("R  b.txt -> a.txt"), "rename status lost: {status}");
+    assert!(!status.contains("._late"), "host metadata leaked into status: {status}");
+}
+
+#[test]
 fn git_snapshots_collect_gitignored_project_files_without_a_large_file_gate() {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path().join("source");

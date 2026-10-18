@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
+import { isCaseInsensitive, mapPhysicalPath, toHostInput } from './path-identity.mjs';
 import {
   resolveToCwd,
   createReadToolDefinition,
@@ -10,16 +11,21 @@ import {
 // Backend supplies the roots; tool input cannot choose an execution. This is an
 // explicit file-tool adapter, not a process-wide namespace or security boundary.
 export function workspacePathMapper(workspace: string, project: string, alias = project) {
-  if (![workspace, project, alias].every(isAbsolute)) throw new Error('Execution roots must be absolute');
-  const roots = [...new Set([resolve(project), resolve(alias)])].sort((a, b) => b.length - a.length);
+  // Normalize extended/MSYS spellings once; tool input and roots then share the
+  // same host-form comparison space.
+  const hostWorkspace = toHostInput(workspace);
+  const hostProject = toHostInput(project);
+  const hostAlias = toHostInput(alias);
+  if (![hostWorkspace, hostProject, hostAlias].every(isAbsolute)) throw new Error('Execution roots must be absolute');
+  const roots = [...new Set([resolve(hostProject), resolve(hostAlias)])].sort((a, b) => b.length - a.length);
+  const mappedWorkspace = resolve(hostWorkspace);
+  const caseInsensitive = isCaseInsensitive(mappedWorkspace);
   return (input: string) => {
     if (!input || input.includes('\0')) throw new Error('Invalid file path');
-    const path = resolveToCwd(input, workspace);
-    for (const root of roots) {
-      const suffix = relative(root, path);
-      if (!isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith(`..${sep}`)) return resolve(workspace, suffix);
-    }
-    return path;
+    // Accept file URLs and Git Bash drive spellings before Pi resolves the
+    // value against the workspace; otherwise `/c/...` becomes `C:\c\...`.
+    const path = resolveToCwd(toHostInput(input), mappedWorkspace);
+    return mapPhysicalPath(path, mappedWorkspace, roots, caseInsensitive);
   };
 }
 

@@ -1,9 +1,10 @@
 // Grapher-owned launch boundary. Applied before extension/MCP factories, not
 // merely in one Bash subprocess. Hooks are part of the frozen native policy,
 // not a frontend/user environment-selection surface.
-import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { delimiter, isAbsolute, dirname, resolve } from 'node:path';
+import { delimiter, isAbsolute, dirname } from 'node:path';
+import { samePath } from './path-identity.mjs';
 
 let active;
 let activePath;
@@ -41,7 +42,7 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
   // hooks may neither set nor delete it.
   const protectedKeys = key => /^(GRAPHER_|PI_|GIT_)/i.test(key)
     || key.toUpperCase() === 'PYTHONDONTWRITEBYTECODE'
-    || /^(PATH|NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS)$/i.test(key);
+    || /^(PATH|NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|OLDPWD|GLOBIGNORE)$/i.test(key);
   if (typeof launch.entry !== 'string' || !isAbsolute(launch.entry) ||
       typeof launch.shell !== 'string' || !isAbsolute(launch.shell) || !existsSync(launch.shell) ||
       !Array.isArray(launch.path) || !launch.path.length || !launch.path.every(value => typeof value === 'string' && isAbsolute(value)) ||
@@ -91,28 +92,12 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
     for (const key of Object.keys(process.env)) if (!identityKey(key)) delete process.env[key];
     for (const [key, value] of Object.entries(environment)) if (!identityKey(key)) process.env[key] = value;
   }
-  // Resolve existing directories so macOS /var aliases, symlinked environments
-  // and Windows path spellings still identify the same declared PATH root.
-  const canonical = value => {
-    const resolved = resolve(value);
-    let real = resolved;
-    try { real = realpathSync(resolved); } catch {}
-    return process.platform === 'win32' ? real.toLowerCase() : real;
-  };
-  // Case-insensitive macOS volumes can expose the same directory with different
-  // letter casing; compare the filesystem identity before the string spelling.
-  const sameDirectory = (left, right) => {
-    if (process.platform !== 'win32') {
-      try {
-        const a = statSync(left, { bigint: true });
-        const b = statSync(right, { bigint: true });
-        if (a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino) return true;
-      } catch {}
-    }
-    return canonical(left) === canonical(right);
-  };
+  // Resolve existing directories and filesystem identity so macOS /var aliases,
+  // symlinked environments, case-insensitive volumes and Windows spellings
+  // still identify the same declared PATH root.
+
   if (!existsSync(launch.entry) || !statSync(launch.entry).isFile() ||
-      !sameDirectory(process.env.PATH?.split(delimiter)[0] || '', dirname(launch.entry))) {
+      !samePath(process.env.PATH?.split(delimiter)[0] || '', dirname(launch.entry))) {
     throw new Error('Declared default entry/PATH is unavailable or changed by the hook; no fallback');
   }
   Object.assign(process.env, deviceEnvironment);
@@ -130,7 +115,7 @@ export function managedBashOptions(options) {
   // omit it entirely. Keep the same Runtime bytecode policy in both cases.
   const env = { ...options.env };
   env.PYTHONDONTWRITEBYTECODE = '1';
-  for (const key of Object.keys(env)) if (/^(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS)$/i.test(key)) delete env[key];
+  for (const key of Object.keys(env)) if (/^(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|OLDPWD|GLOBIGNORE)$/i.test(key)) delete env[key];
   env.PATH = activePath;
   Object.assign(env, deviceEnvironment);
   return { ...options, env };

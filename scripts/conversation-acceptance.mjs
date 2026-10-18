@@ -26,8 +26,10 @@ const proxies = new Set();
 const contexts = new Set();
 let browser;
 const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
+// macOS and most Linux distributions expose Python 3 as python3, not python.
+const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 const command = (file, args, extra = {}) => execFileSync(file, args, { env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...extra });
-const sql = (mode, path, ...args) => JSON.parse(command(process.env.PYTHON || 'python', ['scripts/conversation-acceptance-db.py', mode, path, ...args]));
+const sql = (mode, path, ...args) => JSON.parse(command(python, ['scripts/conversation-acceptance-db.py', mode, path, ...args]));
 const cargo = (...args) => command(process.execPath, ['scripts/cargo.mjs', ...args], { stdio: ['ignore', 'pipe', 'inherit'] });
 function record(id, data) {
   const entry = evidence.cases[id] ||= { status: 'passed', checks: [] };
@@ -53,7 +55,11 @@ async function stop(child) {
   const completed = once(child, 'exit');
   if (process.platform === 'win32') {
     try { command('taskkill', ['/PID', String(child.pid), '/T', '/F']); } catch {}
-  } else process.kill(-child.pid, 'SIGKILL');
+  } else {
+    // macOS may report EPERM for a group that is already zombie-only.
+    try { process.kill(-child.pid, 'SIGKILL'); }
+    catch { try { child.kill('SIGKILL'); } catch {} }
+  }
   await Promise.race([completed, sleep(10_000)]);
   assert.ok(child.exitCode !== null || child.signalCode !== null, 'backend failed to stop'); children.delete(child);
 }

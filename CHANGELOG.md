@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On macOS, untracked Finder/AppleDouble metadata (`.DS_Store`, `._*`) is no longer force-collected into Git snapshots, copied into private workspaces, or reported as uncommitted dirt. Explicitly tracked metadata remains part of the repository, and Windows/Linux collection is unchanged.
 - Sidebar entrance animation could play more than once when progressive history validation removed and re-appended cached cards; validation now preserves the cache's card order, and a cold cache keeps the backend's newest-first order.
 - Frontend real-time refresh treated SSE as the only source of truth, so snapshots were not read correctly; SSE and polling now reconcile consistently.
 - Inconsistent spacing between information cards in the Planner conversation, and incorrect animation for user messages sent or appended.

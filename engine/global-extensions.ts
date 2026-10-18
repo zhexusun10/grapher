@@ -1,7 +1,8 @@
 // Discover resources without loading extension code or changing the user's Pi config.
-import { readFileSync, existsSync, realpathSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { isCaseInsensitive, pathKey, toHostInput } from './path-identity.mjs';
 import { fileURLToPath } from 'node:url';
 import { DefaultPackageManager, SettingsManager, createMcpExtension, type InlineExtension } from './pi-compat.ts';
 import { loadGrapherMcpConfig } from './mcp-config.ts';
@@ -27,13 +28,12 @@ const bundledExtensions = [
 ];
 const bundledDefault = (id: string) => bundledExtensions.find(extension => extension.id === id)?.defaultEnabled ?? true;
 export const globalAgentDir = () => {
-  const path = process.env.GRAPHER_GLOBAL_PI_AGENT_DIR || join(homedir(), '.pi', 'agent');
-  return resolve(path === '~' || path.startsWith('~/') ? homedir() + path.slice(1) : path);
+  const path = toHostInput(process.env.GRAPHER_GLOBAL_PI_AGENT_DIR || join(homedir(), '.pi', 'agent'));
+  return resolve(path === '~' || /^~[\\/]/.test(path) ? homedir() + path.slice(1) : path);
 };
-const identity = (path: string) => {
-  const value = existsSync(path) ? realpathSync(path) : resolve(path);
-  return process.platform === 'win32' ? value.toLowerCase() : value;
-};
+const identity = (path: string) => pathKey(path);
+const keyCase = (value: string, path: string) =>
+  isCaseInsensitive(dirname(path)) ? value.toLowerCase() : value;
 function isBundled(resource: { path: string; metadata: { source: string; packageRoot?: string } }) {
   if (bundledExtensions.some(extension => resource.metadata.source === extension.id ||
     resource.metadata.source.startsWith(`${extension.id}@`) || identity(resource.path) === identity(extension.path))) return true;
@@ -69,31 +69,31 @@ export function resourceKey(resource: { path: string; metadata: { source: string
     const name = extensionName(resource);
     const subpath = relative(resource.metadata.packageRoot, resource.path).replace(/\\/g, '/');
     const key = `pkg:${name}:${subpath}`;
-    return process.platform === 'win32' ? key.toLowerCase() : key;
+    return keyCase(key, resource.path);
   }
   if (resource.metadata.baseDir) {
     const subpath = relative(resource.metadata.baseDir, resource.path).replace(/\\/g, '/');
     const key = `file:${subpath}`;
-    return process.platform === 'win32' ? key.toLowerCase() : key;
+    return keyCase(key, resource.path);
   }
   const key = `file:${basename(resource.path)}`;
-  return process.platform === 'win32' ? key.toLowerCase() : key;
+  return keyCase(key, resource.path);
 }
 export function skillKey(resource: { path: string; metadata?: { packageRoot?: string; baseDir?: string } }): string {
   if (resource.metadata?.packageRoot) {
     const pkg = packageName(resource.metadata.packageRoot) ?? basename(resource.metadata.packageRoot);
     const rel = relative(resource.metadata.packageRoot, resource.path).replace(/\\/g, '/');
     const key = `pkg:${pkg}:${rel}`;
-    return process.platform === 'win32' ? key.toLowerCase() : key;
+    return keyCase(key, resource.path);
   }
   if (resource.metadata?.baseDir) {
     const rel = relative(resource.metadata.baseDir, resource.path).replace(/\\/g, '/');
     const key = `file:${rel}`;
-    return process.platform === 'win32' ? key.toLowerCase() : key;
+    return keyCase(key, resource.path);
   }
   const cleanPath = resource.path.replace(/[/\\]SKILL\.md$/i, '').replace(/[/\\]index\.[jt]s$/i, '');
   const key = `file:${basename(cleanPath)}`;
-  return process.platform === 'win32' ? key.toLowerCase() : key;
+  return keyCase(key, resource.path);
 }
 function overrides(directory: string): Record<string, boolean> {
   const path = join(directory, 'extensions.json');

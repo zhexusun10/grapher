@@ -1,7 +1,7 @@
 // One-use, source-project process preparation. Do not construct a Pi session
 // or run extension factories until Rust supplies the actual Run's binding.
-import { realpathSync } from 'node:fs';
 import { preparePiCli } from './pi-compat.ts';
+import { samePath } from './path-identity.mjs';
 
 const roles = new Set(['partition', 'planner', 'node']);
 const bindingEnvironment = new Set([
@@ -24,15 +24,6 @@ const switches = new Set([
   '--no-prompt-templates', '--no-themes', '--approve', '--no-approve',
   '--no-extensions', '--no-skills', '--no-tools', '--no-context-files',
 ]);
-const samePath = (left: string, right: string) => {
-  const normalize = (path: string) => {
-    if (process.platform !== 'win32') return realpathSync(path);
-    const host = path.startsWith('\\\\?\\UNC\\') ? `\\\\${path.slice(8)}` : path.startsWith('\\\\?\\') ? path.slice(4) : path;
-    return realpathSync.native(host).toLowerCase();
-  };
-  return normalize(left) === normalize(right);
-};
-
 // Unlike readline, this consumes exactly one line, even when the next RPC
 // command shares the same pipe chunk. Leave all later bytes for Pi's RPC reader.
 function controlLine(): Promise<string | null> {

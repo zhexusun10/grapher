@@ -49,7 +49,9 @@ export function launcherScripts(platform, version) {
     '2. Enter a coding goal; Auto picks Serial or Graph. Approve the Graph plan before execution.',
     '3. Results are complete only after they are published back into your project.',
     '',
-    '**Use trusted projects only; start with a disposable one.** Planner Bash writes reach your project before approval, and Windows workspaces are not filesystem sandboxes. See the security notes in the repository README.',
+    platform === 'windows'
+      ? '**Use trusted projects only; start with a disposable one.** Planner Bash writes reach your project before approval, and Windows workspaces are not filesystem sandboxes. See the security notes in the repository README.'
+      : '**Use trusted projects only; start with a disposable one.** Planner Bash writes reach your project before approval. Graph workspaces use the macOS/Linux filesystem boundary, but related host paths remain reachable. See the security notes in the repository README.',
     '',
     '## Data and updates',
     '',
@@ -62,9 +64,14 @@ export function launcherScripts(platform, version) {
     '| --- | --- |',
     '| "Node.js/Git was not found on PATH" | Install the missing tool (links in the launcher message), reopen the terminal, run again |',
     '| Port already in use | Stop the other process or set `GRAPHER_PORT` before starting |',
-    platform === 'macos'
-      ? '| macOS blocks the binary | Right-click `grapher` → Open, or run `xattr -dr com.apple.quarantine .` here |'
-      : '| Wrong macOS download | `uname -m` shows `arm64` (Apple Silicon) or `x64` (Intel); pick the matching archive |',
+    ...(platform === 'macos'
+      ? [
+          '| macOS blocks the binary | Right-click `grapher` → Open, or run `xattr -dr com.apple.quarantine .` here |',
+          '| Wrong macOS download | `uname -m` shows `arm64` (Apple Silicon) or `x64` (Intel); pick the matching archive |',
+        ]
+      : platform === 'linux'
+        ? ['| Wrong architecture | `uname -m` shows `x86_64` or `aarch64`; pick the matching archive |']
+        : []),
     '',
     `Full documentation: ${docsUrl}`,
     '',

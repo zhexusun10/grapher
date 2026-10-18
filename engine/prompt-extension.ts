@@ -94,7 +94,8 @@ export default function (pi: ExtensionAPI) {
       // Normalize existing prompt paths only. Planner gets no extra addendum,
       // cwd announcement, environment hint or instruction to re-read files.
       if (planner) return;
-      const hints = process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS?.trim();
+      const rawHints = process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS?.trim();
+      const hints = rawHints && paths ? paths.visible(rawHints) : rawHints;
       const guidance = hints ? `${pathGuideline}\n${hints}` : pathGuideline;
       if (options.forceSystemPrompt !== undefined) {
         // Respect an explicit override supplied by another extension. Such
@@ -120,6 +121,10 @@ export default function (pi: ExtensionAPI) {
     // contents, provider signatures, or image bytes.
     pi.on('context', async event => ({ messages: view(event.messages) }));
     pi.on('tool_result', async event => ({ content: view(event.content), details: view(event.details) }));
+    // Final assistant text is persisted/output after tool results. Normalize it
+    // too, otherwise workspace spellings survive into the stored result and UI.
+    pi.on('message_end', async event => event.message?.role === 'assistant'
+      ? { message: view(event.message) } : undefined);
   }
 
   const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();

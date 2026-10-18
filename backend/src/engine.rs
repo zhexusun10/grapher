@@ -144,11 +144,10 @@ fn node_key(
     session_id: &str,
 ) -> Result<(NodeKey, u64), String> {
     if config.environment.is_some() { return Err("Managed views require a fresh, exact environment binding".into()); }
-    let repo = Path::new(&config.repository)
-        .canonicalize()
+    let repo = crate::path_identity::actual_path(Path::new(&config.repository))
         .map_err(|e| e.to_string())?;
-    let cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
-    if cwd != repo {
+    let cwd = crate::path_identity::actual_path(&cwd).map_err(|e| e.to_string())?;
+    if !crate::path_identity::same_path(&cwd, &repo) {
         return Err("Only source-checkout nodes can be prewarmed".into());
     }
     let session_dir = session_dir.canonicalize().map_err(|e| e.to_string())?;
@@ -813,6 +812,9 @@ fn run_pi_with_timeout(
         command.args(&config.pi_args);
         command
     };
+    // Session-scoped temp state and shell path hygiene apply to source and
+    // private roles alike; bind_command may re-apply them through clean_command.
+    crate::native::bind_process_paths(&mut command, request.session_dir);
     // Fixture tests opt in with an explicit marker; existing print-mode fixtures
     // retain their original protocol.
     // RPC's stdin-EOF shutdown exits promptly after agent_settled. Print mode
@@ -955,10 +957,12 @@ fn run_pi_with_timeout(
     }
     #[cfg(not(feature = "fixture"))]
     {
-        let graph = request.cwd.canonicalize().map_err(|e| e.to_string())?
-            != Path::new(&config.repository)
+        let graph = !crate::path_identity::same_path(
+            &request.cwd.canonicalize().map_err(|e| e.to_string())?,
+            &Path::new(&config.repository)
                 .canonicalize()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?,
+        );
         command.env(
             "GRAPHER_EXECUTION_KIND",
             if graph { "graph" } else { "source" },
@@ -1048,8 +1052,10 @@ fn run_pi_with_timeout(
         invalidate_warm_node();
     }
     #[cfg(not(feature = "fixture"))]
-    let source_role = !managed && request.role != PiRole::Merger && request.cwd.canonicalize().ok()
-        == Path::new(&config.repository).canonicalize().ok();
+    let source_role = !managed && request.role != PiRole::Merger
+        && request.cwd.canonicalize().ok().is_some_and(|cwd|
+            Path::new(&config.repository).canonicalize().ok()
+                .is_some_and(|repository| crate::path_identity::same_path(&cwd, &repository)));
     #[cfg(not(feature = "fixture"))]
     let prepared = if warm_node.is_none() && source_role {
         process_prewarm::claim(config, request.role, request.cwd)
@@ -1560,6 +1566,8 @@ pub fn execute(
     // sessions from actual interrupted turns must still fail validation.
     if resume_execution_id.is_some() && !initial_recovery && !cfg!(feature = "fixture") {
         crate::session_branch::validate_session(&session_dir, &execution.session_id, Path::new(&execution.worktree))
+            .map_err(|error| format!("Cannot resume node session: {error}"))?;
+        crate::session_branch::rebind_session_cwd(&session_dir, &execution.session_id, Path::new(&execution.worktree))
             .map_err(|error| format!("Cannot resume node session: {error}"))?;
     }
     let model_config = PiModelConfig::resolve(PiRole::NodeAgent, config);

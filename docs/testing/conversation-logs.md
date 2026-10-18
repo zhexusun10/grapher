@@ -34,7 +34,7 @@ Conversation and workspace deletion remove their event, checkpoint and log recor
 The [harness](../../scripts/conversation-acceptance.mjs) requires:
 
 - A prepared Grapher checkout with Node/npm, pinned Pi dependencies, and Rust.
-- Python **3.11+**; the executable defaults to `python` and can be selected with `PYTHON`.
+- Python **3.11+**; the executable defaults to `python` on Windows and `python3` elsewhere, and can be selected with `PYTHON`.
 - Installed Microsoft Edge on Windows, or Playwright Chromium elsewhere; override with `GRAPHER_BROWSER_CHANNEL`.
 - A real legacy `events.sqlite` with saved executions, including a transcript larger than 20 MiB. The initializer expects the legacy schema/output shape; an empty or already fully migrated fresh database is not an equivalent fixture.
 - A new empty acceptance output directory, separate from the original source database, and enough resources for multiple copies and a >=720 MiB derived stress fixture.
@@ -54,7 +54,7 @@ npm run test:conversation-acceptance
 | `GRAPHER_ACCEPTANCE_SOURCE` | `.grapher/events.sqlite`; source legacy database |
 | `GRAPHER_ACCEPTANCE_DIR` | A new timestamped `.grapher/acceptance/` directory |
 | `GRAPHER_BROWSER_CHANNEL` | `msedge` on Windows, `chromium` elsewhere |
-| `PYTHON` | `python`; Python 3.11+ executable |
+| `PYTHON` | `python` on Windows, `python3` elsewhere; Python 3.11+ executable |
 
 The harness builds the UI and a separate fixture/acceptance backend, launches isolated HTTP/browser/worker processes, and retains reproducible copies. Its Cargo builds share one invocation-owned OS temporary target, reclaimed after its backends stop even when an acceptance case fails; an explicit `CARGO_TARGET_DIR` is reused and never deleted. Copied databases, sessions, reports and failure traces remain in the acceptance evidence directory, not the disposable target. It does not require paid model calls or migrate the original source.
 

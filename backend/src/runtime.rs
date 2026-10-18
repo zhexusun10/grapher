@@ -1176,12 +1176,7 @@ impl Runtime {
     }
 
     fn same_workspace_path(left: &Path, right: &Path) -> bool {
-        left == right
-            || left
-                .canonicalize()
-                .ok()
-                .zip(right.canonicalize().ok())
-                .is_some_and(|(left, right)| left == right)
+        crate::path_identity::same_path(left, right)
     }
 
     fn planner_workspace_owner(&self, target: &Execution) -> Option<&Execution> {
@@ -2286,7 +2281,7 @@ impl Runtime {
                         .filter(|execution| {
                             execution.node == previous.node
                                 && execution.session_id == previous.session_id
-                                && execution.worktree == previous.worktree
+                                && Self::same_workspace_path(Path::new(&execution.worktree), Path::new(&previous.worktree))
                                 && !self.state.superseded_execution_ids.contains(&execution.id)
                         })
                         .take_while(|execution| execution.status == "failed")
@@ -2474,7 +2469,8 @@ impl Runtime {
                 .state
                 .executions
                 .iter()
-                .any(|execution| execution.status == "running" && execution.worktree == worktree)
+                .any(|execution| execution.status == "running"
+                    && Self::same_workspace_path(Path::new(&execution.worktree), Path::new(&worktree)))
             {
                 continue;
             }
@@ -2622,17 +2618,19 @@ impl Runtime {
             let environment_previous = self.state.executions.iter().rev()
                 .filter(|previous| previous.status == "completed")
                 .find(|previous| previous.result.as_ref()
-                    .is_some_and(|result| result.layout.as_deref() == Some(&execution.worktree)))
+                    .is_some_and(|result| result.layout.as_deref().is_some_and(|layout|
+                        Self::same_workspace_path(Path::new(layout), Path::new(&execution.worktree)))))
                 .and_then(|previous| self.state.nodes.get(&previous.node)
                     .and_then(|node| node.result.as_ref())
-                    .filter(|result| result.layout.as_deref() == Some(&execution.worktree))
+                    .filter(|result| result.layout.as_deref().is_some_and(|layout|
+                        Self::same_workspace_path(Path::new(layout), Path::new(&execution.worktree))))
                     .or(previous.result.as_ref())).cloned();
             let mut environment_input = None;
             let mut environment_sources = Vec::new();
             let preserve_failed_environment = !history_edit
                 && resume.is_some_and(|previous| {
                     previous.status == "failed"
-                        && previous.worktree == execution.worktree
+                        && Self::same_workspace_path(Path::new(&previous.worktree), Path::new(&execution.worktree))
                         && Path::new(&execution.worktree).is_dir()
                 });
             if let Some(store) = self.environments()? {
@@ -2641,8 +2639,10 @@ impl Runtime {
                         && feedback_workspace.is_none()
                         && resume.is_some_and(|previous| {
                             previous.status == "failed"
-                                && (previous.worktree != execution.worktree
-                                    || !Path::new(&previous.worktree).is_dir())
+                                && (!Self::same_workspace_path(
+                                    Path::new(&previous.worktree),
+                                    Path::new(&execution.worktree),
+                                ) || !Path::new(&previous.worktree).is_dir())
                         })
                     {
                         return Err("Failed partial environment view is missing or cannot be reused; refusing to silently restore old input".into());
@@ -2751,7 +2751,8 @@ impl Runtime {
                 // owner. Keep its exclusion/ownership evidence when resetting it.
                 environment_sources.extend(self.state.nodes.values()
                     .filter_map(|state| state.result.as_ref())
-                    .filter(|result| result.layout.as_deref() == Some(&execution.worktree))
+                    .filter(|result| result.layout.as_deref().is_some_and(|layout|
+                        Self::same_workspace_path(Path::new(layout), Path::new(&execution.worktree))))
                     .cloned());
             }
             self.emit(EventKind::Started {
@@ -2772,7 +2773,8 @@ impl Runtime {
                     .nodes
                     .get(&execution.node)
                     .and_then(|node| node.result.as_ref())
-                    .filter(|result| result.layout.as_deref() == Some(&execution.worktree))
+                    .filter(|result| result.layout.as_deref().is_some_and(|layout|
+                        Self::same_workspace_path(Path::new(layout), Path::new(&execution.worktree))))
                     .map(|result| result.launch_ref.clone())
             } else {
                 None
@@ -2795,7 +2797,7 @@ impl Runtime {
                         && self.state.executions.iter().any(|previous| {
                             previous.node == node.name
                                 && previous.status == "failed"
-                                && previous.worktree == input.worktree
+                                && Self::same_workspace_path(Path::new(&previous.worktree), Path::new(&input.worktree))
                         })
                 }),
                 feedback_workspace,
@@ -3004,7 +3006,7 @@ impl Runtime {
         let path = &executions[0].worktree;
         if executions
             .iter()
-            .any(|execution| &execution.worktree != path)
+            .any(|execution| !Self::same_workspace_path(Path::new(&execution.worktree), Path::new(path)))
         {
             return None;
         }
@@ -3045,14 +3047,16 @@ impl Runtime {
         self.state
             .result_execution
             .as_ref()
-            .is_some_and(|e| e.status == "running" && e.input.layout.as_deref() == path.to_str())
+            .is_some_and(|e| e.status == "running" && e.input.layout.as_deref()
+                .is_some_and(|layout| crate::path_identity::same_path(Path::new(layout), path)))
             || self
                 .state
                 .executions
                 .iter()
                 .chain(&self.state.mergers)
                 .any(|execution| {
-                    execution.status == "running" && Path::new(&execution.worktree) == path
+                    execution.status == "running"
+                        && crate::path_identity::same_path(Path::new(&execution.worktree), path)
                 })
     }
 
@@ -3069,11 +3073,13 @@ impl Runtime {
         // Unrelated jobs must not recycle an input before batch composition.
         if self.state.pending_feedback.iter().any(|pending| {
             self.state.executions.iter().any(|execution| {
-                execution.id == pending.execution_id && Path::new(&execution.worktree) == path
+                execution.id == pending.execution_id
+                    && crate::path_identity::same_path(Path::new(&execution.worktree), path)
             })
         }) || self.state.nodes.iter().any(|(name, node)| {
             Some(name.as_str()) != owner && node.feedback_workspace.as_ref()
-                .is_some_and(|input| input.sources().any(|source| Path::new(&source.worktree) == path))
+                .is_some_and(|input| input.sources().any(|source|
+                    crate::path_identity::same_path(Path::new(&source.worktree), path)))
         }) {
             return true;
         }
@@ -3090,19 +3096,21 @@ impl Runtime {
             .is_some_and(|policy| policy.best_effort);
         let shared_handoff = owner.is_some_and(|owner| self.state.nodes.get(owner)
             .is_some_and(|node| node.shared_workspace)
-            && self.terminal_workspace_for(owner).is_some_and(|terminal| Path::new(&terminal.worktree) == path));
+            && self.terminal_workspace_for(owner).is_some_and(|terminal|
+                crate::path_identity::same_path(Path::new(&terminal.worktree), path)));
         if best_effort && !shared_handoff && self.state.graph.nodes.iter().any(|node|
             Some(node.name.as_str()) != owner
             && self.state.nodes[&node.name].status == "completed"
             && !self.state.graph.edges.iter().any(|edge| !edge.feedback && edge.from == node.name)
             && self.state.nodes[&node.name].result.as_ref()
-                .is_some_and(|result| result.layout.as_deref() == path.to_str())) {
+                .is_some_and(|result| result.layout.as_deref()
+                    .is_some_and(|layout| crate::path_identity::same_path(Path::new(layout), path)))) {
             return true;
         }
         self.state.executions.iter().any(|e| {
             e.status == "failed"
                 && Some(e.node.as_str()) != owner
-                && Path::new(&e.worktree) == path
+                && crate::path_identity::same_path(Path::new(&e.worktree), path)
                 && self
                     .state
                     .nodes
@@ -4148,7 +4156,10 @@ fn perform_with_merger_inner(
     // An interrupted writer's dirty files belong to that execution, not to an
     // expendable workspace slot. Never stash, clean or reset them on recovery.
     let preserved_head = if let Some(previous) = &job.preserved_workspace {
-        if !reused || previous.worktree != job.execution.worktree
+        if !reused || !crate::path_identity::same_path(
+            Path::new(&previous.worktree),
+            Path::new(&job.execution.worktree),
+        )
             || previous.node != job.execution.node
             || previous.session_id != job.execution.session_id
             || job.history_edit || job.feedback_workspace.as_ref()
@@ -4271,7 +4282,7 @@ fn perform_with_merger_inner(
                 // execution history, so attribution never depends on whether
                 // the failed attempt's own session happened to be persisted.
                 let own_residue = job.feedback_repair_retry
-                    && source.worktree == job.execution.worktree
+                    && crate::path_identity::same_path(Path::new(&source.worktree), Path::new(&job.execution.worktree))
                     && workspace::verify_prepared_ancestor(source_path, &source.head).is_ok();
                 if !own_residue {
                     return Err("Feedback workspace changed after completion".into());

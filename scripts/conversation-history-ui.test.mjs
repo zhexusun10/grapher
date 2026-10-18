@@ -1405,7 +1405,11 @@ test("switching conversations on a large viewport never flashes the top user pro
       await alert.waitFor({ state: "visible" });
       await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
       failHistory = false;
-      await alert.getByRole("button", { name: "Retry", exact: true }).click();
+      // A background retry may succeed between reading the error and clicking;
+      // the recovery contract is the rendered marker, not one transient button.
+      if (await alert.isVisible().catch(() => false)) {
+        await alert.getByRole("button", { name: "Retry", exact: true }).click({ timeout: 3000 }).catch(() => {});
+      }
       await page.getByText(`BOTTOM_MARKER_${runId}`, { exact: true }).waitFor();
       await alert.waitFor({ state: "detached" });
     }

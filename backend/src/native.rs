@@ -196,10 +196,105 @@ pub(crate) fn host_path(path: &Path) -> PathBuf {
         if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
             return PathBuf::from(format!(r"\\{unc}"));
         }
-        return PathBuf::from(value.strip_prefix(r"\\?\").unwrap_or(&value));
+        if let Some(path) = value.strip_prefix(r"\\?\") {
+            return PathBuf::from(path);
+        }
+        if let Some(unc) = value.strip_prefix("//?/UNC/") {
+            return PathBuf::from(format!(r"\\{}", unc.replace('/', "\\")));
+        }
+        if let Some(path) = value.strip_prefix("//?/") {
+            return PathBuf::from(path.replace('/', "\\"));
+        }
+        PathBuf::from(value)
     }
     #[cfg(not(windows))]
     path.to_path_buf()
+}
+
+#[cfg(windows)]
+fn normalize_windows_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("/cygdrive/") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'/' {
+            return PathBuf::from(format!(
+                "{}:{}",
+                (bytes[0] as char).to_ascii_uppercase(),
+                &rest[1..]
+            ));
+        }
+    }
+    if let Some(rest) = text.strip_prefix('/') {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'/' {
+            return PathBuf::from(format!(
+                "{}:{}",
+                (bytes[0] as char).to_ascii_uppercase(),
+                &rest[1..]
+            ));
+        }
+    }
+    path
+}
+
+#[cfg(not(windows))]
+fn normalize_windows_path(path: PathBuf) -> PathBuf {
+    path
+}
+
+/// Normalize a configured environment path from Git Bash/MSYS spelling on
+/// Windows (`/c/Users/...`, `/cygdrive/c/...`) and expand a leading `~`.
+pub(crate) fn environment_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(|value| {
+        normalize_windows_path(expand_home_path(PathBuf::from(value)))
+    })
+}
+
+/// Windows prefers USERPROFILE; Git Bash commonly exports a POSIX HOME that
+/// native Win32 path handling must not treat as a current-drive path.
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let value = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let value = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    value.map(|value| normalize_windows_path(expand_home_path(PathBuf::from(value))))
+}
+
+pub(crate) fn expand_home_path(path: PathBuf) -> PathBuf {
+    let Some(home) = home_dir_for_expansion() else { return path };
+    let text = path.to_string_lossy();
+    if text == "~" {
+        return home;
+    }
+    if let Some(rest) = text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
+        return home.join(rest);
+    }
+    path
+}
+
+fn home_dir_for_expansion() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let value = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let value = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    value.map(PathBuf::from)
+}
+
+/// Keep temporary files inside the per-execution session and remove inherited
+/// shell path state that would otherwise make relative `cd` unpredictable.
+pub(crate) fn bind_process_paths(command: &mut Command, temp: &Path) {
+    for key in ["CDPATH", "OLDPWD", "GLOBIGNORE"] {
+        command.env_remove(key);
+    }
+    if !temp.as_os_str().is_empty() {
+        let _ = fs::create_dir_all(temp);
+    }
+    let temp = host_path(temp);
+    command
+        .env("TMPDIR", &temp)
+        .env("TMP", &temp)
+        .env("TEMP", &temp)
+        .env("XDG_RUNTIME_DIR", &temp);
 }
 
 pub(crate) fn clear_git_environment(command: &mut Command) {
@@ -220,11 +315,16 @@ pub(crate) fn clear_git_environment(command: &mut Command) {
 
 pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result<(), String> {
     crate::workspace::validate_binding(repository)?;
-    let repository = repository.canonicalize().map_err(|e| e.to_string())?;
-    let cwd = cwd
-        .canonicalize()
+    let repository = crate::path_identity::actual_path(repository).map_err(|e| e.to_string())?;
+    let cwd = crate::path_identity::actual_path(cwd)
         .map_err(|e| format!("Invalid execution directory: {e}"))?;
-    if cwd != repository {
+    crate::path_identity::ensure_windows_path(&repository, "Source repository")?;
+    crate::path_identity::ensure_windows_path(&cwd, "Execution workspace")?;
+    #[cfg(unix)]
+    if repository.to_str().is_none() || cwd.to_str().is_none() {
+        return Err("Source and execution paths must be valid UTF-8 for model path mapping".into());
+    }
+    if !crate::path_identity::same_path(&cwd, &repository) {
         // Planner follow-ups and conflict repair can use a current node slot.
         // Private Planner/Merger turns retain the same workspace validation and
         // platform boundaries as other private executions.
@@ -285,18 +385,21 @@ pub(crate) fn trusted_git() -> Result<PathBuf, String> {
 }
 
 pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, String> {
-    validate_workspace(role, repository, cwd)?;
-    if repository.canonicalize().map_err(|e| e.to_string())?
-        != cwd.canonicalize().map_err(|e| e.to_string())?
-    {
+    let repository = crate::path_identity::actual_path(repository).map_err(|e| e.to_string())?;
+    let cwd = crate::path_identity::actual_path(cwd).map_err(|e| e.to_string())?;
+    validate_workspace(role, &repository, &cwd)?;
+    if !crate::path_identity::same_path(&repository, &cwd) {
         return Err("Private workspaces require execution_command and its platform context".into());
     }
     let mut command = Command::new(trusted_node()?);
     command.arg(host_path(&installation_root().join("engine/entrypoint.mjs")));
-    command.current_dir(host_path(cwd));
+    command.current_dir(host_path(&cwd));
     command.env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     command.env_remove("GRAPHER_EXECUTION_KIND");
     clear_git_environment(&mut command);
+    for key in ["CDPATH", "OLDPWD", "GLOBIGNORE"] {
+        command.env_remove(key);
+    }
     bind_trusted_git(&mut command)?;
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
@@ -318,10 +421,10 @@ pub fn execution_command(
     session: &Path,
 ) -> Result<Command, String> {
     validate_workspace(role, repository, cwd)?;
-    let source = repository.canonicalize().map_err(|e| e.to_string())?;
-    let current = cwd.canonicalize().map_err(|e| e.to_string())?;
-    if source == current {
-        return command(role, repository, cwd);
+    let source = crate::path_identity::actual_path(repository).map_err(|e| e.to_string())?;
+    let current = crate::path_identity::actual_path(cwd).map_err(|e| e.to_string())?;
+    if crate::path_identity::same_path(&source, &current) {
+        return command(role, &source, &current);
     }
     let worktree_root = current
         .parent()
@@ -334,6 +437,8 @@ pub fn execution_command(
     #[cfg(windows)]
     let _ = worktree_root; // Keep the same workspace layout validation on Windows.
     let engine = prepared_runtime()?;
+    crate::path_identity::ensure_windows_path(&engine, "Native engine")?;
+    crate::path_identity::ensure_windows_path(session, "Execution session")?;
     #[cfg(target_os = "macos")]
     {
         let profile = session.join("execution-instance.sb");
@@ -357,13 +462,16 @@ pub fn execution_command(
             .env("PI_CODING_AGENT_DIR", agent_dir()?);
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
+        bind_process_paths(&mut command, session);
         command.env("PYTHONDONTWRITEBYTECODE", "1");
         return Ok(command);
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = (data, session);
-        return unsandboxed_command(&engine, &current);
+        let _ = data;
+        let mut command = unsandboxed_command(&engine, &current)?;
+        bind_process_paths(&mut command, session);
+        return Ok(command);
     }
     #[cfg(target_os = "linux")]
     {
@@ -379,6 +487,7 @@ pub fn execution_command(
         )?;
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
+        bind_process_paths(&mut command, session);
         Ok(command)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -418,20 +527,11 @@ pub fn fixture_execution_command(cwd: &Path) -> Result<Command, String> {
 
 /// Shared upstream-owned credentials/config; this is not a directory mapping.
 pub fn agent_dir() -> Result<PathBuf, String> {
-    let home = PathBuf::from(
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .ok_or("HOME or USERPROFILE is required")?,
-    );
-    let path = if let Some(path) = std::env::var_os("PI_CODING_AGENT_DIR") {
-        PathBuf::from(path)
+    let home = home_dir().ok_or("HOME or USERPROFILE is required")?;
+    let path = if let Some(path) = environment_path("PI_CODING_AGENT_DIR") {
+        expand_home_path(path)
     } else {
-        PathBuf::from(&home).join(".grapher/pi-agent")
-    };
-    let path = if path == Path::new("~") || path.starts_with("~/") {
-        home.join(path.strip_prefix("~").unwrap())
-    } else {
-        path
+        home.join(".grapher/pi-agent")
     };
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     let target_models = path.join("models.json");
@@ -563,6 +663,15 @@ mod tests {
             .and_then(|(_, value)| value)
             .expect("PYTHONDONTWRITEBYTECODE binding is required");
         assert_eq!(value, "1");
+    }
+
+    #[test]
+    fn environment_paths_expand_home_without_rewriting_absolute_paths() {
+        let expanded = expand_home_path(PathBuf::from("~/grapher-agent"));
+        assert!(expanded.is_absolute(), "{}", expanded.display());
+        assert!(expanded.ends_with("grapher-agent"));
+        let absolute = PathBuf::from("/tmp/absolute-agent");
+        assert_eq!(expand_home_path(absolute.clone()), absolute);
     }
 
     #[test]

@@ -17,7 +17,7 @@ impl PreparedBranch {
     }
 }
 
-fn open_session(source_dir: &Path, source_id: &str, source_cwd: &Path)
+fn session_file(source_dir: &Path, source_id: &str)
     -> Result<(PathBuf, std::io::BufReader<fs::File>, Value), String>
 {
     use std::io::{BufRead, BufReader, Read, Seek};
@@ -38,19 +38,63 @@ fn open_session(source_dir: &Path, source_id: &str, source_cwd: &Path)
     let mut first = String::new();
     reader.read_line(&mut first).map_err(|error| error.to_string())?;
     let header: Value = serde_json::from_str(&first).map_err(|error| error.to_string())?;
-    let expected = crate::native::host_path(source_cwd);
+    if header["type"] != "session" || header["id"] != source_id {
+        return Err("Node session history belongs to another identity".into());
+    }
+    Ok((source, reader, header))
+}
+
+fn open_session(source_dir: &Path, source_id: &str, source_cwd: &Path)
+    -> Result<(PathBuf, std::io::BufReader<fs::File>, Value), String>
+{
+    let (source, reader, header) = session_file(source_dir, source_id)?;
+    let expected = crate::path_identity::actual_path(source_cwd)
+        .unwrap_or_else(|_| source_cwd.to_path_buf());
     let matches_cwd = header.get("cwd").and_then(Value::as_str).is_some_and(|cwd| {
-        let actual = crate::native::host_path(Path::new(cwd));
-        actual == expected || actual.canonicalize().ok().zip(expected.canonicalize().ok()).is_some_and(|(actual, expected)| actual == expected)
+        crate::path_identity::same_path(Path::new(cwd), &expected)
     });
-    if header["type"] != "session" || header["id"] != source_id || !matches_cwd {
+    if !matches_cwd {
         return Err("Node session history belongs to another workspace or identity".into());
     }
     Ok((source, reader, header))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn validate_session(directory: &Path, id: &str, cwd: &Path) -> Result<(), String> {
     open_session(directory, id, cwd).map(|_| ())
+}
+
+/// Pi resumes a custom session directory by comparing the literal header cwd
+/// with the child's actual `process.cwd()`. Rewrite only the first JSON line
+/// when the workspace resolves to a different case/Unicode spelling.
+pub(crate) fn rebind_session_cwd(directory: &Path, id: &str, cwd: &Path) -> Result<(), String> {
+    let (path, mut input, mut header) = session_file(directory, id)?;
+    let actual = crate::native::host_path(&crate::path_identity::actual_path(cwd)?);
+    let current = header.get("cwd").and_then(Value::as_str);
+    if current.is_some_and(|current| crate::path_identity::same_path(Path::new(current), &actual))
+        && current == Some(actual.to_string_lossy().as_ref()) {
+        return Ok(());
+    }
+    header["cwd"] = json!(actual);
+    let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+    let result = (|| -> Result<(), String> {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_writer(&mut output, &header).map_err(|error| error.to_string())?;
+        output.write_all(b"\n").map_err(|error| error.to_string())?;
+        std::io::copy(&mut input, &mut output).map_err(|error| error.to_string())?;
+        output.sync_all().map_err(|error| error.to_string())?;
+        drop(output);
+        drop(input);
+        fs::rename(&temporary, &path).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Move a node's own conversation to a new cwd without rewriting the original
@@ -64,7 +108,9 @@ pub fn fork_session(
     if target_id == source_id { return Err("A forked node session needs a new identity".into()); }
     let (source, mut reader, mut header) = open_session(source_dir, source_id, source_cwd)?;
     header["id"] = json!(target_id);
-    header["cwd"] = json!(crate::native::host_path(target_cwd));
+    header["cwd"] = json!(crate::native::host_path(
+        &crate::path_identity::actual_path(target_cwd)?
+    ));
     header["parentSession"] = json!(crate::native::host_path(&source));
     fs::create_dir_all(target_dir).map_err(|error| error.to_string())?;
     let target = target_dir.join(format!("grapher_{target_id}.jsonl"));
@@ -126,9 +172,7 @@ fn branch_before_user_matching(
     let header = values.first().ok_or("Empty Pi session")?;
     let actual_cwd = header.get("cwd").and_then(Value::as_str).map(Path::new);
     let cwd_matches = actual_cwd.is_some_and(|actual| {
-        let actual = crate::native::host_path(actual);
-        let expected = crate::native::host_path(cwd);
-        actual == expected || actual.canonicalize().ok().zip(expected.canonicalize().ok()).is_some_and(|(a, b)| a == b)
+        crate::path_identity::same_path(actual, cwd)
     });
     if header.get("type").and_then(Value::as_str) != Some("session")
         || header.get("id").and_then(Value::as_str) != Some(session_id)
@@ -200,6 +244,25 @@ fn branch_before_user_matching(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn session_header_is_rebound_to_the_filesystem_case_spelling() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("MixedCaseWorkspace");
+        let sessions = temp.path().join("sessions");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&sessions).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let path = sessions.join(format!("test_{id}.jsonl"));
+        let lower = workspace.to_string_lossy().to_lowercase();
+        fs::write(&path, format!("{}\n", json!({"type":"session","id":id,"cwd":lower}))).unwrap();
+        rebind_session_cwd(&sessions, &id, &workspace).unwrap();
+        let first = fs::read_to_string(&path).unwrap();
+        let header: Value = serde_json::from_str(first.lines().next().unwrap()).unwrap();
+        assert_eq!(Path::new(header["cwd"].as_str().unwrap()), crate::path_identity::actual_path(&workspace).unwrap());
+        validate_session(&sessions, &id, &workspace).unwrap();
+    }
+
     #[test]
     fn workspace_transfer_forks_only_the_owners_history_and_preserves_original_bytes() {
         let temp = tempfile::tempdir().unwrap();
@@ -219,7 +282,9 @@ mod tests {
         let (header, preserved) = result.split_once('\n').unwrap();
         let header: Value = serde_json::from_str(header).unwrap();
         assert_eq!(header["id"], next);
-        assert_eq!(header["cwd"], json!(crate::native::host_path(&new)));
+        assert_eq!(header["cwd"], json!(crate::native::host_path(
+            &crate::path_identity::actual_path(&new).unwrap()
+        )));
         assert_eq!(header["parentSession"], json!(crate::native::host_path(&path)));
         assert_eq!(preserved, body);
         assert_eq!(fs::read_to_string(path).unwrap(), bytes);

@@ -53,24 +53,31 @@ test('bundled Pi model data validates in a fresh checkout and matches the baseli
 });
 
 test('local model-data overlay overrides the baseline and keeps upstream validation green', t => {
-  const overlay = join(root, 'engine/model-data-local');
-  const names = readdirSync(overlay).filter(name => name.endsWith('.json'));
-  assert.ok(names.length > 0, 'this repository is developed with a local overlay; the test exercises it');
+  // A clean checkout has no git-ignored overlay. Build one here so this test
+  // never depends on the developer's personal engine/model-data-local state.
+  const overlay = mkdtempSync(join(tmpdir(), 'grapher-pi-overlay-src-'));
+  const name = Object.keys(lock.modelData).find(entry => entry.endsWith('.json') && entry !== '.manifest.json');
   const data = mkdtempSync(join(tmpdir(), 'grapher-pi-overlay-'));
-  t.after(() => rmSync(data, { recursive: true, force: true }));
+  t.after(() => {
+    rmSync(overlay, { recursive: true, force: true });
+    rmSync(data, { recursive: true, force: true });
+  });
+  const overridden = JSON.parse(readFileSync(join(root, 'engine/model-data', name), 'utf8'));
+  const firstApi = Object.values(overridden)[0];
+  const firstModel = Object.values(firstApi)[0];
+  firstModel.name = `${firstModel.name} (local overlay)`;
+  writeFileSync(join(overlay, name), `${JSON.stringify(overridden)}\n`);
   cpSync(join(root, 'engine/model-data'), data, { recursive: true });
   // A stale provider from an older hydration must not survive the restore.
   writeFileSync(join(data, 'stale-provider.json'), '{}\n');
   const directory = stagedPackage(t, data);
   const merged = join(directory, 'src/providers/data');
-  restoreModelData(merged);
+  restoreModelData(merged, overlay);
   assert.deepEqual(readdirSync(merged).sort(), Object.keys(lock.modelData).sort(), 'overlay may only override known providers');
-  for (const name of names) {
-    assert.notEqual(
-      createHash('sha256').update(readFileSync(join(merged, name))).digest('hex'),
-      lock.modelData[name],
-      `${name} must come from the overlay, not the committed baseline`);
-  }
+  assert.notEqual(
+    createHash('sha256').update(readFileSync(join(merged, name))).digest('hex'),
+    lock.modelData[name],
+    `${name} must come from the overlay, not the committed baseline`);
   // The merged catalog (baseline plus local API tweaks) passes upstream validation.
   validateGeneratedModelData(directory);
 });

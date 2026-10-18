@@ -59,6 +59,8 @@ reports/result.json
 
 Use real host absolute paths for external resources. Within a Graph node, relative paths resolve from its workspace. `cd` and `../` retain native shell semantics; `../shared` is not automatically redirected to a source-project sibling. Prepare a suitable directory layout or use an explicit external path.
 
+Model-visible paths use `/` separators on every host, including Windows, so the same relative path works in Bash and the file tools. Windows drive, UNC, `/c/...`, extended-length and case variants are accepted at tool boundaries and normalized for comparison. Plain filesystem paths inside heredoc bodies and paths inside remote/container commands are intentionally not rewritten (known `file://` URLs are still translated); use project-relative paths there or an explicit external path.
+
 ## Graph tool adaptation
 
 - `read`, `write`, and `edit` adapt recognized source-project path prefixes to the current node repository.

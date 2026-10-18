@@ -63,6 +63,13 @@ test('in-package guide covers prerequisites, start, data and troubleshooting per
     assert.match(guide, /Node\.js 22\.19\+\*\* and \*\*Git\*\*/);
     assert.match(guide, /http:\/\/127\.0\.0\.1:1421/);
     assert.match(guide, /`.grapher\/`/);
+    if (platform === 'macos') {
+      assert.match(guide, /Wrong macOS download/);
+      assert.match(guide, /uname -m/);
+    } else {
+      assert.doesNotMatch(guide, /Wrong macOS download/, 'macOS-specific troubleshooting must not leak onto other platforms');
+    }
+    if (platform === 'linux') assert.match(guide, /Wrong architecture/);
   }
 });
 

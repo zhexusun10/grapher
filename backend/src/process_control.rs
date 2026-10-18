@@ -23,6 +23,10 @@ struct ProcessTreeInner {
     pid: u32,
     #[cfg(windows)]
     job: usize,
+    // Termination runs from explicit owners, shutdown and Drop. Darwin reports
+    // EPERM when the group is already reduced to zombies, so repeated Linux-style
+    // cleanup must stay idempotent instead of surfacing a false failure.
+    terminated: AtomicBool,
 }
 
 // Raw Windows handles are process-local values. The job is owned and closed by
@@ -211,11 +215,15 @@ pub fn configure_command(command: &mut Command) {
 
 pub fn track(child: &Child) -> Result<ProcessTree, String> {
     #[cfg(unix)]
-    let tree = ProcessTree(Arc::new(ProcessTreeInner { pid: child.id() }));
+    let tree = ProcessTree(Arc::new(ProcessTreeInner {
+        pid: child.id(),
+        terminated: AtomicBool::new(false),
+    }));
 
     #[cfg(windows)]
     let tree = ProcessTree(Arc::new(ProcessTreeInner {
         job: create_job(child)?,
+        terminated: AtomicBool::new(false),
     }));
 
     let owner = OWNER.with(|owner| owner.borrow().clone());
@@ -278,8 +286,22 @@ fn retry_termination(mut terminate: impl FnMut() -> std::io::Result<()>) -> std:
     Ok(())
 }
 
+/// Darwin returns EPERM instead of ESRCH when a process group contains only
+/// zombies (for example the leader was already reaped by `wait`). Grapher's
+/// own descendants stay under the same UID, so a live child remains signalable;
+/// the EPERM outcome means no writer under this lifecycle boundary is left to
+/// terminate. Linux reports ESRCH for the same state.
+#[cfg(unix)]
+fn no_signalable_members(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ESRCH)
+        || cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::EPERM)
+}
+
 fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
-    retry_termination(|| {
+    if inner.terminated.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let result = retry_termination(|| {
         #[cfg(unix)]
         {
             let pid = i32::try_from(inner.pid)
@@ -293,8 +315,7 @@ fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
                 })?;
             if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
                 let error = std::io::Error::last_os_error();
-                // A previously terminated group is already clean.
-                if error.raw_os_error() != Some(libc::ESRCH) {
+                if !no_signalable_members(&error) {
                     return Err(std::io::Error::new(
                         error.kind(),
                         format!("kill process group {pid}: {error}"),
@@ -309,13 +330,19 @@ fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
             }
         }
         Ok(())
-    })
+    });
+    if result.is_ok() {
+        inner.terminated.store(true, Ordering::SeqCst);
+    }
+    result
 }
 
 impl ProcessTree {
     /// A successful model response is not a process-drain barrier. Managed
     /// snapshots must fail while descendants remain in the lifecycle boundary.
     pub fn ensure_drained(&self) -> Result<(), String> {
+        // Keep polling even after terminate(): SIGKILL delivery is asynchronous,
+        // and handoff must still wait for descendants that have not exited.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         loop {
             #[cfg(windows)]
@@ -340,7 +367,7 @@ impl ProcessTree {
                     true
                 } else {
                     let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ESRCH) {
+                    if !no_signalable_members(&error) {
                         return Err(format!("Cannot confirm native process drain: {error}"));
                     }
                     false
@@ -641,6 +668,42 @@ fn create_job(child: &Child) -> Result<usize, String> {
 mod tests {
     use super::*;
     use std::process::Stdio;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zombie_only_process_group_is_drained_and_repeated_cleanup_is_idempotent() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        configure_command(&mut command);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let tree = track(&child).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // The leader is a zombie before wait(); Darwin reports EPERM for its
+        // process group even though no live writer remains.
+        tree.ensure_drained()
+            .expect("a zombie-only group must not fail drain");
+        tree.terminate();
+        tree.terminate(); // Owner cleanup, shutdown and Drop may all run.
+        let _ = child.wait();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_permission_denied_only_means_the_group_has_no_signalable_members() {
+        assert!(no_signalable_members(&std::io::Error::from_raw_os_error(
+            libc::EPERM
+        )));
+        assert!(no_signalable_members(&std::io::Error::from_raw_os_error(
+            libc::ESRCH
+        )));
+        assert!(!no_signalable_members(&std::io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+    }
 
     #[test]
     fn termination_retries_transient_errors_and_bounds_failures() {

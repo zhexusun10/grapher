@@ -673,7 +673,9 @@ for (const fixtureName of ["prompt", "compactPrompt"]) {
       assert.ok((await input.boundingBox()).height > originalHeight);
       const expandedBounds = await page.locator(".prompt-box-container").boundingBox();
       assert.ok(Math.abs(expandedBounds.height - page.viewportSize().height * 0.8) < 2, "expanded composer occupies 80% of the viewport");
-      await input.press("ControlOrMeta+End");
+      // Meta/Cmd+End has inconsistent textarea semantics across browsers and
+      // hosts. Set the caret explicitly so the edit tests composer behavior.
+      await input.evaluate(element => element.setSelectionRange(element.value.length, element.value.length));
       await input.press("Shift+Enter");
       await page.keyboard.insertText("Edited while expanded");
       const editedDraft = await input.inputValue();
@@ -1129,6 +1131,12 @@ for (const wireStatus of ["completed", "done"]) {
       await card.waitFor();
       const label = card.locator(".node-footer .status");
       assert.equal(await label.innerText(), "COMPLETED", "backend completion must never leave the card label empty");
+      // The graph entrance can still be fading the new node when the label
+      // first exists; checkVisibility below deliberately includes opacity.
+      await page.waitForFunction(() => {
+        const status = document.querySelector('.graph-canvas .task-node[data-node-name="task"] .node-footer .status');
+        return status && Number(getComputedStyle(status).opacity) === 1;
+      });
       assert.equal(await label.evaluate(element => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })), true);
       const bounds = await label.boundingBox(), cardBounds = await card.boundingBox();
       assert.ok(bounds && cardBounds && bounds.width > 0 && bounds.height > 0 && bounds.x >= cardBounds.x &&
@@ -1744,6 +1752,14 @@ test("completed thinking stays visible and copyable through empty or replacement
       await update("thinking_end", { content: data.ending });
       await append({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: data.final }] } });
       for (const [i, view] of views.entries()) {
+        // message_end settles the card on the next render commit; do not read
+        // its class immediately after the header already exists. Later cards
+        // stay expanded from the copy check below, so index the card itself.
+        const viewName = i === 0 ? "live" : "history";
+        await page.waitForFunction(({ viewName, turn }) => {
+          const card = document.querySelectorAll(`[data-thinking-view="${viewName}"] .thinking-card`)[turn];
+          return card?.classList.contains("settled") && card.classList.contains("collapsed");
+        }, { viewName, turn });
         const card = view.locator(".thinking-card").nth(turn);
         await card.locator(".thinking-card-header").waitFor();
         assert.match(await card.getAttribute("class"), /settled collapsed/);

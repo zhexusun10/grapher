@@ -40,8 +40,7 @@ fn slot(role: PiRole) -> &'static OnceLock<Pool<Key, ReadyProcess>> {
 }
 fn key(config: &Config) -> Result<Key, String> {
     Ok(Key {
-        repository: Path::new(&config.repository)
-            .canonicalize()
+        repository: crate::path_identity::actual_path(Path::new(&config.repository))
             .map_err(|e| e.to_string())?,
     })
 }
@@ -107,7 +106,7 @@ pub(super) fn claim(config: &Config, role: PiRole, cwd: &Path) -> Option<ReadyPr
     }
     let key = key(config).ok()?;
     // An unbound source process cannot acquire a private Graph node's sandbox.
-    if cwd.canonicalize().ok()? != key.repository {
+    if !crate::path_identity::same_path(&cwd.canonicalize().ok()?, &key.repository) {
         return None;
     }
     slot(role)

@@ -74,7 +74,7 @@ See the [execution model](docs/architecture/execution-model.md) for planning sid
 
 ## Quick start
 
-**Requirements:** Node.js 22.19+, stable Rust, Git, npm, network access, and provider authentication. Windows needs Git for Windows Bash; Linux Graph needs bubblewrap and permitted unprivileged user/mount/PID namespaces.
+**Requirements:** Node.js 22.19+, stable Rust, Git, npm, network access, and provider authentication. Windows needs Git for Windows Bash; macOS needs Xcode Command Line Tools for the Rust linker and uses the built-in Seatbelt sandbox for Graph; Linux Graph needs bubblewrap and permitted unprivileged user/mount/PID namespaces.
 
 **No build tools?** Download a ready-to-run release archive instead: verify its `.sha256` checksum, extract it, and run `start.bat` (Windows) or `./start.sh` (macOS/Linux). Archives still require Node.js 22.19+ and Git at runtime; Rust and npm are not needed.
 
