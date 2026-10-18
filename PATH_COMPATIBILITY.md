@@ -301,7 +301,7 @@ and Linux behavior.
 
 ## Latest HEAD Windows acceptance (2026-10-18)
 
-Tested commit: `7cb892a567c0b9bdcae704b1325757abb39fbc99` (clean tree).
+Tested commit: `f719d63bb94b90911f7929df9999c81d9260610c` (clean tree).
 Host: Windows 10.0.26300.9711 x64, Node v24.16.0, npm 12.1.0, Git for
 Windows 2.54.0.windows.1.
 
@@ -333,7 +333,7 @@ Commands were run sequentially (parallel cargo builds can lock `grapher.exe`):
   stayed external and was removed after the check.
 - Workspace containing `;`: file-tool write/read, physical and visible mapping
   passed with the per-value cygpath fallback.
-- Long external path: 231 UTF-16 units read/write passed; the preflight unit test
+- Long external path: 232 UTF-16 units read/write passed; the preflight unit test
   covers the >240 actionable error.
 - Real-path process flows with `TEMP=...\Grapher Real Case 中文`:
   `windows-native.test.ts` passed, `prepared-host.test.mjs` passed,
