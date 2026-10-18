@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   npm-audit:
     name: npm audit / ${{ matrix.scope }}
