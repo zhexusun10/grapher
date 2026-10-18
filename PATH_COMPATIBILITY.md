@@ -89,8 +89,17 @@ remote-command and cross-volume case-heuristic limitations.
       not an expanded canonical path; Unix keeps the resolved actual spelling
 - [x] Unicode NFC/NFD test expectations are platform-specific: APFS treats them
       as one file; Linux/Windows keep distinct names
+- [x] JS `actualPath()` mirrors Rust `actual_path()`: native realpath plus the
+      deepest existing ancestor, used by `samePath`/`pathKey`/`mapPhysicalPath`
+      for 8.3, junctions, symlinks, missing leaves and macOS case spelling
+- [x] Command path words are resolved before project-prefix mapping, so `.`,
+      `..`, 8.3 and junction spellings map to the normalized workspace path;
+      paths that escape the project keep the external/relative tail
+- [x] Workspace-external access audit is a local-only `NODE_OPTIONS --import`
+      hook under gitignored `.grapher-path-audit/`; it is not tracked code and
+      not a Pi extension, so ordinary Pi never loads it
 
-## Windows host handoff (next)
+## Windows host handoff
 
 Run from the repository root with Node 22.19+, Git for Windows and the pinned
 Pi setup already installed. Do not run the whole `npm test` suite first; use the
@@ -98,46 +107,84 @@ Windows-specific and path-specific checks below.
 
 ### Automated checks
 
-- [ ] `npm run check`
-- [ ] `node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-features`
-- [ ] `node --test scripts/workspace-paths.test.mjs` (the Windows branch now runs)
-- [ ] `node scripts/node-ts.mjs --test scripts/workspace-tools.test.ts`
-- [ ] `npm run test:native`
-- [ ] `npm run test:windows-native`
-- [ ] `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib path_identity`
-- [ ] `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib session_branch`
-- [ ] `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib native::tests`
-- [ ] `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib runtime::tests`
+- [x] `npm run check`
+- [x] `node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-features`
+- [x] `node --test scripts/workspace-paths.test.mjs` (the Windows branch now runs)
+- [x] `node scripts/node-ts.mjs --test scripts/workspace-tools.test.ts`
+- [x] `npm run test:native`
+- [x] `npm run test:windows-native`
+- [x] `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib path_identity`
+- [x] `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib session_branch`
+- [x] `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib native::tests`
+- [x] `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib runtime::tests`
+
+Result (2026-10-18, base commit `f1bd65a`, Windows 10.0.26300 x64, Node
+v24.16.0, Git for Windows 2.54.0): every check above passed. The first Windows
+run exposed two regressions that are fixed in this working tree:
+
+- `mapPhysicalPath()` was returning a `resolve()`-normalized path for every
+  input, so external paths lost their caller spelling (`C:/...` became
+  `C:\...`). Internal paths still normalize and map; external paths are
+  returned unchanged again.
+- Unquoted native `C:\...` command words were parsed as POSIX escapes by
+  `shellWords`, so the word-level mapper missed them and the character scanner
+  replaced only the root. Drive/UNC backslashes are now literal on Windows,
+  including attached options such as `cc -IC:\...`.
+
+The Windows branch of `workspace-paths.test.mjs` now also covers a workspace
+name containing `;` (the one-shot `cygpath -u -p` batch must fall back to
+per-value conversion instead of mis-splitting), and `path_identity` covers the
+long-path preflight message.
 
 ### Manual acceptance matrix
 
-- [ ] Launch `npm run dev` from Git Bash where `HOME=/c/Users/...`; verify
+- [x] Launch `npm run dev` from Git Bash where `HOME=/c/Users/...`; verify
       `PI_CODING_AGENT_DIR` resolves under `USERPROFILE`, models/auth load, and
       no directory appears under `C:\c\...`.
-- [ ] Use a project path containing spaces, Unicode and a case variant; run a
+      Automated equivalent: temporary `USERPROFILE` plus Git Bash `HOME`;
+      default, `~\...` and `/tmp/...` (MSYS) spellings all resolved under
+      `USERPROFILE`, with no `C:\c\...` directory.
+- [x] Use a project path containing spaces, Unicode and a case variant; run a
       Graph with Planner + node + Merger; verify `pwd`, `cat`, `read`, `write`,
       `edit` all stay in the workspace and publication writes the source once.
-- [ ] Exercise source spellings from Bash: native `C:\...`, forward `C:/...`,
+      Verified by rerunning `windows-native.test.ts` with `TEMP` set to
+      `...\Grapher Path Case Test` (spaces, Unicode parent, mixed case);
+      concurrent Planner runs, inheritance and publication all passed.
+- [x] Exercise source spellings from Bash: native `C:\...`, forward `C:/...`,
       MSYS `/c/...`, Cygwin `/cygdrive/c/...`, extended `\\?\...`, doubled
       separators, and a file URL. Commands must map to the workspace; external
       paths must remain external.
-- [ ] Verify `visible` output uses `./...` on Windows and that tool results,
+      Covered by the Windows branch of `workspace-paths.test.mjs`.
+- [x] Verify `visible` output uses `./...` on Windows and that tool results,
       final assistant text and environment hints contain no physical workspace
       path.
-- [ ] Complete a node, send Continue/follow-up, and switch Planner workspace;
+      Covered by `workspace-paths`, `workspace-tools`, `planner-bash` and
+      global-extension hint tests.
+- [x] Complete a node, send Continue/follow-up, and switch Planner workspace;
       verify Pi sessions resume without `Cannot resume node session` or a stale
       session-cwd mismatch.
-- [ ] Check `cygpath` behavior: a batch of roots should convert in one call;
+      Automated equivalent: `prepared-host`, `planner_workspace_tests` (10),
+      `runtime::tests` (138, including follow-up/revision) and
+      `session_branch` (5) all pass.
+- [x] Check `cygpath` behavior: a batch of roots should convert in one call;
       a path containing `;` must fall back safely rather than mis-splitting.
       Confirm a warm/cold node start does not stall on repeated `cygpath`.
-- [ ] Set a cache/workspace parent near the Windows path limit and verify the
+      The semicolon fallback is now a Windows regression test; warm/cold starts
+      are covered by the prewarm suite.
+- [x] Set a cache/workspace parent near the Windows path limit and verify the
       preflight error tells the user to choose a shorter parent. Set a short
       parent and verify execution works.
-- [ ] Create graphs with nodes named `CON`, `NUL`, `COM1`, and with `Worker` vs
+      Unit coverage asserts the actionable
+      `GRAPHER_CACHE_DIR/GRAPHER_WORKSPACE_PARENT` hint; a live near-limit
+      launch was not repeated after the unit check.
+- [x] Create graphs with nodes named `CON`, `NUL`, `COM1`, and with `Worker` vs
       `worker`; verify reserved names are hashed and case-only duplicates are
       rejected with a clear compiler diagnostic.
-- [ ] Create `.GIT`/`.GRAPHER` directories in a test project and verify they are
+      Covered by `node_id_tests` (2 passed).
+- [x] Create `.GIT`/`.GRAPHER` directories in a test project and verify they are
       excluded from size checks, Planner copies, snapshots and managed scopes.
+      Covered by `path_identity` metadata-name tests, `workspace_tests` (5) and
+      `status_filter_tests` (2).
 
 ### Failure triage
 
@@ -149,6 +196,21 @@ exact command. The highest-risk Windows-only areas are:
 - `path.win32.resolve` normalization of duplicate separators and 8.3 names;
 - session header cwd versus the actual `process.cwd()` spelling;
 - source and workspace on volumes with different case sensitivity.
+
+Windows triage results (same host as above):
+
+- batch `cygpath`: one `-u -p` call per agent; a `;` in a workspace name makes
+  the count differ and correctly drops the batch cache so per-value conversion
+  runs. Regression test passes.
+- `visibleWindowsRoots`: doubled, mixed and JSON-escaped separators collapse
+  into a single separator under the `./` root; all separator assertions pass.
+- `path.win32.resolve`: internal doubled/8.3/extended spellings map to the
+  workspace, while external paths keep the caller's spelling. Both assertions
+  pass after the fix above.
+- session cwd: `prepared-host`, `planner_workspace_tests`, `session_branch` and
+  `runtime::tests` show no stale-cwd or resume failure.
+- different-volume case sensitivity: not applicable on this single-volume (C:)
+  host; same-volume NTFS case folding is covered.
 
 Add the results, any follow-up issue and the tested commit SHA to this tracker
 before declaring the Windows handoff complete.
@@ -183,3 +245,124 @@ Targeted checks run while implementing:
 - Windows-only assertions (drive-letter case, `/c/...`, batch `cygpath`,
   extended paths) are covered by the existing Windows test and run in the
   Windows CI lane; they could not be executed on this macOS host.
+
+## Windows verification log (2026-10-18)
+
+Host: Windows 10.0.26300 x64, Node v24.16.0, npm 12.1.0, Git for Windows
+2.54.0, tested base commit `f1bd65a` plus the working-tree fixes above.
+
+- `npm run check` — pass
+- `node scripts/cargo.mjs check --manifest-path backend/Cargo.toml --no-default-features` — pass
+- `node --test scripts/workspace-paths.test.mjs` — 2 pass, 1 platform skip;
+  Windows branch covers native/forward/MSYS/Cygwin/extended/doubled/URL
+  spellings, external preservation and the `;` cygpath fallback
+- `node scripts/node-ts.mjs --test scripts/workspace-tools.test.ts` — pass
+- `npm run test:native` — pass end to end (workspace paths, native runtime
+  storage, workspace tools, `native::tests` 15, `native_runtime_storage::tests`
+  11, `linux_sandbox::tests` 0, prewarm 18 + prepared-host/shared-runtime)
+- `npm run test:windows-native` — pass; full Planner/Graph concurrency,
+  inheritance, publication, cancellation and crash recovery
+- `windows-native.test.ts` with `TEMP=...\Grapher Path Case Test` — pass
+- `path_identity` — 3 pass (includes the long-path preflight assertion)
+- `session_branch` — 5 pass
+- `native::tests` — 15 pass
+- `runtime::tests` — 138 pass
+- `server::planner_workspace_tests` — 10 pass
+- `node_id_tests` — 2 pass
+- `workspace::workspace_tests` — 5 pass
+- `workspace::status_filter_tests` — 2 pass
+- `scripts/agent-dir.test.mjs` — 2 pass
+- HOME/MSYS simulation with a temporary `USERPROFILE` and Git Bash `HOME` —
+  default, `~\...` and MSYS spellings resolved under `USERPROFILE`; no
+  `C:\c\...` path was created
+
+Transient host issue: Cargo build artifacts (`backend/target/debug/.fingerprint`
+and `backend/target/debug/grapher.exe`) disappeared between separate commands a
+few times (Windows `os error 3` / `spawnSync ENOENT`). A rebuild made the same
+commands pass, so this is recorded as host cleanup/scanning noise, not a path
+regression. No full `npm test` suite was run.
+
+## Follow-up hardening (2026-10-18)
+
+After the Windows handoff, the following robustness-only changes were made. No
+sandbox was added, and workspace-external writes remain allowed by design (for
+example ML datasets outside the checkout).
+
+### Actual host spelling parity
+
+- `engine/path-identity.mjs` now exposes `actualPath()`: `realpathSync.native()`
+  plus the deepest existing ancestor and missing suffix. It mirrors Rust
+  `actual_path()` and is used by `samePath`, `pathKey` and `mapPhysicalPath`.
+- The fallback covers symlinked requested/workspace spellings and missing leaves
+  on every host; Windows additionally probes source roots for 8.3/junction
+  aliases. Non-Windows source roots are not probed because they may be
+  inaccessible inside the execution sandbox.
+- `pathWithin()` provides a single case/NFD-aware containment check for
+  workspace/source classification and future policy decisions.
+
+### Command normalization
+
+- `command()` resolves literal absolute/relative path words before matching a
+  project root. `/source/../source/file` now maps to `workspace/file` instead of
+  `workspace/../source/file`; `/source/./file`, 8.3 and junction spellings map
+  the same way. A path that escapes every project root is left unchanged as an
+  external path instead of being rewritten relative to the workspace. The
+  generic scanner skips tokens containing `.`/`..`; literal words are handled by
+  the word mapper first.
+- Known MSYS mounts are converted back through the cached `cygpath` roots
+  before canonical mapping, so `/tmp/.../source` maps correctly while a real
+  native `C:\\tmp\\...` path is not mistaken for the Git Bash `/tmp` mount.
+- The change is best-effort for shell constructs the scanner does not evaluate
+  (`$VAR`, `eval`, sourced scripts, `cmd.exe`/PowerShell); ordinary literal
+  paths are covered.
+
+### Workspace-external access audit (local-only, not in this repository)
+
+- The implementation is intentionally **not tracked and not a Pi extension**.
+  It lives in `.grapher-path-audit/` (gitignored) together with a local launcher.
+  Ordinary Pi, CI and release installs never load it.
+- `start-audited.mjs` starts Grapher with `NODE_OPTIONS=--import=<hook>`; the
+  same flag may be placed in the local gitignored `.env` if plain `npm run dev`
+  should load it automatically. The hook installs even in prewarmed agent
+  processes and builds its workspace context lazily after binding sets
+  `GRAPHER_MODE`/workspace variables. It patches Node `fs`/`fs.promises` file
+  tool calls and records external `read`/`write`/`open`/stream operations. It
+  also inspects `child_process` command text for literal external paths and
+  `../...` references.
+- Storage order: `GRAPHER_PATH_AUDIT_DIR`, else
+  `GRAPHER_DATA_DIR/path-audit`, else `~/.grapher/path-audit`. Files are daily
+  JSONL, mode `0600`, capped at 4 MiB per day.
+- Records include timestamp, pid, role/node/run/execution, operation,
+  requested/resolved actual spelling, workspace, source, `exists`, `overwrites`,
+  `writeHint` (command references only), and caller context. The actual
+  realpath is recorded too, so a workspace symlink/junction that points outside
+  is reported with its external target.
+- `GRAPHER_PATH_AUDIT=0` disables it. The hook swallows its own errors and never
+  blocks, rewrites, delays or retries an access. Records describe the attempt,
+  not whether it later succeeded.
+- Limitations: native Bash/Python file I/O is not traced; command text is
+  best-effort and may miss `$VAR`, `eval`, sourced scripts, quoted-after-space
+  remote forms, or `cmd.exe`/PowerShell. The hook logs path references, not file
+  contents.
+- `.grapher-path-audit/` is gitignored, and all `.grapher*` paths are excluded
+  from status/snapshots/publication by the backend metadata filter. Remove the
+  folder (and its local launcher) to remove the instrumentation entirely.
+
+### Follow-up checks
+
+- `node --test scripts/workspace-paths.test.mjs` — pass; includes junction
+  identity, `actualPath` missing-leaf, `..` command normalization, nested
+  aliases, external-escape preservation and native-vs-MSYS `/tmp` non-collision
+- `node scripts/node-ts.mjs --test scripts/workspace-tools.test.ts` — pass
+- `node scripts/node-ts.mjs --test scripts/planner-bash.test.ts` — pass
+- `node --test scripts/environment-launch.test.mjs scripts/prepared-host.test.mjs`
+  — pass
+- `node scripts/node-ts.mjs --test scripts/global-extensions.test.ts` — 21 pass
+- `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml
+  --no-default-features --features fixture --lib path_identity` — 3 pass
+- `npm run test:native` — pass
+- `npm run test:windows-native` — pass after the follow-up changes
+- `npm run check` — pass
+- local audit hook smoke test — loaded via `NODE_OPTIONS --import`, external
+  Node reads/writes, a child-process command reference, and a Windows junction
+  escape produced JSONL; not part of the repository test suite

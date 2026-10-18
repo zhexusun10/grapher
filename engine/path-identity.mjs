@@ -2,7 +2,7 @@
 // This module compares real paths, converts Node/Git Bash spellings and maps
 // source-project paths to the current private workspace. It is not a sandbox.
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const caseCache = new Map();
@@ -77,28 +77,24 @@ function statusIdentity(left, right) {
 /** Compare two existing or prospective paths without trusting spelling. */
 export function samePath(left, right) {
   if (left === right) return true;
-  const a = resolve(hostPath(left));
-  const b = resolve(hostPath(right));
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const a = resolve(toHostInput(left));
+  const b = resolve(toHostInput(right));
   if (a === b) return true;
   const identity = statusIdentity(a, b);
   if (identity !== undefined) return identity;
-  if (process.platform === 'win32') {
-    try {
-      return realpathSync.native(hostPath(a)).toLowerCase() === realpathSync.native(hostPath(b)).toLowerCase();
-    } catch {}
-  } else {
-    try {
-      if (realpathSync(a) === realpathSync(b)) return true;
-    } catch {}
-  }
-  const insensitive = isCaseInsensitive(dirname(a)) || isCaseInsensitive(dirname(b));
-  return foldPath(a, insensitive) === foldPath(b, insensitive);
+  const actualA = actualPath(a);
+  const actualB = actualPath(b);
+  if (actualA === actualB) return true;
+  const insensitive = process.platform === 'win32'
+    || isCaseInsensitive(dirname(a)) || isCaseInsensitive(dirname(b))
+    || isCaseInsensitive(actualA) || isCaseInsensitive(actualB);
+  return foldPath(actualA, insensitive) === foldPath(actualB, insensitive);
 }
 
 /** Stable key for de-duplicating resources on case/Unicode-insensitive volumes. */
 export function pathKey(value) {
-  let path = resolve(hostPath(value));
-  try { path = realpathSync(path); } catch {}
+  const path = actualPath(value);
   const insensitive = process.platform === 'win32' || isCaseInsensitive(dirname(path)) || isCaseInsensitive(path);
   return foldPath(hostPath(path), insensitive).replace(new RegExp(`\\${sep}+$`), '');
 }
@@ -121,13 +117,46 @@ export function toHostInput(value) {
 }
 
 /**
+ * Resolve a path to its actual host spelling, keeping missing leaf components
+ * under the deepest existing ancestor. This mirrors Rust `actual_path()` and
+ * covers Windows 8.3 names, junctions, drive aliases and macOS case spelling.
+ */
+export function actualPath(value) {
+  if (typeof value !== 'string') return value;
+  const original = resolve(toHostInput(value));
+  const missing = [];
+  let candidate = original;
+  while (true) {
+    try {
+      const actual = hostPath(realpathSync.native(hostPath(candidate)));
+      return missing.length ? resolve(actual, ...missing.reverse()) : actual;
+    } catch {}
+    const parent = dirname(candidate);
+    if (parent === candidate) return original;
+    missing.push(basename(candidate));
+    candidate = parent;
+  }
+}
+
+/** Whether a path is inside a root after host spelling and case folding. */
+export function pathWithin(value, root, caseInsensitive = isCaseInsensitive(root)) {
+  if (typeof value !== 'string' || typeof root !== 'string') return false;
+  const foldedValue = foldPath(resolve(toHostInput(value)), caseInsensitive);
+  const foldedRoot = foldPath(resolve(toHostInput(root)), caseInsensitive).replace(/[\\/]+$/, '');
+  return foldedValue === foldedRoot
+    || foldedValue.startsWith(foldedRoot + '/')
+    || foldedValue.startsWith(foldedRoot + '\\');
+}
+
+/**
  * Map a source-project path to the current workspace. Exact spelling wins;
  * on case/normalization-insensitive volumes a folded comparison is used as a
- * fallback. Non-project paths are returned unchanged (external host paths).
+ * fallback. Internal paths use host spelling; non-project paths are returned
+ * unchanged in the caller's spelling (external host paths).
  */
 export function mapPhysicalPath(value, workspace, roots, caseInsensitive = isCaseInsensitive(workspace)) {
   if (typeof value !== 'string') return value;
-  const path = resolve(hostPath(value));
+  const path = resolve(toHostInput(value));
   // Paths already in the target workspace need no source-prefix work. This
   // keeps file-tool calls on already-mapped paths cheap on Windows.
   const workspacePath = resolve(workspace);
@@ -136,24 +165,28 @@ export function mapPhysicalPath(value, workspace, roots, caseInsensitive = isCas
     const suffix = relative(resolve(root), path);
     if (inside(suffix)) return resolve(workspace, suffix);
   }
+  // Resolve the actual host spelling as a best-effort fallback. The workspace
+  // and the requested path are local, so this covers symlinks and missing
+  // leaves. Source roots are probed only on Windows; elsewhere the source can
+  // be inaccessible inside the execution sandbox and must not be required.
+  const actual = actualPath(path);
+  if (inside(relative(actualPath(workspacePath), actual))) return actual;
   if (process.platform === 'win32') {
-    // Expand 8.3 names and junction aliases before falling back to casefold.
-    try {
-      const realPath = realpathSync.native(hostPath(path));
-      for (const root of roots) {
-        let realRoot;
-        try { realRoot = realpathSync.native(hostPath(resolve(root))); } catch { continue; }
-        const suffix = relative(realRoot, realPath);
-        if (inside(suffix)) return resolve(workspace, suffix);
-      }
-    } catch {}
+    for (const root of roots) {
+      // MSYS roots are matched lexically above; resolving them as Win32 paths
+      // would turn /c/... into C:\c\... and could match an unrelated folder.
+      // Keep forward-slash UNC/extended roots available for realpath.
+      if (root.startsWith('/') && !root.startsWith('//')) continue;
+      const suffix = relative(actualPath(resolve(root)), actual);
+      if (inside(suffix)) return resolve(workspace, suffix);
+    }
   }
   const foldedPath = foldPath(path, caseInsensitive);
   for (const root of roots) {
     const suffix = relative(foldPath(resolve(root), caseInsensitive), foldedPath);
     if (inside(suffix)) return resolve(workspace, suffix);
   }
-  return path;
+  return value;
 }
 
 /** Compare two directories by filesystem identity, then by normalized spelling. */

@@ -34,6 +34,7 @@ backend/target*/
 target*/
 .grapher/
 .grapher-verify*/
+.grapher-path-audit/
 .pi/
 .agents/skills/
 

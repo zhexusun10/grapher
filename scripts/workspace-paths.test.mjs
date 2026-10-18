@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { createWorkspacePaths, VISIBLE_ROOT, visibleWindowsRoots } from '../engine/workspace-paths.mjs';
-import { isCaseInsensitive, pathKey, samePath } from '../engine/path-identity.mjs';
+import { actualPath, isCaseInsensitive, pathKey, pathWithin, samePath } from '../engine/path-identity.mjs';
 
 test('Windows visible paths use forward slashes for Bash and JSON spellings', () => {
   assert.equal(visibleWindowsRoots(`${VISIBLE_ROOT}\\a\\b`), './a/b');
@@ -24,6 +24,12 @@ test('literal shell mapping preserves quoting, external paths and opaque content
     mkdirSync(source); mkdirSync(workspace);
     writeFileSync(join(workspace, 'marker'), 'NODE');
     const paths = createWorkspacePaths(workspace, source);
+    assert.equal(actualPath(`${workspace}/marker`), `${workspace}/marker`);
+    assert.equal(pathWithin(`${workspace}/marker`, workspace), true);
+    const sourceLink = join(root, 'source-link');
+    symlinkSync(source, sourceLink, 'dir');
+    assert.equal(samePath(sourceLink, source), true);
+    assert.equal(pathKey(sourceLink), pathKey(source));
     const quote = s => "'" + s.replaceAll("'", "'\\''") + "'";
     for (const command of [
       `cat ${source}/marker`,
@@ -38,6 +44,8 @@ test('literal shell mapping preserves quoting, external paths and opaque content
       `sh -c ${quote(`cat '${source}/marker'`)}`,
     ]) assert.equal(execFileSync('bash', ['-c', paths.command(command)], { cwd: workspace, encoding: 'utf8' }), 'NODE');
     assert.equal(paths.command(`cat ${source}-other/marker`), `cat ${source}-other/marker`);
+    assert.equal(paths.command(`cat ${source}/../source-other/marker`), `cat ${source}/../source-other/marker`);
+    assert.equal(paths.command(`cat ${source}/../source/marker`), `cat ${quote(workspace + '/marker')}`);
     assert.equal(paths.command(`cc -I${source}/include`), `cc -I${quote(workspace + '/include')}`);
     assert.equal(paths.command('cat /etc/hosts'), 'cat /etc/hosts');
     assert.equal(paths.visible(`${workspace}/marker`), './marker');
@@ -119,6 +127,21 @@ test('Windows workspace mapping preserves native and slash paths without requiri
     const paths = createWorkspacePaths(workspace, source);
     const slashSource = source.replaceAll('\\', '/');
     const slashWorkspace = workspace.replaceAll('\\', '/');
+    assert.equal(actualPath(join(workspace, 'marker')), join(workspace, 'marker'));
+    assert.equal(pathWithin(join(workspace, 'marker'), workspace), true);
+    assert.equal(pathWithin(join(root, 'outside', 'marker'), workspace), false);
+    assert.equal(pathWithin(`${source[0]}:\\Windows`, `${source[0]}:\\`), true);
+    assert.equal(samePath(pathToFileURL(source).href, source), true);
+    const msysSource = `/${source[0].toLowerCase()}${source.slice(2).replaceAll('\\', '/')}`;
+    assert.equal(samePath(msysSource, source), true);
+    if (process.platform === 'win32') {
+      const junction = join(root, 'source-link');
+      symlinkSync(source, junction, 'junction');
+      assert.equal(samePath(junction, source), true);
+      assert.equal(pathKey(junction), pathKey(source));
+      assert.equal(actualPath(join(junction, 'missing', 'leaf')),
+        join(realpathSync(source), 'missing', 'leaf'));
+    }
     assert.equal(paths.physical(join(source, 'marker')), join(workspace, 'marker'));
     assert.equal(paths.physical(pathToFileURL(join(source, 'marker')).href), join(workspace, 'marker'));
     assert.equal(paths.visible(join(workspace, 'marker')), './marker');
@@ -129,6 +152,20 @@ test('Windows workspace mapping preserves native and slash paths without requiri
       'source-native and private turns must retain the same valid file URI');
     assert.equal(paths.visible(`${slashWorkspace}/marker`), './marker');
     assert.equal(paths.command(`cat ${slashSource}/marker`), `cat '${slashWorkspace}/marker'`);
+    // Native unquoted spellings and attached options exercise Windows path
+    // tokenization without a POSIX shell escape pass.
+    assert.equal(paths.command(`cat ${source}/marker`), `cat '${slashWorkspace}/marker'`);
+    assert.equal(paths.command(`cc -I${source}/include`), `cc -I'${slashWorkspace}/include'`);
+    assert.equal(paths.command(`cat ${source}/./marker`), `cat '${slashWorkspace}/marker'`);
+    assert.equal(paths.command(`cat ${source}/../source/marker`), `cat '${slashWorkspace}/marker'`);
+    assert.equal(paths.command(`cat ${slashSource}/../source/marker`), `cat '${slashWorkspace}/marker'`);
+    assert.equal(paths.command(`cat ${source}/../source-other/marker`), `cat ${source}/../source-other/marker`);
+    assert.equal(paths.command(`cat ${source}/../source/mark*`), `cat ${source}/../source/mark*`);
+    const nestedAlias = join(source, 'nested');
+    mkdirSync(nestedAlias);
+    const nested = createWorkspacePaths(workspace, source, nestedAlias);
+    assert.equal(nested.command(`cat ${nestedAlias}/marker`), `cat '${slashWorkspace}/marker'`);
+    assert.equal(nested.physical(`${nestedAlias}/marker`), join(workspace, 'marker'));
     assert.equal(paths.command(`cat ${slashSource}-other/marker`), `cat ${slashSource}-other/marker`);
     assert.deepEqual(paths.view({ [join(workspace, 'marker')]: workspace }), { './marker': '.' });
     const extendedSource = `\\\\?\\${source}`;
@@ -152,6 +189,15 @@ test('Windows workspace mapping preserves native and slash paths without requiri
       assert.equal(canonical.physical(`${source.toLowerCase()}/marker`), join(workspace, 'marker'));
       assert.equal(canonical.command(`cat ${source.toLowerCase()}/marker`), `cat '${slashWorkspace}/marker'`);
     }
+    // A batch `cygpath -u -p` can mis-split a path containing ';'. The per-value
+    // fallback must still map the workspace instead of caching a partial batch.
+    const semicolon = join(root, 'work;space with spaces');
+    mkdirSync(semicolon);
+    const semicolonPaths = createWorkspacePaths(semicolon, source);
+    assert.equal(semicolonPaths.physical(`${source}/marker`), join(semicolon, 'marker'));
+    assert.equal(semicolonPaths.visible(`${semicolon}/marker`), './marker');
+    assert.equal(semicolonPaths.command(`cat ${source}/marker`),
+      `cat '${semicolon.replaceAll('\\', '/')}/marker'`);
     const gitRoot = execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim();
     const cygpath = join(gitRoot, '../../../usr/bin/cygpath.exe');
     const bashWorkspace = execFileSync(cygpath, ['-u', workspace], { encoding: 'utf8' }).trim();
@@ -159,5 +205,15 @@ test('Windows workspace mapping preserves native and slash paths without requiri
     assert.equal(canonical.visible(`${bashWorkspace}/marker`), './marker');
     assert.equal(canonical.physical(`${bashSource}/marker`), join(workspace, 'marker'));
     assert.equal(canonical.command(`cat '${bashSource}/marker'`), `cat '${slashWorkspace}/marker'`);
+    const aliasPrefix = bashSource.startsWith('/tmp/') ? ['/tmp/', 'C:\\tmp\\']
+      : bashSource.startsWith('/cygdrive/') ? ['/cygdrive/', 'C:\\cygdrive\\']
+        : bashSource.startsWith('/c/') ? ['/c/', 'C:\\c\\'] : null;
+    if (aliasPrefix) {
+      const fakeNative = `${aliasPrefix[1]}${bashSource.slice(aliasPrefix[0].length).replaceAll('/', '\\')}\\marker`;
+      assert.equal(canonical.physical(fakeNative), fakeNative);
+      assert.equal(canonical.command(`cat ${fakeNative}`), `cat ${fakeNative}`);
+      assert.equal(canonical.physical(`${bashSource}-other/marker`), `${bashSource}-other/marker`);
+      assert.equal(canonical.command(`cat ${bashSource}-other/marker`), `cat ${bashSource}-other/marker`);
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

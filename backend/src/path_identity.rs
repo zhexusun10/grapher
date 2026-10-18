@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn runtime_metadata_names_are_portable() {
-        for name in [".git", ".grapher", ".grapher-worktrees", ".grapher-workspaces"] {
+        for name in [".git", ".grapher", ".grapher-worktrees", ".grapher-workspaces", ".grapher-path-audit"] {
             assert!(is_runtime_metadata_name(OsStr::new(name)));
             #[cfg(any(windows, target_os = "macos"))]
             assert!(is_runtime_metadata_name(&OsStr::new(&name.to_ascii_uppercase())));
@@ -243,5 +243,15 @@ mod tests {
         let existing = temp.path().canonicalize().unwrap();
         let missing = existing.join("not-created-yet");
         assert_eq!(actual_path(&missing).unwrap(), missing);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_paths_fail_with_a_shorter_parent_hint() {
+        assert!(ensure_windows_path(Path::new(r"C:\Users\test\project"), "Workspace").is_ok());
+        let long = PathBuf::from(format!(r"C:\{}", "a".repeat(250)));
+        let error = ensure_windows_path(&long, "Workspace").unwrap_err();
+        assert!(error.contains("Workspace path is"));
+        assert!(error.contains("GRAPHER_CACHE_DIR/GRAPHER_WORKSPACE_PARENT"));
     }
 }

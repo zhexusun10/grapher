@@ -1,8 +1,8 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { foldPath, hostPath, isCaseInsensitive, mapPhysicalPath, pathStartsWith, toHostInput } from './path-identity.mjs';
+import { actualPath, foldPath, hostPath, isCaseInsensitive, mapPhysicalPath, pathStartsWith, pathWithin, toHostInput } from './path-identity.mjs';
 
 // Explicit tool adaptation, not an operating-system mount namespace.
 
@@ -79,12 +79,22 @@ function shellWords(text) {
   for (let i = 0; i < text.length;) {
     if (/\s/.test(text[i]) || ';&|()<>'.includes(text[i])) { i++; continue; }
     const start = i;
-    let value = '', quote = null, literal = true;
+    let value = '', quote = null, literal = true, windowsPath = false;
     for (; i < text.length; i++) {
       const c = text[i];
       if (!quote && (/\s/.test(c) || ';&|()<>'.includes(c))) break;
       if (c === '\\' && quote !== "'") {
         const next = text[i + 1];
+        // Windows accepts native backslash paths in command spellings. Keep
+        // them literal after a drive/UNC prefix instead of applying POSIX
+        // escape removal, which would make the token look like a relative name.
+        if (process.platform === 'win32'
+            && (windowsPath || /[A-Za-z]:$/.test(value)
+              || (value === '' && next === '\\' && text[i + 2] !== undefined))) {
+          windowsPath = true;
+          value += c;
+          continue;
+        }
         // POSIX double quotes only treat backslash as an escape before these.
         if (quote === '"' && next !== undefined && !/[$`"\\\n]/.test(next)) { value += c; continue; }
         if (next !== undefined) { value += text[++i]; continue; }
@@ -204,11 +214,31 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     resolve(directory), root,
     ...extraWorkspaces.map(workspace => resolve(workspace)),
   ])];
-  const projectRoots = [...new Set([base, resolve(sourceAlias)])];
+  const projectRoots = [...new Set([base, resolve(sourceAlias)])].sort((a, b) => b.length - a.length);
   if (process.platform === 'win32') {
     prefetchMsysPaths([...allWorkspaces, ...projectRoots]
       .map(value => hostPath(value).replaceAll('\\', '/')));
   }
+  // Map known Git Bash spellings back to their host roots before passing a path
+  // to the shared mapper. Treating /tmp as C:\tmp would risk a false match;
+  // only roots we actually converted through Git's cygpath are eligible.
+  const msysHostAliases = process.platform === 'win32'
+    ? [...new Set([...allWorkspaces, ...projectRoots].map(value => hostPath(value).replaceAll('\\', '/')))]
+        .map(slash => [msysPath(slash), slash])
+        .filter(([msys, host]) => msys && msys !== host)
+        .sort(([a], [b]) => b.length - a.length)
+    : [];
+  const hostInput = value => {
+    if (process.platform !== 'win32' || typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) {
+      return value;
+    }
+    for (const [msys, host] of msysHostAliases) {
+      if (value === msys || value.startsWith(`${msys}/`)) {
+        return `${host}${value.slice(msys.length)}`;
+      }
+    }
+    return value;
+  };
   const aliases = [...new Set(allWorkspaces.flatMap(variants))].sort((a, b) => b.length - a.length);
   const projects = [...new Set(projectRoots.flatMap(variants))].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s\\/"'`<>:;,&|()\[\]{}]/.test(c);
@@ -265,7 +295,16 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   };
   const physical = value => {
     if (typeof value !== 'string') return value;
-    const mapped = mapPhysicalPath(resolve(toHostInput(value)), root, projects, caseInsensitive);
+    // Git Bash mounts such as /tmp are not convertible by toHostInput() alone.
+    // Convert only known roots, then use canonical roots so a real C:\tmp
+    // path cannot be mistaken for the MSYS /tmp mount.
+    const host = hostInput(value);
+    const mapped = mapPhysicalPath(host, root, projectRoots, caseInsensitive);
+    if (mapped === host && host !== value
+        && !pathWithin(host, root, caseInsensitive)
+        && !projectRoots.some(candidate => pathWithin(host, candidate, caseInsensitive))) {
+      return value;
+    }
     return mapped;
   };
   function findPrefixAt(text, at) {
@@ -344,6 +383,18 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       const source = findPrefixAt(text, i);
       if (source && (i === 0 || boundary(text[i - 1]) || text[i - 1] === '=')
           && boundary(text[i + source.length]) && !remoteOrFileUrlBefore(text, i)) {
+        // Do not rewrite a token that contains . or .. segments in the scanner.
+        // Literal path words are handled by command() above; globs with dot
+        // segments are safer left untouched than rewritten relative to a
+        // possibly different workspace-relative external directory.
+        let tokenEnd = i;
+        while (tokenEnd < text.length && !/[\s"'`<>|;&()]/.test(text[tokenEnd])) tokenEnd++;
+        const token = text.slice(i, tokenEnd);
+        if (/(^|[\\/])\.{1,2}([\\/]|$)/.test(token)) {
+          result += token;
+          i = tokenEnd - 1;
+          continue;
+        }
         const shellPath = commandRoot;
         result += quote === "'" ? shellPath.replaceAll("'", "'\\''") : quote === '"' ? shellPath.replace(/[\\$`"]/g, '\\$&') : shellQuote(shellPath);
         i += source.length - 1;
@@ -377,12 +428,35 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
       const prefix = (assignment?.[1] ?? attached?.[1]) ?? '';
       const value = (assignment?.[2] ?? attached?.[2]) ?? word.value;
       const project = projects.find(project => pathPrefix(value, project));
-      if (!project) continue;
+      const host = toHostInput(hostInput(value));
+      if (!project && (process.platform !== 'win32' || !isAbsolute(host))) continue;
       // Unquoted globs must retain glob semantics; the scanner below handles them.
       if (/[*?\[\]{}]/.test(value)) continue;
-      const foldedValue = foldPath(value, caseInsensitive);
-      const foldedProject = foldPath(project, caseInsensitive);
-      const suffix = foldedValue.slice(foldedProject.length).replaceAll('\\', '/');
+      let resolved = value;
+      let mappedRoot;
+      if (isAbsolute(host)) {
+        resolved = process.platform === 'win32' ? actualPath(host) : resolve(host);
+        mappedRoot = projectRoots
+          .map(candidate => process.platform === 'win32' ? actualPath(resolve(candidate)) : resolve(candidate))
+          .sort((a, b) => b.length - a.length)
+          .find(candidate => pathPrefix(resolved, candidate));
+      }
+      if (!project && !mappedRoot) continue;
+      // A resolved path outside every project root is external. Do not fall
+      // back to rewriting its source-looking prefix (for example source/../data),
+      // which could point at a different directory after mapping.
+      if (!mappedRoot && isAbsolute(host)) continue;
+      const foldedValue = foldPath(mappedRoot ? resolved : value, caseInsensitive);
+      const foldedProject = foldPath(mappedRoot ?? project, caseInsensitive);
+      let suffix;
+      if (mappedRoot) {
+        const relativeSuffix = relative(mappedRoot, resolved).replaceAll('\\', '/');
+        suffix = relativeSuffix === '..' || relativeSuffix.startsWith('../')
+          ? foldedValue.slice(foldedProject.length).replaceAll('\\', '/')
+          : relativeSuffix && !relativeSuffix.startsWith('/') ? `/${relativeSuffix}` : relativeSuffix;
+      } else {
+        suffix = foldedValue.slice(foldedProject.length).replaceAll('\\', '/');
+      }
       edits.push({ ...word, replacement: prefix + shellQuote(commandRoot + suffix) });
     }
     for (const edit of edits.reverse()) text = text.slice(0, edit.start) + edit.replacement + text.slice(edit.end);
