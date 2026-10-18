@@ -1323,8 +1323,7 @@ fn session_path_identity(path: &std::path::Path) -> String {
 /// path as-is (8.3 short names are not expanded), while Unix resolves
 /// symlinks through `getcwd`. Record exactly that spelling.
 fn rebind_planner_session(directory: &std::path::Path, id: &str, workspace: &std::path::Path) -> Result<(), String> {
-    if !directory.is_dir() { return Ok(()); }
-    crate::session_branch::rebind_session_cwd(directory, id, workspace)
+    crate::session_branch::rebind_session_cwd_by_header(directory, id, workspace)
 }
 
 #[cfg(all(test, feature = "fixture"))]

@@ -64,17 +64,12 @@ pub(crate) fn validate_session(directory: &Path, id: &str, cwd: &Path) -> Result
     open_session(directory, id, cwd).map(|_| ())
 }
 
-/// Pi resumes a custom session directory by comparing the literal header cwd
-/// with the child's actual `process.cwd()`. Rewrite only the first JSON line
-/// when the workspace resolves to a different case/Unicode spelling.
-pub(crate) fn rebind_session_cwd(directory: &Path, id: &str, cwd: &Path) -> Result<(), String> {
-    let (path, mut input, mut header) = session_file(directory, id)?;
-    let actual = crate::native::host_path(&crate::path_identity::actual_path(cwd)?);
-    let current = header.get("cwd").and_then(Value::as_str);
-    if current.is_some_and(|current| crate::path_identity::same_path(Path::new(current), &actual))
-        && current == Some(actual.to_string_lossy().as_ref()) {
-        return Ok(());
-    }
+fn rewrite_session_header(
+    path: &Path,
+    mut input: std::io::BufReader<fs::File>,
+    mut header: Value,
+    actual: &Path,
+) -> Result<(), String> {
     header["cwd"] = json!(actual);
     let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
     let result = (|| -> Result<(), String> {
@@ -89,12 +84,66 @@ pub(crate) fn rebind_session_cwd(directory: &Path, id: &str, cwd: &Path) -> Resu
         output.sync_all().map_err(|error| error.to_string())?;
         drop(output);
         drop(input);
-        fs::rename(&temporary, &path).map_err(|error| error.to_string())
+        fs::rename(&temporary, path).map_err(|error| error.to_string())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Pi resumes a custom session directory by comparing the literal header cwd
+/// with the child's actual `process.cwd()`. Rewrite only the first JSON line
+/// when the workspace resolves to a different case/Unicode spelling.
+pub(crate) fn rebind_session_cwd(directory: &Path, id: &str, cwd: &Path) -> Result<(), String> {
+    let (path, input, header) = session_file(directory, id)?;
+    let actual = crate::native::host_path(&crate::path_identity::actual_path(cwd)?);
+    let current = header.get("cwd").and_then(Value::as_str);
+    if current.is_some_and(|current| current == actual.to_string_lossy().as_ref()) {
+        return Ok(());
+    }
+    rewrite_session_header(&path, input, header, &actual)
+}
+
+/// Planner sessions historically use arbitrary JSONL filenames, so locate the
+/// matching Pi identity from the header instead of requiring `_<id>.jsonl`.
+/// This deliberately does not validate the old cwd: a Planner follow-up may
+/// move from a reclaimed node workspace back to source.
+pub(crate) fn rebind_session_cwd_by_header(
+    directory: &Path,
+    id: &str,
+    cwd: &Path,
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    let actual = crate::native::host_path(&crate::path_identity::actual_path(cwd)?);
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        let mut input = BufReader::new(
+            fs::File::open(&path).map_err(|error| error.to_string())?,
+        );
+        let mut line = String::new();
+        input
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        let header: Value =
+            serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        if header.get("id").and_then(Value::as_str) != Some(id) {
+            continue;
+        }
+        if header.get("cwd").and_then(Value::as_str)
+            == Some(actual.to_string_lossy().as_ref())
+        {
+            return Ok(());
+        }
+        return rewrite_session_header(&path, input, header, &actual);
+    }
+    Ok(())
 }
 
 /// Move a node's own conversation to a new cwd without rewriting the original

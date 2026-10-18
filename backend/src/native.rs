@@ -205,7 +205,7 @@ pub(crate) fn host_path(path: &Path) -> PathBuf {
         if let Some(path) = value.strip_prefix("//?/") {
             return PathBuf::from(path.replace('/', "\\"));
         }
-        PathBuf::from(value)
+        PathBuf::from(value.into_owned())
     }
     #[cfg(not(windows))]
     path.to_path_buf()

@@ -74,6 +74,10 @@ remote-command and cross-volume case-heuristic limitations.
       candidates exist
 - [x] Duplicate/mixed Windows separators and `/cygdrive/c/...` spellings are
       normalized for visible paths and command adaptation
+- [x] Windows `host_path` compiles without converting `Cow<str>` directly to
+      `PathBuf` (Windows-only compile failure reported by the handoff host)
+- [x] Planner session rebind locates legacy/arbitrary JSONL filenames by header
+      identity; Node session resume keeps the strict `_<id>.jsonl` contract
 
 ## Windows host handoff (next)
 
@@ -155,6 +159,8 @@ Targeted checks run while implementing:
   `runtime::tests` / `environment::tests` / `workspace_tests` /
   `workspace_files` / `compiler node_id_tests` — pass
 - `node scripts/cargo.mjs check` and `npm run check` — pass
+- `server::prompt_tests` — 62 passed (includes revision/session follow-up)
+- `server::planner_review_tests` — 9 passed (includes auto/manual post-task review)
 - Windows-only assertions (drive-letter case, `/c/...`, batch `cygpath`,
   extended paths) are covered by the existing Windows test and run in the
   Windows CI lane; they could not be executed on this macOS host.
