@@ -2160,7 +2160,11 @@ fn plan_goal_internal_with_started(
                 let snapshot = runtime.state.clone();
                 drop(runtime);
                 write_planning_summary(&directory, &summary)?;
-                if background_review { notify_planning_output(&owner, &planning_id); }
+                // The durable log is final now; tell every open conversation so a
+                // transcript read that raced the writer (or settled at a stale EOF)
+                // is re-read instead of staying cached until a page reload. This is
+                // not review-only: foreground turns need the same completion signal.
+                notify_planning_output(&owner, &planning_id);
                 if snapshot.approved && (route.plan_type == "serial" || config.auto_approve) {
                     drive(service.clone());
                 }
@@ -2260,7 +2264,6 @@ fn plan_goal_internal_with_started(
                                     planning: failure_summary.clone(), approval_required: false,
                                 });
                             }
-                            notify_planning_output(&owner, &planning_id);
                         } else if let Ok(mut runtime) = service.runtime.lock() {
                             // The aborted turn's durable planner.jsonl stays part of
                             // this Run's conversation; record it without touching the
@@ -2272,6 +2275,9 @@ fn plan_goal_internal_with_started(
                                 });
                             }
                         }
+                        // The failed turn's log is final too; re-read it instead of
+                        // trusting a transcript window read while it was still writing.
+                        notify_planning_output(&owner, &planning_id);
                     }
                     Err((err, Some(failure_summary)))
                 }

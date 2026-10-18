@@ -1043,6 +1043,44 @@ for (const role of ["node", "planner"]) {
   });
 }
 
+test("an unrun Node opens at the top until its first execution exists", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: { files: [], skills: [] } } }));
+  try {
+    await page.goto(`${origin}/__history?case=unrunNode`, { waitUntil: "networkidle" });
+    const scroller = page.locator(".initial-query-scroll");
+    const assertAtTop = async () => {
+      await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+      await page.waitForTimeout(150);
+      const metrics = await scroller.evaluate(element => ({ top: element.scrollTop, range: element.scrollHeight - element.clientHeight }));
+      assert.ok(metrics.range > 500, "the task must overflow to distinguish top from bottom");
+      assert.equal(metrics.top, 0, "the newest information is the task at the top");
+    };
+    await assertAtTop();
+    await page.evaluate(() => window.audit.growTask());
+    await page.setViewportSize({ width: 1100, height: 700 });
+    await page.locator(".pane-bottom-chat textarea").fill("Unsent draft\n".repeat(8));
+    await assertAtTop();
+    await page.evaluate(() => window.audit.selectNode(""));
+    await page.locator(".node-task-card").waitFor({ state: "detached" });
+    await page.evaluate(() => window.audit.selectNode("worker"));
+    await assertAtTop();
+    await page.evaluate(() => window.audit.startNode());
+    await page.waitForFunction(() => {
+      const pane = document.querySelector(".initial-query-scroll");
+      return pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 1;
+    });
+    await page.evaluate(() => window.audit.selectNode(""));
+    await page.locator(".node-task-card").waitFor({ state: "detached" });
+    await page.evaluate(() => window.audit.selectNode("worker"));
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+    await page.waitForFunction(() => {
+      const pane = document.querySelector(".initial-query-scroll");
+      return pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 1;
+    });
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 for (const layout of ["virtualized", "long"]) {
   test(`Latest smoothly traverses ${layout} history, tracks new output and can be interrupted`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await newPage(async route => {

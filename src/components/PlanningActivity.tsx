@@ -120,6 +120,15 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     const abort = new AbortController();
     const signal = AbortSignal.any([abort.signal, lifetime.current!]);
     let emptyPages = 0;
+    // A terminal page can be empty because the writer had not appended its
+    // first (or last) bytes yet. Retry such a revision a bounded number of
+    // times instead of caching an empty window forever.
+    const emptyRetries = new Map<string, number>();
+    const staleEmpty = (id: string) => {
+      const window = segments.current.get(id);
+      return !!window && window.settled && window.end === window.total && !window.text &&
+        (emptyRetries.get(id) ?? 0) < 2;
+    };
     setError("");
     if (!planningIds.length) { setReady(true); return () => abort.abort(); }
     const stop = startVisibilityPolling(async () => {
@@ -130,7 +139,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         const toRead = [latestId, ...planningIds.filter(id => id !== latestId && segments.current.has(id))];
         for (const planningId of toRead) {
           const current = segments.current.get(planningId);
-          if (current?.settled && current.end === current.total) continue;
+          if (!staleEmpty(planningId) && current?.settled && current.end === current.total) continue;
           const offset = current?.end ?? 0;
           const page = await runtimeService.getPlanningOutput(planningId, "planner", offset, signal, !current, undefined,
             !current ? INITIAL_TRANSCRIPT_BYTES : undefined);
@@ -149,14 +158,28 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         setReady(true);
         const loaded = [...segments.current.values()];
         if (loaded.some(window => window.end < window.total)) return 0;
-        return loaded.some(window => !window.settled) ? liveOutputDelay(emptyPages) : null;
+        if (loaded.some(window => !window.settled)) return liveOutputDelay(emptyPages);
+        const retry = planningIds.filter(staleEmpty);
+        if (retry.length) {
+          for (const id of retry) emptyRetries.set(id, (emptyRetries.get(id) ?? 0) + 1);
+          return liveOutputDelay(emptyPages);
+        }
+        // Stay suspended rather than settled: the completion notification is the
+        // only authority on a log being final, and it must still be able to wake us.
+        return Infinity;
       } catch (caught) {
         if (!signal.aborted) { setError(caught instanceof Error ? caught.message : String(caught)); setReady(true); }
         return null;
       }
     });
     const unsubscribe = subscribePlanningOutput(event => {
-      if (event.runId === runId && planningIds.includes(event.planningId)) stop.wake();
+      if (event.runId !== runId || !planningIds.includes(event.planningId)) return;
+      // The backend publishes this once a turn's log is final. An earlier read
+      // may have settled at a stale EOF, so re-read that revision from its
+      // cursor instead of trusting the cached window.
+      const segment = segments.current.get(event.planningId);
+      if (segment?.settled) segments.current.set(event.planningId, { ...segment, settled: false });
+      stop.wake();
     });
     return () => { unsubscribe(); abort.abort(); stop(); };
   }, [key, retry, running, publish, lifetime]);

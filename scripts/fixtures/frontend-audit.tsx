@@ -197,6 +197,29 @@ function LatestScrollFixture() {
   </div> : <p>Conversation closed</p>;
 }
 
+function UnrunNodeFixture() {
+  const [selected, setSelected] = useState("worker");
+  const [started, setStarted] = useState(false);
+  const [lines, setLines] = useState(60);
+  audit.selectNode = setSelected;
+  audit.startNode = () => setStarted(true);
+  audit.growTask = () => setLines(previous => previous + 20);
+  const output = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "FIRST_EXECUTION_OUTPUT" }] } }) + "\n";
+  const state = { ...emptySnapshot, runId: "unrun-node", config, phase: "paused", paused: true, approved: true, planType: "graph",
+    graph: { originalGoal: "Unrun node regression", nodes: [{ name: "worker", task: Array.from({ length: lines }, (_, index) => `Task paragraph ${index}\n\n`).join("") }], edges: [] },
+    nodes: { worker: { status: started ? "completed" : "waiting", revision: 0, instruction: "", error: null } },
+    executions: started ? [{ id: "first-execution", node: "worker", status: "completed", revision: 0, attempt: 1, output,
+      startedAt: 1, completedAt: 2, sessionId: "first-session", worktree: "/mock", before: "", after: "" }] : [] } as Snapshot;
+  const noop = () => {};
+  return <div style={{ height: "calc(100vh - 64px)", display: "flex" }}>
+    <GraphWorkbench state={state} routeType="graph" selected={selected} setSelected={setSelected} selectedMergerId="" setSelectedMergerId={noop}
+      effectiveMessages={[]} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
+      onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
+      active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
+      nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
+  </div>;
+}
+
 function PollingFixture() {
   const [snapshot, setSnapshot] = useState<Snapshot>({ ...emptySnapshot, config, runId: "view", phase: "running", graph: { ...emptyGraph, originalGoal: "Initial" } });
   const [ids, setIds] = useState(["broken", "background", "view"]);
@@ -294,7 +317,7 @@ const cases: Record<string, React.ComponentType> = {
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
   polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
-  thinking: ThinkingFixture, cardPresentation: CardPresentationFixture,
+  thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
 };
 const Component = cases[new URLSearchParams(location.search).get("case") || "settings"];
 createRoot(document.getElementById("root")!).render(<Component />);
