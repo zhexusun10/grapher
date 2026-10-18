@@ -259,7 +259,12 @@ After interruption:
   provider failure as successful or silently retry an ordinary failed node.
   Ordinary failures require an explicit node intervention, or a changed Node
   Agent model/thinking selection saved for the current conversation followed
-  by Continue. Alongside never-started nodes, saving with that Run ID records
+  by Continue. A Provider credential failure (OAuth refresh/`invalid_grant`,
+  credential-store, API-key or not-authenticated errors) is the one exception:
+  it leaves the task and session untouched, so after re-authenticating in
+  Settings the same Continue control resumes that session through the same
+  continuity turn instead of demanding an intervention message. Alongside
+  never-started nodes, saving with that Run ID records
   per-node settings for its currently failed nodes; it keeps their failure/error
   evidence and does not dispatch work. Continue resumes those unfinished turns
   with the new settings and unblocks their dependency descendants without

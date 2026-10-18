@@ -479,6 +479,7 @@ export const en: Record<string, string> = {
   "正在暂停": "Pausing",
   "正在停止运行中的节点…": "Stopping running nodes…",
   "执行已暂停，点击继续可恢复": "Execution paused. Continue to resume.",
+  "执行已停止，点击继续恢复失败节点（不会追加消息）": "Execution stopped. Continue resumes the failed nodes without adding a message.",
   "用户已暂停本次执行；点击继续可恢复未完成的会话。": "Execution paused by the user. Continue to resume the unfinished turn.",
   "请等待暂停中的节点停止后再继续": "Wait for paused executions to stop before continuing",
   "运行已完成": "Run completed",

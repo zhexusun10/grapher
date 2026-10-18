@@ -364,3 +364,98 @@ fn legacy_checkpoints_hydrate_the_conversation_selection_from_node_overrides() {
     assert_eq!(settings.model, runtime.state.config.as_ref().unwrap().model,
         "legacy hydration keeps the Run's original non-node roles");
 }
+#[test]
+fn credential_failure_is_continued_without_a_synthetic_message() {
+    let graph = Graph {
+        original_goal: "reauth recovery".into(),
+        nodes: vec![
+            Node { name: "first".into(), task: "first".into() },
+            Node { name: "after".into(), task: "after".into() },
+        ],
+        edges: vec![Edge { from: "first".into(), to: "after".into(), feedback: false }],
+    };
+    let (_temp, source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    workspace::prepare(
+        &source,
+        Path::new(&failed.execution.worktree),
+        &failed.execution.before,
+        &[],
+    )
+    .unwrap();
+    runtime
+        .emit(EventKind::Prepared {
+            execution_id: failed.execution.id.clone(),
+            head: failed.execution.before.clone(),
+        })
+        .unwrap();
+    let partial = Path::new(&failed.execution.worktree).join("partial.txt");
+    fs::write(&partial, "keep unfinished work").unwrap();
+    runtime
+        .finish(
+            &failed.execution,
+            Err("OAuth refresh failed for openai: OpenAI OAuth token request failed (400): { \"error\": \"invalid_grant\" }".into()),
+        )
+        .unwrap();
+    runtime.jobs().unwrap(); // The failed root blocks its dependent.
+    assert_eq!(runtime.state.phase, "needs_attention");
+    assert_eq!(runtime.state.nodes["after"].status, "blocked");
+    assert!(
+        !runtime.state.can_resume_interrupted(),
+        "a credential failure is a real failure, not an interrupted turn"
+    );
+    assert!(runtime.state.can_resume(), "re-authenticating makes Continue the recovery path");
+    assert_eq!(
+        crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"],
+        true,
+        "the browser's Continue button follows the same recovery hint"
+    );
+
+    // Continue is the topology control here: it must not invent a user turn.
+    runtime.pause(false).unwrap();
+    assert_eq!(runtime.state.nodes["first"].status, "waiting");
+    assert_eq!(runtime.state.nodes["after"].status, "waiting");
+    assert!(runtime.state.events.iter().any(|event| matches!(
+        event.kind,
+        EventKind::RecoveryQueued { ref nodes, .. }
+            if nodes.iter().any(|node| node == "first") && nodes.iter().any(|node| node == "after")
+    )));
+
+    let resumed = runtime.jobs().unwrap();
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].execution.node, "first");
+    assert!(resumed[0].continuation);
+    assert!(resumed[0].task.is_empty(), "do not add a synthetic user message");
+    assert_eq!(resumed[0].execution.session_id, failed.execution.session_id);
+    assert_eq!(resumed[0].execution.worktree, failed.execution.worktree);
+    assert_eq!(resumed[0].resume_execution_id.as_deref(), Some(failed.execution.id.as_str()));
+    assert_ne!(resumed[0].execution.id, failed.execution.id);
+    assert!(resumed[0].preserved_workspace.is_some(), "Continue keeps the partial work");
+    assert_eq!(fs::read_to_string(partial).unwrap(), "keep unfinished work");
+    assert_eq!(runtime.state.executions[0].status, "failed", "failure evidence stays recorded");
+    assert!(!runtime.state.can_resume(), "a queued recovery is no longer offered twice");
+}
+
+#[test]
+fn credential_recovery_classification_stays_narrow() {
+    for error in [
+        "OAuth refresh failed for openai: OpenAI OAuth token request failed (400): { \"error\": \"invalid_grant\" }",
+        "OAuth refresh returned a token that expires too soon for openai",
+        "Credential store read failed for openai",
+        "API key auth failed for provider openai",
+        "Provider is not configured: openai",
+    ] {
+        assert!(crate::model::is_credential_error(error), "{error}");
+        assert!(!crate::model::is_interrupted_error(error), "{error}");
+    }
+    for error in [
+        "Provider quota exhausted",
+        "Pi exited with exit code: 1",
+        "boom",
+        "user paused",
+        "application stopped during this execution",
+    ] {
+        assert!(!crate::model::is_credential_error(error), "{error}");
+    }
+}

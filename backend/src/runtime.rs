@@ -1562,6 +1562,7 @@ impl Runtime {
     fn queue_node_recovery(&mut self) -> Result<(), String> {
         let mut roots = self.state.interrupted_nodes();
         roots.extend(self.state.model_retry_nodes());
+        roots.extend(self.state.credential_retry_nodes());
         roots.sort();
         roots.dedup();
         if roots.is_empty() {

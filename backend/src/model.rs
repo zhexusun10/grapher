@@ -1209,6 +1209,31 @@ impl Snapshot {
         self.recovery_is_idle() && !self.interrupted_nodes().is_empty()
     }
 
+    /// Failed nodes whose latest attempt only lost its Provider authorization.
+    /// Continue resumes them as a continuity turn, exactly like an interrupted
+    /// node, because re-authenticating already removed the root cause.
+    pub fn credential_retry_nodes(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .filter_map(|(name, node)| {
+                if node.status != "failed"
+                    || !node.error.as_deref().is_some_and(is_credential_error)
+                {
+                    return None;
+                }
+                self.executions
+                    .iter()
+                    .rev()
+                    .find(|execution| {
+                        execution.node == *name
+                            && !self.superseded_execution_ids.contains(&execution.id)
+                    })
+                    .filter(|execution| execution.status == "failed")
+                    .map(|_| name.clone())
+            })
+            .collect()
+    }
+
     pub fn model_retry_nodes(&self) -> Vec<String> {
         self.nodes.iter().filter_map(|(name, node)| {
             if node.status != "failed" || node.model_config.is_none()
@@ -1226,7 +1251,9 @@ impl Snapshot {
     /// Backend-owned recovery hint; neither a retry nor a completion claim.
     pub fn can_resume(&self) -> bool {
         self.recovery_is_idle()
-            && (!self.interrupted_nodes().is_empty() || !self.model_retry_nodes().is_empty())
+            && (!self.interrupted_nodes().is_empty()
+                || !self.model_retry_nodes().is_empty()
+                || !self.credential_retry_nodes().is_empty())
     }
 
     pub fn is_node_user_paused(&self, node: &str) -> bool {
@@ -1349,6 +1376,29 @@ pub fn is_interrupted_error(error: &str) -> bool {
         || lower.contains("manually stopped")
         || lower.contains("user paused")
         || lower.contains("user stopped")
+}
+
+/// Credential failures live outside the Run: the task and its session are
+/// untouched, only the Provider authorization changed. Re-authenticating in
+/// Settings is the fix, so an explicit Continue may resume the same session
+/// instead of requiring a fabricated user instruction. Ordinary task failures
+/// are deliberately excluded: they keep requiring an intervention or a
+/// changed Node Agent model selection.
+pub fn is_credential_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("oauth refresh failed")
+        || lower.contains("oauth refresh returned a token that expires too soon")
+        || lower.contains("oauth auth derivation failed")
+        || lower.contains("credential store read failed")
+        || lower.contains("credential store modify failed")
+        || lower.contains("api key auth failed")
+        || lower.contains("provider is not configured")
+        || lower.contains("invalid_grant")
+        || lower.contains("invalid_token")
+        || lower.contains("not authenticated")
+        || lower.contains("unauthenticated")
+        || lower.contains("authentication failed")
+        || lower.contains("unauthorized")
 }
 
 pub fn now() -> u64 {
@@ -1651,7 +1701,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }
                 let continuation = node.pending_messages.is_empty() && continuation_nodes.contains(name)
                     && (node.model_config.is_some()
-                        || node.error.as_deref().is_some_and(is_interrupted_error));
+                        || node.error.as_deref().is_some_and(|error| {
+                            is_interrupted_error(error) || is_credential_error(error)
+                        }));
                 // A failed multi-source repair has a queued user continuation
                 // that duplicates the node instruction. Claim it so the retry
                 // keeps the feedback batch input and cannot re-batch the text.

@@ -2525,7 +2525,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           : graphPhase === "followup" ? t("源目录直改中（无快照）")
                             : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
                               : graphPhase === "pausing" ? t("正在停止运行中的节点…")
-                                : graphPhase === "paused" ? t("执行已暂停，点击继续可恢复")
+                                : graphPhase === "paused" ? (state.paused
+                                  ? t("执行已暂停，点击继续可恢复")
+                                  : t("执行已停止，点击继续恢复失败节点（不会追加消息）"))
                                   : graphPhase === "completed" ? t("运行已完成")
                                     : state.approved ? phaseText[graphPhase] ?? graphPhase : ""}
                     </span>
