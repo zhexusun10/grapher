@@ -29,10 +29,16 @@ test('file tools map source aliases, file URLs and case/Unicode variants', () =>
     const unicodeWorkspace = join(root, 'ws\u00e9');
     mkdirSync(unicodeSource);
     mkdirSync(unicodeWorkspace);
-    assert.equal(
-      workspacePathMapper(unicodeWorkspace, unicodeSource)(join(unicodeSource.normalize('NFD'), 'marker')),
-      join(unicodeWorkspace, 'marker'),
+    const unicodeMapped = workspacePathMapper(unicodeWorkspace, unicodeSource)(
+      join(unicodeSource.normalize('NFD'), 'marker'),
     );
+    if (process.platform === 'darwin') {
+      // APFS resolves NFC/NFD to the same file.
+      assert.equal(unicodeMapped, join(unicodeWorkspace, 'marker'));
+    } else {
+      // Linux and Windows keep distinct byte/code-unit names.
+      assert.equal(unicodeMapped, join(unicodeSource.normalize('NFD'), 'marker'));
+    }
     assert.equal(map(join(root, 'outside', 'marker')), join(root, 'outside', 'marker'));
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -87,6 +87,8 @@ remote-command and cross-volume case-heuristic limitations.
       removals and TMP/TEMP/TMPDIR/XDG_RUNTIME_DIR values
 - [x] Windows session rebind writes the launched spelling (`host_path(cwd)`),
       not an expanded canonical path; Unix keeps the resolved actual spelling
+- [x] Unicode NFC/NFD test expectations are platform-specific: APFS treats them
+      as one file; Linux/Windows keep distinct names
 
 ## Windows host handoff (next)
 

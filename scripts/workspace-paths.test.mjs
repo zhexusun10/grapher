@@ -50,7 +50,13 @@ test('literal shell mapping preserves quoting, external paths and opaque content
     const unicodeName = 'caf\u00e9';
     const unicodePath = join(root, unicodeName);
     mkdirSync(unicodePath);
-    assert.equal(pathKey(unicodePath), pathKey(unicodePath.normalize('NFD')));
+    if (process.platform === 'darwin') {
+      // APFS is normalization-insensitive even on case-sensitive volumes.
+      assert.equal(pathKey(unicodePath), pathKey(unicodePath.normalize('NFD')));
+    } else {
+      // Linux and Windows treat NFC and NFD names as distinct paths.
+      assert.notEqual(pathKey(unicodePath), pathKey(unicodePath.normalize('NFD')));
+    }
     const fileUrl = pathToFileURL(join(workspace, 'marker')).href;
     assert.equal(paths.visible(fileUrl).endsWith('/marker'), true);
     assert.equal(paths.visible(fileUrl).startsWith('file:'), true);
