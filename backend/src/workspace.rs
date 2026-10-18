@@ -2115,18 +2115,57 @@ pub(crate) fn scoped_args<'a>(base: &[&'a str], exclusions: &'a [String]) -> Vec
 }
 
 pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<String, String> {
-    // NUL-delimited output keeps paths with spaces exact. Non-macOS keeps
-    // ignored host metadata visible because `stage_scoped` force-collects
-    // ordinary ignored project files; Grapher internals and declared scopes are
-    // filtered below.
-    let base: &[&str] = if cfg!(target_os = "macos") {
-        &["status", "--porcelain", "-z"]
-    } else {
-        &["status", "--porcelain", "-z", "--ignored"]
-    };
-    let args = scoped_args(base, exclusions);
+    // NUL-delimited output keeps paths with spaces exact. Ignored host metadata
+    // is collected separately with `ls-files` so behavior does not depend on
+    // platform-specific `git status --ignored` output.
+    let args = scoped_args(&["status", "--porcelain", "-z"], exclusions);
     let raw = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
-    Ok(filtered_status(raw, path, exclusions))
+    let mut status = filtered_status(raw, path, exclusions);
+    if !cfg!(target_os = "macos") {
+        let args = scoped_args(
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ],
+            exclusions,
+        );
+        let ignored = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let ignored = ignored_host_metadata(&ignored, path, exclusions);
+        if !ignored.is_empty() {
+            if !status.is_empty() {
+                status.push('\n');
+            }
+            status.push_str(&ignored);
+        }
+    }
+    Ok(status)
+}
+
+fn status_path_excluded(
+    name: &str,
+    root: Option<&Path>,
+    data: Option<&Path>,
+    exclusions: &[String],
+) -> bool {
+    if crate::path_identity::is_runtime_metadata_path(Path::new(name)) {
+        return true;
+    }
+    if exclusions
+        .iter()
+        .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
+    {
+        return true;
+    }
+    root.zip(data).is_some_and(|(root, data)| {
+        data.strip_prefix(root).ok().is_some_and(|relative| {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            !relative.is_empty()
+                && (name == relative || name.starts_with(&format!("{relative}/")))
+        })
+    })
 }
 
 fn filtered_status(raw: String, root: &Path, exclusions: &[String]) -> String {
@@ -2139,24 +2178,6 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
     }
     let root = root.canonicalize().ok();
     let data = data_root().canonicalize().ok();
-    let excluded = |name: &str| {
-        if crate::path_identity::is_runtime_metadata_path(Path::new(name)) {
-            return true;
-        }
-        if exclusions
-            .iter()
-            .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
-        {
-            return true;
-        }
-        root.as_ref().zip(data.as_ref()).is_some_and(|(root, data)| {
-            data.strip_prefix(root).ok().is_some_and(|relative| {
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                !relative.is_empty()
-                    && (name == relative || name.starts_with(&format!("{relative}/")))
-            })
-        })
-    };
     let mut lines = Vec::new();
     let mut fields = raw.split('\0');
     while let Some(entry) = fields.next() {
@@ -2167,13 +2188,12 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
         let path = &entry[3..];
         let renamed = code.contains('R') || code.contains('C');
         // macOS treats Finder bookkeeping as host metadata. Elsewhere it is an
-        // ordinary project file, but only ignored host metadata is added by
-        // `--ignored`; unrelated build output stays out of the dirty report.
+        // ordinary project file, but tracked edits remain visible on every host.
         if is_host_metadata_name(path) {
             if macos && (code == "??" || code == "!!") {
                 continue;
             }
-            if code == "!!" && excluded(path) {
+            if code == "!!" && status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions) {
                 continue;
             }
         } else if code == "!!" {
@@ -2189,6 +2209,19 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
     }
     lines.join("\n")
 }
+
+fn ignored_host_metadata(raw: &str, root: &Path, exclusions: &[String]) -> String {
+    let root = root.canonicalize().ok();
+    let data = data_root().canonicalize().ok();
+    raw.split('\0')
+        .filter(|path| !path.is_empty()
+            && is_host_metadata_name(path)
+            && !status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions))
+        .map(|path| format!("!! {path}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 
 /// Host bookkeeping that macOS filters from dirty reports; other hosts still
 /// force-collect it as ordinary project data.
@@ -2467,5 +2500,37 @@ mod status_filter_tests {
         assert!(!other.contains("managed/._cache"), "{other}");
         assert!(other.contains("?? ._new"), "{other}");
         assert!(other.contains(" M .DS_Store"), "{other}");
+
+        let ignored = ignored_host_metadata(
+            "._late\0nested/.DS_Store\0node_modules/build.o\0managed/._cache\0",
+            root,
+            &exclusions,
+        );
+        assert!(ignored.contains("!! ._late"), "{ignored}");
+        assert!(ignored.contains("!! nested/.DS_Store"), "{ignored}");
+        assert!(!ignored.contains("node_modules"), "{ignored}");
+        assert!(!ignored.contains("managed/._cache"), "{ignored}");
+    }
+
+    #[test]
+    fn ignored_host_metadata_is_collected_from_git_ls_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repo");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "-q"]).unwrap();
+        fs::write(repository.join(".gitignore"), ".DS_Store\n._*\n").unwrap();
+        fs::create_dir(repository.join("nested")).unwrap();
+        fs::write(repository.join("._late"), "late").unwrap();
+        fs::write(repository.join("nested/.DS_Store"), "nested").unwrap();
+        fs::write(repository.join("nested/keep.txt"), "keep").unwrap();
+        let raw = repository_git(
+            &repository,
+            &["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        )
+        .unwrap();
+        let result = ignored_host_metadata(&raw, &repository, &[]);
+        assert!(result.contains("!! ._late"), "{result}");
+        assert!(result.contains("!! nested/.DS_Store"), "{result}");
+        assert!(!result.contains("nested/keep.txt"), "{result}");
     }
 }

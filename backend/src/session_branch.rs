@@ -59,6 +59,22 @@ fn open_session(source_dir: &Path, source_id: &str, source_cwd: &Path)
     Ok((source, reader, header))
 }
 
+/// The spelling Pi will report from `process.cwd()`. Windows preserves the
+/// launched spelling (including 8.3 aliases), while Unix resolves symlinks and
+/// reports the filesystem spelling.
+fn session_cwd(cwd: &Path) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        Ok(crate::native::host_path(cwd))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(crate::native::host_path(
+            &crate::path_identity::actual_path(cwd)?,
+        ))
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn validate_session(directory: &Path, id: &str, cwd: &Path) -> Result<(), String> {
     open_session(directory, id, cwd).map(|_| ())
@@ -97,7 +113,7 @@ fn rewrite_session_header(
 /// when the workspace resolves to a different case/Unicode spelling.
 pub(crate) fn rebind_session_cwd(directory: &Path, id: &str, cwd: &Path) -> Result<(), String> {
     let (path, input, header) = session_file(directory, id)?;
-    let actual = crate::native::host_path(&crate::path_identity::actual_path(cwd)?);
+    let actual = session_cwd(cwd)?;
     let current = header.get("cwd").and_then(Value::as_str);
     if current.is_some_and(|current| current == actual.to_string_lossy().as_ref()) {
         return Ok(());
@@ -118,7 +134,7 @@ pub(crate) fn rebind_session_cwd_by_header(
     if !directory.is_dir() {
         return Ok(());
     }
-    let actual = crate::native::host_path(&crate::path_identity::actual_path(cwd)?);
+    let actual = session_cwd(cwd)?;
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let path = entry.map_err(|error| error.to_string())?.path();
         if path.extension().is_none_or(|ext| ext != "jsonl") {
@@ -157,9 +173,7 @@ pub fn fork_session(
     if target_id == source_id { return Err("A forked node session needs a new identity".into()); }
     let (source, mut reader, mut header) = open_session(source_dir, source_id, source_cwd)?;
     header["id"] = json!(target_id);
-    header["cwd"] = json!(crate::native::host_path(
-        &crate::path_identity::actual_path(target_cwd)?
-    ));
+    header["cwd"] = json!(session_cwd(target_cwd)?);
     header["parentSession"] = json!(crate::native::host_path(&source));
     fs::create_dir_all(target_dir).map_err(|error| error.to_string())?;
     let target = target_dir.join(format!("grapher_{target_id}.jsonl"));

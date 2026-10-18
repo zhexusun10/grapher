@@ -79,11 +79,14 @@ remote-command and cross-volume case-heuristic limitations.
 - [x] Planner session rebind locates legacy/arbitrary JSONL filenames by header
       identity; Node session resume keeps the strict `_<id>.jsonl` contract
 - [x] Non-macOS `repository_status` reports new ignored host metadata that
-      forced snapshots would collect; tracked edits stay visible and internal
-      `.grapher*`/scope/data paths stay filtered. Covered by a platform-neutral
-      filter unit test.
+      forced snapshots would collect, using `git ls-files --others --ignored`
+      instead of relying on platform-specific `status --ignored`. Tracked edits
+      stay visible and internal `.grapher*`/scope/data paths stay filtered.
+      Covered by a platform-neutral filter unit test.
 - [x] Prepared-host binding accepts runtime-owned CDPATH/OLDPWD/GLOBIGNORE
       removals and TMP/TEMP/TMPDIR/XDG_RUNTIME_DIR values
+- [x] Windows session rebind writes the launched spelling (`host_path(cwd)`),
+      not an expanded canonical path; Unix keeps the resolved actual spelling
 
 ## Windows host handoff (next)
 
@@ -168,9 +171,13 @@ Targeted checks run while implementing:
 - `server::prompt_tests` — 62 passed (includes revision/session follow-up)
 - `server::planner_review_tests` — 9 passed (includes auto/manual post-task review)
 - `workspace::workspace_tests` — 8 passed (host metadata snapshot/status)
-- `workspace::status_filter_tests` — 1 passed (macOS vs other-host filtering)
+- `workspace::status_filter_tests` — 2 passed (macOS vs other-host filtering and real `git ls-files` collection)
 - `scripts/prewarm-http.test.mjs` — auto-refill prepared-host binding pass
 - `scripts/prepared-host.test.mjs` — three-role binding pass
+- `workspace::workspace_tests` / `status_filter_tests` — rerun after switched
+  ignored metadata collection via `ls-files`
+- `server::planner_workspace_tests` — 10 passed after Windows launched-spelling
+  session rebind
 - Windows-only assertions (drive-letter case, `/c/...`, batch `cygpath`,
   extended paths) are covered by the existing Windows test and run in the
   Windows CI lane; they could not be executed on this macOS host.
