@@ -301,11 +301,14 @@ and Linux behavior.
 
 ## Latest HEAD Windows acceptance (2026-10-18)
 
-Tested commit: `f719d63bb94b90911f7929df9999c81d9260610c` (clean tree).
+Tested commit: `bfff517dd5b9f09e7a266969f87ae491affe5688` (clean tree).
 Host: Windows 10.0.26300.9711 x64, Node v24.16.0, npm 12.1.0, Git for
 Windows 2.54.0.windows.1.
 
-Commands were run sequentially (parallel cargo builds can lock `grapher.exe`):
+Commands were run sequentially (parallel cargo builds can lock `grapher.exe`).
+Local `test:native`/`test:windows-native` used an isolated `CARGO_TARGET_DIR`
+because a separately running dev backend held the default debug executable; no
+service was stopped.
 
 - `node scripts/cargo.mjs test --manifest-path backend/Cargo.toml
   --no-default-features --features fixture --lib` — **412 passed, 0 failed**
@@ -324,10 +327,11 @@ Commands were run sequentially (parallel cargo builds can lock `grapher.exe`):
   physical read/write all passed.
 - Junction (`source junction` -> source): `samePath`, `pathKey`, missing-leaf
   `actualPath` and file-tool mapping passed.
-- 8.3/short path: this host does not expose an 8.3 short name for the test
-  folder; the CI failure (`RUNNER~1` vs `runneradmin`) reproduced the platform
-  policy and is fixed by the platform-specific `session_branch` assertion. The
-  final full Windows suites pass.
+- 8.3/short path: the Windows CI failure expected `RUNNER~1` while
+  `actualPath()` returned `runneradmin`; `createWorkspacePaths`/Planner now use
+  native realpath for their root spelling, and the Windows path test normalizes
+  its baseline with `realpathSync.native`. This host does not expose an 8.3
+  short name for the test folder, so the CI lane remains the direct executor.
 - MSYS `/tmp`: `/tmp/.../source` and `/tmp/.../external` file-tool inputs map to
   host source/external correctly; a real `C:\tmp\grapher-manual-check` path
   stayed external and was removed after the check.
