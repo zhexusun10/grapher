@@ -5,6 +5,26 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - 2026-10-20
+
+### Added
+
+- Markdown code blocks now include accessible copy buttons with clipboard success feedback.
+- Added `npm run clean:stale` to inspect and clean stale build artifacts; the development launcher also attempts cleanup after a successful backend build.
+
+### Changed
+
+- Sidebar conversation cards now load from a prewarmed, read-only backend summary projection instead of hydrating every conversation history. SQLite commits invalidate the projection, and unavailable histories do not block settings or unrelated conversations.
+- Improved workbench typography, spacing, sidebar cards, Markdown presentation, and session timing readability. Session durations now display whole seconds and refresh on elapsed-second boundaries.
+- `npm run dev` now opens the frontend in the browser automatically.
+- Renamed the backend test script to `test:backend` and updated CI and contributor documentation to use the explicit suite name.
+
+### Fixed
+
+- Sidebar reconciliation now replaces stale browser hints with the authoritative backend conversation index while preserving only explicitly unavailable conversations.
+- Settings saves no longer depend on loading the global sidebar projection, and startup metadata no longer waits for repository scans.
+- Code-block copying now handles clipboard failures and cleans up feedback timers when the component unmounts.
+
 ## [1.2.3] - 2026-10-19
 
 ### Added
@@ -114,6 +134,7 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
+[1.2.4]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.4
 [1.2.3]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.3
 [1.2.2]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.2
 [1.2.1]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.1
