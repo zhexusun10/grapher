@@ -1,18 +1,9 @@
 # Workspace directories and Git publication
 
-> **Scope:** Git-backed project inheritance, physical workspace ownership, feedback handoff, publication, and managed-environment boundaries.
+> **Scope:** Git-backed project inheritance, physical ownership, shadow repositories, feedback handoff and source-side merge mechanics.
 > **Maintained with:** [workspace.rs](../../backend/src/workspace.rs), [native_copy.rs](../../backend/src/native_copy.rs), [runtime.rs](../../backend/src/runtime.rs), [graph_merge.rs](../../backend/src/graph_merge.rs), and the workspace/runtime tests.
 
-Grapher has one project-file channel: **Git**. A node workspace is a physical
-working tree, but successful node snapshots force-add all project files to the
-node's Git commit. A file matching `.gitignore` is not a special Runtime state.
-`.gitignore` remains a tracked Git file and can conflict normally; its patterns
-do not prevent Runtime from collecting project files.
-
-The only paths outside this project Git channel are Grapher internals, Runtime
-data, and explicitly managed native-environment scopes/caches. Managed
-environment scopes retain their own evidence/manifests because they are an
-environment contract, not project output.
+Grapher has one project-file version channel: **Git**. The host prepares snapshots and transfers commits; agents do not exchange commits or use Git as a conversation protocol. Collection rules below define which paths enter this channel; [managed environment evidence](native-environments.md) is separate.
 
 ## Git collection
 
@@ -31,19 +22,9 @@ with pathspec exclusions for:
   in the snapshot: exact index paths are staged again after the excluded add.
   Windows and Linux retain their previous collection strategy.
 
-The collector does not ask Git whether a project path is ignored. Ignored
-project files, newly created files, modifications, and deletions therefore all
-enter the snapshot commit. This applies both to source snapshots and to node
-result snapshots. No `before-*`/`after-*` project-file manifests, content
-hashes, or Run blob stores are created. On macOS, untracked host metadata is
-also ignored by cleanliness/status checks, so merely browsing a project in
-Finder does not block publication; a tracked metadata edit remains a real
-change because exact index paths are staged again.
+The collector does not query ignore status: additions, modifications and deletions enter source/node snapshot commits even under ignored directories. `.gitignore` is an ordinary tracked project file, not a collection boundary. No `before-*`/`after-*` project-file manifests, content hashes or Run blob stores are created.
 
-This intentionally changes the meaning of `.gitignore` inside Grapher: it is
-still part of the project's Git history and still participates in Git merges,
-but it is not a Runtime collection boundary. A regular file that is created
-under an ignored directory is still part of the node's Git result.
+On macOS, cleanliness/status checks also ignore untracked host metadata; browsing in Finder cannot alone block publication. Tracked metadata edits remain real changes.
 
 ### Interpreter bytecode
 
@@ -64,12 +45,9 @@ file: it is collected, merged and published like any other project file, and
 is a cache, and CPU/NPU kernel caches such as Triton, TorchInductor and CUDA
 JIT outputs are separate systems that this policy does not touch.
 
-There is no automatic per-file size guard. A large project file is collected
-by Git like any other project file. Git will read/hash it and may create a
-large object; projects that need different storage must use an explicit Git
-LFS/artifact policy. Grapher keeps a single project-file channel, so a large
-file is treated like any other project file; this does not make Git large-file
-I/O cheap.
+### Binding and size checks
+
+There is no automatic per-file size guard: Git reads/hashes large project files and may create large objects. Use an explicit Git LFS/artifact policy when needed; the single-channel design does not make large-file I/O cheap.
 
 The user's desktop folder is not an accepted binding: [detection and
 binding validation](../../backend/src/workspace.rs) refuse it before a shadow
@@ -123,10 +101,9 @@ of that snapshot.
 <workspace-parent>/.grapher-worktrees/<run>/<node>-<execution>/
 ```
 
-A physical directory is a reusable node/Merger single-writer slot, not a
-permanent node identity or a security sandbox. A Planner follow-up may share the
-newest slot with its active writer; the writer snapshots the combined directory
-when it drains.
+Graph slots are Run-owned private repositories, not `git worktree` checkouts. A physical directory is a reusable node/Merger single-writer slot, not a permanent node identity or security sandbox. Inputs come from the latest recorded source snapshot and completed dependency results, never the live source working tree.
+
+Scheduling retains slots required by pending feedback/repair. The Planner is an exception to node/Merger writer exclusivity; its sharing and snapshot rules belong to [Planner follow-up workspaces](execution-model.md#planner-follow-up-workspaces).
 
 | Transition | Git behavior | Physical behavior |
 | --- | --- | --- |
@@ -135,16 +112,15 @@ when it drains.
 | Single-source feedback B → A | A receives B's committed result and normal Git ancestry | Reuse B's directory after ownership, generation, budget and drain checks |
 | Concurrent feedback to A | Git merges only applicable feedback senders' pinned commits | Compose in a separate target-owned slot; retain the senders' directories as immutable evidence |
 | Fan-out | Each branch has a distinct Git working tree and result history | One branch may take the parent slot; other branches get independent slots |
-| Fan-in | Git merges all parent commits; conflicts include formerly ignored paths and `.gitignore` | The selected parent directory is used for the merge. Runtime reuses a verified environment at that current workspace when possible; otherwise the downstream execution is unbound. Parent environments need not agree and are never directory-merged |
+| Fan-in | Git merges all parent commits | The selected parent directory is used for the merge; environment handling follows [local reuse/unbound selection](native-environments.md#branches-metadata-and-storage) |
 
-The native copy primitive remains available for creating a new physical slot
-and for files that are intentionally outside the project Git channel. It uses
-CoW where available and byte copies otherwise, preserves permissions, keeps
-symbolic links as links, does not follow them, and rejects unsupported special
-files. It excludes Git/Grapher internals and managed environment scopes.
+Conversation creation, continuation and forks belong to [Session continuity](execution-model.md#sessions-follow-ups-and-history-edits).
 
-Each execution has a fresh conversation unless it is an explicit continuation
-or feedback session fork. Conversations are never transferred through Git.
+### Physical copy primitive
+
+[Native copy](../../backend/src/native_copy.rs) prepares new slots and files outside the Git channel. Ordinary slot preparation excludes Git/Grapher internals and managed environment scopes. It preserves permissions, keeps symbolic links as links without following them, and rejects unsupported special files; link access/rebasing follows [Inherited project resources](filesystem-isolation.md#inherited-project-resources).
+
+It tries Linux FICLONE, macOS `clonefile` or Windows block cloning, then independent byte copies for unsupported storage operations. Other I/O errors fail. No writable hardlinks or shared mutable inodes are used. Clone support is filesystem-specific; it optimizes copying without promising stable logical paths, shared working layers, sandboxing or system snapshots. Managed snapshots impose additional [metadata restrictions](native-environments.md#branches-metadata-and-storage).
 
 ## Backend Git storage
 
@@ -173,11 +149,7 @@ merged using normal Git semantics. A conflict in any tracked path—including a
 path that the source project's `.gitignore` would normally ignore—is a Git
 conflict and follows the existing Merger flow.
 
-Project files are committed before composition, so an ordinary-file conflict is
-a Git conflict. If two parents create or modify the
-same path differently, Git reports the conflict. A successful Merger must
-stage the resolution and commit a clean result preserving the incoming
-parents.
+A successful Merger must stage the resolution and commit a clean result preserving incoming parents. Conversation controls, blocked-node retry and publication-Merger distinctions belong to [Merger lifecycle](execution-model.md#parent-composition-conflicts).
 
 A completed workspace that is modified after completion fails the feedback
 handoff cleanliness check. The result must first be represented by a new
@@ -207,18 +179,10 @@ For feedback to A:
    repair releases them. A real Git conflict invokes the existing Merger;
    failed composition preserves the partial slot and original source evidence
    without starting A's agent. Retry can recompose from those immutable inputs.
-   Managed environment directories are never merged; normal environment reuse
-   or best-effort unbound selection applies at the new slot.
-4. A's own Pi history is forked; sender conversations are never imported.
-   A failed multi-source repair with Prepared evidence retains its partial target workspace
-   for continuation rather than replacing it with the senders' old files.
-5. A's next execution produces another Git snapshot containing all project
-   files, including files that match `.gitignore`. Cross-layer regressions are
-   in [feedback batch tests](../../backend/src/feedback_batch_tests.rs).
+4. A failed multi-source repair with Prepared evidence retains its partial target workspace for continuation rather than replacing it with the senders' old files.
+5. A's next execution uses the normal collection rules. Cross-layer regressions are in [feedback batch tests](../../backend/src/feedback_batch_tests.rs).
 
-History edits retain the existing Git rollback/branch behavior. There is no
-separate project-file `before-*` snapshot to restore and no second file
-version channel.
+Session forks and history-edit rollback behavior belong to [Session continuity](execution-model.md#sessions-follow-ups-and-history-edits).
 
 ## Publication
 
@@ -227,37 +191,20 @@ Publication is Git-only:
 1. Source-side user changes are staged into a Git base using the same forced
    collection rules.
 2. Terminal node commits are merged into that source repository.
-3. Git applies additions, modifications, and deletions, including paths that
-   were previously ignored by the project.
-4. A successful Git merge is the published project state.
+3. Git applies the complete project diff; no ordinary-file copy-back pass or ignore-based delivery filter exists.
+4. The merged source commit is the published project state.
 
-Publication does not need a separate ordinary-file copy-back pass. It does not
-read `.gitignore` to decide which node outputs to deliver. It preserves the
-existing Merger/retry/recovery lifecycle and only completes after
-`PublicationCompleted`.
+Phase transitions, completion checks, retained-head retries and failure handling belong to [Final publication](execution-model.md#final-publication).
 
 ## Managed environment boundary
 
-Managed environment scopes/caches are not project output. They remain governed
-by `environment.rs` and their scoped evidence store; they are not force-added
-into project Git. They are never merged between parents and never copied back
-into the source. Runtime may reuse a verified environment at the current physical
-workspace; otherwise the execution starts unbound. Different terminal
-environments can publish separate business entries over the same final code; see
-[native environments](native-environments.md#publication-and-model-free-execution).
+Managed environment scopes/caches are excluded from project Git collection and source publication. They have a separate evidence store, not a second project-file channel. Scope ownership, reuse, fan-in and business entries belong to [Native environments](native-environments.md).
 
 ## Cleanup and reproducibility
 
-Git commits and refs provide the project history needed for reconstruction.
-Physical workspace slots may be reclaimed after their ownership/recovery
-requirements end. Pi sessions and Git history remain separate from workspace
-identity. Ordinary Runtime data and managed environment stores have their own
-cleanup/evidence rules.
+Git commits and refs provide project-file reconstruction after snapshotting, independent of physical slot identity. This does not reproduce model output, requirement interpretation or code quality, and is not a [filesystem access boundary](filesystem-isolation.md).
 
-Project results are Git-reproducible after snapshotting, including paths that
-`.gitignore` would hide from a normal user `git add`. This does not promise
-provider/model reproducibility or filesystem-sandbox behavior; see
-[Filesystem isolation](filesystem-isolation.md).
+Slots may be reclaimed only after ownership/recovery requirements end. Data/cache deletion belongs to [Storage and cleanup](storage.md); managed evidence retention belongs to [Native environments](native-environments.md#current-state-historical-evidence-and-ownership).
 
 ## Implementation and evidence
 

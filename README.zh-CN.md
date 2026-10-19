@@ -37,7 +37,7 @@ Grapher
 
 **并非所有工作都需要多个 Agent。** Grapher 在 **Auto** 模式下按意图路由，也允许手动选择：线性任务使用 **Serial**，并行有价值时使用 **Graph**。
 
-基于 [Pi](https://github.com/earendil-works/pi) 构建。 [快速开始](#快速开始) · [工作方式](#工作方式) · [架构](docs/architecture/overview.md) · [English](README.md)
+基于 [Pi](https://github.com/earendil-works/pi) 构建。 [快速开始](#快速开始) · [工作方式](#工作方式) · [使用指南](docs/user-guide.md) · [English](README.md)
 
 ![Grapher 真实界面：完成多节点复杂依赖拓扑图编译与执行，包含需求提示词、规划过程工具调用与执行拓扑图](assets/execution-graph-zh.png)
 
@@ -71,7 +71,7 @@ Grapher
 | 工作区 | 用户项目 | 支持状态继承与独占交接的 Run 私有工作区 |
 | 调度 | 顺序执行 | 依赖感知、有界并行 |
 
-规划副作用和发布语义见[执行模型](docs/architecture/execution-model.md)。Graph 是执行路线，不是 Agent 数量下限；图也可以只有一个节点。
+规划副作用、操作控制与恢复方式见[使用指南](docs/user-guide.md)。Graph 是执行路线，不是 Agent 数量下限；图也可以只有一个节点。
 
 ## 快速开始
 
@@ -94,7 +94,7 @@ npm run dev
 3. Graph 模式下查看并**批准**计划。执行中可查看节点日志、暂停正在运行的节点并稍后继续原会话，或追加指令。
 4. Graph 的有效结果成功发布回项目后才算完成；发布失败会保留状态供检查或重试。
 
-**只在可信项目上使用，首次体验建议用可丢弃的项目。** Planner 的 Bash 写入会在审批前直接修改源项目，规划失败或取消也不会回滚；Git 快照会强制收集项目文件，Runtime/环境内部目录除外。拒绝计划不等于回滚。Windows 工作区不是文件系统沙箱。在重要代码上运行前，请阅读[执行模型](docs/architecture/execution-model.md)和[文件系统边界](docs/architecture/filesystem-isolation.md)。
+**只在可信项目上使用，首次体验建议用可丢弃的项目。** Planner 的 Bash 写入会在审批前直接修改源项目，规划失败或取消也不会回滚；Git 快照会强制收集项目文件，Runtime/环境内部目录除外。拒绝计划不等于回滚。Windows 工作区不是文件系统沙箱。在重要代码上运行前，请阅读[审批前须知](docs/user-guide.md#before-you-approve)和[文件系统边界](docs/architecture/filesystem-isolation.md)。
 
 已有克隆仓库请先运行 `git submodule update --init --recursive`。Pi 是锁定版本，不会使用全局 Pi 替代。
 
@@ -165,9 +165,9 @@ Partitioner
 
 ## 架构
 
-Rust 后端与 SQLite 事件日志拥有运行时状态，React 界面只显示投影。Graph 执行使用 Run 私有仓库，每个目录同时只有一个写入者；已完成的目录可以在节点之间交接，而不是永久绑定到某个节点。后端为项目文件准备完整 Git 快照，包括被 Git 忽略的路径；Agent 不交换提交。交付要求 Git 成功发布，而不仅仅是模型调用结束。
+**模型负责编码，Runtime 负责流程。** Grapher 将依赖、有界返工与交付显式化，而不是把调度交给另一段对话。你可以检查计划、在执行中干预，并确认结果确实写回项目。
 
-阅读[架构](docs/architecture/overview.md)了解动机与不变量，或阅读[执行模型](docs/architecture/execution-model.md)了解规划、会话、工作区继承、Git 快照与发布语义。底层运行时、隔离和 Pi 契约从这些页面继续导航，不在首页重复。
+日常操作请阅读[使用指南](docs/user-guide.md)。如果要开发或修改 Grapher，请从[开发者架构文档](docs/architecture/overview.md)了解组件边界与各专题的唯一契约。
 
 ## 开发
 
@@ -182,12 +182,11 @@ npm test                      # Rust 固定样例；无需付费模型
 
 ## 文档导航
 
-先查看面向任务的[文档索引](docs/index.md)。Coding Agent 应使用 [AGENTS.md](AGENTS.md) 进行导航并了解仓库约束。
+**使用 Grapher：** [使用指南](docs/user-guide.md) · [安全政策](SECURITY.md)。
 
-- [架构](docs/architecture/overview.md)
-- [执行模型](docs/architecture/execution-model.md)
-- [开发指南](docs/development/contributing.md)
-- [Benchmark / Evaluation](docs/benchmarks/harbor.md)
+**开发 Grapher：** [架构契约](docs/architecture/overview.md) · [开发指南](docs/development/contributing.md) · [Benchmark / Evaluation](docs/benchmarks/harbor.md)。
+
+[文档索引](docs/index.md)区分用户指南与开发者任务路由。Coding Agent 应使用 [AGENTS.md](AGENTS.md) 了解仓库约束。
 
 ## 许可证
 

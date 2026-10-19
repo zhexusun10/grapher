@@ -1,6 +1,16 @@
 # Documentation index
 
-This index routes development and maintenance tasks. For installing and using Grapher, start with the [English](../README.md#quick-start) or [Chinese](../README.zh-CN.md#快速开始) quick start.
+## Choose your audience
+
+| Audience | Start here | Purpose |
+| --- | --- | --- |
+| Users evaluating or installing Grapher | [English README](../README.md), [中文 README](../README.zh-CN.md) | Value proposition, mode choice and quick start; key points may repeat for emphasis |
+| Users running tasks | [User guide](user-guide.md) | Approval risks, controls, recovery, delivery and data removal |
+| Developers changing Grapher | [Architecture contracts](architecture/overview.md#contract-ownership), [task routes](#task-routes) below | Component boundaries, canonical behavior contracts and implementation/test entry points |
+
+README and the user guide explain outcomes and actions. `architecture/` is developer reference: one canonical owner per contract, with links across boundaries rather than repeated explanations. User-facing summaries do not replace those contracts.
+
+## Developer navigation
 
 Repository instructions live in [AGENTS.md](../AGENTS.md), supplemented by the [backend](../backend/AGENTS.md) and [engine](../engine/AGENTS.md) guides for work in those directories. This index is a routing map, not a reading or execution checklist.
 
@@ -18,7 +28,7 @@ Choose the closest task row and inspect only the relevant entry files; follow im
 | Composition & final publication | [graph_merge.rs](../backend/src/graph_merge.rs), [publication.rs](../backend/tests/publication.rs), [merger-native.test.ts](../scripts/merger-native.test.ts) | [Composition recovery](architecture/execution-model.md#parent-composition-conflicts), [Publication](architecture/execution-model.md#final-publication) |
 | Post-task Planner review & continuation | [server.rs](../backend/src/server.rs), [planner_review_tests.rs](../backend/src/planner_review_tests.rs), [SettingsModal.tsx](../src/components/modals/SettingsModal.tsx) | [Post-task Planner review](architecture/execution-model.md#post-task-planner-review) |
 | API snapshots & live updates | [server.rs](../backend/src/server.rs), [runtime.ts](../src/services/runtime.ts), [runtimeEvents.ts](../src/services/runtimeEvents.ts), [types.ts](../src/types.ts), [runtime-completions.test.ts](../scripts/runtime-completions.test.ts) | [Runtime authority](architecture/runtime.md) |
-| Graph UI & conversation switching | [GraphWorkbench.tsx](../src/components/views/GraphWorkbench.tsx), [useGraphElements.ts](../src/hooks/useGraphElements.ts), [graph-elements.test.ts](../scripts/graph-elements.test.ts), [graph-switching.test.mjs](../scripts/graph-switching.test.mjs) | [Graph representation](architecture/runtime.md#graph-representation), [Development](development/contributing.md) |
+| Graph UI & conversation switching | [GraphWorkbench.tsx](../src/components/views/GraphWorkbench.tsx), [useGraphElements.ts](../src/hooks/useGraphElements.ts), [graph-elements.test.ts](../scripts/graph-elements.test.ts), [graph-switching.test.mjs](../scripts/graph-switching.test.mjs) | [Graph compilation](architecture/overview.md#graph-compilation), [Planning projection](architecture/runtime.md#planning-graph-projection), [Development](development/contributing.md) |
 | Transcript loading & log storage | [store/logs.rs](../backend/src/store/logs.rs), [transcriptCache.ts](../src/services/transcriptCache.ts), [useAutoTranscriptHistory.ts](../src/hooks/useAutoTranscriptHistory.ts), [transcript_page_tests.rs](../backend/src/transcript_page_tests.rs), [transcript-cache.test.ts](../scripts/transcript-cache.test.ts) | [Conversation logs](testing/conversation-logs.md), [Event storage](architecture/runtime.md#event-and-output-storage) |
 | Providers & authentication | [provider_auth.rs](../backend/src/provider_auth.rs), [provider-host.ts](../engine/provider-host.ts), [provider-auth-adapter.mjs](../engine/provider-auth-adapter.mjs), [pi-process-contract.test.mjs](../scripts/pi-process-contract.test.mjs) | [Provider/auth checks](development/pi-integration.md#providerauth-contract-checks) |
 | Role models & settings | [engine.rs](../backend/src/engine.rs) (`PiModelConfig`), [modelConfig.ts](../src/modelConfig.ts), [RoleModelSettings.tsx](../src/components/RoleModelSettings.tsx), [model-settings.test.ts](../scripts/model-settings.test.ts) | [Pi integration](development/pi-integration.md) |
@@ -26,15 +36,16 @@ Choose the closest task row and inspect only the relevant entry files; follow im
 | Upgrade Pi or bundled extensions | [pi-baseline.mjs](../scripts/pi-baseline.mjs), [pi-compat.ts](../engine/pi-compat.ts), [pi-compat.test.ts](../scripts/pi-compat.test.ts) | [Upgrade procedure](development/pi-integration.md#upgrade-procedure) |
 | Startup & prewarming | [prewarm.rs](../backend/src/engine/prewarm.rs), [process_prewarm.rs](../backend/src/engine/process_prewarm.rs), [prepared-host.ts](../engine/prepared-host.ts), [startup_prewarm_tests.rs](../backend/src/startup_prewarm_tests.rs), [prepared-host.test.mjs](../scripts/prepared-host.test.mjs) | [Prewarming](development/pi-integration.md#prewarming-and-prepared-runtime) |
 | Permissions, sandbox & paths | [native.rs](../backend/src/native.rs), [sandbox.rs](../backend/src/sandbox.rs), [linux_sandbox.rs](../backend/src/linux_sandbox.rs), [workspace-tools.ts](../engine/workspace-tools.ts) | [Filesystem isolation](architecture/filesystem-isolation.md) |
-| Workspace & cache cleanup | [cleanup.rs](../backend/src/cleanup.rs), [workspace_cleanup.rs](../backend/src/workspace_cleanup.rs), [native_runtime_storage.rs](../backend/src/native_runtime_storage.rs), [cleanup_tests.rs](../backend/src/cleanup_tests.rs), [native-runtime-storage.test.mjs](../scripts/native-runtime-storage.test.mjs) | [Storage & cleanup](architecture/execution-model.md#storage-and-cleanup) |
+| Workspace & cache cleanup | [cleanup.rs](../backend/src/cleanup.rs), [workspace_cleanup.rs](../backend/src/workspace_cleanup.rs), [native_runtime_storage.rs](../backend/src/native_runtime_storage.rs), [cleanup_tests.rs](../backend/src/cleanup_tests.rs), [native-runtime-storage.test.mjs](../scripts/native-runtime-storage.test.mjs) | [Storage & cleanup](architecture/storage.md) |
 | Setup, config & troubleshooting | [package.json](../package.json), [.env.example](../.env.example), [dev.mjs](../scripts/dev.mjs) | [README quick start](../README.md#quick-start) |
 | Verification, build targets & CI | [package.json](../package.json), [cargo.mjs](../scripts/cargo.mjs), [temporary-target.mjs](../scripts/temporary-target.mjs), [planner-source.yml](../.github/workflows/planner-source.yml), [release.yml](../.github/workflows/release.yml) | [Testing](development/testing.md) |
 | Harbor benchmark evaluation | [harbor_agent.py](../benchmark/harbor_agent.py), [run.py](../benchmark/run.py), [Dockerfile](../benchmark/Dockerfile) | [Harbor](benchmarks/harbor.md), [benchmark README](../benchmark/README.md) |
 
 ## Reference pages (on demand)
 
-- **Entrypoints**: [README.md](../README.md), [Chinese README](../README.zh-CN.md), [CONTRIBUTING.md](../CONTRIBUTING.md), [SECURITY.md](../SECURITY.md)
-- **Architecture**: [Overview](architecture/overview.md), [Execution model](architecture/execution-model.md), [Runtime](architecture/runtime.md), [Workspaces & Git](architecture/workspace-snapshots-and-feedback.md), [Native environments](architecture/native-environments.md), [Filesystem isolation](architecture/filesystem-isolation.md)
+- **For users**: [English README](../README.md), [中文 README](../README.zh-CN.md), [User guide](user-guide.md), [Security policy](../SECURITY.md)
+- **For developers — architecture**: [Boundaries & compilation](architecture/overview.md), [Execution lifecycle](architecture/execution-model.md), [Runtime](architecture/runtime.md), [Workspaces & Git](architecture/workspace-snapshots-and-feedback.md), [Native environments](architecture/native-environments.md), [Filesystem isolation](architecture/filesystem-isolation.md), [Storage & cleanup](architecture/storage.md)
+- **Contributor entrypoint**: [CONTRIBUTING.md](../CONTRIBUTING.md)
 - **Development & testing**: [Development](development/contributing.md), [Testing](development/testing.md), [Pi integration](development/pi-integration.md), [engine README](../engine/README.md), [Conversation logs](testing/conversation-logs.md), [Harbor](benchmarks/harbor.md), [benchmark README](../benchmark/README.md), [Repository homepage settings](../.github/repository-homepage.md)
 
 ## History
@@ -45,5 +56,7 @@ Choose the closest task row and inspect only the relevant entry files; follow im
 
 - Keep routes current when entry files move or ownership changes; add new permanent documentation here.
 - Keep this a routing map, not a complete file inventory or command catalog. Link check procedures and prerequisites to the testing guide.
-- Update the single canonical contract when behavior changes; avoid duplicate explanations, volatile constants, and per-run reports.
+- Update the single canonical developer contract when behavior changes; use the [ownership table](architecture/overview.md#contract-ownership) to choose it. Other developer pages should link to it, not restate its algorithm, state machine or exceptions.
+- Keep README/user guidance outcome-oriented: lead with benefits, actions and risks; repeat important points when helpful. Keep developer reference concise and technical: boundaries, conditions, failure semantics and evidence, not product pitches.
+- Update affected user summaries alongside their contract, without copying internal schemas or implementation walkthroughs into user pages. Avoid volatile constants and per-run reports.
 - Prompts linked in the task routes are production inputs, not contributor documentation.

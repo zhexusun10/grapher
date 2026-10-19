@@ -5,32 +5,9 @@
 
 The Rust backend owns Run state. SQLite stores append-only business events; a reducer produces the current Snapshot. React displays that projection and submits commands—it does not simulate execution or invent authoritative status.
 
-[Native workspace environments](native-environments.md) use durable backend
-admission for the current workspace, without frontend environment choices. They
-fix code/E/L/resources for each execution and advance current workspace aliases
-atomically with completion/feedback. Model-free result execution reserves a
-generation, releases the Run mutex for native work, then guards the commit;
-success requests republishing, not UI-invented completion. Environment mismatch
-falls back to unbound execution; damaged or missing required evidence still fails.
-Named business entries can retain independent terminal environments.
+Graph shape and validation belong to [Graph compilation](overview.md#graph-compilation). Managed environment transitions and model-free execution belong to [Native environments](native-environments.md).
 
-## Graph representation
-
-```ts
-interface Graph {
-  originalGoal: string;
-  nodes: Array<{ name: string; task: string }>;
-  edges: Array<{
-    from: string;
-    to: string;
-    feedback: boolean;
-  }>;
-}
-```
-
-Names are semantic identifiers, not literal directory names. Edges contain only `from`, `to`, and `feedback` and are unique by ordered `(from, to)` pair. The backend ignores the removed `relation` field when reading historical graphs, events, or checkpoints, and never serializes it back. The compiler checks nonempty/unique nodes and tasks, valid endpoints, no self-edges, duplicate edges, one feedback target per source, feedback ancestry, and an acyclic ordinary dependency graph; new mutations also reject redundant dependency edges.
-
-The compiler returns `executionBatches`, `roots`, `terminals`, and warnings. Batches describe topology; scheduling does not wait for every slow node in a batch before dispatching a ready descendant.
+## Planning graph projection
 
 During foreground planning, the graph pane opens on an accepted (successful)
 `node`/`edge` tool result, not on a pending or failed call.
@@ -125,9 +102,9 @@ conversations use the saved global defaults. `config.json` remains the defaults
 document for new Runs; the Run projection carries `modelConfig` for its own
 conversation.
 
-Scheduling enforces one node/Merger writer per physical Run directory and retains directories required by pending feedback/repair. Planner follow-ups may share the newest workspace with its active writer so they never wait. Allocation, reuse and reclamation follow the [workspace directory contract](workspace-snapshots-and-feedback.md#physical-workspaces-and-ownership).
+Dispatch must honor [physical workspace ownership](workspace-snapshots-and-feedback.md#physical-workspaces-and-ownership) and the [Planner follow-up dispatch/publication barrier](execution-model.md#planner-follow-up-workspaces).
 
-Source locks cover approval and recorded Git snapshots after approved Planner revisions, not the Planner's live Bash/model session. They do not serialize node model sessions or final Graph publication across Runs. Concurrent direct edits or publications can produce Git conflicts, surfaced by each execution/publication result.
+Source locks cover approval and recorded Git snapshots after approved Planner revisions, not the Planner's live Bash/model session. They do not serialize node model sessions or final Graph publication across Runs. Concurrent source-native Planners can overwrite one another's files; they have no private merge. Concurrent direct edits or publications can produce Git conflicts, surfaced by each execution/publication result.
 
 ## Bounded feedback
 
@@ -143,7 +120,7 @@ While feedback budget remains, a pending verdict that will apply makes every run
 
 `Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, the reviewed target execution/revision, and the final response's log-byte range before invalidation clears heads. The reviewed execution is taken from dispatch order, not the target's movable head after directory handoff. Legacy requests without that execution identity retain exact-head validation and are not grouped with other requests. Batch resolutions, per-edge counters and the single invalidation commit atomically; restart cannot partially consume a batch. Duplicate deliveries are idempotent, and a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership. Batching waits for already-running affected work, not for feedback nodes that have not been dispatched.
 
-Completion-state verification, forwarded-message shape and session forks are specified in [Feedback workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits).
+Cleanliness and physical transfer checks belong to [Feedback workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits); conversation forks belong to [Session continuity](execution-model.md#sessions-follow-ups-and-history-edits).
 
 Live steering does not itself mark a running node dirty. Completed-node follow-ups are new messages, not original-task rewrites; shared-terminal continuations, other changed results and history edits follow the distinct [session/invalidation rules](execution-model.md#sessions-follow-ups-and-history-edits).
 
@@ -289,10 +266,6 @@ After interruption:
 
 Old executor leases block startup until the old execution is confirmed stopped; the native backend does not silently discard them or take over background writers.
 
-Unix process groups and Windows kill-on-close Job Objects provide different lifecycle controls. They are not filesystem sandboxes and do not guarantee control of every detached process or external service. See [Filesystem isolation](filesystem-isolation.md#process-lifecycle).
-
-## Delivery boundary
-
-Only `PublicationCompleted` establishes Graph completion—not a finished model response or green UI. Retry/failure behavior is defined in [Final publication](execution-model.md#final-publication).
+Process termination guarantees belong to [Process lifecycle](filesystem-isolation.md#process-lifecycle); publication transitions and delivery evidence belong to [Final publication](execution-model.md#final-publication).
 
 Source references: [runtime.rs](../../backend/src/runtime.rs), [store.rs](../../backend/src/store.rs), [server.rs](../../backend/src/server.rs), and [process_control.rs](../../backend/src/process_control.rs).

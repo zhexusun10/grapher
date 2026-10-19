@@ -5,12 +5,7 @@
 
 **Use trusted projects, extensions, and tools.** Private Git state, filesystem access controls, and model-visible path adaptation are separate mechanisms. None is a general malicious-multi-tenant or credential-protection guarantee.
 
-[Native workspace environments](native-environments.md) add backend-owned business
-entry/PATH/state and device binding inside these same boundaries, without a user
-environment configuration surface. Native CUDA proofs are per execution, not
-universal GPU acceptance. Job quotas/device locks do not add a Windows filesystem
-sandbox, system snapshots or stronger cross-slot path/metadata guarantees.
-Unsupported requirements are rejected without a user-selected fallback.
+[Native environment controls](native-environments.md#native-resources) operate inside these access boundaries; quotas, device locks and computation proofs do not strengthen filesystem isolation.
 
 ## Roles and permissions
 
@@ -24,7 +19,7 @@ Unsupported requirements are rejected without a user-selected fallback.
 
 Exact tool, extension, MCP, skill and context loading belongs to the [Pi role policy](../development/pi-integration.md#role-loading-policy).
 
-Source-native Planner turns use host-user permissions and write the source immediately. Follow-ups in private node worktrees retain the platform boundaries below, without extra source/sibling access. There is no Bash write-command filter, and Reject, failure, and cancellation do not roll back writes in the selected directory. A Merger's permissions follow the policy for its selected workspace; conflict repair does not grant access to the source or sibling workspaces beyond that. See [Planning and approval](execution-model.md#planning-and-approval).
+Source-native Planner turns use host-user permissions; private-workspace turns retain the platform boundaries below, without extra source/sibling access. A Merger gets no additional conflict-repair permissions. Tool availability and immediate-write/rollback behavior belong to [Planning and approval](execution-model.md#planning-and-approval).
 
 ## Platform boundaries
 
@@ -82,7 +77,7 @@ Model-visible paths use `/` separators on every host, including Windows, so the 
 
 This is finite tool/text adaptation, **not kernel-level transparent remapping for arbitrary programs**. On macOS/Linux, unsupported direct source access may be denied; on Windows it may access the real source under host permissions. Do not relax source permissions to hide a mapping failure.
 
-Planner's `read`/`bash` (and `write`/`edit` when the setting mounts them) share Graph tool path adaptation and model-facing normalization, including source-native turns. Its physical cwd can change while the model keeps the same project-root-relative namespace (and stable source addresses for structured URIs). Existing prompt paths, tool results and conversation context are normalized. Each Planner follow-up with unfinished node work receives a regenerated transport announcement for the selected node workspace and graph status; when an alternate exists, the follow-up-only `switch_workspace` tool is exposed. If every node is already completed, or the Graph is still a draft awaiting approval, Planner runs in source, sends the user's instruction without transport context, and exposes no workspace switch. The rework explanation is included only on the first context-bearing follow-up, and the browser removes this transport context from the displayed conversation. Physical worktree paths remain backend/session/UI metadata. Source/sibling access remains subject to the platform policy. See [Planner follow-up workspaces](execution-model.md#planner-follow-up-workspaces).
+Planner's `read`/`bash` (and mounted `write`/`edit`) share Graph tool adaptation, including source-native turns. Across cwd changes the model retains a stable project-root-relative namespace and source addresses for structured URIs; existing prompt paths, tool results and conversation context are normalized. Physical paths remain backend/session/UI metadata, and source/sibling access remains subject to platform policy. Workspace selection, transport announcements and `switch_workspace` availability belong to [Planner follow-up workspaces](execution-model.md#planner-follow-up-workspaces).
 
 Model-visible normalization is not a byte-for-byte file representation or a data-loss-prevention system. Images, thinking content, provider signatures, unknown encodings, and extension channels are not universally sanitized. Perform exact byte processing inside programs rather than relying on normalized model-visible text.
 
@@ -92,11 +87,11 @@ Model-visible normalization is not a byte-for-byte file representation or a data
 
 Internal directory links are rebased (Windows uses junctions); external directory links are rejected rather than granted broad access. External file targets remain subject to platform permissions. Source-local secrets can be copied as ordinary files: physical-directory inheritance is not a credential filter. Managed environment scopes have their own policy and evidence rules.
 
-The [managed environment portability boundary](workspace-snapshots-and-feedback.md#managed-environment-boundary) and tool-mapping limits above apply to copied environments; copying is not a process namespace or stable-path volume.
+Managed snapshot metadata and copy limitations belong to [Native environments](native-environments.md#branches-metadata-and-storage); copying is not a process namespace or stable-path volume.
 
 ## Shared runtime and external state
 
-Private executions load a prepared shared engine copy prepared by [prepare-native-runtime.mjs](../../scripts/prepare-native-runtime.mjs), allowing self-hosting without source-engine write access. The copy holds engine/dependencies, not project snapshots or conversations. Cache paths, leases and reclamation belong to [Storage and cleanup](execution-model.md#storage-and-cleanup); role/process preparation belongs to [Pi prewarming](../development/pi-integration.md#prewarming-and-prepared-runtime).
+Private executions load the shared engine copy from [prepare-native-runtime.mjs](../../scripts/prepare-native-runtime.mjs), allowing self-hosting without source-engine write access. Cache paths, contents, leases and reclamation belong to [Storage and cleanup](storage.md#shared-pi-runtime-cache); role/process preparation belongs to [Pi prewarming](../development/pi-integration.md#prewarming-and-prepared-runtime).
 
 Pi authentication uses its dedicated configuration directory, not a per-node credential vault. Model tools may read auth material available to their process. Shared HOME, temporary files, hard links, services and global configuration are outside Git node-version isolation.
 

@@ -4,8 +4,7 @@
 > **Scope:** Backend-owned environment admission, Graph node environment snapshots and launch bindings, native resource controls and model-free result execution. No VM, WSL, container fallback, new allocator or maintenance Agent.
 > **Maintained with:** [automatic admission](../../backend/src/environment_automatic.rs), [tool observations](../../backend/src/environment_discovery.rs), [environment state](../../backend/src/environment.rs), [resources](../../backend/src/environment_resources.rs), [runtime](../../backend/src/runtime.rs), [launch binding](../../engine/launch-binding.mjs), [state tests](../../backend/src/environment_tests.rs) and [native acceptance](../../scripts/environment-native.test.ts).
 
-This page owns the implemented contract. The capability limitations and native
-acceptance boundaries below distinguish it from unimplemented design goals.
+This page owns managed state outside project Git. [Workspace allocation](workspace-snapshots-and-feedback.md#physical-workspaces-and-ownership), [publication phases](execution-model.md#final-publication) and [platform permissions](filesystem-isolation.md#platform-boundaries) remain separate contracts. Capability limitations and acceptance gaps are listed at the end.
 
 ## Terms and stored references
 
@@ -21,13 +20,7 @@ acceptance boundaries below distinguish it from unimplemented design goals.
 
 ## Admission and configuration
 
-**Users do not configure or choose environments.** Settings has no environment
-mode selector, policy JSON editor, device selector or relocation assertion.
-Runtime makes admission/selection decisions from native tool evidence;
-ambiguity or missing capabilities produce diagnostics,
-not a request that the user select an environment, authoritative parent or
-CPU/OS fallback. Graph approval and result arguments remain business controls,
-not environment configuration.
+Runtime admits environments from native tool evidence. Settings exposes no environment mode, policy JSON, device selector or relocation assertion. Ambiguity/missing capabilities produce diagnostics, not a request to choose an authoritative parent or CPU/OS fallback. Graph approval, result entry selection and arguments are business controls, not environment policy.
 
 Graph approval without an already frozen environment policy records
 `EnvironmentPolicyRequested`. After Planner's existing source writes, Rust resolves
@@ -48,10 +41,7 @@ and not a user environment choice:
   temporary activation into a Runtime failure. The OS sandbox/permissions and
   the command's own exit status still apply. Runtime records receipts only when
   a private project-owned environment can be verified; external use is recorded
-  as unbound business execution. No task-text parser, extra binding message,
-  maintenance Agent or user choice is involved. Persisted compatibility records
-  retain their recorded ownership/offline contract for replay only; they are not
-  a user-facing environment mode.
+  as unbound business execution. No task-text parser, extra binding message or maintenance Agent is involved.
 - After drain, Runtime tries to identify a unique private candidate's ownership,
   native metadata, actual interpreter prefix and ABI/library-byte evidence, then
   versions L and captures E separately. The current workspace policy treats
@@ -61,24 +51,15 @@ and not a user environment choice:
   external prefixes and unverified switches fall back to an unbound launch rather
   than blocking the node. Metadata inventory remains bounded and is used only to
   retain managed-scope evidence, not to adopt an environment by directory name.
-- Environment binding is an execution/workspace property, not a distinction between
-  execution labels. Runtime attempts safe reuse at the current workspace;
-  if it cannot bind the observed environment, the execution remains unbound and
-  is not blocked. Persisted E/L records are evidence for replay and recovery, not an
-  instruction to resurrect an obsolete workspace or force a historical policy.
+- Binding is an execution/workspace property, not an execution-label distinction. Reuse and fan-in follow [Branches, metadata and storage](#branches-metadata-and-storage).
 
 `environmentPolicy` is present in full/metadata projections and checkpoints.
 The current workspace contract is frozen for the execution, while verified E/L and
 private prefix scopes evolve through immutable composite references. Retry cannot
 replace that contract; a workspace that falls back to unbound remains runnable and
-records that decision. Draft/model-setting changes cannot override it. Environment
-policy is not exposed as a frontend choice.
+records that decision. Draft/model-setting changes cannot override it.
 
-The active workspace contract is resolved by Runtime; persisted compatibility
-records remain readable for replay and recovery but are not a second user-visible
-mode. Automatic device/quota policy synthesis and complete package-manager
-coverage are **not implemented**; lazy discovery is limited to the supported
-native tool adapters.
+Persisted compatibility records retain their recorded ownership/offline contract for replay and recovery only, not as another admission mode. Lazy discovery is limited to supported native tool adapters; [capability gaps](#capabilities-not-implemented-or-accepted) are not admission promises.
 
 The internal policy fixes platform/architecture, baseline, initial
 managed-environment scopes, rebuildable caches, layout and discovery rules. A verified
@@ -105,7 +86,7 @@ secrets. Existing [native permission limits](filesystem-isolation.md) apply.
 The existing allocator determines W. Environment control neither assigns new
 node slots nor serializes the whole graph. Linear dependencies hand off the same
 physical directory. A continuation of A in the unique terminal tree uses that
-tree's **current** code/resources/E/L and A's conversation, not A0's environment.
+tree's **current** code/resources/E/L and A's conversation, not A0's environment. Physical handoff eligibility remains governed by the workspace allocator.
 
 Successful execution fixes a composite input/result:
 
@@ -133,11 +114,7 @@ from the current managed composite when the result contract requires it.
 Environment evidence alone does not reconstruct ordinary project files; those
 follow the [Git workspace contract](workspace-snapshots-and-feedback.md#cleanup-and-reproducibility).
 
-Feedback retains pinned sender results, generation/budget checks and
-**drain-before-handoff**. It forks only the receiver's own history. Failed and
-pending-feedback views are not opportunistically reclaimed. Managed layouts and
-snapshots remain until explicit conversation deletion; bounded long-term
-retention/reference GC is not implemented.
+Environment evidence participates in [feedback generation/drain checks](runtime.md#bounded-feedback) and [pinned workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits). Failed and pending-feedback views are not opportunistically reclaimed. Managed layouts and snapshots remain until explicit conversation deletion; bounded long-term retention/reference GC is not implemented.
 
 ## Branches, metadata and storage
 
@@ -148,7 +125,7 @@ The Node may then discover, activate, switch or install environments through Bas
 Runtime may carry a non-owning ambient hint as
 `previous agent used: <manager> <selector> (<executable>)`. At fan-in all parent
 hints are preserved, sorted and deduplicated; no hint is authoritative and
-conflicting hints do not block the node.
+conflicting hints do not block the node. The downstream Node may ignore, verify, activate or replace a hint through Bash; it is not Runtime activation or authorization.
 
 At fan-in, Runtime selects a provable local input if one exists; other parents'
 E/L are provenance, not constraints on the downstream task. Otherwise the current
@@ -158,25 +135,13 @@ including environments not selected for reuse. Known custom prefixes remain
 excluded from copying and Git collection. Ordinary business Bash retains its
 existing exploration/creation behavior and permissions.
 
-Persisted records from earlier execution contracts remain readable for replay and
-recovery; they are not a second user-visible environment mode. The current
-workspace contract uses local reuse/unbound fallback. Arbitrary `activate`/`export`
-may affect the Node's business process, but only a verifiable private environment
-is recorded as reusable L. Multiple candidates do not block the node; they simply
-remain unbound.
-
 Scopes support basic files/directories, Unix modes/Windows readonly and supported
 links. Special files, escaping directory links and nested Runtime/Git metadata
 are rejected; managed Unix trees also reject hardlinks and special permission
 bits. Ownership, ACLs, xattrs/capabilities, sparse layout, ADS and general hardlink
 topology are not preserved by the basic snapshot contract.
 
-[Private copy](../../backend/src/native_copy.rs) tries Linux FICLONE, macOS
-`clonefile` or Windows block cloning, then uses independent byte copies for
-unsupported storage operations. Other I/O errors fail. No writable hardlinks or
-shared mutable inodes are used. Native clones optimize copies, not logical path
-stability, shared working layers, sandboxing or system snapshots. Actual clone
-support is filesystem-specific and may fall back to independent byte copies.
+Physical copying uses the shared [native copy primitive](workspace-snapshots-and-feedback.md#physical-copy-primitive); it does not add environment relocation or logical-path guarantees.
 
 ## Native resources
 
@@ -205,9 +170,7 @@ ROCm/MPS support or arbitrary CUDA framework compatibility.
 
 ## Publication and model-free execution
 
-Code/Git state follows the Git publication contract. Managed scopes/caches
-are **not copied back into source**; source environments are not removed,
-overwritten or activated. New best-effort Runs publish schema-2 descriptors with
+Code/Git state follows [Git publication](workspace-snapshots-and-feedback.md#publication). Managed scopes/caches are **not copied back into source**; source environments are not removed, overwritten or activated. New best-effort Runs publish schema-2 descriptors with
 one named business entry per terminal, each retaining its own E/L and fixed
 workspace. Every entry uses the final published code commit and passes native
 integrity/startup checks. Validation and code preparation run outside the Run
@@ -250,13 +213,7 @@ Results have **no implicit execution timeout**. Internal policies may set
 `maxOutputBytes` (4–256 MiB). Output is bounded, not live streamed. Native probes
 and computation proofs retain bounded time/drain checks.
 
-Planner/Serial remain source-native. A Git-conflict Merger keeps its plain
-workspace shell. Environment differences do not create a Merger or a new Agent
-instruction; the affected execution either reuses the current workspace
-environment or runs unbound. Managed ML
-commands in a Git-only Merger role are not accepted. Process groups/Job Objects
-cover defined descendants, not arbitrary external services or universally
-detached writers.
+Serial/source Planner launches retain their source-native environment contract; private Planner turns follow their selected workspace's access policy. A Git-conflict Merger keeps its plain workspace shell: environment differences do not invoke it or generate new Agent instructions, and managed ML commands are not accepted in that role. Process ownership guarantees belong to [Process lifecycle](filesystem-isolation.md#process-lifecycle).
 
 ## Capabilities not implemented or accepted
 

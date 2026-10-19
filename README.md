@@ -36,7 +36,7 @@ Goal → Planner → Compiled Graph → Deterministic Runtime
 
 **Not all work needs multiple agents.** Grapher uses intent-based routing in **Auto** mode or lets you choose manually: **Serial** for linear tasks, **Graph** when parallelism helps.
 
-Built on [Pi](https://github.com/earendil-works/pi). [Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](docs/architecture/overview.md) · [简体中文](README.zh-CN.md)
+Built on [Pi](https://github.com/earendil-works/pi). [Quick start](#quick-start) · [How it works](#how-it-works) · [User guide](docs/user-guide.md) · [简体中文](README.zh-CN.md)
 
 ![Grapher UI showing compiled execution graph with user prompt, planning tool calls, and 16-node dependency topology](assets/execution-graph.png)
 
@@ -70,7 +70,7 @@ For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph
 | Workspace | Your project | Private Run workspaces with state inheritance and exclusive handoff |
 | Scheduling | Sequential | Dependency-aware, bounded parallelism |
 
-See the [execution model](docs/architecture/execution-model.md) for planning side effects and publication semantics. Graph is a route, not a minimum agent count; it can contain a single node.
+See the [user guide](docs/user-guide.md) for planning side effects, controls and recovery. Graph is a route, not a minimum agent count; it can contain a single node.
 
 ## Quick start
 
@@ -93,7 +93,7 @@ Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo com
 3. For Graph, inspect and **approve** the plan. Follow node logs, pause running nodes and later continue their sessions, or send instructions.
 4. Graph work is complete only after valid results are published to your project. Publication failures preserve state for inspection or retry.
 
-**Use trusted projects; start with a disposable one.** Planner Bash writes directly to the source before approval, even if planning fails or is cancelled; snapshots force-collect project files into Git except Runtime/managed-environment internals. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read the [execution model](docs/architecture/execution-model.md) and [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.
+**Use trusted projects; start with a disposable one.** Planner Bash writes directly to the source before approval, even if planning fails or is cancelled; snapshots force-collect project files into Git except Runtime/managed-environment internals. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read [Before you approve](docs/user-guide.md#before-you-approve) and the [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.
 
 For an existing clone, first run `git submodule update --init --recursive`. Pi is pinned; a global Pi installation is not substituted.
 
@@ -164,9 +164,9 @@ When enabled, **Post-task Planner review** invokes the Planner once all nodes fi
 
 ## Architecture
 
-The Rust backend and SQLite event log own runtime state; the React UI displays projections. Graph executions use private Run repositories with one writer per directory; completed directories can pass between nodes rather than being permanently assigned to one node. The backend prepares complete Git snapshots of project files, including Git-ignored paths; agents do not exchange commits. Delivery requires successful Git publication—not merely finished model calls.
+**Models do the coding; the runtime owns the workflow.** Grapher keeps dependencies, bounded rework and delivery explicit instead of delegating scheduling to another conversation. You can inspect the plan, intervene during execution and verify that the result reached your project.
 
-Read [Architecture](docs/architecture/overview.md) for motivation and invariants, or [Execution model](docs/architecture/execution-model.md) for planning, sessions, workspace inheritance, Git snapshots, and publication semantics. Low-level runtime, isolation, and Pi contracts are linked from those pages rather than duplicated here.
+For everyday operation, read the [user guide](docs/user-guide.md). Building or changing Grapher? Start with [developer architecture](docs/architecture/overview.md) for component boundaries and canonical contracts.
 
 ## Development
 
@@ -181,13 +181,11 @@ See [Contributing](CONTRIBUTING.md) and the [testing guide](docs/development/tes
 
 ## Documentation
 
-Start with the [task-oriented documentation index](docs/index.md). Coding agents
-should use [AGENTS.md](AGENTS.md) for navigation and repository constraints.
+**Using Grapher:** [User guide](docs/user-guide.md) · [Security policy](SECURITY.md).
 
-- [Architecture](docs/architecture/overview.md)
-- [Execution model](docs/architecture/execution-model.md)
-- [Development guide](docs/development/contributing.md)
-- [Benchmarks](docs/benchmarks/harbor.md)
+**Developing Grapher:** [Architecture contracts](docs/architecture/overview.md) · [Development guide](docs/development/contributing.md) · [Benchmarks](docs/benchmarks/harbor.md).
+
+The [documentation index](docs/index.md) separates user guidance from developer task routes. Coding agents should use [AGENTS.md](AGENTS.md) for repository constraints.
 
 ## License
 

@@ -12,4 +12,4 @@ Please report security issues privately through [GitHub Security Advisories](htt
 
 Grapher can execute commands and modify project files, including during planning. Use trusted projects and extensions, and keep the local API private. Git isolation is not a security sandbox, and rejecting a graph does not undo earlier changes.
 
-For details, see [Filesystem isolation](docs/architecture/filesystem-isolation.md) and the [execution model](docs/architecture/execution-model.md).
+Before running important work, read the [user safety guide](docs/user-guide.md#before-you-approve). Developer details live in [Filesystem isolation](docs/architecture/filesystem-isolation.md) and the [execution lifecycle](docs/architecture/execution-model.md).

@@ -37,7 +37,7 @@ Source Partitioner/Planner/Serial roles prepare unbound processes without sessio
 
 Provider/Auth readiness loads code without constructing a credential runtime, checking credentials, or initiating login. Private Graph nodes, private Planner turns, and Mergers cold-start through their platform launcher; an already-started source process cannot acquire that private sandbox later.
 
-[process_prewarm.rs](../../backend/src/engine/process_prewarm.rs), [prepared-host.ts](../../engine/prepared-host.ts), and their tests own handshake/timing details. Shared engine copies contain code/dependencies, not Run state; cache ownership and reclamation belong to [Storage and cleanup](../architecture/execution-model.md#storage-and-cleanup).
+[process_prewarm.rs](../../backend/src/engine/process_prewarm.rs), [prepared-host.ts](../../engine/prepared-host.ts), and their tests own handshake/timing details. Shared engine copies contain code/dependencies, not Run state; cache ownership and reclamation belong to [Storage and cleanup](../architecture/storage.md#shared-pi-runtime-cache).
 
 ## Upgrade procedure
 
