@@ -1056,16 +1056,22 @@ fn graph_result_cannot_discard_its_prepared_commit() {
 }
 
 #[test]
-fn serial_snapshot_does_not_create_or_move_graph_refs() {
+fn serial_snapshot_does_not_commit_stage_or_move_graph_refs() {
     let temp = TempDir::new().unwrap();
     let repository = grapher::fixture::repository(temp.path()).unwrap();
+    let before = workspace::git(&repository, &["rev-parse", "HEAD"]).unwrap();
+    fs::write(repository.join("README.md"), "staged user change\n").unwrap();
+    workspace::git(&repository, &["add", "README.md"]).unwrap();
+    fs::write(repository.join("README.md"), "unstaged user change\n").unwrap();
     fs::write(repository.join("serial.txt"), "serial result\n").unwrap();
+    let status = workspace::git(&repository, &["status", "--porcelain"]).unwrap();
+    let index = fs::read(repository.join(".git/index")).unwrap();
 
     let head = workspace::snapshot_execution(&repository, &repository, "task").unwrap();
-    assert_eq!(
-        head,
-        workspace::git(&repository, &["rev-parse", "HEAD"]).unwrap()
-    );
+    assert_eq!(head, "");
+    assert_eq!(workspace::git(&repository, &["rev-parse", "HEAD"]).unwrap(), before);
+    assert_eq!(fs::read(repository.join(".git/index")).unwrap(), index);
+    assert_eq!(workspace::git(&repository, &["status", "--porcelain"]).unwrap(), status);
     assert!(workspace::git(
         &repository,
         &["rev-parse", "--verify", "refs/heads/grapher-node"]

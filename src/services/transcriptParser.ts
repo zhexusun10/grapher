@@ -279,7 +279,7 @@ export function parseTranscriptChunkLines(
           let remaining = delta;
           while (remaining.length > 0) {
             if (state.inTagThinking) {
-              const endTag = remaining.includes("</think>") ? "</think>" : remaining.includes("</thought>") ? "</thought>" : null;
+              const endTag = remaining.match(/<\/(?:think|thought)>/)?.[0] ?? null;
               if (endTag) {
                 const endIdx = remaining.indexOf(endTag);
                 const thinkText = remaining.slice(0, endIdx);
@@ -316,7 +316,9 @@ export function parseTranscriptChunkLines(
                 remaining = "";
               }
             } else {
-              const startTag = remaining.includes("<think>") ? "<think>" : remaining.includes("<thought>") ? "<thought>" : null;
+              // Coalesced deltas can contain both spellings. Match the first
+              // tag in the stream, rather than prioritizing one spelling.
+              const startTag = remaining.match(/<(?:think|thought)>/)?.[0] ?? null;
               if (startTag) {
                 const startIdx = remaining.indexOf(startTag);
                 const textBefore = remaining.slice(0, startIdx);

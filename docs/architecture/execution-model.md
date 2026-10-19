@@ -80,7 +80,11 @@ to Graph Runs, which already have a Planner conversation, not Serial Runs.
 After every successful publication, when all nodes are completed, an enabled Run
 appends a brief neutral completion notification to its existing Planner session.
 The notification is not a user bubble and is omitted from the browser transcript,
-including after reload; the shared Planner system prompt is unchanged.
+including after reload; the shared Planner system prompt is unchanged. The rework
+explanation shares the same durable one-shot marker as ordinary follow-ups: a
+review appends it only while that marker is pending and consumes the marker.
+Later reviews or follow-ups do not repeat it, including after reload or a failed
+review.
 
 The review uses the normal Planner tool policy and may inspect, verify, revise the graph, report or make administrative source edits. It does not receive node conversation histories.
 

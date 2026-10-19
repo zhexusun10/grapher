@@ -632,19 +632,18 @@ impl Runtime {
 
     /// Whether this Run may release its plain-directory source snapshot now.
     ///
-    /// A completed Run no longer needs it once its result reached the source
-    /// (`PublicationCompleted`) or once it is proven that this Run never had
-    /// that downstream: a serial/plan-less Run settles without publishing, so
-    /// completion is its final hand-off. Failed, interrupted, paused and
-    /// still-publishing Runs keep the snapshot for retry and evidence, and a
-    /// completed Graph Run that never published keeps it too — publication is
-    /// its only copy of the merged result.
+    /// A completed Graph Run no longer needs it once its result reached the
+    /// source (`PublicationCompleted`). Serial Runs never own a source snapshot
+    /// and must not reclaim one belonging to a Graph Run on the same directory.
+    /// Failed, interrupted, paused and still-publishing Runs keep the snapshot
+    /// for retry and evidence, as does a completed Graph Run that never published.
     ///
     /// Read-only; callers should release the runtime lock before the actual
     /// removal.
     pub(crate) fn shadow_reclaimable(&self, repository: &Path) -> Result<bool, String> {
-        if self.state.phase != "completed"
-            || (self.state.published_head.is_none() && !self.is_serial())
+        if self.is_serial()
+            || self.state.phase != "completed"
+            || self.state.published_head.is_none()
         {
             return Ok(false);
         }
@@ -661,10 +660,9 @@ impl Runtime {
             .shadow_repo_needed_by_other_run(&self.state.run_id, repository)?)
     }
 
-    /// Reclaim this Run's source snapshot. Attempted whenever the Run may have
-    /// handed off its result (completion or publication) and on explicit Run
-    /// deletion; failed, interrupted and paused Runs keep their snapshot for
-    /// retry/evidence.
+    /// Reclaim this Graph Run's source snapshot after publication/completion.
+    /// Failed, interrupted and paused Runs keep it for retry/evidence; Serial
+    /// never participates. Explicit Run deletion has its own ownership cleanup.
     pub fn reclaim_shadow(&self, repository: &Path) -> Result<(), String> {
         if self.shadow_reclaimable(repository)? {
             workspace::remove_shadow_repo(repository)?;
@@ -951,7 +949,7 @@ impl Runtime {
         })
     }
 
-    fn is_serial(&self) -> bool {
+    pub(crate) fn is_serial(&self) -> bool {
         match self.state.plan_type.as_deref() {
             Some(mode) => mode == "serial",
             None => self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].name == "task",
@@ -1296,6 +1294,9 @@ impl Runtime {
 
     pub(crate) fn capture_planner_source(&mut self) -> Result<(), String> {
         self.require_current_file_contract()?;
+        if self.is_serial() {
+            return Ok(());
+        }
         let repository = resolve_repository(
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
@@ -1353,10 +1354,9 @@ impl Runtime {
                 self.emit(EventKind::EnvironmentInitialized { result })?;
             }
         }
-        // Approval is immutable. Plain directories (and serial on either
-        // repository type) have no Git snapshot yet: the lazy snapshot is
-        // materialized by the first node worker and recorded as `base` only
-        // for a standard Git repository, whose commits stay user-owned.
+        // Approval is immutable. Serial never records a Git snapshot. Graph
+        // snapshots standard Git sources here; plain directories defer their
+        // snapshot to the first node worker.
         let base = if self.is_serial() || !workspace::is_standard_git(&repository) {
             String::new()
         } else {
@@ -2187,7 +2187,11 @@ impl Runtime {
         for node in ready {
             let id = Uuid::new_v4().to_string();
             // Dependency nodes normally take over their parent's physical workspace.
-            let source_head = self.latest_source_head().to_owned();
+            let source_head = if self.is_serial() {
+                String::new()
+            } else {
+                self.latest_source_head().to_owned()
+            };
             let parent_names = self.parents(&node.name);
             let parent_heads = parent_names
                 .iter()
@@ -2198,7 +2202,7 @@ impl Runtime {
                         .ok_or("Ready node has no completed parent head")
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut before = if source_direct_run {
+            let mut before = if self.is_serial() || source_direct_run {
                 String::new()
             } else {
                 self.state.nodes[&node.name]
@@ -4174,6 +4178,13 @@ fn perform_with_merger_inner(
 ) -> Result<(String, String), String> {
     let repository = resolve_repository(root, &job.config)?;
     let path = Path::new(&job.execution.worktree);
+    // The scheduler explicitly selects the source path for Serial/direct turns.
+    // A private Graph slot that aliases the source must fail closed, not gain
+    // source-direct semantics merely by resolving to the same physical path.
+    let source_tree = path == repository;
+    if !source_tree && crate::path_identity::same_path(path, &repository) {
+        return Err("Graph workspace resolves to the source directory; an isolated workspace is required".into());
+    }
     let reused = path.is_dir();
     // Validate before any checkout, copying or native-environment preparation.
     // An interrupted writer's dirty files belong to that execution, not to an
@@ -4320,7 +4331,7 @@ fn perform_with_merger_inner(
         }
     }
     #[cfg(not(feature = "fixture"))]
-    if path != repository {
+    if !source_tree {
         crate::native::require_graph_execution()?;
     }
     // Direct `perform` callers (fixtures, embedded use) may not have gone
@@ -4328,6 +4339,7 @@ fn perform_with_merger_inner(
     // snapshot or create it once. Production workers already did this under
     // the per-source lock and passed the commit in through the Job.
     let materialized_base = if job.materialize_source
+        && !source_tree
         && !job.source_direct
         && !workspace::is_standard_git(&repository)
     {
@@ -4369,7 +4381,6 @@ fn perform_with_merger_inner(
     }
     // Serial runs and post-publication source-direct follow-ups execute in the
     // source directory: no shadow base pin, no worktree composition, no refs.
-    let source_tree = path == repository;
     // A post-publication rebaseline recreates a plain folder's shadow snapshot
     // from the current source files, so parent commits recorded before it no
     // longer exist. Empty heads come from source-direct edits. In both cases the
@@ -4435,7 +4446,7 @@ fn perform_with_merger_inner(
     } else if can_inherit {
         inherited_head.unwrap_or_else(|| execution_before.to_string())
     } else if job.source_direct || source_tree {
-        execution_before.to_string()
+        String::new()
     } else {
         workspace::prepare_with_merger_expected_for_run(
             &repository,
@@ -4537,7 +4548,7 @@ fn perform_with_merger_inner(
     } else {
         output
     };
-    if path != repository {
+    if !source_tree {
         workspace::verify_prepared_ancestor(path, &before)?;
     }
     let environment_result_input =
@@ -4559,8 +4570,8 @@ fn perform_with_merger_inner(
     if let Some(config) = &job.config.environment {
         config.check_tracked(path)?;
     }
-    let head = if job.source_direct {
-        // The source directory was edited directly; no commit belongs to Grapher.
+    let head = if job.source_direct || source_tree {
+        // Source execution never creates Git snapshots, even in a Git repository.
         String::new()
     } else if environments.is_some() {
         workspace::snapshot_node_scoped(
@@ -4571,12 +4582,11 @@ fn perform_with_merger_inner(
             &exclusions,
         )?
     } else {
-        workspace::snapshot_execution_scoped(
+        workspace::snapshot_node_for_run(
             path,
             &repository,
             &job.execution.node,
             Some(&job.run_id),
-            execution_before,
         )?
     };
     if let (Some(store), Some(input)) = (&environments, &environment_result_input) {

@@ -122,3 +122,39 @@ fn workspace_deletion_rejects_active_runs_without_partially_removing_other_conve
     let root = primary.runtime.lock().unwrap().root.clone();
     invalidate_service_cache(&root, None);
 }
+
+#[test]
+fn startup_recovers_historical_deleted_owners_without_cleanup_tasks() {
+    let (_temp, source, primary, ids) = workspace_deletion_fixture();
+    let merger_id = Uuid::new_v4().to_string();
+    let root = {
+        let runtime = primary.runtime.lock().unwrap();
+        let merger = runtime.root.join("mergers").join(&merger_id);
+        fs::create_dir_all(&merger).unwrap();
+        fs::write(merger.join("output.jsonl"), "orphaned merger history").unwrap();
+        runtime.store.remember_cleanup_targets(&ids[0], &BTreeSet::from([
+            crate::cleanup::Target::data("mergers", &merger_id),
+        ])).unwrap();
+        // Reproduce an older deletion that removed SQL history, but left
+        // physical ownership behind without a durable filesystem task.
+        for id in &ids[..2] { runtime.store.delete_run(id).unwrap(); }
+        assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+        let owners = runtime.store.orphaned_cleanup_owners().unwrap();
+        assert!(ids[..2].iter().all(|id| owners.contains(id)));
+        assert!(merger.is_dir());
+        runtime.root.clone()
+    };
+    recover_cleanup_tasks(&primary).unwrap();
+    let runtime = primary.runtime.lock().unwrap();
+    for id in &ids[..2] {
+        assert!(runtime.store.run_was_deleted(id).unwrap());
+        assert!(runtime.store.owned_cleanup_targets(id).unwrap().is_empty());
+        assert!(!root.join("sessions").join(id).exists());
+    }
+    assert!(!root.join("mergers").join(merger_id).exists());
+    assert!(runtime.store.orphaned_cleanup_owners().unwrap().is_empty());
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+    assert!(runtime.store.contains_run(&ids[2]).unwrap());
+    assert!(root.join("sessions").join(&ids[2]).exists());
+    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "published source");
+}

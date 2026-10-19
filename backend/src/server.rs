@@ -505,11 +505,21 @@ const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
 const POST_TASK_REVIEW_PROMPT: &str = "All tasks you assigned are completed. Consider your next move.";
 /// Rework semantics shared by the injected Planner status block and the
 /// post-task review turn so revisions price downstream re-runs correctly.
+/// Both consume the same durable one-shot marker.
 /// Runtime enforces the same rule in `revision_affected` regardless.
 const PLANNER_REWORK_NOTE: &str = "Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the updated dependencies' workspace states); unrelated branches keep their work.";
 
-fn post_task_review_task() -> String {
-    format!("{POST_TASK_REVIEW_PROMPT}\n\n{PLANNER_REWORK_NOTE}")
+fn post_task_review_task(include_rework_note: bool) -> String {
+    if include_rework_note {
+        format!("{POST_TASK_REVIEW_PROMPT}\n\n{PLANNER_REWORK_NOTE}")
+    } else {
+        POST_TASK_REVIEW_PROMPT.to_string()
+    }
+}
+
+fn is_post_task_review_task(task: &str) -> bool {
+    // A resumed session can contain both variants, including older turns.
+    task == POST_TASK_REVIEW_PROMPT || task == post_task_review_task(true)
 }
 
 // Keep the synthetic turn in Pi's own session, not in the UI transcript.
@@ -519,8 +529,7 @@ fn hidden_review_turn(line: &str, background_review: bool) -> bool {
     matches!(event["type"].as_str(), Some("message_start" | "message_end"))
         && event["message"]["role"] == "user"
         && event["message"]["content"].as_array().is_some_and(|parts| {
-            parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")
-                == post_task_review_task()
+            is_post_task_review_task(&parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n"))
         })
 }
 
@@ -535,8 +544,8 @@ fn review_transcript_line(line: &str, background_review: bool) -> Option<std::bo
     let synthetic = |message: &serde_json::Value| -> bool {
         message.get("role").and_then(|role| role.as_str()) == Some("user")
             && message.get("content").and_then(|content| content.as_array()).is_some_and(|parts| {
-                parts.iter().filter_map(|part| part.get("text").and_then(|text| text.as_str()))
-                    .collect::<Vec<_>>().join("\n") == post_task_review_task()
+                is_post_task_review_task(&parts.iter().filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+                    .collect::<Vec<_>>().join("\n"))
             })
     };
     let Some(messages) = event.get_mut("messages").and_then(|messages| messages.as_array_mut()) else {
@@ -1844,13 +1853,12 @@ fn plan_goal_internal_with_started(
                         let planner_config = planner_model_cfg.effective_config(&config);
                         let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                             .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
-                        let (task, is_followup) = if background_review {
-                            (post_task_review_task(), false)
-                        } else {
+                        let (task, is_followup) = {
                             let mut runtime =
                                 service.runtime.lock().map_err(|error| error.to_string())?;
                             let is_approved = runtime.state.approved;
-                            let is_followup = revision_run_id.is_some()
+                            let is_followup = !background_review
+                                && revision_run_id.is_some()
                                 && is_approved
                                 && planner_context_required;
                             let include_rework_note = planner_rework_note_pending(
@@ -1860,7 +1868,9 @@ fn plan_goal_internal_with_started(
                             let workspace_node = selected.as_ref().map(|execution| execution.node.as_str());
                             let include_workspace_move = is_followup
                                 && planner_workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
-                            let task = if is_followup {
+                            let task = if background_review {
+                                post_task_review_task(include_rework_note)
+                            } else if is_followup {
                                 planner_followup_prompt_for_workspace(
                                     &goal,
                                     workspace_node,
@@ -1872,8 +1882,8 @@ fn plan_goal_internal_with_started(
                             } else {
                                 goal.clone()
                             };
-                            // The one-shot marker is consumed by this follow-up
-                            // even when the transport context is omitted.
+                            // Reviews and follow-ups share the one-shot marker;
+                            // follow-ups consume it even without transport context.
                             if include_rework_note {
                                 runtime.emit(EventKind::PlannerReworkNoteInjected)?;
                             }
@@ -2672,7 +2682,7 @@ fn drive(service: Arc<Service>) {
                                 };
                                 if let Some(config) = review {
                                     if let Err((error, _)) = plan_goal_internal_with_started(
-                                        post_task_review_task().into(), config, Some("graph"), None,
+                                        POST_TASK_REVIEW_PROMPT.into(), config, Some("graph"), None,
                                         Some(run_id.clone()), &service, true, |_| {}, |_| {}, |_| {}, |_| {},
                                     ) {
                                         eprintln!("Post-task Planner review failed: {error}");
@@ -2688,14 +2698,12 @@ fn drive(service: Arc<Service>) {
                             }
                         }
                     }
-                    // A Run that settles without publishing (serial/plan-less)
-                    // holds no downstream copy: completion alone releases its
-                    // source snapshot instead of waiting for an explicit
-                    // deletion. Publication already reclaimed its own snapshot;
-                    // for a reclaimed or foreign source this is a cheap no-op.
+                    // Retry Graph snapshot cleanup if publication's first pass
+                    // was interrupted. Serial never participates in the shadow
+                    // repository lifecycle, even when it shares a Graph source.
                     let settled_repository = {
                         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                        if runtime.state.phase == "completed" {
+                        if runtime.state.phase == "completed" && !runtime.is_serial() {
                             runtime.source_repository()?
                         } else {
                             None

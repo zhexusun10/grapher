@@ -290,9 +290,9 @@ impl Store {
         Ok(false)
     }
 
-    /// Whether any other, still-incomplete Run shares this source binding and
-    /// therefore still needs its shadow snapshot. Completed Runs do not count:
-    /// their source files were already written back by publication.
+    /// Whether another incomplete Graph/unrouted Run shares this source binding
+    /// and may still need its shadow snapshot. Completed Runs have published;
+    /// explicitly routed Serial Runs never consume shadow snapshots.
     pub fn shadow_repo_needed_by_other_run(
         &self,
         excluded: &str,
@@ -316,7 +316,10 @@ impl Store {
                 continue;
             }
             let state = self.load(&id)?;
-            if state.events.is_empty() {
+            // Serial does not consume Git snapshots, even while running or
+            // paused. Keep unrouted histories conservative: a provisional
+            // planning Run can still resolve to Graph.
+            if state.events.is_empty() || state.plan_type.as_deref() == Some("serial") {
                 continue;
             }
             let Some(config) = state.config else {

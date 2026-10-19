@@ -2421,8 +2421,8 @@ pub(crate) fn snapshot_repository_scoped(
     }
 }
 
-/// Choose the Serial source/shadow or Graph isolated-node snapshot contract
-/// from canonical workspace identity.
+/// Snapshot only isolated Graph workspaces. Executions in the source directory
+/// (Serial and source-direct follow-ups) never stage, commit or create Git metadata.
 pub fn snapshot_execution(
     path: &Path,
     repository: &Path,
@@ -2437,29 +2437,12 @@ pub fn snapshot_execution_for_run(
     node_name: &str,
     run_id: Option<&str>,
 ) -> Result<String, String> {
-    snapshot_execution_scoped(path, repository, node_name, run_id, "")
-}
-
-/// Serial/plain-directory executions run in the source directory and have no
-/// Git snapshot: the caller's `before` is returned unchanged. Standard Git
-/// serial runs keep committing their own source repository.
-pub(crate) fn snapshot_execution_scoped(
-    path: &Path,
-    repository: &Path,
-    node_name: &str,
-    run_id: Option<&str>,
-    before: &str,
-) -> Result<String, String> {
     let canonical_repo = repository
         .canonicalize()
         .map_err(|error| error.to_string())?;
     let canonical_path = path.canonicalize().map_err(|error| error.to_string())?;
     if crate::path_identity::same_path(&canonical_path, &canonical_repo) {
-        if is_standard_git(&canonical_repo) {
-            snapshot_repository(&canonical_path)
-        } else {
-            Ok(before.to_string())
-        }
+        Ok(String::new())
     } else {
         snapshot_node_for_run(&canonical_path, &canonical_repo, node_name, run_id)
     }

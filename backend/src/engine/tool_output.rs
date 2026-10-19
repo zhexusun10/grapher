@@ -16,6 +16,23 @@ impl ToolOutputProjection {
     /// False means a redundant progress event has no display-log payload.
     pub(super) fn project(&mut self, event: &mut Value) -> bool {
         match event["type"].as_str().unwrap_or_default() {
+            "message_update" => {
+                // Usage is authoritative on message_end, not on every token.
+                // The UI uses complete tool args from toolcall_end/start, not
+                // the partial JSON fragments emitted while generating them.
+                if let Some(object) = event.as_object_mut() { object.remove("usage"); }
+                let update = &mut event["assistantMessageEvent"];
+                match update["type"].as_str() {
+                    Some("toolcall_delta") => return false,
+                    Some("text_delta" | "thinking_delta") => {
+                        // Some Pi transports also repeat cumulative snapshots;
+                        // these consumers only need the lossless delta itself.
+                        if let Some(object) = update.as_object_mut() { object.remove("partial"); }
+                        if let Some(object) = event.as_object_mut() { object.remove("message"); }
+                    }
+                    _ => {}
+                }
+            }
             "tool_execution_start" => {
                 if let Some(id) = event["toolCallId"].as_str() { self.progress_seen.remove(id); }
             }
@@ -136,6 +153,37 @@ fn limit_content(content: &mut Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_output_projection_removes_unused_stream_copies_but_keeps_final_usage_and_args() {
+        let mut projection = ToolOutputProjection::default();
+        for kind in ["text_delta", "thinking_delta"] {
+            let mut event = json!({ "type": "message_update", "usage": { "totalTokens": 42 },
+                "message": { "content": "repeated snapshot" },
+                "assistantMessageEvent": { "type": kind, "contentIndex": 2, "delta": "完整🚀",
+                    "partial": { "content": "another repeated snapshot" } } });
+            assert!(projection.project(&mut event));
+            assert!(event.get("usage").is_none());
+            assert!(event.get("message").is_none());
+            assert!(event["assistantMessageEvent"].get("partial").is_none());
+            assert_eq!(event["assistantMessageEvent"]["delta"], "完整🚀");
+            assert_eq!(event["assistantMessageEvent"]["contentIndex"], 2);
+        }
+        let mut fragment = json!({ "type": "message_update", "assistantMessageEvent": {
+            "type": "toolcall_delta", "contentIndex": 0, "delta": "partial JSON" } });
+        assert!(!projection.project(&mut fragment));
+        let mut complete = json!({ "type": "message_update", "assistantMessageEvent": {
+            "type": "toolcall_end", "contentIndex": 0,
+            "toolCall": { "id": "tool", "name": "bash", "arguments": { "command": "echo kept" } } } });
+        let original = complete.clone();
+        assert!(projection.project(&mut complete));
+        assert_eq!(complete, original);
+        let mut final_event = json!({ "type": "message_end", "message": { "role": "assistant",
+            "usage": { "input": 7, "output": 3, "totalTokens": 10 }, "stopReason": "error", "errorMessage": "kept" } });
+        let original = final_event.clone();
+        assert!(projection.project(&mut final_event));
+        assert_eq!(final_event, original);
+    }
 
     #[test]
     fn tool_output_projection_bounds_utf8_body_and_keeps_failure_and_timing() {

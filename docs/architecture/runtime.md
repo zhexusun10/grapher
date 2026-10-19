@@ -168,6 +168,14 @@ partial chunk up to 32 KiB instead of one row per stdout packet. Extending a chu
 never changes its committed prefix or existing byte cursors; log writes and
 cursor/projection updates remain commit-ordered.
 
+The engine coalesces adjacent text/thinking deltas within a bounded byte/time
+window before persistence; message/block changes, other events, stderr, EOF and
+timeouts flush pending text in order. Incremental records omit repeated usage
+and cumulative message snapshots. Unused `toolcall_delta` JSON fragments are
+omitted; tool identity and complete arguments remain in start/end records.
+`message_end` retains final usage, model, errors and full assistant content.
+This changes only new display-log bytes, never existing cursors or Pi sessions.
+
 Grapher's tool-output display log is a projection, not a raw Pi-session dump. The
 [engine projection](../../backend/src/engine/tool_output.rs) retains at most
 100 KiB of UTF-8 text per tool-result body and per tool-call argument value

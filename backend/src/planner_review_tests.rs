@@ -21,6 +21,8 @@ let task = ''; for await (const chunk of process.stdin) task += chunk;
 const emit = event => console.log(JSON.stringify(event));
 const say = text => emit({type:'message_end',message:{role:'assistant',content:[{type:'text',text}]}});
 if (process.env.GRAPHER_MODE === 'planner') {
+  fs.appendFileSync(new URL('./planner-tasks.jsonl', import.meta.url), JSON.stringify(task)+'\n');
+  if (task.endsWith('\nFollow up')) { say('Follow-up reply'); process.exit(0); }
   if (!fs.existsSync('first.txt')) throw Error('review ran before publication');
   emit({type:'message_start',message:{role:'user',content:[{type:'text',text:task}]}});
   emit({type:'message_end',message:{role:'user',content:[{type:'text',text:task}]}});
@@ -68,8 +70,29 @@ if (process.env.GRAPHER_MODE === 'planner') {
     (temp, repo, service)
 }
 
-fn continuation(auto: bool) {
-    let (_temp, repo, service) = setup(true, auto);
+fn planner_tasks(temp: &tempfile::TempDir) -> Vec<String> {
+    fs::read_to_string(temp.path().join("planner-tasks.jsonl")).unwrap()
+        .lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+fn continuation(auto: bool, followup_first: bool) {
+    let (temp, repo, service) = setup(true, auto);
+    if followup_first {
+        // Hold the driver while an ordinary follow-up consumes the shared marker.
+        service.driving.store(true, Ordering::SeqCst);
+        let (run_id, config) = {
+            let runtime = service.runtime.lock().unwrap();
+            (runtime.state.run_id.clone(), runtime.state.effective_config().unwrap())
+        };
+        plan_goal_internal("Follow up".into(), config, Some("graph"), None,
+            Some(run_id.clone()), &service, |_| {}, |_| {}, |_| {}).unwrap();
+        let mut runtime = service.runtime.lock().unwrap();
+        let mut reopened = runtime.open_run(&run_id).unwrap();
+        assert!(!planner_rework_note_pending(&reopened.state, Some(&run_id)));
+        reopened.pause(false).unwrap();
+        *runtime = reopened;
+        service.driving.store(false, Ordering::SeqCst);
+    }
     drive(service.clone());
     let live = wait(&service, |s| s.review_graph.as_ref().is_some_and(|g| g.nodes.len() == 2));
     assert_eq!(live.graph.nodes.len(), 1, "candidate must not execute during the Planner turn");
@@ -98,20 +121,35 @@ fn continuation(auto: bool) {
     assert_eq!(completed.executions.len(), 2);
     assert_eq!(fs::read_to_string(repo.join("second.txt")).unwrap(), "continued");
     assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 2);
+    let tasks = planner_tasks(&temp);
+    assert_eq!(tasks.len(), if followup_first { 3 } else { 2 });
+    assert!(tasks[0].contains(PLANNER_REWORK_NOTE));
+    assert!(tasks[1..].iter().all(|task| !task.contains(PLANNER_REWORK_NOTE)));
+    let reviews: Vec<_> = tasks.iter().filter(|task| task.starts_with(POST_TASK_REVIEW_PROMPT)).collect();
+    assert_eq!(reviews.len(), 2);
+    assert_eq!(reviews[1], POST_TASK_REVIEW_PROMPT);
+    if followup_first { assert_eq!(reviews[0], POST_TASK_REVIEW_PROMPT); }
     let runtime = service.runtime.lock().unwrap();
+    let replay = runtime.store.load(&completed.run_id).unwrap();
+    assert_eq!(replay.events.iter().filter(|e| matches!(e.kind, EventKind::PlannerReworkNoteInjected)).count(), 1);
+    assert!(!planner_rework_note_pending(&replay, Some(&completed.run_id)));
     for event in &completed.events {
         if let EventKind::PlannerReviewStarted { planning } = &event.kind {
             let output = fs::read_to_string(runtime.root.join("planning").join(&planning.planning_id).join("planner.jsonl")).unwrap();
             assert!(!output.contains(POST_TASK_REVIEW_PROMPT));
+            assert!(!output.contains(PLANNER_REWORK_NOTE));
         }
     }
 }
 
 #[test]
-fn post_task_review_auto_continuation_uses_published_source() { continuation(true); }
+fn post_task_review_auto_continuation_uses_published_source() { continuation(true, false); }
 
 #[test]
-fn post_task_review_manual_approval_preserves_completed_nodes() { continuation(false); }
+fn post_task_review_manual_approval_preserves_completed_nodes() { continuation(false, false); }
+
+#[test]
+fn post_task_review_omits_rework_note_after_followup_and_reload() { continuation(true, true); }
 
 #[test]
 fn post_task_review_disabled_does_not_call_planner() {
@@ -157,7 +195,7 @@ fn aborted_follow_up_revision_is_recorded_in_the_run_conversation() {
 
 #[test]
 fn post_task_review_failure_preserves_published_graph_and_source_writes() {
-    let (_temp, repo, service) = setup(true, true);
+    let (temp, repo, service) = setup(true, true);
     fs::write(repo.join("fail-review"), "fail").unwrap();
     drive(service.clone());
     let completed = wait(&service, |s| s.phase == "completed" && s.planning.as_ref().is_some_and(|p| p.status.as_deref() == Some("failed")));
@@ -166,6 +204,11 @@ fn post_task_review_failure_preserves_published_graph_and_source_writes() {
     assert!(completed.review_graph.is_none());
     assert_eq!(fs::read_to_string(repo.join("review.txt")).unwrap(), "fresh source");
     assert!(completed.events.iter().any(|e| matches!(e.kind, EventKind::SourceSnapshotted { .. })));
+    assert!(planner_tasks(&temp)[0].contains(PLANNER_REWORK_NOTE));
+    wait(&service, |_| !service.driving.load(Ordering::SeqCst));
+    let reopened = service.runtime.lock().unwrap().open_run(&completed.run_id).unwrap();
+    assert_eq!(reopened.state.events.iter().filter(|e| matches!(e.kind, EventKind::PlannerReworkNoteInjected)).count(), 1);
+    assert!(!planner_rework_note_pending(&reopened.state, Some(&completed.run_id)));
 }
 
 #[test]
@@ -198,6 +241,7 @@ fn post_task_review_interruption_discards_candidate_and_never_retries_model() {
     let mut runtime = service.runtime.lock().unwrap();
     let planning = PlanningSummary { planning_id: Uuid::new_v4().to_string(), status: Some("running".into()), ..Default::default() };
     runtime.emit(EventKind::PlannerReviewStarted { planning }).unwrap();
+    runtime.emit(EventKind::PlannerReworkNoteInjected).unwrap();
     let mut candidate = runtime.state.graph.clone();
     candidate.nodes.push(Node { name: "uncommitted".into(), task: "uncommitted".into() });
     runtime.emit(EventKind::PlannerReviewProgress { graph: candidate }).unwrap();
@@ -208,26 +252,33 @@ fn post_task_review_interruption_discards_candidate_and_never_retries_model() {
     let reopened = Runtime::open(&root).unwrap().open_run(&id).unwrap();
     assert!(reopened.state.review_graph.is_none());
     assert_eq!(reopened.state.graph.nodes.len(), 1);
-    assert_eq!(reopened.state.planning.unwrap().status.as_deref(), Some("failed"));
+    assert_eq!(reopened.state.planning.as_ref().unwrap().status.as_deref(), Some("failed"));
+    assert!(!planner_rework_note_pending(&reopened.state, Some(&id)));
 }
 
 #[test]
 fn transcript_projection_hides_the_synthetic_review_turn_everywhere() {
-    let task = post_task_review_task();
-    let user_message = serde_json::json!({
-        "type": "message_end",
-        "message": { "role": "user", "content": [{ "type": "text", "text": task }] },
-    });
-    let line = format!("{}\n", user_message);
-    // Ordinary turns pass through untouched; the synthetic review turn is dropped.
-    assert_eq!(review_transcript_line(&line, false).as_deref(), Some(line.as_str()));
-    assert_eq!(review_transcript_line(&line, true), None);
-    // Lifecycle records embed the conversation: the synthetic user message is
-    // scrubbed while the assistant entry, metrics and the trailing newline stay.
+    for include_rework_note in [true, false] {
+        let task = post_task_review_task(include_rework_note);
+        for event_type in ["message_start", "message_end"] {
+            let user_message = serde_json::json!({
+                "type": event_type,
+                "message": { "role": "user", "content": [{ "type": "text", "text": task }] },
+            });
+            let line = format!("{}\n", user_message);
+            // Ordinary turns pass through untouched; both review variants are dropped.
+            assert_eq!(review_transcript_line(&line, false).as_deref(), Some(line.as_str()));
+            assert_eq!(review_transcript_line(&line, true), None);
+        }
+    }
+    // A resumed conversation can embed both review variants. Hide both but
+    // preserve real user messages, assistant errors, metrics and the newline.
     let agent_end = serde_json::json!({
         "grapherReceivedAt": 1000u64, "type": "agent_end", "willRetry": true,
         "messages": [
-            { "role": "user", "content": [{ "type": "text", "text": task }] },
+            { "role": "user", "content": [{ "type": "text", "text": post_task_review_task(true) }] },
+            { "role": "user", "content": [{ "type": "text", "text": post_task_review_task(false) }] },
+            { "role": "user", "content": [{ "type": "text", "text": "Follow up" }] },
             { "role": "assistant", "content": [], "stopReason": "error", "errorMessage": "Request timed out.",
               "usage": { "input": 0, "output": 0, "totalTokens": 0 } },
         ],
@@ -239,9 +290,10 @@ fn transcript_projection_hides_the_synthetic_review_turn_everywhere() {
     assert_eq!(projected["type"], "agent_end");
     assert_eq!(projected["willRetry"], true);
     let messages = projected["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["role"], "assistant");
-    assert_eq!(messages[0]["errorMessage"], "Request timed out.");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["content"][0]["text"], "Follow up");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["errorMessage"], "Request timed out.");
     // A lifecycle record without the synthetic turn stays byte-identical.
     let plain = format!("{}\n", serde_json::json!({ "type": "agent_end", "messages": [] }));
     assert_eq!(review_transcript_line(&plain, true).as_deref(), Some(plain.as_str()));

@@ -15,6 +15,10 @@ mod feedback_workspace;
 #[path = "recovery_workspace_tests.rs"]
 mod recovery_workspace;
 
+#[cfg(feature = "fixture")]
+#[path = "serial_workspace_tests.rs"]
+mod serial_workspace;
+
 fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
@@ -3065,11 +3069,13 @@ fn completed_runs_release_only_snapshots_with_no_pending_downstream() {
     // A Graph Run that completed without publishing keeps its only copy.
     runtime.state.phase = "completed".into();
     assert!(!runtime.shadow_reclaimable(&source).unwrap());
-    // The same completion is the final hand-off for a Run that cannot publish.
+    // Serial must not reclaim a Graph snapshot on the same source, including
+    // when old persisted state happens to carry a publication head.
     runtime.state.plan_type = Some("serial".into());
-    assert!(runtime.shadow_reclaimable(&source).unwrap());
+    runtime.state.published_head = Some("legacy-head".into());
+    assert!(!runtime.shadow_reclaimable(&source).unwrap());
     runtime.reclaim_shadow(&source).unwrap();
-    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
 }
 
 #[test]

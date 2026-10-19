@@ -24,6 +24,7 @@ use std::{
 };
 
 mod tool_output;
+mod output_buffer;
 
 #[cfg(not(feature = "fixture"))]
 pub(crate) mod prewarm;
@@ -1249,7 +1250,9 @@ fn run_pi_with_timeout(
     let mut agent_ended = None::<Instant>;
     let mut first_output_ms = None;
     let mut tool_output = tool_output::ToolOutputProjection::default();
+    let mut output_buffer = output_buffer::OutputBuffer::default();
     loop {
+        output_buffer.flush_due(&mut on_output)?;
         // Planners/nodes need a steer handoff window. The Partitioner has no
         // follow-up commands, so close RPC stdin as soon as its turn settles.
         let handoff = if request.role == PiRole::Partitioner {
@@ -1275,7 +1278,7 @@ fn run_pi_with_timeout(
         if let Ok(Err(error)) = input_receiver.try_recv() {
             input_error = Some(error);
         }
-        match receiver.recv_timeout(Duration::from_millis(100)) {
+        match receiver.recv_timeout(output_buffer.wait_timeout()) {
             Ok((is_error, line)) => {
                 if is_error {
                     if line.contains("No project session found with id")
@@ -1288,6 +1291,7 @@ fn run_pi_with_timeout(
                         stderr_lines.push(trimmed.to_string());
                     }
                     stderr_tail = line.clone();
+                    output_buffer.flush(&mut on_output)?;
                     on_output(format!("[stderr] {line}\n"));
                     continue;
                 }
@@ -1402,13 +1406,12 @@ fn run_pi_with_timeout(
                 if let Some(object) = event.as_mut().and_then(Value::as_object_mut) {
                     object.insert("grapherReceivedAt".into(), crate::model::now().into());
                 }
-                let mut output = if let Some(event) = event {
-                    serde_json::to_string(&event).map_err(|error| error.to_string())?
+                if let Some(event) = event {
+                    output_buffer.push(event, &mut on_output)?;
                 } else {
-                    line
-                };
-                output.push('\n');
-                on_output(output);
+                    output_buffer.flush(&mut on_output)?;
+                    on_output(format!("{line}\n"));
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 if child
@@ -1437,6 +1440,9 @@ fn run_pi_with_timeout(
             }
         }
     }
+    // Includes timeout/EOF paths without a final message: never lose the last
+    // buffered thinking/text suffix, even if the child did not settle.
+    output_buffer.flush(&mut on_output)?;
     // Do not hold the input pipe open after the final agent turn.
     drop(rpc_guard);
     drop(rpc_sender);
@@ -1840,6 +1846,9 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         fs::write(&script, r#"import json, sys
 request = json.loads(sys.stdin.readline())
 print(json.dumps({'type':'response','id':request['id'],'success':True}), flush=True)
+for i in range(2000):
+    print(json.dumps({'type':'message_update','usage':{'totalTokens':42},'assistantMessageEvent':{'type':'thinking_delta','contentIndex':0,'delta':'中🚀'}}), flush=True)
+    print(json.dumps({'type':'message_update','assistantMessageEvent':{'type':'toolcall_delta','contentIndex':1,'delta':'unused JSON fragment'}}), flush=True)
 text = 'head ' + 'x' * 1200000 + ' original tail'
 with open('original-tool-result.txt', 'w', encoding='utf-8') as f: f.write(text)
 print(json.dumps({'type':'tool_execution_start','toolCallId':'one','toolName':'bash','args':{'command':'long job'}}), flush=True)
@@ -1850,7 +1859,7 @@ print(json.dumps({'type':'tool_execution_end','toolCallId':'one','toolName':'bas
 message = {'role':'toolResult','toolCallId':'one','content':result['content']}
 print(json.dumps({'type':'message_end','message':message}), flush=True)
 print(json.dumps({'type':'agent_end','messages':[message]}), flush=True)
-print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'FINAL_UNCHANGED'}]}}), flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'FINAL_UNCHANGED'}],'usage':{'totalTokens':42},'model':'mock/model'}}), flush=True)
 print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
@@ -1871,6 +1880,11 @@ sys.stdin.read()
         assert!(fs::read_to_string(temp.path().join("original-tool-result.txt")).unwrap().ends_with("original tail"));
         assert!(fs::metadata(temp.path().join("original-tool-result.txt")).unwrap().len() > 1_000_000);
         let events: Vec<Value> = output.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+        let deltas: Vec<_> = events.iter().filter(|event| event["type"] == "message_update").collect();
+        assert!(deltas.len() < 100, "tiny deltas must be coalesced by the actual reader");
+        assert!(deltas.iter().all(|event| event.get("usage").is_none()));
+        let thinking: String = deltas.iter().map(|event| event["assistantMessageEvent"]["delta"].as_str().unwrap()).collect();
+        assert_eq!(thinking, "中🚀".repeat(2000));
         let updates: Vec<_> = events.iter().filter(|event| event["type"] == "tool_execution_update").collect();
         assert_eq!(updates.len(), 1);
         assert!(updates[0].get("partialResult").is_none());
@@ -1882,6 +1896,92 @@ sys.stdin.read()
         assert_eq!(tool["result"]["details"]["exitCode"], 0);
         assert_eq!(tool["durationMs"], 42);
         assert!(output.len() < 400 * 1024, "repeated progress and aggregate copies must not restore giant output");
+        let metrics = crate::model::parse_execution_metrics(&output, 0, 0);
+        assert_eq!(metrics.usage.total_tokens, 42);
+        assert_eq!(metrics.assistant_messages, 1);
+        assert_eq!(metrics.tools, 1);
+        assert_eq!(metrics.model.as_deref(), Some("mock/model"));
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn output_buffer_rpc_reader_flushes_idle_and_failed_eof_tails() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("idle_stream_rpc.py");
+        fs::write(&script, r#"import json, sys, time, os
+request = json.loads(sys.stdin.readline())
+print(json.dumps({'type':'response','id':request['id'],'success':True}), flush=True)
+def delta(text):
+    print(json.dumps({'type':'message_update','assistantMessageEvent':{'type':'text_delta','contentIndex':0,'delta':text}}), flush=True)
+delta('IDLE_VISIBLE')
+deadline = time.monotonic() + 3
+while not os.path.exists('idle-observed'):
+    if time.monotonic() >= deadline: sys.exit(3)
+    time.sleep(0.01)
+delta('BEFORE_RAW')
+print('raw output barrier', flush=True)
+print('stderr diagnostic', file=sys.stderr, flush=True)
+delta('FAILED_SUFFIX')
+sys.exit(2) # No message_end/agent_settled: the partial text must still survive.
+"#).unwrap();
+        let config = Config {
+            environment: None, engine: "pi".into(), pi_command: test_python(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
+            role_models: Default::default(), post_task_review: false, planner_write_tools: true,
+        };
+        let mut output = String::new();
+        let result = run_pi_with_timeout(PiRequest {
+            role: PiRole::Partitioner, config: &config, cwd: temp.path(), task: "test",
+            session_dir: &temp.path().join("session"), extension: None, tools: Some(""), session_id: None,
+            extra_args: vec![], environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None, images: None,
+        }, |line| {
+            if line.contains("IDLE_VISIBLE") { fs::write(temp.path().join("idle-observed"), "ok").unwrap(); }
+            output.push_str(&line);
+        }, Some(Duration::from_secs(5)));
+        assert!(result.is_err(), "failed children must not become successful completions");
+        assert!(temp.path().join("idle-observed").exists(), "idle delta was not delivered before EOF");
+        assert!(output.contains("[stderr] stderr diagnostic"));
+        let idle = output.find("IDLE_VISIBLE").unwrap();
+        let before = output.find("BEFORE_RAW").unwrap();
+        let raw = output.find("raw output barrier").unwrap();
+        let suffix = output.find("FAILED_SUFFIX").unwrap();
+        let exited = output.find("grapher_process_exited").unwrap();
+        assert!(idle < before && before < raw && raw < suffix && suffix < exited);
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn output_buffer_rpc_reader_preserves_partial_text_on_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("timed_stream_rpc.py");
+        fs::write(&script, r#"import json, sys, time
+request = json.loads(sys.stdin.readline())
+print(json.dumps({'type':'response','id':request['id'],'success':True}), flush=True)
+print(json.dumps({'type':'message_update','assistantMessageEvent':{'type':'text_delta','contentIndex':0,'delta':'TIMED_OUT_SUFFIX'}}), flush=True)
+time.sleep(10)
+"#).unwrap();
+        let config = Config {
+            environment: None, engine: "pi".into(), pi_command: test_python(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
+            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
+            role_models: Default::default(), post_task_review: false, planner_write_tools: true,
+        };
+        let mut output = String::new();
+        let result = run_pi_with_timeout(PiRequest {
+            role: PiRole::Partitioner, config: &config, cwd: temp.path(), task: "test",
+            session_dir: &temp.path().join("session"), extension: None, tools: Some(""), session_id: None,
+            extra_args: vec![], environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None, images: None,
+        }, |line| output.push_str(&line), Some(Duration::from_secs(1)));
+        assert!(result.unwrap_err().contains("Partitioner timed out"));
+        let suffix = output.find("TIMED_OUT_SUFFIX").unwrap();
+        let exited = output.find("grapher_process_exited").unwrap();
+        assert!(suffix < exited);
+        let exited: Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
+        assert_eq!(exited["timedOut"], true);
+        assert_eq!(exited["success"], false);
     }
 
     #[cfg(feature = "fixture")]
