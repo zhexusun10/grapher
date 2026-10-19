@@ -73,6 +73,90 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
   return { context, page, errors };
 }
 
+test("Markdown block copy controls copy only their current code and recover from clipboard denial", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("markdownCopy");
+  try {
+    await page.evaluate(() => {
+      window.audit.copies = [];
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+        writeText: async text => {
+          if (window.audit.rejectCopy) throw new Error("Clipboard denied");
+          window.audit.copies.push(text);
+        },
+      } });
+    });
+    const buttons = page.locator(".code-copy-btn");
+    assert.equal(await buttons.count(), 2);
+    assert.equal(await page.locator("p .code-copy-btn").count(), 0);
+    await buttons.first().locator("svg.code-copy-icon").click();
+    await page.waitForFunction(() => document.querySelector(".code-copy-btn").classList.contains("copied"));
+    assert.equal(await buttons.first().getAttribute("aria-label"), "Copied");
+    assert.deepEqual(await page.evaluate(() => window.audit.copies), ['printf "<tag> & 中文"\npwd\n']);
+    await buttons.last().focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.audit.copies.length === 2);
+    assert.equal(await page.evaluate(() => window.audit.copies.at(-1)), 'print("second")\n');
+
+    await page.evaluate(() => window.audit.setMarkdown("```sh\necho streaming", true));
+    assert.equal(await buttons.count(), 1);
+    await buttons.first().click();
+    await page.waitForFunction(() => window.audit.copies.length === 3);
+    assert.equal(await page.evaluate(() => window.audit.copies.at(-1)), "echo streaming\n");
+    await page.evaluate(() => window.audit.setMarkdown("```sh\necho streaming updated", true));
+    await buttons.first().click();
+    await page.waitForFunction(() => window.audit.copies.length === 4);
+    assert.equal(await page.evaluate(() => window.audit.copies.at(-1)), "echo streaming updated\n");
+
+    await page.evaluate(() => {
+      window.audit.setMarkdown("```\nretry after denial\n```");
+      window.audit.rejectCopy = true;
+    });
+    await buttons.first().click();
+    assert.equal(await buttons.first().getAttribute("aria-label"), "Copy to clipboard");
+    assert.equal(await page.evaluate(() => window.audit.copies.length), 4);
+    await page.evaluate(() => { window.audit.rejectCopy = false; });
+    await buttons.first().click();
+    await page.waitForFunction(() => window.audit.copies.length === 5);
+    assert.equal(await page.evaluate(() => window.audit.copies.at(-1)), "retry after denial\n");
+    await page.waitForFunction(() => !document.querySelector(".code-copy-btn").classList.contains("copied"));
+    assert.equal(await buttons.first().getAttribute("aria-label"), "Copy to clipboard");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("session clocks display whole seconds aligned with authoritative elapsed time", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("timeTook");
+  try {
+    const base = new Date("2026-10-17T08:00:00Z");
+    await page.clock.install({ time: base });
+    await page.clock.pauseAt(new Date(base.getTime() + 1000));
+    const values = () => page.locator("[data-execution-time], [data-planner-time]").allTextContents();
+    await page.evaluate(() => window.audit.start(Date.now() - 800));
+    assert.deepEqual(await values(), ["0s", "0s"]);
+    await page.clock.runFor(199);
+    assert.deepEqual(await values(), ["0s", "0s"]);
+    await page.clock.runFor(1);
+    assert.deepEqual(await values(), ["1s", "1s"], "refresh at the elapsed-second boundary, not a second after mounting");
+    await page.clock.runFor(9000);
+    assert.deepEqual(await values(), ["10s", "10s"]);
+    await page.clock.runFor(1000);
+    assert.deepEqual(await values(), ["11s", "11s"]);
+    await page.evaluate(() => window.audit.finish());
+    assert.deepEqual(await values(), ["3s", "3s"]);
+    await page.clock.runFor(2000);
+    assert.deepEqual(await values(), ["3s", "3s"], "settled durations must stay fixed");
+    await page.evaluate(() => window.audit.start(Date.now() - 100, "next"));
+    assert.deepEqual(await values(), ["0s", "0s"]);
+    await page.clock.runFor(900);
+    assert.deepEqual(await values(), ["1s", "1s"]);
+    await page.evaluate(() => window.audit.start(Date.now() - 5800, "late"));
+    assert.deepEqual(await values(), ["5s", "5s"], "late mounting must not reset the elapsed time");
+    await page.clock.runFor(200);
+    assert.deepEqual(await values(), ["6s", "6s"]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("cancelled Provider login/respond replies cannot reopen the panel or replace a newer login", { timeout: 30_000 }, async () => {
   const loginGate = deferred(), responseGate = deferred();
   let logins = 0, responses = 0, oldReply = false, responseReply = false;

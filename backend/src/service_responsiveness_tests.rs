@@ -58,6 +58,53 @@ fn saving_model_defaults_does_not_rediscover_or_scan_the_repository() {
 }
 
 #[test]
+fn sidebar_metadata_bootstrap_uses_summaries_without_repository_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = primary(temp.path());
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": temp.path().join("not-a-git-checkout"), "model": "mock/model", "maxParallel": 1
+    })).unwrap();
+    fs::write(temp.path().join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut state = Snapshot { run_id: "sidebar-card".into(), ..Default::default() };
+    primary.runtime.lock().unwrap().store.append(&mut state, EventKind::Created {
+        graph: Graph { original_goal: "Sidebar title".into(), ..Default::default() },
+        config: config.clone(), planning_id: None, planning: None,
+    }).unwrap();
+    let boot = bootstrap(&primary, true).unwrap();
+    assert!(boot.repository_info.is_none(), "metadata bootstrap must not inspect the working tree");
+    assert_eq!(boot.config.repository, config.repository);
+    let conversations = boot.conversations.unwrap();
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0].run_id, "sidebar-card");
+    assert_eq!(conversations[0].title, "Sidebar title");
+    assert_eq!(conversations[0].repository, config.repository);
+    assert_eq!(conversations[0].phase, "awaiting_approval");
+    assert!(!conversations[0].has_active_executions);
+    crate::store::forget_catalog(&temp.path().join("events.sqlite"));
+}
+
+#[test]
+fn sidebar_failure_cannot_fail_bootstrap_or_an_already_committed_settings_save() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = primary(temp.path());
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": temp.path(), "model": "mock/model", "maxParallel": 1
+    })).unwrap();
+    // A fault only in the disposable catalog's read path. The live runtime and
+    // settings file remain usable; never run this against a workspace database.
+    rusqlite::Connection::open(temp.path().join("events.sqlite")).unwrap()
+        .execute_batch("DROP TABLE deleted_runs").unwrap();
+    let boot = bootstrap(&primary, true).unwrap();
+    assert!(boot.conversations.is_none(), "failure must not become an authoritative empty list");
+    let saved = save_config(config.clone(), &primary).unwrap();
+    assert!(saved.conversations.is_none(), "settings saves do not build the catalog");
+    assert_eq!(saved.config.model, "mock/model");
+    let disk: Config = serde_json::from_slice(&fs::read(temp.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(disk.model, config.model);
+    crate::store::forget_catalog(&temp.path().join("events.sqlite"));
+}
+
+#[test]
 fn concurrent_lookups_of_one_identity_share_one_writer() {
     let temp = tempfile::tempdir().unwrap();
     let primary = primary(temp.path());

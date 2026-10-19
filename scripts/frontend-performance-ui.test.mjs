@@ -180,7 +180,7 @@ test("hidden log polling slows down, visible resumes at the byte cursor and comp
   } finally { await context.close(); }
 });
 
-test("bootstrap reuses selected metadata and labels, bounds requests and does not refetch blank goals", { timeout: 30_000 }, async () => {
+test("bootstrap renders 24 authoritative summaries with no history or blank-title requests", { timeout: 30_000 }, async () => {
   const context = await browser.newContext({ locale: "en-US" });
   const config = { repository: "/perf", model: "", thinkingLevel: "medium", maxParallel: 0, maxFeedback: 3, autoApprove: false };
   const info = { name: "Performance", path: "/perf", branch: "main", clean: true, head: "" };
@@ -188,19 +188,21 @@ test("bootstrap reuses selected metadata and labels, bounds requests and does no
     approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const snapshots = Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`perf-${i}`, { ...empty, runId: `perf-${i}`, config, phase: "completed",
     graph: { ...empty.graph, originalGoal: i % 3 ? `Goal ${i}` : "" } }]));
-  const histories = [], errors = [];
+  const histories = [], snapshotPolls = [], errors = [];
   let active = 0, maximum = 0;
   await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: snapshots["perf-0"], runs: Object.keys(snapshots), repositoryInfo: info, dataPath: "/mock" }; break;
+      case "bootstrap": result = { config, snapshot: snapshots["perf-0"], runs: Object.keys(snapshots), repositoryInfo: info, dataPath: "/mock",
+        conversations: Object.values(snapshots).map(snapshot => ({ runId: snapshot.runId, repository: config.repository,
+          title: snapshot.graph.originalGoal, phase: snapshot.phase, hasActiveExecutions: false })) }; break;
       case "history":
         histories.push(body.runId); active++; maximum = Math.max(maximum, active);
         await new Promise(resolve => setTimeout(resolve, 50)); active--; result = snapshots[body.runId]; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
-      case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
+      case "snapshot_if_changed": snapshotPolls.push(body.runId); result = { version: "fixed", snapshot: snapshots[body.runId] ?? null }; break;
       case "list_plannings": result = []; break;
       default: errors.push(`Unexpected API: ${command}`); result = null;
     }
@@ -210,10 +212,13 @@ test("bootstrap reuses selected metadata and labels, bounds requests and does no
   try {
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.waitForFunction(() => document.querySelectorAll(".run-item").length === 24);
-    await page.waitForTimeout(500);
-    assert.equal(histories.length, 23); assert.equal(new Set(histories).size, 23); assert.ok(maximum <= 8);
+    // Cover two disconnected polling cycles, not only the first painted frame.
+    await page.waitForTimeout(5500);
+    assert.equal(histories.length, 0); assert.equal(maximum, 0);
+    assert.deepEqual(snapshotPolls, [], "settled summaries must not shift history restoration into snapshot polling");
+    assert.equal(await page.locator(".run-title-text.is-resolving").count(), 0);
     assert.equal(histories.includes("perf-0"), false);
     assert.deepEqual(errors, []);
-    console.log(`Bootstrap acceptance: 24 Runs, ${histories.length} history requests, maximum concurrency ${maximum}, no duplicate label requests`);
+    console.log(`Bootstrap acceptance: 24 Runs, ${histories.length} history requests, ${snapshotPolls.length} snapshot polls after two polling cycles`);
   } finally { await context.close(); }
 });

@@ -2,6 +2,7 @@
    PromptBox 智能补全与联想弹窗（@ 文件/智能体，/ Skills）
    ============================================================================= */
 .prompt-box-suggestions-popover {
+  --prompt-suggestions-radius: 14px;
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
@@ -9,8 +10,8 @@
   max-height: 320px;
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 14px;
-  box-shadow: 0 16px 36px -4px rgba(15, 23, 42, 0.14), 0 4px 16px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  border-radius: var(--prompt-suggestions-radius);
+  box-shadow: inherit;
   display: flex;
   flex-direction: column;
   z-index: 1000;
@@ -108,10 +109,11 @@
 
 
 .prompt-box-suggestion-item {
+  position: relative;
   display: flex;
   align-items: center;
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: var(--prompt-suggestions-radius);
   cursor: pointer;
   background: transparent;
   transition: background 0.12s ease;
@@ -122,9 +124,17 @@
   background: #f1f5f9;
 }
 
-.prompt-box-suggestion-item.active {
-  background: #f1f5f9;
-  box-shadow: inset 3px 0 0 #2563eb;
+.prompt-box-suggestion-item.active::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 3px;
+  height: 16px;
+  border-radius: 999px;
+  background: #2563eb;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 
 .prompt-box-file-icon-code {

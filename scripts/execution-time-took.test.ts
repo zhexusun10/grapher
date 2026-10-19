@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateExecutionDurationMs, calculatePlannerDurationMs, formatSessionStartTime } from "../src/components/ExecutionTimeTook.tsx";
+import { calculateExecutionDurationMs, calculatePlannerDurationMs, formatSessionStartTime, formatTimeTookDuration } from "../src/components/ExecutionTimeTook.tsx";
 import { formatToolDuration } from "../src/utils/toolTiming.ts";
 import type { Execution } from "../src/types.ts";
 
@@ -31,6 +31,17 @@ test("formatSessionStartTime renders a stable English timestamp for session deta
   assert.equal(formatSessionStartTime(null), "-");
   assert.equal(formatSessionStartTime(0), "-");
   assert.equal(formatSessionStartTime("not-a-time"), "-");
+});
+
+test("time took displays completed whole seconds without changing tool duration precision", () => {
+  for (const [ms, expected] of [
+    [-100, "0s"], [0, "0s"], [800, "0s"], [999, "0s"], [1000, "1s"],
+    [1800, "1s"], [3500, "3s"], [9999, "9s"], [10000, "10s"],
+    [59999.9, "59s"], [60000, "1m 00s"], [75999, "1m 15s"], [3665999, "1h 1m 5s"],
+  ] as const) {
+    assert.equal(formatTimeTookDuration(ms), expected);
+  }
+  assert.equal(formatToolDuration(800), "0.8s");
 });
 
 test("returns null when execution is missing or has no startedAt", () => {

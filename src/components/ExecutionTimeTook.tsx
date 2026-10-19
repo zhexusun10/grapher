@@ -31,23 +31,42 @@ export function formatSessionStartTime(value?: number | string | null): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-export function ExecutionTimeTookText({ execution }: { execution?: Execution | null }) {
+/** Session durations use completed whole seconds; tool cards retain their precision. */
+export function formatTimeTookDuration(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1000));
+  return seconds < 10 ? `${seconds}s` : formatToolDuration(seconds * 1000);
+}
+
+/** Refresh at elapsed-second boundaries without changing the authoritative start time. */
+function useTimeTookClock(running: boolean, startedAt?: number | null, attemptId?: string) {
   const [now, setNow] = useState(Date.now);
-  const running = execution?.status === "running" && execution?.completedAt == null;
 
   useEffect(() => {
     if (!running) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [running, execution?.id]);
+    const start = startedAt && startedAt > 0 ? startedAt : Date.now();
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      const current = Date.now();
+      setNow(current);
+      timer = setTimeout(tick, 1000 - (Math.max(0, current - start) % 1000));
+    };
+    tick();
+    return () => clearTimeout(timer);
+  }, [running, startedAt, attemptId]);
+
+  return now;
+}
+
+export function ExecutionTimeTookText({ execution }: { execution?: Execution | null }) {
+  const running = execution?.status === "running" && execution?.completedAt == null;
+  const now = useTimeTookClock(running, execution?.startedAt, execution?.id);
 
   const durationMs = calculateExecutionDurationMs(execution, now);
   if (durationMs == null) {
     return <span>-</span>;
   }
 
-  return <span>{formatToolDuration(durationMs)}</span>;
+  return <span>{formatTimeTookDuration(durationMs)}</span>;
 }
 
 export function calculatePlannerDurationMs({
@@ -82,19 +101,13 @@ export function PlannerTimeTookText({
   startedAt?: number | null;
   durationSeconds?: number | null;
 }) {
-  const [now, setNow] = useState(Date.now);
   const running = Boolean(isPlanning);
+  const now = useTimeTookClock(running, startedAt);
   const liveStartRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!running) {
-      liveStartRef.current = null;
-      return;
-    }
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [running, startedAt]);
+    if (!running) liveStartRef.current = null;
+  }, [running]);
 
   if (running) {
     if (startedAt && startedAt > 0) {
@@ -116,5 +129,5 @@ export function PlannerTimeTookText({
     return <span>-</span>;
   }
 
-  return <span>{formatToolDuration(durationMs)}</span>;
+  return <span>{formatTimeTookDuration(durationMs)}</span>;
 }

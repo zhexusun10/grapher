@@ -36,7 +36,7 @@ import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
 import { Sidebar } from "./components/layout/Sidebar";
-import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey } from "./services/workspaceConversations";
+import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
 import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
@@ -198,6 +198,7 @@ export default function App() {
       return {};
     }
   });
+  const hasConversationSummariesRef = useRef(false);
   const pendingRunLabelIdsRef = useRef(new Set<string>());
   const deletedRunIdsRef = useRef(new Set<string>());
 
@@ -211,7 +212,7 @@ export default function App() {
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
 
   useEffect(() => {
-    if (!isBootstrapReady) return;
+    if (!isBootstrapReady || hasConversationSummariesRef.current) return;
     const missing = runs.filter(id => !id.startsWith("pending-") && !(id in runLabels) && !pendingRunLabelIdsRef.current.has(id));
     if (missing.length > 0) {
       missing.forEach(id => pendingRunLabelIdsRef.current.add(id));
@@ -235,7 +236,7 @@ export default function App() {
       });
     }
   }, [runs, runLabels, runtimeService, isBootstrapReady]);
-  const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot } = useRunIndicators(state);
+  const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot, observeRunSummary } = useRunIndicators(state);
   const allRunIds = useMemo(() => [...new Set(Object.values(workspaceRuns).flat())], [workspaceRuns]);
   const [activities, setActivities] = useState<Record<string, RuntimeActivity[]>>({});
   const observeActivity = useCallback((runId: string, activity: RuntimeActivity[]) => {
@@ -801,22 +802,6 @@ export default function App() {
           isShadow: latestProj.isShadow,
         };
         setProjects(sorted);
-        runtimeService.detectRepository(latestProj.path).then((detected) => {
-          if (detected && planningRecovery.current(scope)) {
-            setRepoInfo({ ...detected, path: normalizeWorkspacePath(detected.path) });
-            setProjects((prev) => {
-              const updated = prev.map((p) =>
-                p.path === latestProj.path
-                  ? { ...p, branch: detected.branch, clean: detected.clean, isShadow: detected.isShadow }
-                  : p
-              );
-              try {
-                localStorage.setItem("grapher_projects", JSON.stringify(updated));
-              } catch { }
-              return updated;
-            });
-          }
-        }).catch(() => { });
       }
     } else if (storedProjects === null && data.repositoryInfo) {
       const info = { ...data.repositoryInfo, path: normalizeWorkspacePath(data.repositoryInfo.path) };
@@ -835,6 +820,17 @@ export default function App() {
       } catch { }
       activeRepo = info.path;
       activeInfo = info;
+    } else if (storedProjects === null && data.config.repository) {
+      // Metadata bootstrap intentionally does no Git discovery. Seed only the
+      // configured workspace identity; its status is checked asynchronously.
+      activeRepo = normalizeWorkspacePath(data.config.repository);
+      const item: ProjectItem = {
+        id: activeRepo, path: activeRepo,
+        name: activeRepo.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || activeRepo,
+        branch: "", clean: false, lastOpened: Date.now(),
+      };
+      setProjects([item]);
+      try { localStorage.setItem("grapher_projects", JSON.stringify([item])); } catch { }
     } else {
       setProjects([]);
       activeRepo = "";
@@ -842,6 +838,20 @@ export default function App() {
     }
 
     setRepoInfo(activeInfo);
+    if (activeRepo && (!data.repositoryInfo || workspaceKey(data.repositoryInfo.path) !== workspaceKey(activeRepo))) {
+      const repository = activeRepo;
+      void runtimeService.detectRepository(repository).then(detected => {
+        if (!detected || !planningRecovery.current(scope)) return;
+        setRepoInfo({ ...detected, path: normalizeWorkspacePath(detected.path) });
+        setProjects(previous => {
+          const next = previous.map(project => workspaceKey(project.path) === workspaceKey(repository)
+            ? { ...project, name: detected.name, branch: detected.branch, clean: detected.clean, isShadow: detected.isShadow }
+            : project);
+          try { localStorage.setItem("grapher_projects", JSON.stringify(next)); } catch { }
+          return next;
+        });
+      }).catch(() => { });
+    }
     // Bootstrap owns the defaults for new conversations. A selected conversation
     // applies its own model selection once its snapshot becomes foreground.
     const activeRepository = activeRepo || (activeInfo ? activeInfo.path : "");
@@ -859,6 +869,7 @@ export default function App() {
       setDefaultSettings({ ...data.config, maxFeedback: 3 });
     }
     setConfig(nextConfigObj);
+    hasConversationSummariesRef.current = Array.isArray(data.conversations);
     setIsBootstrapReady(true);
     // A retry may have overlapped an edit attempt that was rejected only
     // because settings were still loading. Do not leave that stale error up.
@@ -877,89 +888,149 @@ export default function App() {
       void runtimeService.saveConfig(nextConfigObj).catch(() => { });
     }
 
-    // Local browser indexes can lag another tab or a restarted backend.
-    // Prioritize runs for the active workspace so the user sees their current
-    // conversation list immediately, without waiting for unrelated repositories.
-    const rawIndexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
-      .filter(id => !id.startsWith("pending-"));
-    const activeRepoKey = workspaceKey(activeRepo);
-    const candidateActiveIds = new Set([
-      ...(data.snapshot.runId && snapshotBelongsToWorkspace(data.snapshot, activeRepo) ? [data.snapshot.runId] : []),
-      ...(storedWorkspaceRuns?.[activeRepoKey] || []),
-    ]);
-    const indexedIds = [
-      ...rawIndexedIds.filter(id => candidateActiveIds.has(id)),
-      ...rawIndexedIds.filter(id => !candidateActiveIds.has(id)),
-    ];
-
-    // If the active repository has no candidate runs, sidebar is ready immediately
-    // without stalling on foreign workspace histories.
-    if (candidateActiveIds.size === 0) {
-      setIsSidebarReady(true);
+    if (!activeRepo && storedProjects === null) {
+      // First launch used to discover the backend cwd during bootstrap. Keep
+      // that behavior asynchronous, but do not undo an explicitly empty list.
+      void runtimeService.detectRepository().then(detected => {
+        if (!detected || !planningRecovery.current(scope)) return;
+        const info = { ...detected, path: normalizeWorkspacePath(detected.path) };
+        const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
+        const discoveredConfig = {
+          ...(acceptedSettingsRef.current ?? nextConfigObj), repository: info.path,
+        };
+        // Binding the discovered workspace supersedes operations that began
+        // without one (notably an in-flight settings response).
+        foregroundGeneration.current += 1;
+        setProjects([item]);
+        setRepoInfo(info);
+        setConfig(discoveredConfig);
+        setDefaultSettings(previous => ({ ...previous, repository: info.path }));
+        try {
+          localStorage.setItem("grapher_projects", JSON.stringify([item]));
+          localStorage.setItem("grapher_config", JSON.stringify(discoveredConfig));
+        } catch { }
+        // Like opening a project, discovery selects a view; it must not race
+        // an explicit settings save by rewriting backend defaults itself.
+      }).catch(() => { });
     }
 
-    // Publish validated cards preserving canonical order, without letting one stalled
-    // history keep all cards loading or causing items to jump and re-order.
-    const validatedSnapshots = new Map<string, Snapshot>();
-    let publishScheduled = false;
-
-    const buildValidatedRuns = (): Record<string, string[]> => {
-      const result: Record<string, string[]> = {};
-      for (const snap of validatedSnapshots.values()) {
-        if (!snap.config?.repository) continue;
-        const owner = workspaceKey(snap.config.repository);
-        if (!result[owner]) result[owner] = [];
+    let indexedRuns: Record<string, string[]>;
+    if (data.conversations) {
+      // One lightweight authoritative read replaces N history replays. Empty
+      // titles are resolved too; never fetch a snapshot just to label a card.
+      const summaries = data.conversations.filter(item => !deletedRunIdsRef.current.has(item.runId));
+      indexedRuns = workspaceRunsFromSummaries(summaries, storedWorkspaceRuns || {}, data.unavailableConversationIds);
+      // Seed the poller before enabling/rendering the indexed Runs. Settled
+      // cards never need a snapshot just to discover their phase; live and
+      // standalone-Merger work remain covered by the SSE watchdog.
+      for (const summary of summaries) {
+        if (summary.phase) setBackendStatus({ ...summary, phase: summary.phase });
+        observeRunSummary(summary);
       }
-      for (const owner of Object.keys(result)) {
-        result[owner] = indexedIds.filter(id => {
-          const snap = validatedSnapshots.get(id);
-          return snap && snapshotBelongsToWorkspace(snap, owner);
-        });
-      }
-      return result;
-    };
-
-    // Histories validate one by one. Merge each batch into the cached index
-    // instead of replacing it with the partial set; warm-cached cards stay
-    // mounted, so their entrance animation does not replay when the remaining
-    // histories resolve.
-    const schedulePublish = () => {
-      if (publishScheduled) return;
-      publishScheduled = true;
-      queueMicrotask(() => {
-        publishScheduled = false;
-        if (!planningRecovery.current(scope)) return;
-        const validatedRuns = buildValidatedRuns();
-        const activeRuns = validatedRuns[workspaceKey(activeRepo)] || [];
-        setWorkspaceRuns(prev => mergeValidatedWorkspaceRuns(prev, validatedRuns));
-        if (activeRuns.length > 0 || candidateActiveIds.size === 0) {
-          setIsSidebarReady(true);
-        }
-      });
-    };
-
-    const snapshots = await mapWithConcurrency(indexedIds, 8, async id => {
-      if (!planningRecovery.current(scope)) return null;
-      const snapshot = data.snapshot.runId === id ? data.snapshot : await runtimeService.history(id).catch(() => null);
-      if (!planningRecovery.current(scope) || !snapshot || snapshot.runId !== id) return null;
-      setBackendStatus(snapshot);
-      setRunLabels(prev => {
-        const label = snapshot.graph.originalGoal || "";
-        const next = label || prev[id] === undefined ? { ...prev, [id]: label } : prev;
+      setWorkspaceRuns(indexedRuns);
+      setRunLabels(previous => {
+        const next = { ...previous };
+        for (const item of summaries) next[item.runId] = item.title;
         try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
         return next;
       });
-      if (snapshot.config?.repository) {
-        validatedSnapshots.set(id, snapshot);
-        schedulePublish();
+      setRunModes(previous => {
+        const next = { ...previous };
+        for (const item of summaries) {
+          if (item.planType === "serial" || item.planType === "graph") next[item.runId] = item.planType;
+        }
+        try { localStorage.setItem("grapher_run_modes", JSON.stringify(next)); } catch { }
+        return next;
+      });
+      try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
+      setIsSidebarReady(true);
+      if (data.snapshot.runId) setBackendStatus(data.snapshot);
+    } else {
+      // Compatibility with older backends that do not expose the summary index.
+      // Local browser indexes can lag another tab or a restarted backend.
+      // Prioritize runs for the active workspace so the user sees their current
+      // conversation list immediately, without waiting for unrelated repositories.
+      const rawIndexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
+        .filter(id => !id.startsWith("pending-"));
+      const activeRepoKey = workspaceKey(activeRepo);
+      const candidateActiveIds = new Set([
+        ...(data.snapshot.runId && snapshotBelongsToWorkspace(data.snapshot, activeRepo) ? [data.snapshot.runId] : []),
+        ...(storedWorkspaceRuns?.[activeRepoKey] || []),
+      ]);
+      const indexedIds = [
+        ...rawIndexedIds.filter(id => candidateActiveIds.has(id)),
+        ...rawIndexedIds.filter(id => !candidateActiveIds.has(id)),
+      ];
+
+      // If the active repository has no candidate runs, sidebar is ready immediately
+      // without stalling on foreign workspace histories.
+      if (candidateActiveIds.size === 0) {
+        setIsSidebarReady(true);
       }
-      return snapshot;
-    });
-    if (!planningRecovery.current(scope)) return;
-    const indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
-    setWorkspaceRuns(indexedRuns);
-    try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
-    setIsSidebarReady(true);
+
+      // Publish validated cards preserving canonical order, without letting one stalled
+      // history keep all cards loading or causing items to jump and re-order.
+      const validatedSnapshots = new Map<string, Snapshot>();
+      let publishScheduled = false;
+
+      const buildValidatedRuns = (): Record<string, string[]> => {
+        const result: Record<string, string[]> = {};
+        for (const snap of validatedSnapshots.values()) {
+          if (!snap.config?.repository) continue;
+          const owner = workspaceKey(snap.config.repository);
+          if (!result[owner]) result[owner] = [];
+        }
+        for (const owner of Object.keys(result)) {
+          result[owner] = indexedIds.filter(id => {
+            const snap = validatedSnapshots.get(id);
+            return snap && snapshotBelongsToWorkspace(snap, owner);
+          });
+        }
+        return result;
+      };
+
+      // Histories validate one by one. Merge each batch into the cached index
+      // instead of replacing it with the partial set; warm-cached cards stay
+      // mounted, so their entrance animation does not replay when the remaining
+      // histories resolve.
+      const schedulePublish = () => {
+        if (publishScheduled) return;
+        publishScheduled = true;
+        queueMicrotask(() => {
+          publishScheduled = false;
+          if (!planningRecovery.current(scope)) return;
+          const validatedRuns = buildValidatedRuns();
+          const activeRuns = validatedRuns[workspaceKey(activeRepo)] || [];
+          setWorkspaceRuns(prev => mergeValidatedWorkspaceRuns(prev, validatedRuns));
+          if (activeRuns.length > 0 || candidateActiveIds.size === 0) {
+            setIsSidebarReady(true);
+          }
+        });
+      };
+
+      const snapshots = await mapWithConcurrency(indexedIds, 8, async id => {
+        if (!planningRecovery.current(scope)) return null;
+        const snapshot = data.snapshot.runId === id ? data.snapshot : await runtimeService.history(id).catch(() => null);
+        if (!planningRecovery.current(scope) || !snapshot || snapshot.runId !== id) return null;
+        setBackendStatus(snapshot);
+        setRunLabels(prev => {
+          const label = snapshot.graph.originalGoal || "";
+          const next = label || prev[id] === undefined ? { ...prev, [id]: label } : prev;
+          try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
+          return next;
+        });
+        if (snapshot.config?.repository) {
+          validatedSnapshots.set(id, snapshot);
+          schedulePublish();
+        }
+        return snapshot;
+      });
+      if (!planningRecovery.current(scope)) return;
+      indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
+      setWorkspaceRuns(indexedRuns);
+      try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
+      setIsSidebarReady(true);
+    }
 
     const currentRuns = indexedRuns[workspaceKey(activeRepo)] || [];
     const isActivelyRunning = Boolean(

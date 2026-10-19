@@ -9,6 +9,10 @@ use std::{
 
 mod cleanup;
 mod logs;
+mod conversations;
+pub use conversations::{conversation_summaries, ConversationCatalog, ConversationSummary};
+#[cfg(test)]
+pub(crate) use conversations::forget_catalog;
 pub use logs::{LogPage, MigrationReport};
 const CHECKPOINT_INTERVAL: usize = 128;
 

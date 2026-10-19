@@ -8,6 +8,8 @@ import { LandingView } from "../../src/components/views/LandingView";
 import { useSnapshotPolling } from "../../src/hooks/useSnapshotPolling";
 import { runtimeService } from "../../src/services/runtime";
 import { ThinkingCard } from "../../src/components/ThinkingCard";
+import { MarkdownRenderer } from "../../src/components/MarkdownRenderer";
+import { ExecutionTimeTookText, PlannerTimeTookText } from "../../src/components/ExecutionTimeTook";
 import { ToolCallCard } from "../../src/components/ToolCallCard";
 import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
 import { TranscriptHistoryStatus } from "../../src/components/TranscriptHistoryStatus";
@@ -18,7 +20,7 @@ import { cachedPlanningOutput, planningTranscriptKey } from "../../src/services/
 import { GraphWorkbench } from "../../src/components/views/GraphWorkbench";
 import { tokens } from "../../src/tokens";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../../src/services/thinkingTranscript";
-import type { TranscriptItem } from "../../src/types";
+import type { Execution, TranscriptItem } from "../../src/types";
 import { defaultConfig, emptyGraph, emptySnapshot, type RuntimeActivity, type Snapshot } from "../../src/types";
 import "../../src/styles.css";
 import "../../src/styles-workbench.css";
@@ -311,6 +313,32 @@ function CardPresentationFixture() {
   </section></Mode>;
 }
 
+function MarkdownCopyFixture() {
+  const [markdown, setMarkdown] = useState({
+    content: 'Run `pwd` first.\n\n```bash\nprintf "<tag> & 中文"\npwd\n```\n\n```python\nprint("second")\n```',
+    streaming: false,
+  });
+  audit.setMarkdown = (content: string, streaming = false) => setMarkdown({ content, streaming });
+  return <MarkdownRenderer content={markdown.content} isStreaming={markdown.streaming} streamingCursor={markdown.streaming} />;
+}
+
+function TimeTookFixture() {
+  const [clock, setClock] = useState({ running: false, startedAt: 0, id: "first" });
+  audit.start = (startedAt: number, id = "first") => setClock({ running: true, startedAt, id });
+  audit.finish = () => setClock(previous => ({ ...previous, running: false }));
+  const execution: Execution | undefined = clock.startedAt ? {
+    id: clock.id, node: "worker", revision: 0, attempt: 1,
+    sessionId: "session", worktree: "/a", before: "", after: "", output: "",
+    status: clock.running ? "running" : "completed", startedAt: clock.startedAt,
+    completedAt: clock.running ? null : clock.startedAt + 3500,
+  } : undefined;
+  return <>
+    <output data-execution-time><ExecutionTimeTookText execution={execution} /></output>
+    <output data-planner-time><PlannerTimeTookText isPlanning={clock.running}
+      startedAt={clock.startedAt} durationSeconds={clock.startedAt ? 3.5 : null} /></output>
+  </>;
+}
+
 const cases: Record<string, React.ComponentType> = {
   settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, unchangedBubble: UnchangedBubbleFixture,
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
@@ -318,6 +346,7 @@ const cases: Record<string, React.ComponentType> = {
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
   polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
+  timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
 };
 const Component = cases[new URLSearchParams(location.search).get("case") || "settings"];
 createRoot(document.getElementById("root")!).render(<Component />);

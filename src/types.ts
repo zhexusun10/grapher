@@ -171,7 +171,20 @@ export interface ProjectItem {
   isShadow?: boolean;
 }
 
+export interface ConversationSummary {
+  runId: string;
+  repository: string;
+  title: string;
+  planType?: string | null;
+  /** Older summary-capable backends may not supply status yet. */
+  phase?: string;
+  hasActiveExecutions?: boolean;
+}
+
 export interface Bootstrap {
+  /** Omitted by older backends, settings saves, or when the index is unavailable. */
+  conversations?: ConversationSummary[];
+  unavailableConversationIds?: string[];
   snapshot: Snapshot;
   config: Config;
   runs: string[];

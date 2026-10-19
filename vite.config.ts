@@ -23,6 +23,7 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 1420,
+    open: true,
     strictPort: true,
     watch: {
       ignored: [

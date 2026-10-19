@@ -54,7 +54,7 @@ jobs:
       - name: Verify frontend state, i18n and transcript contracts
         run: npm run test:frontend
       - name: Verify snapshot inheritance, failed revisions and event replay
-        run: npm test
+        run: npm run test:backend
       - name: Verify production HTTP paths and safe workspace cleanup
         run: npm run test:hardening
       - name: Verify the same unmodified Planner Bash on every host

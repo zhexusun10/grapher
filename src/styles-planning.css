@@ -339,7 +339,8 @@
   background: #fdfdfe;
 }
 
-.thinking-card-body .thinking-markdown {
+.thinking-card-body .thinking-markdown,
+.tool-call-body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: #334155;
 }
@@ -695,7 +696,6 @@
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
   margin-bottom: 6px;
-  font-size: 11px;
 }
 
 /* Bottom line of an expanded tool body: the duration reported by the runtime. */
@@ -704,7 +704,6 @@
   align-items: baseline;
   justify-content: flex-end;
   gap: 6px;
-  font-size: 10.5px;
   color: var(--text-muted);
 }
 
@@ -714,8 +713,7 @@
 }
 
 .tool-timing-val {
-  font-family: var(--font-mono, monospace);
-  font-weight: 600;
+  font-weight: 400;
   font-variant-numeric: tabular-nums;
   color: var(--text-primary);
 }
@@ -734,15 +732,12 @@
 
 .meta-lbl {
   color: var(--text-secondary);
-  font-size: 10.5px;
   white-space: nowrap;
   flex-shrink: 0;
   user-select: none;
-  line-height: 1.5;
 }
 
 .meta-val {
-  font-family: var(--font-mono, monospace);
   font-weight: 600;
 }
 
@@ -763,9 +758,7 @@
 }
 
 .meta-val-code {
-  font-family: var(--font-mono, monospace);
-  font-size: 10.5px;
-  line-height: 1.5;
+  font: inherit;
   background: rgba(255, 255, 255, 0.05);
   padding: 1px 6px;
   border-radius: 4px;
@@ -803,7 +796,6 @@
 }
 
 .section-label {
-  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.4px;
@@ -813,9 +805,7 @@
 
 .tool-args-code,
 .tool-result-code {
-  font-family: var(--font-mono, monospace);
-  font-size: 11.5px;
-  line-height: 1.5;
+  font: inherit;
   background: #0f141c;
   color: #e2e8f0;
   padding: 8px 10px;
@@ -837,6 +827,7 @@
    Markdown Content Styling
    ========================================================================== */
 
+.tool-call-body,
 .markdown-content {
   color: var(--text-primary);
   font-size: 13.5px;
@@ -909,6 +900,67 @@
   line-height: 1.5;
   background: transparent;
   padding: 0;
+}
+
+.markdown-content .code-block-wrapper {
+  position: relative;
+  min-width: 0;
+  margin: 8px 0;
+  padding-right: 36px;
+  background: #0b0f17;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+}
+
+.markdown-content .code-block-wrapper pre {
+  margin: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+.thinking-markdown .code-block-wrapper {
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.markdown-content .code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: #cbd5e1;
+}
+
+.markdown-content .code-copy-btn:hover {
+  color: #f8fafc;
+}
+
+.thinking-markdown .code-copy-btn {
+  color: #64748b;
+}
+
+.thinking-markdown .code-copy-btn:hover {
+  color: #334155;
+}
+
+.markdown-content .code-copy-check,
+.markdown-content .code-copy-btn.copied .code-copy-icon {
+  display: none;
+}
+
+.markdown-content .code-copy-btn.copied {
+  color: #22c55e;
+}
+
+.markdown-content .code-copy-btn.copied .code-copy-check {
+  display: block;
 }
 
 .markdown-content blockquote {

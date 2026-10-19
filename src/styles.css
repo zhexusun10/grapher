@@ -604,12 +604,12 @@ a,
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 7px 9px;
-  border-radius: 7px;
+  padding: 8px 10px;
+  border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
   position: relative;
   width: var(--sidebar-content-width, 230px);
   min-width: var(--sidebar-content-width, 230px);
@@ -631,6 +631,7 @@ a,
 .project-workspace-item.active {
   background: var(--brand-subtle);
   border-color: var(--brand-border);
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
 }
 
 .proj-icon {
@@ -1182,11 +1183,9 @@ a,
   white-space: normal;
   overflow-wrap: break-word;
   word-break: break-word;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
-  line-height: 1.5;
   color: var(--text-primary);
-  letter-spacing: -0.01em;
   flex: 1;
   min-width: 0;
   transition: opacity 0.2s ease, color 0.15s ease;

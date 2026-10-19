@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Execution, Snapshot } from "../types";
+import type { ConversationSummary, Execution, Snapshot } from "../types";
 
 function executionActivityVersion(executions: Execution[] = []): string {
   return executions.map((execution) =>
@@ -44,6 +44,18 @@ export function useRunIndicators(viewedSnapshot: Snapshot) {
     });
   }, []);
 
+  // Seed display status without manufacturing a snapshot activity version or
+  // marking old activity unread when the first actual snapshot arrives.
+  const observeRunSummary = useCallback((summary: ConversationSummary) => {
+    if (!summary.runId || !summary.phase) return;
+    const phase = summary.phase;
+    setRunIndicators(previous => {
+      const current = previous[summary.runId];
+      if (current?.phase === phase) return previous;
+      return { ...previous, [summary.runId]: { unread: current?.unread ?? false, phase } };
+    });
+  }, []);
+
   const observeRunSnapshot = useCallback((snapshot: Snapshot) => {
     if (!snapshot.runId) return;
     const nextVersion = snapshotActivityVersion(snapshot);
@@ -64,5 +76,5 @@ export function useRunIndicators(viewedSnapshot: Snapshot) {
     markSnapshotRead(viewedSnapshot);
   }, [viewedSnapshot, markSnapshotRead]);
 
-  return { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot };
+  return { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot, observeRunSummary };
 }

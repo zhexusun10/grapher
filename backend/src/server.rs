@@ -494,6 +494,10 @@ pub struct Bootstrap {
     snapshot: serde_json::Value,
     config: Config,
     runs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversations: Option<Vec<crate::store::ConversationSummary>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unavailable_conversation_ids: Vec<String>,
     data_path: String,
     repository_info: Option<crate::workspace::RepositoryInfo>,
     pub effective_role_models: std::collections::HashMap<String, String>,
@@ -617,13 +621,16 @@ fn load_env_file() {
 }
 
 fn bootstrap(service: &Arc<Service>, metadata: bool) -> Result<Bootstrap, String> {
-    bootstrap_projection(service, metadata, true)
+    // The UI detects repository status separately. Git/working-tree scans are
+    // not prerequisites for settings or the prewarmed sidebar summary index.
+    bootstrap_projection(service, metadata, !metadata, true)
 }
 
 fn bootstrap_projection(
     service: &Arc<Service>,
     metadata: bool,
     discover_repository: bool,
+    include_conversations: bool,
 ) -> Result<Bootstrap, String> {
     load_env_file();
     let active_config = if service.planning.load(Ordering::SeqCst) {
@@ -775,10 +782,25 @@ fn bootstrap_projection(
         }
     }
 
+    let (conversations, unavailable_conversation_ids) = if include_conversations {
+        match crate::store::conversation_summaries(&root.join("events.sqlite")) {
+            Ok(catalog) => (Some(catalog.conversations), catalog.unavailable_run_ids),
+            Err(error) => {
+                // A display projection is not a prerequisite for settings or
+                // startup. Omit it (not an authoritative empty list) on failure.
+                eprintln!("[Grapher] Sidebar metadata unavailable: {error}");
+                (None, Vec::new())
+            }
+        }
+    } else {
+        (None, Vec::new())
+    };
     Ok(Bootstrap {
         snapshot,
         config,
         runs,
+        conversations,
+        unavailable_conversation_ids,
         data_path: crate::native::host_path(&root).to_string_lossy().into(),
         repository_info,
         effective_role_models,
@@ -897,7 +919,8 @@ fn save_config_projection(
         crate::provider_auth::warm();
         crate::engine::warm_planning_engines(config);
     }
-    bootstrap_projection(service, metadata, false)
+    // Saving settings must not depend on a global sidebar read after commit.
+    bootstrap_projection(service, metadata, false, false)
 }
 
 pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetrics {
@@ -5574,6 +5597,17 @@ pub fn run() -> Result<(), String> {
                 Err(_) => break,
             }
         });
+    }
+    // Warm the sidebar independently of engines. This read-only connection never
+    // holds a runtime lock or loads full histories, and the cache is invalidated by
+    // SQLite commits (including writes made by other Run services).
+    let catalog_path = root.join("events.sqlite");
+    if let Err(error) = thread::Builder::new().name("sidebar-prewarm".into()).spawn(move || {
+        if let Err(error) = crate::store::conversation_summaries(&catalog_path) {
+            eprintln!("[Grapher] Sidebar prewarm unavailable: {error}");
+        }
+    }) {
+        eprintln!("[Grapher] Cannot start sidebar prewarm: {error}");
     }
     // HTTP workers and shutdown handling are ready before any speculative work.
     // Do not scan the installation cwd or serialize history just to choose a warm key.

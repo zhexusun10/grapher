@@ -1,4 +1,4 @@
-import type { Snapshot } from "../types";
+import type { ConversationSummary, Snapshot } from "../types";
 
 export type WorkspaceRuns = Record<string, string[]>;
 
@@ -75,6 +75,33 @@ export function mergeValidatedWorkspaceRuns(
     for (const id of ids) if (!list.includes(id)) list.push(id);
   }
   return merged;
+}
+
+/** Replace the browser hint with the authoritative, newest-first backend index. */
+export function workspaceRunsFromSummaries(
+  summaries: ConversationSummary[],
+  cached: WorkspaceRuns = {},
+  unavailableRunIds: string[] = [],
+): WorkspaceRuns {
+  const result: WorkspaceRuns = {};
+  const seen = new Set<string>();
+  for (const summary of summaries) {
+    const owner = workspaceKey(summary.repository);
+    if (!owner || !summary.runId || summary.runId.startsWith("pending-") || seen.has(summary.runId)) continue;
+    seen.add(summary.runId);
+    (result[owner] ??= []).push(summary.runId);
+  }
+  // A failed read is not evidence of deletion or new ownership. Only preserve
+  // explicitly unavailable IDs; all other stale browser cards must disappear.
+  const unavailable = new Set(unavailableRunIds);
+  for (const [owner, ids] of Object.entries(normalizeWorkspaceRuns(cached))) {
+    for (const id of ids) {
+      if (!unavailable.has(id) || seen.has(id) || id.startsWith("pending-")) continue;
+      seen.add(id);
+      (result[owner] ??= []).push(id);
+    }
+  }
+  return result;
 }
 
 export function snapshotBelongsToWorkspace(snapshot: Snapshot, repository: string): boolean {

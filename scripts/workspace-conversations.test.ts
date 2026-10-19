@@ -1,10 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultConfig, emptySnapshot, type Snapshot } from "../src/types.ts";
-import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey } from "../src/services/workspaceConversations.ts";
+import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "../src/services/workspaceConversations.ts";
 
 const snapshot = (runId: string, repository: string): Snapshot => ({
   ...emptySnapshot, runId, config: { ...defaultConfig, repository },
+});
+
+test("authoritative summaries preserve backend order and normalize workspace ownership", () => {
+  const summaries = [
+    { runId: "newest", repository: "\\\\?\\C:\\Projects\\App\\", title: "Newest" },
+    { runId: "foreign", repository: "/other", title: "Other" },
+    { runId: "older", repository: "c:/projects/app", title: "" },
+    { runId: "newest", repository: "/wrong", title: "Duplicate" },
+    { runId: "pending-old", repository: "/other", title: "Provisional" },
+    { runId: "unbound", repository: "", title: "Unbound" },
+  ];
+  assert.deepEqual(workspaceRunsFromSummaries(summaries), {
+    "c:/projects/app": ["newest", "older"], "/other": ["foreign"],
+  });
+  assert.deepEqual(workspaceRunsFromSummaries([]), {}, "an empty backend list is authoritative");
+});
+
+test("failed summary reads preserve only explicitly unavailable cached IDs", () => {
+  assert.deepEqual(workspaceRunsFromSummaries([
+    { runId: "healthy", repository: "/actual", title: "Healthy" },
+  ], {
+    "/cached": ["damaged", "healthy", "deleted", "pending-old"],
+    "/duplicate": ["damaged"],
+  }, ["damaged", "healthy", "pending-old"]), {
+    "/actual": ["healthy"], "/cached": ["damaged"],
+  });
 });
 
 test("Windows path aliases and UNC prefixes resolve to the same workspace", () => {

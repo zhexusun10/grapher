@@ -175,7 +175,7 @@ Partitioner
 npm run check
 npm run build
 npm run test:frontend
-npm test                      # Rust 固定样例；无需付费模型
+npm run test:backend          # Rust 固定样例；无需付费模型
 ```
 
 集成、平台验证和日志验收见[贡献指南](CONTRIBUTING.md)与[测试指南](docs/development/testing.md)。安全漏洞请按[安全政策](SECURITY.md)报告。无模型测试不能证明服务商效果或全部沙箱边界。

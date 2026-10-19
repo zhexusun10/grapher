@@ -204,7 +204,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             const isLoadingThisRun = loadingRunId === id && currentRunId !== id;
             let displayLabel = `Graph ${id.slice(0, 8)}`;
             const labelText = runLabels[id];
-            const isResolvingLabel = !labelText;
+            const isResolvingLabel = labelText === undefined;
             if (labelText) {
               displayLabel = labelText;
             }

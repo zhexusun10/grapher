@@ -185,6 +185,14 @@ Grapher's tool-output display log is a projection, not a raw Pi-session dump. Th
 actual tool result are untouched; `full=true` exports the retained display log
 and does not bypass producer-side truncation.
 
+The sidebar uses backend-owned conversation summaries, prewarmed without
+transcripts or runtime locks. Settled cards do not require snapshots; live work
+remains watched. Browser caches are rendering hints, and failed reads must not
+imply deletion or block settings saves. Repository discovery is asynchronous and
+respects explicitly empty saved workspace lists. See the
+[summary projection](../../backend/src/store/conversations.rs) and
+[polling](../../src/hooks/useSnapshotPolling.ts) implementations.
+
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand by
 `(runId, executionId, byteOffset)`; planning revisions have their own cursor.
 Execution-log pages default to 256 KiB and are capped at 1 MiB; planning forward

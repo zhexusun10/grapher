@@ -174,7 +174,7 @@ For everyday operation, read the [user guide](docs/user-guide.md). Building or c
 npm run check
 npm run build
 npm run test:frontend
-npm test                      # Rust fixtures; no paid model
+npm run test:backend          # Rust fixtures; no paid model
 ```
 
 See [Contributing](CONTRIBUTING.md) and the [testing guide](docs/development/testing.md) for integration/platform checks and log acceptance. Report vulnerabilities through the [security policy](SECURITY.md). Model-free tests do not establish provider quality or every sandbox boundary.

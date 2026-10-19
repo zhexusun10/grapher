@@ -26,13 +26,26 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function app(handler, projects = [{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }]) {
+async function app(handler, projects = [{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }], cachedRuns, connectedEvents = false) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "en-US", reducedMotion: "reduce" });
-  await context.addInitScript(({ projects, config }) => {
+  await context.addInitScript(({ projects, config, cachedRuns, connectedEvents }) => {
     localStorage.setItem("grapher_language_v1", "en");
-    localStorage.setItem("grapher_projects", JSON.stringify(projects));
+    if (projects !== null) localStorage.setItem("grapher_projects", JSON.stringify(projects));
+    if (cachedRuns) localStorage.setItem("grapher_workspace_runs", JSON.stringify(cachedRuns));
     localStorage.setItem("grapher_config", JSON.stringify({ ...config, model: "stale/browser-model" }));
-  }, { projects, config });
+    if (connectedEvents) {
+      // Connected but silent: only watchdog reads can discover durable changes.
+      window.EventSource = class {
+        static CLOSED = 2;
+        constructor() {
+          this.readyState = 0;
+          setTimeout(() => { this.readyState = 1; this.onopen?.({}); }, 0);
+        }
+        addEventListener() {}
+        close() { this.readyState = 2; }
+      };
+    }
+  }, { projects, config, cachedRuns, connectedEvents });
   const errors = [], calls = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
@@ -42,7 +55,7 @@ async function app(handler, projects = [{ id: repository, path: repository, name
       repository_status: { repository, valid: true, error: null }, list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] },
       provider_auth: catalog, pi_extensions: { globalDirectory: "mock", extensions: [] }, environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true } };
     if (!Object.hasOwn(defaults, command)) errors.push(`Unexpected API: ${command}`);
-    await route.fulfill({ json: { result: defaults[command] ?? null } });
+    await route.fulfill({ headers: connectedEvents ? { "x-grapher-events": "1" } : {}, json: { result: defaults[command] ?? null } });
   });
   const page = await context.newPage(); page.setDefaultTimeout(8_000);
   page.on("pageerror", error => errors.push(String(error)));
@@ -82,6 +95,192 @@ test("one stalled history cannot keep validated sidebar cards and saved models l
     assert.equal(await page.locator('[data-run-id="fast"]').count(), 1);
     assert.equal(await page.locator(".runs-list").getByRole("alert").count(), 0);
     assert.equal(await page.locator(".runs-list").getByRole("button", { name: "Retry", exact: true }).count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("prewarmed summaries render every sidebar card without histories or repository status", { timeout: 30_000 }, async () => {
+  const summaries = [
+    { runId: "slow", repository, title: "Ready without history", planType: "serial", phase: "completed", hasActiveExecutions: false },
+    { runId: "blank", repository, title: "", planType: "graph", phase: "completed", hasActiveExecutions: false },
+    { runId: "foreign", repository: "/other", title: "Other workspace", phase: "completed", hasActiveExecutions: false },
+  ];
+  const { context, page, errors, calls } = await app(async (route, command) => {
+    if (command === "bootstrap") {
+      await route.fulfill({ json: { result: { ...bootstrap, snapshot: empty, conversations: summaries,
+        runs: summaries.map(item => item.runId), repositoryInfo: null } } });
+      return true;
+    }
+    if (command === "history" || command === "detect_repository") return true; // deliberately stalled
+    return false;
+  }, undefined, { [repository]: ["fast", "foreign"] });
+  try {
+    await page.locator('[data-run-id="slow"]').waitFor();
+    await page.locator('[data-run-id="blank"]').waitFor();
+    assert.equal(await page.locator('[data-run-id="foreign"]').count(), 0);
+    assert.equal(await page.locator('[data-run-id="fast"]').count(), 0, "stale browser cards are not authoritative");
+    assert.deepEqual(await page.locator(".run-item").evaluateAll(items => items.map(item => item.dataset.runId)), ["slow", "blank"]);
+    assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0);
+    assert.equal(await page.locator('[data-run-id="blank"] .is-resolving').count(), 0, "a blank title is resolved");
+    assert.equal(calls.filter(call => call.command === "history").length, 0);
+    assert.equal(calls.filter(call => call.command === "detect_repository").length, 1, "Git status loads independently");
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_workspace_runs"))), {
+      [repository]: ["slow", "blank"], "/other": ["foreign"],
+    });
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("sidebar summaries seed live status and watchdogs without polling settled Runs", { timeout: 30_000 }, async () => {
+  const snapshots = {
+    done: { ...fast, runId: "done" },
+    background: { ...fast, runId: "background", phase: "running" },
+    standalone: { ...fast, runId: "standalone", mergers: [{ id: "merger", status: "running", output: "" }] },
+  };
+  const summaries = Object.values(snapshots).map(snapshot => ({
+    runId: snapshot.runId, repository, title: snapshot.runId, phase: snapshot.phase,
+    hasActiveExecutions: snapshot.runId === "standalone",
+  }));
+  const { context, page, errors, calls } = await app(async (route, command, body) => {
+    if (command === "bootstrap") {
+      await route.fulfill({ headers: { "x-grapher-events": "1" }, json: { result: {
+        ...bootstrap, snapshot: empty, conversations: summaries, runs: Object.keys(snapshots),
+      } } });
+      return true;
+    }
+    if (command === "snapshot_if_changed") {
+      const snapshot = snapshots[body.runId];
+      await route.fulfill({ json: { result: { version: snapshot.phase, snapshot } } });
+      return true;
+    }
+    return false;
+  }, undefined, undefined, true);
+  try {
+    await page.locator('[data-run-id="background"] .running-pulse').waitFor();
+    snapshots.background = { ...snapshots.background, phase: "completed" };
+    // No SSE change is delivered: the bounded watchdog must see completion.
+    await page.clock.runFor(4500);
+    await until(async () => await page.locator('[data-run-id="background"] .running-pulse').count() === 0);
+    const polls = calls.filter(call => call.command === "snapshot_if_changed").map(call => call.body.runId);
+    assert.ok(polls.includes("background"));
+    assert.ok(polls.includes("standalone"), "a running standalone Merger is watched even in completed phase");
+    assert.equal(polls.includes("done"), false);
+    assert.equal(calls.filter(call => call.command === "history").length, 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("sidebar preserves unavailable cached cards but removes confirmed stale cards", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await app(async (route, command) => {
+    if (command !== "bootstrap") return false;
+    await route.fulfill({ json: { result: { ...bootstrap, snapshot: empty,
+      conversations: [{ runId: "healthy", repository, title: "Healthy", phase: "completed", hasActiveExecutions: false }],
+      unavailableConversationIds: ["damaged"],
+    } } });
+    return true;
+  }, undefined, { [repository]: ["damaged", "deleted"] });
+  try {
+    await page.locator('[data-run-id="healthy"]').waitFor();
+    assert.equal(await page.locator('[data-run-id="damaged"]').count(), 1);
+    assert.equal(await page.locator('[data-run-id="deleted"]').count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("first-launch workspace discovery is asynchronous and restores the detected workspace", { timeout: 30_000 }, async () => {
+  let discovery;
+  const fresh = { ...bootstrap, config: { ...config, repository: "" }, snapshot: empty, repositoryInfo: null,
+    conversations: [{ runId: "discovered", repository: "/discovered", title: "Discovered", phase: "completed", hasActiveExecutions: false }] };
+  const { context, page, errors, calls } = await app(async (route, command, body) => {
+    if (command === "bootstrap") { await route.fulfill({ json: { result: fresh } }); return true; }
+    if (command === "detect_repository") { discovery = route; return true; }
+    if (command === "save_config") {
+      await route.fulfill({ json: { result: { ...fresh, config: body.config } } }); return true;
+    }
+    return false;
+  }, null);
+  try {
+    await until(() => !!discovery);
+    assert.equal(calls.find(call => call.command === "detect_repository").body.path, null);
+    assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0, "discovery cannot block the sidebar");
+    await discovery.fulfill({ json: { result: { ...info, path: "/discovered", name: "Discovered workspace" } } });
+    await page.locator('[data-run-id="discovered"]').waitFor();
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).repository), "/discovered");
+    assert.equal(calls.filter(call => call.command === "save_config").length, 0, "discovery must not overwrite model defaults");
+    assert.equal(await page.locator(".project-workspace-item").count(), 1);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("first-launch discovery cannot be overwritten by an older settings response", { timeout: 30_000 }, async () => {
+  let discovery, saving;
+  const fresh = { ...bootstrap, config: { ...config, repository: "" }, snapshot: empty, repositoryInfo: null, conversations: [] };
+  const { context, page, errors } = await app(async (route, command, body) => {
+    if (command === "bootstrap") { await route.fulfill({ json: { result: fresh } }); return true; }
+    if (command === "detect_repository") { discovery = route; return true; }
+    if (command === "save_config") { saving = { route, config: body.config }; return true; }
+    return false;
+  }, null);
+  try {
+    await until(() => !!discovery);
+    await openSettings(page);
+    await nodeModel(page).selectOption("test/new");
+    await page.locator(".save-config-btn").click();
+    await until(() => !!saving);
+    await discovery.fulfill({ json: { result: { ...info, path: "/discovered" } } });
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_config")).repository === "/discovered");
+    await saving.route.fulfill({ json: { result: { ...fresh, config: saving.config } } });
+    await page.waitForFunction(() => document.querySelector(".save-config-btn")?.disabled === false);
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).repository), "/discovered");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("first-launch discovery never restores a deliberately empty workspace list", { timeout: 30_000 }, async () => {
+  const { context, page, errors, calls } = await app(async (route, command) => {
+    if (command !== "bootstrap") return false;
+    await route.fulfill({ json: { result: { ...bootstrap, config: { ...config, repository: "" },
+      snapshot: empty, repositoryInfo: null, conversations: [] } } });
+    return true;
+  }, []);
+  try {
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_config")).repository === "");
+    assert.equal(calls.filter(call => call.command === "detect_repository").length, 0);
+    assert.equal(await page.locator(".project-workspace-item").count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a cold browser uses the configured workspace before Git discovery finishes", { timeout: 30_000 }, async () => {
+  const { context, page, errors, calls } = await app(async (route, command) => {
+    if (command === "bootstrap") {
+      await route.fulfill({ json: { result: { ...bootstrap, snapshot: empty, repositoryInfo: null,
+        conversations: [{ runId: "cold", repository, title: "Cold browser conversation" }] } } });
+      return true;
+    }
+    if (command === "detect_repository") return true;
+    return false;
+  }, null);
+  try {
+    await page.locator('[data-run-id="cold"]').waitFor();
+    assert.equal(await page.locator(".project-workspace-item").count(), 1);
+    assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0);
+    assert.equal(calls.filter(call => call.command === "history").length, 0);
+    assert.equal(calls.filter(call => call.command === "detect_repository").length, 1);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("empty authoritative summary index removes stale cached cards without requesting history", { timeout: 30_000 }, async () => {
+  const { context, page, errors, calls } = await app(async (route, command) => {
+    if (command !== "bootstrap") return false;
+    await route.fulfill({ json: { result: { ...bootstrap, snapshot: empty, conversations: [] } } });
+    return true;
+  }, undefined, { [repository]: ["fast"] });
+  try {
+    await page.locator(".run-placeholder").waitFor();
+    assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0);
+    assert.equal(calls.filter(call => call.command === "history").length, 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
