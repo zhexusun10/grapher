@@ -26,6 +26,7 @@
     "test:extensions": "node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --bin grapher && node scripts/node-ts.mjs scripts/check-pi-extension.ts",
     "dev": "node scripts/dev.mjs",
     "cleanup:workspaces": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --cleanup-workspaces",
+    "clean:stale": "node scripts/clean-stale-artifacts.mjs",
     "compact": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --compact",
     "migrate": "node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --migrate",
     "build": "tsc --noEmit && vite build",

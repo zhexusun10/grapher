@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { ensureDependencies, findCargoExecutable, root } from './ensure-deps.mjs';
 import { toolchainEnv, prependPath } from './cargo.mjs';
+import { cleanStaleArtifacts } from './clean-stale-artifacts.mjs';
 
 export function loadDevEnvironment(installationRoot, base = process.env) {
   const env = { ...base };
@@ -80,6 +81,7 @@ function terminateChild(child, force = false) {
 export async function runDev({
   installationRoot = root, env: baseEnv = process.env, spawnProcess = spawn,
   ensureReady = ensureDependencies, startupTimeoutMs = 60_000,
+  cleanStale = cleanStaleArtifacts,
   signals = process, log = console.log, logError = console.error,
 } = {}) {
   const children = new Set();
@@ -137,6 +139,11 @@ export async function runDev({
     log('[dev] Building backend. The first download/compilation can take several minutes; Ctrl+C cancels.');
     await run(cargo, ['build', ...cargoArgs]);
     controller.signal.throwIfAborted();
+    if (typeof cleanStale === 'function') {
+      try {
+        await cleanStale({ installationRoot, silent: true, log });
+      } catch {}
+    }
     // Recheck after the potentially long build without killing a new listener.
     await assertPortAvailable(frontendPort);
     await assertPortAvailable(backendPort);
