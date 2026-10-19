@@ -4852,6 +4852,23 @@ pub fn dispatch(
             to_value(serde_json::json!({"requested": true}))
         }
         "launch_result" => {
+            // Publication can be durable before the driver thread has finished its
+            // final cleanup. Give that short teardown window to close before starting
+            // a result execution; otherwise drive() below can observe the old driver
+            // and fail to start a new one.
+            if service.driving.load(Ordering::SeqCst) && !service.planning.load(Ordering::SeqCst) {
+                let settled = service.runtime.lock().map(|runtime| {
+                    runtime.state.phase == "completed" && !runtime.active()
+                }).unwrap_or(false);
+                if settled {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while service.driving.load(Ordering::SeqCst)
+                        && std::time::Instant::now() < deadline
+                    {
+                        thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+            }
             if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) { return Err("Wait for the Run driver/Planner before launching its published result".into()); }
             let args: Vec<String> = argument(&body, "args")?;
             let entry: Option<String> = body.get("entryId").map(|_| argument(&body, "entryId")).transpose()?;
