@@ -680,17 +680,21 @@ pub fn pick_folder() -> Result<Option<PathBuf>, String> {
                 .output();
         }
 
-        if let Ok(out) = output {
-            if out.status.success() {
+        match output {
+            Ok(out) if out.status.success() => {
                 let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !path_str.is_empty() {
-                    return Ok(Some(PathBuf::from(path_str)));
+                    Ok(Some(PathBuf::from(path_str)))
                 } else {
-                    return Ok(None);
+                    Ok(None)
                 }
             }
+            Ok(out) => Err(format!(
+                "macOS folder picker failed with exit status: {}",
+                out.status
+            )),
+            Err(err) => Err(format!("macOS folder picker is unavailable: {err}")),
         }
-        Ok(None)
     }
     #[cfg(target_os = "windows")]
     {
@@ -727,26 +731,37 @@ pub fn pick_folder() -> Result<Option<PathBuf>, String> {
 pub fn pick_repository() -> Result<PickResult, String> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        if let Some(folder) = pick_folder()? {
-            let info = detect(Some(&folder))?;
-            if let Some(info) = info {
-                Ok(PickResult {
+        let folder = match pick_folder() {
+            Ok(Some(folder)) => folder,
+            Ok(None) => {
+                return Ok(PickResult {
                     supported: true,
-                    repository: Some(info),
-                    cancelled: false,
-                })
-            } else {
-                Err(format!(
-                    "所选目录「{}」无法初始化为有效工作区。",
-                    folder.display()
-                ))
+                    repository: None,
+                    cancelled: true,
+                });
             }
-        } else {
+            Err(err) => {
+                eprintln!("Native folder picker unavailable: {err}");
+                return Ok(PickResult {
+                    supported: false,
+                    repository: None,
+                    cancelled: false,
+                });
+            }
+        };
+
+        let info = detect(Some(&folder))?;
+        if let Some(info) = info {
             Ok(PickResult {
                 supported: true,
-                repository: None,
-                cancelled: true,
+                repository: Some(info),
+                cancelled: false,
             })
+        } else {
+            Err(format!(
+                "所选目录「{}」无法初始化为有效工作区。",
+                folder.display()
+            ))
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

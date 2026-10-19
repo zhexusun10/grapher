@@ -8,6 +8,51 @@ export const modelRoles: Array<{ id: ModelRole; label: string; description: stri
   { id: "partitioner", label: "Partitioner", description: t("负责判断任务走 Serial 还是 Graph。推荐选择小型、低延迟模型。") },
 ];
 
+export const THINKING_LEVEL_SCALE: readonly ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
+export function defaultRoleThinkingLevel(
+  role: ModelRole,
+  levels?: ThinkingLevel[],
+  fallbacks?: Partial<Record<ThinkingLevel, ThinkingLevel>>
+): ThinkingLevel {
+  const supported = levels && levels.length > 0
+    ? THINKING_LEVEL_SCALE.filter(l => levels.includes(l))
+    : [];
+
+  if (supported.length === 0) {
+    if (role === "planner") return "high";
+    return "low";
+  }
+
+  const n = supported.length;
+  if (role === "planner") {
+    // Planner 默认为最高可用的等级
+    return supported[n - 1];
+  }
+
+  if (role === "nodeAgent") {
+    // Node Agent 默认最高可用等级的低一档（若只有一档则使用该档）
+    return n >= 2 ? supported[n - 2] : supported[0];
+  }
+
+  // Partitioner 默认为低
+  if (supported.includes("low")) {
+    return "low";
+  }
+  if (fallbacks?.low && supported.includes(fallbacks.low)) {
+    return fallbacks.low;
+  }
+  return supported[0];
+}
+
 /** Project one conversation's saved selection onto the shared settings object. */
 export function applyModelConfig(config: Config, settings: ConversationModelConfig | null | undefined): Config {
   return {
@@ -20,9 +65,28 @@ export function applyModelConfig(config: Config, settings: ConversationModelConf
 
 export function roleModelConfig(config: Config, role: ModelRole, envOverrides: Record<string, string> = {}): Required<RoleModelConfig> {
   const settings = config.roleModels?.[role];
+  const envLevel = envOverrides[`${role}Thinking`];
+  if (envLevel) {
+    return {
+      model: envOverrides[role]?.trim() || settings?.model?.trim() || config.model.trim(),
+      thinkingLevel: envLevel as ThinkingLevel,
+    };
+  }
+  if (settings?.thinkingLevel) {
+    return {
+      model: envOverrides[role]?.trim() || settings.model?.trim() || config.model.trim(),
+      thinkingLevel: settings.thinkingLevel,
+    };
+  }
+  const defaultLevel: ThinkingLevel =
+    role === "partitioner"
+      ? "low"
+      : role === "planner"
+        ? (config.thinkingLevel && config.thinkingLevel !== "low" ? config.thinkingLevel : "high")
+        : config.thinkingLevel || "low";
   return {
     model: envOverrides[role]?.trim() || settings?.model?.trim() || config.model.trim(),
-    thinkingLevel: (envOverrides[`${role}Thinking`] || settings?.thinkingLevel || (role === "partitioner" ? "low" : config.thinkingLevel || "low")) as ThinkingLevel,
+    thinkingLevel: defaultLevel,
   };
 }
 
@@ -45,13 +109,29 @@ export function updateRoleModelConfig(config: Config, role: ModelRole, patch: Pa
 export function normalizeModelThinkingLevels(config: Config, catalog?: ProviderCatalog): Config {
   const resolved = new Map<ModelRole, ThinkingLevel>();
   for (const { id } of modelRoles) {
+    const roleConfig = config.roleModels?.[id];
     const settings = roleModelConfig(config, id);
     const model = catalog?.models.find(item => `${item.provider}/${item.id}` === settings.model);
     const levels = model?.thinkingLevels;
-    let level = settings.thinkingLevel;
-    if (levels?.length && !levels.includes(level)) {
-      const fallback = model?.thinkingLevelFallbacks?.[level];
-      if (fallback && levels.includes(fallback)) level = fallback;
+    let level: ThinkingLevel;
+    if (roleConfig?.thinkingLevel) {
+      level = roleConfig.thinkingLevel;
+      if (levels?.length && !levels.includes(level)) {
+        const fallback = model?.thinkingLevelFallbacks?.[level];
+        if (fallback && levels.includes(fallback)) level = fallback;
+        else level = defaultRoleThinkingLevel(id, levels, model?.thinkingLevelFallbacks);
+      }
+    } else if (id === "nodeAgent" && config.thinkingLevel && config.thinkingLevel !== "low") {
+      level = config.thinkingLevel;
+      if (levels?.length && !levels.includes(level)) {
+        const fallback = model?.thinkingLevelFallbacks?.[level];
+        if (fallback && levels.includes(fallback)) level = fallback;
+        else level = defaultRoleThinkingLevel(id, levels, model?.thinkingLevelFallbacks);
+      }
+    } else {
+      level = levels?.length
+        ? defaultRoleThinkingLevel(id, levels, model?.thinkingLevelFallbacks)
+        : settings.thinkingLevel;
     }
     resolved.set(id, level);
   }

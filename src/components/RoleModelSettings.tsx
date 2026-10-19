@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import React, { useState } from "react";
 import type { Config, ThinkingLevel } from "../types";
 import type { ProviderCatalog } from "../services/providerAuth";
-import { modelRoles, normalizeModelThinkingLevels, roleModelConfig, updateRoleModelConfig } from "../modelConfig";
+import { defaultRoleThinkingLevel, modelRoles, normalizeModelThinkingLevels, roleModelConfig, updateRoleModelConfig } from "../modelConfig";
 
 const thinkingLabels: Record<ThinkingLevel, string> = {
   off: t("关闭"), minimal: t("最少 (minimal)"), low: t("低 (low)"),
@@ -58,11 +58,15 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
             <p>{role.description}</p>
             <div className="form-grid">
               <label className="form-field">
-                <span>{role.label}{t(" 模型")}</span>
+                <span>{t("模型")}</span>
                 <select value={model} onChange={event => {
                   const value = event.target.value;
                   if (!value || availableModels.some(item => `${item.provider}/${item.id}` === value)) {
-                    setConfig(prev => normalizeModelThinkingLevels(updateRoleModelConfig(prev, role.id, { model: value }), catalog));
+                    setConfig(prev => {
+                      const targetModel = catalog?.models.find(item => `${item.provider}/${item.id}` === value);
+                      const defaultLevel = value ? defaultRoleThinkingLevel(role.id, targetModel?.thinkingLevels, targetModel?.thinkingLevelFallbacks) : undefined;
+                      return normalizeModelThinkingLevels(updateRoleModelConfig(prev, role.id, { model: value, thinkingLevel: defaultLevel }), catalog);
+                    });
                   }
                 }} className="provider-filter-select" disabled={busy || !catalog || availableModels.length === 0}>
                   <option value="">{role.id === "nodeAgent" ? t("请选择可用模型") : t("使用 Node Agent 默认模型")}</option>
@@ -71,7 +75,7 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
                 </select>
               </label>
               <label className="form-field">
-                <span>{`${role.label}${t(" 思维等级")}`}</span>
+                <span>{t("思维等级")}</span>
                 <select value={settings.thinkingLevel} disabled={busy || levels.length <= 1} onChange={event => {
                   const value = event.target.value as ThinkingLevel;
                   if (levels.includes(value)) {
@@ -81,15 +85,20 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
                   {!supported && <option value={settings.thinkingLevel} disabled>{thinkingLabels[settings.thinkingLevel]}</option>}
                   {levels.map(value => <option key={value} value={value}>{thinkingLabels[value]}</option>)}
                 </select>
-                {levels.length === 0 && <small>{t("暂未获取该模型的思维等级，请刷新 Provider 状态。")}</small>}
               </label>
             </div>
-            <small className={override ? "role-model-warning" : "role-model-effective"}>
-              {override ? t("环境变量覆盖：") : t("保存后使用：")}{effective.model || t("未设置模型")} · {effective.thinkingLevel}
+            <small className={override || !effective.model ? "role-model-warning" : "role-model-effective"}>
+              {override
+                ? `${t("环境变量覆盖：")}${effective.model ? `${effective.model} · ${effective.thinkingLevel}` : t("未设置模型")}`
+                : effective.model
+                  ? `${t("保存后使用：")}${effective.model} · ${effective.thinkingLevel}`
+                  : t("未设置模型")}
             </small>
             {unavailable && <small className="role-model-warning">{t("当前使用的模型不可用，请先认证对应 Provider 或重新选择可用模型。")}</small>}
             {role.id === "nodeAgent" && (envOverrides.merger || envOverrides.mergerThinking) && (
-              <small className="role-model-warning">{t("Merger 环境变量覆盖：")}{envOverrides.merger || settings.model} · {envOverrides.mergerThinking || settings.thinkingLevel}</small>
+              <small className="role-model-warning">
+                {t("Merger 环境变量覆盖：")}{envOverrides.merger || settings.model ? `${envOverrides.merger || settings.model} · ${envOverrides.mergerThinking || settings.thinkingLevel}` : t("未设置模型")}
+              </small>
             )}
           </section>
         );

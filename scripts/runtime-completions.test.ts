@@ -192,3 +192,85 @@ test("planning stream preserves the persisted Run identity through completion", 
     assert.deepEqual(events, [result.runId]);
   } finally { globalThis.fetch = original; }
 });
+
+test("pickRepository surfaces rejection errors instead of falling back to window.prompt banner", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalPrompt = globalThis.window?.prompt;
+  let promptCalled = false;
+  (globalThis as any).window = globalThis.window || {};
+  globalThis.window.prompt = () => {
+    promptCalled = true;
+    return "/some/path";
+  };
+  try {
+    const sizeLimitError = "工作区体积超过 10GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。";
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: sizeLimitError }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+    await assert.rejects(
+      runtimeService.pickRepository(),
+      (err: Error) => err.message === sizeLimitError,
+      "oversized workspace rejection must throw instead of falling back to path prompt"
+    );
+    assert.equal(promptCalled, false, "window.prompt must not be called when picker rejects a folder");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalPrompt) globalThis.window.prompt = originalPrompt;
+    else delete (globalThis as any).window.prompt;
+  }
+});
+
+test("pickRepository returns null without prompting when native picker is cancelled", async () => {
+  const originalFetch = globalThis.fetch;
+  let promptCalled = false;
+  (globalThis as any).window = globalThis.window || {};
+  globalThis.window.prompt = () => {
+    promptCalled = true;
+    return "/some/path";
+  };
+  try {
+    globalThis.fetch = async () => response({ supported: true, repository: null, cancelled: true });
+    const result = await runtimeService.pickRepository();
+    assert.equal(result, null);
+    assert.equal(promptCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete (globalThis as any).window.prompt;
+  }
+});
+
+test("pickRepository falls back to window.prompt only when picker is unsupported or unavailable", async () => {
+  const originalFetch = globalThis.fetch;
+  let promptCalled = false;
+  (globalThis as any).window = globalThis.window || {};
+  globalThis.window.prompt = () => {
+    promptCalled = true;
+    return "/manual/project";
+  };
+  try {
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("pick_repository")) {
+        return response({ supported: false, repository: null, cancelled: false });
+      }
+      if (url.includes("detect_repository")) {
+        return response({
+          path: "/manual/project",
+          name: "project",
+          branch: "main",
+          head: "abc",
+          clean: true,
+          isShadow: false,
+        });
+      }
+      return response({});
+    };
+    const result = await runtimeService.pickRepository();
+    assert.equal(promptCalled, true, "window.prompt must be called when picker is unsupported");
+    assert.equal(result?.path, "/manual/project");
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete (globalThis as any).window.prompt;
+  }
+});

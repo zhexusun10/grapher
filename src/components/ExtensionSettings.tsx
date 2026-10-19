@@ -17,9 +17,9 @@ export function ExtensionItem({ extension, disabled, onToggle }: {
   return <li className="extension-settings-row">
     <div>
       <strong>{extension.name}</strong>
-      <code title={description}>{description}</code>
+      <code>{description}</code>
     </div>
-    {extension.required ? <span className="extension-settings-required" role="img" aria-label={t('始终启用，不可删除')} title={t('始终启用，不可删除')}>
+    {extension.required ? <span className="extension-settings-required" role="img" aria-label={t('始终启用，不可删除')}>
       <LockKeyhole size={14} aria-hidden="true" />
     </span> : <button type="button" className="secondary" disabled={disabled} onClick={() => onToggle(extension)}
       aria-label={t('{0}扩展 {1}', extension.enabled ? t('删除') : t('添加'), extension.name)}>

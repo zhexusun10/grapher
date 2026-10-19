@@ -274,10 +274,16 @@ export const runtimeService = {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("不是有效的 Git 仓库") || msg.includes("未找到 .git")) {
+      if (
+        msg.includes("folder picker is unavailable") ||
+        msg.includes("folder picker failed") ||
+        msg.includes("404") ||
+        msg.includes("Unknown command")
+      ) {
+        console.warn("Native file picker failed or unsupported, fallback to prompt", err);
+      } else {
         throw err;
       }
-      console.warn("Native file picker failed or unsupported, fallback to prompt", err);
     }
     const path = window.prompt(t("输入本地项目文件夹绝对路径（支持 Git 仓库或普通文件夹）"));
     if (!path?.trim()) return null;

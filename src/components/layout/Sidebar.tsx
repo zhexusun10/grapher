@@ -1,7 +1,7 @@
 import { t } from "../../i18n";
 import React, { useState } from "react";
 import { createPortal } from "react-dom";
-import { Folder, Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
+import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
 import { ProjectItem } from "../../types";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
 
@@ -112,7 +112,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
             aria-label={t("添加或打开本地 Git 仓库")}
-            title={t("添加或打开本地 Git 仓库")}
             onClick={onOpenProject}
             disabled={isOpeningProject}
             aria-busy={isOpeningProject}
@@ -150,13 +149,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             );
           })
         ) : (
-          <div
-            className={`empty-projects-hint ${isOpeningProject ? "disabled" : ""}`}
-            onClick={isOpeningProject ? undefined : onOpenProject}
-          >
-            {isOpeningProject ? <Loader2 size={24} className="sidebar-btn-spin" /> : <Folder size={24} />}
-            <span>{isOpeningProject ? t("正在打开...") : t("暂无工作区")}</span>
-            <small>{isOpeningProject ? t("等待选择本地项目文件夹") : t("点击打开本地项目文件夹")}</small>
+          <div className="projects-placeholder">
+            <span>{t("暂无工作区")}</span>
           </div>
         )}
       </div>
@@ -168,7 +162,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             type="button"
             className="sidebar-add-btn icon-tiny-btn"
             aria-label={t("新建对话")}
-            title={t("新建对话")}
             onClick={onNewConversation}
           >
             <Plus size={18} />
@@ -257,7 +250,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           className={`sidebar-bottom-btn ${isSettingsOpen ? "active" : ""}`}
           onClick={onOpenSettings}
           aria-label="Settings"
-          title="Settings"
         >
           <Settings2 size={18} />
           <span>Settings</span>

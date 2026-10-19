@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
-import { applyModelConfig, normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
+import { applyModelConfig, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import { providerAuth, type ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
@@ -85,6 +85,18 @@ test("role selectors offer only available models and their providers, without fr
   assert.ok(!markup.includes("Unavailable Provider"));
   assert.ok(!markup.includes("<input"));
   assert.ok(!markup.includes("<datalist"));
+});
+
+test("role sections do not repeat agent names in field labels", () => {
+  const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config: legacy, setConfig: () => {}, catalog, busy: false }));
+  assert.ok(markup.includes(`<span>${t("模型")}</span>`));
+  assert.ok(markup.includes(`<span>${t("思维等级")}</span>`));
+  assert.ok(!markup.includes("<span>Node Agent 模型</span>"));
+  assert.ok(!markup.includes("<span>Node Agent 思维等级</span>"));
+  assert.ok(!markup.includes("<span>Planner 模型</span>"));
+  assert.ok(!markup.includes("<span>Planner 思维等级</span>"));
+  assert.ok(!markup.includes("<span>Partitioner 模型</span>"));
+  assert.ok(!markup.includes("<span>Partitioner 思维等级</span>"));
 });
 
 test("an unavailable saved model is preserved as a disabled option with a warning", () => {
@@ -180,11 +192,64 @@ test("unknown capabilities disable controls and never invent seven choices or ov
       assert.equal(field.values.length, 1);
       assert.match(field.select, /<select[^>]*disabled=""/);
       assert.match(field.select, /<option[^>]*disabled=""/);
-      assert.ok(field.card.includes(t("暂未获取该模型的思维等级，请刷新 Provider 状态。")));
+      assert.ok(!field.card.includes(t("暂未获取该模型的思维等级，请刷新 Provider 状态。")));
     }
   }
   const unavailable = updateRoleModelConfig(legacy, "planner", { model: "closed/old", thinkingLevel: "max" });
   assert.equal(normalizeModelThinkingLevels(unavailable, catalog), unavailable);
+});
+
+test("defaultRoleThinkingLevel defaults planner to highest, node agent to one tier below highest, partitioner to low", () => {
+  // Model with ["off", "low", "high"]
+  assert.equal(defaultRoleThinkingLevel("planner", ["off", "low", "high"]), "high");
+  assert.equal(defaultRoleThinkingLevel("nodeAgent", ["off", "low", "high"]), "low");
+  assert.equal(defaultRoleThinkingLevel("partitioner", ["off", "low", "high"]), "low");
+
+  // Model with ["low", "high", "max"]
+  assert.equal(defaultRoleThinkingLevel("planner", ["low", "high", "max"]), "max");
+  assert.equal(defaultRoleThinkingLevel("nodeAgent", ["low", "high", "max"]), "high");
+  assert.equal(defaultRoleThinkingLevel("partitioner", ["low", "high", "max"]), "low");
+
+  // Model with full 7 levels
+  const allLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  assert.equal(defaultRoleThinkingLevel("planner", allLevels), "max");
+  assert.equal(defaultRoleThinkingLevel("nodeAgent", allLevels), "xhigh");
+  assert.equal(defaultRoleThinkingLevel("partitioner", allLevels), "low");
+
+  // Single-level model ["off"]
+  assert.equal(defaultRoleThinkingLevel("planner", ["off"]), "off");
+  assert.equal(defaultRoleThinkingLevel("nodeAgent", ["off"]), "off");
+  assert.equal(defaultRoleThinkingLevel("partitioner", ["off"]), "off");
+
+  // Single-level model ["high"]
+  assert.equal(defaultRoleThinkingLevel("planner", ["high"]), "high");
+  assert.equal(defaultRoleThinkingLevel("nodeAgent", ["high"]), "high");
+  assert.equal(defaultRoleThinkingLevel("partitioner", ["high"]), "high");
+
+  // Fallback for partitioner when "low" is not in options
+  assert.equal(defaultRoleThinkingLevel("partitioner", ["minimal", "max"], { low: "max" }), "max");
+});
+
+test("when no providers are available or no model is set, neither missing thinking levels nor unconfigured model reasoning levels are displayed", () => {
+  const empty: ProviderCatalog = {
+    providers: [{ id: "example", name: "Example", methods: [], configured: false, authType: null }],
+    models: [{ provider: "example", id: "default", name: "Default", api: "test", contextWindow: 1000, available: false }],
+    warning: null,
+  };
+  const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config: defaultConfig, setConfig: () => {}, catalog: empty, busy: false }));
+  assert.ok(!markup.includes("暂未获取该模型的思维等级"));
+  assert.ok(!markup.includes(" · low"));
+  assert.ok(markup.includes(t("未设置模型")));
+  assert.ok(markup.includes(t("暂无可用模型，请先在上方登录 Provider 或绑定 API Key，然后刷新状态。")));
+});
+
+test("normalizing without explicit role thinking levels applies role defaults based on model capabilities", () => {
+  // Model example/restricted has ["low", "high", "max"]
+  const config: Config = { ...defaultConfig, model: "example/restricted" };
+  const normalized = normalizeModelThinkingLevels(config, catalog);
+  assert.equal(roleModelConfig(normalized, "planner").thinkingLevel, "max", "planner defaults to highest level");
+  assert.equal(roleModelConfig(normalized, "nodeAgent").thinkingLevel, "high", "nodeAgent defaults to one tier lower than highest");
+  assert.equal(roleModelConfig(normalized, "partitioner").thinkingLevel, "low", "partitioner defaults to low");
 });
 
 test("capability refreshes and model switches use backend fallbacks rather than a frontend level heuristic", () => {
@@ -490,6 +555,40 @@ test("providerAuth catalog cache stores and returns synchronously without redund
   } finally {
     globalThis.fetch = originalFetch;
     providerAuth.setCachedCatalog(null);
+  }
+});
+
+test("ProviderSettings does not include 'configured API key' cards under bound credentials", async () => {
+  const { createServer } = await import('vite');
+  const vite = await createServer({
+    configFile: false, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] },
+    server: { middlewareMode: true, watch: null, hmr: false, ws: false },
+  });
+  try {
+    const { providerAuth: ssrAuth } = await vite.ssrLoadModule('/src/services/providerAuth.ts');
+    const { ProviderSettings } = await vite.ssrLoadModule('/src/components/ProviderSettings.tsx');
+    const catalogWithConfiguredKey: ProviderCatalog = {
+      providers: [
+        { id: "stored-prov", name: "Stored Provider", methods: [], configured: true, authSource: "stored", authType: "api_key" },
+        { id: "env-key-prov", name: "Configured Key Provider", methods: [], configured: true, authSource: "env", authEnvVar: "configured API key" },
+      ],
+      models: [],
+      warning: null,
+    };
+    ssrAuth.setCachedCatalog(catalogWithConfiguredKey);
+    try {
+      const markup = renderToStaticMarkup(React.createElement(ProviderSettings, {
+        onCatalogChange: () => {},
+        onBusyChange: () => {},
+      }));
+      assert.ok(markup.includes(`${t("已绑定的 Provider 凭据 (")}1)`));
+      assert.ok(!markup.includes(`${t("已绑定的 Provider 凭据 (")}2)`));
+      assert.ok(!markup.includes("configured API key"));
+    } finally {
+      ssrAuth.setCachedCatalog(null);
+    }
+  } finally {
+    await vite.close();
   }
 });
 

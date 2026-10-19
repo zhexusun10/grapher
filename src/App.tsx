@@ -440,13 +440,13 @@ export default function App() {
   const [editPrefillText, setEditPrefillText] = useState<string>("");
   const planningAbortControllerRef = useRef<AbortController | null>(null);
 
-  // 规划路由模式选择：auto (默认，Partitioner评估) / serial (单Agent跳过Partitioner) / graph (Planner跳过Partitioner)
+  // 规划路由模式选择：graph (默认，Planner跳过Partitioner) / serial (单Agent跳过Partitioner) / auto (Partitioner评估)
   const [planMode, setPlanMode] = useState<PlanMode>(() => {
     try {
       const saved = localStorage.getItem("grapher_plan_mode");
       if (saved === "serial" || saved === "graph" || saved === "auto") return saved;
     } catch { }
-    return "auto";
+    return "graph";
   });
 
   const handlePlanModeChange = useCallback((mode: PlanMode) => {

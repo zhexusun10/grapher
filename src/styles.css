@@ -245,7 +245,7 @@ h3 {
   flex-direction: column;
   z-index: 10;
   overflow: hidden;
-  will-change: width, max-width, transform, opacity;
+  will-change: width, max-width;
   animation: sidebarEnter 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
   transition:
     width var(--sidebar-width-duration) var(--sidebar-anim-ease),
@@ -546,7 +546,7 @@ a,
   .sidebar-skeleton-item::after,
   .sidebar-skeleton-wrap,
   .project-workspace-item,
-  .empty-projects-hint,
+  .projects-placeholder,
   .nav-section,
   .sidebar-bottom,
   .run-item,
@@ -905,45 +905,6 @@ a,
   transform: scale(0.98);
 }
 
-.empty-projects-hint {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 20px 12px;
-  width: var(--sidebar-content-width, 230px);
-  min-width: var(--sidebar-content-width, 230px);
-  box-sizing: border-box;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  text-align: center;
-  transition: all 0.15s ease;
-  animation: sidebarListFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.empty-projects-hint:hover {
-  border-color: var(--text-primary);
-  color: var(--text-primary);
-}
-
-.empty-projects-hint span {
-  font-size: 12.5px;
-  font-weight: 500;
-  margin-top: 6px;
-}
-
-.empty-projects-hint small {
-  font-size: 11px;
-  color: var(--text-secondary);
-  transition: color 0.15s ease;
-}
-
-.empty-projects-hint:hover small {
-  color: var(--text-primary);
-}
 
 .section-actions{
   display: flex;
@@ -1291,6 +1252,7 @@ a,
   }
 }
 
+.projects-placeholder,
 .run-placeholder {
   font-size: 13px;
   color: var(--text-secondary);

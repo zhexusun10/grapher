@@ -256,7 +256,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                       const cleanPath = normalizeWorkspacePath(dataPath);
                       if (cleanPath) void navigator.clipboard.writeText(cleanPath);
                     }}
-                    title={t("复制路径")}
+                    aria-label={t("复制路径")}
                   >
                     <Copy size={13} />
                   </button>
