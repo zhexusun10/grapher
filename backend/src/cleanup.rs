@@ -74,7 +74,7 @@ impl Target {
             Self::Data { bucket, id } => {
                 if !matches!(
                     bucket.as_str(),
-                    "sessions" | "planning" | "mergers" | "planner-sessions" | "partition-workers" | "environments"
+                    "sessions" | "planning" | "mergers" | "planner-sessions" | "partition-workers" | "environments" | "file-changes"
                 ) || !safe_id(id)
                 {
                     return Err("Invalid owned session directory".into());
@@ -407,6 +407,9 @@ pub(crate) fn manifest(
         }
         if safe_id(&state.run_id) {
             targets.insert(Target::data("planner-sessions", &state.run_id));
+        }
+        if safe_id(&state.run_id) {
+            targets.insert(Target::data("file-changes", &state.run_id));
         }
     } else {
         targets.retain(|target| matches!(target, Target::Workspace { .. }));

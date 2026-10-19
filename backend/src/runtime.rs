@@ -282,6 +282,17 @@ impl Runtime {
             .unwrap_or(0)
     }
 
+    /// Persist the tiny per-Run file-change summary after durable terminal
+    /// events, so reopening a conversation never replays its logs for counts.
+    fn persist_file_changes_if(&self, terminal: bool) {
+        if !terminal {
+            return;
+        }
+        if let Err(error) = crate::file_changes::persist_run(&self.root, &self.state.run_id) {
+            eprintln!("[Grapher] Cannot persist file-change summary: {error}");
+        }
+    }
+
     pub fn emit(&mut self, mut kind: EventKind) -> Result<(), String> {
         if let EventKind::Prepared { execution_id, .. } = &kind {
             if self
@@ -403,7 +414,16 @@ impl Runtime {
             | EventKind::MergerFailed { execution_id, .. } => Some(execution_id.clone()),
             _ => None,
         };
+        let persist_changes = matches!(
+            &kind,
+            EventKind::Finished { .. }
+                | EventKind::Failed { execution_id: Some(_), .. }
+                | EventKind::MergerFinished { .. }
+                | EventKind::MergerFailed { .. }
+                | EventKind::PublicationCompleted { .. }
+        );
         self.store.append(&mut self.state, kind)?;
+        self.persist_file_changes_if(persist_changes);
         if let Some((execution_id, before_bytes)) = output_target {
             let after_bytes = self.execution_bytes(&execution_id);
             if before_bytes == 0 && after_bytes > 0 {
@@ -469,7 +489,18 @@ impl Runtime {
                 }
             }
         }
+        let persist_changes = events.iter().any(|kind| {
+            matches!(
+                kind,
+                EventKind::Finished { .. }
+                    | EventKind::Failed { execution_id: Some(_), .. }
+                    | EventKind::MergerFinished { .. }
+                    | EventKind::MergerFailed { .. }
+                    | EventKind::PublicationCompleted { .. }
+            )
+        });
         self.store.append_batch(&mut self.state, events)?;
+        self.persist_file_changes_if(persist_changes);
         let mut crossed_zero = false;
         let mut notifications = Vec::with_capacity(targets.len());
         for (execution_id, (before_bytes, settled)) in targets {
@@ -4589,6 +4620,17 @@ fn perform_with_merger_inner(
             Some(&job.run_id),
         )?
     };
+    if !head.is_empty() && !before.is_empty() {
+        crate::file_changes::record_git_commit_changes(
+            &job.run_id,
+            &job.execution.id,
+            &job.execution.node,
+            path,
+            &repository,
+            &before,
+            &head,
+        );
+    }
     if let (Some(store), Some(input)) = (&environments, &environment_result_input) {
         store.prove_accelerator(&repository, path, input)?;
         store.seal(

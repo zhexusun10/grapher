@@ -1429,7 +1429,7 @@
 
 .card-action-btn.login-btn {
   background: var(--brand-default);
-  color: #000;
+  color: #fff;
   font-weight: 600;
   width: 100%;
   justify-content: center;
@@ -1511,15 +1511,6 @@
 
 .configured-key-icon {
   color: #4ade80;
-}
-
-.configured-status-tag {
-  font-size: 11px;
-  color: #4ade80;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-weight: 500;
 }
 
 .configured-list {

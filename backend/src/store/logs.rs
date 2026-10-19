@@ -108,10 +108,24 @@ impl Store {
         }
         tx.commit().map_err(|e| e.to_string())?;
         // Neither cursors nor the live projection advance before COMMIT.
+        let repo = state.config.as_ref().map(|c| c.repository.clone()).unwrap_or_default();
         for (execution_id, text) in texts {
             if let Some(execution) = state.executions.iter_mut().chain(state.mergers.iter_mut()).find(|e| e.id == execution_id) {
                 append_live_output(execution, &text);
                 execution.output_bytes = offsets[&execution_id];
+                // Incremental parse of just this flush; a long transcript is
+                // never re-read on every append.
+                if text.contains("\"tool") || text.contains("\"grapher_process") {
+                    crate::file_changes::update_from_log_chunk(
+                        &state.run_id,
+                        &execution.id,
+                        &execution.node,
+                        &execution.worktree,
+                        &repo,
+                        &text,
+                        execution.status == "running",
+                    );
+                }
             }
         }
         self.execution_offsets.borrow_mut().extend(offsets);

@@ -796,12 +796,10 @@ fn snapshot(service: &Arc<Service>) -> Result<Snapshot, String> {
 }
 
 fn history(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
-    service
-        .runtime
-        .lock()
-        .map_err(|error| error.to_string())?
-        .store
-        .load(&run_id)
+    let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    let snapshot = runtime.store.load(&run_id)?;
+    crate::file_changes::warm_run_changes(&snapshot, &runtime.store, Some(&runtime.root));
+    Ok(snapshot)
 }
 
 fn load_run(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
@@ -812,6 +810,7 @@ fn load_run(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> 
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
     let snapshot = runtime.load_run(&run_id)?;
+    crate::file_changes::warm_run_changes(&snapshot, &runtime.store, Some(&runtime.root));
     #[cfg(not(feature = "fixture"))]
     runtime.warm_completed_serial_node();
     Ok(snapshot)
@@ -1948,6 +1947,8 @@ fn plan_goal_internal_with_started(
                         // only Pi's private conversation directory is shared.
                         let mut planner_log = fs::File::create(directory.join("planner.jsonl"))
                             .map_err(|e| e.to_string())?;
+                        crate::file_changes::reset_planning(&owner, &planning_id);
+                        let planning_worktree = planner_workspace.to_string_lossy().into_owned();
                         let mut log_error = None;
                         check_planning_cancelled(&owner)?;
                         let planner_start = std::time::Instant::now();
@@ -1993,6 +1994,13 @@ fn plan_goal_internal_with_started(
                                     log_error = Some(error.to_string());
                                 }
                                 log.push_str(&text);
+                                crate::file_changes::update_planning_from_log_chunk(
+                                    &owner,
+                                    &planning_id,
+                                    &planning_worktree,
+                                    &repo_str,
+                                    &text,
+                                );
                                 on_planner_line(&text);
                                 if let Some(event) = serde_json::from_str::<serde_json::Value>(&text).ok() {
                                     if event["type"] == "tool_execution_end" && event["toolName"] == "switch_workspace" && event["isError"] != true {
@@ -2042,6 +2050,10 @@ fn plan_goal_internal_with_started(
                                 }
                             },
                         );
+                        crate::file_changes::settle_planning(&owner, &planning_id);
+                        if let Ok(runtime) = service.runtime.lock() {
+                            let _ = crate::file_changes::persist_run(&runtime.root, &owner);
+                        }
                         let planner_wall_sec = planner_start.elapsed().as_secs_f64();
                         if let Some(error) = log_error {
                             return Err(format!("Cannot persist planning output: {error}"));
@@ -2661,6 +2673,8 @@ fn drive(service: Arc<Service>) {
                                 {
                                     return Err("Stale publication worker cannot commit to this Run".into());
                                 }
+                                let base_commit = runtime.state.base.clone();
+                                let published_commit = head.clone();
                                 let mut events = Vec::new();
                                 if let Some(descriptor) = descriptor { events.push(EventKind::ResultPublished { descriptor }); }
                                 events.push(EventKind::PublicationCompleted { head });
@@ -2672,6 +2686,12 @@ fn drive(service: Arc<Service>) {
                                 // contains the merged result.
                                 let repository = PathBuf::from(&publication.repository);
                                 drop(runtime);
+                                crate::file_changes::record_publication_git_changes(
+                                    &run_id,
+                                    &repository,
+                                    &base_commit,
+                                    &published_commit,
+                                );
                                 reclaim_source_snapshot(&service, &repository);
                                 let review = {
                                     let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
@@ -4031,6 +4051,22 @@ fn get_execution_output(
     };
     // Legacy events without a checkpoint have no structured metrics. Recover
     // them from the already requested full response, never during Store::load.
+    if !page.content.is_empty() && page.start_offset == 0 && page.complete {
+        if let Some(exec) = runtime.state.executions.iter().chain(&runtime.state.mergers)
+            .find(|e| e.id == execution_id) {
+            let repo = runtime.state.config.as_ref().map(|c| c.repository.as_str()).unwrap_or_default();
+            crate::file_changes::update_from_log_text(
+                &run_id,
+                &execution_id,
+                &exec.node,
+                &exec.worktree,
+                repo,
+                &page.content,
+                status == "running",
+                true,
+            );
+        }
+    }
     if status != "running" && page.start_offset == 0 && page.complete {
         let state = &mut runtime.state;
         if let Some(exec) = state.executions.iter_mut().chain(state.mergers.iter_mut())
@@ -4043,6 +4079,71 @@ fn get_execution_output(
     Ok(serde_json::json!({ "runId":run_id, "executionId":execution_id,
         "content":page.content, "startOffset":page.start_offset, "nextOffset":page.next_offset, "totalBytes":page.total_bytes,
         "complete":page.complete, "status":status }))
+}
+
+fn get_file_changes(
+    body: &serde_json::Value,
+    service: &Arc<Service>,
+) -> Result<serde_json::Value, String> {
+    let requested_run_id = body
+        .get("runId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let execution_id = body
+        .get("executionId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let state = {
+        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        let state = if requested_run_id.is_empty() || runtime.state.run_id == requested_run_id {
+            runtime.state.clone()
+        } else {
+            runtime.store.load(&requested_run_id)?
+        };
+        crate::file_changes::warm_run_changes(&state, &runtime.store, Some(&runtime.root));
+        state
+    };
+
+    let summary = if let Some(exec_id) = &execution_id {
+        if let Some(exec) = state
+            .executions
+            .iter()
+            .chain(state.mergers.iter())
+            .find(|e| &e.id == exec_id)
+        {
+            if exec.status == "running" && !exec.before.is_empty() && !exec.worktree.is_empty() {
+                if let Some(live_git) = crate::file_changes::compute_git_changes(
+                    std::path::Path::new(&exec.worktree),
+                    &exec.before,
+                    None,
+                    &exec.node,
+                    &exec.id,
+                ) {
+                    let cached = crate::file_changes::get_cached_execution_changes(&state.run_id, exec)
+                        .unwrap_or_default();
+                    crate::file_changes::merge_summaries(&[cached, live_git], true)
+                } else {
+                    crate::file_changes::get_cached_execution_changes(&state.run_id, exec)
+                        .unwrap_or_default()
+                }
+            } else {
+                crate::file_changes::get_cached_execution_changes(&state.run_id, exec)
+                    .unwrap_or_default()
+            }
+        } else {
+            crate::file_changes::FileChangeSummary::default()
+        }
+    } else {
+        crate::file_changes::get_cached_run_changes(&state).unwrap_or_default()
+    };
+
+    Ok(serde_json::json!({
+        "runId": state.run_id,
+        "executionId": execution_id,
+        "summary": summary,
+    }))
 }
 
 fn get_merger_prompt(
@@ -4794,6 +4895,7 @@ pub fn dispatch(
             service,
         )?),
         "get_execution_output" => return get_execution_output(&body, service),
+        "get_file_changes" => to_value(get_file_changes(&body, service)?),
         "get_merger_prompt" => to_value(get_merger_prompt(&body, service)?),
         "get_planning_snapshot" => {
             let id: String = argument(&body, "planningId")?;

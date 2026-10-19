@@ -128,6 +128,21 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
     if let Some(plan_type) = &state.plan_type {
         metadata["planType"] = json!(plan_type);
     }
+    if !state.run_id.is_empty() {
+        for (idx, exec) in state.executions.iter().enumerate() {
+            if let Some(changes) = crate::file_changes::get_cached_execution_changes(&state.run_id, exec) {
+                metadata["executions"][idx]["fileChanges"] = json!(changes);
+            }
+        }
+        for (idx, exec) in state.mergers.iter().enumerate() {
+            if let Some(changes) = crate::file_changes::get_cached_execution_changes(&state.run_id, exec) {
+                metadata["mergers"][idx]["fileChanges"] = json!(changes);
+            }
+        }
+        if let Some(run_changes) = crate::file_changes::get_cached_run_changes(state) {
+            metadata["fileChanges"] = json!(run_changes);
+        }
+    }
     Ok(metadata)
 }
 
@@ -135,6 +150,43 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
 mod tests {
     use super::*;
     use crate::model::{Event, EventKind};
+
+    #[test]
+    fn file_change_metadata_exposes_counts_for_the_browser() {
+        use crate::model::{Event, EventKind};
+
+        let mut state = Snapshot::default();
+        state.run_id = "changes-run".into();
+        state.events.push(Event {
+            sequence: 1, timestamp: 1,
+            kind: EventKind::Paused { paused: false },
+        });
+        state.executions.push(crate::model::Execution {
+            id: "exec".into(), node: "worker".into(), revision: 0, attempt: 1,
+            session_id: "session".into(), worktree: "/repo".into(), before: String::new(),
+            workspace_lineage: vec![], after: None, input: None, result: None,
+            status: "completed".into(), output: String::new(), output_bytes: 0, pid: None,
+            started_at: 1, completed_at: Some(2), metrics: None,
+        });
+        let jsonl = [
+            r#"{"type":"tool_execution_start","toolCallId":"t","toolName":"edit","args":{"path":"src/a.ts","edits":[{"oldText":"old","newText":"new"}]}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t","toolName":"edit","isError":false}"#,
+        ].join("
+");
+        crate::file_changes::update_from_log_text(
+            "changes-run", "exec", "worker", "/repo", "/repo", &jsonl, false, true,
+        );
+
+        let projected = snapshot_metadata(&state).unwrap();
+        let changes = &projected["executions"][0]["fileChanges"];
+        assert_eq!(changes["totalFiles"], 1);
+        assert_eq!(changes["files"][0]["path"], "src/a.ts");
+        assert_eq!(changes["files"][0]["additions"], 1);
+        assert_eq!(changes["files"][0]["deletions"], 1);
+        assert!(changes["files"][0].get("diff").is_none());
+        assert_eq!(projected["fileChanges"]["totalFiles"], 1);
+        crate::file_changes::invalidate_run("changes-run");
+    }
 
     #[test]
     fn metadata_filters_large_outputs_without_changing_event_schema() {

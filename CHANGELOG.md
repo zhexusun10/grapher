@@ -5,6 +5,26 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-10-19
+
+### Added
+
+- **Workspace file changes panel and diff card components**: Added a file changes disclosure panel and diff indicators to inspect files created, modified, or deleted across agent executions (`src/components/changes/`, `src/hooks/useWorkspaceChanges.ts`, `src/services/fileChanges.ts`, `src/components/AnimatedDisclosure.tsx`, `backend/src/file_changes.rs`).
+  - Aggregates file change status (added, modified, deleted, renamed) alongside per-file line addition and deletion counts (`+N / −M`).
+  - Displays real-time loading spinners on files actively being touched by in-flight tool runs (`write`, `edit`, `bash`).
+  - Seamlessly integrates into the workspace details drawer across Planner, Serial, and Graph node conversation views with smooth animated transitions.
+  - Backed by incremental backend log chunk parsing and Git working tree status, avoiding expensive full-repository diff operations on every turn.
+
+### Changed
+
+- **Bypassed Git pipeline in Serial mode**: Serial execution now operates directly against the project workspace without creating Git snapshots, staging commits, worktrees, or shadow repositories (`backend/src/runtime.rs`, `backend/src/workspace.rs`, `backend/src/server.rs`, `backend/src/serial_workspace_tests.rs`). Bypassing the Git snapshot cycle for single-agent execution eliminates unnecessary commit overhead, reduces file I/O churn, and keeps the host repository clean.
+- **SQLite logging and output stream coalescing**: Introduced an in-memory output buffer to coalesce high-frequency, small streaming deltas (such as thinking and text tokens) into bounded batches (up to 4 KB or 50 ms) before database persistence (`backend/src/engine/output_buffer.rs`, `backend/src/engine.rs`). Combined with single-transaction batched log appends and incremental transcript projections (`backend/src/store/logs.rs`, `backend/src/store.rs`), this significantly reduces SQLite write operations and JSON serialization overhead while preserving responsive UI streaming and guaranteeing tail preservation on process interruption or timeout.
+
+### Fixed
+
+- **Top-aligned scroll for unrun node agents**: Fixed scroll positioning when opening the conversation view for a node agent that has never run (`src/components/views/GraphWorkbench.tsx`). Because unexecuted nodes only contain their initial task prompt at the top, the scroller now starts at the top rather than scrolling down to empty space or spuriously displaying the "scroll to bottom" button.
+- **Planner chat transcript settlement and completion sync**: Fixed a race condition where the final message or trailing output of a Planner conversation turn could disappear from the UI (`backend/src/server.rs`, `src/components/PlanningActivity.tsx`). The backend now reliably broadcasts planning output completion notifications (`notify_planning_output`) across both foreground and background turns once durable logs are finalized, and the frontend resets settled segments upon notification and bounds empty-window retries to ensure transcripts are always read through to the true EOF.
+
 ## [1.2.2] - 2026-10-18
 
 ### Fixed
@@ -92,6 +112,7 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
+[1.2.3]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.3
 [1.2.2]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.2
 [1.2.1]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.1
 [1.2.0]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.0

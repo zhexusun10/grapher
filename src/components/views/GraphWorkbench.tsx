@@ -23,7 +23,7 @@ import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
 import { shouldShowRouteBadge } from "../../services/executionRoute";
 import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit } from "../../services/conversationBranch";
-import { captureViewScrollState, resolveViewScroll, calculateWorkspaceDetailsScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
+import { captureViewScrollState, resolveViewScroll, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ThinkingCard } from "../ThinkingCard";
@@ -47,6 +47,9 @@ import { EnvironmentResult } from "../EnvironmentResult";
 import { PlannerTranscript } from "../PlannerTranscript";
 import { resolveExecutionModelAndThinking, roleModelConfig } from "../../modelConfig";
 import { AnimatedUserTurn } from "../AnimatedUserTurn";
+import { useWorkspaceChanges } from "../../hooks/useWorkspaceChanges";
+import { WorkspaceChangesPanel, WorkspaceChangesTrigger } from "../changes/WorkspaceChangesPanel";
+import { AnimatedDisclosure, getConversationViewport } from "../AnimatedDisclosure";
 
 /** Transient I/O status takes precedence over the durable phase copy. */
 function activityStatusText(activity: RuntimeActivity[]): string | null {
@@ -145,26 +148,13 @@ function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = fa
   </button>;
 }
 
-/** The composer overlays the scroller instead of taking space in its layout.
- * Reveal content against its actual top edge, including multiline drafts,
- * attachments and queued-message banners, not the scroller's covered bottom.
- */
-function getConversationViewport(scroll: HTMLElement) {
-  const bounds = scroll.getBoundingClientRect();
-  const top = bounds.top + scroll.clientTop;
-  const scrollBottom = top + scroll.clientHeight;
-  const composer = scroll.parentElement?.querySelector<HTMLElement>(".pane-bottom-chat");
-  const overlay = composer?.getBoundingClientRect();
-  const bottom = overlay && overlay.height > 0 && overlay.bottom > top
-    ? Math.max(top, Math.min(scrollBottom, overlay.top)) : scrollBottom;
-  return { top, bottom, height: bottom - top };
-}
-
 interface WorkspaceDetailsPanelProps {
   showWorking?: boolean;
   compacting?: boolean;
   /** Defaults to the node wording; Planner turns may use different workspaces. */
   label?: string;
+  summaryAction?: React.ReactNode;
+  additionalDetails?: React.ReactNode;
   children: React.ReactNode;
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   onBeforeToggle?: () => void;
@@ -175,6 +165,8 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
   showWorking,
   compacting,
   label,
+  summaryAction,
+  additionalDetails,
   children,
   scrollContainerRef,
   onBeforeToggle,
@@ -182,115 +174,6 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
-  const animatorRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const rafIdRef = useRef<number | null>(null);
-  const interruptedRef = useRef<boolean>(false);
-  const cleanupListenersRef = useRef<(() => void) | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (rafIdRef.current !== null) {
-        cancelAnimationFrame(rafIdRef.current);
-      }
-      cleanupListenersRef.current?.();
-    };
-  }, []);
-
-  const handleToggle = useCallback(() => {
-    const nextOpen = !isOpen;
-    const animator = animatorRef.current;
-    const content = contentRef.current;
-    const panel = panelRef.current;
-
-    if (!animator || !content || !panel) {
-      setIsOpen(nextOpen);
-      return;
-    }
-
-    if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
-    }
-    cleanupListenersRef.current?.();
-    cleanupListenersRef.current = null;
-
-    const container =
-      scrollContainerRef?.current ||
-      (panel.closest(".initial-query-scroll") as HTMLElement | null);
-
-    onBeforeToggle?.();
-
-    const startHeight = animator.offsetHeight;
-    const measuredHeight = Math.max(content.offsetHeight, content.scrollHeight);
-    const targetHeight = nextOpen ? (measuredHeight > 0 ? measuredHeight : 120) : 0;
-
-    const startScrollTop = container ? container.scrollTop : 0;
-    let scrollDelta = 0;
-    interruptedRef.current = false;
-
-    if (container && nextOpen) {
-      const visibleBottom = getConversationViewport(container).bottom - 12;
-      const panelRect = panel.getBoundingClientRect();
-      scrollDelta = calculateWorkspaceDetailsScrollDelta(
-        nextOpen,
-        startHeight,
-        targetHeight,
-        panelRect.bottom,
-        visibleBottom,
-      );
-
-      const onUserScroll = () => {
-        interruptedRef.current = true;
-      };
-      container.addEventListener("wheel", onUserScroll, { passive: true });
-      container.addEventListener("touchmove", onUserScroll, { passive: true });
-      cleanupListenersRef.current = () => {
-        container.removeEventListener("wheel", onUserScroll);
-        container.removeEventListener("touchmove", onUserScroll);
-      };
-    }
-
-    setIsOpen(nextOpen);
-
-    const duration = 280;
-    const startTime = performance.now();
-
-    const tick = (now: number) => {
-      const elapsed = now - startTime;
-      const progress = Math.min(1, elapsed / duration);
-      // ease-out cubic
-      const ease = 1 - Math.pow(1 - progress, 3);
-
-      const currentH = startHeight + (targetHeight - startHeight) * ease;
-      const currentOp = nextOpen ? ease : 1 - ease;
-
-      animator.style.height = `${currentH}px`;
-      animator.style.opacity = `${currentOp}`;
-
-      if (container && scrollDelta > 0 && !interruptedRef.current && container.dataset.transcriptScrollMode !== "latest") {
-        container.scrollTop = startScrollTop + scrollDelta * ease;
-      }
-
-      if (progress < 1) {
-        rafIdRef.current = requestAnimationFrame(tick);
-      } else {
-        rafIdRef.current = null;
-        cleanupListenersRef.current?.();
-        cleanupListenersRef.current = null;
-        if (nextOpen) {
-          animator.style.height = "auto";
-          animator.style.opacity = "1";
-        } else {
-          animator.style.height = "0px";
-          animator.style.opacity = "0";
-        }
-        onAfterToggle?.();
-      }
-    };
-
-    rafIdRef.current = requestAnimationFrame(tick);
-  }, [isOpen, onBeforeToggle, onAfterToggle, scrollContainerRef]);
 
   return (
     <div ref={panelRef} className={`workspace-details ${isOpen ? "open" : ""}`} style={{ marginTop: 12 }}>
@@ -304,28 +187,26 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
         <button
           type="button"
           className="workspace-details-trigger"
-          onClick={handleToggle}
+          onClick={() => setIsOpen(open => !open)}
           aria-expanded={isOpen}
         >
           <span>{label ?? t("工作区与会话信息")}</span>
           <ChevronRight size={11} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} />
         </button>
+        {summaryAction}
       </div>
 
-      <div
-        ref={animatorRef}
-        className="workspace-details-animator"
-        style={{
-          overflow: "hidden",
-          height: 0,
-          opacity: 0,
-        }}
-        aria-hidden={!isOpen}
+      {additionalDetails}
+
+      <AnimatedDisclosure
+        open={isOpen}
+        panelRef={panelRef}
+        scrollContainerRef={scrollContainerRef}
+        onBeforeToggle={onBeforeToggle}
+        onAfterToggle={onAfterToggle}
       >
-        <div ref={contentRef} className="workspace-details-body">
-          {children}
-        </div>
-      </div>
+        <div className="workspace-details-body">{children}</div>
+      </AnimatedDisclosure>
     </div>
   );
 };
@@ -713,8 +594,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     : (plannerRole?.sessionStart ?? plannerStream?.startedAt);
   // The panel also carries the planner's working indicator, so it must exist
   // for the whole live-planning window, before the summary reaches a snapshot.
-  const showPlannerDetails = routeType !== "serial" &&
-    !!(state.planning || failedPlanning || isPlanning);
+  const showPlannerDetails = routeType !== "serial";
   // A run owns one Planner conversation, although each planning attempt has
   // its own durable output log. Replay every recorded turn after a reload —
   // including aborted revision turns — excluding turns still live-streaming.
@@ -1688,6 +1568,52 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   });
 
+  const changesPanelId = React.useId();
+  const [changesOpenForView, setChangesOpenForView] = useState<string | null>(null);
+  const changesPanelOpen = changesOpenForView === conversationViewKey;
+  useEffect(() => {
+    setChangesOpenForView(null);
+  }, [conversationViewKey]);
+
+  const activeScopeExecutions = useMemo(() => (
+    selectedNode && routeType === "graph"
+      ? nodeTurns.flatMap((turn) => turn.executions)
+      : []
+  ), [selectedNode, routeType, nodeTurns]);
+
+  const isCurrentViewWorking =
+    selectedNode && routeType === "graph"
+      ? isSelectedNodeWorking
+      : isMainViewWorking ||
+        graphPhase === "running" ||
+        graphPhase === "publishing" ||
+        graphPhase === "merging";
+
+  const { summary: workspaceChangesSummary } = useWorkspaceChanges({
+    state,
+    // Node/Merger conversations show only their own executions; the main view
+    // uses the run-level projection, which also covers Planner and publication.
+    scopedExecutions:
+      selectedNode && routeType === "graph" ? activeScopeExecutions : undefined,
+    isWorking: isCurrentViewWorking,
+  });
+
+  const changesTrigger = <WorkspaceChangesTrigger
+    summary={workspaceChangesSummary}
+    panelId={changesPanelId}
+    isOpen={changesPanelOpen}
+    onToggle={() => setChangesOpenForView(changesPanelOpen ? null : conversationViewKey)}
+  />;
+  const changesPanel = <WorkspaceChangesPanel
+    key={conversationViewKey}
+    id={changesPanelId}
+    summary={workspaceChangesSummary}
+    open={changesPanelOpen}
+    scrollContainerRef={chatScrollRef}
+    onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
+    onAfterToggle={handleWorkspaceDetailsAfterToggle}
+  />;
+
   const plannerResultCards = <>
     {routeType === "graph" && state.graph.nodes.length > 0 && (
       <motion.div
@@ -1957,6 +1883,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   key={`${state.runId}:${selectedNode.name}`}
                   showWorking={isSelectedNodeWorking}
                   compacting={isSelectedNodeCompacting}
+                  summaryAction={changesTrigger}
+                  additionalDetails={changesPanel}
                   scrollContainerRef={chatScrollRef}
                   onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                   onAfterToggle={handleWorkspaceDetailsAfterToggle}
@@ -2149,6 +2077,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       key={`${state.runId}:serial`}
                       showWorking={isMainViewWorking}
                       compacting={isMainViewWorking && !!serialExecution?.id && !!compactingAttempts[serialExecution.id]}
+                      summaryAction={changesTrigger}
+                      additionalDetails={changesPanel}
                       scrollContainerRef={chatScrollRef}
                       onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                       onAfterToggle={handleWorkspaceDetailsAfterToggle}
@@ -2334,6 +2264,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     label={t("规划会话信息")}
                     showWorking={isMainViewWorking}
                     compacting={isMainViewCompacting}
+                    summaryAction={changesTrigger}
+                    additionalDetails={changesPanel}
                     scrollContainerRef={chatScrollRef}
                     onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                     onAfterToggle={handleWorkspaceDetailsAfterToggle}

@@ -1,0 +1,72 @@
+import React, { useState } from "react";
+import { createRoot } from "react-dom/client";
+import { GraphWorkbench } from "../../src/components/views/GraphWorkbench";
+import { buildSummaryFromFiles } from "../../src/services/fileChanges";
+import { defaultConfig, emptySnapshot, publicationMergerCardId, type Execution, type FileChangeItem, type Snapshot } from "../../src/types";
+import { tokens } from "../../src/tokens";
+import "../../src/styles.css";
+import "../../src/styles-workbench.css";
+import "../../src/styles-planning.css";
+
+const noop = () => {};
+const config = { ...defaultConfig, repository: "/project", model: "test/model" };
+const files: FileChangeItem[] = [
+  { path: "src/components/Button.tsx", status: "modified", additions: 2, deletions: 1, source: "edit", nodes: ["worker"] },
+  { path: "src/hooks/usePreview.ts", status: "added", additions: 24, deletions: 0, source: "write" , nodes: ["worker"] },
+  { path: "src/legacy.ts", status: "deleted", additions: 0, deletions: 18, nodes: ["worker"] },
+  { path: "docs/guide.md", oldPath: "docs/readme.md", status: "renamed", additions: 0, deletions: 0, nodes: ["planner"] },
+  { path: "src/styles/theme.css", status: "modified", additions: 6, deletions: 2, nodes: ["worker"] },
+  { path: "src/components/a-very-long-file-name-for-a-small-conversation-pane.tsx", status: "modified", additions: 1, deletions: 1, nodes: ["worker"] },
+];
+
+const referenceFiles: FileChangeItem[] = [
+  { path: "src/components/Chat.tsx", status: "modified", additions: 24, deletions: 8 },
+  { path: "src/styles/chat.css", status: "modified", additions: 18, deletions: 10 },
+  { path: "src/hooks/useChat.ts", status: "modified", additions: 0, deletions: 0 },
+];
+
+function Fixture() {
+  const params = new URLSearchParams(location.search);
+  const mode = params.get("mode") || "serial";
+  const shownFiles = params.get("reference") === "1" ? referenceFiles : files;
+  const writeDebug = params.get("write") === "1";
+  const [running, setRunning] = useState(true);
+  const [empty, setEmpty] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const [selected, setSelected] = useState(mode === "node" ? "worker" : mode === "merger" ? publicationMergerCardId : "");
+  const [selectedMergerId, setSelectedMergerId] = useState("");
+  const summary = buildSummaryFromFiles(empty ? [] : (writeDebug ? [{ path: "src/components/WriteOnly.tsx", status: "added" as const, additions: 2, deletions: 0, source: "write" as const }] : shownFiles).map((file, index) => ({
+    ...file, additions: file.additions + (index === 0 ? revision : 0),
+  })), false);
+  const execution: Execution = {
+    id: "execution", node: "worker", revision: 0, attempt: 1,
+    sessionId: "session", worktree: "/project", before: "", after: "",
+    status: running ? "running" : "completed", startedAt: 1, completedAt: running ? null : 2,
+    output: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The implementation is ready for review." }] } }) + "\n",
+    fileChanges: summary,
+  };
+  const state: Snapshot = {
+    ...emptySnapshot, runId: "changes-run", config, planType: mode === "serial" ? "serial" : "graph",
+    approved: true, phase: running ? "running" : "completed",
+    graph: { originalGoal: "Review the file changes in this conversation.", nodes: [{ name: "worker", task: "Implement the preview component." }], edges: [] },
+    nodes: { worker: { status: running ? "running" : "completed", revision: 0, head: null, instruction: "", error: null } },
+    executions: mode === "planner" || mode === "merger" ? [] : [execution],
+    mergers: mode === "merger" ? [{ ...execution, id: "merger-execution", node: "merger" }] : [],
+    fileChanges: mode === "planner" ? summary : undefined,
+  };
+  (window as any).changesAudit = {
+    settle: () => setRunning(false), empty: () => setEmpty(true),
+    update: () => setRevision(value => value + 1), select: setSelected,
+  };
+
+  return <div style={{ height: "100dvh", display: "flex", padding: "12px", boxSizing: "border-box" }}>
+    <GraphWorkbench state={state} routeType={mode === "serial" ? "serial" : "graph"}
+      selected={selected} setSelected={setSelected} selectedMergerId={selectedMergerId} setSelectedMergerId={setSelectedMergerId}
+      effectiveMessages={[]} isPlanning={mode === "planner" && running} plannerStream={{ items: [] }}
+      onSendMessage={noop} onRequestConfirmation={noop} onControl={noop} onSave={noop}
+      onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
+      active={running} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
+      nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
+  </div>;
+}
+createRoot(document.getElementById("root")!).render(<React.StrictMode><Fixture /></React.StrictMode>);

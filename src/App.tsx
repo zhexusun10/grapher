@@ -181,8 +181,6 @@ export default function App() {
     }
   });
   const [isBootstrapReady, setIsBootstrapReady] = useState(false);
-  const [bootstrapLoading, setBootstrapLoading] = useState(true);
-  const [bootstrapError, setBootstrapError] = useState("");
   const acceptedSettingsRef = useRef<Config | null>(null);
   const [runLabels, setRunLabels] = useState<Record<string, string>>(() => {
     try {
@@ -902,7 +900,6 @@ export default function App() {
 
     // Publish validated cards preserving canonical order, without letting one stalled
     // history keep all cards loading or causing items to jump and re-order.
-    let historyFailed = false;
     const validatedSnapshots = new Map<string, Snapshot>();
     let publishScheduled = false;
 
@@ -943,10 +940,7 @@ export default function App() {
 
     const snapshots = await mapWithConcurrency(indexedIds, 8, async id => {
       if (!planningRecovery.current(scope)) return null;
-      const snapshot = data.snapshot.runId === id ? data.snapshot : await runtimeService.history(id).catch(() => {
-        historyFailed = true;
-        return null;
-      });
+      const snapshot = data.snapshot.runId === id ? data.snapshot : await runtimeService.history(id).catch(() => null);
       if (!planningRecovery.current(scope) || !snapshot || snapshot.runId !== id) return null;
       setBackendStatus(snapshot);
       setRunLabels(prev => {
@@ -963,7 +957,6 @@ export default function App() {
     });
     if (!planningRecovery.current(scope)) return;
     const indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
-    if (historyFailed) setBootstrapError(t("部分会话历史加载失败，请重试。"));
     setWorkspaceRuns(indexedRuns);
     try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
     setIsSidebarReady(true);
@@ -2876,17 +2869,13 @@ export default function App() {
   }, [handleEditMessageSubmit, state.executions, state.mergers]);
 
   const initialize = useCallback(async () => {
-    setBootstrapLoading(true);
-    setBootstrapError("");
     setError("");
     try {
       await load();
     } catch (err) {
-      setBootstrapError(String(err));
       setError(String(err));
     } finally {
       setIsSidebarReady(true);
-      setBootstrapLoading(false);
     }
   }, [load]);
   useEffect(() => { void initialize(); }, [initialize]);
@@ -3144,9 +3133,6 @@ export default function App() {
             runs={runs}
             runLabels={runLabels}
             isReady={isSidebarReady}
-            loadError={bootstrapError}
-            retrying={bootstrapLoading}
-            onRetryLoad={() => void initialize()}
             currentRunId={state.runId}
             loadingRunId={loadingRunId}
             runIndicators={runIndicators}

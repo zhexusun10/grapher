@@ -42,7 +42,34 @@ interface RunMetrics {
   executionUsage: TokenUsage;
 }
 
-export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; input?: CompositeResult | null; result?: CompositeResult | null; workspaceLineage?: string[]; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null }
+export type FileChangeStatus = "added" | "modified" | "deleted" | "renamed";
+
+export interface FileChangeItem {
+  path: string;
+  oldPath?: string;
+  status: FileChangeStatus;
+  additions: number;
+  deletions: number;
+  isRunning?: boolean;
+  nodes?: string[];
+  executionIds?: string[];
+  source?: "git" | "write" | "edit" | "bash";
+}
+
+export interface FileChangeSummary {
+  files: FileChangeItem[];
+  totalFiles: number;
+  addedCount: number;
+  modifiedCount: number;
+  deletedCount: number;
+  renamedCount: number;
+  totalAdditions: number;
+  totalDeletions: number;
+  isRunning?: boolean;
+  activeFilePath?: string;
+}
+
+export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; input?: CompositeResult | null; result?: CompositeResult | null; workspaceLineage?: string[]; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null; fileChanges?: FileChangeSummary | null }
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Execution; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; requested_node?: string; actual_node?: string; reason?: string; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; old_instruction?: string; first_turn?: boolean; selected_version?: number; human?: boolean; planning_id?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
@@ -117,6 +144,7 @@ export interface Snapshot {
   base: string;
   feedbackCounts: Record<string, number>;
   runMetrics?: RunMetrics | null;
+  fileChanges?: FileChangeSummary | null;
 }
 
 /** Transient backend progress outside durable Run state. */

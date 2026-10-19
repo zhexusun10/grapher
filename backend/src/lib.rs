@@ -7,6 +7,7 @@ pub mod environment;
 mod environment_automatic;
 pub mod environment_discovery;
 pub mod environment_resources;
+pub mod file_changes;
 #[cfg(feature = "fixture")]
 pub mod fixture;
 pub mod graph_merge;

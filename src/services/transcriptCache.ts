@@ -24,10 +24,29 @@ export function transcriptFromCache(entry: CachedTranscript | undefined): Transc
     total: entry.totalBytes ?? entry.offset, settled: entry.complete || (!!entry.status && entry.status !== "running") } : null;
 }
 
+const cacheListeners = new Set<() => void>();
+let notifyScheduled = false;
+
+export function subscribeTranscriptCacheChanges(listener: () => void): () => void {
+  cacheListeners.add(listener);
+  return () => { cacheListeners.delete(listener); };
+}
+
+export function notifyTranscriptCacheChanged(): void {
+  if (cacheListeners.size === 0 || notifyScheduled) return;
+  notifyScheduled = true;
+  queueMicrotask(() => {
+    notifyScheduled = false;
+    for (const listener of cacheListeners) listener();
+  });
+}
+
 export function cacheTranscriptWindow(window: TranscriptWindow): CachedTranscript {
-  return { text: window.text, offset: window.end, startOffset: window.start, totalBytes: window.total,
+  const cached: CachedTranscript = { text: window.text, offset: window.end, startOffset: window.start, totalBytes: window.total,
     complete: window.start === 0 && window.end === window.total && window.settled,
     status: window.settled ? "completed" : "running" };
+  notifyTranscriptCacheChanged();
+  return cached;
 }
 
 export function composePlanningOutput(ids: string[], segments: ReadonlyMap<string, TranscriptWindow>): string {

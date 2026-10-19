@@ -1,0 +1,56 @@
+/* File review uses the session-details row and body slot, not its own card. */
+.workspace-details-summary:has(.workspace-changes-trigger) {
+  justify-content: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.workspace-changes-panel {
+  padding-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.changed-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px 0;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.changed-file-icon-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #475569;
+}
+.changed-file-icon { flex-shrink: 0; }
+.changed-file-item[data-status="added"] .changed-file-icon-chip { background: #ecfdf5; color: #047857; }
+.changed-file-item[data-status="modified"] .changed-file-icon-chip { background: #eff6ff; color: #1d4ed8; }
+.changed-file-item[data-status="deleted"] .changed-file-icon-chip { background: #fef2f2; color: #b91c1c; }
+.changed-file-item[data-status="renamed"] .changed-file-icon-chip { background: #f5f3ff; color: #6d28d9; }
+.changed-file-path { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.change-diff-stats {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.diff-stat-add { color: var(--status-success); }
+.diff-stat-del { color: var(--status-danger); }
+.changes-panel-empty { padding-top: 4px; color: var(--text-secondary); }
+

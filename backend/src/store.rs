@@ -275,8 +275,39 @@ impl Store {
                 });
                 *output_bytes = output.len();
                 self.replace_logs(&state.run_id, execution_id, output)?;
+                let (node_name, worktree) = state
+                    .executions
+                    .iter()
+                    .chain(&state.mergers)
+                    .find(|e| e.id == *execution_id)
+                    .map(|e| (e.node.clone(), e.worktree.clone()))
+                    .unwrap_or_default();
+                let repo = state
+                    .config
+                    .as_ref()
+                    .map(|c| c.repository.as_str())
+                    .unwrap_or_default();
+                crate::file_changes::update_from_log_text(
+                    &state.run_id,
+                    execution_id,
+                    &node_name,
+                    &worktree,
+                    repo,
+                    output,
+                    false,
+                    true,
+                );
                 *output = String::new();
             }
+        }
+        match &kind {
+            EventKind::Finished { execution_id, .. }
+            | EventKind::Failed { execution_id: Some(execution_id), .. }
+            | EventKind::MergerFinished { execution_id, .. }
+            | EventKind::MergerFailed { execution_id, .. } => {
+                crate::file_changes::settle(&state.run_id, execution_id);
+            }
+            _ => {}
         }
         let initial = if let EventKind::Started { execution, .. }
         | EventKind::MergerStarted { execution } = &mut kind
@@ -724,6 +755,7 @@ impl Store {
                 .map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM execution_logs WHERE run_id=?1", [run_id])
                 .map_err(|e| e.to_string())?;
+            crate::file_changes::invalidate_run(run_id);
         }
         tx.commit().map_err(|e| e.to_string())?;
         self.execution_offsets.borrow_mut().clear();
@@ -766,6 +798,7 @@ impl Store {
         tx.execute("DELETE FROM execution_logs", [])
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        crate::file_changes::clear_all();
         self.execution_offsets.borrow_mut().clear();
         self.reclaim_deleted_pages();
         Ok(())

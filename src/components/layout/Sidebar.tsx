@@ -25,9 +25,6 @@ interface SidebarProps {
   isSettingsOpen: boolean;
   runLabels?: Record<string, string>;
   isReady?: boolean;
-  loadError?: string;
-  retrying?: boolean;
-  onRetryLoad?: () => void;
   isOpeningProject?: boolean;
   switchingProjectPath?: string | null;
   loadingRunId?: string | null;
@@ -51,9 +48,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   isSettingsOpen,
   runLabels = {},
   isReady = true,
-  loadError,
-  retrying = false,
-  onRetryLoad,
   isOpeningProject = false,
   switchingProjectPath = null,
   loadingRunId = null,
@@ -183,24 +177,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       </div>
 
       <div className="runs-list">
-        {loadError && (
-          <div className="sidebar-load-error" role="alert" title={loadError}>
-            <div className="sidebar-load-error-header">
-              <span className="sidebar-load-error-title">{t("对话列表加载失败")}</span>
-              {onRetryLoad && (
-                <button
-                  type="button"
-                  className="sidebar-load-error-retry text-button"
-                  disabled={retrying}
-                  onClick={onRetryLoad}
-                >
-                  {t("重试")}
-                </button>
-              )}
-            </div>
-            <small className="sidebar-load-error-desc">{loadError}</small>
-          </div>
-        )}
         {!isReady ? (
           <div className="sidebar-skeleton-wrap" aria-hidden="true">
             <div className="sidebar-skeleton-item">

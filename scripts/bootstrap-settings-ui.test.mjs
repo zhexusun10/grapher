@@ -78,7 +78,10 @@ test("one stalled history cannot keep validated sidebar cards and saved models l
     await openSettings(page);
     assert.equal(await nodeModel(page).inputValue(), "test/old", "backend settings are ready before all histories finish");
     await page.clock.fastForward(15_001);
-    await page.locator(".sidebar-load-error").filter({ hasText: "Some conversation histories failed to load" }).waitFor();
+    await page.clock.runFor(1);
+    assert.equal(await page.locator('[data-run-id="fast"]').count(), 1);
+    assert.equal(await page.locator(".runs-list").getByRole("alert").count(), 0);
+    assert.equal(await page.locator(".runs-list").getByRole("button", { name: "Retry", exact: true }).count(), 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -135,10 +138,10 @@ test("conversation settings stay scoped and new conversations use defaults", { t
   } finally { await context.close(); }
 });
 
-test("stalled bootstrap shows a recoverable error, not an endless skeleton or a false missing-Planner prompt", { timeout: 30_000 }, async () => {
-  let stall = true, bootstraps = 0;
+test("stalled bootstrap releases the skeleton without a sidebar error card or a false missing-Planner prompt", { timeout: 30_000 }, async () => {
+  let bootstraps = 0;
   const { context, page, errors } = await app(async (_route, command) => {
-    if (command === "bootstrap") { bootstraps++; return stall; }
+    if (command === "bootstrap") { bootstraps++; return true; }
     return false;
   });
   try {
@@ -149,14 +152,10 @@ test("stalled bootstrap shows a recoverable error, not an endless skeleton or a 
     assert.equal(await page.locator(".settings-modal").count(), 0);
     assert.equal(await composer.inputValue(), "Do a short task", "a rejected submit retains the draft");
     await page.clock.fastForward(15_001);
-    await page.locator(".sidebar-load-error").waitFor();
-    assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0);
+    await page.locator(".sidebar-skeleton-wrap").waitFor({ state: "detached" });
     assert.equal(bootstraps, 1, "timeouts do not multiply the stalled request budget");
-    stall = false;
-    await page.locator(".sidebar-load-error").getByRole("button", { name: "Retry", exact: true }).click();
-    await page.locator('[data-run-id="fast"]').waitFor();
-    assert.equal(await page.locator(".sidebar-load-error").count(), 0);
-    await openSettings(page); assert.equal(await nodeModel(page).inputValue(), "test/old");
+    assert.equal(await page.locator(".runs-list").getByRole("alert").count(), 0);
+    assert.equal(await page.locator(".runs-list").getByRole("button", { name: "Retry", exact: true }).count(), 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

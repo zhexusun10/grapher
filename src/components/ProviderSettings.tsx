@@ -376,18 +376,13 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             <div className="configured-title-group">
               <strong>{t("已绑定的 Provider 凭据 (")}{configuredProviders.length})</strong>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span className="configured-status-tag">
-                <CheckCircle2 size={11} />{t(" 运行环境就绪")}
-              </span>
-              <ChevronDown
-                size={16}
-                style={{
-                  transition: mounted.current ? "transform 0.2s ease" : "none",
-                  transform: showConfigured ? "rotate(180deg)" : "rotate(0deg)",
-                }}
-              />
-            </div>
+            <ChevronDown
+              size={16}
+              style={{
+                transition: mounted.current ? "transform 0.2s ease" : "none",
+                transform: showConfigured ? "rotate(180deg)" : "rotate(0deg)",
+              }}
+            />
           </div>
 
           <CollapsibleCardBody expanded={showConfigured}>
@@ -806,7 +801,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                               void startLogin(p, defaultMethod as "api_key" | "oauth");
                             }}
                           >
-                            <LogIn size={13} />{t(" 登录 (/login)")}</button>
+                            <LogIn size={13} />{t(" 登陆")}</button>
                         ) : (
                           <span className="env-only-hint">{t("由环境变量或系统配置")}</span>
                         )}
