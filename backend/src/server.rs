@@ -2497,6 +2497,28 @@ fn plan_goal(
     .map_err(|(error, _)| error)
 }
 
+/// Reclaim a Run's temporary source snapshot once nothing needs it. Takes the
+/// per-source lock and re-checks under it: a concurrent dispatch may have
+/// materialized a new snapshot while this caller was finishing.
+fn reclaim_source_snapshot(service: &Arc<Service>, repository: &std::path::Path) {
+    let result = (|| -> Result<(), String> {
+        let lock = source_lock(repository)?;
+        let _guard = lock.lock().map_err(|error| error.to_string())?;
+        let reclaimable = service
+            .runtime
+            .lock()
+            .map_err(|error| error.to_string())?
+            .shadow_reclaimable(repository)?;
+        if reclaimable {
+            crate::workspace::remove_shadow_repo(repository)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("[Grapher] Cannot reclaim source snapshot: {error}");
+    }
+}
+
 fn drive(service: Arc<Service>) {
     if service.driving.swap(true, Ordering::SeqCst) {
         // Wake the active driver even if its current workers are long-running.
@@ -2637,31 +2659,10 @@ fn drive(service: Arc<Service>) {
                                     eprintln!("Cannot clean completed run worktrees: {error}");
                                 }
                                 // Publication succeeded, so the user's source now
-                                // contains the merged result. Reclaim the snapshot
-                                // under the source lock and re-check there: a
-                                // concurrent dispatch may have materialized a new
-                                // snapshot while this publication was finishing.
+                                // contains the merged result.
                                 let repository = PathBuf::from(&publication.repository);
                                 drop(runtime);
-                                let reclaimed = (|| -> Result<(), String> {
-                                    let lock = source_lock(&repository)?;
-                                    let _guard =
-                                        lock.lock().map_err(|error| error.to_string())?;
-                                    let reclaimable = service
-                                        .runtime
-                                        .lock()
-                                        .map_err(|error| error.to_string())?
-                                        .shadow_reclaimable_after_publication(&repository)?;
-                                    if reclaimable {
-                                        crate::workspace::remove_shadow_repo(&repository)?;
-                                    }
-                                    Ok(())
-                                })();
-                                if let Err(error) = reclaimed {
-                                    eprintln!(
-                                        "Cannot reclaim published shadow repository: {error}"
-                                    );
-                                }
+                                reclaim_source_snapshot(&service, &repository);
                                 let review = {
                                     let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                                     runtime.state.effective_config().filter(|config| config.post_task_review)
@@ -2686,6 +2687,22 @@ fn drive(service: Arc<Service>) {
                                 runtime.emit(EventKind::PublicationFailed { error })?;
                             }
                         }
+                    }
+                    // A Run that settles without publishing (serial/plan-less)
+                    // holds no downstream copy: completion alone releases its
+                    // source snapshot instead of waiting for an explicit
+                    // deletion. Publication already reclaimed its own snapshot;
+                    // for a reclaimed or foreign source this is a cheap no-op.
+                    let settled_repository = {
+                        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                        if runtime.state.phase == "completed" {
+                            runtime.source_repository()?
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(repository) = settled_repository {
+                        reclaim_source_snapshot(&service, &repository);
                     }
                     break;
                 }

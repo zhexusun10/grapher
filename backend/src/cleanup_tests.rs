@@ -208,6 +208,44 @@ fn shared_plain_folder_shadow_snapshot_survives_until_the_last_run_is_deleted() 
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
+#[test]
+fn deleting_a_run_releases_a_snapshot_only_completed_runs_still_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("plain source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("user.txt"), "keep user files").unwrap();
+    let config: Config = serde_json::from_value(
+        serde_json::json!({"repository": source, "model":"test", "maxParallel":1}),
+    )
+    .unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("data")).unwrap();
+    runtime.create(graph(), config.clone()).unwrap();
+    let completed = runtime.state.run_id.clone();
+    let node = Uuid::new_v4().to_string();
+    failed_execution(&mut runtime, &node);
+    let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
+    assert!(!crate::workspace::materialize_shadow_repo(&source, &[]).unwrap().is_empty());
+    runtime.create(graph(), config).unwrap();
+    let doomed = runtime.state.run_id.clone();
+    // A completed Conversation handed its result to the source, so it no longer
+    // pins the snapshot: deleting the last unfinished Run releases it even
+    // though the completed Run still records the same target.
+    let mut finished = runtime.store.load(&completed).unwrap();
+    runtime
+        .store
+        .append(
+            &mut finished,
+            EventKind::PublicationCompleted {
+                head: "deadbeef".into(),
+            },
+        )
+        .unwrap();
+    runtime.delete_run(&doomed).unwrap();
+    assert!(!shadow.exists(), "completed Runs must not pin a released snapshot");
+    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "keep user files");
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+}
+
 fn legacy_runtime(source: &std::path::Path, root: &std::path::Path) -> Runtime {
     let mut runtime = Runtime::open_lazy(root).unwrap();
     runtime.state.run_id = Uuid::new_v4().to_string();

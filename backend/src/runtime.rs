@@ -630,17 +630,30 @@ impl Runtime {
         Ok(())
     }
 
-    /// Whether a successful publication may reclaim the plain-directory shadow
-    /// snapshot. Read-only; callers should release the runtime lock before the
-    /// actual removal.
-    pub(crate) fn shadow_reclaimable_after_publication(
-        &self,
-        repository: &Path,
-    ) -> Result<bool, String> {
-        if workspace::is_standard_git(repository) {
+    /// Whether this Run may release its plain-directory source snapshot now.
+    ///
+    /// A completed Run no longer needs it once its result reached the source
+    /// (`PublicationCompleted`) or once it is proven that this Run never had
+    /// that downstream: a serial/plan-less Run settles without publishing, so
+    /// completion is its final hand-off. Failed, interrupted, paused and
+    /// still-publishing Runs keep the snapshot for retry and evidence, and a
+    /// completed Graph Run that never published keeps it too — publication is
+    /// its only copy of the merged result.
+    ///
+    /// Read-only; callers should release the runtime lock before the actual
+    /// removal.
+    pub(crate) fn shadow_reclaimable(&self, repository: &Path) -> Result<bool, String> {
+        if self.state.phase != "completed"
+            || (self.state.published_head.is_none() && !self.is_serial())
+        {
             return Ok(false);
         }
+        // Cheap discriminator first: a standard Git source owns its objects and
+        // never materializes a shadow snapshot.
         if workspace::shadow_repo_if_exists(repository)?.is_none() {
+            return Ok(false);
+        }
+        if workspace::is_standard_git(repository) {
             return Ok(false);
         }
         Ok(!self
@@ -648,14 +661,23 @@ impl Runtime {
             .shadow_repo_needed_by_other_run(&self.state.run_id, repository)?)
     }
 
-    /// Reclaim the published source's shadow snapshot. Only a successful
-    /// publication or an explicit Run deletion may release it; failed,
-    /// interrupted and paused Runs keep their snapshot for retry/evidence.
-    pub fn reclaim_shadow_after_publication(&self, repository: &Path) -> Result<(), String> {
-        if self.shadow_reclaimable_after_publication(repository)? {
+    /// Reclaim this Run's source snapshot. Attempted whenever the Run may have
+    /// handed off its result (completion or publication) and on explicit Run
+    /// deletion; failed, interrupted and paused Runs keep their snapshot for
+    /// retry/evidence.
+    pub fn reclaim_shadow(&self, repository: &Path) -> Result<(), String> {
+        if self.shadow_reclaimable(repository)? {
             workspace::remove_shadow_repo(repository)?;
         }
         Ok(())
+    }
+
+    /// Resolved source binding of the current Run, when it has one.
+    pub(crate) fn source_repository(&self) -> Result<Option<PathBuf>, String> {
+        match self.state.effective_config() {
+            Some(config) => Ok(Some(resolve_repository(&self.root, &config)?)),
+            None => Ok(None),
+        }
     }
 
     /// A plain-directory Run has no source snapshot until its first node

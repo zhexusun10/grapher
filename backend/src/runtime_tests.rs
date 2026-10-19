@@ -2648,7 +2648,7 @@ fn resume_after_stopped_post_task_review_settles_instead_of_republishing() {
     // The successful publication reclaimed the snapshot and worktrees, so the
     // terminal commit only exists in the recorded state.
     runtime.cleanup_worktrees().unwrap();
-    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    runtime.reclaim_shadow(&source).unwrap();
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
 
     // A post-task review stopped by the user walks completed -> planning ->
@@ -2980,8 +2980,8 @@ fn publication_reclaims_shadow_and_failure_retains_it() {
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
-    assert!(runtime.shadow_reclaimable_after_publication(&source).unwrap());
-    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    assert!(runtime.shadow_reclaimable(&source).unwrap());
+    runtime.reclaim_shadow(&source).unwrap();
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
     assert!(source.join("result.txt").is_file());
 }
@@ -2993,7 +2993,27 @@ fn shared_source_reclaims_after_last_incomplete_run() {
     runtime.approve().unwrap();
     let mut job = runtime.jobs().unwrap().remove(0);
     attach(&mut runtime, &mut job);
+    let path = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
+    fs::write(path.join("result.txt"), "completed").unwrap();
+    let head = workspace::snapshot_node(path, &source, "task").unwrap();
+    runtime
+        .finish(&job.execution, Ok((head, "completed".into())))
+        .unwrap();
     let run_id = runtime.state.run_id.clone();
+    // A Graph Run reaches completion through publication, which hands the
+    // merged result to the source directory.
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "publishing");
+    let publication = runtime.state.publication.clone().unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    assert!(runtime.shadow_reclaimable(&source).unwrap());
     // A second, still-incomplete Run on the same source keeps the snapshot.
     let config = runtime.state.config.clone().unwrap();
     let mut other = Snapshot {
@@ -3016,7 +3036,7 @@ fn shared_source_reclaims_after_last_incomplete_run() {
         .store
         .shadow_repo_needed_by_other_run(&run_id, &source)
         .unwrap());
-    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    runtime.reclaim_shadow(&source).unwrap();
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
     // Once every other Run is completed, the last finisher reclaims it.
     let mut other = runtime.store.load(&other.run_id).unwrap();
@@ -3029,7 +3049,26 @@ fn shared_source_reclaims_after_last_incomplete_run() {
             },
         )
         .unwrap();
-    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    runtime.reclaim_shadow(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+}
+
+#[test]
+fn completed_runs_release_only_snapshots_with_no_pending_downstream() {
+    let (_temp, source, mut runtime) = setup(false, single());
+    workspace::remove_shadow_repo(&source).unwrap();
+    runtime.approve().unwrap();
+    let mut job = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut job);
+    // An unfinished Run never releases its snapshot.
+    assert!(!runtime.shadow_reclaimable(&source).unwrap());
+    // A Graph Run that completed without publishing keeps its only copy.
+    runtime.state.phase = "completed".into();
+    assert!(!runtime.shadow_reclaimable(&source).unwrap());
+    // The same completion is the final hand-off for a Run that cannot publish.
+    runtime.state.plan_type = Some("serial".into());
+    assert!(runtime.shadow_reclaimable(&source).unwrap());
+    runtime.reclaim_shadow(&source).unwrap();
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
 }
 
@@ -3057,7 +3096,7 @@ fn post_publication_node_followup_runs_in_source() {
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
-    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    runtime.reclaim_shadow(&source).unwrap();
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
 
     runtime.intervene("task", "again").unwrap();
@@ -3135,7 +3174,7 @@ fn post_publication_direct_edit_keeps_downstream_and_publication() {
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
-    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    runtime.reclaim_shadow(&source).unwrap();
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
     let child_head = runtime.state.nodes["child"].head.clone().unwrap();
 
@@ -3232,7 +3271,7 @@ fn post_publication_planner_revision_materializes_only_on_dispatch() {
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
-    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    runtime.reclaim_shadow(&source).unwrap();
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
 
     let mut revised = single();
@@ -3303,7 +3342,7 @@ fn post_publication_revision_with_completed_parent_ignores_stale_commit() {
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
-    runtime.reclaim_shadow_after_publication(&source).unwrap();
+    runtime.reclaim_shadow(&source).unwrap();
     let child_head = runtime.state.nodes["child"].head.clone().unwrap();
 
     // The revision adds a node after a node whose commit only existed in the

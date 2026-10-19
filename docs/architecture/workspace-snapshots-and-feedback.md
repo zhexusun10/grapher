@@ -91,11 +91,17 @@ standard Git repositories never create a shadow repository.
 
 Materialization runs without holding the Runtime lock, so the UI keeps
 reporting a `source_materialize` activity while Git walks the project. A
-successful publication reclaims the shadow repository as soon as no other
-incomplete Run still needs the shared snapshot; failed, interrupted and paused
-Runs keep it for `retry_publication` and evidence. Run deletion and the offline
-`--cleanup-workspaces --apply` GC also reclaim it. `""` is the only encoding
-of "no Git snapshot", and every consumer must handle it explicitly.
+completed Run releases the shadow repository as soon as no other incomplete Run
+still needs the shared snapshot, so a snapshot is reclaimed at completion and
+not only at publication. The release is re-checked when the Run's driver drains
+and after a successful publication, and Run deletion applies the same "no
+incomplete Run still needs it" predicate instead of pinning the snapshot to
+every Run that still records the target. A completed Graph Run that never
+published keeps the snapshot, because publication is the only copy of its merged
+result; failed, interrupted and paused Runs keep it for `retry_publication` and
+evidence. The offline `--cleanup-workspaces --apply` GC reclaims it under the
+same predicate. `""` is the only encoding of "no Git snapshot", and every
+consumer must handle it explicitly.
 
 After a successful publication, a conversation with a completed node edits the
 source directory directly: no shadow repository is rebuilt, no new worktree is

@@ -232,6 +232,14 @@ impl Store {
         excluded: &str,
         target: &Target,
     ) -> Result<bool, String> {
+        // A shadow snapshot is shared only while another Run still needs it:
+        // completed Runs already handed their result to the source or never had
+        // a publishable one, which is the same predicate the offline workspace
+        // GC applies. Deleting any Run therefore releases a snapshot that the
+        // last incomplete Run no longer needs.
+        if let Target::Shadow { root, name } = target {
+            return self.shadow_repo_referenced_by(excluded, &root.join("shadow_repos").join(name));
+        }
         let payload = serde_json::to_string(target).map_err(|error| error.to_string())?;
         let recorded: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM run_owned_directories o
             WHERE o.target=?1 AND o.run_id<>?2 AND EXISTS(SELECT 1 FROM events e WHERE e.run_id=o.run_id))",
