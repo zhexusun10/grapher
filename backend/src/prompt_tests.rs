@@ -3761,8 +3761,35 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
 #[cfg(feature = "fixture")]
 #[test]
 fn completed_graph_is_published_by_driver() {
+    // This exercises real Git/filesystem I/O, not a 15-second performance SLA.
+    // Keep fixture data alive until the detached driver has actually drained,
+    // including when an assertion fails before publication finishes.
+    struct DrivenFixture {
+        service: Arc<Service>,
+        temp: Option<tempfile::TempDir>,
+    }
+    impl Drop for DrivenFixture {
+        fn drop(&mut self) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while self.service.driving.load(Ordering::SeqCst)
+                && std::time::Instant::now() < deadline
+            {
+                thread::sleep(std::time::Duration::from_millis(20));
+            }
+            if self.service.driving.load(Ordering::SeqCst) {
+                if let Some(temp) = self.temp.take() {
+                    eprintln!(
+                        "Publication test driver still active; preserving fixture at {}",
+                        temp.keep().display()
+                    );
+                }
+            }
+        }
+    }
+
     let temp = tempfile::TempDir::new().unwrap();
-    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let root = temp.path().to_path_buf();
+    let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
         environment: None,
         repository: String::new(),
@@ -3804,18 +3831,66 @@ fn completed_graph_is_published_by_driver() {
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused-extension.ts"),
     });
+    let fixture = DrivenFixture { service, temp: Some(temp) };
+    let service = &fixture.service;
     drive(service.clone());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    while service.driving.load(Ordering::SeqCst) {
+    let started = std::time::Instant::now();
+    let mut stage = 0;
+    let mut stage_deadline = started + std::time::Duration::from_secs(30);
+    let mut observed = String::from("runtime not yet observed");
+    loop {
+        // Do not block the timeout/diagnostics on a mutex held by slow I/O.
+        match service.runtime.try_lock() {
+            Ok(runtime) => {
+                let state = &runtime.state;
+                let next_stage = if state.published_head.is_some() {
+                    2
+                } else if state.nodes.values().all(|node| node.status == "completed") {
+                    1
+                } else {
+                    0
+                };
+                if next_stage > stage {
+                    stage = next_stage;
+                    stage_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                }
+                observed = format!(
+                    "phase={}, driving={}, nodes={:?}, executions={:?}, publication={:?}, last_event={:?}",
+                    state.phase, service.driving.load(Ordering::SeqCst),
+                    state.nodes.iter().map(|(name, node)| (name, &node.status)).collect::<Vec<_>>(),
+                    state.executions.iter().map(|execution| (&execution.node, &execution.status)).collect::<Vec<_>>(),
+                    state.publication, state.events.last(),
+                );
+                assert!(
+                    !state.executions.iter().any(|execution| execution.status == "failed")
+                        && state.phase != "publication_failed",
+                    "Driver failed before successful publication: {observed}"
+                );
+                if !service.driving.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+            Err(error) => panic!("Driver runtime poisoned: {error}; last observed: {observed}"),
+        }
+        let now = std::time::Instant::now();
         assert!(
-            std::time::Instant::now() < deadline,
-            "Driver did not settle"
+            now < stage_deadline && now.duration_since(started) < std::time::Duration::from_secs(90),
+            "Driver stalled in {} after {:.2}s; runtime_busy={}; last observed: {observed}",
+            ["node execution", "publication", "driver cleanup"][stage],
+            now.duration_since(started).as_secs_f64(), service.runtime.try_lock().is_err(),
         );
         thread::sleep(std::time::Duration::from_millis(20));
     }
     let runtime = service.runtime.lock().unwrap();
-    assert_eq!(runtime.state.phase, "completed");
-    let source = temp.path().join("fixture-repository");
+    assert_eq!(runtime.state.phase, "completed", "{observed}");
+    let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert_eq!(replayed.phase, "completed", "publication must survive event replay");
+    assert!(
+        replayed.events.iter().any(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })),
+        "completed phase requires durable publication evidence"
+    );
+    let source = root.join("fixture-repository");
     assert!(source.join("first.md").exists());
     assert!(source.join("last.md").exists());
     assert!(crate::workspace::git(&source, &["status", "--porcelain"])
@@ -3824,7 +3899,7 @@ fn completed_graph_is_published_by_driver() {
     drop(runtime);
     // The fixture streams output chunks, then Finished seals the transcript;
     // the redundant chunks must not accumulate in the event store.
-    let db = rusqlite::Connection::open(temp.path().join("events.sqlite")).unwrap();
+    let db = rusqlite::Connection::open(root.join("events.sqlite")).unwrap();
     let chunks: i64 = db
         .query_row("SELECT COUNT(*) FROM events WHERE kind='output'", [], |row| {
             row.get(0)

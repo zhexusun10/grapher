@@ -43,7 +43,7 @@ Choose a suite only when its scope is relevant. Invoke npm scripts with `npm run
 | `test:environment`, `test:environment-chain` | Native environment admission, inheritance, and lifecycle; needs Python 3.11+, Git, Bash, and platform prerequisites below. |
 | `test:merger`, `test:bindings` | Git composition/publication and project binding/routing. |
 | `test:concurrent` | Fixture HTTP multi-Run concurrency; needs `/bin/sh`, skips on Windows. |
-| `test:conversation-acceptance` | Large-log migration and stress harness; see [prerequisites](../testing/conversation-logs.md#acceptance-prerequisites). |
+| `test:conversation-acceptance` | Large-log migration and stress harness; see [prerequisites](conversation-logs.md#acceptance-prerequisites). |
 
 Native suites require the actual [platform boundary](../architecture/filesystem-isolation.md#platform-boundaries): Linux needs bubblewrap and permitted namespaces; macOS needs Seatbelt. Windows environment tests can use `GRAPHER_ENV_TEST_PARENT` for a short path. Harbor adapter checks have separate [Linux prerequisites](../benchmarks/harbor.md#adapter-tests).
 

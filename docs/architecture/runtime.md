@@ -230,7 +230,7 @@ streams. The planning SSE `complete` event is terminal even if the HTTP transpor
 remains open: the client releases the reader and supersedes in-flight draft polls
 with the committed snapshot. This applies to appended Planner revisions as well
 as first plans. Tests and legacy-log migration are described in
-[Conversation logs](../testing/conversation-logs.md).
+[Conversation logs](../development/conversation-logs.md).
 
 ## Recovery and ownership
 

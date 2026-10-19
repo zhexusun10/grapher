@@ -66,7 +66,7 @@ English is canonical under `docs/`; [README.zh-CN.md](../../README.zh-CN.md) rem
 
 When behavior changes, update the relevant canonical page and any affected README/translation summary. [docs/index.md](../index.md) is the discovery path; source, tests, and CI are the final authority.
 
-For log migration, see [Conversation logs](../testing/conversation-logs.md).
+For log migration, see [Conversation logs](conversation-logs.md).
 
 ## Licensing and sensitive data
 

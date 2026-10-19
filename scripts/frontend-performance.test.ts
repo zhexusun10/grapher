@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { marked } from "marked";
 import { appendItemDelta } from "../src/services/transcriptUpdates.ts";
 import { closeThinkingItems, updateThinkingItems, finalizeThinkingItems } from "../src/services/thinkingTranscript.ts";
@@ -202,32 +202,48 @@ test("history deduplication never crosses a mutating action or lets old cleanup 
   } finally { finishAction?.(); releases.forEach(release => release()); globalThis.fetch = original; }
 });
 
-test("visibility polling wakes cursors, never overlaps requests and cleans up terminal/unmounted work", async () => {
+// Promise continuations and SSE microtasks schedule timers too. Drain them on
+// both sides of each virtual clock step, without a wall-clock sleep/deadline.
+async function advanceTimers(context: TestContext, milliseconds = 0) {
+  await new Promise<void>(resolve => setImmediate(resolve));
+  context.mock.timers.tick(milliseconds);
+  await new Promise<void>(resolve => setImmediate(resolve));
+}
+
+test("visibility polling wakes cursors, never overlaps requests and cleans up terminal/unmounted work", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   class Visibility extends EventTarget { hidden = false; }
   const visibility = new Visibility();
-  let calls = 0, release!: () => void;
+  let calls = 0, release: (() => void) | undefined;
+  let stopTerminal: (() => void) | undefined;
   const stop = startVisibilityPolling(async () => {
     calls++;
     await new Promise<void>(resolve => { release = resolve; });
     return 1000;
   }, 0, visibility as unknown as Document, 10_000);
-  await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(calls, 1);
+  context.after(() => { stop(); stopTerminal?.(); release?.(); });
+
+  await advanceTimers(context); assert.equal(calls, 1);
   visibility.hidden = true; visibility.dispatchEvent(new Event("visibilitychange"));
   visibility.hidden = false; visibility.dispatchEvent(new Event("visibilitychange"));
-  assert.equal(calls, 1); release();
-  await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(calls, 2);
-  stop(); release();
+  await advanceTimers(context, 10_000);
+  assert.equal(calls, 1, "elapsed time and visibility changes cannot overlap an in-flight pull");
+  release!();
+  await advanceTimers(context);
+  assert.equal(calls, 2, "the queued visibility wake runs without waiting for the normal cadence");
+  stop(); release!();
   visibility.dispatchEvent(new Event("visibilitychange"));
-  await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(calls, 2);
+  await advanceTimers(context, 20_000); assert.equal(calls, 2);
   let terminal = 0;
-  startVisibilityPolling(async () => { terminal++; return null; }, 0, visibility as unknown as Document);
-  await new Promise(resolve => setTimeout(resolve, 10));
+  stopTerminal = startVisibilityPolling(async () => { terminal++; return null; }, 0, visibility as unknown as Document);
+  await advanceTimers(context);
   visibility.dispatchEvent(new Event("visibilitychange"));
-  await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(terminal, 1);
+  await advanceTimers(context, 10_000); assert.equal(terminal, 1);
   assert.deepEqual([0, 1, 2, 3, 20].map(liveOutputDelay), [150, 300, 600, 1200, 1200]);
 });
 
-test("SSE push-wake suspends empty polling at Infinity, ignores unwatched nodes and short-circuits already synced bytes", async () => {
+test("SSE push-wake suspends empty polling at Infinity, ignores unwatched nodes and short-circuits already synced bytes", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   class Visibility extends EventTarget { hidden = false; }
   const visibility = new Visibility();
   let pulls = 0;
@@ -247,24 +263,24 @@ test("SSE push-wake suspends empty polling at Infinity, ignores unwatched nodes 
     if (event.runId === "run-1") snapshotWakes++;
   });
   try {
-    await new Promise(resolve => setTimeout(resolve, 15));
+    await advanceTimers(context);
     assert.equal(pulls, 1, "initial pull runs once and suspends at Infinity");
-    await new Promise(resolve => setTimeout(resolve, 60));
+    await advanceTimers(context, 10_000);
     assert.equal(pulls, 1, "no timer polling while SSE is connected and idle");
 
     // 1. Signal for another running node in the DAG is ignored before reaching watched-node.
     dispatchOutputAvailableForTest({ runId: "run-1", executionId: "other-parallel-node", totalBytes: 5000 });
-    await new Promise(resolve => setTimeout(resolve, 15));
+    await advanceTimers(context, 10_000);
     assert.equal(pulls, 1, "unwatched node output never triggers a pull");
 
     // 2. Signal for watched-node with totalBytes <= syncedBytes is swallowed in memory.
     dispatchOutputAvailableForTest({ runId: "run-1", executionId: "watched-node", totalBytes: 100 });
-    await new Promise(resolve => setTimeout(resolve, 15));
+    await advanceTimers(context, 10_000);
     assert.equal(pulls, 1, "already synced byte offset is swallowed in memory");
 
     // 3. Signal for watched-node with new bytes wakes the poller in 0ms.
     dispatchOutputAvailableForTest({ runId: "run-1", executionId: "watched-node", totalBytes: 240 });
-    await new Promise(resolve => setTimeout(resolve, 15));
+    await advanceTimers(context);
     assert.equal(pulls, 2, "new bytes wake the poller immediately");
     assert.equal(syncedBytes, 240);
 
@@ -279,14 +295,14 @@ test("SSE push-wake suspends empty polling at Infinity, ignores unwatched nodes 
   }
 });
 
-test("a failed push channel wakes suspended pollers and recreates a dead stream", async () => {
+test("a failed push channel wakes suspended pollers and recreates a dead stream", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   // Infinite suspension is only safe while pushes actually arrive; a fallback
   // that is never rescheduled leaves the transcript and Run status frozen.
   assert.ok(Number.isFinite(RUNTIME_EVENTS_WATCHDOG_MS));
   assert.ok(RUNTIME_EVENTS_WATCHDOG_MS <= 2_000, "missed status pushes must self-heal within two seconds");
   assert.ok(RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS <= RUNTIME_EVENTS_WATCHDOG_MS,
     "streamed text must recover at least as fast as status");
-  const settle = () => new Promise(resolve => setTimeout(resolve, 5));
   const original = (globalThis as { EventSource?: unknown }).EventSource;
   class FakeEventSource {
     static readonly CONNECTING = 0;
@@ -311,29 +327,37 @@ test("a failed push channel wakes suspended pollers and recreates a dead stream"
     assert.ok(first, "subscribing opens the shared event stream");
     first.readyState = FakeEventSource.OPEN;
     first.onopen!();
-    await settle();
+    await advanceTimers(context);
     assert.equal(isRuntimeEventsConnected(), true);
     assert.deepEqual(statuses, [true]);
 
     // Browser-managed reconnect: status listeners must stop trusting the push channel.
     first.readyState = FakeEventSource.CONNECTING;
     first.onerror!();
-    await settle();
+    await advanceTimers(context);
     assert.equal(isRuntimeEventsConnected(), false);
     assert.deepEqual(statuses, [true, false]);
 
     // Fatal failure: EventSource stops retrying, so the app must recreate it.
     first.readyState = FakeEventSource.CLOSED;
     first.onerror!();
-    await new Promise(resolve => setTimeout(resolve, RUNTIME_EVENTS_RETRY_MS + 50));
+    await advanceTimers(context, RUNTIME_EVENTS_RETRY_MS - 1);
+    assert.equal(FakeEventSource.instances.length, 1, "retry waits for its configured deadline");
+    await advanceTimers(context, 1);
     const retried = FakeEventSource.instances.at(-1)!;
     assert.notEqual(retried, first, "fatal close is retried while subscribers exist");
     retried.readyState = FakeEventSource.OPEN;
     retried.onopen!();
-    await settle();
+    await advanceTimers(context);
     assert.equal(isRuntimeEventsConnected(), true);
     const transitions = statuses.filter((value, index) => index === 0 || value !== statuses[index - 1]);
     assert.deepEqual(transitions, [true, false, true]);
+
+    retried.readyState = FakeEventSource.CLOSED;
+    retried.onerror!();
+    unsubscribeSnapshot();
+    await advanceTimers(context, RUNTIME_EVENTS_RETRY_MS);
+    assert.equal(FakeEventSource.instances.length, 2, "unmount cancels a pending reconnect");
   } finally {
     unsubscribeSnapshot();
     unsubscribeStatus();
