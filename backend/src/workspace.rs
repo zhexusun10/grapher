@@ -2458,11 +2458,11 @@ pub(crate) fn scoped_args<'a>(base: &[&'a str], exclusions: &'a [String]) -> Vec
 }
 
 pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<String, String> {
-    // Status describes the physical checkout/index. A standard source must use
-    // the user's index even when an internal shadow snapshot exists; plain
-    // folders fall back to their shadow database through `working_tree_git`.
+    // Graph source status compares the working tree against the host snapshot;
+    // node workspaces resolve to their own Git view. The user's staged state is
+    // preserved separately and is intentionally not part of Graph collection.
     let args = scoped_args(&["status", "--porcelain", "-z"], exclusions);
-    let raw = working_tree_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let raw = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     let mut status = filtered_status(raw, path, exclusions);
     if !cfg!(target_os = "macos") {
         let args = scoped_args(
@@ -2475,7 +2475,7 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
             ],
             exclusions,
         );
-        let ignored = working_tree_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let ignored = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         let ignored = ignored_host_metadata(&ignored, path, exclusions);
         if !ignored.is_empty() {
             if !status.is_empty() {

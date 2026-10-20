@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_objects_work_inside_isolation_without_exposing_source() {
+    fn node_workspace_hides_git_and_source_objects_under_isolation() {
         require_supported().expect("Linux Graph requires bwrap in CI");
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
@@ -353,7 +353,7 @@ mod tests {
         let output = Command::new(BWRAP)
             .args(&args[..args.len() - 2])
             .args(["/bin/sh", "-c",
-                "set -e; git diff | grep -q '+edited'; git status --porcelain | grep -q file; test ! -e \"$1/file\"; ! (echo bad > \"$2/forbidden\") 2>/dev/null; git add file; git -c user.name=Test -c user.email=test@example.com commit -qm test; git cat-file -e HEAD",
+                "set -e; test ! -e .git; ! git rev-parse --git-dir >/dev/null 2>&1; test ! -e \"$1/file\"; ! (echo bad > \"$2/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
                 "probe"])
             .args([&source, &objects])
             .current_dir(&current)
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_external_objects_work_under_masked_data() {
+    fn separate_external_git_database_stays_hidden_from_the_node() {
         require_supported().expect("Linux Graph requires bwrap in CI");
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
@@ -387,7 +387,7 @@ mod tests {
         let output = Command::new(BWRAP)
             .args(&args[..args.len() - 2])
             .args(["/bin/sh", "-c",
-                "set -e; git diff | grep -q '+edited'; test ! -e \"$1/file\"; test ! -e \"$2/HEAD\"; ! (echo bad > \"$2/objects/forbidden\") 2>/dev/null",
+                "set -e; test ! -e .git; test ! -e \"$1/file\"; test ! -e \"$2/HEAD\"; ! (echo bad > \"$2/objects/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
                 "probe"])
             .args([&source, &common])
             .current_dir(&current).output().unwrap();
