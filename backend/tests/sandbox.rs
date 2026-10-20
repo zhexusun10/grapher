@@ -244,7 +244,7 @@ fn shared_git_metadata_outside_source_is_protected() {
 }
 
 #[test]
-fn standalone_workspace_allows_git_diff_inside_sandbox_while_protecting_source() {
+fn standalone_workspace_hides_git_inside_sandbox_while_protecting_source() {
     use grapher::workspace;
     let temp = TempDir::new().unwrap();
     let base = temp.path().canonicalize().unwrap();
@@ -259,32 +259,25 @@ fn standalone_workspace_allows_git_diff_inside_sandbox_while_protecting_source()
     workspace::git(&source, &["commit", "-m", "init"]).unwrap();
     let head = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
 
-    // Prepare standalone workspace
+    // Prepare a standalone workspace. Its Git metadata must stay host-only.
     workspace::prepare(&source, &current, &head, &[]).unwrap();
+    assert!(!current.join(".git").exists());
 
-    // Modify file in workspace
-    fs::write(current.join("file.txt"), "modified in workspace\n").unwrap();
-
-    // Write sandbox profile
     let profile = base.join("profile.sb");
     sandbox::write_graph_profile(&profile, &source, &root, &current).unwrap();
 
-    // Inside sandbox: git diff must succeed!
-    let diff_output = run(&profile, &current, "git diff", &[]);
-    assert!(
-        diff_output.status.success(),
-        "git diff failed inside sandbox: {}",
-        String::from_utf8_lossy(&diff_output.stderr)
+    // Inside the sandbox the node can edit project files but cannot discover Git.
+    let isolated = run(
+        &profile,
+        &current,
+        "set -e; test ! -e .git; ! git rev-parse --git-dir >/dev/null 2>&1; echo isolated > local.txt; test -f local.txt",
+        &[],
     );
-    let diff_str = String::from_utf8_lossy(&diff_output.stdout);
-    assert!(diff_str.contains("-initial content"));
-    assert!(diff_str.contains("+modified in workspace"));
-
-    // Inside sandbox: git status must succeed!
-    let status_output = run(&profile, &current, "git status --porcelain", &[]);
-    assert!(status_output.status.success());
-    let status_str = String::from_utf8_lossy(&status_output.stdout);
-    assert!(status_str.contains("M file.txt"));
+    assert!(
+        isolated.status.success(),
+        "workspace isolation failed: {}",
+        String::from_utf8_lossy(&isolated.stderr)
+    );
 
     // Inside sandbox: source repository must remain DENIED!
     let leak_check = run(&profile, &current, "/bin/cat \"$1/file.txt\"", &[&source]);
