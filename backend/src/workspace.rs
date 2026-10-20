@@ -2047,12 +2047,12 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     let canonical_repo = canonical_workspace_path(repository)?;
     // A new destination is allowed to be absent; existing paths (including
     // dangling symlinks) must resolve successfully before comparing identity.
-    let canonical_path =
-        if path.try_exists().map_err(|error| error.to_string())? || path.is_symlink() {
-            Some(canonical_workspace_path(path)?)
-        } else {
-            None
-        };
+    let destination_exists = path.try_exists().map_err(|error| error.to_string())?;
+    let canonical_path = if destination_exists || path.is_symlink() {
+        Some(canonical_workspace_path(path)?)
+    } else {
+        None
+    };
     if canonical_path.as_ref()
         .is_some_and(|path| crate::path_identity::same_path(path, &canonical_repo))
     {
@@ -2076,6 +2076,11 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         check_shadow_base(&canonical_repo, expected_source_head)?;
     }
 
+    // A deleted workspace leaves its hidden Git metadata beside the Run root.
+    // Never revive that stale index/HEAD for a newly materialized slot.
+    if !destination_exists && !path.is_symlink() {
+        remove_private_git(path)?;
+    }
     fs::create_dir_all(path).map_err(|error| error.to_string())?;
     canonical_workspace_path(path)?;
 

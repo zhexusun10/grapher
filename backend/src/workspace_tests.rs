@@ -449,3 +449,23 @@ fn reclaimed_slots_remove_private_git_metadata_and_orphans() {
     workspace::reclaim_orphan_git_metadata(&run).unwrap();
     assert!(!metadata.exists());
 }
+
+#[test]
+fn recreated_slot_ignores_metadata_from_a_deleted_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    workspace::git(&source, &["init", "-q"]).unwrap();
+    fs::write(source.join("keep.txt"), "base").unwrap();
+    workspace::git(&source, &["add", "-A"]).unwrap();
+    workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
+    let base = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
+    let slot = temp.path().join(".grapher-worktrees").join("run").join("slot");
+    workspace::prepare(&source, &slot, &base, &[]).unwrap();
+    workspace::hide_private_git(&slot).unwrap();
+    assert!(workspace::private_git_dir(&slot).is_some());
+    fs::remove_dir_all(&slot).unwrap();
+    workspace::prepare(&source, &slot, &base, &[]).unwrap();
+    assert_eq!(fs::read_to_string(slot.join("keep.txt")).unwrap(), "base");
+    assert!(workspace::git(&slot, &["rev-parse", "HEAD"]).is_ok());
+}
