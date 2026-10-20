@@ -136,7 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.0]
 
-Baseline release. The changelog is restarted from the current codebase at v1.1.0; this version is the reference point for future entries.
+Baseline release. The changelog is restarted from the current codebase at v1.1.0; this version is the reference point for future entries. Project development began on 2026-09-12.
 
 ### Added
 
