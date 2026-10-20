@@ -23,12 +23,12 @@ test("session details show backend token counts in k units without changing the 
   assert.deepEqual(usage, { input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600, totalTokens: 18_000 });
 });
 
-test("token counts use only k or m, with at most two decimals and automatic promotion", () => {
+test("token counts use only k or M, with at most two decimals and automatic promotion", () => {
   for (const [count, expected] of [
     [0, "0k"], [1, "&lt;0.01k"], [9, "&lt;0.01k"], [10, "0.01k"],
     [100, "0.1k"], [999, "1k"], [1_000, "1k"], [12_345, "12.35k"],
-    [999_994, "999.99k"], [999_995, "1m"], [1_000_000, "1m"],
-    [1_234_567, "1.23m"], [1_000_000_000, "1000m"],
+    [999_994, "999.99k"], [999_995, "1M"], [1_000_000, "1M"],
+    [1_234_567, "1.23M"], [1_000_000_000, "1000M"],
   ] as const) {
     const html = render({ ...usage, totalTokens: count });
     assert.ok(html.includes(`total tokens: ${expected}</p>`), `${count}: ${html}`);
@@ -99,6 +99,6 @@ test("completed run copy includes compact total tokens and cached percentage in 
   const key = "运行已完成 - 本次消耗 Token:{0} Cached:{1}";
   const total = formatTokenCount(999_900_000);
   const cached = formatCacheHitRate({ ...usage, input: 100, cacheRead: 900, cacheWrite: 0 });
-  assert.equal(translate("zh-CN", key, total, cached), "运行已完成 - 本次消耗 Token:999.9m Cached:90%");
-  assert.equal(translate("en", key, total, cached), "Run completed - Tokens used: 999.9m  cached:90%");
+  assert.equal(translate("zh-CN", key, total, cached), "运行已完成 - 本次消耗 Token:999.9M Cached:90%");
+  assert.equal(translate("en", key, total, cached), "Run completed - Tokens used: 999.9M  cached:90%");
 });

@@ -8,7 +8,7 @@ export function formatTokenCount(value?: number): string {
   // Promote rounded values too, so the display never reaches 1000k.
   const useMillions = thousands >= 1_000;
   const count = useMillions ? value / 1_000_000 : thousands;
-  return `${count.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 2 })}${useMillions ? "m" : "k"}`;
+  return `${count.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 2 })}${useMillions ? "M" : "k"}`;
 }
 
 /** Pi reports uncached input, cache reads and cache writes separately. */

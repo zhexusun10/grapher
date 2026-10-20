@@ -3183,7 +3183,10 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
         label: &str,
         ready: impl Fn(&Snapshot) -> bool,
     ) -> Snapshot {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        // CI can spend tens of seconds in Git publication after all test gates
+        // are released. This is an ordering barrier, not a publication-latency
+        // budget, so keep a generous ceiling while still failing on a deadlock.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let state = service.runtime.lock().unwrap().state.clone();
             if ready(&state) {

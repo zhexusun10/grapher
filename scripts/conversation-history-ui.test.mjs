@@ -72,6 +72,7 @@ test("transcript and parser hot updates preserve the mounted conversation", { ti
   try {
     await hmrServer.listen();
     await page.goto(`http://127.0.0.1:${hmrServer.httpServer.address().port}/__hmr?case=cardPresentation&type=tool&source=node`, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => !!window.audit?.showCards);
     await page.evaluate(() => window.audit.showCards(true));
     await page.locator(".tool-call-header").click();
     await page.locator(".tool-call-body").waitFor();
@@ -351,7 +352,7 @@ test("completed topology reports backend run totals and cache percentage only af
     await status.waitFor();
     assert.doesNotMatch(await status.innerText(), /Tokens used|cached:/);
     await page.evaluate(metrics => window.audit.setRunSummary("completed", metrics), metrics);
-    await status.filter({ hasText: /Run completed - Tokens used: 999\.9m\s+cached:90%/ }).waitFor();
+    await status.filter({ hasText: /Run completed - Tokens used: 999\.9M\s+cached:90%/ }).waitFor();
     await page.setViewportSize({ width: 600, height: 900 });
     assert.equal(await page.locator(".graph-bottom").evaluate(element => element.scrollWidth > element.clientWidth), false,
       "the completed usage summary must fit or wrap inside the topology footer");
@@ -393,7 +394,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
         await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
       }
       await update({ totalTokens: 1_234_567, input: 1_000_000, output: 200_000, cacheRead: 30_000, cacheWrite: 4_000, reasoning: 567 });
-      for (const [index, value] of ["1.23m", "1m", "200k", "30k", "4k", "0.57k"].entries()) {
+      for (const [index, value] of ["1.23M", "1M", "200k", "30k", "4k", "0.57k"].entries()) {
         await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
       }
       const positions = await details.locator("p").evaluateAll(elements => elements.map(element => {
