@@ -5,6 +5,17 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Planner and node error messages now use the compact conversation-error styling, and sidebar hover/active states and conversation reveal transitions are more consistent.
+
+### Fixed
+
+- Windows planning no longer fails when Git receives a console interruption (Ctrl+C/Ctrl+Break) during a snapshot commit. Host Git now runs outside the backend console, and failed Git commands retain their exit status, working directory, command, and output instead of only line-ending warnings.
+- Planning failure diagnostics survive backend restarts and remain visible in the conversation.
+
 ## [1.2.4] - 2026-10-20
 
 ### Added
@@ -134,6 +145,7 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.2.4...HEAD
 [1.2.4]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.4
 [1.2.3]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.3
 [1.2.2]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.2
